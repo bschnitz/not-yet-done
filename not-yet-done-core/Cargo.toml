@@ -1,0 +1,15 @@
+[package]
+name = "not-yet-done-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sea-orm     = { workspace = true }
+shaku       = { workspace = true }
+tokio       = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true, features = ["v4"] }
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+regex       = { workspace = true }

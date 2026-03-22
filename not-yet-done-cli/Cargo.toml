@@ -1,0 +1,12 @@
+[package]
+name = "not-yet-done-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+not-yet-done-core = { path = "../not-yet-done-core" }
+sea-orm            = { workspace = true }
+shaku              = { workspace = true }
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+tusks              = "2.1"

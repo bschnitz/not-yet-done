@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["not-yet-done-cli", "not-yet-done-core"]
+
+[workspace.dependencies]
+sea-orm = { version = "2.0.0-rc", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "schema-sync",
+    "entity-registry",
+    "macros",
+] }
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = ["full"] }
+uuid = { version = "1.22.0", features = ["v4"] }
+shaku = { version = "0.6.2", features = ["derive"] }
+async-trait = "0.1.89"
+chrono = "0.4.44"
+regex = "1.12.3"
