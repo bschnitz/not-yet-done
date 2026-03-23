@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tusks::tusks;
 
+use not_yet_done_core::config::ConfigServiceImpl;
 use not_yet_done_core::db;
 use not_yet_done_core::module::AppModule;
 use not_yet_done_core::repository::{
@@ -53,8 +54,19 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let sync_schema = args.windows(2).any(|w| w[0] == "db" && w[1] == "sync");
 
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://nyd.db?mode=rwc".to_string());
+    let config_service = ConfigServiceImpl::new();
+
+    let db_url = tokio::runtime::Runtime::new()
+        .expect("tokio Runtime konnte nicht erstellt werden")
+        .block_on(async { config_service.get_database_url().await });
+
+    let db_url = match db_url {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("Configuration error: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
 
     let db = tokio::runtime::Runtime::new()
         .expect("tokio Runtime konnte nicht erstellt werden")
