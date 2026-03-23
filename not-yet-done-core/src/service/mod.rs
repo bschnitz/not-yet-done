@@ -2,6 +2,7 @@ mod project_service;
 mod tag_service;
 mod tracking_service;
 mod task_service;
+mod backup_service;
 
 pub use project_service::{ProjectService, ProjectServiceImpl};
 pub use tag_service::{TagItem, TagService, TagServiceImpl};
@@ -11,3 +12,4 @@ pub use tracking_service::{
     StoppedTracking, Summary, DaySummary, TaskSummary,
     MoveOptions, GravityDirection, MovedTracking,
 };
+pub use backup_service::{BackupService, BackupServiceImpl};

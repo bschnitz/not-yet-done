@@ -1,7 +1,11 @@
 use shaku::module;
 
-use crate::repository::{ProjectRepositoryImpl, TagRepositoryImpl, TaskRepositoryImpl, TrackingRepositoryImpl};
-use crate::service::{ProjectServiceImpl, TagServiceImpl, TaskServiceImpl, TrackingServiceImpl};
+use crate::repository::{
+    ProjectRepositoryImpl, TagRepositoryImpl, TaskRepositoryImpl, TrackingRepositoryImpl,
+};
+use crate::service::{
+    BackupServiceImpl, ProjectServiceImpl, TagServiceImpl, TaskServiceImpl, TrackingServiceImpl,
+};
 
 module! {
     pub AppModule {
@@ -14,6 +18,7 @@ module! {
             ProjectServiceImpl,
             TagServiceImpl,
             TrackingServiceImpl,
+            BackupServiceImpl,
         ],
         providers = []
     }

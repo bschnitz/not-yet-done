@@ -46,6 +46,9 @@ pub mod cli {
     #[command(about = "Datenbankoperationen")]
     pub use crate::commands::db::cli as db;
 
+    #[command(about = "Backup erstellen")]
+    pub use crate::commands::backup::cli as backup;
+
     #[command(about = "Time tracking")]
     pub use crate::commands::track::cli as track;
 }

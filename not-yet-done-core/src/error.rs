@@ -59,4 +59,13 @@ pub enum AppError {
 
     #[error("No free slot found to place the tracking")]
     NoFreeSlot,
+
+    #[error("Database is not a file-based database")]
+    NotFileBasedDatabase,
+
+    #[error("Database file not found: {0:?}")]
+    DatabaseFileNotFound(std::path::PathBuf),
+
+    #[error("Backup failed: {0}")]
+    BackupFailed(String),
 }

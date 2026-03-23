@@ -80,14 +80,23 @@ impl ConfigServiceImpl {
     }
 }
 
-impl ConfigServiceImpl {
+ impl ConfigServiceImpl {
     pub async fn get_database_url(&self) -> Result<String, ConfigError> {
         if let Ok(db_url) = std::env::var("DATABASE_URL") {
             return Ok(db_url);
         }
 
+        let config = self.get_config().await?;
+        Ok(config.database.url)
+    }
+
+    pub async fn get_config(&self) -> Result<Config, ConfigError> {
+        if let Ok(_db_url) = std::env::var("DATABASE_URL") {
+            return Ok(Config::default());
+        }
+
         match Self::load_config() {
-            Ok(config) => Ok(config.database.url),
+            Ok(config) => Ok(config),
             Err(e) if matches!(e.kind(), crate::config::error::ConfigErrorKind::NotFound) => {
                 let create = Self::prompt_user_to_create_config()?;
                 
@@ -100,7 +109,7 @@ impl ConfigServiceImpl {
                 
                 println!("Configuration file created at: {}", Self::config_path().display());
                 
-                Ok(default_config.database.url)
+                Ok(default_config)
             }
             Err(e) => Err(e),
         }
