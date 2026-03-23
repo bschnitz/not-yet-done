@@ -1,0 +1,18 @@
+[package]
+name = "not-yet-done-tui"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "not-yet-done-tui"
+path = "src/main.rs"
+
+[dependencies]
+not-yet-done-core = { path = "../not-yet-done-core" }
+ratatui            = { workspace = true }
+crossterm          = { workspace = true }
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+serde              = { workspace = true }
+serde_yaml         = { workspace = true }
+dirs               = { workspace = true }
