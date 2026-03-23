@@ -19,6 +19,9 @@ pub enum ConfigError {
 
     #[error("User declined to create config file")]
     CreationDeclined,
+
+    #[error("Configuration validation error: {0}")]
+    ValidationError(String),
 }
 
 impl ConfigError {
@@ -29,6 +32,7 @@ impl ConfigError {
             | ConfigError::WriteError(_)
             | ConfigError::DirectoryError(_) => ConfigErrorKind::Io,
             ConfigError::ParseError(_) => ConfigErrorKind::Parse,
+            ConfigError::ValidationError(_) => ConfigErrorKind::Validation,
             ConfigError::CreationDeclined => ConfigErrorKind::UserDeclined,
         }
     }
@@ -39,5 +43,6 @@ pub enum ConfigErrorKind {
     NotFound,
     Io,
     Parse,
+    Validation,
     UserDeclined,
 }

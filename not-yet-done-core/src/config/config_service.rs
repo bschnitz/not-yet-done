@@ -32,6 +32,12 @@ impl ConfigServiceImpl {
         let config: Config = serde_yaml::from_str(&content)
             .map_err(|e| ConfigError::ParseError(e))?;
 
+        config.backup.ensure_directory_exists()
+            .map_err(|e| ConfigError::DirectoryError(e))?;
+
+        config.backup.validate()
+            .map_err(|e| ConfigError::ValidationError(e.to_string()))?;
+
         Ok(config)
     }
 
