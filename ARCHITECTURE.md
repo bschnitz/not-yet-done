@@ -558,12 +558,25 @@ Wenn `not-yet-done-web` aktiviert wird:
 
 | Bereich              | Konvention                                                     |
 |----------------------|----------------------------------------------------------------|
-| Benennungsschema     | Traits: `XyzService`, `XyzRepository` / Impls: `XyzServiceImpl` |
-| Fehler              | `Result<T, AppError>` in Core; kein `unwrap()` in Services     |
-| Async               | Tokio als Runtime; alle DB-Ops sind `async`                    |
-| Tests               | Unit-Tests in `#[cfg(test)]`-Blöcken; SeaORM `mock`-Feature   |
-| Edition             | Rust 2024 (`edition = "2024"` in allen Crates)                |
-| Resolver            | `resolver = "3"` im Workspace                                  |
+| Benennungsschema     | Traits: `XyzService`, `XyzRepository` / Impls: `XyzServiceImpl`|
+| Fehler               | `Result<T, AppError>` in Core; kein `unwrap()` in Services     |
+| Async                | Tokio als Runtime; alle DB-Ops sind `async`                    |
+| Tests                | Unit-Tests in `#[cfg(test)]`-Blöcken; SeaORM `mock`-Feature    |
+| Edition              | Rust 2024 (`edition = "2024"` in allen Crates)                 |
+| Resolver             | `resolver = "3"` im Workspace                                  |
+| Zeitzonen            | Intern immer UTC (`chrono::Utc`); alle User-Eingaben ohne explizite Zeitzone werden als lokale Zeit des Nutzers interpretiert (`chrono::Local`); alle Ausgaben von Zeitstempeln erfolgen in lokaler Zeit |
+
+### Zeitzonenkonvention
+
+Die Applikation arbeitet intern ausschließlich mit UTC. An den Grenzen zur Außenwelt gilt:
+
+- **Eingaben:** Datumsangaben und Zeitangaben ohne explizite Zeitzone werden als lokale Zeit des
+  Nutzers interpretiert und sofort nach UTC konvertiert (`chrono::Local → chrono::Utc`).
+- **Ausgaben:** Alle Zeitstempel werden vor der Ausgabe in die lokale Zeit des Nutzers konvertiert
+  (`chrono::Utc → chrono::Local`).
+- **Explizite Zeitzonen:** Falls ein Nutzer künftig Zeiten mit Offset eingibt (z.B. `2026-03-22T10:00+05:30`),
+  wird dieser Offset respektiert und nicht überschrieben.
+- **In der Datenbank** werden ausschließlich UTC-Werte gespeichert (`DateTimeUtc` in SeaORM-Entities).
 
 ---
 

@@ -41,4 +41,22 @@ pub enum AppError {
 
     #[error("Invalid status transition: {0}")]
     InvalidStatusTransition(String),
+
+    #[error("No active trackings found")]
+    NoActiveTrackingAny,
+
+    #[error("Tracking {0} is still active — only completed trackings can be moved")]
+    TrackingStillActive(Uuid),
+
+    #[error("Moving tracking would place it in the future — use --allow-future to override")]
+    TrackingInFuture,
+
+    #[error("Tracking would overlap with another tracking of the same task")]
+    OverlapSameTask,
+
+    #[error("Tracking would overlap with existing trackings — use --allow-overlap to override")]
+    OverlapOtherTask,
+
+    #[error("No free slot found to place the tracking")]
+    NoFreeSlot,
 }

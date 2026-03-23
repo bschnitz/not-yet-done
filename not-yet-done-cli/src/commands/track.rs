@@ -30,7 +30,251 @@ pub mod cli {
         });
         match result {
             Ok(tracking) => {
-                println!("✓ Tracking started: [{}] started at {}", tracking.id, tracking.started_at);
+                println!("✓ Tracking started: [{}] started at {}",
+                    tracking.id,
+                    tracking.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
+                );
+                0
+            }
+            Err(e) => { eprintln!("Error: {e}"); 1 }
+        }
+    }
+
+    /// Stop tracking. Stops the active tracking for a specific task, or all active
+    /// trackings if no task ID is given.
+    pub fn stop(
+        #[arg(long, help = "Task ID to stop tracking for (stops all active trackings if omitted)")]
+        task_id: Option<String>,
+    ) -> u8 {
+        let result = crate::run_async(|module| async move {
+            use shaku::HasComponent;
+            use not_yet_done_core::service::TrackingService;
+            use sea_orm::prelude::Uuid;
+
+            let task_id = match task_id {
+                Some(id) => Some(
+                    Uuid::parse_str(&id)
+                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?
+                ),
+                None => None,
+            };
+
+            let service: &dyn TrackingService = module.resolve_ref();
+            service.stop(task_id).await
+        });
+
+        match result {
+            Ok(stopped) => {
+                for s in &stopped {
+                    println!("✓ Tracking stopped: [{}] {} | {} → {}",
+                        s.tracking.id,
+                        s.task_description,
+                        s.tracking.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                        s.tracking.ended_at.unwrap().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                    );
+                }
+                0
+            }
+            Err(e) => { eprintln!("Error: {e}"); 1 }
+        }
+    }
+
+    /// Show a summary of tracked time grouped by task.
+    /// Defaults to today if no date range is given.
+    ///
+    /// Examples:
+    ///   nyd track summary
+    ///   nyd track summary --from 2026-03-01 --to 2026-03-22
+    ///   nyd track summary --from 2026-03-01
+    pub fn summary(
+        #[arg(long, help = "Start date/time (e.g. '2026-03-01', 'yesterday', 'last monday'), defaults to today")]
+        from: Option<crate::datetime::LocalDateTime>,
+        #[arg(long, help = "End date/time (e.g. '2026-03-22', 'today'), defaults to today")]
+        to: Option<crate::datetime::LocalDateTime>,
+        #[arg(long, help = "Filter by task ID")]
+        task_id: Option<String>,
+    ) -> u8 {
+        use chrono::{Local, TimeZone};
+
+        let now = Local::now();
+
+        let from_dt = from
+            .map(|d| d.utc)
+            .unwrap_or_else(|| {
+                Local
+                    .from_local_datetime(
+                        &now.date_naive().and_hms_opt(0, 0, 0).unwrap()
+                    )
+                    .single()
+                    .unwrap()
+                    .to_utc()
+            });
+
+        let to_dt = to
+            .map(|d| d.utc)
+            .unwrap_or_else(|| {
+                Local
+                    .from_local_datetime(
+                        &now.date_naive().and_hms_opt(23, 59, 59).unwrap()
+                    )
+                    .single()
+                    .unwrap()
+                    .to_utc()
+            });
+
+        if from_dt > to_dt {
+            eprintln!("Error: --from must not be after --to");
+            return 1;
+        }
+
+        let result = crate::run_async(|module| async move {
+            use shaku::HasComponent;
+            use not_yet_done_core::service::TrackingService;
+            use sea_orm::prelude::Uuid;
+
+            let task_id = match task_id {
+                Some(id) => Some(
+                    Uuid::parse_str(&id)
+                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?
+                ),
+                None => None,
+            };
+
+            let service: &dyn TrackingService = module.resolve_ref();
+            service.summary(from_dt, to_dt, task_id).await
+        });
+
+        match result {
+            Ok(summary) => {
+                if summary.entries.is_empty() {
+                    println!("No tracked time found for the given range.");
+                    return 0;
+                }
+
+                println!(
+                    "From {} to {}\n",
+                    from_dt.with_timezone(&Local).format("%Y-%m-%d"),
+                    to_dt.with_timezone(&Local).format("%Y-%m-%d"),
+                );
+
+                let max_len = summary.entries.iter()
+                    .map(|e| e.task_description.len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(5);
+
+                for entry in &summary.entries {
+                    println!(
+                        "[{}] {:<width$}  {}",
+                        entry.task_id,
+                        entry.task_description,
+                        format_duration(entry.total_duration),
+                        width = max_len,
+                    );
+                }
+
+                println!("{}", "─".repeat(max_len + 46));
+                println!(
+                    "       {:<width$}  {}",
+                    "Total",
+                    format_duration(summary.total),
+                    width = max_len,
+                );
+                0
+            }
+            Err(e) => { eprintln!("Error: {e}"); 1 }
+        }
+    }
+
+    fn format_duration(d: chrono::Duration) -> String {
+        let total_secs = d.num_seconds().max(0);
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        let s = total_secs % 60;
+        format!("{h}:{m:02}:{s:02}")
+    }
+
+    /// Move a completed tracking entry to a new start time.
+    ///
+    /// Examples:
+    ///   nyd track move <id> "yesterday 9am"
+    ///   nyd track move <id> "2026-03-22" --gravity end
+    ///   nyd track move <id> "today" --gravity start --offset +1h
+    ///   nyd track move <id> "2026-03-20" --allow-overlap --allow-future
+    pub fn r#move(
+        #[arg(help = "Tracking entry ID to move")]
+        entry_id: String,
+        #[arg(help = "New start time (e.g. 'yesterday 9am', '2026-03-22', 'today 14:00')")]
+        start: crate::datetime::LocalDateTime,
+        #[arg(long, help = "Allow overlap with other tasks' trackings")]
+        allow_overlap: bool,
+        #[arg(long, help = "Allow moving the tracking into the future")]
+        allow_future: bool,
+        #[arg(
+            long,
+            value_parser = ["start", "end"],
+            help = "Snap to boundary and find next free slot ('start' = forward, 'end' = backward)"
+        )]
+        gravity: Option<String>,
+        #[arg(long, help = "Offset to apply after gravity (e.g. +1h, -30min, +2days)")]
+        offset: Option<crate::offset::LocalOffset>,
+    ) -> u8 {
+        use not_yet_done_core::entity::granularity::Granularity;
+        use not_yet_done_core::service::{GravityDirection, MoveOptions};
+        use sea_orm::prelude::Uuid;
+
+        let entry_id = match Uuid::parse_str(&entry_id) {
+            Ok(id) => id,
+            Err(_) => {
+                eprintln!("Error: Invalid tracking ID '{}'", entry_id);
+                return 1;
+            }
+        };
+
+        let gravity_dir = match gravity.as_deref() {
+            Some("start") => Some(GravityDirection::Start),
+            Some("end")   => Some(GravityDirection::End),
+            _             => None,
+        };
+
+        let granularity = gravity_dir.as_ref().map(|_| {
+            Granularity::from_original(&start.original)
+        });
+
+        let options = MoveOptions {
+            allow_overlap,
+            allow_future,
+            gravity: gravity_dir,
+            granularity,
+            offset: offset.map(|o| o.duration),
+        };
+
+        let new_start_utc = start.utc;
+
+        let result = crate::run_async(|module| async move {
+            use shaku::HasComponent;
+            use not_yet_done_core::service::TrackingService;
+            let service: &dyn TrackingService = module.resolve_ref();
+            service.move_tracking(entry_id, new_start_utc, options).await
+        });
+
+        match result {
+            Ok(moved) => {
+                use chrono::Local;
+                println!("✓ Tracking moved:");
+                println!("  Task:  {}", moved.task_description);
+                println!(
+                    "  Old:   [{}] {} → {}",
+                    moved.old_id,
+                    moved.old_started_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    moved.old_ended_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                );
+                println!(
+                    "  New:   [{}] {} → {}",
+                    moved.new_id,
+                    moved.new_started_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    moved.new_ended_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                );
                 0
             }
             Err(e) => { eprintln!("Error: {e}"); 1 }

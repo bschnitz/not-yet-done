@@ -6,3 +6,4 @@ pub mod task_global_tag;
 pub mod task_project;
 pub mod task_project_tag;
 pub mod tracking;
+pub mod granularity;

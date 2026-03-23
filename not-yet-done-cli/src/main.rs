@@ -13,6 +13,8 @@ use not_yet_done_core::repository::{
 };
 
 mod commands;
+mod datetime;
+mod offset;
 
 static MODULE: OnceLock<Arc<AppModule>> = OnceLock::new();
 
