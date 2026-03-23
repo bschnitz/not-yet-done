@@ -9,7 +9,6 @@ use ratatui::{
 use crate::app::App;
 use crate::config::Action;
 use crate::tabs::Tab;
-use crate::ui::theme::Theme;
 
 pub struct TabBar<'a> {
     app: &'a App,
@@ -23,15 +22,16 @@ impl<'a> TabBar<'a> {
 
 impl Widget for TabBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Fill background of the entire tab bar row first
+        let t = &self.app.theme;
+
         for x in area.left()..area.right() {
             if let Some(cell) = buf.cell_mut(Position::new(x, area.top())) {
                 cell.set_char(' ');
-                cell.set_bg(Theme::SURFACE);
+                cell.set_bg(t.surface());
             }
         }
 
-        let mut x = area.left() + 1; // 1-cell left margin
+        let mut x = area.left() + 1;
 
         for tab in Tab::ALL {
             let is_active = *tab == self.app.active_tab;
@@ -42,7 +42,6 @@ impl Widget for TabBar<'_> {
                 Tab::Trackings => Action::TabTrackings,
             };
             let key_label = self.app.keybindings.label(&action);
-            // "  Welcome [1]  "  with side-accent glyphs for active tab
             let tab_text = if is_active {
                 format!("▌  {} {}  ▐", tab.title(), key_label)
             } else {
@@ -51,19 +50,17 @@ impl Widget for TabBar<'_> {
 
             let style = if is_active {
                 Style::default()
-                    .fg(Theme::ON_PRIMARY)
-                    .bg(Theme::PRIMARY)
+                    .fg(t.on_primary())
+                    .bg(t.primary())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
-                    .fg(Theme::TEXT_MED)
-                    .bg(Theme::SURFACE)
+                    .fg(t.text_med())
+                    .bg(t.surface())
             };
 
             for ch in tab_text.chars() {
-                if x >= area.right() {
-                    break;
-                }
+                if x >= area.right() { break; }
                 if let Some(cell) = buf.cell_mut(Position::new(x, area.top())) {
                     cell.set_char(ch);
                     cell.set_style(style);
@@ -71,35 +68,42 @@ impl Widget for TabBar<'_> {
                 x += 1;
             }
 
-            // Single-space gap between tabs
             if x < area.right() {
                 if let Some(cell) = buf.cell_mut(Position::new(x, area.top())) {
                     cell.set_char(' ');
-                    cell.set_bg(Theme::SURFACE);
+                    cell.set_bg(t.surface());
                 }
                 x += 1;
             }
         }
 
-        // Fill remaining cells on the right
         while x < area.right() {
             if let Some(cell) = buf.cell_mut(Position::new(x, area.top())) {
                 cell.set_char(' ');
-                cell.set_bg(Theme::SURFACE);
+                cell.set_bg(t.surface());
             }
             x += 1;
         }
     }
 }
 
-/// The thin separator line below the tab bar
-pub struct TabSeparator;
+/// The thin separator line below the tab bar.
+pub struct TabSeparator<'a> {
+    app: &'a App,
+}
 
-impl Widget for TabSeparator {
+impl<'a> TabSeparator<'a> {
+    pub fn new(app: &'a App) -> Self {
+        Self { app }
+    }
+}
+
+impl Widget for TabSeparator<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let t = &self.app.theme;
         let line = Line::from(vec![Span::styled(
             "─".repeat(area.width as usize),
-            Style::default().fg(Theme::PRIMARY_DIM).bg(Theme::BG),
+            Style::default().fg(t.primary_dim()).bg(t.bg()),
         )]);
         line.render(area, buf);
     }

@@ -8,7 +8,6 @@ use ratatui::{
 
 use crate::app::App;
 use crate::config::Action;
-use crate::ui::theme::Theme;
 
 pub struct StatusBar<'a> {
     app: &'a App,
@@ -22,23 +21,21 @@ impl<'a> StatusBar<'a> {
 
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let quit_key  = self.app.keybindings.label(&Action::Quit);
-        let next_key  = self.app.keybindings.label(&Action::TabNext);
-        let prev_key  = self.app.keybindings.label(&Action::TabPrev);
+        let t = &self.app.theme;
+        let quit_key = self.app.keybindings.label(&Action::Quit);
+        let next_key = self.app.keybindings.label(&Action::TabNext);
+        let prev_key = self.app.keybindings.label(&Action::TabPrev);
 
         let spans = vec![
-            Span::styled(" ", Style::default().bg(Theme::SURFACE)),
-            Span::styled(quit_key,  Style::default().fg(Theme::ACCENT).bg(Theme::SURFACE)),
-            Span::styled(" quit  ", Style::default().fg(Theme::TEXT_MED).bg(Theme::SURFACE)),
-            Span::styled(next_key,  Style::default().fg(Theme::ACCENT).bg(Theme::SURFACE)),
-            Span::styled("/",       Style::default().fg(Theme::TEXT_DIM).bg(Theme::SURFACE)),
-            Span::styled(prev_key,  Style::default().fg(Theme::ACCENT).bg(Theme::SURFACE)),
-            Span::styled(" cycle tabs ", Style::default().fg(Theme::TEXT_MED).bg(Theme::SURFACE)),
+            Span::styled(" ",              Style::default().bg(t.surface())),
+            Span::styled(quit_key,         Style::default().fg(t.accent()).bg(t.surface())),
+            Span::styled(" quit  ",        Style::default().fg(t.text_med()).bg(t.surface())),
+            Span::styled(next_key,         Style::default().fg(t.accent()).bg(t.surface())),
+            Span::styled("/",              Style::default().fg(t.text_dim()).bg(t.surface())),
+            Span::styled(prev_key,         Style::default().fg(t.accent()).bg(t.surface())),
+            Span::styled(" cycle tabs ",   Style::default().fg(t.text_med()).bg(t.surface())),
         ];
 
         Line::from(spans).render(area, buf);
-
-        // Fill remainder
-        // (ratatui Line::render fills its area, so background is set via spans)
     }
 }

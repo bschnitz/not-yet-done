@@ -26,17 +26,17 @@ pub fn render(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    frame.render_widget(TabBar::new(app),    chunks[0]);
-    frame.render_widget(TabSeparator,        chunks[1]);
+    frame.render_widget(TabBar::new(app),     chunks[0]);
+    frame.render_widget(TabSeparator::new(app), chunks[1]);
 
     match app.active_tab {
-        Tab::Welcome => frame.render_widget(WelcomeTab, chunks[2]),
+        Tab::Welcome => frame.render_widget(WelcomeTab::new(app), chunks[2]),
         Tab::Tasks   => frame.render_widget(
-            PlaceholderTab { label: "Tasks", icon: "󰄰" },
+            PlaceholderTab::new(app, "Tasks", "󰄰"),
             chunks[2],
         ),
         Tab::Trackings => frame.render_widget(
-            PlaceholderTab { label: "Trackings", icon: "󱦗" },
+            PlaceholderTab::new(app, "Trackings", "󱦗"),
             chunks[2],
         ),
     }

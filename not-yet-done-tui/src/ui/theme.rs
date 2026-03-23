@@ -1,30 +1,45 @@
 use ratatui::style::Color;
 
-/// Material Design-inspired dark theme
-pub struct Theme;
+use crate::config::ThemeConfig;
+
+/// Runtime theme — wraps `ThemeConfig` and exposes `ratatui::Color` values.
+///
+/// Every widget receives `&Theme` instead of referencing `Theme::CONSTANT`,
+/// which allows the theme to change at startup based on `tui-theme.yaml`.
+pub struct Theme {
+    cfg: ThemeConfig,
+}
 
 impl Theme {
-    // Surface colours
-    pub const BG:          Color = Color::Rgb(18,  18,  18);   // #121212 — Material surface
-    pub const SURFACE:     Color = Color::Rgb(30,  30,  30);   // #1e1e1e — elevated surface
-    pub const SURFACE_2:   Color = Color::Rgb(40,  40,  40);   // #282828 — card surface
+    pub fn new(cfg: ThemeConfig) -> Self {
+        Self { cfg }
+    }
 
-    // Primary — deep teal (Material Teal 300 / 200)
-    pub const PRIMARY:     Color = Color::Rgb(77,  182, 172);  // #4db6ac — teal 300
-    pub const PRIMARY_DIM: Color = Color::Rgb(38,  166, 154);  // #26a69a — teal 400
-    pub const ON_PRIMARY:  Color = Color::Rgb(0,   37,  34);   // #002522 — text on primary
+    // ── Surfaces ──────────────────────────────────────────────────────────
+    pub fn bg(&self)        -> Color { self.cfg.bg.to_ratatui() }
+    pub fn surface(&self)   -> Color { self.cfg.surface.to_ratatui() }
+    pub fn surface_2(&self) -> Color { self.cfg.surface_2.to_ratatui() }
 
-    // Secondary — amber accent
-    pub const ACCENT:      Color = Color::Rgb(255, 202, 40);   // #ffca28 — amber 400
-    pub const ACCENT_DIM:  Color = Color::Rgb(255, 179, 0);    // #ffb300 — amber 600
+    // ── Primary ───────────────────────────────────────────────────────────
+    pub fn primary(&self)     -> Color { self.cfg.primary.to_ratatui() }
+    pub fn primary_dim(&self) -> Color { self.cfg.primary_dim.to_ratatui() }
+    pub fn on_primary(&self)  -> Color { self.cfg.on_primary.to_ratatui() }
 
-    // Text
-    pub const TEXT_HIGH:   Color = Color::Rgb(230, 230, 230);  // primary text
-    pub const TEXT_MED:    Color = Color::Rgb(158, 158, 158);  // secondary text (Grey 500)
-    pub const TEXT_DIM:    Color = Color::Rgb(97,  97,  97);   // disabled text (Grey 600)
+    // ── Accent ────────────────────────────────────────────────────────────
+    pub fn accent(&self)     -> Color { self.cfg.accent.to_ratatui() }
+    #[allow(dead_code)]
+    pub fn accent_dim(&self) -> Color { self.cfg.accent_dim.to_ratatui() }
 
-    // Status colours
-    pub const SUCCESS:     Color = Color::Rgb(102, 187, 106);  // green 400
-    pub const ERROR:       Color = Color::Rgb(239, 83,  80);   // red 400
-    pub const WARNING:     Color = Color::Rgb(255, 167, 38);   // orange 400
+    // ── Text ──────────────────────────────────────────────────────────────
+    pub fn text_high(&self) -> Color { self.cfg.text_high.to_ratatui() }
+    pub fn text_med(&self)  -> Color { self.cfg.text_med.to_ratatui() }
+    pub fn text_dim(&self)  -> Color { self.cfg.text_dim.to_ratatui() }
+
+    // ── Status ────────────────────────────────────────────────────────────
+    #[allow(dead_code)]
+    pub fn success(&self) -> Color { self.cfg.success.to_ratatui() }
+    #[allow(dead_code)]
+    pub fn error(&self)   -> Color { self.cfg.error.to_ratatui() }
+    #[allow(dead_code)]
+    pub fn warning(&self) -> Color { self.cfg.warning.to_ratatui() }
 }

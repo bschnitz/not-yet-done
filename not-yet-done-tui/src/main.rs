@@ -14,15 +14,18 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
 use app::App;
-use config::TuiConfigService;
+use config::{TuiConfigService, TuiThemeService};
+use ui::theme::Theme;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let keybindings = TuiConfigService::load()?;
-    let mut app = App::new(keybindings);
+    let theme_cfg   = TuiThemeService::load()?;
+    let theme       = Theme::new(theme_cfg);
+    let mut app     = App::new(keybindings, theme);
 
     let mut terminal = setup_terminal()?;
-    let result = run_loop(&mut terminal, &mut app);
+    let result       = run_loop(&mut terminal, &mut app);
     restore_terminal(&mut terminal)?;
 
     result

@@ -1,17 +1,20 @@
 use crate::config::{Action, KeyBindingConfig};
 use crate::tabs::Tab;
+use crate::ui::theme::Theme;
 
 pub struct App {
-    pub active_tab: Tab,
+    pub active_tab:  Tab,
     pub keybindings: KeyBindingConfig,
+    pub theme:       Theme,
     pub should_quit: bool,
 }
 
 impl App {
-    pub fn new(keybindings: KeyBindingConfig) -> Self {
+    pub fn new(keybindings: KeyBindingConfig, theme: Theme) -> Self {
         Self {
             active_tab: Tab::Welcome,
             keybindings,
+            theme,
             should_quit: false,
         }
     }
@@ -27,7 +30,7 @@ impl App {
         }
     }
 
-    /// Resolve a raw key string to an Action, if one is mapped
+    /// Resolve a raw key string to an Action, if one is mapped.
     pub fn resolve_key(&self, key: &str) -> Option<Action> {
         for (action, binding) in &self.keybindings.bindings {
             if binding.as_str() == key {

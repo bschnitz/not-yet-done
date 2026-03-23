@@ -6,17 +6,26 @@ use ratatui::{
     widgets::{Block, Paragraph, Widget},
 };
 
-use crate::ui::theme::Theme;
+use crate::app::App;
 
-pub struct PlaceholderTab {
-    pub label: &'static str,
-    pub icon:  &'static str,
+pub struct PlaceholderTab<'a> {
+    app:   &'a App,
+    label: &'static str,
+    icon:  &'static str,
 }
 
-impl Widget for PlaceholderTab {
+impl<'a> PlaceholderTab<'a> {
+    pub fn new(app: &'a App, label: &'static str, icon: &'static str) -> Self {
+        Self { app, label, icon }
+    }
+}
+
+impl Widget for PlaceholderTab<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let t = &self.app.theme;
+
         Block::default()
-            .style(Style::default().bg(Theme::BG))
+            .style(Style::default().bg(t.bg()))
             .render(area, buf);
 
         let v_chunks = Layout::default()
@@ -29,18 +38,16 @@ impl Widget for PlaceholderTab {
             .split(area);
 
         let lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("{}  {}", self.icon, self.label),
-                    Style::default()
-                        .fg(Theme::TEXT_DIM)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ])
+            Line::from(vec![Span::styled(
+                format!("{}  {}", self.icon, self.label),
+                Style::default()
+                    .fg(t.text_dim())
+                    .add_modifier(Modifier::ITALIC),
+            )])
             .alignment(Alignment::Center),
             Line::from(vec![Span::styled(
                 "coming soon",
-                Style::default().fg(Theme::TEXT_DIM),
+                Style::default().fg(t.text_dim()),
             )])
             .alignment(Alignment::Center),
         ];
