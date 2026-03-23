@@ -1,14 +1,20 @@
 use async_trait::async_trait;
+use chrono::{Datelike, NaiveDate};
 use shaku::Component;
 use std::sync::Arc;
 use uuid::Uuid;
+use chrono::TimeZone;
 
+use crate::entity::granularity::Granularity;
 use crate::entity::tracking;
 use crate::error::AppError;
+use crate::local_context::LocalContext;
 use crate::repository::{TaskRepository, TrackingRepository};
-use crate::entity::granularity::{Granularity};
 
-pub enum GravityDirection { Start, End }
+pub enum GravityDirection {
+    Start,
+    End,
+}
 
 pub struct StoppedTracking {
     pub tracking: tracking::Model,
@@ -21,8 +27,21 @@ pub struct TaskSummary {
     pub total_duration: chrono::Duration,
 }
 
-pub struct Summary {
+/// Summary for a single local calendar day.
+pub struct DaySummary {
+    /// The local date this summary covers.
+    pub date: NaiveDate,
+    /// Per-task breakdown for this day, sorted alphabetically by description.
     pub entries: Vec<TaskSummary>,
+    /// Sum of all task durations for this day.
+    pub day_total: chrono::Duration,
+}
+
+/// Full summary across all days in the requested range.
+pub struct Summary {
+    /// One entry per local calendar day that has tracked time, sorted ascending.
+    pub days: Vec<DaySummary>,
+    /// Grand total across all days.
     pub total: chrono::Duration,
 }
 
@@ -56,17 +75,21 @@ pub trait TrackingService: shaku::Interface {
     /// Returns all stopped tracking entries.
     async fn stop(&self, task_id: Option<Uuid>) -> Result<Vec<StoppedTracking>, AppError>;
 
+    /// Return a summary of tracked time grouped by local calendar day and task.
+    ///
+    /// `from` and `to` carry the user's local timezone so that day boundaries
+    /// are computed correctly.  Both bounds are inclusive.
     async fn summary(
         &self,
-        from: chrono::DateTime<chrono::Utc>,
-        to: chrono::DateTime<chrono::Utc>,
+        from: LocalContext,
+        to: LocalContext,
         task_id: Option<Uuid>,
     ) -> Result<Summary, AppError>;
 
     async fn move_tracking(
         &self,
         entry_id: Uuid,
-        new_start: chrono::DateTime<chrono::Utc>,
+        new_start: LocalContext,
         options: MoveOptions,
     ) -> Result<MovedTracking, AppError>;
 }
@@ -87,15 +110,17 @@ impl TrackingService for TrackingServiceImpl {
         task_id: Uuid,
         parallel: bool,
     ) -> Result<tracking::Model, AppError> {
+        // Guard: task must exist
+        self.task_repository.find_by_id(task_id).await?;
+
         // Guard: task must not already have an active tracking
-        if let Some(_) = self.tracking_repository.find_active_for_task(task_id).await? {
+        if self.tracking_repository.find_active_for_task(task_id).await?.is_some() {
             return Err(AppError::TrackingAlreadyActive(task_id));
         }
 
         let now = chrono::Utc::now();
 
         if !parallel {
-            // Stop all other active trackings
             let active = self.tracking_repository.find_all_active().await?;
             for t in active {
                 if t.task_id != task_id {
@@ -139,54 +164,107 @@ impl TrackingService for TrackingServiceImpl {
 
     async fn summary(
         &self,
-        from: chrono::DateTime<chrono::Utc>,
-        to: chrono::DateTime<chrono::Utc>,
+        from: LocalContext,
+        to: LocalContext,
         task_id: Option<Uuid>,
     ) -> Result<Summary, AppError> {
         let now = chrono::Utc::now();
-        let trackings = self.tracking_repository.find_in_range(from, to, task_id).await?;
+        // Use the timezone from `from` for all day-boundary calculations.
+        // `to` is expected to carry the same timezone (same user session).
+        let tz = from.timezone;
 
-        // Gruppieren nach task_id, Dauer clampen auf [from, to]
-        let mut by_task: std::collections::HashMap<Uuid, chrono::Duration> =
-        std::collections::HashMap::new();
+        let trackings = self.tracking_repository
+            .find_in_range(from.utc, to.utc, task_id)
+            .await?;
+
+        // Group durations by (local_date, task_id), clamping each tracking to
+        // the requested [from, to] window.
+        let mut by_day_task: std::collections::BTreeMap<
+            (NaiveDate, Uuid),
+            chrono::Duration,
+        > = std::collections::BTreeMap::new();
 
         for t in &trackings {
-            let start = t.started_at.max(from);
-            let end = t.ended_at.unwrap_or(now).min(to);
-            let duration = end - start;
-            if duration > chrono::Duration::zero() {
-                *by_task.entry(t.task_id).or_insert(chrono::Duration::zero()) += duration;
+            let start_utc = t.started_at.max(from.utc);
+            let end_utc = t.ended_at.unwrap_or(now).min(to.utc);
+            if end_utc <= start_utc {
+                continue;
+            }
+
+            // Walk through each local day this tracking spans and accumulate
+            // only the portion that falls within that day.
+            let mut cursor = start_utc;
+            while cursor < end_utc {
+                let local_cursor = cursor.with_timezone(&tz);
+                let local_date = local_cursor.date_naive();
+
+                // End of the current local day in UTC
+                let day_end_local = tz
+                    .with_ymd_and_hms(
+                        local_date.year(),
+                        local_date.month(),
+                        local_date.day(),
+                        23, 59, 59,
+                    )
+                    .unwrap();
+                let day_end_utc = day_end_local.to_utc() + chrono::Duration::seconds(1);
+
+                let slice_end = end_utc.min(day_end_utc);
+                let duration = slice_end - cursor;
+
+                if duration > chrono::Duration::zero() {
+                    *by_day_task
+                        .entry((local_date, t.task_id))
+                        .or_insert(chrono::Duration::zero()) += duration;
+                }
+
+                cursor = day_end_utc;
             }
         }
 
-        // Task-Beschreibungen holen und Einträge aufbauen
-        let mut entries: Vec<TaskSummary> = Vec::new();
-        for (tid, duration) in &by_task {
-            let task = self.task_repository.find_by_id(*tid).await?;
-            entries.push(TaskSummary {
-                task_id: *tid,
-                task_description: task.description,
-                total_duration: *duration,
-            });
+        // Build the per-day summaries.
+        // BTreeMap iteration is already sorted by (date, task_id).
+        let mut days_map: std::collections::BTreeMap<NaiveDate, Vec<(Uuid, chrono::Duration)>> =
+            std::collections::BTreeMap::new();
+        for ((date, tid), duration) in &by_day_task {
+            days_map.entry(*date).or_default().push((*tid, *duration));
         }
 
-        // Alphabetisch nach Beschreibung sortieren für stabile Ausgabe
-        entries.sort_by(|a, b| a.task_description.cmp(&b.task_description));
+        let mut total = chrono::Duration::zero();
+        let mut days: Vec<DaySummary> = Vec::new();
 
-        let total = entries.iter().fold(chrono::Duration::zero(), |acc, e| acc + e.total_duration);
+        for (date, task_durations) in days_map {
+            // Resolve task descriptions and build entries
+            let mut entries: Vec<TaskSummary> = Vec::new();
+            for (tid, duration) in task_durations {
+                let task = self.task_repository.find_by_id(tid).await?;
+                entries.push(TaskSummary {
+                    task_id: tid,
+                    task_description: task.description,
+                    total_duration: duration,
+                });
+            }
+            entries.sort_by(|a, b| a.task_description.cmp(&b.task_description));
 
-        Ok(Summary { entries, total })
+            let day_total = entries
+                .iter()
+                .fold(chrono::Duration::zero(), |acc, e| acc + e.total_duration);
+            total += day_total;
+
+            days.push(DaySummary { date, entries, day_total });
+        }
+
+        Ok(Summary { days, total })
     }
 
     async fn move_tracking(
         &self,
         entry_id: Uuid,
-        new_start: chrono::DateTime<chrono::Utc>,
+        new_start: LocalContext,
         options: MoveOptions,
     ) -> Result<MovedTracking, AppError> {
         let now = chrono::Utc::now();
 
-        // 1. Tracking laden und validieren
         let tracking = self.tracking_repository
             .find_by_id(entry_id)
             .await?
@@ -198,21 +276,18 @@ impl TrackingService for TrackingServiceImpl {
 
         let duration = tracking.ended_at.unwrap() - tracking.started_at;
 
-        // 2. Startzeitpunkt berechnen
         let proposed_start = self.resolve_start(new_start, duration, &options)?;
 
         let candidate_start = match &options.gravity {
             Some(gravity) => {
                 self.find_free_slot(
-                    proposed_start, duration, entry_id,
-                    tracking.task_id, gravity
+                    proposed_start, duration, entry_id, tracking.task_id, gravity,
                 ).await?
             }
             None => {
-                // Ohne gravity: einmal prüfen, kein iteratives Suchen
                 let overlapping = self.tracking_repository
                     .find_overlapping(proposed_start, proposed_start + duration, entry_id)
-                .await?;
+                    .await?;
                 if overlapping.iter().any(|t| t.task_id == tracking.task_id) {
                     return Err(AppError::OverlapSameTask);
                 }
@@ -223,27 +298,22 @@ impl TrackingService for TrackingServiceImpl {
             }
         };
 
-        // 3. Zukunfts-Check
         if !options.allow_future && candidate_start > now {
             return Err(AppError::TrackingInFuture);
         }
 
-        // 4. Task-Beschreibung holen
         let task = self.task_repository.find_by_id(tracking.task_id).await?;
 
-        // 5. Immutability-Pattern: altes löschen, neues anlegen
         let candidate_end = candidate_start + duration;
         let old_id = tracking.id;
         let old_started_at = tracking.started_at;
         let old_ended_at = tracking.ended_at.unwrap();
 
-        // Altes Tracking soft-deleten (ended_at bleibt wie es ist)
         self.tracking_repository.soft_delete_keeping_times(old_id).await?;
 
-        // Neues Tracking anlegen
         let new_tracking = self.tracking_repository
             .insert_with_end(tracking.task_id, candidate_start, candidate_end, Some(old_id))
-        .await?;
+            .await?;
 
         Ok(MovedTracking {
             old_id,
@@ -260,30 +330,26 @@ impl TrackingService for TrackingServiceImpl {
 impl TrackingServiceImpl {
     fn resolve_start(
         &self,
-        new_start: chrono::DateTime<chrono::Utc>,
+        new_start: LocalContext,
         duration: chrono::Duration,
         options: &MoveOptions,
     ) -> Result<chrono::DateTime<chrono::Utc>, AppError> {
-        // Ohne gravity: direkt new_start + offset
+        let offset = options.offset.unwrap_or(chrono::Duration::zero());
+
         let Some(ref gravity) = options.gravity else {
-            return Ok(new_start + options.offset.unwrap_or(chrono::Duration::zero()));
+            return Ok(new_start.utc + offset);
         };
 
-        let granularity = options.granularity.as_ref()
-            .unwrap_or(&Granularity::Day);
-
-        let offset = options.offset.unwrap_or(chrono::Duration::zero());
+        let granularity = options.granularity.as_ref().unwrap_or(&Granularity::Day);
 
         match gravity {
             GravityDirection::Start => {
-                let snapped = granularity.snap_start(new_start);
+                let snapped = granularity.snap_start(new_start.utc, new_start.timezone);
                 Ok(snapped + offset)
             }
             GravityDirection::End => {
-                let snapped = granularity.snap_end(new_start);
+                let snapped = granularity.snap_end(new_start.utc, new_start.timezone);
                 Ok(snapped + offset - duration)
-                // snap_end gibt den spätesten Endzeitpunkt,
-                // start = end - duration
             }
         }
     }
@@ -302,16 +368,13 @@ impl TrackingServiceImpl {
                 loop {
                     let overlapping = self.tracking_repository
                         .find_overlapping(candidate, candidate + duration, exclude_id)
-                    .await?;
-
+                        .await?;
                     if overlapping.is_empty() {
                         return Ok(candidate);
                     }
                     if overlapping.iter().any(|t| t.task_id == task_id) {
                         return Err(AppError::OverlapSameTask);
                     }
-
-                    // Hinter das letzte überlappende Tracking springen
                     candidate = overlapping.iter()
                         .filter_map(|t| t.ended_at)
                         .max()
@@ -323,16 +386,13 @@ impl TrackingServiceImpl {
                 loop {
                     let overlapping = self.tracking_repository
                         .find_overlapping(candidate_end - duration, candidate_end, exclude_id)
-                    .await?;
-
+                        .await?;
                     if overlapping.is_empty() {
                         return Ok(candidate_end - duration);
                     }
                     if overlapping.iter().any(|t| t.task_id == task_id) {
                         return Err(AppError::OverlapSameTask);
                     }
-
-                    // Vor das erste überlappende Tracking springen
                     candidate_end = overlapping.iter()
                         .map(|t| t.started_at)
                         .min()

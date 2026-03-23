@@ -126,7 +126,6 @@ impl TrackingRepository for TrackingRepositoryImpl {
             .ok_or(AppError::TrackingNotFound(id))?;
         let mut model: tracking::ActiveModel = tracking.into();
         model.ended_at = Set(Some(ended_at));
-        model.deleted = Set(true);
         Ok(model.update(db).await?)
     }
 

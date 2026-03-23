@@ -20,9 +20,9 @@ pub mod cli {
         parallel: bool,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_core::service::TrackingService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
             let task_id = Uuid::parse_str(&task_id)
                 .map_err(|_| not_yet_done_core::error::AppError::InvalidId(task_id))?;
             let service: &dyn TrackingService = module.resolve_ref();
@@ -30,13 +30,19 @@ pub mod cli {
         });
         match result {
             Ok(tracking) => {
-                println!("✓ Tracking started: [{}] started at {}",
+                println!(
+                    "✓ Tracking started: [{}] started at {}",
                     tracking.id,
-                    tracking.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
+                    tracking.started_at
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S")
                 );
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -47,14 +53,14 @@ pub mod cli {
         task_id: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_core::service::TrackingService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
 
             let task_id = match task_id {
                 Some(id) => Some(
                     Uuid::parse_str(&id)
-                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?
+                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?,
                 ),
                 None => None,
             };
@@ -66,20 +72,29 @@ pub mod cli {
         match result {
             Ok(stopped) => {
                 for s in &stopped {
-                    println!("✓ Tracking stopped: [{}] {} | {} → {}",
+                    println!(
+                        "✓ Tracking stopped: [{}] {} | {} → {}",
                         s.tracking.id,
                         s.task_description,
-                        s.tracking.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
-                        s.tracking.ended_at.unwrap().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                        s.tracking.started_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M"),
+                        s.tracking.ended_at
+                            .unwrap()
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M"),
                     );
                 }
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
-    /// Show a summary of tracked time grouped by task.
+    /// Show a summary of tracked time grouped by day and task.
     /// Defaults to today if no date range is given.
     ///
     /// Examples:
@@ -87,9 +102,15 @@ pub mod cli {
     ///   nyd track summary --from 2026-03-01 --to 2026-03-22
     ///   nyd track summary --from 2026-03-01
     pub fn summary(
-        #[arg(long, help = "Start date/time (e.g. '2026-03-01', 'yesterday', 'last monday'), defaults to today")]
+        #[arg(
+            long,
+            help = "Start date/time (e.g. '2026-03-01', 'yesterday', 'last monday'), defaults to today"
+        )]
         from: Option<crate::datetime::LocalDateTime>,
-        #[arg(long, help = "End date/time (e.g. '2026-03-22', 'today'), defaults to today")]
+        #[arg(
+            long,
+            help = "End date/time (e.g. '2026-03-22', 'today'), defaults to today"
+        )]
         to: Option<crate::datetime::LocalDateTime>,
         #[arg(long, help = "Filter by task ID")]
         task_id: Option<String>,
@@ -97,92 +118,110 @@ pub mod cli {
         use chrono::{Local, TimeZone};
 
         let now = Local::now();
+        let tz = *now.offset();
 
-        let from_dt = from
-            .map(|d| d.utc)
-            .unwrap_or_else(|| {
-                Local
-                    .from_local_datetime(
-                        &now.date_naive().and_hms_opt(0, 0, 0).unwrap()
-                    )
-                    .single()
-                    .unwrap()
-                    .to_utc()
-            });
+        let from_ctx = from.map(|d| d.into()).unwrap_or_else(|| {
+            let utc = Local
+                .from_local_datetime(
+                    &now.date_naive().and_hms_opt(0, 0, 0).unwrap(),
+                )
+                .single()
+                .unwrap()
+                .to_utc();
+            not_yet_done_core::local_context::LocalContext::new(utc, tz)
+        });
 
-        let to_dt = to
-            .map(|d| d.utc)
-            .unwrap_or_else(|| {
-                Local
-                    .from_local_datetime(
-                        &now.date_naive().and_hms_opt(23, 59, 59).unwrap()
-                    )
-                    .single()
-                    .unwrap()
-                    .to_utc()
-            });
+        let to_ctx = to.map(|d| d.into()).unwrap_or_else(|| {
+            let utc = Local
+                .from_local_datetime(
+                    &now.date_naive().and_hms_opt(23, 59, 59).unwrap(),
+                )
+                .single()
+                .unwrap()
+                .to_utc();
+            not_yet_done_core::local_context::LocalContext::new(utc, tz)
+        });
 
-        if from_dt > to_dt {
+        if from_ctx.utc > to_ctx.utc {
             eprintln!("Error: --from must not be after --to");
             return 1;
         }
 
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_core::service::TrackingService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
 
             let task_id = match task_id {
                 Some(id) => Some(
                     Uuid::parse_str(&id)
-                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?
+                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?,
                 ),
                 None => None,
             };
 
             let service: &dyn TrackingService = module.resolve_ref();
-            service.summary(from_dt, to_dt, task_id).await
+            service.summary(from_ctx, to_ctx, task_id).await
         });
 
         match result {
             Ok(summary) => {
-                if summary.entries.is_empty() {
+                if summary.days.is_empty() {
                     println!("No tracked time found for the given range.");
                     return 0;
                 }
 
                 println!(
                     "From {} to {}\n",
-                    from_dt.with_timezone(&Local).format("%Y-%m-%d"),
-                    to_dt.with_timezone(&Local).format("%Y-%m-%d"),
+                    from_ctx.to_local().format("%Y-%m-%d"),
+                    to_ctx.to_local().format("%Y-%m-%d"),
                 );
 
-                let max_len = summary.entries.iter()
+                // Determine column width from all task descriptions across all days
+                let max_desc_len = summary.days.iter()
+                    .flat_map(|d| d.entries.iter())
                     .map(|e| e.task_description.len())
                     .max()
                     .unwrap_or(0)
-                    .max(5);
+                    .max(5); // at least "Total"
 
-                for entry in &summary.entries {
+                let sep_width = max_desc_len + 50;
+
+                for day in &summary.days {
+                    println!("{}", day.date.format("%Y-%m-%d"));
+
+                    for entry in &day.entries {
+                        println!(
+                            "  [{task_id}] {desc:<width$}  {dur}",
+                            task_id = entry.task_id,
+                            desc = entry.task_description,
+                            width = max_desc_len,
+                            dur = format_duration(entry.total_duration),
+                        );
+                    }
+
                     println!(
-                        "[{}] {:<width$}  {}",
-                        entry.task_id,
-                        entry.task_description,
-                        format_duration(entry.total_duration),
-                        width = max_len,
+                        "  {label:<width$}  {dur}",
+                        label = "Day total",
+                        width = max_desc_len + 38, // UUID + brackets + spaces
+                        dur = format_duration(day.day_total),
                     );
+                    println!();
                 }
 
-                println!("{}", "─".repeat(max_len + 46));
+                println!("{}", "─".repeat(sep_width));
                 println!(
-                    "       {:<width$}  {}",
-                    "Total",
-                    format_duration(summary.total),
-                    width = max_len,
+                    "  {label:<width$}  {dur}",
+                    label = "Total",
+                    width = max_desc_len + 38,
+                    dur = format_duration(summary.total),
                 );
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -233,8 +272,8 @@ pub mod cli {
 
         let gravity_dir = match gravity.as_deref() {
             Some("start") => Some(GravityDirection::Start),
-            Some("end")   => Some(GravityDirection::End),
-            _             => None,
+            Some("end") => Some(GravityDirection::End),
+            _ => None,
         };
 
         let granularity = gravity_dir.as_ref().map(|_| {
@@ -249,13 +288,13 @@ pub mod cli {
             offset: offset.map(|o| o.duration),
         };
 
-        let new_start_utc = start.utc;
+        let start_ctx: not_yet_done_core::local_context::LocalContext = start.into();
 
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_core::service::TrackingService;
+            use shaku::HasComponent;
             let service: &dyn TrackingService = module.resolve_ref();
-            service.move_tracking(entry_id, new_start_utc, options).await
+            service.move_tracking(entry_id, start_ctx, options).await
         });
 
         match result {
@@ -266,18 +305,29 @@ pub mod cli {
                 println!(
                     "  Old:   [{}] {} → {}",
                     moved.old_id,
-                    moved.old_started_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
-                    moved.old_ended_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    moved.old_started_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M"),
+                    moved.old_ended_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M"),
                 );
                 println!(
                     "  New:   [{}] {} → {}",
                     moved.new_id,
-                    moved.new_started_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
-                    moved.new_ended_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    moved.new_started_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M"),
+                    moved.new_ended_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M"),
                 );
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 }
