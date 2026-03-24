@@ -1,0 +1,16 @@
+# not-yet-done-core/tests/fixtures/filter_compound.yaml
+
+description: "Nested OR inside AND: high priority OR matching description, but not deleted"
+
+filter:
+  and:
+    - not:
+        [deleted, =, true]
+    - or:
+        - [priority, '>=', 8]
+        - [description, like, '%release%']
+
+expected:
+  - "Fix the login bug"
+  - "Write release notes"
+  - "High priority cancelled task"

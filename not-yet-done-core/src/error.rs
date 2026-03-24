@@ -1,3 +1,5 @@
+// not-yet-done-core/src/error.rs
+
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -68,4 +70,9 @@ pub enum AppError {
 
     #[error("Backup failed: {0}")]
     BackupFailed(String),
+
+    /// Returned when a [`crate::filter::FilterExpr`] cannot be translated into
+    /// a valid SQL condition — e.g. an unknown column name or a type mismatch.
+    #[error("Filter error: {0}")]
+    FilterError(String),
 }

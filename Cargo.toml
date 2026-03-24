@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["not-yet-done-cli", "not-yet-done-core", "not-yet-done-tui"]
+members = [
+  "not-yet-done-cli",
+  "not-yet-done-core",
+  "not-yet-done-tui",
+  "not-yet-done-macros"
+]
 
 [workspace.dependencies]
 sea-orm = { version = "2.0.0-rc", features = [
@@ -28,3 +33,4 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 crossterm = "0.29.0"
 ratatui = "0.30.0"
+not-yet-done-macros = { path = "not-yet-done-macros" }

@@ -1847,6 +1847,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs",
+ "not-yet-done-macros",
  "regex",
  "sea-orm",
  "serde",
@@ -1855,6 +1856,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "not-yet-done-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

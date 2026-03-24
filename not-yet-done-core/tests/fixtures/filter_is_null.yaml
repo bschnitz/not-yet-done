@@ -1,0 +1,14 @@
+# not-yet-done-core/tests/fixtures/filter_is_null.yaml
+
+description: "IS NULL finds tasks without a parent"
+
+filter:
+  [parent_id, is_null]
+
+expected:
+  - "Gustav works on the parser"
+  - "Augustava reviews the PR"
+  - "Fix the login bug"
+  - "Write release notes"
+  - "Deleted task should be invisible"
+  - "High priority cancelled task"

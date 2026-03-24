@@ -16,3 +16,9 @@ regex       = { workspace = true }
 dirs        = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
+not-yet-done-macros = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }

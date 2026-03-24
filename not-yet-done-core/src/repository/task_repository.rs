@@ -1,3 +1,5 @@
+// not-yet-done-core/src/repository/task_repository.rs
+
 use sea_orm::prelude::Expr;
 use async_trait::async_trait;
 use sea_orm::{
@@ -7,9 +9,10 @@ use sea_orm::{
 use shaku::Component;
 use uuid::Uuid;
 
-use crate::entity::task::{self, ActiveModel};
+use crate::entity::task::{self, ActiveModel, TaskColumnRegistry};
 use crate::entity::task_project;
 use crate::error::AppError;
+use crate::filter::{FilterBuilder, FilterExpr};
 
 #[async_trait]
 pub trait TaskRepository: shaku::Interface {
@@ -26,6 +29,13 @@ pub trait TaskRepository: shaku::Interface {
     async fn assign_project_tag(&self, task_id: Uuid, tag_id: Uuid) -> Result<(), AppError>;
     async fn unassign_project_tag(&self, task_id: Uuid, tag_id: Uuid) -> Result<(), AppError>;
     async fn find_project_ids_for_task(&self, task_id: Uuid) -> Result<Vec<Uuid>, AppError>;
+
+    /// Return all tasks matching the given filter expression.
+    ///
+    /// The expression is compiled entirely to SQL.  Only columns of the `task`
+    /// entity may be referenced; unknown column names produce
+    /// [`AppError::FilterError`].
+    async fn find_filtered(&self, expr: &FilterExpr) -> Result<Vec<task::Model>, AppError>;
 }
 
 #[derive(Component)]
@@ -92,11 +102,7 @@ impl TaskRepository for TaskRepositoryImpl {
         Ok(())
     }
 
-    async fn update_description(
-        &self,
-        id: Uuid,
-        description: String,
-    ) -> Result<task::Model, AppError> {
+    async fn update_description(&self, id: Uuid, description: String) -> Result<task::Model, AppError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let task = self.find_by_id(id).await?;
         let mut model: ActiveModel = task.into();
@@ -122,7 +128,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .filter(task_project::Column::TaskId.eq(task_id))
             .filter(task_project::Column::ProjectId.eq(project_id))
             .exec(db)
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -130,7 +136,6 @@ impl TaskRepository for TaskRepositoryImpl {
         use crate::entity::task::Column;
         let db = self.db.as_ref().expect("DB nicht initialisiert");
 
-        // Alle task_ids des Projekts holen
         let task_ids: Vec<Uuid> = task_project::Entity::find()
             .filter(task_project::Column::ProjectId.eq(project_id))
             .all(db)
@@ -143,13 +148,12 @@ impl TaskRepository for TaskRepositoryImpl {
             return Ok(());
         }
 
-        // Batch soft-delete
         task::Entity::update_many()
             .col_expr(task::Column::Deleted, Expr::value(true))
             .col_expr(task::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
             .filter(Column::Id.is_in(task_ids))
             .exec(db)
-        .await?;
+            .await?;
 
         Ok(())
     }
@@ -161,7 +165,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task_id: Set(task_id),
             global_tag_id: Set(tag_id),
         }
-            .insert(db)
+        .insert(db)
         .await?;
         Ok(())
     }
@@ -173,7 +177,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .filter(task_global_tag::Column::TaskId.eq(task_id))
             .filter(task_global_tag::Column::GlobalTagId.eq(tag_id))
             .exec(db)
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -184,7 +188,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task_id: Set(task_id),
             project_tag_id: Set(tag_id),
         }
-            .insert(db)
+        .insert(db)
         .await?;
         Ok(())
     }
@@ -196,7 +200,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .filter(task_project_tag::Column::TaskId.eq(task_id))
             .filter(task_project_tag::Column::ProjectTagId.eq(tag_id))
             .exec(db)
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -209,5 +213,11 @@ impl TaskRepository for TaskRepositoryImpl {
             .into_iter()
             .map(|tp| tp.project_id)
             .collect())
+    }
+
+    async fn find_filtered(&self, expr: &FilterExpr) -> Result<Vec<task::Model>, AppError> {
+        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let condition = FilterBuilder::new(&TaskColumnRegistry).build(expr)?;
+        Ok(task::Entity::find().filter(condition).all(db).await?)
     }
 }

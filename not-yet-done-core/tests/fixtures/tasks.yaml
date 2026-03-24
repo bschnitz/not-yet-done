@@ -1,0 +1,42 @@
+# not-yet-done-core/tests/fixtures/tasks.yaml
+#
+# Seed data for filter integration tests.
+# Each entry maps directly to task fields.
+# `id` is omitted — generated at insert time; tests match by description.
+
+- description: "Gustav works on the parser"
+  status: todo
+  priority: 3
+  deleted: false
+
+- description: "Augustava reviews the PR"
+  status: in_progress
+  priority: 5
+  deleted: false
+
+- description: "Fix the login bug"
+  status: done
+  priority: 8
+  deleted: false
+
+- description: "Write release notes"
+  status: todo
+  priority: 1
+  deleted: false
+
+- description: "Deleted task should be invisible"
+  status: todo
+  priority: 2
+  deleted: true
+
+- description: "High priority cancelled task"
+  status: cancelled
+  priority: 10
+  deleted: false
+
+- description: "Child task with parent"
+  status: todo
+  priority: 4
+  deleted: false
+  # parent_description is resolved by the test harness to a parent_id
+  parent_description: "Gustav works on the parser"
