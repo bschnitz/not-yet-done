@@ -11,9 +11,15 @@ use std::str::FromStr;
 pub struct KeyBinding(pub String);
 
 impl KeyBinding {
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
-    pub fn as_str(&self) -> &str { &self.0 }
-    pub fn display_label(&self) -> String { format!("[{}]", self.0) }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn display_label(&self) -> String {
+        format!("[{}]", self.0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -53,36 +59,76 @@ pub enum GlobalAction {
 impl GlobalAction {
     fn as_str(&self) -> &'static str {
         match self {
-            GlobalAction::Quit         => "quit",
-            GlobalAction::TabWelcome   => "tab_welcome",
-            GlobalAction::TabTasks     => "tab_tasks",
+            GlobalAction::Quit => "quit",
+            GlobalAction::TabWelcome => "tab_welcome",
+            GlobalAction::TabTasks => "tab_tasks",
             GlobalAction::TabTrackings => "tab_trackings",
-            GlobalAction::TabNext      => "tab_next",
-            GlobalAction::TabPrev      => "tab_prev",
+            GlobalAction::TabNext => "tab_next",
+            GlobalAction::TabPrev => "tab_prev",
         }
     }
 }
 
 impl fmt::Display for GlobalAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl FromStr for GlobalAction {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "quit"          => Ok(GlobalAction::Quit),
-            "tab_welcome"   => Ok(GlobalAction::TabWelcome),
-            "tab_tasks"     => Ok(GlobalAction::TabTasks),
+            "quit" => Ok(GlobalAction::Quit),
+            "tab_welcome" => Ok(GlobalAction::TabWelcome),
+            "tab_tasks" => Ok(GlobalAction::TabTasks),
             "tab_trackings" => Ok(GlobalAction::TabTrackings),
-            "tab_next"      => Ok(GlobalAction::TabNext),
-            "tab_prev"      => Ok(GlobalAction::TabPrev),
-            other           => Err(format!("unknown global action: {}", other)),
+            "tab_next" => Ok(GlobalAction::TabNext),
+            "tab_prev" => Ok(GlobalAction::TabPrev),
+            other => Err(format!("unknown global action: {}", other)),
         }
     }
 }
 
 impl_string_serde!(GlobalAction);
+
+// ---------------------------------------------------------------------------
+// FormAction
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FormAction {
+    Next,
+    Prev,
+}
+
+impl FormAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            FormAction::Next => "next",
+            FormAction::Prev => "prev",
+        }
+    }
+}
+
+impl fmt::Display for FormAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for FormAction {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "next" => Ok(FormAction::Next),
+            "prev" => Ok(FormAction::Prev),
+            other => Err(format!("unknown form action: {}", other)),
+        }
+    }
+}
+
+impl_string_serde!(FormAction);
 
 // ---------------------------------------------------------------------------
 // TasksAction
@@ -105,35 +151,37 @@ pub enum TasksAction {
 impl TasksAction {
     fn as_str(&self) -> &'static str {
         match self {
-            TasksAction::ViewList   => "view_list",
-            TasksAction::ViewTree   => "view_tree",
+            TasksAction::ViewList => "view_list",
+            TasksAction::ViewTree => "view_tree",
             TasksAction::FormFilter => "form_filter",
-            TasksAction::FormAdd    => "form_add",
+            TasksAction::FormAdd => "form_add",
             TasksAction::FormDelete => "form_delete",
-            TasksAction::FormClose  => "form_close",
-            TasksAction::ListNext   => "list_next",
-            TasksAction::ListPrev   => "list_prev",
+            TasksAction::FormClose => "form_close",
+            TasksAction::ListNext => "list_next",
+            TasksAction::ListPrev => "list_prev",
         }
     }
 }
 
 impl fmt::Display for TasksAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl FromStr for TasksAction {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "view_list"   => Ok(TasksAction::ViewList),
-            "view_tree"   => Ok(TasksAction::ViewTree),
+            "view_list" => Ok(TasksAction::ViewList),
+            "view_tree" => Ok(TasksAction::ViewTree),
             "form_filter" => Ok(TasksAction::FormFilter),
-            "form_add"    => Ok(TasksAction::FormAdd),
+            "form_add" => Ok(TasksAction::FormAdd),
             "form_delete" => Ok(TasksAction::FormDelete),
-            "form_close"  => Ok(TasksAction::FormClose),
-            "list_next"   => Ok(TasksAction::ListNext),
-            "list_prev"   => Ok(TasksAction::ListPrev),
-            other         => Err(format!("unknown tasks action: {}", other)),
+            "form_close" => Ok(TasksAction::FormClose),
+            "list_next" => Ok(TasksAction::ListNext),
+            "list_prev" => Ok(TasksAction::ListPrev),
+            other => Err(format!("unknown tasks action: {}", other)),
         }
     }
 }
@@ -183,12 +231,12 @@ where
 impl Default for KeyBindingSection<GlobalAction> {
     fn default() -> Self {
         let mut m = HashMap::new();
-        m.insert(GlobalAction::Quit,         KeyBinding::new("q"));
-        m.insert(GlobalAction::TabWelcome,   KeyBinding::new("1"));
-        m.insert(GlobalAction::TabTasks,     KeyBinding::new("2"));
+        m.insert(GlobalAction::Quit, KeyBinding::new("q"));
+        m.insert(GlobalAction::TabWelcome, KeyBinding::new("1"));
+        m.insert(GlobalAction::TabTasks, KeyBinding::new("2"));
         m.insert(GlobalAction::TabTrackings, KeyBinding::new("3"));
-        m.insert(GlobalAction::TabNext,      KeyBinding::new("tab"));
-        m.insert(GlobalAction::TabPrev,      KeyBinding::new("shift+tab"));
+        m.insert(GlobalAction::TabNext, KeyBinding::new("tab"));
+        m.insert(GlobalAction::TabPrev, KeyBinding::new("shift+tab"));
         Self { bindings: m }
     }
 }
@@ -196,14 +244,23 @@ impl Default for KeyBindingSection<GlobalAction> {
 impl Default for KeyBindingSection<TasksAction> {
     fn default() -> Self {
         let mut m = HashMap::new();
-        m.insert(TasksAction::ViewList,   KeyBinding::new("l"));
-        m.insert(TasksAction::ViewTree,   KeyBinding::new("t"));
+        m.insert(TasksAction::ViewList, KeyBinding::new("l"));
+        m.insert(TasksAction::ViewTree, KeyBinding::new("t"));
         m.insert(TasksAction::FormFilter, KeyBinding::new("f"));
-        m.insert(TasksAction::FormAdd,    KeyBinding::new("a"));
+        m.insert(TasksAction::FormAdd, KeyBinding::new("a"));
         m.insert(TasksAction::FormDelete, KeyBinding::new("d"));
-        m.insert(TasksAction::FormClose,  KeyBinding::new("esc"));
-        m.insert(TasksAction::ListNext,   KeyBinding::new("j"));
-        m.insert(TasksAction::ListPrev,   KeyBinding::new("k"));
+        m.insert(TasksAction::FormClose, KeyBinding::new("esc"));
+        m.insert(TasksAction::ListNext, KeyBinding::new("j"));
+        m.insert(TasksAction::ListPrev, KeyBinding::new("k"));
+        Self { bindings: m }
+    }
+}
+
+impl Default for KeyBindingSection<FormAction> {
+    fn default() -> Self {
+        let mut m = HashMap::new();
+        m.insert(FormAction::Next, KeyBinding::new("ctrl+j"));
+        m.insert(FormAction::Prev, KeyBinding::new("ctrl+k"));
         Self { bindings: m }
     }
 }
@@ -217,5 +274,7 @@ pub struct KeyBindingConfig {
     #[serde(default)]
     pub global: KeyBindingSection<GlobalAction>,
     #[serde(default)]
-    pub tasks:  KeyBindingSection<TasksAction>,
+    pub tasks: KeyBindingSection<TasksAction>,
+    #[serde(default)]
+    pub form: KeyBindingSection<FormAction>,
 }

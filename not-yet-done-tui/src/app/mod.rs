@@ -3,7 +3,7 @@ use std::sync::Arc;
 use not_yet_done_core::entity::task::Model as Task;
 use not_yet_done_core::service::TaskService;
 
-use crate::config::{GlobalAction, KeyBindingConfig, TasksAction, TuiConfig};
+use crate::config::{FormAction, GlobalAction, KeyBindingConfig, TasksAction, TuiConfig};
 use crate::filter_builder;
 use crate::tabs::{FilterField, LoadState, Tab, TasksForm, TasksState};
 use crate::ui::theme::Theme;
@@ -153,26 +153,30 @@ impl App {
     fn handle_filter_key(&mut self, key: &str) -> bool {
         let focused = self.tasks_state.filter.focused_field;
 
-        match key {
-            // ── Field navigation ──────────────────────────────────────────
-            "tab" | "down" if focused != FilterField::Status => {
-                self.tasks_state.filter.focus_next();
-                return true;
+        // Check for configurable form navigation keys first
+        if let Some(action) = self.resolve_form_key(key) {
+            match action {
+                FormAction::Next => {
+                    if focused == FilterField::Status {
+                        self.tasks_state.filter.status_cursor_next();
+                    } else {
+                        self.tasks_state.filter.focus_next();
+                    }
+                    return true;
+                }
+                FormAction::Prev => {
+                    if focused == FilterField::Status {
+                        self.tasks_state.filter.status_cursor_prev();
+                    } else {
+                        self.tasks_state.filter.focus_prev();
+                    }
+                    return true;
+                }
             }
-            "shift+tab" | "up" if focused != FilterField::Status => {
-                self.tasks_state.filter.focus_prev();
-                return true;
-            }
+        }
 
-            // Status field: up/down cycles options; left/right changes field
-            "down" | "tab" if focused == FilterField::Status => {
-                self.tasks_state.filter.status_cursor_next();
-                return true;
-            }
-            "up" | "shift+tab" if focused == FilterField::Status => {
-                self.tasks_state.filter.status_cursor_prev();
-                return true;
-            }
+        match key {
+            // Status field: left/right changes field
             "left" if focused == FilterField::Status => {
                 self.tasks_state.filter.focus_prev();
                 return true;
@@ -246,6 +250,13 @@ impl App {
 
     fn resolve_tasks_key(&self, key: &str) -> Option<TasksAction> {
         for (action, binding) in &self.keybindings.tasks.bindings {
+            if binding.as_str() == key { return Some(action.clone()); }
+        }
+        None
+    }
+
+    fn resolve_form_key(&self, key: &str) -> Option<FormAction> {
+        for (action, binding) in &self.keybindings.form.bindings {
             if binding.as_str() == key { return Some(action.clone()); }
         }
         None

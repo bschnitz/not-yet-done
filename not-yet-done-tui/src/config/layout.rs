@@ -12,7 +12,9 @@ pub enum SplitType {
 }
 
 impl Default for SplitType {
-    fn default() -> Self { SplitType::Vertical }
+    fn default() -> Self {
+        SplitType::Vertical
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -45,7 +47,10 @@ pub struct SplitConfig {
     /// Minimum terminal height (rows) required for a horizontal split (stacked).
     /// Below this threshold the split collapses to a single pane.
     /// Named after the split type it controls.
-    #[serde(alias = "horizontal-threshold", default = "default_horizontal_threshold")]
+    #[serde(
+        alias = "horizontal-threshold",
+        default = "default_horizontal_threshold"
+    )]
     pub horizontal_threshold: u16,
 
     /// Render order of the two panes — first entry is rendered first
@@ -54,8 +59,12 @@ pub struct SplitConfig {
     pub order: Vec<SplitPane>,
 }
 
-fn default_vertical_threshold()   -> u16 { 120 }
-fn default_horizontal_threshold() -> u16 { 30  }
+fn default_vertical_threshold() -> u16 {
+    120
+}
+fn default_horizontal_threshold() -> u16 {
+    30
+}
 fn default_order() -> Vec<SplitPane> {
     vec![SplitPane::View, SplitPane::Form]
 }
@@ -63,10 +72,10 @@ fn default_order() -> Vec<SplitPane> {
 impl Default for SplitConfig {
     fn default() -> Self {
         Self {
-            split_type:           SplitType::default(),
-            vertical_threshold:   default_vertical_threshold(),
+            split_type: SplitType::default(),
+            vertical_threshold: default_vertical_threshold(),
             horizontal_threshold: default_horizontal_threshold(),
-            order:                default_order(),
+            order: default_order(),
         }
     }
 }

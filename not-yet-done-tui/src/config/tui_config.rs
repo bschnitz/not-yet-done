@@ -44,9 +44,9 @@ pub struct TuiConfig {
     #[serde(default)]
     pub keybindings: KeyBindingConfig,
     #[serde(default)]
-    pub theme:       ThemeConfig,
+    pub theme: ThemeConfig,
     #[serde(default)]
-    pub layout:      LayoutConfig,
+    pub layout: LayoutConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,8 +93,7 @@ impl TuiConfigService {
             })?;
         }
 
-        let yaml = serde_yaml::to_string(config)
-            .context("Failed to serialize tui.yaml")?;
+        let yaml = serde_yaml::to_string(config).context("Failed to serialize tui.yaml")?;
 
         fs::File::create(&path)
             .with_context(|| format!("Failed to create {}", path.display()))?
