@@ -1872,12 +1872,15 @@ name = "not-yet-done-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "chrono-english",
  "crossterm",
  "dirs",
  "not-yet-done-core",
  "ratatui",
  "serde",
  "serde_yaml",
+ "shaku",
  "tokio",
 ]
 

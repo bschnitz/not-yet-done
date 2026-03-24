@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::entity::task;
 use crate::error::AppError;
+use crate::filter::FilterExpr;
 use crate::repository::{ProjectRepository, TagRepository, TaskRepository};
 
 #[async_trait]
@@ -17,6 +18,7 @@ pub trait TaskService: shaku::Interface {
         tag: Option<String>,
     ) -> Result<task::Model, AppError>;
     async fn list_tasks(&self, project: Option<String>) -> Result<Vec<task::Model>, AppError>;
+    async fn list_filtered(&self, expr: &FilterExpr) -> Result<Vec<task::Model>, AppError>;
     async fn delete_task(&self, id: Uuid) -> Result<(), AppError>;
     async fn edit_task(
         &self,
@@ -42,14 +44,14 @@ pub struct TaskServiceImpl {
 
 #[async_trait]
 impl TaskService for TaskServiceImpl {
-async fn add_task(
+    async fn add_task(
         &self,
         description: String,
         project: Option<String>,
         parent_id: Option<String>,
         tag: Option<String>,
     ) -> Result<task::Model, AppError> {
-        // Parent-ID auflösen
+        // Resolve parent ID
         let parent_uuid = if let Some(p) = parent_id {
             Some(Uuid::parse_str(&p).map_err(|_| AppError::InvalidId(p))?)
         } else {
@@ -86,6 +88,15 @@ async fn add_task(
         self.task_repository.find_all(project_id).await
     }
 
+    /// Return all tasks matching the given filter expression.
+    ///
+    /// Unlike `list_tasks`, this method does not apply any implicit filters
+    /// (e.g. `deleted = false`) — the caller is responsible for including
+    /// all desired conditions in the expression.
+    async fn list_filtered(&self, expr: &FilterExpr) -> Result<Vec<task::Model>, AppError> {
+        self.task_repository.find_filtered(expr).await
+    }
+
     async fn delete_task(&self, id: Uuid) -> Result<(), AppError> {
         self.task_repository.soft_delete(id).await
     }
@@ -119,9 +130,9 @@ async fn add_task(
             let resolved = self.resolve_tag(id, &tag_ref).await?;
             match resolved {
                 crate::repository::ResolvedTag::Global(t) =>
-                self.task_repository.assign_global_tag(id, t.id).await?,
+                    self.task_repository.assign_global_tag(id, t.id).await?,
                 crate::repository::ResolvedTag::Project(t) =>
-                self.task_repository.assign_project_tag(id, t.id).await?,
+                    self.task_repository.assign_project_tag(id, t.id).await?,
             }
         }
 
@@ -129,9 +140,9 @@ async fn add_task(
             let resolved = self.resolve_tag(id, &tag_ref).await?;
             match resolved {
                 crate::repository::ResolvedTag::Global(t) =>
-                self.task_repository.unassign_global_tag(id, t.id).await?,
+                    self.task_repository.unassign_global_tag(id, t.id).await?,
                 crate::repository::ResolvedTag::Project(t) =>
-                self.task_repository.unassign_project_tag(id, t.id).await?,
+                    self.task_repository.unassign_project_tag(id, t.id).await?,
             }
         }
 
@@ -140,7 +151,7 @@ async fn add_task(
 }
 
 impl TaskServiceImpl {
-    /// Löst einen Projekt-Referenz-String (Name oder UUID) auf
+    /// Resolve a project reference string (name or UUID).
     async fn resolve_project(
         &self,
         proj_ref: &str,
@@ -155,14 +166,14 @@ impl TaskServiceImpl {
         }
     }
 
-async fn resolve_tag(
+    async fn resolve_tag(
         &self,
         task_id: Uuid,
         tag_ref: &str,
     ) -> Result<crate::repository::ResolvedTag, AppError> {
         use crate::repository::ResolvedTag;
 
-        // Präfix-Format: "global-tag:<uuid>" oder "project-tag:<uuid>"
+        // Prefix format: "global-tag:<uuid>" or "project-tag:<uuid>"
         if let Some(rest) = tag_ref.strip_prefix("global-tag:") {
             let id = Uuid::parse_str(rest).map_err(|_| AppError::InvalidId(rest.to_string()))?;
             let tag = self.tag_repository.find_global_by_id(id).await?;
@@ -174,7 +185,7 @@ async fn resolve_tag(
             return Ok(ResolvedTag::Project(tag));
         }
 
-        // Plain UUID → zuerst global, dann project
+        // Plain UUID — try global first, then project
         if let Ok(id) = Uuid::parse_str(tag_ref) {
             if let Ok(tag) = self.tag_repository.find_global_by_id(id).await {
                 return Ok(ResolvedTag::Global(tag));
@@ -185,7 +196,7 @@ async fn resolve_tag(
             return Err(AppError::TagNotFound(tag_ref.to_string()));
         }
 
-        // Name-Auflösung: zuerst in Projekt-Tags des Tasks
+        // Name resolution: check project tags of the task first
         let project_ids = self.task_repository.find_project_ids_for_task(task_id).await?;
         let project_matches = self.tag_repository
             .find_project_tags_by_name(tag_ref, &project_ids)
@@ -198,7 +209,7 @@ async fn resolve_tag(
             return Ok(ResolvedTag::Project(tag));
         }
 
-        // Dann global
+        // Then global
         if let Some(tag) = self.tag_repository.find_global_by_name(tag_ref).await? {
             return Ok(ResolvedTag::Global(tag));
         }

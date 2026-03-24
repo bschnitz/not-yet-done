@@ -96,6 +96,10 @@ pub enum TasksAction {
     FormAdd,
     FormDelete,
     FormClose,
+    /// Move selection down in the task list.
+    ListNext,
+    /// Move selection up in the task list.
+    ListPrev,
 }
 
 impl TasksAction {
@@ -107,6 +111,8 @@ impl TasksAction {
             TasksAction::FormAdd    => "form_add",
             TasksAction::FormDelete => "form_delete",
             TasksAction::FormClose  => "form_close",
+            TasksAction::ListNext   => "list_next",
+            TasksAction::ListPrev   => "list_prev",
         }
     }
 }
@@ -125,6 +131,8 @@ impl FromStr for TasksAction {
             "form_add"    => Ok(TasksAction::FormAdd),
             "form_delete" => Ok(TasksAction::FormDelete),
             "form_close"  => Ok(TasksAction::FormClose),
+            "list_next"   => Ok(TasksAction::ListNext),
+            "list_prev"   => Ok(TasksAction::ListPrev),
             other         => Err(format!("unknown tasks action: {}", other)),
         }
     }
@@ -134,15 +142,6 @@ impl_string_serde!(TasksAction);
 
 // ---------------------------------------------------------------------------
 // KeyBindingSection<A>
-//
-// Serialises directly as a YAML mapping, e.g.:
-//
-//   quit: q
-//   tab_tasks: "2"
-//   tab_next: tab
-//
-// We implement Serialize/Deserialize manually to avoid the serde(flatten)
-// limitation with custom-key HashMaps in serde_yaml.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -162,7 +161,6 @@ impl<A: Eq + std::hash::Hash> KeyBindingSection<A> {
     }
 }
 
-/// Serialize as a plain mapping: { "quit": "q", "tab_tasks": "2", ... }
 impl<A> Serialize for KeyBindingSection<A>
 where
     A: Eq + std::hash::Hash + Serialize,
@@ -172,7 +170,6 @@ where
     }
 }
 
-/// Deserialize from the same plain mapping.
 impl<'de, A> Deserialize<'de> for KeyBindingSection<A>
 where
     A: Eq + std::hash::Hash + Deserialize<'de>,
@@ -205,6 +202,8 @@ impl Default for KeyBindingSection<TasksAction> {
         m.insert(TasksAction::FormAdd,    KeyBinding::new("a"));
         m.insert(TasksAction::FormDelete, KeyBinding::new("d"));
         m.insert(TasksAction::FormClose,  KeyBinding::new("esc"));
+        m.insert(TasksAction::ListNext,   KeyBinding::new("j"));
+        m.insert(TasksAction::ListPrev,   KeyBinding::new("k"));
         Self { bindings: m }
     }
 }
@@ -213,19 +212,6 @@ impl Default for KeyBindingSection<TasksAction> {
 // Top-level KeyBindingConfig
 // ---------------------------------------------------------------------------
 
-/// Serialises as:
-///
-/// ```yaml
-/// keybindings:
-///   global:
-///     quit: q
-///     tab_welcome: "1"
-///     ...
-///   tasks:
-///     view_list: l
-///     form_add: a
-///     ...
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeyBindingConfig {
     #[serde(default)]

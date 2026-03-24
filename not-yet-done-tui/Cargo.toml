@@ -16,3 +16,6 @@ anyhow             = { workspace = true }
 serde              = { workspace = true }
 serde_yaml         = { workspace = true }
 dirs               = { workspace = true }
+chrono-english     = { workspace = true }
+shaku              = { workspace = true }
+chrono             = { workspace = true }
