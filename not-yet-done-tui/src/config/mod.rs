@@ -1,10 +1,13 @@
 pub mod color;
-pub mod config_service;
 pub mod keybindings;
+pub mod layout;
 pub mod theme_config;
-pub mod theme_service;
+pub mod tui_config;
  
-pub use config_service::TuiConfigService;
-pub use keybindings::{Action, KeyBindingConfig};
+// Legacy single-purpose services are superseded by TuiConfigService —
+// kept as dead modules only if needed for migration; otherwise removed.
+ 
+pub use keybindings::{GlobalAction, KeyBindingConfig, TasksAction};
+pub use layout::{SplitPane, SplitType};
 pub use theme_config::ThemeConfig;
-pub use theme_service::TuiThemeService;
+pub use tui_config::{TuiConfig, TuiConfigService};

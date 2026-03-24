@@ -7,36 +7,41 @@ use std::str::FromStr;
 // KeyBinding
 // ---------------------------------------------------------------------------
 
-/// A key combination, e.g. "q", "ctrl+c", "tab", "shift+tab"
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyBinding(pub String);
 
 impl KeyBinding {
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns a short display label, e.g. "[q]"
-    pub fn display_label(&self) -> String {
-        format!("[{}]", self.0)
-    }
+    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn display_label(&self) -> String { format!("[{}]", self.0) }
 }
 
 // ---------------------------------------------------------------------------
-// Action
+// Macro: Serialize/Deserialize via Display/FromStr
 // ---------------------------------------------------------------------------
 
-/// All configurable actions in the TUI.
-///
-/// We derive Hash/Eq for use as a HashMap key, and implement Serialize /
-/// Deserialize manually so that the enum serialises as a plain snake_case
-/// string — which is required for it to work as a YAML mapping key.
+macro_rules! impl_string_serde {
+    ($t:ty) => {
+        impl Serialize for $t {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(&self.to_string())
+            }
+        }
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let raw = String::deserialize(d)?;
+                <$t>::from_str(&raw).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// GlobalAction
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Action {
+pub enum GlobalAction {
     Quit,
     TabWelcome,
     TabTasks,
@@ -45,105 +50,186 @@ pub enum Action {
     TabPrev,
 }
 
-impl Action {
+impl GlobalAction {
     fn as_str(&self) -> &'static str {
         match self {
-            Action::Quit         => "quit",
-            Action::TabWelcome   => "tab_welcome",
-            Action::TabTasks     => "tab_tasks",
-            Action::TabTrackings => "tab_trackings",
-            Action::TabNext      => "tab_next",
-            Action::TabPrev      => "tab_prev",
+            GlobalAction::Quit         => "quit",
+            GlobalAction::TabWelcome   => "tab_welcome",
+            GlobalAction::TabTasks     => "tab_tasks",
+            GlobalAction::TabTrackings => "tab_trackings",
+            GlobalAction::TabNext      => "tab_next",
+            GlobalAction::TabPrev      => "tab_prev",
         }
     }
 }
 
-impl fmt::Display for Action {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
+impl fmt::Display for GlobalAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
 }
 
-impl FromStr for Action {
+impl FromStr for GlobalAction {
     type Err = String;
-
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "quit"          => Ok(Action::Quit),
-            "tab_welcome"   => Ok(Action::TabWelcome),
-            "tab_tasks"     => Ok(Action::TabTasks),
-            "tab_trackings" => Ok(Action::TabTrackings),
-            "tab_next"      => Ok(Action::TabNext),
-            "tab_prev"      => Ok(Action::TabPrev),
-            other           => Err(format!("unknown action: {}", other)),
+            "quit"          => Ok(GlobalAction::Quit),
+            "tab_welcome"   => Ok(GlobalAction::TabWelcome),
+            "tab_tasks"     => Ok(GlobalAction::TabTasks),
+            "tab_trackings" => Ok(GlobalAction::TabTrackings),
+            "tab_next"      => Ok(GlobalAction::TabNext),
+            "tab_prev"      => Ok(GlobalAction::TabPrev),
+            other           => Err(format!("unknown global action: {}", other)),
         }
     }
 }
 
-impl Serialize for Action {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for Action {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(d)?;
-        Action::from_str(&raw).map_err(serde::de::Error::custom)
-    }
-}
+impl_string_serde!(GlobalAction);
 
 // ---------------------------------------------------------------------------
-// KeyBindingConfig
+// TasksAction
 // ---------------------------------------------------------------------------
 
-/// Maps each action to a key binding.
-///
-/// Serialises as a YAML mapping with snake_case action names as keys:
-///
-/// ```yaml
-/// bindings:
-///   quit: q
-///   tab_welcome: "1"
-///   tab_tasks: "2"
-///   tab_trackings: "3"
-///   tab_next: tab
-///   tab_prev: shift+tab
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyBindingConfig {
-    #[serde(default = "default_bindings")]
-    pub bindings: HashMap<Action, KeyBinding>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TasksAction {
+    ViewList,
+    ViewTree,
+    FormFilter,
+    FormAdd,
+    FormDelete,
+    FormClose,
 }
 
-fn default_bindings() -> HashMap<Action, KeyBinding> {
-    let mut map = HashMap::new();
-    map.insert(Action::Quit,         KeyBinding::new("q"));
-    map.insert(Action::TabWelcome,   KeyBinding::new("1"));
-    map.insert(Action::TabTasks,     KeyBinding::new("2"));
-    map.insert(Action::TabTrackings, KeyBinding::new("3"));
-    map.insert(Action::TabNext,      KeyBinding::new("tab"));
-    map.insert(Action::TabPrev,      KeyBinding::new("shift+tab"));
-    map
-}
-
-impl Default for KeyBindingConfig {
-    fn default() -> Self {
-        Self {
-            bindings: default_bindings(),
+impl TasksAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TasksAction::ViewList   => "view_list",
+            TasksAction::ViewTree   => "view_tree",
+            TasksAction::FormFilter => "form_filter",
+            TasksAction::FormAdd    => "form_add",
+            TasksAction::FormDelete => "form_delete",
+            TasksAction::FormClose  => "form_close",
         }
     }
 }
 
-impl KeyBindingConfig {
-    pub fn get(&self, action: &Action) -> Option<&KeyBinding> {
+impl fmt::Display for TasksAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
+}
+
+impl FromStr for TasksAction {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "view_list"   => Ok(TasksAction::ViewList),
+            "view_tree"   => Ok(TasksAction::ViewTree),
+            "form_filter" => Ok(TasksAction::FormFilter),
+            "form_add"    => Ok(TasksAction::FormAdd),
+            "form_delete" => Ok(TasksAction::FormDelete),
+            "form_close"  => Ok(TasksAction::FormClose),
+            other         => Err(format!("unknown tasks action: {}", other)),
+        }
+    }
+}
+
+impl_string_serde!(TasksAction);
+
+// ---------------------------------------------------------------------------
+// KeyBindingSection<A>
+//
+// Serialises directly as a YAML mapping, e.g.:
+//
+//   quit: q
+//   tab_tasks: "2"
+//   tab_next: tab
+//
+// We implement Serialize/Deserialize manually to avoid the serde(flatten)
+// limitation with custom-key HashMaps in serde_yaml.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct KeyBindingSection<A: Eq + std::hash::Hash> {
+    pub bindings: HashMap<A, KeyBinding>,
+}
+
+impl<A: Eq + std::hash::Hash> KeyBindingSection<A> {
+    pub fn get(&self, action: &A) -> Option<&KeyBinding> {
         self.bindings.get(action)
     }
 
-    /// Returns the display label for an action, e.g. "[q]". Falls back to "[?]".
-    pub fn label(&self, action: &Action) -> String {
+    pub fn label(&self, action: &A) -> String {
         self.get(action)
             .map(|k| k.display_label())
             .unwrap_or_else(|| "[?]".to_string())
     }
+}
+
+/// Serialize as a plain mapping: { "quit": "q", "tab_tasks": "2", ... }
+impl<A> Serialize for KeyBindingSection<A>
+where
+    A: Eq + std::hash::Hash + Serialize,
+{
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.bindings.serialize(serializer)
+    }
+}
+
+/// Deserialize from the same plain mapping.
+impl<'de, A> Deserialize<'de> for KeyBindingSection<A>
+where
+    A: Eq + std::hash::Hash + Deserialize<'de>,
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bindings = HashMap::<A, KeyBinding>::deserialize(deserializer)?;
+        Ok(Self { bindings })
+    }
+}
+
+impl Default for KeyBindingSection<GlobalAction> {
+    fn default() -> Self {
+        let mut m = HashMap::new();
+        m.insert(GlobalAction::Quit,         KeyBinding::new("q"));
+        m.insert(GlobalAction::TabWelcome,   KeyBinding::new("1"));
+        m.insert(GlobalAction::TabTasks,     KeyBinding::new("2"));
+        m.insert(GlobalAction::TabTrackings, KeyBinding::new("3"));
+        m.insert(GlobalAction::TabNext,      KeyBinding::new("tab"));
+        m.insert(GlobalAction::TabPrev,      KeyBinding::new("shift+tab"));
+        Self { bindings: m }
+    }
+}
+
+impl Default for KeyBindingSection<TasksAction> {
+    fn default() -> Self {
+        let mut m = HashMap::new();
+        m.insert(TasksAction::ViewList,   KeyBinding::new("l"));
+        m.insert(TasksAction::ViewTree,   KeyBinding::new("t"));
+        m.insert(TasksAction::FormFilter, KeyBinding::new("f"));
+        m.insert(TasksAction::FormAdd,    KeyBinding::new("a"));
+        m.insert(TasksAction::FormDelete, KeyBinding::new("d"));
+        m.insert(TasksAction::FormClose,  KeyBinding::new("esc"));
+        Self { bindings: m }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level KeyBindingConfig
+// ---------------------------------------------------------------------------
+
+/// Serialises as:
+///
+/// ```yaml
+/// keybindings:
+///   global:
+///     quit: q
+///     tab_welcome: "1"
+///     ...
+///   tasks:
+///     view_list: l
+///     form_add: a
+///     ...
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeyBindingConfig {
+    #[serde(default)]
+    pub global: KeyBindingSection<GlobalAction>,
+    #[serde(default)]
+    pub tasks:  KeyBindingSection<TasksAction>,
 }

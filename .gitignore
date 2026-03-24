@@ -1,4 +1,5 @@
 /target
 /nyd.db
-/ignored
+ignored
 nyd
+nyd-tui

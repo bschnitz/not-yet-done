@@ -14,15 +14,14 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
 use app::App;
-use config::{TuiConfigService, TuiThemeService};
+use config::TuiConfigService;
 use ui::theme::Theme;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let keybindings = TuiConfigService::load()?;
-    let theme_cfg   = TuiThemeService::load()?;
-    let theme       = Theme::new(theme_cfg);
-    let mut app     = App::new(keybindings, theme);
+    let tui_config = TuiConfigService::load()?;
+    let theme      = Theme::new(tui_config.theme.clone());
+    let mut app    = App::new(tui_config, theme);
 
     let mut terminal = setup_terminal()?;
     let result       = run_loop(&mut terminal, &mut app);
@@ -35,8 +34,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -54,18 +52,11 @@ fn run_loop(
         terminal.draw(|frame| render::render(frame, app))?;
 
         if let Some(key_str) = events::poll_event()? {
-            // ctrl+c is always a hard exit regardless of keybinding config
-            if key_str == "ctrl+c" {
-                break;
-            }
-            if let Some(action) = app.resolve_key(&key_str) {
-                app.handle_action(action);
-            }
+            if key_str == "ctrl+c" { break; }
+            app.handle_key(&key_str);
         }
 
-        if app.should_quit {
-            break;
-        }
+        if app.should_quit { break; }
     }
     Ok(())
 }

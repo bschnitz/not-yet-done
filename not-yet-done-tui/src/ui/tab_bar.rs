@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::config::Action;
+use crate::config::GlobalAction;
 use crate::tabs::Tab;
 
 pub struct TabBar<'a> {
@@ -37,11 +37,11 @@ impl Widget for TabBar<'_> {
             let is_active = *tab == self.app.active_tab;
 
             let action = match tab {
-                Tab::Welcome   => Action::TabWelcome,
-                Tab::Tasks     => Action::TabTasks,
-                Tab::Trackings => Action::TabTrackings,
+                Tab::Welcome   => GlobalAction::TabWelcome,
+                Tab::Tasks     => GlobalAction::TabTasks,
+                Tab::Trackings => GlobalAction::TabTrackings,
             };
-            let key_label = self.app.keybindings.label(&action);
+            let key_label = self.app.keybindings.global.label(&action);
             let tab_text = if is_active {
                 format!("▌  {} {}  ▐", tab.title(), key_label)
             } else {
