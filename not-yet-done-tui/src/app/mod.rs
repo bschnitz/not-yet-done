@@ -157,20 +157,24 @@ impl App {
         if let Some(action) = self.resolve_form_key(key) {
             match action {
                 FormAction::Next => {
-                    if focused == FilterField::Status {
-                        self.tasks_state.filter.status_cursor_next();
-                    } else {
-                        self.tasks_state.filter.focus_next();
-                    }
+                    self.tasks_state.filter.focus_next();
                     return true;
                 }
                 FormAction::Prev => {
+                    self.tasks_state.filter.focus_prev();
+                    return true;
+                }
+                FormAction::MultiselectNext => {
+                    if focused == FilterField::Status {
+                        self.tasks_state.filter.status_cursor_next();
+                        return true;
+                    }
+                }
+                FormAction::MultiselectPrev => {
                     if focused == FilterField::Status {
                         self.tasks_state.filter.status_cursor_prev();
-                    } else {
-                        self.tasks_state.filter.focus_prev();
+                        return true;
                     }
-                    return true;
                 }
             }
         }

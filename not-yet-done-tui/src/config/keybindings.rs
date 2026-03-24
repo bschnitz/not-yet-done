@@ -100,6 +100,8 @@ impl_string_serde!(GlobalAction);
 pub enum FormAction {
     Next,
     Prev,
+    MultiselectNext,
+    MultiselectPrev,
 }
 
 impl FormAction {
@@ -107,6 +109,8 @@ impl FormAction {
         match self {
             FormAction::Next => "next",
             FormAction::Prev => "prev",
+            FormAction::MultiselectNext => "multiselect_next",
+            FormAction::MultiselectPrev => "multiselect_prev",
         }
     }
 }
@@ -123,6 +127,8 @@ impl FromStr for FormAction {
         match s {
             "next" => Ok(FormAction::Next),
             "prev" => Ok(FormAction::Prev),
+            "multiselect_next" => Ok(FormAction::MultiselectNext),
+            "multiselect_prev" => Ok(FormAction::MultiselectPrev),
             other => Err(format!("unknown form action: {}", other)),
         }
     }
@@ -261,6 +267,8 @@ impl Default for KeyBindingSection<FormAction> {
         let mut m = HashMap::new();
         m.insert(FormAction::Next, KeyBinding::new("ctrl+j"));
         m.insert(FormAction::Prev, KeyBinding::new("ctrl+k"));
+        m.insert(FormAction::MultiselectNext, KeyBinding::new("tab"));
+        m.insert(FormAction::MultiselectPrev, KeyBinding::new("shift+tab"));
         Self { bindings: m }
     }
 }
