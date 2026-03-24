@@ -4,7 +4,8 @@ members = [
   "not-yet-done-cli",
   "not-yet-done-core",
   "not-yet-done-tui",
-  "not-yet-done-macros"
+  "not-yet-done-macros",
+  "ratatui-form-widgets"
 ]
 
 [workspace.dependencies]

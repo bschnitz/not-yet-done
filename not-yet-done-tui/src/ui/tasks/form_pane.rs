@@ -5,10 +5,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
+use ratatui_form_widgets::{ChoiceOption, MultipleChoiceWidget, TextFieldWidget, ToggleFieldWidget};
 
 use crate::app::App;
 use crate::config::TasksAction;
-use crate::tabs::{FilterField, FilterState, TasksForm};
+use crate::tabs::{FilterField, FilterState, StatusFilter, TasksForm};
 
 pub struct TasksFormPane<'a> {
     app: &'a App,
@@ -63,9 +64,9 @@ impl Widget for TasksFormPane<'_> {
         block.render(area, buf);
 
         match form {
-            TasksForm::Filter => render_filter_form(inner, buf, &ts.filter, &self.app.theme),
-            TasksForm::Add => render_placeholder(inner, buf, "Add form", "", &self.app),
-            TasksForm::Delete => render_placeholder(inner, buf, "Delete form", "󰆴", &self.app),
+            TasksForm::Filter => render_filter_form(inner, buf, &ts.filter, t),
+            TasksForm::Add => render_placeholder(inner, buf, "Add form", "", self.app),
+            TasksForm::Delete => render_placeholder(inner, buf, "Delete form", "󰆴", self.app),
         }
     }
 }
@@ -80,71 +81,65 @@ fn render_filter_form(
     filter: &FilterState,
     t: &crate::ui::theme::Theme,
 ) {
-    // Layout: small top padding, then one row per field + spacing
     if area.height < 3 {
         return;
     }
 
-    let mut y = area.y;
+    let tf_style = t.text_field_style();
+    let mc_style = t.multiple_choice_style();
+    let tg_style = t.toggle_field_style();
+
     let x = area.x;
     let width = area.width;
 
+    macro_rules! text_field {
+        ($y:expr, $field:expr, $value:expr, $error:expr, $placeholder:expr) => {{
+            if $y + 2 > area.bottom() {
+                return;
+            }
+            let focused = filter.focused_field == $field;
+            let cursor = if focused { Some(filter.cursor_pos) } else { None };
+            TextFieldWidget {
+                label: $field.label(),
+                value: $value,
+                placeholder: $placeholder,
+                error: $error,
+                focused,
+                cursor_pos: cursor,
+                style: tf_style,
+            }
+            .render_and_next_y(Rect { x, y: $y, width, height: 2 }, buf)
+        }};
+    }
+
+    let mut y = area.y;
+
     // ── Date fields ───────────────────────────────────────────────────────
-    y = render_text_field(
-        Rect {
-            x,
-            y,
-            width,
-            height: 2,
-        },
-        buf,
-        filter,
+    y = text_field!(
+        y,
         FilterField::CreatedAfter,
         &filter.created_after_raw,
         filter.created_after_err.as_deref(),
-        "e.g. last monday, 2 weeks ago, 2024-01-01",
-        t,
+        "e.g. last monday, 2 weeks ago, 2024-01-01"
     );
     y += 1;
 
-    if y + 2 > area.bottom() {
-        return;
-    }
-    y = render_text_field(
-        Rect {
-            x,
-            y,
-            width,
-            height: 2,
-        },
-        buf,
-        filter,
+    y = text_field!(
+        y,
         FilterField::CreatedBefore,
         &filter.created_before_raw,
         filter.created_before_err.as_deref(),
-        "e.g. yesterday, today, 2024-06-30",
-        t,
+        "e.g. yesterday, today, 2024-06-30"
     );
     y += 1;
 
     // ── Description ───────────────────────────────────────────────────────
-    if y + 2 > area.bottom() {
-        return;
-    }
-    y = render_text_field(
-        Rect {
-            x,
-            y,
-            width,
-            height: 2,
-        },
-        buf,
-        filter,
+    y = text_field!(
+        y,
         FilterField::Description,
         &filter.description_like,
         None,
-        "substring match",
-        t,
+        "substring match"
     );
     y += 1;
 
@@ -152,37 +147,24 @@ fn render_filter_form(
     if y + 2 > area.bottom() {
         return;
     }
-    y = render_status_field(
-        Rect {
-            x,
-            y,
-            width,
-            height: 2,
-        },
-        buf,
-        filter,
-        t,
-    );
+    let status_options = status_options(&filter.status);
+    y = MultipleChoiceWidget::new(
+        FilterField::Status.label(),
+        &status_options,
+        filter.focused_field == FilterField::Status,
+        filter.status_cursor,
+        mc_style,
+    )
+    .render_and_next_y(Rect { x, y, width, height: 2 }, buf);
     y += 1;
 
     // ── Priority ──────────────────────────────────────────────────────────
-    if y + 2 > area.bottom() {
-        return;
-    }
-    y = render_text_field(
-        Rect {
-            x,
-            y,
-            width,
-            height: 2,
-        },
-        buf,
-        filter,
+    y = text_field!(
+        y,
         FilterField::Priority,
         &filter.priority_min_raw,
         filter.priority_err.as_deref(),
-        "integer, e.g. 1",
-        t,
+        "integer, e.g. 1"
     );
     y += 1;
 
@@ -190,22 +172,15 @@ fn render_filter_form(
     if y + 1 > area.bottom() {
         return;
     }
-    render_toggle_field(
-        Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        },
-        buf,
-        filter,
-        FilterField::ShowDeleted,
+    ToggleFieldWidget::new(
+        FilterField::ShowDeleted.label(),
         filter.show_deleted,
-        t,
-    );
+        filter.focused_field == FilterField::ShowDeleted,
+        tg_style,
+    )
+    .render(Rect { x, y, width, height: 1 }, buf);
 
-    // ── Tag / Project placeholders ────────────────────────────────────────
-    // Reserve visual space for future fields so the layout doesn't shift
+    // ── Coming-soon placeholder ───────────────────────────────────────────
     let placeholder_y = y + 2;
     if placeholder_y + 1 < area.bottom() {
         let sep = Line::from(vec![Span::styled(
@@ -215,335 +190,20 @@ fn render_filter_form(
                 .add_modifier(Modifier::ITALIC),
         )]);
         Paragraph::new(sep).render(
-            Rect {
-                x,
-                y: placeholder_y,
-                width,
-                height: 1,
-            },
+            Rect { x, y: placeholder_y, width, height: 1 },
             buf,
         );
     }
 }
 
-// ---------------------------------------------------------------------------
-// Field renderers
-// ---------------------------------------------------------------------------
-
-/// Renders a labelled text input field.
-/// Returns the next available y position.
-fn render_text_field(
-    area: Rect,
-    buf: &mut Buffer,
-    filter: &FilterState,
-    field: FilterField,
-    value: &str,
-    error: Option<&str>,
-    placeholder: &str,
-    t: &crate::ui::theme::Theme,
-) -> u16 {
-    let focused = filter.focused_field == field;
-    let x = area.x;
-    let y = area.y;
-    let width = area.width;
-
-    // Label line
-    let label_fg = if focused { t.primary() } else { t.text_dim() };
-    let prefix = if focused { "▶ " } else { "  " };
-    let label_line = Line::from(vec![
-        Span::styled(prefix, Style::default().fg(label_fg)),
-        Span::styled(
-            field.label(),
-            Style::default().fg(label_fg).add_modifier(if focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
-        ),
-        // Inline error
-        if let Some(err) = error {
-            Span::styled(
-                format!("  ⚠ {}", err),
-                Style::default()
-                    .fg(t.error())
-                    .add_modifier(Modifier::ITALIC),
-            )
-        } else {
-            Span::raw("")
-        },
-    ]);
-    Paragraph::new(label_line).render(
-        Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        },
-        buf,
-    );
-
-    // Input line
-    let input_y = y + 1;
-    if input_y < area.bottom() {
-        let border_fg = if focused { t.primary() } else { t.text_dim() };
-        let (display_text, text_style) = if value.is_empty() {
-            (
-                format!("  {}", placeholder),
-                Style::default()
-                    .fg(t.text_dim())
-                    .add_modifier(Modifier::ITALIC),
-            )
-        } else {
-            let cursor_pos = if focused {
-                Some(filter.cursor_pos)
-            } else {
-                None
-            };
-            render_text_with_cursor(
-                buf,
-                x + 2,
-                input_y,
-                width.saturating_sub(4),
-                value,
-                cursor_pos,
-                t,
-                focused,
-            );
-            // Already rendered by render_text_with_cursor — use empty placeholder
-            return input_y + 1;
-        };
-
-        // Underline decoration for the input row
-        let underline_char = if focused { '─' } else { '╌' };
-        let underline: String = std::iter::repeat(underline_char)
-            .take(width.saturating_sub(4) as usize)
-            .collect();
-        let input_line = Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(display_text.trim_start_matches("  "), text_style),
-        ]);
-        Paragraph::new(input_line).render(
-            Rect {
-                x,
-                y: input_y,
-                width,
-                height: 1,
-            },
-            buf,
-        );
-
-        // Draw underline below (skip if no room)
-        let _ = (underline_char, underline, border_fg); // suppress unused warnings
-    }
-
-    input_y + 1
-}
-
-/// Render a text value with the cursor inserted at cursor_pos.
-/// Returns the next y.
-fn render_text_with_cursor(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    width: u16,
-    value: &str,
-    cursor_pos: Option<usize>,
-    t: &crate::ui::theme::Theme,
-    focused: bool,
-) {
-    let fg = if focused { t.text_high() } else { t.text_med() };
-    let chars: Vec<char> = value.chars().collect();
-    let max_w = width as usize;
-
-    // Simple scroll: if cursor would be off-screen, shift view
-    let view_start = if let Some(pos) = cursor_pos {
-        if pos >= max_w {
-            pos + 1 - max_w
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-
-    for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
-        if screen_idx >= max_w {
-            break;
-        }
-        let cx = x + screen_idx as u16;
-        if cx >= x + width {
-            break;
-        }
-
-        let ch = chars[char_idx];
-        let is_cursor = cursor_pos.map_or(false, |p| p == char_idx);
-        let style = if is_cursor {
-            Style::default().fg(t.bg()).bg(t.primary())
-        } else {
-            Style::default().fg(fg)
-        };
-
-        if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-
-    // Draw cursor at end-of-string position if needed
-    if let Some(pos) = cursor_pos {
-        if pos == chars.len() {
-            let screen_pos = pos.saturating_sub(view_start);
-            if screen_pos < max_w {
-                let cx = x + screen_pos as u16;
-                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, y)) {
-                    cell.set_char(' ');
-                    cell.set_bg(t.primary());
-                }
-            }
-        }
-    }
-}
-
-/// Render the status multi-select field.
-fn render_status_field(
-    area: Rect,
-    buf: &mut Buffer,
-    filter: &FilterState,
-    t: &crate::ui::theme::Theme,
-) -> u16 {
-    let focused = filter.focused_field == FilterField::Status;
-    let x = area.x;
-    let y = area.y;
-    let width = area.width;
-
-    let label_fg = if focused { t.primary() } else { t.text_dim() };
-    let prefix = if focused { "▶ " } else { "  " };
-
-    // Label
-    let label_line = Line::from(vec![
-        Span::styled(prefix, Style::default().fg(label_fg)),
-        Span::styled(
-            FilterField::Status.label(),
-            Style::default().fg(label_fg).add_modifier(if focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
-        ),
-        Span::styled(
-            "  ← → navigate  space toggle",
-            Style::default().fg(t.text_dim()),
-        ),
-    ]);
-    Paragraph::new(label_line).render(
-        Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        },
-        buf,
-    );
-
-    // Options row
-    let opts_y = y + 1;
-    if opts_y < area.bottom() {
-        let statuses = [
-            ("todo", filter.status.todo, 0),
-            ("in_progress", filter.status.in_progress, 1),
-            ("done", filter.status.done, 2),
-            ("cancelled", filter.status.cancelled, 3),
-        ];
-
-        let mut rx = x + 2u16;
-        for (label, active, idx) in &statuses {
-            let is_cursor = focused && filter.status_cursor == *idx;
-            let is_checked = *active;
-
-            let check = if is_checked { "● " } else { "○ " };
-            let check_fg = if is_checked {
-                t.primary()
-            } else {
-                t.text_dim()
-            };
-            let (text_fg, text_bg, bold) = if is_cursor {
-                (t.on_primary(), t.primary(), true)
-            } else {
-                (t.text_med(), t.surface_2(), false)
-            };
-
-            let checkbox_style = Style::default().fg(check_fg).bg(text_bg);
-            let label_style = Style::default()
-                .fg(text_fg)
-                .bg(text_bg)
-                .add_modifier(if bold {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-
-            let label_str = format!("{} ", label);
-            let total_width = (check.len() + label_str.len()) as u16;
-
-            // Write check
-            for (ci, ch) in check.chars().enumerate() {
-                let cx = rx + ci as u16;
-                if cx >= x + width {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(checkbox_style);
-                }
-            }
-            // Write label
-            for (li, ch) in label_str.chars().enumerate() {
-                let cx = rx + check.len() as u16 + li as u16;
-                if cx >= x + width {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(label_style);
-                }
-            }
-
-            rx += total_width + 1;
-        }
-    }
-
-    opts_y + 1
-}
-
-/// Render a boolean toggle field (checkbox).
-fn render_toggle_field(
-    area: Rect,
-    buf: &mut Buffer,
-    filter: &FilterState,
-    field: FilterField,
-    value: bool,
-    t: &crate::ui::theme::Theme,
-) {
-    let focused = filter.focused_field == field;
-    let label_fg = if focused { t.primary() } else { t.text_dim() };
-    let prefix = if focused { "▶ " } else { "  " };
-    let check = if value { "󰄵  " } else { "󰄰  " };
-    let check_fg = if value { t.success() } else { t.text_dim() };
-
-    let line = Line::from(vec![
-        Span::styled(prefix, Style::default().fg(label_fg)),
-        Span::styled(check, Style::default().fg(check_fg)),
-        Span::styled(
-            field.label(),
-            Style::default().fg(label_fg).add_modifier(if focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
-        ),
-        Span::styled("  space to toggle", Style::default().fg(t.text_dim())),
-    ]);
-    Paragraph::new(line).render(area, buf);
+/// Builds `ChoiceOption` slice for the status multi-select.
+fn status_options(s: &StatusFilter) -> Vec<ChoiceOption<'_>> {
+    vec![
+        ChoiceOption::new("todo", s.todo),
+        ChoiceOption::new("in_progress", s.in_progress),
+        ChoiceOption::new("done", s.done),
+        ChoiceOption::new("cancelled", s.cancelled),
+    ]
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ Dieses Dokument beschreibt eine verbindliche Architektur. Folgende Verhaltensreg
 3. **Stelle Rückfragen, wenn etwas unklar ist.** Lieber einmal mehr nachfragen als eine Entscheidung still im falschen Sinne treffen.
 4. **Schlage Alternativen vor, die im Einklang mit der Architektur stehen**, wenn eine Anfrage nicht direkt umsetzbar ist.
 5. **Verweise auf die relevante Sektion dieses Dokuments**, wenn du eine Abweichung bemerkst (z.B. „Laut Sektion 3 darf die CLI keine Repository-Typen direkt importieren — meinst du stattdessen …?").
-6. **Erweitere dieses Dokument**, wenn wichtige Designentscheidungen getroffen oder geändert werden, dann sollte das Dokument ergänzt werden, oder wenn Dir sonst etwas auffällt, das hier vermerkt werden sollte. Bitte den Nutzer informieren.
+6. **Erweitere dieses Dokument**, wenn wichtige Designentscheidungen getroffen oder geändert werden, dann sollte das Dokument ergänzt werden, oder wenn Dir sonst etwas auffällt, das hier vermerkt werden sollte. Bitte den Nutzer informieren und dabei sofort eine Aktualisierung konkrete für das Dokument anbieten oder auch das gesamte Dokument nochal aktualisiert zum Download anbieten.
 
 Beispiel: Wenn der Nutzer sagt „Ruf SeaORM direkt im CLI-Command auf", sollte die KI antworten: „Das würde die Schichtentrennung aus Sektion 3 verletzen. Soll ich stattdessen einen Service dafür anlegen?"
 

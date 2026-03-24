@@ -1878,6 +1878,7 @@ dependencies = [
  "dirs",
  "not-yet-done-core",
  "ratatui",
+ "ratatui-form-widgets",
  "serde",
  "serde_yaml",
  "shaku",
@@ -2473,6 +2474,13 @@ dependencies = [
  "crossterm",
  "instability",
  "ratatui-core",
+]
+
+[[package]]
+name = "ratatui-form-widgets"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
 ]
 
 [[package]]

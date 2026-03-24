@@ -8,14 +8,15 @@ name = "not-yet-done-tui"
 path = "src/main.rs"
 
 [dependencies]
-not-yet-done-core = { path = "../not-yet-done-core" }
-ratatui            = { workspace = true }
-crossterm          = { workspace = true }
-tokio              = { workspace = true }
-anyhow             = { workspace = true }
-serde              = { workspace = true }
-serde_yaml         = { workspace = true }
-dirs               = { workspace = true }
-chrono-english     = { workspace = true }
-shaku              = { workspace = true }
-chrono             = { workspace = true }
+ratatui              = { workspace = true }
+crossterm            = { workspace = true }
+tokio                = { workspace = true }
+anyhow               = { workspace = true }
+serde                = { workspace = true }
+serde_yaml           = { workspace = true }
+dirs                 = { workspace = true }
+chrono-english       = { workspace = true }
+shaku                = { workspace = true }
+chrono               = { workspace = true }
+not-yet-done-core    = { path = "../not-yet-done-core" }
+ratatui-form-widgets = { path = "../ratatui-form-widgets" }
