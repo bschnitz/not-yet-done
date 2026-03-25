@@ -218,7 +218,6 @@ impl FilterState {
     pub fn insert_char(&mut self, c: char) {
         let pos = self.cursor_pos;
         if let Some(s) = self.focused_text_mut() {
-            // byte-safe insert
             let byte_pos = s.char_indices().nth(pos).map(|(i, _)| i).unwrap_or(s.len());
             s.insert(byte_pos, c);
             self.cursor_pos += 1;
@@ -235,7 +234,6 @@ impl FilterState {
             if s.is_empty() {
                 return;
             }
-            // find the byte index of the (pos-1)-th char
             let byte_pos = s.char_indices().nth(pos - 1).map(|(i, _)| i).unwrap_or(0);
             s.remove(byte_pos);
             self.cursor_pos -= 1;
@@ -344,15 +342,26 @@ pub struct TasksState {
     pub active_form: Option<TasksForm>,
 
     // ── Filter form ──────────────────────────────────────────────────────
-    /// All filter inputs.
+    /// All filter inputs (drives the DB-level list query).
     pub filter: FilterState,
 
+    // ── Tree-view fuzzy filter ────────────────────────────────────────────
+    /// The text typed into the inline filter input in the sub-tab-bar when the
+    /// Tree view is active.  Drives `Forest::filter` on the client side.
+    pub tree_filter: String,
+    /// Cursor position inside `tree_filter`.
+    pub tree_filter_cursor: usize,
+    /// Whether the tree filter input currently has keyboard focus.
+    pub tree_filter_focused: bool,
+
     // ── View pane ────────────────────────────────────────────────────────
-    /// Cached task rows from the last successful load.
+    /// Cached task rows from the last successful load (used by List view).
     pub task_rows: Vec<not_yet_done_core::entity::task::Model>,
+    /// The forest built from the last successful load (used by Tree view).
+    pub forest: Option<crate::ui::tasks::forest::TaskForest>,
     /// Index of the selected row in the list.
     pub selected_row: usize,
-    /// Scroll offset for the task list.
+    /// Scroll offset for the task list / tree.
     pub scroll_offset: usize,
     /// Current load state.
     pub load_state: LoadState,
@@ -364,7 +373,11 @@ impl TasksState {
             active_view: TasksView::List,
             active_form: None,
             filter: FilterState::new(),
+            tree_filter: String::new(),
+            tree_filter_cursor: 0,
+            tree_filter_focused: false,
             task_rows: Vec::new(),
+            forest: None,
             selected_row: 0,
             scroll_offset: 0,
             load_state: LoadState::Idle,
@@ -383,6 +396,53 @@ impl TasksState {
         self.active_form = None;
     }
 
+    // ── Tree filter helpers ──────────────────────────────────────────────
+
+    pub fn tree_filter_insert(&mut self, c: char) {
+        let pos = self.tree_filter_cursor;
+        let byte_pos = self
+            .tree_filter
+            .char_indices()
+            .nth(pos)
+            .map(|(i, _)| i)
+            .unwrap_or(self.tree_filter.len());
+        self.tree_filter.insert(byte_pos, c);
+        self.tree_filter_cursor += 1;
+    }
+
+    pub fn tree_filter_backspace(&mut self) {
+        if self.tree_filter_cursor == 0 || self.tree_filter.is_empty() {
+            return;
+        }
+        let pos = self.tree_filter_cursor;
+        let byte_pos = self
+            .tree_filter
+            .char_indices()
+            .nth(pos - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.tree_filter.remove(byte_pos);
+        self.tree_filter_cursor -= 1;
+    }
+
+    pub fn tree_filter_cursor_left(&mut self) {
+        if self.tree_filter_cursor > 0 {
+            self.tree_filter_cursor -= 1;
+        }
+    }
+
+    pub fn tree_filter_cursor_right(&mut self) {
+        let max = self.tree_filter.chars().count();
+        if self.tree_filter_cursor < max {
+            self.tree_filter_cursor += 1;
+        }
+    }
+
+    pub fn tree_filter_clear(&mut self) {
+        self.tree_filter.clear();
+        self.tree_filter_cursor = 0;
+    }
+
     // ── List navigation ──────────────────────────────────────────────────
 
     pub fn select_next(&mut self, visible_rows: usize) {
@@ -392,7 +452,6 @@ impl TasksState {
         let max = self.task_rows.len() - 1;
         if self.selected_row < max {
             self.selected_row += 1;
-            // scroll down if needed
             if self.selected_row >= self.scroll_offset + visible_rows {
                 self.scroll_offset = self.selected_row + 1 - visible_rows;
             }
@@ -409,8 +468,12 @@ impl TasksState {
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<not_yet_done_core::entity::task::Model>) {
+        // Build forest from the fresh task list
+        use crate::ui::tasks::forest::build_forest;
+        self.forest = Some(build_forest(tasks.clone()));
         self.task_rows = tasks;
-        // clamp selection
+
+        // Clamp list selection
         if !self.task_rows.is_empty() && self.selected_row >= self.task_rows.len() {
             self.selected_row = self.task_rows.len() - 1;
         }

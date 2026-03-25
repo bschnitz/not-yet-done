@@ -5,7 +5,7 @@ use not_yet_done_core::service::TaskService;
 
 use crate::config::{FormAction, GlobalAction, KeyBindingConfig, TasksAction, TuiConfig};
 use crate::filter_builder;
-use crate::tabs::{FilterField, LoadState, Tab, TasksForm, TasksState};
+use crate::tabs::{FilterField, LoadState, Tab, TasksForm, TasksState, TasksView};
 use crate::ui::theme::Theme;
 
 // ---------------------------------------------------------------------------
@@ -31,7 +31,6 @@ pub struct App {
 
     task_service: Arc<dyn TaskService>,
 
-    /// Receives results from the background loader (non-blocking).
     pub load_rx: tokio::sync::mpsc::UnboundedReceiver<LoadMsg>,
     load_tx:     tokio::sync::mpsc::UnboundedSender<LoadMsg>,
 }
@@ -64,14 +63,11 @@ impl App {
     // Async task loading
     // -----------------------------------------------------------------------
 
-    /// Spawn a background Tokio task to load tasks, pushing the result via
-    /// an unbounded channel.  Call `poll_load()` each render tick to receive.
     pub fn spawn_load(&mut self) {
         self.tasks_state.load_state = LoadState::Loading;
 
         let build_result = filter_builder::build(&self.tasks_state.filter);
 
-        // Write field-level parse errors back immediately (these are cheap)
         self.tasks_state.filter.created_after_err  = None;
         self.tasks_state.filter.created_before_err = None;
         self.tasks_state.filter.priority_err       = None;
@@ -97,7 +93,6 @@ impl App {
         });
     }
 
-    /// Drain pending load messages — call once per render tick.
     pub fn poll_load(&mut self) {
         if let Ok(msg) = self.load_rx.try_recv() {
             match msg {
@@ -112,7 +107,18 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: &str) -> bool {
-        // Filter form intercepts keys first
+        // Tree filter input intercepts keys when Tree view is active and the
+        // filter input has focus (or the user starts typing in Tree view).
+        if self.active_tab == Tab::Tasks
+            && self.tasks_state.active_view == TasksView::Tree
+            && self.tasks_state.tree_filter_focused
+        {
+            if self.handle_tree_filter_key(key) {
+                return true;
+            }
+        }
+
+        // Filter form intercepts keys first (when open)
         if self.active_tab == Tab::Tasks {
             if let Some(TasksForm::Filter) = self.tasks_state.active_form {
                 if self.handle_filter_key(key) {
@@ -143,6 +149,58 @@ impl App {
             return true;
         }
 
+        // When Tree view is active and no other handler consumed the key,
+        // printable characters activate and feed the tree filter input.
+        if self.active_tab == Tab::Tasks
+            && self.tasks_state.active_view == TasksView::Tree
+            && !self.tasks_state.form_visible()
+        {
+            if is_printable(key) {
+                self.tasks_state.tree_filter_focused = true;
+                let c = key.chars().next().unwrap();
+                self.tasks_state.tree_filter_insert(c);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // -----------------------------------------------------------------------
+    // Tree filter key handling
+    // -----------------------------------------------------------------------
+
+    fn handle_tree_filter_key(&mut self, key: &str) -> bool {
+        match key {
+            "esc" => {
+                if self.tasks_state.tree_filter.is_empty() {
+                    self.tasks_state.tree_filter_focused = false;
+                } else {
+                    self.tasks_state.tree_filter_clear();
+                }
+                return true;
+            }
+            "enter" => {
+                // Commit — keep focus but do nothing special (filter is live)
+                return true;
+            }
+            "backspace" => {
+                self.tasks_state.tree_filter_backspace();
+                // If the filter is now empty, release focus
+                if self.tasks_state.tree_filter.is_empty() {
+                    self.tasks_state.tree_filter_focused = false;
+                }
+                return true;
+            }
+            "left"  => { self.tasks_state.tree_filter_cursor_left();  return true; }
+            "right" => { self.tasks_state.tree_filter_cursor_right(); return true; }
+            ch if is_printable(ch) => {
+                let c = ch.chars().next().unwrap();
+                self.tasks_state.tree_filter_insert(c);
+                return true;
+            }
+            _ => {}
+        }
         false
     }
 
@@ -153,7 +211,6 @@ impl App {
     fn handle_filter_key(&mut self, key: &str) -> bool {
         let focused = self.tasks_state.filter.focused_field;
 
-        // Check for configurable form navigation keys first
         if let Some(action) = self.resolve_form_key(key) {
             match action {
                 FormAction::Next => {
@@ -180,7 +237,6 @@ impl App {
         }
 
         match key {
-            // Status field: left/right changes field
             "left" if focused == FilterField::Status => {
                 self.tasks_state.filter.focus_prev();
                 return true;
@@ -194,19 +250,13 @@ impl App {
                 self.spawn_load();
                 return true;
             }
-
-            // Toggle show_deleted
             " " | "enter" if focused == FilterField::ShowDeleted => {
                 self.tasks_state.filter.toggle_show_deleted();
                 self.spawn_load();
                 return true;
             }
-
-            // Cursor movement in text fields
             "left"  => { self.tasks_state.filter.cursor_left();  return true; }
             "right" => { self.tasks_state.filter.cursor_right(); return true; }
-
-            // Text editing
             "backspace" => {
                 self.tasks_state.filter.backspace();
                 self.spawn_load();
@@ -216,15 +266,11 @@ impl App {
                 self.spawn_load();
                 return true;
             }
-
-            // Reset all filters
             "ctrl+r" => {
                 self.tasks_state.filter.reset();
                 self.spawn_load();
                 return true;
             }
-
-            // Printable character → insert into focused text field
             ch if is_printable(ch)
                 && focused != FilterField::Status
                 && focused != FilterField::ShowDeleted =>
@@ -234,7 +280,6 @@ impl App {
                 self.spawn_load();
                 return true;
             }
-
             _ => {}
         }
 
@@ -287,10 +332,15 @@ impl App {
     }
 
     fn handle_tasks_action(&mut self, action: TasksAction) {
-        use crate::tabs::TasksView;
         match action {
-            TasksAction::ViewList   => self.tasks_state.active_view = TasksView::List,
-            TasksAction::ViewTree   => self.tasks_state.active_view = TasksView::Tree,
+            TasksAction::ViewList => {
+                self.tasks_state.active_view = TasksView::List;
+                // Release tree filter focus when switching away from Tree
+                self.tasks_state.tree_filter_focused = false;
+            }
+            TasksAction::ViewTree => {
+                self.tasks_state.active_view = TasksView::Tree;
+            }
             TasksAction::FormFilter => self.tasks_state.open_form(TasksForm::Filter),
             TasksAction::FormAdd    => self.tasks_state.open_form(TasksForm::Add),
             TasksAction::FormDelete => self.tasks_state.open_form(TasksForm::Delete),

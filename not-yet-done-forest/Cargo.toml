@@ -1,0 +1,8 @@
+[package]
+name = "not-yet-done-forest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzy-matcher = { workspace = true }
+unicode-width = { workspace = true }

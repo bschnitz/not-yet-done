@@ -2,11 +2,11 @@
 name = "not-yet-done-tui"
 version = "0.1.0"
 edition = "2024"
-
+ 
 [[bin]]
 name = "not-yet-done-tui"
 path = "src/main.rs"
-
+ 
 [dependencies]
 ratatui              = { workspace = true }
 crossterm            = { workspace = true }
@@ -18,5 +18,9 @@ dirs                 = { workspace = true }
 chrono-english       = { workspace = true }
 shaku                = { workspace = true }
 chrono               = { workspace = true }
+uuid                 = { workspace = true }
+fuzzy-matcher        = { workspace = true }
+unicode-width        = { workspace = true }
 not-yet-done-core    = { path = "../not-yet-done-core" }
+not-yet-done-forest  = { path = "../not-yet-done-forest" }
 ratatui-form-widgets = { path = "../ratatui-form-widgets" }

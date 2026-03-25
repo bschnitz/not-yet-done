@@ -1,3 +1,4 @@
+pub mod forest;
 pub mod form_pane;
 pub mod sub_tab_bar;
 pub mod view_pane;
@@ -30,20 +31,14 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App) {
     let split_cfg = &app.config.layout.tasks.split;
     let form_open = app.tasks_state.form_visible();
 
-    // Thresholds are measured against the full terminal size so that
-    // border/chrome overhead doesn't affect the comparison.
     let term = frame.area();
 
     let split_active = form_open && match split_cfg.split_type {
-        // Side-by-side needs enough width — controlled by vertical_threshold
         SplitType::Vertical   => term.width  >= split_cfg.vertical_threshold,
-        // Stacked needs enough height — controlled by horizontal_threshold
         SplitType::Horizontal => term.height >= split_cfg.horizontal_threshold,
     };
 
     if !split_active {
-        // Terminal too small to split: show the form if one is open (so the
-        // user can still interact with it), otherwise show the view.
         if form_open {
             frame.render_widget(TasksFormPane::new(app), area);
         } else {
@@ -60,8 +55,6 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_vertical_split(frame: &mut Frame, area: Rect, app: &App) {
     let split_cfg = &app.config.layout.tasks.split;
-
-    // View gets ~60 %, form ~40 % — feels balanced for a sidebar form
     let (view_pct, form_pct) = (60, 40);
 
     let panes = Layout::default()
@@ -76,8 +69,6 @@ fn render_vertical_split(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_horizontal_split(frame: &mut Frame, area: Rect, app: &App) {
     let split_cfg = &app.config.layout.tasks.split;
-
-    // View gets ~65 %, form ~35 % — form as a bottom drawer
     let (view_pct, form_pct) = (65, 35);
 
     let panes = Layout::default()
@@ -90,11 +81,6 @@ fn render_horizontal_split(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(TasksFormPane::new(app), form_area);
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Build constraints respecting the configured pane order.
 fn ordered_constraints(
     split_cfg: &crate::config::layout::SplitConfig,
     view_pct: u16,
@@ -113,7 +99,6 @@ fn ordered_constraints(
     }
 }
 
-/// Return (view_area, form_area) correctly regardless of render order.
 fn ordered_areas(
     order: &[crate::config::SplitPane],
     first: Rect,
@@ -121,7 +106,7 @@ fn ordered_areas(
 ) -> (Rect, Rect) {
     use crate::config::SplitPane;
     match order.first() {
-        Some(SplitPane::Form) => (second, first),  // form is first pane
-        _                     => (first, second),  // view is first pane (default)
+        Some(SplitPane::Form) => (second, first),
+        _                     => (first, second),
     }
 }
