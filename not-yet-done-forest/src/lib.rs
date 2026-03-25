@@ -1,11 +1,17 @@
+// not-yet-done-forest/src/lib.rs
+
 //! Generic filterable-forest data structure.
 //!
 //! This crate is intentionally task-agnostic.  It provides:
 //!
 //! - [`TreeNode`] / [`HasTreeShape`] — building blocks for any tree
 //! - [`ForestItem`] — trait for filter-matching
-//! - [`Forest<T, S>`] — an immutable, O(1)-filterable forest
-//! - [`Table`] / [`ForestTable`] traits — rendering helpers
+//! - [`Forest<T, S>`] — an immutable forest
+//! - [`GhostNode`] — a borrowed view into a subtree (filtered + sorted)
+//! - [`TransformableForest<Q>`] — produce a `GhostNode` forest from a query
+//! - [`TreeDisplay`] — optional per-node label for the tree column
+//! - [`IntoRow`] — convert an element into non-tree [`Row`] cells
+//! - [`FilterableTable<Q>`] — filterable, tree-rendered table
 //! - Column sizing strategies ([`MixedColSizer`], [`FixedColSizer`])
 //! - [`fit_to_width`] — unicode-aware cell truncation / padding
 
@@ -13,7 +19,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
 // =============================================================================
-// TreeNode + traits
+// TreeNode + HasTreeShape + ForestItem
 // =============================================================================
 
 /// A single node in the forest holding an element and its children.
@@ -45,25 +51,19 @@ pub trait ForestItem<Q> {
     fn matches_filter(&self, query: &Q) -> bool;
 }
 
-/// A filterable forest — knows how to return matching root nodes.
-pub trait FilterableForest<Q> {
-    type Item;
-    fn filter(&self, query: &Q) -> Vec<&TreeNode<Self::Item>>;
-}
-
 // =============================================================================
 // Forest<T, S>
 // =============================================================================
 
 /// An immutable forest of elements of type `T` with ID type `S`.
 ///
-/// Built once via [`Forest::from_items`]; all filter operations are
-/// read-only afterwards.
+/// Built once via [`Forest::from_items`]; all operations are read-only
+/// afterwards.
 pub struct Forest<T, S> {
     roots: Vec<TreeNode<T>>,
     /// item_id → index in `roots`
     item_to_root: HashMap<S, usize>,
-    /// item_id → raw pointer to element (O(1) filter without tree traversal)
+    /// item_id → raw pointer to element (O(1) lookup without tree traversal)
     flat_items: HashMap<S, *const T>,
 }
 
@@ -91,8 +91,6 @@ where
 {
     fn clone(&self) -> Self {
         let mut items: Vec<T> = Vec::with_capacity(self.flat_items.len());
-        
-        // Iterative traversal
         for root in &self.roots {
             let mut stack = vec![root];
             while let Some(node) = stack.pop() {
@@ -100,7 +98,6 @@ where
                 stack.extend(node.children.iter());
             }
         }
-        
         Forest::from_items(items)
     }
 }
@@ -111,8 +108,6 @@ where
     T: HasTreeShape<S>,
 {
     /// Build the forest in O(n).
-    ///
-    /// # Algorithm
     ///
     /// **Pass 1** — Load all items into `HashMap<S, TreeNode<T>>`.
     ///
@@ -187,16 +182,12 @@ where
             }
         }
 
-        Forest {
-            roots,
-            item_to_root,
-            flat_items,
-        }
+        Forest { roots, item_to_root, flat_items }
     }
 
     /// All root nodes of the forest.
-    pub fn roots(&self) -> Vec<&TreeNode<T>> {
-        self.roots.iter().collect()
+    pub fn roots(&self) -> &[TreeNode<T>] {
+        &self.roots
     }
 
     /// Total number of items (all levels).
@@ -209,21 +200,56 @@ where
     }
 }
 
-impl<T, S, Q> FilterableForest<Q> for Forest<T, S>
+// =============================================================================
+// GhostNode — a borrowed, transformed view into a Forest
+// =============================================================================
+
+/// A borrowed node in a transformed (filtered + sorted) view of a [`Forest`].
+///
+/// `GhostNode`s are produced by [`TransformableForest::transform`] and live
+/// only for the duration of a single `rows()` or `tree_min_width()` call —
+/// they are never stored.
+pub struct GhostNode<'a, T> {
+    pub node: &'a TreeNode<T>,
+    pub children: Vec<GhostNode<'a, T>>,
+}
+
+// =============================================================================
+// TransformableForest<Q>
+// =============================================================================
+
+/// Produce a transformed (filtered, sorted, restructured) view of the forest
+/// as a `Vec<GhostNode>` for a given query.
+///
+/// The default implementation provided for [`Forest<T, S>`] only filters
+/// (items where `matches_filter` returns `true`).  Callers who need sorting
+/// or other transformations implement this trait on a newtype wrapper around
+/// `Forest`.
+///
+/// # Lifetimes
+///
+/// `GhostNode<'a, T>` borrows from `&'a self`.  The returned vec must not
+/// outlive the forest — in practice this is never a problem since `rows()` and
+/// `tree_min_width()` consume the vec immediately within the same call.
+pub trait TransformableForest<Q> {
+    type Item;
+    fn transform<'a>(&'a self, query: &Q) -> Vec<GhostNode<'a, Self::Item>>;
+}
+
+/// Default implementation: filter only, no sorting.
+impl<T, S, Q> TransformableForest<Q> for Forest<T, S>
 where
     S: Eq + Hash + Clone,
     T: HasTreeShape<S> + ForestItem<Q>,
 {
     type Item = T;
 
-    /// Filter in O(n): walk `flat_items`, call `matches_filter`, look up the
-    /// root index, deduplicate via HashSet.
-    fn filter(&self, query: &Q) -> Vec<&TreeNode<T>> {
+    fn transform<'a>(&'a self, query: &Q) -> Vec<GhostNode<'a, T>> {
+        // Collect matching root indices (O(n) flat scan).
         let mut root_indices: HashSet<usize> = HashSet::new();
-
-        for (id, &task_ptr) in &self.flat_items {
-            // SAFETY: flat_items points into roots which live for &self.
-            let item = unsafe { &*task_ptr };
+        for (id, &ptr) in &self.flat_items {
+            // SAFETY: flat_items points into roots which live for &'a self.
+            let item = unsafe { &*ptr };
             if item.matches_filter(query) {
                 if let Some(&root_idx) = self.item_to_root.get(id) {
                     root_indices.insert(root_idx);
@@ -233,13 +259,43 @@ where
 
         root_indices
             .into_iter()
-            .map(|idx| &self.roots[idx])
+            .map(|idx| ghost_from_node(&self.roots[idx]))
             .collect()
     }
 }
 
+/// Recursively build a `GhostNode` tree that mirrors a `TreeNode` tree.
+fn ghost_from_node<T>(node: &TreeNode<T>) -> GhostNode<'_, T> {
+    GhostNode {
+        node,
+        children: node.children.iter().map(ghost_from_node).collect(),
+    }
+}
+
 // =============================================================================
-// Column / Table traits
+// TreeDisplay + IntoRow
+// =============================================================================
+
+/// Optional label shown in the tree column next to the connector.
+///
+/// When `description()` returns `Some(s)`, the cell renders as
+/// `<connector><s>`.  When it returns `None`, only the connector is shown
+/// (with a `┐` suffix if the node has children).
+pub trait TreeDisplay {
+    fn description(&self) -> Option<&str>;
+}
+
+/// Convert an element into a [`Row`] containing **only the non-tree columns**.
+///
+/// The tree column (`TREE_COLUMN`) is injected automatically by
+/// [`FilterableTable`].
+pub trait IntoRow {
+    type Id: Eq + Hash + Clone;
+    fn into_row(&self) -> Row<Self::Id>;
+}
+
+// =============================================================================
+// Column / Table types
 // =============================================================================
 
 /// Identifies a column by name.
@@ -421,46 +477,213 @@ where
     pub rendered: String,
 }
 
-/// Generic table trait.
+// =============================================================================
+// The fixed tree column id
+// =============================================================================
+
+/// The fixed [`ColumnId`] used for the tree column.
+pub const TREE_COLUMN: &str = "tree";
+
+// =============================================================================
+// FilterableTable<Q>
+// =============================================================================
+
+/// A table whose rows are produced by transforming a forest with a query.
 ///
-/// Implementors supply raw rows and an optional header.
-/// `rendered_rows` is a provided default and normally need not be overridden.
-pub trait Table {
-    type Id: Eq + Hash + Clone;
+/// Implement [`TransformableForest<Q>`] on your type (or a newtype wrapper)
+/// to control filtering and sorting.  Then `FilterableTable` uses the result
+/// to build rows with tree connectors and optional descriptions.
+pub trait FilterableTable<Q>: TransformableForest<Q>
+where
+    Self::Item: TreeDisplay + IntoRow,
+    <Self::Item as IntoRow>::Id: Eq + Hash + Clone,
+{
+    /// Returns rows for all items matching `query`, with the tree column
+    /// already populated (connector + optional description).
+    fn rows(&self, query: &Q) -> Vec<Row<<Self::Item as IntoRow>::Id>> {
+        let tree_col = ColumnId::new(TREE_COLUMN);
+        let ghost_roots = self.transform(query);
+        let mut result = Vec::new();
 
-    fn rows(&self) -> Vec<Row<Self::Id>>;
-    fn header(&self) -> Option<Row<Self::Id>>;
+        for ghost_root in &ghost_roots {
+            // Stack entries: (ghost_node, depth, is_last, prefix)
+            let mut stack: Vec<(&GhostNode<'_, Self::Item>, usize, bool, String)> =
+                vec![(ghost_root, 0, true, String::new())];
 
-    /// Render rows according to a `TableLayout` and an ordered column slice.
-    fn rendered_rows(&self, layout: &TableLayout, cols: &[ColumnId]) -> Vec<RenderedRow<Self::Id>> {
-        let rows = self.rows();
+            while let Some((ghost, depth, is_last, prefix)) = stack.pop() {
+                let elem = &ghost.node.element;
+                let desc = elem.description();
+                let has_desc = desc.is_some();
+                let has_children = !ghost.children.is_empty();
+
+                let connector = forest_connector(depth, is_last, &prefix, has_desc, has_children);
+                let tree_cell = match desc {
+                    Some(d) => format!("{}{}", connector, d),
+                    None => connector,
+                };
+
+                let mut row = elem.into_row();
+                row.cells.insert(tree_col.clone(), tree_cell);
+                result.push(row);
+
+                let n = ghost.children.len();
+                let next_prefix = forest_child_prefix(depth, is_last, has_desc, &prefix);
+                for (i, child) in ghost.children.iter().enumerate().rev() {
+                    stack.push((child, depth + 1, i == n - 1, next_prefix.clone()));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Render rows to strings.
+    ///
+    /// `header` is optional and, when supplied, is rendered as the first row
+    /// using the same column widths as the data rows.
+    fn rendered_rows(
+        &self,
+        query: &Q,
+        layout: &TableLayout,
+        cols: &[ColumnId],
+        header: Option<Row<<Self::Item as IntoRow>::Id>>,
+    ) -> Vec<RenderedRow<<Self::Item as IntoRow>::Id>> {
+        let rows = self.rows(query);
         let widths = layout
             .sizer
             .col_widths(cols, &rows, layout.max_width, &layout.separator);
-        rows.into_iter()
-            .map(|row| {
-                let fitted: Vec<String> = cols
-                    .iter()
-                    .zip(widths.iter())
-                    .map(|(col_id, &width)| {
-                        let value = row.cells.get(col_id).cloned().unwrap_or_default();
-                        fit_to_width(&value, width)
-                    })
-                    .collect();
-                let rendered = fitted.join(&layout.separator);
-                RenderedRow {
-                    id: row.id,
-                    rendered,
-                }
-            })
-            .collect()
+
+        let render_one = |row: Row<<Self::Item as IntoRow>::Id>| {
+            let fitted: Vec<String> = cols
+                .iter()
+                .zip(widths.iter())
+                .map(|(col_id, &width)| {
+                    let value = row.cells.get(col_id).cloned().unwrap_or_default();
+                    fit_to_width(&value, width)
+                })
+                .collect();
+            RenderedRow {
+                id: row.id,
+                rendered: fitted.join(&layout.separator),
+            }
+        };
+
+        let mut result = Vec::new();
+        if let Some(h) = header {
+            result.push(render_one(h));
+        }
+        result.extend(rows.into_iter().map(render_one));
+        result
     }
 }
 
-/// Extension of `Table` for forests — the first column is always the tree
-/// representation.
-pub trait ForestTable: Table {
-    fn available_columns(&self) -> Vec<ColumnId>;
+/// Blanket impl: every type that implements `TransformableForest<Q>` with
+/// the right bounds automatically implements `FilterableTable<Q>`.
+impl<Q, F> FilterableTable<Q> for F
+where
+    F: TransformableForest<Q>,
+    F::Item: TreeDisplay + IntoRow,
+    <F::Item as IntoRow>::Id: Eq + Hash + Clone,
+{
+}
+
+// =============================================================================
+// Tree-column minimum width helper
+// =============================================================================
+
+impl<T, S> Forest<T, S>
+where
+    S: Eq + Hash + Clone,
+    T: HasTreeShape<S> + TreeDisplay,
+{
+    /// Returns the minimum display width needed to show the tree structure
+    /// (connectors only, **without** description text) for all nodes matching
+    /// `query`.
+    ///
+    /// Use this as a baseline when configuring the tree column width, e.g.:
+    ///
+    /// ```rust,ignore
+    /// let min = forest.tree_min_width(&query);
+    /// strategies.insert(ColumnId::new(TREE_COLUMN), ColStrategy::Fixed(min + 20));
+    /// ```
+    pub fn tree_min_width<Q>(&self, query: &Q) -> usize
+    where
+        T: ForestItem<Q>,
+    {
+        use unicode_width::UnicodeWidthStr;
+
+        let ghost_roots = <Self as TransformableForest<Q>>::transform(self, query);
+        let mut max_width = 0usize;
+
+        for ghost_root in &ghost_roots {
+            let mut stack: Vec<(&GhostNode<'_, T>, usize, bool, String)> =
+                vec![(ghost_root, 0, true, String::new())];
+
+            while let Some((ghost, depth, is_last, prefix)) = stack.pop() {
+                let has_desc = ghost.node.element.description().is_some();
+                let has_children = !ghost.children.is_empty();
+
+                let connector = forest_connector(depth, is_last, &prefix, has_desc, has_children);
+                max_width = max_width.max(connector.width());
+
+                let n = ghost.children.len();
+                let next_prefix = forest_child_prefix(depth, is_last, has_desc, &prefix);
+                for (i, child) in ghost.children.iter().enumerate().rev() {
+                    stack.push((child, depth + 1, i == n - 1, next_prefix.clone()));
+                }
+            }
+        }
+
+        max_width
+    }
+}
+
+// =============================================================================
+// Internal tree-rendering helpers (broot-style, description-aware)
+// =============================================================================
+
+/// Connector string for a single node.
+///
+/// | has_description | has_children | is_last | depth=0 | result            |
+/// |-----------------|--------------|---------|---------|-------------------|
+/// | any             | any          | any     | yes     | `""`              |
+/// | true            | any          | false   | no      | `"<prefix>├── "`  |
+/// | true            | any          | true    | no      | `"<prefix>└── "`  |
+/// | false           | true         | false   | no      | `"<prefix>├───┐"` |
+/// | false           | true         | true    | no      | `"<prefix>└───┐"` |
+/// | false           | false        | false   | no      | `"<prefix>├── "`  |
+/// | false           | false        | true    | no      | `"<prefix>└── "`  |
+fn forest_connector(
+    depth: usize,
+    is_last: bool,
+    prefix: &str,
+    has_description: bool,
+    has_children: bool,
+) -> String {
+    if depth == 0 {
+        return String::new();
+    }
+    match (has_description || !has_children, is_last) {
+        (true, false) => format!("{}├── ", prefix),
+        (true, true)  => format!("{}└── ", prefix),
+        (false, false) => format!("{}├───┐", prefix),
+        (false, true)  => format!("{}└───┐", prefix),
+    }
+}
+
+/// Prefix passed down to the children of a node.
+fn forest_child_prefix(depth: usize, is_last: bool, has_description: bool, prefix: &str) -> String {
+    if depth == 0 {
+        if has_description {
+            prefix.to_string()
+        } else {
+            format!("{} ", prefix)
+        }
+    } else if is_last {
+        format!("{}    ", prefix)
+    } else {
+        format!("{}│   ", prefix)
+    }
 }
 
 // =============================================================================
@@ -483,7 +706,7 @@ pub fn fit_to_width(s: &str, width: usize) -> String {
         format!("{}{}", s, " ".repeat(padding))
     } else {
         let ellipsis = "…";
-        let ellipsis_width = 1; // U+2026 is always 1 display column wide
+        let ellipsis_width = 1;
         let target = width.saturating_sub(ellipsis_width);
 
         let mut result = String::new();
@@ -503,7 +726,7 @@ pub fn fit_to_width(s: &str, width: usize) -> String {
 }
 
 // =============================================================================
-// Tree rendering helper (broot-style connectors)
+// Original tree-rendering helpers — kept for backwards compatibility
 // =============================================================================
 
 /// Build the connector prefix string for a node at a given depth.

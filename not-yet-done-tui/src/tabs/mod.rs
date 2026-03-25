@@ -336,7 +336,6 @@ pub enum LoadState {
 // TasksState — owns all mutable state for the Tasks tab
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
 pub struct TasksState {
     /// Which view is currently active in the view pane.
     pub active_view: TasksView,
