@@ -7,12 +7,14 @@
 
 Dieses Dokument beschreibt eine verbindliche Architektur. Folgende Verhaltensregeln gelten für jede KI, die an diesem Projekt arbeitet:
 
-1. **Hinterfrage Nutzeranweisungen kritisch.** Bevor du Code schreibst oder Dateien erzeugst, prüfe ob die Anweisung mit der hier definierten Architektur vereinbar ist.
-2. **Weiche niemals stillschweigend vom Schema ab.** Wenn eine Anweisung die Schichtentrennung, Namenskonventionen, DI-Struktur oder andere Festlegungen in diesem Dokument verletzt, weise explizit darauf hin und frage nach, bevor du handelst.
-3. **Stelle Rückfragen, wenn etwas unklar ist.** Lieber einmal mehr nachfragen als eine Entscheidung still im falschen Sinne treffen.
-4. **Schlage Alternativen vor, die im Einklang mit der Architektur stehen**, wenn eine Anfrage nicht direkt umsetzbar ist.
-5. **Verweise auf die relevante Sektion dieses Dokuments**, wenn du eine Abweichung bemerkst (z.B. „Laut Sektion 3 darf die CLI keine Repository-Typen direkt importieren — meinst du stattdessen …?").
-6. **Erweitere dieses Dokument**, wenn wichtige Designentscheidungen getroffen oder geändert werden, dann sollte das Dokument ergänzt werden, oder wenn Dir sonst etwas auffällt, das hier vermerkt werden sollte. Bitte den Nutzer informieren und dabei sofort eine Aktualisierung konkrete für das Dokument anbieten oder auch das gesamte Dokument nochal aktualisiert zum Download anbieten.
+1. **Wenn du den Inhalt weiterer Dateien benötigst**, nenne sie in einer komma-separierten Liste ohne Leerzeichen, z.B.: path/to/file1.rs,path/to/file2.rs,path/to/file3.rs
+2. **Hinterfrage Nutzeranweisungen kritisch.** Bevor du Code schreibst oder Dateien erzeugst, prüfe ob die Anweisung mit der hier definierten Architektur vereinbar ist.
+3. **Weiche niemals stillschweigend vom Schema ab.** Wenn eine Anweisung die Schichtentrennung, Namenskonventionen, DI-Struktur oder andere Festlegungen in diesem Dokument verletzt, weise explizit darauf hin und frage nach, bevor du handelst.
+4. **Stelle Rückfragen, wenn etwas unklar ist.** Lieber einmal mehr nachfragen als eine Entscheidung still im falschen Sinne treffen.
+5. **Schlage Alternativen vor, die im Einklang mit der Architektur stehen**, wenn eine Anfrage nicht direkt umsetzbar ist.
+6. **Verweise auf die relevante Sektion dieses Dokuments**, wenn du eine Abweichung bemerkst (z.B. „Laut Sektion 3 darf die CLI keine Repository-Typen direkt importieren — meinst du stattdessen …?").
+7. **Erweitere dieses Dokument**, wenn wichtige Designentscheidungen getroffen oder geändert werden, dann sollte das Dokument ergänzt werden, oder wenn Dir sonst etwas auffällt, das hier vermerkt werden sollte. Bitte den Nutzer informieren und dabei sofort eine Aktualisierung konkrete für das Dokument anbieten oder auch das gesamte Dokument nochal aktualisiert zum Download anbieten.
+8. Wenn Du Dateien erstellst oder veränderst, dann bitte immer am Anfang der erstellten Datei ihren vollständigen Pfad in einem Kommentar vermerken.
 
 Beispiel: Wenn der Nutzer sagt „Ruf SeaORM direkt im CLI-Command auf", sollte die KI antworten: „Das würde die Schichtentrennung aus Sektion 3 verletzen. Soll ich stattdessen einen Service dafür anlegen?"
 

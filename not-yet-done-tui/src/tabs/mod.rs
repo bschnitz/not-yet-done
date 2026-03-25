@@ -2,6 +2,8 @@
 // Main tabs
 // ---------------------------------------------------------------------------
 
+use crate::ui::tasks::forest::TaskForest;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Welcome,
@@ -365,6 +367,11 @@ pub struct TasksState {
     pub scroll_offset: usize,
     /// Current load state.
     pub load_state: LoadState,
+
+    // Cache for the TreeRows, to prevent recalculation when filter does not change
+    tree_rows_cache: Option<Vec<crate::ui::tasks::forest::TreeRow>>,
+    /// Filterstring for the above cache
+    cached_tree_filter: String,
 }
 
 impl TasksState {
@@ -381,6 +388,8 @@ impl TasksState {
             selected_row: 0,
             scroll_offset: 0,
             load_state: LoadState::Idle,
+            tree_rows_cache: None,
+            cached_tree_filter: String::new()
         }
     }
 
@@ -478,10 +487,23 @@ impl TasksState {
             self.selected_row = self.task_rows.len() - 1;
         }
         self.load_state = LoadState::Loaded;
+
+        self.tree_rows_cache = None;
+        self.cached_tree_filter.clear();
     }
 
     pub fn set_load_error(&mut self, msg: String) {
         self.load_state = LoadState::Error(msg);
+    }
+
+    /// Returns the tree rows for the given forest and query, using an internal cache.
+    pub fn get_tree_rows(&mut self, forest: &TaskForest, query: &str) -> &[crate::ui::tasks::forest::TreeRow] {
+        // Prüfen, ob der Cache noch gültig ist
+        if self.cached_tree_filter != query {
+            self.tree_rows_cache = Some(crate::ui::tasks::forest::build_tree_rows(forest, query));
+            self.cached_tree_filter = query.to_string();
+        }
+        self.tree_rows_cache.as_ref().unwrap()
     }
 }
 

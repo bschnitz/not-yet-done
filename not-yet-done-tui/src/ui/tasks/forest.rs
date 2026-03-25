@@ -1,12 +1,3 @@
-// Task-specific wiring between `not-yet-done-forest` and the Task entity.
-//
-// The orphan rules prevent implementing traits from `not-yet-done-forest`
-// directly on `Task` (from `not-yet-done-core`) or `Uuid` (from `uuid`),
-// since neither type is local to this crate.
-//
-// Solution: a thin newtype `TaskItem` that wraps `Task` and lives here.
-// `Forest<TaskItem, LocalUuid>` is the concrete forest type.
-
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use uuid::Uuid;
 
@@ -16,19 +7,16 @@ use not_yet_done_forest::{
 };
 
 // ---------------------------------------------------------------------------
-// Local Uuid newtype — satisfies orphan rules for HasTreeShape
+// Local Uuid newtype
 // ---------------------------------------------------------------------------
 
-/// Newtype around `Uuid` so we can implement foreign traits for it locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalUuid(pub Uuid);
 
 // ---------------------------------------------------------------------------
-// TaskItem newtype — wraps Task so we can implement foreign traits
+// TaskItem newtype
 // ---------------------------------------------------------------------------
 
-/// Newtype wrapping `Task`.  Lives in this crate, so we can implement
-/// `HasTreeShape` and `ForestItem` for it without violating orphan rules.
 #[derive(Debug, Clone)]
 pub struct TaskItem(pub Task);
 
@@ -46,12 +34,21 @@ impl HasTreeShape<LocalUuid> for TaskItem {
 // ---------------------------------------------------------------------------
 
 /// Query used for fuzzy-filtering the task forest.
-#[derive(Debug, Clone, Default)]
+/// Holds the matcher instance so it is constructed exactly once per query.
 pub struct TaskQuery {
-    /// Fuzzy search term against `description`. `None` = no text filter.
     pub text: Option<String>,
-    /// Minimum fuzzy score (sensible default: 10–30).
     pub min_score: i64,
+    matcher: SkimMatcherV2,
+}
+
+impl std::fmt::Debug for TaskQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskQuery")
+            .field("text", &self.text)
+            .field("min_score", &self.min_score)
+            .field("matcher", &"<SkimMatcherV2>")
+            .finish()
+    }
 }
 
 impl TaskQuery {
@@ -60,6 +57,7 @@ impl TaskQuery {
         TaskQuery {
             text: if t.is_empty() { None } else { Some(t) },
             min_score,
+            matcher: SkimMatcherV2::default(), // ← genau einmal
         }
     }
 }
@@ -69,8 +67,8 @@ impl ForestItem<TaskQuery> for TaskItem {
         match &query.text {
             None => true,
             Some(pattern) => {
-                let matcher = SkimMatcherV2::default();
-                matcher
+                query
+                    .matcher // ← wiederverwendet
                     .fuzzy_match(&self.0.description, pattern)
                     .map(|score| score >= query.min_score)
                     .unwrap_or(false)
@@ -80,22 +78,19 @@ impl ForestItem<TaskQuery> for TaskItem {
 }
 
 // ---------------------------------------------------------------------------
-// TaskForest — concrete forest type
+// TaskForest
 // ---------------------------------------------------------------------------
 
 pub type TaskForest = Forest<TaskItem, LocalUuid>;
 
 // ---------------------------------------------------------------------------
-// TreeRow — flat representation consumed by view_pane
+// TreeRow
 // ---------------------------------------------------------------------------
 
-/// A single displayable row in the tree view.
 #[derive(Debug, Clone)]
 pub struct TreeRow {
     pub id: Uuid,
-    /// The full display string for the "tree" column (connector + description).
     pub tree_cell: String,
-    /// Depth in the tree (0 = root).
     pub depth: usize,
     pub status: TaskStatus,
     pub deleted: bool,
@@ -103,30 +98,51 @@ pub struct TreeRow {
 }
 
 // ---------------------------------------------------------------------------
-// build_tree_rows — entry point for view_pane
+// build_forest / build_tree_rows
 // ---------------------------------------------------------------------------
 
-/// Build a `TaskForest` from a flat list of tasks.
 pub fn build_forest(tasks: Vec<Task>) -> TaskForest {
     TaskForest::from_items(tasks.into_iter().map(TaskItem).collect())
 }
 
-/// Produce a flat `Vec<TreeRow>` from a `TaskForest`, optionally filtered by
-/// a fuzzy `query` string.  Pass `""` (empty) to show the full tree.
 pub fn build_tree_rows(forest: &TaskForest, query: &str) -> Vec<TreeRow> {
     let task_query = TaskQuery::new(query, 20);
 
-    let roots: Vec<&TreeNode<TaskItem>> = if task_query.text.is_none() {
-        forest.roots()
+    let mut roots: Vec<&TreeNode<TaskItem>> = if task_query.text.is_none() {
+        forest.roots().to_vec()
     } else {
-        forest.filter(&task_query)
+        forest.filter(&task_query).to_vec()
     };
+
+    // Sort roots by max subtree score (descending), then alphabetically by description.
+    roots.sort_by(|a, b| {
+        let score_a = max_score_in_subtree(a, &task_query);
+        let score_b = max_score_in_subtree(b, &task_query);
+        score_b.cmp(&score_a)
+            .then_with(|| a.element.0.description.cmp(&b.element.0.description))
+    });
 
     let mut result = Vec::new();
     for root in roots {
-        collect_tree_rows(root, 0, true, "", &mut result);
+        collect_tree_rows(root, 0, true, "", &mut result, &task_query);
     }
     result
+}
+
+/// Recursively compute the maximum fuzzy match score in a subtree.
+fn max_score_in_subtree(node: &TreeNode<TaskItem>, query: &TaskQuery) -> i64 {
+    let self_score = match &query.text {
+        None => 0,
+        Some(pattern) => query
+            .matcher
+            .fuzzy_match(&node.element.0.description, pattern)
+            .unwrap_or(0),
+    };
+    let child_max = node.children.iter()
+        .map(|child| max_score_in_subtree(child, query))
+        .max()
+        .unwrap_or(0);
+    self_score.max(child_max)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +155,7 @@ fn collect_tree_rows(
     is_last: bool,
     prefix: &str,
     result: &mut Vec<TreeRow>,
+    query: &TaskQuery,
 ) {
     let task = &node.element.0;
     let connector = tree_connector(depth, is_last, prefix);
@@ -154,8 +171,16 @@ fn collect_tree_rows(
     });
 
     let next_prefix = child_prefix(depth, is_last, prefix);
-    let child_count = node.children.len();
-    for (i, child) in node.children.iter().enumerate() {
-        collect_tree_rows(child, depth + 1, i == child_count - 1, &next_prefix, result);
+    // Sort children by max subtree score (descending) then alphabetically.
+    let mut children: Vec<_> = node.children.iter().collect();
+    children.sort_by(|a, b| {
+        let score_a = max_score_in_subtree(a, query);
+        let score_b = max_score_in_subtree(b, query);
+        score_b.cmp(&score_a)
+            .then_with(|| a.element.0.description.cmp(&b.element.0.description))
+    });
+    let child_count = children.len();
+    for (i, child) in children.into_iter().enumerate() {
+        collect_tree_rows(child, depth + 1, i == child_count - 1, &next_prefix, result, query);
     }
 }
