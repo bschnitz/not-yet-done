@@ -1,5 +1,5 @@
+use fuzzy_matcher::FuzzyMatcher;
 use chrono::{DateTime, Local};
-use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use uuid::Uuid;
 
 use not_yet_done_core::entity::task::{Model as Task, TaskStatus};
@@ -7,6 +7,9 @@ use not_yet_done_forest::{
     ColumnId, Forest, ForestItem, GhostNode, HasTreeShape, IntoRow, Row, TransformableForest,
     TreeDisplay, TreeNode,
 };
+
+use super::highlight::fill_highlight_ranges;
+use super::sort::sort_ghost_forest;
 
 // ---------------------------------------------------------------------------
 // Local Uuid newtype
@@ -73,7 +76,7 @@ fn format_local_date(dt: DateTime<chrono::Utc>) -> String {
 pub struct TaskQuery {
     pub text: Option<String>,
     pub min_score: i64,
-    pub matcher: SkimMatcherV2,
+    pub matcher: fuzzy_matcher::skim::SkimMatcherV2,
 }
 
 impl std::fmt::Debug for TaskQuery {
@@ -92,7 +95,7 @@ impl TaskQuery {
         TaskQuery {
             text: if t.is_empty() { None } else { Some(t) },
             min_score,
-            matcher: SkimMatcherV2::default(),
+            matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
         }
     }
 }
@@ -136,7 +139,7 @@ impl TransformableForest<TaskQuery> for TaskForest {
         let mut ghost_roots =
             <TaskForestInner as TransformableForest<TaskQuery>>::transform(&self.0, query);
 
-        // 2. Fill highlight_ranges via fuzzy_indices.
+        // 2. Fill highlight_ranges (char index ranges into description).
         fill_highlight_ranges(&mut ghost_roots, query);
 
         // 3. Sort by max subtree score, then alphabetically.
@@ -144,98 +147,6 @@ impl TransformableForest<TaskQuery> for TaskForest {
 
         ghost_roots
     }
-}
-
-// ---------------------------------------------------------------------------
-// Highlight range helpers
-// ---------------------------------------------------------------------------
-
-fn fill_highlight_ranges(ghosts: &mut Vec<GhostNode<'_, TaskItem>>, query: &TaskQuery) {
-    for ghost in ghosts.iter_mut() {
-        if let (Some(pattern), Some(desc)) = (&query.text, ghost.node.element.description()) {
-            // fuzzy_indices returns Option<(score, Vec<usize>)> where Vec<usize>
-            // contains the matched *char* indices.
-            if let Some((_score, indices)) = query.matcher.fuzzy_indices(desc, pattern) {
-                ghost.highlight_ranges = char_indices_to_byte_ranges(desc, &indices);
-            }
-        }
-        fill_highlight_ranges(&mut ghost.children, query);
-    }
-}
-
-/// Convert a list of matched char indices into byte `Range`s, merging
-/// consecutive chars into single ranges.
-fn char_indices_to_byte_ranges(s: &str, char_indices: &[usize]) -> Vec<std::ops::Range<usize>> {
-    if char_indices.is_empty() {
-        return vec![];
-    }
-
-    // Collect (char_index, byte_offset, char_byte_len) for every char in s.
-    let char_map: Vec<(usize, usize)> = s
-        .char_indices()
-        .map(|(byte_off, ch)| (byte_off, ch.len_utf8()))
-        .collect();
-
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut iter = char_indices.iter().peekable();
-
-    while let Some(&ci) = iter.next() {
-        if ci >= char_map.len() {
-            continue;
-        }
-        let start_byte = char_map[ci].0;
-        let mut end_byte = start_byte + char_map[ci].1;
-        let mut prev_ci = ci;
-
-        // Extend range while the next char index is consecutive.
-        while let Some(&&next_ci) = iter.peek() {
-            if next_ci == prev_ci + 1 && next_ci < char_map.len() {
-                iter.next();
-                end_byte = char_map[next_ci].0 + char_map[next_ci].1;
-                prev_ci = next_ci;
-            } else {
-                break;
-            }
-        }
-
-        ranges.push(start_byte..end_byte);
-    }
-
-    ranges
-}
-
-// ---------------------------------------------------------------------------
-// Sorting helpers
-// ---------------------------------------------------------------------------
-
-fn sort_ghost_forest(ghosts: &mut Vec<GhostNode<'_, TaskItem>>, query: &TaskQuery) {
-    ghosts.sort_by(|a, b| {
-        let score_a = max_score_in_ghost(a, query);
-        let score_b = max_score_in_ghost(b, query);
-        score_b
-            .cmp(&score_a)
-            .then_with(|| a.node.element.0.description.cmp(&b.node.element.0.description))
-    });
-    for ghost in ghosts.iter_mut() {
-        sort_ghost_forest(&mut ghost.children, query);
-    }
-}
-
-fn max_score_in_ghost(ghost: &GhostNode<'_, TaskItem>, query: &TaskQuery) -> i64 {
-    let self_score = match &query.text {
-        None => 0,
-        Some(pattern) => query
-            .matcher
-            .fuzzy_match(&ghost.node.element.0.description, pattern)
-            .unwrap_or(0),
-    };
-    let child_max = ghost
-        .children
-        .iter()
-        .map(|c| max_score_in_ghost(c, query))
-        .max()
-        .unwrap_or(0);
-    self_score.max(child_max)
 }
 
 // ---------------------------------------------------------------------------

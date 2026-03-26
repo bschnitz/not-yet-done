@@ -2,10 +2,12 @@
 // Main tabs
 // ---------------------------------------------------------------------------
 
+use std::collections::HashMap;
+
 use crate::ui::tasks::forest::{find_task_in_forest, LocalUuid, TaskForest, TaskQuery};
 use not_yet_done_forest::{
-    ColSizerEnum, ColStrategy, ColumnId, IntoRow, MixedColSizer, RenderableTree, Row, TableLayout,
-    TableRow, render_table, TREE_COLUMN,
+    ColStrategy, ColumnId, IntoRow, MixedColSizer, RenderableTree, RenderedTable, Row, TableLayout,
+    render_table, TREE_COLUMN,
 };
 use uuid::Uuid;
 
@@ -284,6 +286,13 @@ pub enum LoadState {
 // TasksState
 // ---------------------------------------------------------------------------
 
+/// Cached output of the tree render pipeline.
+pub struct TreeTableCache {
+    pub table: RenderedTable<LocalUuid>,
+    pub filter: String,
+    pub width: usize,
+}
+
 pub struct TasksState {
     pub active_view: TasksView,
     pub active_form: Option<TasksForm>,
@@ -299,12 +308,8 @@ pub struct TasksState {
     pub scroll_offset: usize,
     pub load_state: LoadState,
 
-    /// Cached rendered table rows (header at index 0, data rows after).
-    /// Keyed by `cached_tree_filter` — invalidated when filter or forest changes.
-    tree_rows_cache: Option<Vec<TableRow<LocalUuid>>>,
-    cached_tree_filter: String,
-    /// Width used when the cache was built — invalidated on resize.
-    cached_width: usize,
+    /// Cached rendered table — invalidated when filter, forest, or width changes.
+    pub(crate) tree_table_cache: Option<TreeTableCache>,
 }
 
 impl TasksState {
@@ -321,9 +326,7 @@ impl TasksState {
             selected_row: 0,
             scroll_offset: 0,
             load_state: LoadState::Idle,
-            tree_rows_cache: None,
-            cached_tree_filter: String::new(),
-            cached_width: 0,
+            tree_table_cache: None,
         }
     }
 
@@ -351,7 +354,7 @@ impl TasksState {
             .unwrap_or(self.tree_filter.len());
         self.tree_filter.insert(byte_pos, c);
         self.tree_filter_cursor += 1;
-        self.tree_rows_cache = None; // invalidate
+        self.tree_table_cache = None;
     }
 
     pub fn tree_filter_backspace(&mut self) {
@@ -367,7 +370,7 @@ impl TasksState {
             .unwrap_or(0);
         self.tree_filter.remove(byte_pos);
         self.tree_filter_cursor -= 1;
-        self.tree_rows_cache = None; // invalidate
+        self.tree_table_cache = None;
     }
 
     pub fn tree_filter_cursor_left(&mut self) {
@@ -386,7 +389,7 @@ impl TasksState {
     pub fn tree_filter_clear(&mut self) {
         self.tree_filter.clear();
         self.tree_filter_cursor = 0;
-        self.tree_rows_cache = None; // invalidate
+        self.tree_table_cache = None;
     }
 
     // ── List navigation ──────────────────────────────────────────────────
@@ -422,13 +425,37 @@ impl TasksState {
             self.selected_row = self.task_rows.len() - 1;
         }
         self.load_state = LoadState::Loaded;
-        self.tree_rows_cache = None;
-        self.cached_tree_filter.clear();
-        self.cached_width = 0;
+        self.tree_table_cache = None;
     }
 
     pub fn set_load_error(&mut self, msg: String) {
         self.load_state = LoadState::Error(msg);
+    }
+
+    /// Return the cached rendered table, rebuilding it when stale.
+    pub fn get_or_build_tree_table(
+        &mut self,
+        area_width: usize,
+    ) -> Option<&RenderedTable<LocalUuid>> {
+        let forest = self.forest.as_ref()?;
+        let filter = &self.tree_filter;
+
+        let cache_valid = self
+            .tree_table_cache
+            .as_ref()
+            .map(|c| c.filter == *filter && c.width == area_width)
+            .unwrap_or(false);
+
+        if !cache_valid {
+            let table = build_rendered_table(forest, filter, area_width);
+            self.tree_table_cache = Some(TreeTableCache {
+                table,
+                filter: filter.clone(),
+                width: area_width,
+            });
+        }
+
+        self.tree_table_cache.as_ref().map(|c| &c.table)
     }
 }
 
@@ -439,17 +466,20 @@ impl Default for TasksState {
 }
 
 // ---------------------------------------------------------------------------
-// build_table_rows — the actual render pipeline
+// build_rendered_table — the render pipeline
 // ---------------------------------------------------------------------------
 
 /// Columns shown in the tree table, in display order.
 pub const TREE_TABLE_COLS: &[&str] = &[TREE_COLUMN, "priority", "created_at", "updated_at"];
 
-pub fn build_table_rows(
+/// Build a fully rendered [`RenderedTable`] for the given forest and filter
+/// string.  Highlights are stored in `RenderedTable::highlights`, keyed by
+/// row id — not embedded in the rows themselves.
+pub fn build_rendered_table(
     forest: &TaskForest,
     query_str: &str,
     area_width: usize,
-) -> Vec<TableRow<LocalUuid>> {
+) -> RenderedTable<LocalUuid> {
     let query = TaskQuery::new(query_str, 20);
 
     let cols: Vec<ColumnId> = TREE_TABLE_COLS.iter().map(|s| ColumnId::new(*s)).collect();
@@ -458,11 +488,15 @@ pub fn build_table_rows(
     let tree_min = forest.inner().tree_min_width(&query);
     let tree_col_width = (tree_min + 20).max(30).min(area_width * 3 / 5);
 
-    // 1. Tree cells (connector + description, fitted + highlights shifted).
+    // 1. Tree cells (connector + description, fitted; highlights stored inside).
     let tree_rows = RenderableTree::tree_rows::<LocalUuid>(forest, &query, tree_col_width);
 
     if tree_rows.is_empty() {
-        return vec![];
+        return RenderedTable {
+            header: None,
+            rows: vec![],
+            highlights: HashMap::new(),
+        };
     }
 
     // 2. Data rows (non-tree columns), same order as tree_rows.
@@ -485,21 +519,22 @@ pub fn build_table_rows(
     };
 
     // 4. Layout.
+    let sizer = MixedColSizer {
+        strategies: {
+            let mut m = std::collections::HashMap::new();
+            m.insert(ColumnId::new(TREE_COLUMN), ColStrategy::Fixed(tree_col_width));
+            m.insert(ColumnId::new("priority"), ColStrategy::Max);
+            m.insert(ColumnId::new("created_at"), ColStrategy::Max);
+            m.insert(ColumnId::new("updated_at"), ColStrategy::Max);
+            m
+        },
+    };
     let layout = TableLayout {
         max_width: area_width,
         separator: " ".to_string(),
-        sizer: ColSizerEnum::Mixed(MixedColSizer {
-            strategies: {
-                let mut m = std::collections::HashMap::new();
-                m.insert(ColumnId::new(TREE_COLUMN), ColStrategy::Fixed(tree_col_width));
-                m.insert(ColumnId::new("priority"), ColStrategy::Max);
-                m.insert(ColumnId::new("created_at"), ColStrategy::Max);
-                m.insert(ColumnId::new("updated_at"), ColStrategy::Max);
-                m
-            },
-        }),
+        sizer: Box::new(sizer),
     };
 
-    // 5. Combine everything.
+    // 5. Combine everything — highlights are returned separately in RenderedTable.
     render_table(tree_rows, data_rows, &layout, &cols, Some(header))
 }

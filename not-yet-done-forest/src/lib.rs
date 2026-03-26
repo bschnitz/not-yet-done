@@ -9,8 +9,8 @@
 //! - [`TransformableForest<Q>`] — produce a `GhostNode` forest from a query
 //! - [`TreeDisplay`] — optional per-node label for the tree column
 //! - [`IntoRow`] — convert an element into non-tree [`Row`] cells
-//! - [`RenderableTree<Q>`] — renders the tree column and produces [`TableRow`]s
-//! - [`render_table`] — fits all columns to width and returns per-cell strings
+//! - [`RenderableTree<Q>`] — renders the tree column and produces [`TreeCellRow`]s
+//! - [`render_table`] — fits all columns to width and returns a [`RenderedTable`]
 //! - Column sizing strategies ([`MixedColSizer`], [`FixedColSizer`])
 //! - [`fit_to_width`] — unicode-aware cell truncation / padding
 
@@ -196,16 +196,16 @@ where
 
 /// A borrowed node in a transformed (filtered + sorted) view of a [`Forest`].
 ///
-/// `highlight_ranges` contains byte ranges **into the description string**
+/// `highlight_ranges` contains **char index** ranges into the description string
 /// (`TreeDisplay::description()`) that matched the query.  They are produced
-/// by [`TransformableForest::transform`] and shifted by the connector width
-/// inside [`RenderableTree`].
+/// by [`TransformableForest::transform`] and shifted by the connector char
+/// width inside [`RenderableTree`].
 ///
 /// `GhostNode`s are never stored — they live only for the duration of a
 /// single `tree_rows()` or `tree_min_width()` call.
 pub struct GhostNode<'a, T> {
     pub node: &'a TreeNode<T>,
-    /// Byte ranges into `TreeDisplay::description()` that matched the query.
+    /// Char index ranges into `TreeDisplay::description()` that matched the query.
     /// Empty when there is no active query or no match information available.
     pub highlight_ranges: Vec<Range<usize>>,
     pub children: Vec<GhostNode<'a, T>>,
@@ -218,7 +218,7 @@ pub struct GhostNode<'a, T> {
 /// Produce a transformed (filtered, sorted, restructured) view of the forest
 /// as a `Vec<GhostNode>` for a given query.
 ///
-/// Implementors fill `GhostNode::highlight_ranges` with byte ranges into
+/// Implementors fill `GhostNode::highlight_ranges` with char index ranges into
 /// `TreeDisplay::description()` that matched the query.  The default impl
 /// on `Forest<T, S>` only filters and leaves `highlight_ranges` empty.
 pub trait TransformableForest<Q> {
@@ -305,11 +305,15 @@ pub enum ColStrategy {
 }
 
 /// Determines absolute character widths for a set of columns.
+///
+/// Receives cell content as `&[&HashMap<ColumnId, String>]` — the sizer only
+/// needs the string values, not the typed row id, so the generic `Id`
+/// parameter is absent here and `dyn ColSizer` works fine.
 pub trait ColSizer {
-    fn col_widths<Id: Eq + Hash>(
+    fn col_widths(
         &self,
         cols: &[ColumnId],
-        rows: &[Row<Id>],
+        cells: &[&HashMap<ColumnId, String>],
         max_width: usize,
         separator: &str,
     ) -> Vec<usize>;
@@ -321,10 +325,10 @@ pub struct FixedColSizer {
 }
 
 impl ColSizer for FixedColSizer {
-    fn col_widths<Id: Eq + Hash>(
+    fn col_widths(
         &self,
         cols: &[ColumnId],
-        _rows: &[Row<Id>],
+        _cells: &[&HashMap<ColumnId, String>],
         _max_width: usize,
         _separator: &str,
     ) -> Vec<usize> {
@@ -340,10 +344,10 @@ pub struct MixedColSizer {
 }
 
 impl ColSizer for MixedColSizer {
-    fn col_widths<Id: Eq + Hash>(
+    fn col_widths(
         &self,
         cols: &[ColumnId],
-        rows: &[Row<Id>],
+        cells: &[&HashMap<ColumnId, String>],
         max_width: usize,
         separator: &str,
     ) -> Vec<usize> {
@@ -375,9 +379,9 @@ impl ColSizer for MixedColSizer {
                     used += widths[i];
                 }
                 ColStrategy::Max => {
-                    let max_content = rows
+                    let max_content = cells
                         .iter()
-                        .map(|row| row.cells.get(col).map(|s| s.width()).unwrap_or(0))
+                        .map(|row| row.get(col).map(|s| s.width()).unwrap_or(0))
                         .max()
                         .unwrap_or(0);
                     let w = max_content.min(usable.saturating_sub(used));
@@ -410,31 +414,11 @@ impl ColSizer for MixedColSizer {
     }
 }
 
-pub enum ColSizerEnum {
-    Fixed(FixedColSizer),
-    Mixed(MixedColSizer),
-}
-
-impl ColSizer for ColSizerEnum {
-    fn col_widths<Id: Eq + Hash>(
-        &self,
-        cols: &[ColumnId],
-        rows: &[Row<Id>],
-        max_width: usize,
-        separator: &str,
-    ) -> Vec<usize> {
-        match self {
-            ColSizerEnum::Fixed(s) => s.col_widths(cols, rows, max_width, separator),
-            ColSizerEnum::Mixed(s) => s.col_widths(cols, rows, max_width, separator),
-        }
-    }
-}
-
 /// Layout configuration for a table.
 pub struct TableLayout {
     pub max_width: usize,
     pub separator: String,
-    pub sizer: ColSizerEnum,
+    pub sizer: Box<dyn ColSizer>,
 }
 
 /// A raw table row with a typed ID and per-column string cells.
@@ -457,18 +441,18 @@ pub const TREE_COLUMN: &str = "tree";
 
 /// A single row produced by [`RenderableTree::tree_rows`].
 ///
-/// Contains the rendered tree cell (connector + description, fitted to width),
-/// the highlight ranges **shifted to positions within `tree_cell`**, and the
-/// original item id.
+/// Contains the rendered tree cell (connector + description, fitted to width)
+/// and the original item id. Highlight ranges are tracked separately and
+/// transported via [`RenderedTable::highlights`].
 #[derive(Debug, Clone)]
 pub struct TreeCellRow<Id: Eq + Hash + Clone> {
     pub id: Id,
     /// Connector + description, already fitted to `tree_col_width` display columns.
     pub tree_cell: String,
-    /// Byte ranges within `tree_cell` that should be highlighted.
+    /// Char index ranges within `tree_cell` that should be highlighted.
     /// These are the original `highlight_ranges` from [`GhostNode`] shifted
-    /// right by the byte length of the connector prefix.
-    pub highlight_ranges: Vec<Range<usize>>,
+    /// right by the char length of the connector prefix.
+    pub(crate) highlight_ranges: Vec<Range<usize>>,
 }
 
 // =============================================================================
@@ -490,7 +474,7 @@ where
         query: &Q,
         tree_col_width: usize,
     ) -> Vec<TreeCellRow<Id>>
-where
+    where
         Self::Item: IntoRow<Id = Id>,
         Id: Eq + Hash + Clone,
     {
@@ -500,7 +484,7 @@ where
         for ghost_root in &ghost_roots {
             // Stack: (ghost, depth, is_last, prefix)
             let mut stack: Vec<(&GhostNode<'_, Self::Item>, usize, bool, String)> =
-            vec![(ghost_root, 0, true, String::new())];
+                vec![(ghost_root, 0, true, String::new())];
 
             while let Some((ghost, depth, is_last, prefix)) = stack.pop() {
                 let elem = &ghost.node.element;
@@ -509,14 +493,16 @@ where
                 let has_children = !ghost.children.is_empty();
 
                 let connector =
-                forest_connector(depth, is_last, &prefix, has_desc, has_children);
-                let connector_byte_len = connector.len();
+                    forest_connector(depth, is_last, &prefix, has_desc, has_children);
+                let connector_char_len = connector.chars().count();
 
-                // Shift highlight ranges by the connector byte length.
-                let highlight_ranges: Vec<Range<usize>> = ghost
+                // Shift char-index highlight ranges by the connector char length.
+                let shifted_ranges: Vec<Range<usize>> = ghost
                     .highlight_ranges
                     .iter()
-                    .map(|r| (r.start + connector_byte_len)..(r.end + connector_byte_len))
+                    .map(|r| {
+                        (r.start + connector_char_len)..(r.end + connector_char_len)
+                    })
                     .collect();
 
                 let raw_cell = match desc {
@@ -524,21 +510,18 @@ where
                     None => connector,
                 };
 
-                // Konvertiere Byte-Ranges zu Char-Ranges
-                let char_ranges = byte_ranges_to_char_ranges(&raw_cell, &highlight_ranges);
-
-                let (tree_cell, final_highlight_ranges) = 
-                fit_to_width_with_char_highlights(&raw_cell, tree_col_width, &char_ranges);
+                let (tree_cell, final_ranges) =
+                    fit_to_width_with_highlights(&raw_cell, tree_col_width, &shifted_ranges);
 
                 result.push(TreeCellRow {
                     id: elem.into_row().id,
                     tree_cell,
-                    highlight_ranges: final_highlight_ranges,
+                    highlight_ranges: final_ranges,
                 });
 
                 let n = ghost.children.len();
                 let next_prefix =
-                forest_child_prefix(depth, is_last, has_desc, &prefix);
+                    forest_child_prefix(depth, is_last, has_desc, &prefix);
                 for (i, child) in ghost.children.iter().enumerate().rev() {
                     stack.push((child, depth + 1, i == n - 1, next_prefix.clone()));
                 }
@@ -547,99 +530,6 @@ where
 
         result
     }
-}
-
-/// Passt den String auf `width` Breite an und projiziert die Char-Ranges
-/// (bezogen auf den vollen String) auf den getrimmten String.
-/// Gibt (trimmed_string, char_ranges_after_trim) zurück.
-fn fit_to_width_with_char_highlights(
-    s: &str,
-    width: usize,
-    char_ranges: &[Range<usize>],  // bereits Char-Ranges, bezogen auf s
-) -> (String, Vec<Range<usize>>) {
-    use unicode_width::UnicodeWidthChar;
-    use unicode_width::UnicodeWidthStr;
-
-    let display_width = s.width();
-    if display_width <= width {
-        let padding = width - display_width;
-        let padded = format!("{}{}", s, " ".repeat(padding));
-        return (padded, char_ranges.to_vec());
-    }
-
-    // Zielbreite für den sichtbaren Text (ohne Ellipse)
-    let target = width.saturating_sub(1);
-    let mut trimmed_chars = Vec::new();          // Zeichen im sichtbaren Teil
-    let mut full_to_trimmed = Vec::new();        // (full_index, trimmed_index)
-
-    let mut used = 0;
-    let mut full_idx = 0;
-    for ch in s.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if used + ch_width > target {
-            break;
-        }
-        trimmed_chars.push(ch);
-        full_to_trimmed.push((full_idx, trimmed_chars.len() - 1));
-        used += ch_width;
-        full_idx += 1;
-    }
-
-    // Ergebnis-String: sichtbarer Teil + Ellipse
-    let mut result = String::with_capacity(trimmed_chars.len() + 1);
-    for ch in &trimmed_chars {
-        result.push(*ch);
-    }
-    result.push('…');
-
-    // Projektion der Ranges
-    let mut final_ranges = Vec::new();
-    for range in char_ranges {
-        let start = range.start;
-        let end = range.end;
-
-        // Suche den ersten übernommenen Char, dessen full_idx >= start
-        let start_trim = full_to_trimmed
-            .iter()
-            .find_map(|&(f, t)| if f >= start { Some(t) } else { None })
-            .unwrap_or(trimmed_chars.len());
-
-        // Suche den letzten übernommenen Char, dessen full_idx < end
-        let end_trim = full_to_trimmed
-            .iter()
-            .rev()
-            .find_map(|&(f, t)| if f < end { Some(t + 1) } else { None })
-            .unwrap_or(start_trim);
-
-        if start_trim < end_trim {
-            final_ranges.push(start_trim..end_trim);
-        }
-    }
-
-    (result, final_ranges)
-}
-
-/// Konvertiert Byte-Ranges in einem String zu Char-Ranges.
-fn byte_ranges_to_char_ranges(s: &str, byte_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
-    let mut char_starts: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
-    char_starts.push(s.len());
-    
-    let mut result = Vec::new();
-    for byte_range in byte_ranges {
-        let start_char = char_starts
-            .iter()
-            .position(|&byte_idx| byte_idx >= byte_range.start)
-            .unwrap_or(char_starts.len() - 1);
-        let end_char = char_starts
-            .iter()
-            .position(|&byte_idx| byte_idx >= byte_range.end)
-            .unwrap_or(char_starts.len() - 1);
-        
-        if start_char < end_char {
-            result.push(start_char..end_char);
-        }
-    }
-    result
 }
 
 /// Blanket impl: every `TransformableForest<Q>` whose `Item: TreeDisplay`
@@ -658,15 +548,31 @@ where
 /// A fully laid-out row ready for the TUI to paint.
 ///
 /// `cells` contains one already-fitted string per column (in the same order
-/// as the `cols` slice passed to [`render_table`]).  `highlight_ranges`
-/// applies to the tree column only (index 0 when the tree column is first).
+/// as the `cols` slice passed to [`render_table`]).
 #[derive(Debug, Clone)]
 pub struct TableRow<Id: Eq + Hash + Clone> {
     pub id: Id,
     /// One fitted string per column, in `cols` order.
     pub cells: Vec<String>,
-    /// Byte ranges within `cells[tree_col_index]` to highlight.
-    pub highlight_ranges: Vec<Range<usize>>,
+}
+
+// =============================================================================
+// RenderedTable — output of render_table
+// =============================================================================
+
+/// The result of [`render_table`].
+///
+/// Highlights are decoupled from rows: callers look up the highlight ranges
+/// for a given row by its `id` in the `highlights` map.  The tree column
+/// highlights are char-index ranges into `cells[tree_col_index]`.
+pub struct RenderedTable<Id: Eq + Hash + Clone> {
+    /// Optional header row (no highlights).
+    pub header: Option<TableRow<Id>>,
+    /// Data rows, in display order.
+    pub rows: Vec<TableRow<Id>>,
+    /// Char-index ranges within the tree cell (`cells[tree_col_index]`)
+    /// keyed by row id.  Absent means no highlights for that row.
+    pub highlights: HashMap<Id, Vec<Range<usize>>>,
 }
 
 // =============================================================================
@@ -674,7 +580,7 @@ pub struct TableRow<Id: Eq + Hash + Clone> {
 // =============================================================================
 
 /// Combine [`TreeCellRow`]s with additional [`Row`] data and fit everything
-/// to the given layout, producing one [`TableRow`] per row.
+/// to the given layout, producing a [`RenderedTable`].
 ///
 /// `tree_col_index` is the position of `ColumnId(TREE_COLUMN)` in `cols` —
 /// typically 0.  The tree cell string is taken from `tree_rows`; all other
@@ -683,40 +589,38 @@ pub struct TableRow<Id: Eq + Hash + Clone> {
 /// `data_rows` must be in the same order as `tree_rows` (both come from a
 /// single `transform` call on the same forest).
 ///
-/// An optional `header` row is prepended with empty `highlight_ranges`.
+/// An optional `header` row is included in `RenderedTable::header`.
 pub fn render_table<Id>(
     tree_rows: Vec<TreeCellRow<Id>>,
     data_rows: Vec<Row<Id>>,
     layout: &TableLayout,
     cols: &[ColumnId],
     header: Option<Row<Id>>,
-) -> Vec<TableRow<Id>>
+) -> RenderedTable<Id>
 where
     Id: Eq + Hash + Clone,
 {
-    // Build a combined Row<Id> for sizing (tree cell + data cells merged).
-    let sizing_rows: Vec<Row<Id>> = tree_rows
+    let tree_col_id = ColumnId::new(TREE_COLUMN);
+
+    // Build merged cell maps for column-width sizing (tree cell + data cells).
+    // The sizer only needs the string content, not the typed id.
+    let sizing_cells: Vec<HashMap<ColumnId, String>> = tree_rows
         .iter()
         .zip(data_rows.iter())
         .map(|(tr, dr)| {
             let mut cells = dr.cells.clone();
-            cells.insert(ColumnId::new(TREE_COLUMN), tr.tree_cell.clone());
-            Row { id: tr.id.clone(), cells }
+            cells.insert(tree_col_id.clone(), tr.tree_cell.clone());
+            cells
         })
         .collect();
+    let sizing_cell_refs: Vec<&HashMap<ColumnId, String>> = sizing_cells.iter().collect();
 
     let widths =
         layout
             .sizer
-            .col_widths(cols, &sizing_rows, layout.max_width, &layout.separator);
+            .col_widths(cols, &sizing_cell_refs, layout.max_width, &layout.separator);
 
-    let tree_col_id = ColumnId::new(TREE_COLUMN);
-
-    let render_one = |id: Id,
-                      tree_cell: Option<&str>,
-                      data: &Row<Id>,
-                      highlight_ranges: Vec<Range<usize>>|
-     -> TableRow<Id> {
+    let fit_row = |id: Id, tree_cell: Option<&str>, data: &Row<Id>| -> TableRow<Id> {
         let cells: Vec<String> = cols
             .iter()
             .zip(widths.iter())
@@ -729,32 +633,29 @@ where
                 fit_to_width(&raw, w)
             })
             .collect();
-        TableRow { id, cells, highlight_ranges }
+        TableRow { id, cells }
     };
 
-    let mut result = Vec::new();
+    // Render optional header (no highlights).
+    let rendered_header = header.map(|h| {
+        let dummy_tree = h.cells.get(&tree_col_id).map(|s| s.as_str()).unwrap_or("");
+        fit_row(h.id.clone(), Some(dummy_tree), &h)
+    });
 
-    // Optional header (no highlights).
-    if let Some(h) = header {
-        let dummy_tree = h
-            .cells
-            .get(&tree_col_id)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        result.push(render_one(h.id.clone(), Some(dummy_tree), &h, vec![]));
-    }
+    // Render data rows and collect highlights separately.
+    let mut rows = Vec::with_capacity(tree_rows.len());
+    let mut highlights: HashMap<Id, Vec<Range<usize>>> =
+        HashMap::with_capacity(tree_rows.len());
 
-    // Data rows.
     for (tr, dr) in tree_rows.into_iter().zip(data_rows.into_iter()) {
-        result.push(render_one(
-            tr.id,
-            Some(&tr.tree_cell),
-            &dr,
-            tr.highlight_ranges,
-        ));
+        let id = tr.id.clone();
+        if !tr.highlight_ranges.is_empty() {
+            highlights.insert(id.clone(), tr.highlight_ranges);
+        }
+        rows.push(fit_row(id, Some(&tr.tree_cell), &dr));
     }
 
-    result
+    RenderedTable { header: rendered_header, rows, highlights }
 }
 
 // =============================================================================
@@ -845,35 +746,76 @@ fn forest_child_prefix(
 }
 
 // =============================================================================
-// fit_to_width
+// fit_to_width  +  fit_to_width_with_highlights
 // =============================================================================
 
 /// Truncate or pad a string to exactly `width` display columns.
 pub fn fit_to_width(s: &str, width: usize) -> String {
+    let (fitted, _) = fit_to_width_with_highlights(s, width, &[]);
+    fitted
+}
+
+/// Truncate or pad `s` to exactly `width` display columns, and project
+/// char-index `highlight_ranges` (relative to `s`) onto the resulting string.
+///
+/// Returns `(fitted_string, projected_char_ranges)`.
+///
+/// When the string is truncated an ellipsis (`…`) is appended.  Ranges that
+/// fall entirely after the cut-off point are dropped; partially overlapping
+/// ranges are clamped.
+pub fn fit_to_width_with_highlights(
+    s: &str,
+    width: usize,
+    highlight_ranges: &[Range<usize>],
+) -> (String, Vec<Range<usize>>) {
     use unicode_width::UnicodeWidthChar;
     use unicode_width::UnicodeWidthStr;
 
     let display_width = s.width();
 
     if display_width <= width {
+        // Pad with spaces — ranges are unchanged.
         let padding = width - display_width;
-        format!("{}{}", s, " ".repeat(padding))
-    } else {
-        let target = width.saturating_sub(1);
-        let mut result = String::new();
-        let mut used = 0;
-        for ch in s.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if used + ch_width > target {
-                break;
-            }
-            result.push(ch);
-            used += ch_width;
-        }
-        result.push_str(&" ".repeat(target - used));
-        result.push('…');
-        result
+        let padded = format!("{}{}", s, " ".repeat(padding));
+        return (padded, highlight_ranges.to_vec());
     }
+
+    // Need to truncate.  Reserve one display column for the ellipsis.
+    let target = width.saturating_sub(1);
+
+    // Walk chars, tracking (char_index, display_cols_used).
+    let mut kept_chars: Vec<char> = Vec::new();
+    let mut used_cols = 0usize;
+
+    for ch in s.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used_cols + ch_width > target {
+            break;
+        }
+        kept_chars.push(ch);
+        used_cols += ch_width;
+    }
+
+    // The number of kept chars is the cut-off point for range projection.
+    let kept_len = kept_chars.len();
+
+    let mut result = String::with_capacity(kept_len + 3 /* '…' is 3 bytes */);
+    for ch in &kept_chars {
+        result.push(*ch);
+    }
+    result.push('…');
+
+    // Project ranges: clamp to [0, kept_len), drop empty ones.
+    let projected: Vec<Range<usize>> = highlight_ranges
+        .iter()
+        .filter_map(|r| {
+            let start = r.start.min(kept_len);
+            let end = r.end.min(kept_len);
+            if start < end { Some(start..end) } else { None }
+        })
+        .collect();
+
+    (result, projected)
 }
 
 // =============================================================================

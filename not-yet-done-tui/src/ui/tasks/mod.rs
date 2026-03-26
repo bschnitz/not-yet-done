@@ -1,7 +1,7 @@
-// Pfad: not-yet-done-tui/src/ui/tasks/mod.rs
-
 pub mod forest;
 pub mod form_pane;
+pub mod highlight;
+pub mod sort;
 pub mod sub_tab_bar;
 pub mod view_pane;
 
@@ -19,7 +19,6 @@ use view_pane::TasksViewPane;
 
 /// Entry point called from render.rs for the Tasks tab area.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    // ── Layout: sub-tab-bar (1 row) + content area ───────────────────────
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Fill(1)])
@@ -57,13 +56,10 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_vertical_split(frame: &mut Frame, area: Rect, app: &App) {
     let split_cfg = &app.config.layout.tasks.split;
-    let (view_pct, form_pct) = (60, 40);
-
     let panes = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(ordered_constraints(split_cfg, view_pct, form_pct))
+        .constraints(ordered_constraints(split_cfg, 60, 40))
         .split(area);
-
     let (view_area, form_area) = ordered_areas(&split_cfg.order, panes[0], panes[1]);
     frame.render_widget(TasksViewPane::new(app), view_area);
     frame.render_widget(TasksFormPane::new(app), form_area);
@@ -71,13 +67,10 @@ fn render_vertical_split(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_horizontal_split(frame: &mut Frame, area: Rect, app: &App) {
     let split_cfg = &app.config.layout.tasks.split;
-    let (view_pct, form_pct) = (65, 35);
-
     let panes = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(ordered_constraints(split_cfg, view_pct, form_pct))
+        .constraints(ordered_constraints(split_cfg, 65, 35))
         .split(area);
-
     let (view_area, form_area) = ordered_areas(&split_cfg.order, panes[0], panes[1]);
     frame.render_widget(TasksViewPane::new(app), view_area);
     frame.render_widget(TasksFormPane::new(app), form_area);

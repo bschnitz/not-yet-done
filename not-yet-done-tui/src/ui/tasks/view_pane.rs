@@ -11,8 +11,10 @@ use not_yet_done_core::entity::task::{Model as Task, TaskStatus};
 use not_yet_done_forest::TableRow;
 
 use crate::app::App;
-use crate::tabs::{build_table_rows, LoadState, TasksView};
+use crate::tabs::{LoadState, TasksView};
 use crate::ui::tasks::forest::{find_task_in_forest, LocalUuid};
+use crate::tabs::build_rendered_table;
+
 
 pub struct TasksViewPane<'a> {
     app: &'a App,
@@ -83,7 +85,7 @@ impl Widget for TasksViewPane<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// List view (unchanged)
+// List view
 // ---------------------------------------------------------------------------
 
 fn render_list(inner: Rect, buf: &mut Buffer, app: &App) {
@@ -125,28 +127,24 @@ fn render_tree(inner: Rect, buf: &mut Buffer, app: &App) {
     let ts = &app.tasks_state;
 
     let Some(forest) = &ts.forest else {
-        render_centered_msg(inner, buf, "󰄰  No tasks found.", app);
+        render_centered_msg(inner, buf, "󰄰  No tasks loaded.", app);
         return;
     };
 
-    // Build table rows for tree view
-    let table_rows = build_table_rows(forest, &ts.tree_filter, inner.width as usize);
-    
-    if table_rows.is_empty() {
+    let table = build_rendered_table(forest, &ts.tree_filter, inner.width as usize);
+
+    if table.rows.is_empty() {
         render_centered_msg(inner, buf, "󰄰  No tasks match the current filter.", app);
         return;
     }
 
-    // First row is the header, the rest are data.
-    let Some((header, data_rows)) = table_rows.split_first() else {
-        return;
-    };
+    // Header
+    if let Some(header) = &table.header {
+        let header_area = Rect { y: inner.y, height: 1, ..inner };
+        render_table_header(header_area, buf, header, t);
+    }
 
-    // Draw header
-    let header_area = Rect { y: inner.y, height: 1, ..inner };
-    render_table_header(header_area, buf, header, t);
-
-    // Draw data rows
+    // Data rows
     let rows_area = Rect {
         y: inner.y + 1,
         height: inner.height.saturating_sub(1),
@@ -156,20 +154,20 @@ fn render_tree(inner: Rect, buf: &mut Buffer, app: &App) {
     let scroll = ts.scroll_offset;
     let selected = ts.selected_row;
 
-    // Korrekte Reihenfolge: erst skip, dann take
-    // Wir brauchen keine explizite Typannotation mehr
-    for (i, row) in data_rows.iter().skip(scroll).take(visible_rows).enumerate() {
+    for (i, row) in table.rows.iter().skip(scroll).take(visible_rows).enumerate() {
         let row_area = Rect { y: rows_area.y + i as u16, height: 1, ..rows_area };
         let is_sel = (scroll + i) == selected;
 
+        // Verwende find_task_in_forest statt forest.inner().find_task(...)
         let (status, deleted) = find_task_in_forest(forest, row.id.0)
             .map(|item| (item.status().clone(), item.deleted()))
             .unwrap_or((TaskStatus::Todo, false));
 
-        render_tree_table_row(row_area, buf, row, is_sel, &status, deleted, t);
+        let highlights = table.highlights.get(&row.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        render_tree_table_row(row_area, buf, row, highlights, is_sel, &status, deleted, t);
     }
 
-    render_scroll_indicator(inner, data_rows.len(), visible_rows, selected, buf, t);
+    render_scroll_indicator(inner, table.rows.len(), visible_rows, selected, buf, t);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +209,7 @@ fn render_tree_table_row(
     area: Rect,
     buf: &mut Buffer,
     row: &TableRow<LocalUuid>,
+    highlights: &[std::ops::Range<usize>],
     selected: bool,
     status: &TaskStatus,
     deleted: bool,
@@ -238,10 +237,9 @@ fn render_tree_table_row(
 
     // Tree column (index 0) — with highlight ranges.
     if let Some(tree_cell) = row.cells.first() {
-
         spans.extend(spans_with_highlights(
             tree_cell,
-            &row.highlight_ranges,
+            highlights,
             Style::default().fg(fg).bg(bg),
             Style::default().fg(hl_fg).bg(bg).add_modifier(Modifier::BOLD),
         ));
@@ -263,6 +261,9 @@ fn render_tree_table_row(
 // spans_with_highlights
 // ---------------------------------------------------------------------------
 
+/// Split `s` into styled [`Span`]s based on char-index `ranges`.
+///
+/// Characters inside a range get `hl_style`; all others get `normal_style`.
 fn spans_with_highlights<'a>(
     s: &'a str,
     ranges: &[std::ops::Range<usize>],
@@ -273,7 +274,6 @@ fn spans_with_highlights<'a>(
         return vec![Span::styled(s, normal_style)];
     }
 
-    // ranges are already char indices
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
     let mut spans = Vec::new();
@@ -340,7 +340,7 @@ fn render_scroll_indicator(
 }
 
 // ---------------------------------------------------------------------------
-// List header & row (unchanged)
+// List header & row
 // ---------------------------------------------------------------------------
 
 fn render_list_header(area: Rect, buf: &mut Buffer, t: &crate::ui::theme::Theme) {
