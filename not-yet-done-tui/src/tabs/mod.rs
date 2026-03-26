@@ -2,7 +2,12 @@
 // Main tabs
 // ---------------------------------------------------------------------------
 
-use crate::ui::tasks::forest::TaskForest;
+use crate::ui::tasks::forest::{find_task_in_forest, LocalUuid, TaskForest, TaskQuery};
+use not_yet_done_forest::{
+    ColSizerEnum, ColStrategy, ColumnId, IntoRow, MixedColSizer, RenderableTree, Row, TableLayout,
+    TableRow, render_table, TREE_COLUMN,
+};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -52,7 +57,6 @@ impl Tab {
 // Tasks sub-tabs
 // ---------------------------------------------------------------------------
 
-/// The view pane shows task data in one of these modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TasksView {
     List,
@@ -68,7 +72,6 @@ impl TasksView {
     }
 }
 
-/// The form pane shows one of these panels (or nothing if closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TasksForm {
     Filter,
@@ -87,10 +90,9 @@ impl TasksForm {
 }
 
 // ---------------------------------------------------------------------------
-// FilterField — which field in the filter form is focused
+// FilterField
 // ---------------------------------------------------------------------------
 
-/// All fields in the filter form, in tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterField {
     CreatedAfter,
@@ -99,7 +101,6 @@ pub enum FilterField {
     Status,
     Priority,
     ShowDeleted,
-    // Future: Tags, Projects (placeholders — not yet interactive)
 }
 
 impl Default for FilterField {
@@ -141,10 +142,9 @@ impl FilterField {
 }
 
 // ---------------------------------------------------------------------------
-// StatusFilter — multi-select for task status
+// StatusFilter
 // ---------------------------------------------------------------------------
 
-/// Which statuses to include.  An empty set means "all".
 #[derive(Debug, Clone, Default)]
 pub struct StatusFilter {
     pub todo: bool,
@@ -154,46 +154,32 @@ pub struct StatusFilter {
 }
 
 impl StatusFilter {
-    /// Returns true if no status is explicitly selected (= show all).
     pub fn is_empty(&self) -> bool {
         !self.todo && !self.in_progress && !self.done && !self.cancelled
     }
 
-    /// Cycle the cursor through the four options.
     pub const OPTIONS: &'static [&'static str] = &["todo", "in_progress", "done", "cancelled"];
 }
 
 // ---------------------------------------------------------------------------
-// FilterState — all user-entered filter values
+// FilterState
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
 pub struct FilterState {
-    /// Raw text input for "created after" (parsed on apply).
     pub created_after_raw: String,
-    /// Raw text input for "created before" (parsed on apply).
     pub created_before_raw: String,
-    /// `description LIKE %value%` — empty means no filter.
     pub description_like: String,
-    /// Multi-select status filter.
     pub status: StatusFilter,
-    /// Minimum priority (inclusive).  None = no filter.
     pub priority_min_raw: String,
-    /// Whether to include soft-deleted tasks.
     pub show_deleted: bool,
 
-    // ── Parse error feedback ─────────────────────────────────────────────
     pub created_after_err: Option<String>,
     pub created_before_err: Option<String>,
     pub priority_err: Option<String>,
 
-    // ── Focus inside the filter form ─────────────────────────────────────
     pub focused_field: FilterField,
-    /// Cursor position within the currently focused text field.
     pub cursor_pos: usize,
-
-    // ── Status option cursor (for arrow navigation inside StatusFilter) ──
-    /// Which status option is highlighted (0–3).
     pub status_cursor: usize,
 }
 
@@ -202,10 +188,6 @@ impl FilterState {
         Self::default()
     }
 
-    // ── Text field helpers ───────────────────────────────────────────────
-
-    /// Returns a mutable reference to the raw string of the focused text field,
-    /// or None if the focused field is not a text field.
     pub fn focused_text_mut(&mut self) -> Option<&mut String> {
         match self.focused_field {
             FilterField::CreatedAfter => Some(&mut self.created_after_raw),
@@ -216,7 +198,6 @@ impl FilterState {
         }
     }
 
-    /// Insert a character at the cursor position in the focused text field.
     pub fn insert_char(&mut self, c: char) {
         let pos = self.cursor_pos;
         if let Some(s) = self.focused_text_mut() {
@@ -226,7 +207,6 @@ impl FilterState {
         }
     }
 
-    /// Delete the character before the cursor (backspace).
     pub fn backspace(&mut self) {
         if self.cursor_pos == 0 {
             return;
@@ -265,8 +245,6 @@ impl FilterState {
         }
     }
 
-    // ── Field navigation ─────────────────────────────────────────────────
-
     pub fn focus_next(&mut self) {
         self.focused_field = self.focused_field.next();
         self.clamp_cursor();
@@ -284,9 +262,6 @@ impl FilterState {
         }
     }
 
-    // ── Toggle helpers ────────────────────────────────────────────────────
-
-    /// Toggle the currently highlighted status option (when Status field is focused).
     pub fn toggle_status_cursor(&mut self) {
         match self.status_cursor {
             0 => self.status.todo = !self.status.todo,
@@ -309,68 +284,48 @@ impl FilterState {
         self.show_deleted = !self.show_deleted;
     }
 
-    // ── Reset ─────────────────────────────────────────────────────────────
-
     pub fn reset(&mut self) {
         *self = Self::new();
     }
 }
 
 // ---------------------------------------------------------------------------
-// LoadState — async task loading
+// LoadState
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadState {
-    /// Initial state — no load started yet.
     Idle,
-    /// A load is in progress.
     Loading,
-    /// Last load completed successfully.
     Loaded,
-    /// Last load failed with this message.
     Error(String),
 }
 
 // ---------------------------------------------------------------------------
-// TasksState — owns all mutable state for the Tasks tab
+// TasksState
 // ---------------------------------------------------------------------------
 
 pub struct TasksState {
-    /// Which view is currently active in the view pane.
     pub active_view: TasksView,
-    /// Which form is currently shown (None = form pane hidden).
     pub active_form: Option<TasksForm>,
-
-    // ── Filter form ──────────────────────────────────────────────────────
-    /// All filter inputs (drives the DB-level list query).
     pub filter: FilterState,
 
-    // ── Tree-view fuzzy filter ────────────────────────────────────────────
-    /// The text typed into the inline filter input in the sub-tab-bar when the
-    /// Tree view is active.  Drives `Forest::filter` on the client side.
     pub tree_filter: String,
-    /// Cursor position inside `tree_filter`.
     pub tree_filter_cursor: usize,
-    /// Whether the tree filter input currently has keyboard focus.
     pub tree_filter_focused: bool,
 
-    // ── View pane ────────────────────────────────────────────────────────
-    /// Cached task rows from the last successful load (used by List view).
     pub task_rows: Vec<not_yet_done_core::entity::task::Model>,
-    /// The forest built from the last successful load (used by Tree view).
-    pub forest: Option<crate::ui::tasks::forest::TaskForest>,
-    /// Index of the selected row in the list.
+    pub forest: Option<TaskForest>,
     pub selected_row: usize,
-    /// Scroll offset for the task list / tree.
     pub scroll_offset: usize,
-    /// Current load state.
     pub load_state: LoadState,
 
-    // Cache for the TreeRows, to prevent recalculation when filter does not change
-    tree_rows_cache: Option<Vec<crate::ui::tasks::forest::TreeRow>>,
-    /// Filterstring for the above cache
+    /// Cached rendered table rows (header at index 0, data rows after).
+    /// Keyed by `cached_tree_filter` — invalidated when filter or forest changes.
+    tree_rows_cache: Option<Vec<TableRow<LocalUuid>>>,
     cached_tree_filter: String,
+    /// Width used when the cache was built — invalidated on resize.
+    cached_width: usize,
 }
 
 impl TasksState {
@@ -388,7 +343,8 @@ impl TasksState {
             scroll_offset: 0,
             load_state: LoadState::Idle,
             tree_rows_cache: None,
-            cached_tree_filter: String::new()
+            cached_tree_filter: String::new(),
+            cached_width: 0,
         }
     }
 
@@ -416,6 +372,7 @@ impl TasksState {
             .unwrap_or(self.tree_filter.len());
         self.tree_filter.insert(byte_pos, c);
         self.tree_filter_cursor += 1;
+        self.tree_rows_cache = None; // invalidate
     }
 
     pub fn tree_filter_backspace(&mut self) {
@@ -431,6 +388,7 @@ impl TasksState {
             .unwrap_or(0);
         self.tree_filter.remove(byte_pos);
         self.tree_filter_cursor -= 1;
+        self.tree_rows_cache = None; // invalidate
     }
 
     pub fn tree_filter_cursor_left(&mut self) {
@@ -449,6 +407,7 @@ impl TasksState {
     pub fn tree_filter_clear(&mut self) {
         self.tree_filter.clear();
         self.tree_filter_cursor = 0;
+        self.tree_rows_cache = None; // invalidate
     }
 
     // ── List navigation ──────────────────────────────────────────────────
@@ -476,33 +435,48 @@ impl TasksState {
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<not_yet_done_core::entity::task::Model>) {
-        // Build forest from the fresh task list
         use crate::ui::tasks::forest::build_forest;
         self.forest = Some(build_forest(tasks.clone()));
         self.task_rows = tasks;
 
-        // Clamp list selection
         if !self.task_rows.is_empty() && self.selected_row >= self.task_rows.len() {
             self.selected_row = self.task_rows.len() - 1;
         }
         self.load_state = LoadState::Loaded;
-
         self.tree_rows_cache = None;
         self.cached_tree_filter.clear();
+        self.cached_width = 0;
     }
 
     pub fn set_load_error(&mut self, msg: String) {
         self.load_state = LoadState::Error(msg);
     }
 
-    /// Returns the tree rows for the given forest and query, using an internal cache.
-    pub fn get_tree_rows(&mut self, forest: &TaskForest, query: &str) -> &[crate::ui::tasks::forest::TreeRow] {
-        // Prüfen, ob der Cache noch gültig ist
-        if self.cached_tree_filter != query {
-            self.tree_rows_cache = Some(crate::ui::tasks::forest::build_tree_rows(forest, query));
-            self.cached_tree_filter = query.to_string();
+    // ── Tree table cache ─────────────────────────────────────────────────
+
+    /// Returns cached `TableRow`s (header at index 0, data after) for the
+    /// current `tree_filter` and the given `area_width`.
+    ///
+    /// Rebuilds if the filter text or the available width has changed.
+    /// The `forest` argument is required for the build but not stored.
+    pub fn get_table_rows(
+        &mut self,
+        forest: &TaskForest,
+        area_width: usize,
+    ) -> &[TableRow<LocalUuid>] {
+        let filter = self.tree_filter.clone();
+        let needs_rebuild = self.tree_rows_cache.is_none()
+            || self.cached_tree_filter != filter
+            || self.cached_width != area_width;
+
+        if needs_rebuild {
+            let rows = build_table_rows(forest, &filter, area_width);
+            self.tree_rows_cache = Some(rows);
+            self.cached_tree_filter = filter;
+            self.cached_width = area_width;
         }
-        self.tree_rows_cache.as_ref().unwrap()
+
+        self.tree_rows_cache.as_deref().unwrap()
     }
 }
 
@@ -510,4 +484,70 @@ impl Default for TasksState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// build_table_rows — the actual render pipeline
+// ---------------------------------------------------------------------------
+
+/// Columns shown in the tree table, in display order.
+pub const TREE_TABLE_COLS: &[&str] = &[TREE_COLUMN, "priority", "created_at", "updated_at"];
+
+pub fn build_table_rows(
+    forest: &TaskForest,
+    query_str: &str,
+    area_width: usize,
+) -> Vec<TableRow<LocalUuid>> {
+    let query = TaskQuery::new(query_str, 20);
+
+    let cols: Vec<ColumnId> = TREE_TABLE_COLS.iter().map(|s| ColumnId::new(*s)).collect();
+
+    // Tree column width: connector baseline + room for descriptions.
+    let tree_min = forest.inner().tree_min_width(&query);
+    let tree_col_width = (tree_min + 20).max(30).min(area_width * 3 / 5);
+
+    // 1. Tree cells (connector + description, fitted + highlights shifted).
+    let tree_rows = RenderableTree::tree_rows::<LocalUuid>(forest, &query, tree_col_width);
+
+    if tree_rows.is_empty() {
+        return vec![];
+    }
+
+    // 2. Data rows (non-tree columns), same order as tree_rows.
+    let data_rows: Vec<Row<LocalUuid>> = tree_rows
+        .iter()
+        .filter_map(|tr| find_task_in_forest(forest, tr.id.0).map(|item| item.into_row()))
+        .collect();
+
+    // 3. Header row.
+    let header = {
+        let mut cells = std::collections::HashMap::new();
+        cells.insert(ColumnId::new(TREE_COLUMN), "Task".to_string());
+        cells.insert(ColumnId::new("priority"), "Pri".to_string());
+        cells.insert(ColumnId::new("created_at"), "Created".to_string());
+        cells.insert(ColumnId::new("updated_at"), "Updated".to_string());
+        Row {
+            id: LocalUuid(Uuid::nil()),
+            cells,
+        }
+    };
+
+    // 4. Layout.
+    let layout = TableLayout {
+        max_width: area_width,
+        separator: " ".to_string(),
+        sizer: ColSizerEnum::Mixed(MixedColSizer {
+            strategies: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(ColumnId::new(TREE_COLUMN), ColStrategy::Fixed(tree_col_width));
+                m.insert(ColumnId::new("priority"), ColStrategy::Max);
+                m.insert(ColumnId::new("created_at"), ColStrategy::Max);
+                m.insert(ColumnId::new("updated_at"), ColStrategy::Max);
+                m
+            },
+        }),
+    };
+
+    // 5. Combine everything.
+    render_table(tree_rows, data_rows, &layout, &cols, Some(header))
 }
