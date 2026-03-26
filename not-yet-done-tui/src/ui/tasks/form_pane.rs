@@ -5,7 +5,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
-use ratatui_form_widgets::{ChoiceOption, MultipleChoiceWidget, TextFieldWidget, ToggleFieldWidget};
+use ratatui_form_widgets::{
+    ChoiceOption, MultipleChoiceWidget, TextFieldWidget, ToggleFieldWidget,
+};
 
 use crate::app::App;
 use crate::config::TasksAction;
@@ -32,7 +34,7 @@ impl Widget for TasksFormPane<'_> {
         };
 
         let (title, _icon) = match form {
-            TasksForm::Filter => (" 󰈲  Filter Tasks ", "󰈲"),
+            TasksForm::Filter => (" 󰈲  Search Tasks ", "󰈲"),
             TasksForm::Add => ("   Add Task ", ""),
             TasksForm::Delete => (" 󰆴  Delete Task ", "󰆴"),
         };
@@ -58,7 +60,7 @@ impl Widget for TasksFormPane<'_> {
                 ),
                 Style::default().fg(t.text_dim()),
             ))
-            .style(Style::default().bg(t.surface_2()));
+            .style(Style::default().bg(t.form_bg()));
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -98,7 +100,11 @@ fn render_filter_form(
                 return;
             }
             let focused = filter.focused_field == $field;
-            let cursor = if focused { Some(filter.cursor_pos) } else { None };
+            let cursor = if focused {
+                Some(filter.cursor_pos)
+            } else {
+                None
+            };
             TextFieldWidget {
                 label: $field.label(),
                 value: $value,
@@ -108,11 +114,22 @@ fn render_filter_form(
                 cursor_pos: cursor,
                 style: tf_style,
             }
-            .render_and_next_y(Rect { x, y: $y, width, height: 2 }, buf)
+            .render_and_next_y(
+                Rect {
+                    x,
+                    y: $y,
+                    width,
+                    height: 2,
+                },
+                buf,
+            )
         }};
     }
 
     let mut y = area.y;
+
+    // Add empty line at the top
+    y += 1;
 
     // ── Date fields ───────────────────────────────────────────────────────
     y = text_field!(
@@ -155,7 +172,15 @@ fn render_filter_form(
         filter.status_cursor,
         mc_style,
     )
-    .render_and_next_y(Rect { x, y, width, height: 2 }, buf);
+    .render_and_next_y(
+        Rect {
+            x,
+            y,
+            width,
+            height: 2,
+        },
+        buf,
+    );
     y += 1;
 
     // ── Priority ──────────────────────────────────────────────────────────
@@ -178,7 +203,15 @@ fn render_filter_form(
         filter.focused_field == FilterField::ShowDeleted,
         tg_style,
     )
-    .render(Rect { x, y, width, height: 1 }, buf);
+    .render(
+        Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        },
+        buf,
+    );
 
     // ── Coming-soon placeholder ───────────────────────────────────────────
     let placeholder_y = y + 2;
@@ -190,7 +223,12 @@ fn render_filter_form(
                 .add_modifier(Modifier::ITALIC),
         )]);
         Paragraph::new(sep).render(
-            Rect { x, y: placeholder_y, width, height: 1 },
+            Rect {
+                x,
+                y: placeholder_y,
+                width,
+                height: 1,
+            },
             buf,
         );
     }

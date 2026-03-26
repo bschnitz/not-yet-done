@@ -67,6 +67,12 @@ pub struct ThemeConfig {
     pub error: HexColor,
     #[serde(default = "d_warning")]
     pub warning: HexColor,
+
+    // ── Form ───────────────────────────────────────────────────────────────
+    #[serde(default = "d_focused_bg")]
+    pub focused_bg: HexColor,
+    #[serde(default = "d_form_bg")]
+    pub form_bg: HexColor,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,53 +80,59 @@ pub struct ThemeConfig {
 // ---------------------------------------------------------------------------
 
 fn default_name() -> String {
-    "Teal Dark".to_string()
+    "Catppuccin Mocha".to_string()
 }
 fn hex(s: &str) -> HexColor {
     s.parse().expect("hardcoded hex is valid")
 }
 
 fn d_bg() -> HexColor {
-    hex("#121212")
+    hex("#1e1e2e")
 }
 fn d_surface() -> HexColor {
-    hex("#1e1e1e")
+    hex("#313244")
 }
 fn d_surface_2() -> HexColor {
-    hex("#282828")
+    hex("#45475a")
 }
 fn d_primary() -> HexColor {
-    hex("#4db6ac")
+    hex("#cba6f7")
 }
 fn d_primary_dim() -> HexColor {
-    hex("#26a69a")
+    hex("#f5c2e7")
 }
 fn d_on_primary() -> HexColor {
-    hex("#002522")
+    hex("#1e1e2e")
 }
 fn d_accent() -> HexColor {
-    hex("#ffca28")
+    hex("#f9e2af")
 }
 fn d_accent_dim() -> HexColor {
-    hex("#ffb300")
+    hex("#fab387")
 }
 fn d_text_high() -> HexColor {
-    hex("#e6e6e6")
+    hex("#cdd6f4")
 }
 fn d_text_med() -> HexColor {
-    hex("#9e9e9e")
+    hex("#bac2de")
 }
 fn d_text_dim() -> HexColor {
-    hex("#616161")
+    hex("#45475a")
 }
 fn d_success() -> HexColor {
-    hex("#66bb6a")
+    hex("#a6e3a1")
 }
 fn d_error() -> HexColor {
-    hex("#ef5350")
+    hex("#f38ba8")
 }
 fn d_warning() -> HexColor {
-    hex("#ffa726")
+    hex("#f9e2af")
+}
+fn d_focused_bg() -> HexColor {
+    hex("#000000")
+}
+fn d_form_bg() -> HexColor {
+    hex("#000000")
 }
 
 impl Default for ThemeConfig {
@@ -141,6 +153,8 @@ impl Default for ThemeConfig {
             success: d_success(),
             error: d_error(),
             warning: d_warning(),
+            focused_bg: d_focused_bg(),
+            form_bg: d_form_bg(),
         }
     }
 }

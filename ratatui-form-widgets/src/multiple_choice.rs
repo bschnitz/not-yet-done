@@ -30,20 +30,22 @@ use ratatui::{
 pub struct MultipleChoiceStyle {
     pub label_focused: ratatui::style::Color,
     pub label_idle: ratatui::style::Color,
-    /// Color of the ●/○ indicator when the option is checked.
+    /// Color of  ●/○ indicator when to option is checked.
     pub checked_fg: ratatui::style::Color,
-    /// Color of the ●/○ indicator when the option is unchecked.
+    /// Color of  ●/○ indicator when to option is unchecked.
     pub unchecked_fg: ratatui::style::Color,
-    /// Text color of the option under the keyboard cursor.
+    /// Text color of option under to keyboard cursor.
     pub cursor_text_fg: ratatui::style::Color,
-    /// Background of the option under the keyboard cursor.
+    /// Background of the option under to keyboard cursor.
     pub cursor_bg: ratatui::style::Color,
-    /// Text color of options not under the cursor.
+    /// Text color of options not under to cursor.
     pub item_idle_fg: ratatui::style::Color,
-    /// Background of options not under the cursor.
+    /// Background of options not under to cursor.
     pub item_idle_bg: ratatui::style::Color,
     /// Color for the navigation hint text.
     pub hint_fg: ratatui::style::Color,
+    /// Background for focused field (header + options).
+    pub focused_bg: ratatui::style::Color,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,13 +142,9 @@ impl Widget for MultipleChoiceWidget<'_> {
         let s = &self.style;
 
         // ── Label row ─────────────────────────────────────────────────────
-        let label_fg = if self.focused { s.label_focused } else { s.label_idle };
-        let prefix = if self.focused { "▶ " } else { "  " };
-        let label_modifier = if self.focused {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        };
+        let label_fg = s.label_focused;
+        let prefix = " ▍ ";
+        let label_modifier = Modifier::BOLD;
 
         let mut label_spans = vec![
             Span::styled(prefix, Style::default().fg(label_fg)),
@@ -163,7 +161,12 @@ impl Widget for MultipleChoiceWidget<'_> {
         }
 
         Paragraph::new(Line::from(label_spans)).render(
-            Rect { x, y, width, height: 1 },
+            Rect {
+                x,
+                y,
+                width,
+                height: 1,
+            },
             buf,
         );
 
@@ -173,13 +176,198 @@ impl Widget for MultipleChoiceWidget<'_> {
             return;
         }
 
+        // Determine background color for focused state
+        let bg_color = if self.focused {
+            s.focused_bg
+        } else {
+            s.item_idle_bg
+        };
+
+        // Write ▍ prefix on options row (with leading space)
+        let prefix_str = " ▍ ";
+        let label_fg = s.label_focused;
+        let prefix_style = Style::default().fg(label_fg);
+        let prefix_chars: Vec<char> = prefix_str.chars().collect();
+
+        for (pi, ch) in prefix_chars.iter().enumerate() {
+            let cx = x + pi as u16;
+            if cx >= x + width {
+                return;
+            }
+            if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                cell.set_char(*ch);
+                cell.set_style(prefix_style);
+            }
+        }
+
+        let mut rx = x + prefix_chars.len() as u16 + 1u16;
+
+        for (idx, opt) in self.options.iter().enumerate() {
+            let is_cursor = self.focused && self.cursor == idx;
+
+            let icon = if opt.selected {
+                self.checked_icon
+            } else {
+                self.unchecked_icon
+            };
+            let icon_fg = if opt.selected {
+                s.checked_fg
+            } else {
+                s.unchecked_fg
+            };
+
+            let (text_fg, text_bg, bold) = if is_cursor {
+                (s.cursor_text_fg, s.cursor_bg, true)
+            } else {
+                (s.item_idle_fg, bg_color, false)
+            };
+
+            let icon_style = Style::default().fg(icon_fg).bg(bg_color);
+            let label_style = Style::default()
+                .fg(text_fg)
+                .bg(text_bg)
+                .add_modifier(if bold {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+
+            let label_str = format!("{} ", opt.label);
+
+            // Write icon chars
+            for (ci, ch) in icon.chars().enumerate() {
+                let cx = rx + ci as u16;
+                if cx >= x + width {
+                    return;
+                }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(icon_style);
+                }
+            }
+
+            // Write label chars (leading space included in highlight)
+            let icon_len = icon.chars().count() as u16;
+
+            // Leading space — highlighted with cursor background
+            let cx = rx + icon_len;
+            if cx >= x + width {
+                return;
+            }
+            if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                cell.set_char(' ');
+                cell.set_style(label_style);
+            }
+
+            for (li, ch) in label_str.chars().enumerate() {
+                let cx = rx + icon_len + 1 + li as u16;
+                if cx >= x + width {
+                    return;
+                }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(label_style);
+                }
+            }
+
+            rx += icon_len + 1 + label_str.chars().count() as u16 + 2;
+        }
+
+        let mut rx = x + 2u16;
+
+        // Determine background color for focused state
+        let bg_color = if self.focused {
+            s.focused_bg
+        } else {
+            s.item_idle_bg
+        };
+
+        for (idx, opt) in self.options.iter().enumerate() {
+            let is_cursor = self.focused && self.cursor == idx;
+
+            let icon = if opt.selected {
+                self.checked_icon
+            } else {
+                self.unchecked_icon
+            };
+            let icon_fg = if opt.selected {
+                s.checked_fg
+            } else {
+                s.unchecked_fg
+            };
+
+            let (text_fg, text_bg, bold) = if is_cursor {
+                (s.cursor_text_fg, s.cursor_bg, true)
+            } else {
+                (s.item_idle_fg, bg_color, false)
+            };
+
+            let icon_style = Style::default().fg(icon_fg).bg(bg_color);
+            let label_style = Style::default()
+                .fg(text_fg)
+                .bg(text_bg)
+                .add_modifier(if bold {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+
+            let label_str = format!("{} ", opt.label);
+
+            // Write icon chars
+            for (ci, ch) in icon.chars().enumerate() {
+                let cx = rx + ci as u16;
+                if cx >= x + width {
+                    return;
+                }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(icon_style);
+                }
+            }
+
+            // Write label chars (leading space included in highlight)
+            let icon_len = icon.chars().count() as u16;
+
+            // Leading space — highlighted with cursor background
+            let cx = rx + icon_len;
+            if cx >= x + width {
+                return;
+            }
+            if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                cell.set_char(' ');
+                cell.set_style(label_style);
+            }
+
+            for (li, ch) in label_str.chars().enumerate() {
+                let cx = rx + icon_len + 1 + li as u16;
+                if cx >= x + width {
+                    return;
+                }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cx, opts_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(label_style);
+                }
+            }
+
+            rx += icon_len + 1 + label_str.chars().count() as u16 + 2;
+        }
+
         let mut rx = x + 2u16;
 
         for (idx, opt) in self.options.iter().enumerate() {
             let is_cursor = self.focused && self.cursor == idx;
 
-            let icon = if opt.selected { self.checked_icon } else { self.unchecked_icon };
-            let icon_fg = if opt.selected { s.checked_fg } else { s.unchecked_fg };
+            let icon = if opt.selected {
+                self.checked_icon
+            } else {
+                self.unchecked_icon
+            };
+            let icon_fg = if opt.selected {
+                s.checked_fg
+            } else {
+                s.unchecked_fg
+            };
 
             let (text_fg, text_bg, bold) = if is_cursor {
                 (s.cursor_text_fg, s.cursor_bg, true)
@@ -191,7 +379,11 @@ impl Widget for MultipleChoiceWidget<'_> {
             let label_style = Style::default()
                 .fg(text_fg)
                 .bg(text_bg)
-                .add_modifier(if bold { Modifier::BOLD } else { Modifier::empty() });
+                .add_modifier(if bold {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
 
             let label_str = format!("{} ", opt.label);
 

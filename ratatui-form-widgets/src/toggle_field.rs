@@ -1,5 +1,3 @@
-// ratatui-form-widgets/src/toggle_field.rs
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -22,6 +20,7 @@ use ratatui::{
 ///     checked_fg:     theme.success(),
 ///     unchecked_fg:   theme.text_dim(),
 ///     hint_fg:        theme.text_dim(),
+///     focused_bg:      theme.focused_bg(),
 /// }
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -30,8 +29,10 @@ pub struct ToggleFieldStyle {
     pub label_idle: ratatui::style::Color,
     pub checked_fg: ratatui::style::Color,
     pub unchecked_fg: ratatui::style::Color,
-    /// Color for the secondary hint text (e.g. "space to toggle").
+    /// Color for secondary hint text (e.g. "space to toggle").
     pub hint_fg: ratatui::style::Color,
+    /// Background for focused field (header + toggle).
+    pub focused_bg: ratatui::style::Color,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,17 +46,17 @@ pub struct ToggleFieldStyle {
 /// # Layout
 /// ```text
 ///   󰄵  Label text  space to toggle
-/// ▶ 󰄰  Label text  space to toggle   ← when focused
+/// ▍ 󰄰  Label text  space to toggle   ← when focused
 /// ```
 pub struct ToggleFieldWidget<'a> {
     pub label: &'a str,
     pub value: bool,
     pub focused: bool,
-    /// Icon rendered when the toggle is `true`. Defaults to `"󰄵 "`.
+    /// Icon rendered when to toggle is `true`. Defaults to `"󰄵 "`.
     pub checked_icon: &'a str,
-    /// Icon rendered when the toggle is `false`. Defaults to `"󰄰 "`.
+    /// Icon rendered when to toggle is `false`. Defaults to `"󰄰 "`.
     pub unchecked_icon: &'a str,
-    /// Optional hint shown after the label. Pass `""` to hide.
+    /// Optional hint shown after to label. Pass `""` to hide.
     pub hint: &'a str,
     pub style: ToggleFieldStyle,
 }
@@ -78,15 +79,19 @@ impl<'a> ToggleFieldWidget<'a> {
 impl Widget for ToggleFieldWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let s = &self.style;
-        let label_fg = if self.focused { s.label_focused } else { s.label_idle };
-        let prefix = if self.focused { "▶ " } else { "  " };
-        let icon = if self.value { self.checked_icon } else { self.unchecked_icon };
-        let icon_fg = if self.value { s.checked_fg } else { s.unchecked_fg };
-        let label_modifier = if self.focused {
-            Modifier::BOLD
+        let label_fg = s.label_focused;
+        let prefix = " ▍ ";
+        let icon = if self.value {
+            self.checked_icon
         } else {
-            Modifier::empty()
+            self.unchecked_icon
         };
+        let icon_fg = if self.value {
+            s.checked_fg
+        } else {
+            s.unchecked_fg
+        };
+        let label_modifier = Modifier::BOLD;
 
         let mut spans = vec![
             Span::styled(prefix, Style::default().fg(label_fg)),
