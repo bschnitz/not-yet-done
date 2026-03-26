@@ -63,30 +63,11 @@ pub enum TasksView {
     Tree,
 }
 
-impl TasksView {
-    pub fn title(&self) -> &'static str {
-        match self {
-            TasksView::List => "List",
-            TasksView::Tree => "Tree",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TasksForm {
     Filter,
     Add,
     Delete,
-}
-
-impl TasksForm {
-    pub fn title(&self) -> &'static str {
-        match self {
-            TasksForm::Filter => "Filter",
-            TasksForm::Add => "Add",
-            TasksForm::Delete => "Delete",
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +138,6 @@ impl StatusFilter {
     pub fn is_empty(&self) -> bool {
         !self.todo && !self.in_progress && !self.done && !self.cancelled
     }
-
-    pub const OPTIONS: &'static [&'static str] = &["todo", "in_progress", "done", "cancelled"];
 }
 
 // ---------------------------------------------------------------------------
@@ -450,33 +429,6 @@ impl TasksState {
 
     pub fn set_load_error(&mut self, msg: String) {
         self.load_state = LoadState::Error(msg);
-    }
-
-    // ── Tree table cache ─────────────────────────────────────────────────
-
-    /// Returns cached `TableRow`s (header at index 0, data after) for the
-    /// current `tree_filter` and the given `area_width`.
-    ///
-    /// Rebuilds if the filter text or the available width has changed.
-    /// The `forest` argument is required for the build but not stored.
-    pub fn get_table_rows(
-        &mut self,
-        forest: &TaskForest,
-        area_width: usize,
-    ) -> &[TableRow<LocalUuid>] {
-        let filter = self.tree_filter.clone();
-        let needs_rebuild = self.tree_rows_cache.is_none()
-            || self.cached_tree_filter != filter
-            || self.cached_width != area_width;
-
-        if needs_rebuild {
-            let rows = build_table_rows(forest, &filter, area_width);
-            self.tree_rows_cache = Some(rows);
-            self.cached_tree_filter = filter;
-            self.cached_width = area_width;
-        }
-
-        self.tree_rows_cache.as_deref().unwrap()
     }
 }
 

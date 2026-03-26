@@ -238,6 +238,7 @@ fn render_tree_table_row(
 
     // Tree column (index 0) — with highlight ranges.
     if let Some(tree_cell) = row.cells.first() {
+
         spans.extend(spans_with_highlights(
             tree_cell,
             &row.highlight_ranges,
@@ -262,9 +263,6 @@ fn render_tree_table_row(
 // spans_with_highlights
 // ---------------------------------------------------------------------------
 
-/// Split `s` into ratatui `Span`s, applying `hl_style` to the byte ranges in
-/// `ranges` and `normal_style` to everything else.  Out-of-bounds ranges are
-/// clamped to the string length.
 fn spans_with_highlights<'a>(
     s: &'a str,
     ranges: &[std::ops::Range<usize>],
@@ -275,7 +273,9 @@ fn spans_with_highlights<'a>(
         return vec![Span::styled(s, normal_style)];
     }
 
-    let len = s.len();
+    // ranges are already char indices
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
     let mut spans = Vec::new();
     let mut cursor = 0usize;
 
@@ -283,16 +283,19 @@ fn spans_with_highlights<'a>(
         let start = range.start.min(len);
         let end = range.end.min(len);
         if start > cursor {
-            spans.push(Span::styled(&s[cursor..start], normal_style));
+            let text: String = chars[cursor..start].iter().collect();
+            spans.push(Span::styled(text, normal_style));
         }
         if end > start {
-            spans.push(Span::styled(&s[start..end], hl_style));
+            let text: String = chars[start..end].iter().collect();
+            spans.push(Span::styled(text, hl_style));
         }
         cursor = end;
     }
 
     if cursor < len {
-        spans.push(Span::styled(&s[cursor..], normal_style));
+        let text: String = chars[cursor..].iter().collect();
+        spans.push(Span::styled(text, normal_style));
     }
 
     spans

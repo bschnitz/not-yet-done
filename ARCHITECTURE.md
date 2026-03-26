@@ -32,89 +32,6 @@ Beispiel: Wenn der Nutzer sagt „Ruf SeaORM direkt im CLI-Command auf", sollte 
 
 ---
 
-## 2. Workspace-Struktur
-
-```
-not-yet-done/                    ← Workspace Root
-├── Cargo.toml                   ← Workspace Manifest (kein [package])
-├── Cargo.lock
-├── ARCHITECTURE.md              ← dieses Dokument
-│
-├── not-yet-done-core/           ← lib crate: Domäne, Services, Entities, DI-Module
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── entity/              ← SeaORM Entities (Entity-First)
-│       │   ├── mod.rs
-│       │   ├── task.rs          ← deleted statt archived
-│       │   ├── project.rs
-│       │   ├── global_tag.rs
-│       │   ├── project_tag.rs
-│       │   ├── tracking.rs      ← deleted statt active
-│       │   ├── task_project.rs       ← Join: Task ↔ Project
-│       │   ├── task_global_tag.rs    ← Join: Task ↔ GlobalTag
-│       │   └── task_project_tag.rs   ← Join: Task ↔ ProjectTag
-│       ├── service/             ← Business-Logik (Traits + Impls)
-│       │   ├── mod.rs
-│       │   ├── task_service.rs
-│       │   ├── project_service.rs    ← neu
-│       │   ├── tag_service.rs
-│       │   └── tracking_service.rs
-│       ├── repository/          ← Datenbankzugriff (Traits + Impls)
-│       │   ├── mod.rs
-│       │   ├── task_repository.rs
-│       │   ├── project_repository.rs
-│       │   ├── tag_repository.rs
-│       │   └── tracking_repository.rs
-│       ├── module.rs            ← Shaku-Modul-Definition (AppModule)
-│       ├── db.rs                ← DB-Verbindung & schema-sync Logik
-│       └── error.rs             ← AppError-Typ
-│
-├── not-yet-done-cli/            ← binary crate: CLI
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs              ← Einstiegspunkt: CLI starten
-│       └── commands/            ← tusks CLI-Module
-│           ├── mod.rs           ← #[tusks(root)] Markierung
-│           ├── task.rs          ← add, list, done, delete, edit
-│           ├── project.rs       ← add, list, edit, delete
-│           ├── track.rs         ← start, stop, move (Subcommands)
-│           └── db.rs            ← sync (Schema-Sync Subcommand)
-│
-└── not-yet-done-web/            ← binary crate: zukünftiger Web-Server (Axum)
-    ├── Cargo.toml
-    └── src/
-        └── main.rs
-```
-
-### Workspace `Cargo.toml`
-
-```toml
-[workspace]
-resolver = "3"
-members = [
-    "not-yet-done-core",
-    "not-yet-done-cli",
-    # "not-yet-done-web",   # später aktivieren
-]
-
-[workspace.dependencies]
-sea-orm = { version = "2.0.0-rc.*", features = [
-    "sqlx-sqlite",
-    "runtime-tokio-rustls",
-    "schema-sync",
-    "entity-registry",
-    "macros",
-] }
-shaku       = { version = "0.6", features = ["derive"] }
-tokio       = { version = "1", features = ["full"] }
-tusks       = { version = "*" }           # nur in CLI-Crate
-anyhow      = "1"
-thiserror   = "2"
-```
-
----
-
 ## 3. Schichten-Architektur
 
 ```
@@ -144,19 +61,6 @@ thiserror   = "2"
 - Kein Code in CLI/Web darf `use not_yet_done_core::repository::*` importieren
 
 ---
-
-## 4. Crate-Abhängigkeiten
-
-```
-not-yet-done-cli (CLI)   →  not-yet-done-core
-not-yet-done-web (Web)   →  not-yet-done-core
-not-yet-done-core        →  sea-orm, shaku, tokio, anyhow
-```
-
-CLI und Web teilen sich **keinen** Code miteinander — nur über Core.
-
----
-
 ## 5. CLI-Struktur mit Tusks
 
 [tusks](https://crates.io/crates/tusks) ist ein High-Level-Wrapper um Clap. Rust-Module werden automatisch zu CLI-Commands, öffentliche Funktionen zu Subcommands.
@@ -216,60 +120,6 @@ pub mod not_yet_done {
     pub mod track;
 }
 ```
-
-```rust
-// commands/task.rs
-use crate::bootstrap::AppModuleRef;
-
-/// Fügt einen neuen Task hinzu
-pub fn add(title: String, description: Option<String>) { ... }
-
-/// Listet alle offenen Tasks
-pub fn list() { ... }
-
-/// Markiert einen Task als erledigt
-pub fn done(id: i32) { ... }
-
-/// Löscht einen Task
-pub fn delete(id: i32) { ... }
-
-/// Bearbeitet Titel oder Beschreibung eines Tasks
-pub fn edit(id: i32, title: Option<String>, description: Option<String>) { ... }
-```
-
-```rust
-// commands/track.rs
-
-/// Startet das Tracking für einen Task
-pub fn start(task_id: i32) { ... }
-
-/// Stoppt das aktive Tracking
-pub fn stop() { ... }
-
-/// Verschiebt einen abgeschlossenen Tracking-Eintrag
-pub fn r#move(entry_id: i32, start: String, end: String) { ... }
-```
-
-### Commands (initial)
-
-| Command          | Subcommand | Argumente (neu/geändert)                   | Beschreibung                                    |
-|------------------|------------|--------------------------------------------|-------------------------------------------------|
-| `task`           | `add`      | `description`, `--project` (opt.)          | Neuen Task erstellen                            |
-| `task`           | `list`     | `--project <name-oder-id>` (opt. Filter)   | Tasks anzeigen                                  |
-| `task`           | `done`     | `id`                                       | Task als erledigt markieren                     |
-| `task`           | `delete`   | `id`                                       | Task soft-löschen (`deleted = true`)            |
-| `task`           | `edit`     | `id`, `--add-project`, `--remove-project`  | Task bearbeiten inkl. Projektzuordnung          |
-| `project`        | `add`      | `name`, `--description` (opt.)             | Projekt erstellen                               |
-| `project`        | `list`     | —                                          | Alle Projekte anzeigen                          |
-| `project`        | `edit`     | `id`, `--name` (opt.), `--description` (opt.) | Projekt umbenennen/beschreiben               |
-| `project`        | `delete`   | `id`, `--cascade` (opt.)                   | Projekt löschen; `--cascade` soft-löscht Tasks  |
-| `track`          | `start`    | `task-id`                                  | Zeiterfassung für Task starten                  |
-| `track`          | `stop`     | —                                          | Aktives Tracking beenden                        |
-| `track`          | `move`     | `entry-id`, `start`, `end`                 | Abgeschlossenes Tracking verschieben            |
-| `db`             | `sync`     | —                                          | Datenbankschema mit Entities synchronisieren    |
-
-Weitere Commands folgen nach Bedarf.
-
 ---
 
 ## 6. Dependency Injection mit Shaku
@@ -342,64 +192,13 @@ service.create_task(title).await?;
 
 SeaORM 2.0 unterstützt Entity-First: Entities werden per Hand geschrieben, SeaORM synchronisiert das Schema automatisch. Kein manuelles Schreiben von Migrations-Dateien.
 
-### Datenbankschema (final)
-
-#### `task`
-| Feld | Typ | Constraints |
-|---|---|---|
-| `id` | `uuid` | PK, auto-generiert |
-| `description` | `text` | NOT NULL |
-| `status` | `task_status` | NOT NULL, DEFAULT `todo` |
-| `deleted` | `bool` | NOT NULL, DEFAULT `false` |
-| `priority` | `integer` | NOT NULL, DEFAULT `0`, kann negativ sein |
-| `parent_id` | `uuid` | FK → `task.id`, nullable |
-| `created_at` | `timestamptz` | NOT NULL |
-| `updated_at` | `timestamptz` | NOT NULL |
-
-`task_status` Enum: `todo | in_progress | done | cancelled`
-
 `deleted` ist ein Soft-Delete-Flag — gelöschte Tasks bleiben in der DB erhalten und sind über ihren Status noch nachvollziehbar. Das Muster wird einheitlich auf andere Entities ausgeweitet sobald nötig.
 
-#### `project`
-| Feld | Typ | Constraints |
-|---|---|---|
-| `id` | `uuid` | PK, auto-generiert |
-| `name` | `text` | NOT NULL |
-| `description` | `text` | nullable |
-| `created_at` | `timestamptz` | NOT NULL |
-| `updated_at` | `timestamptz` | NOT NULL |
-
-#### `global_tag`
-| Feld | Typ | Constraints |
-|---|---|---|
-| `id` | `uuid` | PK, auto-generiert |
-| `name` | `text` | NOT NULL, UNIQUE |
-| `color` | `text` | nullable, Hex-String (z.B. `#FF5733`) |
-
 Globale Tags sind projekt-übergreifend. Der Name ist systemweit eindeutig. Die Farbe wird auf Applikationsebene gegen `^#[0-9A-Fa-f]{3,8}$` validiert.
-
-#### `project_tag`
-| Feld | Typ | Constraints |
-|---|---|---|
-| `id` | `uuid` | PK, auto-generiert |
-| `name` | `text` | NOT NULL |
-| `project_id` | `uuid` | FK → `project.id`, NOT NULL |
-| `color` | `text` | nullable, Hex-String (z.B. `#FF5733`) |
 
 UNIQUE-Constraint auf `(name, project_id)` — gleicher Name in zwei verschiedenen Projekten ist erlaubt.
 
 **Begründung für zwei Tag-Tabellen:** Statt einer Tabelle mit nullable `project_id` (die partielle Unique-Indizes erfordern würde, die SeaORM nicht direkt ableiten kann) werden zwei klar getrennte Tabellen verwendet. Jede hat triviale Constraints, keine NULL-Trickserei.
-
-#### `tracking`
-| Feld | Typ | Constraints |
-|---|---|---|
-| `id` | `uuid` | PK, auto-generiert |
-| `task_id` | `uuid` | FK → `task.id`, NOT NULL |
-| `predecessor_id` | `uuid` | FK → `tracking.id`, nullable |
-| `started_at` | `timestamptz` | NOT NULL |
-| `ended_at` | `timestamptz` | nullable |
-| `deleted` | `bool` | NOT NULL, DEFAULT `false` |
-| `created_at` | `timestamptz` | NOT NULL |
 
 **Invariante:** Ein Tracking mit `deleted = false` und `ended_at = NULL` ist das aktive Tracking eines Tasks. Pro Task darf es maximal ein solches geben — auf Applikationsebene erzwungen.
 
@@ -419,35 +218,6 @@ Ein Vorgänger kann mehrere Nachfolger haben (Aufspaltung eines Trackings in meh
 | `task_project_tag` | `task_id` FK, `project_tag_id` FK | Task kann projektspezifische Tags haben |
 
 Alle Join-Tabellen haben zusammengesetzten PK aus beiden FK-Spalten (kein separates `id`-Feld).
-
-### Schema-Sync Strategie
-
-Die Synchronisierung erfolgt über einen dedizierten CLI-Subcommand `db sync`. Er wird bewusst **nicht** automatisch beim Start ausgeführt, um versehentliche Schemaänderungen in Produktion zu verhindern.
-
-```rust
-// commands/db.rs
-/// Synchronisiert das Datenbankschema mit den aktuellen Entities
-pub fn sync() { ... }
-```
-
-```rust
-// commands/mod.rs — db als weiteres Subcommand-Modul
-#[tusks(root, not_yet_done)]
-pub mod not_yet_done {
-    pub mod task;
-    pub mod track;
-    pub mod db;    // ← enthält: sync
-}
-```
-
-**Nutzung:**
-```bash
-# Schema einmalig synchronisieren (erster Start, nach Entity-Änderungen)
-not-yet-done-cli db sync
-
-# Normaler Betrieb — kein Schema-Sync
-not-yet-done-cli task list
-```
 
 Die `db::connect()`-Funktion im Core nimmt weiterhin einen `sync_schema: bool`-Parameter entgegen. Der `db sync`-Subcommand übergibt `true`, alle anderen Commands übergeben `false`.
 
@@ -512,51 +282,6 @@ pub enum AppError {
 
 ---
 
-## 9. Bootstrapping (main.rs)
-
-```rust
-// not-yet-done-cli/src/main.rs
-use not_yet_done_core::{db, module::AppModule};
-use shaku::HasComponent;
-
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    // sync_schema wird vom `db sync`-Subcommand auf true gesetzt,
-    // von allen anderen Commands auf false
-    let sync_schema = commands::is_sync_command();
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://not-yet-done.db?mode=rwc".to_string());
-
-    // DB verbinden (bei `db sync`: mit Schema-Sync)
-    let db = db::connect(&db_url, sync_schema).await
-        .expect("Datenbankverbindung fehlgeschlagen");
-
-    // Shaku-Modul aufbauen
-    let module = AppModule::builder()
-        .with_component_parameters::<not_yet_done_core::repository::TaskRepositoryImpl>(
-            not_yet_done_core::repository::TaskRepositoryImplParameters { db: db.clone() }
-        )
-        // ... weitere Parameter
-        .build();
-
-    // CLI starten
-    std::process::ExitCode::from(commands::exec_cli(module).unwrap_or(0) as u8)
-}
-```
-
----
-
-## 10. Zukünftige Web-Erweiterung
-
-Wenn `not-yet-done-web` aktiviert wird:
-
-1. Axum-Handler erhalten `Arc<AppModule>` als State
-2. Handler holen Services via `module.resolve_ref::<dyn TaskService>()`
-3. Fehler werden via `impl IntoResponse for AppError` in HTTP-Responses gewandelt
-4. Das `AppModule` in `not-yet-done-core` bleibt **unverändert** — nur der Consumer (Web statt CLI) ändert sich
-
----
-
 ## 11. Coding-Konventionen
 
 | Bereich              | Konvention                                                     |
@@ -580,30 +305,3 @@ Die Applikation arbeitet intern ausschließlich mit UTC. An den Grenzen zur Auß
 - **Explizite Zeitzonen:** Falls ein Nutzer künftig Zeiten mit Offset eingibt (z.B. `2026-03-22T10:00+05:30`),
   wird dieser Offset respektiert und nicht überschrieben.
 - **In der Datenbank** werden ausschließlich UTC-Werte gespeichert (`DateTimeUtc` in SeaORM-Entities).
-
----
-
-## 12. Abhängigkeiten-Übersicht
-
-| Crate                  | Version   | Zweck                                    |
-|------------------------|-----------|------------------------------------------|
-| `tusks`                | latest    | CLI-Framework (Clap-Wrapper)             |
-| `sea-orm`              | `2.0.*`   | ORM + Entity-First Schema-Sync           |
-| `shaku`                | `0.6`     | Compile-Time Dependency Injection        |
-| `tokio`                | `1`       | Async Runtime                            |
-| `anyhow`               | `1`       | Fehlerbehandlung (in binaries)           |
-| `thiserror`            | `2`       | Fehlertypen (in core lib)                |
-
----
-
-## 13. Offene Punkte / Entscheidungen für später
-
-- [ ] Zeitformat für `TimeEntry.start` / `TimeEntry.end`: UTC oder lokal?
-- [ ] Ausgabeformat der `list`-Commands: tabellarisch, JSON, farbig?
-- [ ] Konfigurationsdatei vs. Environment-Variablen für DB-URL
-- [ ] `not-yet-done-web`: Axum oder Actix-Web?
-- [ ] Auth/Multi-User oder single-user lokal?
-
----
-
-*Letzte Aktualisierung: März 2026 — v7 (Englisch als Pflichtsprache, CLI-Dokumentationspflicht, Tracking-Commands)*

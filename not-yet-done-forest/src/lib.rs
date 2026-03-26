@@ -485,14 +485,12 @@ pub trait RenderableTree<Q>: TransformableForest<Q>
 where
     Self::Item: TreeDisplay,
 {
-    /// Returns one [`TreeCellRow`] per visible node, with the tree column
-    /// fitted to `tree_col_width` display columns.
     fn tree_rows<Id>(
         &self,
         query: &Q,
         tree_col_width: usize,
     ) -> Vec<TreeCellRow<Id>>
-    where
+where
         Self::Item: IntoRow<Id = Id>,
         Id: Eq + Hash + Clone,
     {
@@ -502,7 +500,7 @@ where
         for ghost_root in &ghost_roots {
             // Stack: (ghost, depth, is_last, prefix)
             let mut stack: Vec<(&GhostNode<'_, Self::Item>, usize, bool, String)> =
-                vec![(ghost_root, 0, true, String::new())];
+            vec![(ghost_root, 0, true, String::new())];
 
             while let Some((ghost, depth, is_last, prefix)) = stack.pop() {
                 let elem = &ghost.node.element;
@@ -511,32 +509,36 @@ where
                 let has_children = !ghost.children.is_empty();
 
                 let connector =
-                    forest_connector(depth, is_last, &prefix, has_desc, has_children);
+                forest_connector(depth, is_last, &prefix, has_desc, has_children);
                 let connector_byte_len = connector.len();
+
+                // Shift highlight ranges by the connector byte length.
+                let highlight_ranges: Vec<Range<usize>> = ghost
+                    .highlight_ranges
+                    .iter()
+                    .map(|r| (r.start + connector_byte_len)..(r.end + connector_byte_len))
+                    .collect();
 
                 let raw_cell = match desc {
                     Some(d) => format!("{}{}", connector, d),
                     None => connector,
                 };
 
-                // Shift highlight ranges by the connector byte length.
-                let highlight_ranges = ghost
-                    .highlight_ranges
-                    .iter()
-                    .map(|r| (r.start + connector_byte_len)..(r.end + connector_byte_len))
-                    .collect();
+                // Konvertiere Byte-Ranges zu Char-Ranges
+                let char_ranges = byte_ranges_to_char_ranges(&raw_cell, &highlight_ranges);
 
-                let tree_cell = fit_to_width(&raw_cell, tree_col_width);
+                let (tree_cell, final_highlight_ranges) = 
+                fit_to_width_with_char_highlights(&raw_cell, tree_col_width, &char_ranges);
 
                 result.push(TreeCellRow {
                     id: elem.into_row().id,
                     tree_cell,
-                    highlight_ranges,
+                    highlight_ranges: final_highlight_ranges,
                 });
 
                 let n = ghost.children.len();
                 let next_prefix =
-                    forest_child_prefix(depth, is_last, has_desc, &prefix);
+                forest_child_prefix(depth, is_last, has_desc, &prefix);
                 for (i, child) in ghost.children.iter().enumerate().rev() {
                     stack.push((child, depth + 1, i == n - 1, next_prefix.clone()));
                 }
@@ -545,6 +547,99 @@ where
 
         result
     }
+}
+
+/// Passt den String auf `width` Breite an und projiziert die Char-Ranges
+/// (bezogen auf den vollen String) auf den getrimmten String.
+/// Gibt (trimmed_string, char_ranges_after_trim) zurück.
+fn fit_to_width_with_char_highlights(
+    s: &str,
+    width: usize,
+    char_ranges: &[Range<usize>],  // bereits Char-Ranges, bezogen auf s
+) -> (String, Vec<Range<usize>>) {
+    use unicode_width::UnicodeWidthChar;
+    use unicode_width::UnicodeWidthStr;
+
+    let display_width = s.width();
+    if display_width <= width {
+        let padding = width - display_width;
+        let padded = format!("{}{}", s, " ".repeat(padding));
+        return (padded, char_ranges.to_vec());
+    }
+
+    // Zielbreite für den sichtbaren Text (ohne Ellipse)
+    let target = width.saturating_sub(1);
+    let mut trimmed_chars = Vec::new();          // Zeichen im sichtbaren Teil
+    let mut full_to_trimmed = Vec::new();        // (full_index, trimmed_index)
+
+    let mut used = 0;
+    let mut full_idx = 0;
+    for ch in s.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used + ch_width > target {
+            break;
+        }
+        trimmed_chars.push(ch);
+        full_to_trimmed.push((full_idx, trimmed_chars.len() - 1));
+        used += ch_width;
+        full_idx += 1;
+    }
+
+    // Ergebnis-String: sichtbarer Teil + Ellipse
+    let mut result = String::with_capacity(trimmed_chars.len() + 1);
+    for ch in &trimmed_chars {
+        result.push(*ch);
+    }
+    result.push('…');
+
+    // Projektion der Ranges
+    let mut final_ranges = Vec::new();
+    for range in char_ranges {
+        let start = range.start;
+        let end = range.end;
+
+        // Suche den ersten übernommenen Char, dessen full_idx >= start
+        let start_trim = full_to_trimmed
+            .iter()
+            .find_map(|&(f, t)| if f >= start { Some(t) } else { None })
+            .unwrap_or(trimmed_chars.len());
+
+        // Suche den letzten übernommenen Char, dessen full_idx < end
+        let end_trim = full_to_trimmed
+            .iter()
+            .rev()
+            .find_map(|&(f, t)| if f < end { Some(t + 1) } else { None })
+            .unwrap_or(start_trim);
+
+        if start_trim < end_trim {
+            final_ranges.push(start_trim..end_trim);
+        }
+    }
+
+    (result, final_ranges)
+}
+
+/// Konvertiert Byte-Ranges in einem String zu Char-Ranges.
+fn byte_ranges_to_char_ranges(s: &str, byte_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut char_starts: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    char_starts.push(s.len());
+    
+    let mut result = Vec::new();
+    for byte_range in byte_ranges {
+        let start_char = char_starts
+            .iter()
+            .position(|&byte_idx| byte_idx >= byte_range.start)
+            .unwrap_or(char_starts.len() - 1);
+        let end_char = char_starts
+            .iter()
+            .position(|&byte_idx| byte_idx >= byte_range.end)
+            .unwrap_or(char_starts.len() - 1);
+        
+        if start_char < end_char {
+            result.push(start_char..end_char);
+        }
+    }
+    result
 }
 
 /// Blanket impl: every `TransformableForest<Q>` whose `Item: TreeDisplay`
