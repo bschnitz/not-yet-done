@@ -286,13 +286,6 @@ pub enum LoadState {
 // TasksState
 // ---------------------------------------------------------------------------
 
-/// Cached output of the tree render pipeline.
-pub struct TreeTableCache {
-    pub table: RenderedTable<LocalUuid>,
-    pub filter: String,
-    pub width: usize,
-}
-
 pub struct TasksState {
     pub active_view: TasksView,
     pub active_form: Option<TasksForm>,
@@ -307,9 +300,6 @@ pub struct TasksState {
     pub selected_row: usize,
     pub scroll_offset: usize,
     pub load_state: LoadState,
-
-    /// Cached rendered table — invalidated when filter, forest, or width changes.
-    pub(crate) tree_table_cache: Option<TreeTableCache>,
 }
 
 impl TasksState {
@@ -326,7 +316,6 @@ impl TasksState {
             selected_row: 0,
             scroll_offset: 0,
             load_state: LoadState::Idle,
-            tree_table_cache: None,
         }
     }
 
@@ -354,7 +343,6 @@ impl TasksState {
             .unwrap_or(self.tree_filter.len());
         self.tree_filter.insert(byte_pos, c);
         self.tree_filter_cursor += 1;
-        self.tree_table_cache = None;
     }
 
     pub fn tree_filter_backspace(&mut self) {
@@ -370,7 +358,6 @@ impl TasksState {
             .unwrap_or(0);
         self.tree_filter.remove(byte_pos);
         self.tree_filter_cursor -= 1;
-        self.tree_table_cache = None;
     }
 
     pub fn tree_filter_cursor_left(&mut self) {
@@ -389,7 +376,6 @@ impl TasksState {
     pub fn tree_filter_clear(&mut self) {
         self.tree_filter.clear();
         self.tree_filter_cursor = 0;
-        self.tree_table_cache = None;
     }
 
     // ── List navigation ──────────────────────────────────────────────────
@@ -425,37 +411,10 @@ impl TasksState {
             self.selected_row = self.task_rows.len() - 1;
         }
         self.load_state = LoadState::Loaded;
-        self.tree_table_cache = None;
     }
 
     pub fn set_load_error(&mut self, msg: String) {
         self.load_state = LoadState::Error(msg);
-    }
-
-    /// Return the cached rendered table, rebuilding it when stale.
-    pub fn get_or_build_tree_table(
-        &mut self,
-        area_width: usize,
-    ) -> Option<&RenderedTable<LocalUuid>> {
-        let forest = self.forest.as_ref()?;
-        let filter = &self.tree_filter;
-
-        let cache_valid = self
-            .tree_table_cache
-            .as_ref()
-            .map(|c| c.filter == *filter && c.width == area_width)
-            .unwrap_or(false);
-
-        if !cache_valid {
-            let table = build_rendered_table(forest, filter, area_width);
-            self.tree_table_cache = Some(TreeTableCache {
-                table,
-                filter: filter.clone(),
-                width: area_width,
-            });
-        }
-
-        self.tree_table_cache.as_ref().map(|c| &c.table)
     }
 }
 

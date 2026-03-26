@@ -817,29 +817,3 @@ pub fn fit_to_width_with_highlights(
 
     (result, projected)
 }
-
-// =============================================================================
-// Original tree-rendering helpers — kept for backwards compatibility
-// =============================================================================
-
-/// Build the connector prefix string for a node at a given depth (original helper).
-pub fn tree_connector(depth: usize, is_last: bool, prefix: &str) -> String {
-    if depth == 0 {
-        String::new()
-    } else if is_last {
-        format!("{}└── ", prefix)
-    } else {
-        format!("{}├── ", prefix)
-    }
-}
-
-/// Build the prefix string to pass to children (original helper).
-pub fn child_prefix(depth: usize, is_last: bool, prefix: &str) -> String {
-    if depth == 0 {
-        prefix.to_string()
-    } else if is_last {
-        format!("{}    ", prefix)
-    } else {
-        format!("{}│   ", prefix)
-    }
-}
