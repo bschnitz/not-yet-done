@@ -144,10 +144,15 @@ impl_string_serde!(FormAction);
 pub enum TasksAction {
     ViewList,
     ViewTree,
+    /// Öffnet die Search-Form (ehemals "Filter").
     FormFilter,
     FormAdd,
     FormDelete,
     FormClose,
+    /// Öffnet den FuzzyFilter-Modus (zeigt FuzzyPane, versteckt Form-Leiste).
+    FuzzyFilterOpen,
+    /// Verlässt den FuzzyFilter-Modus wieder (konfigurierbar, Default: tab).
+    FuzzyFilterExit,
     /// Move selection down in the task list.
     ListNext,
     /// Move selection up in the task list.
@@ -163,6 +168,8 @@ impl TasksAction {
             TasksAction::FormAdd => "form_add",
             TasksAction::FormDelete => "form_delete",
             TasksAction::FormClose => "form_close",
+            TasksAction::FuzzyFilterOpen => "fuzzy_filter_open",
+            TasksAction::FuzzyFilterExit => "fuzzy_filter_exit",
             TasksAction::ListNext => "list_next",
             TasksAction::ListPrev => "list_prev",
         }
@@ -185,6 +192,8 @@ impl FromStr for TasksAction {
             "form_add" => Ok(TasksAction::FormAdd),
             "form_delete" => Ok(TasksAction::FormDelete),
             "form_close" => Ok(TasksAction::FormClose),
+            "fuzzy_filter_open" => Ok(TasksAction::FuzzyFilterOpen),
+            "fuzzy_filter_exit" => Ok(TasksAction::FuzzyFilterExit),
             "list_next" => Ok(TasksAction::ListNext),
             "list_prev" => Ok(TasksAction::ListPrev),
             other => Err(format!("unknown tasks action: {}", other)),
@@ -252,10 +261,14 @@ impl Default for KeyBindingSection<TasksAction> {
         let mut m = HashMap::new();
         m.insert(TasksAction::ViewList, KeyBinding::new("l"));
         m.insert(TasksAction::ViewTree, KeyBinding::new("t"));
-        m.insert(TasksAction::FormFilter, KeyBinding::new("f"));
+        // Search (ehemals Filter): Default s
+        m.insert(TasksAction::FormFilter, KeyBinding::new("s"));
         m.insert(TasksAction::FormAdd, KeyBinding::new("a"));
         m.insert(TasksAction::FormDelete, KeyBinding::new("d"));
         m.insert(TasksAction::FormClose, KeyBinding::new("esc"));
+        // FuzzyFilter: Default f öffnen, tab verlassen
+        m.insert(TasksAction::FuzzyFilterOpen, KeyBinding::new("f"));
+        m.insert(TasksAction::FuzzyFilterExit, KeyBinding::new("tab"));
         m.insert(TasksAction::ListNext, KeyBinding::new("j"));
         m.insert(TasksAction::ListPrev, KeyBinding::new("k"));
         Self { bindings: m }

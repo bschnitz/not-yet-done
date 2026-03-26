@@ -1,8 +1,12 @@
 pub mod forest;
 pub mod form_pane;
+pub mod fuzzy_pane;
 pub mod highlight;
+pub mod list_view;
 pub mod sort;
 pub mod sub_tab_bar;
+pub mod tree_view;
+pub mod view_helpers;
 pub mod view_pane;
 
 use ratatui::{
@@ -14,30 +18,53 @@ use crate::app::App;
 use crate::config::SplitType;
 
 use form_pane::TasksFormPane;
+use fuzzy_pane::FuzzyPane;
 use sub_tab_bar::TasksSubTabBar;
 use view_pane::TasksViewPane;
 
 /// Entry point called from render.rs for the Tasks tab area.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    // Layout:
+    //  row[0] = SubTabBar (1 Zeile)          — immer sichtbar
+    //  row[1] = Content (rest)
+    //
+    // Wenn fuzzy_active: row[1] wird nochmals geteilt:
+    //   content[0] = ViewPane
+    //   content[1] = FuzzyPane (1 Zeile, ersetzt Form-Leiste)
+    //
+    // Hinweis: Die SubTabBar zeigt immer Filter/Add/Delete/FuzzyFilter-Tabs,
+    // unabhängig von der aktiven View (Bug-Fix: Tree-Ansicht hatte keine Bar).
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Fill(1)])
         .split(area);
 
     frame.render_widget(TasksSubTabBar::new(app), rows[0]);
-    render_content(frame, rows[1], app);
+
+    if app.tasks_state.fuzzy_active {
+        // FuzzyFilter-Modus: ViewPane + FuzzyPane unten (Form versteckt)
+        let content = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Fill(1), Constraint::Length(1)])
+            .split(rows[1]);
+        frame.render_widget(TasksViewPane::new(app), content[0]);
+        frame.render_widget(FuzzyPane::new(app), content[1]);
+    } else {
+        render_content(frame, rows[1], app);
+    }
 }
 
 fn render_content(frame: &mut Frame, area: Rect, app: &App) {
     let split_cfg = &app.config.layout.tasks.split;
     let form_open = app.tasks_state.form_visible();
-
     let term = frame.area();
 
-    let split_active = form_open && match split_cfg.split_type {
-        SplitType::Vertical   => term.width  >= split_cfg.vertical_threshold,
-        SplitType::Horizontal => term.height >= split_cfg.horizontal_threshold,
-    };
+    let split_active = form_open
+        && match split_cfg.split_type {
+            SplitType::Vertical => term.width >= split_cfg.vertical_threshold,
+            SplitType::Horizontal => term.height >= split_cfg.horizontal_threshold,
+        };
 
     if !split_active {
         if form_open {
@@ -49,7 +76,7 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     match split_cfg.split_type {
-        SplitType::Vertical   => render_vertical_split(frame, area, app),
+        SplitType::Vertical => render_vertical_split(frame, area, app),
         SplitType::Horizontal => render_horizontal_split(frame, area, app),
     }
 }
@@ -102,6 +129,6 @@ fn ordered_areas(
     use crate::config::SplitPane;
     match order.first() {
         Some(SplitPane::Form) => (second, first),
-        _                     => (first, second),
+        _ => (first, second),
     }
 }

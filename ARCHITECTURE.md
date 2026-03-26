@@ -305,3 +305,9 @@ Die Applikation arbeitet intern ausschließlich mit UTC. An den Grenzen zur Auß
 - **Explizite Zeitzonen:** Falls ein Nutzer künftig Zeiten mit Offset eingibt (z.B. `2026-03-22T10:00+05:30`),
   wird dieser Offset respektiert und nicht überschrieben.
 - **In der Datenbank** werden ausschließlich UTC-Werte gespeichert (`DateTimeUtc` in SeaORM-Entities).
+
+---
+
+## Architektur: Kommunikation zwischen Komponenten
+
+Es gilt konsequent: Widgets lesen &App, Mutations laufen ausschließlich über app.handle_key() → handle_tasks_action().

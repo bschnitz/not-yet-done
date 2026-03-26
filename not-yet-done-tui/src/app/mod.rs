@@ -107,18 +107,12 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: &str) -> bool {
-        // Tree filter input intercepts keys when Tree view is active and the
-        // filter input has focus (or the user starts typing in Tree view).
-        if self.active_tab == Tab::Tasks
-            && self.tasks_state.active_view == TasksView::Tree
-            && self.tasks_state.tree_filter_focused
-        {
-            if self.handle_tree_filter_key(key) {
-                return true;
-            }
+        // ── FuzzyFilter-Modus: alle Keys abfangen ────────────────────────
+        if self.active_tab == Tab::Tasks && self.tasks_state.fuzzy_active {
+            return self.handle_fuzzy_key(key);
         }
 
-        // Filter form intercepts keys first (when open)
+        // ── Filter form intercepts keys first (when open) ────────────────
         if self.active_tab == Tab::Tasks {
             if let Some(TasksForm::Filter) = self.tasks_state.active_form {
                 if self.handle_filter_key(key) {
@@ -127,7 +121,7 @@ impl App {
             }
         }
 
-        // Tasks actions
+        // ── Tasks actions ────────────────────────────────────────────────
         if self.active_tab == Tab::Tasks {
             if let Some(action) = self.resolve_tasks_key(key) {
                 self.handle_tasks_action(action);
@@ -135,7 +129,7 @@ impl App {
             }
         }
 
-        // Global actions (tab switching blocked while a form is open)
+        // ── Global actions (blocked while a form is open) ────────────────
         if let Some(action) = self.resolve_global_key(key) {
             match action {
                 GlobalAction::TabWelcome
@@ -149,59 +143,51 @@ impl App {
             return true;
         }
 
-        // When Tree view is active and no other handler consumed the key,
-        // printable characters activate and feed the tree filter input.
-        if self.active_tab == Tab::Tasks
-            && self.tasks_state.active_view == TasksView::Tree
-            && !self.tasks_state.form_visible()
-        {
-            if is_printable(key) {
-                self.tasks_state.tree_filter_focused = true;
-                let c = key.chars().next().unwrap();
-                self.tasks_state.tree_filter_insert(c);
-                return true;
-            }
-        }
-
         false
     }
 
     // -----------------------------------------------------------------------
-    // Tree filter key handling
+    // FuzzyFilter key handling
     // -----------------------------------------------------------------------
 
-    fn handle_tree_filter_key(&mut self, key: &str) -> bool {
+    fn handle_fuzzy_key(&mut self, key: &str) -> bool {
+        // Prüfe zuerst ob es der Exit-Key ist (konfigurierbar)
+        if let Some(exit_binding) = self.keybindings.tasks.get(&TasksAction::FuzzyFilterExit) {
+            if exit_binding.as_str() == key {
+                self.tasks_state.fuzzy_close();
+                return true;
+            }
+        }
+
         match key {
             "esc" => {
-                if self.tasks_state.tree_filter.is_empty() {
-                    self.tasks_state.tree_filter_focused = false;
+                // Esc: Query leeren oder Modus verlassen
+                if self.tasks_state.fuzzy_query.is_empty() {
+                    self.tasks_state.fuzzy_close();
                 } else {
-                    self.tasks_state.tree_filter_clear();
+                    self.tasks_state.fuzzy_query.clear();
+                    self.tasks_state.fuzzy_cursor = 0;
+                    self.tasks_state.tree_filter.clear();
                 }
-                return true;
-            }
-            "enter" => {
-                // Commit — keep focus but do nothing special (filter is live)
-                return true;
+                true
             }
             "backspace" => {
-                self.tasks_state.tree_filter_backspace();
-                // If the filter is now empty, release focus
-                if self.tasks_state.tree_filter.is_empty() {
-                    self.tasks_state.tree_filter_focused = false;
-                }
-                return true;
+                self.tasks_state.fuzzy_backspace();
+                true
             }
-            "left"  => { self.tasks_state.tree_filter_cursor_left();  return true; }
-            "right" => { self.tasks_state.tree_filter_cursor_right(); return true; }
+            "left"  => { self.tasks_state.fuzzy_cursor_left();  true }
+            "right" => { self.tasks_state.fuzzy_cursor_right(); true }
+            "enter" => {
+                // Live-Filter — kein extra Commit nötig
+                true
+            }
             ch if is_printable(ch) => {
                 let c = ch.chars().next().unwrap();
-                self.tasks_state.tree_filter_insert(c);
-                return true;
+                self.tasks_state.fuzzy_insert(c);
+                true
             }
-            _ => {}
+            _ => false,
         }
-        false
     }
 
     // -----------------------------------------------------------------------
@@ -335,8 +321,6 @@ impl App {
         match action {
             TasksAction::ViewList => {
                 self.tasks_state.active_view = TasksView::List;
-                // Release tree filter focus when switching away from Tree
-                self.tasks_state.tree_filter_focused = false;
             }
             TasksAction::ViewTree => {
                 self.tasks_state.active_view = TasksView::Tree;
@@ -345,6 +329,13 @@ impl App {
             TasksAction::FormAdd    => self.tasks_state.open_form(TasksForm::Add),
             TasksAction::FormDelete => self.tasks_state.open_form(TasksForm::Delete),
             TasksAction::FormClose  => self.tasks_state.close_form(),
+            TasksAction::FuzzyFilterOpen => {
+                // Öffnet FuzzyFilter; schließt ggf. offene Form-Dialoge
+                self.tasks_state.close_form();
+                self.tasks_state.fuzzy_open();
+            }
+            // FuzzyFilterExit wird direkt in handle_fuzzy_key behandelt
+            TasksAction::FuzzyFilterExit => {}
             TasksAction::ListNext   => self.tasks_state.select_next(20),
             TasksAction::ListPrev   => self.tasks_state.select_prev(),
         }

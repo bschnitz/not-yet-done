@@ -291,9 +291,15 @@ pub struct TasksState {
     pub active_form: Option<TasksForm>,
     pub filter: FilterState,
 
+    /// Query-String für die Tree-Ansicht (wird über den FuzzyFilter befüllt).
     pub tree_filter: String,
-    pub tree_filter_cursor: usize,
-    pub tree_filter_focused: bool,
+
+    /// FuzzyFilter-Modus aktiv (Tab [f] gedrückt).
+    pub fuzzy_active: bool,
+    /// Aktueller Eingabe-String im FuzzyFilter.
+    pub fuzzy_query: String,
+    /// Cursor-Position im FuzzyFilter-Eingabefeld.
+    pub fuzzy_cursor: usize,
 
     pub task_rows: Vec<not_yet_done_core::entity::task::Model>,
     pub forest: Option<TaskForest>,
@@ -309,8 +315,9 @@ impl TasksState {
             active_form: None,
             filter: FilterState::new(),
             tree_filter: String::new(),
-            tree_filter_cursor: 0,
-            tree_filter_focused: false,
+            fuzzy_active: false,
+            fuzzy_query: String::new(),
+            fuzzy_cursor: 0,
             task_rows: Vec::new(),
             forest: None,
             selected_row: 0,
@@ -331,51 +338,60 @@ impl TasksState {
         self.active_form = None;
     }
 
-    // ── Tree filter helpers ──────────────────────────────────────────────
+    // ── FuzzyFilter helpers ──────────────────────────────────────────────
 
-    pub fn tree_filter_insert(&mut self, c: char) {
-        let pos = self.tree_filter_cursor;
+    pub fn fuzzy_open(&mut self) {
+        self.fuzzy_active = true;
+        // Bestehende Query beibehalten, Cursor ans Ende
+        self.fuzzy_cursor = self.fuzzy_query.chars().count();
+    }
+
+    pub fn fuzzy_close(&mut self) {
+        self.fuzzy_active = false;
+        // Query in tree_filter übernehmen (wirkt als Tree-Filter)
+        self.tree_filter = self.fuzzy_query.clone();
+    }
+
+    pub fn fuzzy_insert(&mut self, c: char) {
+        let pos = self.fuzzy_cursor;
         let byte_pos = self
-            .tree_filter
+            .fuzzy_query
             .char_indices()
             .nth(pos)
             .map(|(i, _)| i)
-            .unwrap_or(self.tree_filter.len());
-        self.tree_filter.insert(byte_pos, c);
-        self.tree_filter_cursor += 1;
+            .unwrap_or(self.fuzzy_query.len());
+        self.fuzzy_query.insert(byte_pos, c);
+        self.fuzzy_cursor += 1;
+        self.tree_filter = self.fuzzy_query.clone();
     }
 
-    pub fn tree_filter_backspace(&mut self) {
-        if self.tree_filter_cursor == 0 || self.tree_filter.is_empty() {
+    pub fn fuzzy_backspace(&mut self) {
+        if self.fuzzy_cursor == 0 || self.fuzzy_query.is_empty() {
             return;
         }
-        let pos = self.tree_filter_cursor;
+        let pos = self.fuzzy_cursor;
         let byte_pos = self
-            .tree_filter
+            .fuzzy_query
             .char_indices()
             .nth(pos - 1)
             .map(|(i, _)| i)
             .unwrap_or(0);
-        self.tree_filter.remove(byte_pos);
-        self.tree_filter_cursor -= 1;
+        self.fuzzy_query.remove(byte_pos);
+        self.fuzzy_cursor -= 1;
+        self.tree_filter = self.fuzzy_query.clone();
     }
 
-    pub fn tree_filter_cursor_left(&mut self) {
-        if self.tree_filter_cursor > 0 {
-            self.tree_filter_cursor -= 1;
+    pub fn fuzzy_cursor_left(&mut self) {
+        if self.fuzzy_cursor > 0 {
+            self.fuzzy_cursor -= 1;
         }
     }
 
-    pub fn tree_filter_cursor_right(&mut self) {
-        let max = self.tree_filter.chars().count();
-        if self.tree_filter_cursor < max {
-            self.tree_filter_cursor += 1;
+    pub fn fuzzy_cursor_right(&mut self) {
+        let max = self.fuzzy_query.chars().count();
+        if self.fuzzy_cursor < max {
+            self.fuzzy_cursor += 1;
         }
-    }
-
-    pub fn tree_filter_clear(&mut self) {
-        self.tree_filter.clear();
-        self.tree_filter_cursor = 0;
     }
 
     // ── List navigation ──────────────────────────────────────────────────
@@ -443,11 +459,9 @@ pub fn build_rendered_table(
 
     let cols: Vec<ColumnId> = TREE_TABLE_COLS.iter().map(|s| ColumnId::new(*s)).collect();
 
-    // Tree column width: connector baseline + room for descriptions.
     let tree_min = forest.inner().tree_min_width(&query);
     let tree_col_width = (tree_min + 20).max(30).min(area_width * 3 / 5);
 
-    // 1. Tree cells (connector + description, fitted; highlights stored inside).
     let tree_rows = RenderableTree::tree_rows::<LocalUuid>(forest, &query, tree_col_width);
 
     if tree_rows.is_empty() {
@@ -458,13 +472,11 @@ pub fn build_rendered_table(
         };
     }
 
-    // 2. Data rows (non-tree columns), same order as tree_rows.
     let data_rows: Vec<Row<LocalUuid>> = tree_rows
         .iter()
         .filter_map(|tr| find_task_in_forest(forest, tr.id.0).map(|item| item.into_row()))
         .collect();
 
-    // 3. Header row.
     let header = {
         let mut cells = std::collections::HashMap::new();
         cells.insert(ColumnId::new(TREE_COLUMN), "Task".to_string());
@@ -477,7 +489,6 @@ pub fn build_rendered_table(
         }
     };
 
-    // 4. Layout.
     let sizer = MixedColSizer {
         strategies: {
             let mut m = std::collections::HashMap::new();
@@ -494,6 +505,5 @@ pub fn build_rendered_table(
         sizer: Box::new(sizer),
     };
 
-    // 5. Combine everything — highlights are returned separately in RenderedTable.
     render_table(tree_rows, data_rows, &layout, &cols, Some(header))
 }
