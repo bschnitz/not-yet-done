@@ -9,10 +9,9 @@
 //! Enter zeigt die gesammelten Werte an (simulierter Submit).
 //! Esc beendet.
 
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::{cursor::SetCursorStyle, event::{Event, KeyCode, KeyEventKind}, execute};
 use not_yet_done_ratatui::{
-    apply_cursor_style, CursorShape, CursorStyle, LineStyle,
-    TextInput, TextInputEvent, TextInputKeymap, TextInputState, TextInputStyle,
+    LineStyle, TextInput, TextInputEvent, TextInputKeymap, TextInputState, TextInputStyle,
 };
 
 use ratatui::{
@@ -153,7 +152,6 @@ fn make_style(is_active: bool) -> TextInputStyle {
             .input_style(LineStyle::default().fg(INPUT_FG).bg(INPUT_BG))
             .placeholder_color(PLACEHOLDER)
             .error_style(LineStyle::default().fg(ERROR_FG))
-            .cursor(CursorStyle::default()) // Bar, blinkend
     } else {
         TextInputStyle::new()
             .prefix_color(ACCENT)
@@ -278,26 +276,29 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
     }
 
     // Aktives Widget nochmal konstruieren um cursor_position zu berechnen
-    let active_area = match app.active {
-        Field::Hostname => chunks[2],
-        Field::Port     => chunks[4],
-        Field::ApiKey   => chunks[6],
-    };
     let active_state = match app.active {
         Field::Hostname => &app.hostname,
         Field::Port     => &app.port,
         Field::ApiKey   => &app.api_key,
     };
-    let active_widget = TextInput::new("").width(inner.width);
-    let pos = active_widget.cursor_position(active_area, active_state);
-    frame.set_cursor_position(pos);
+
+    if !active_state.value().is_empty() {
+        let active_area = match app.active {
+            Field::Hostname => chunks[2],
+            Field::Port     => chunks[4],
+            Field::ApiKey   => chunks[6],
+        };
+        let active_widget = TextInput::new("").width(inner.width);
+        let pos = active_widget.cursor_position(active_area, active_state);
+        frame.set_cursor_position(pos);
+    }
 }
 
 // ── Main Loop ─────────────────────────────────────────────────────────────────
 
 fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
     // Cursor-Style einmalig setzen
-    apply_cursor_style(&CursorStyle::default())?;
+    execute!(std::io::stdout(), SetCursorStyle::BlinkingBar)?;
 
     let keymap = TextInputKeymap::default();
     let mut app = App::new();
@@ -349,7 +350,6 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                     let state = app.state_mut(active);
                     if let TextInputEvent::Changed(_) = state.handle_event(&event, &keymap) {
                         // Live-Validierung bei jeder Änderung
-                        drop(state); // borrow beenden
                         app.validate_field(active);
                     }
                 }

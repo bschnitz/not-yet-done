@@ -2,44 +2,26 @@ pub mod keymap;
 pub mod state;
 pub mod style;
 
-pub use keymap::{KeyBinding, TextInputKeymap};
+pub use keymap::TextInputKeymap;
 pub use state::{TextInputEvent, TextInputState};
-pub use style::{hex_color, CursorShape, CursorStyle, LineStyle, TextInputStyle};
+pub use style::TextInputStyle;
 
-use ratatui::crossterm::execute;
-use ratatui::crossterm::cursor::{
-    SetCursorStyle as CrosstermCursorStyle,
-};
-
-pub fn apply_cursor_style(cursor: &CursorStyle) -> std::io::Result<()> {
-    let ct_style = match (&cursor.shape, cursor.blinking) {
-        (CursorShape::Block,     true)  => CrosstermCursorStyle::BlinkingBlock,
-        (CursorShape::Block,     false) => CrosstermCursorStyle::SteadyBlock,
-        (CursorShape::Bar,       true)  => CrosstermCursorStyle::BlinkingBar,
-        (CursorShape::Bar,       false) => CrosstermCursorStyle::SteadyBar,
-        (CursorShape::Underline, true)  => CrosstermCursorStyle::BlinkingUnderScore,
-        (CursorShape::Underline, false) => CrosstermCursorStyle::SteadyUnderScore,
-    };
-    execute!(std::io::stdout(), ct_style)
-}
+use crate::widgets::common::{render_prefixed_line, truncate_to_width, LineStyle, PREFIX_LEN};
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     widgets::Widget,
 };
 
-const PREFIX: &str = "▍ ";
-const PREFIX_LEN: u16 = 2;
-
 #[derive(Debug, Clone)]
 pub struct TextInput<'a> {
-    pub title: &'a str,
+    pub title:       &'a str,
     pub placeholder: &'a str,
-    pub width: Option<u16>,
-    pub style: TextInputStyle,
-    pub keymap: TextInputKeymap,
+    pub width:       Option<u16>,
+    pub style:       TextInputStyle,
+    pub keymap:      TextInputKeymap,
 }
 
 impl<'a> TextInput<'a> {
@@ -86,9 +68,10 @@ impl<'a> TextInput<'a> {
             text_width,
             &self.style.prefix_color,
             &self.style.title_style,
+            false,
         );
 
-        // Zeile 1: Eingabe — Placeholder bekommt eigene Farbe
+        // Zeile 1: Eingabe
         let input_text = if state.value.is_empty() {
             self.placeholder
         } else {
@@ -115,6 +98,7 @@ impl<'a> TextInput<'a> {
             text_width,
             &self.style.prefix_color,
             &effective_input_style,
+            false,
         );
 
         // Zeile 2: Fehler
@@ -133,8 +117,6 @@ impl<'a> TextInput<'a> {
         }
     }
 
-    /// Gibt die Terminal-Cursor-Position zurück — vom Aufrufer per
-    /// `frame.set_cursor_position()` zu setzen, wenn das Feld aktiv ist.
     pub fn cursor_position(&self, area: Rect, state: &TextInputState) -> (u16, u16) {
         let chars_before = state.value[..state.cursor].chars().count();
         let total_width = self.width.unwrap_or(area.width);
@@ -151,58 +133,7 @@ impl Widget for TextInput<'_> {
     }
 }
 
-fn render_prefixed_line(
-    buf: &mut Buffer,
-    x: u16, y: u16,
-    total_width: u16,
-    text: &str,
-    text_width: usize,
-    prefix_color: &Option<Color>,
-    line_style: &LineStyle,
-) {
-    // Hintergrund über gesamte Breite
-    if let Some(bg) = line_style.bg {
-        for dx in 0..total_width {
-            if let Some(cell) = buf.cell_mut((x + dx, y)) {
-                cell.set_bg(bg);
-            }
-        }
-    }
-
-    // Prefix
-    let mut px = x;
-    for ch in PREFIX.chars() {
-        if let Some(cell) = buf.cell_mut((px, y)) {
-            let mut s = Style::default();
-            if let Some(fg) = prefix_color {
-                s = s.fg(*fg);
-            }
-            if let Some(bg) = line_style.bg {
-                s = s.bg(bg);
-            }
-            cell.set_char(ch);
-            cell.set_style(s);
-        }
-        px += 1;
-    }
-
-    // Text
-    for ch in truncate_to_width(text, text_width).chars() {
-        if let Some(cell) = buf.cell_mut((px, y)) {
-            let mut s = Style::default();
-            if let Some(fg) = line_style.fg {
-                s = s.fg(fg);
-            }
-            if let Some(bg) = line_style.bg {
-                s = s.bg(bg);
-            }
-            cell.set_char(ch);
-            cell.set_style(s);
-        }
-        px += 1;
-    }
-}
-
+/// Zeile ohne Prefix – nur für die Fehlerzeile des TextInput.
 fn render_plain_line(
     buf: &mut Buffer,
     x: u16, y: u16,
@@ -233,17 +164,4 @@ fn render_plain_line(
         }
         px += 1;
     }
-}
-
-fn truncate_to_width(s: &str, max_chars: usize) -> &str {
-    let mut count = 0;
-    let mut byte_pos = 0;
-    for ch in s.chars() {
-        if count >= max_chars {
-            break;
-        }
-        count += 1;
-        byte_pos += ch.len_utf8();
-    }
-    &s[..byte_pos]
 }

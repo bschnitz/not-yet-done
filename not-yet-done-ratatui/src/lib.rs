@@ -1,16 +1,22 @@
 pub mod widgets;
 
+// --- gemeinsame Primitives ---
+pub use widgets::common::{hex_color, KeyBinding, LineStyle};
+
+// --- text_input ---
 pub use widgets::text_input::{
     TextInput,
-    TextInputState,
-    TextInputStyle,
     TextInputEvent,
     TextInputKeymap,
-    LineStyle,
-    KeyBinding,
-    CursorStyle,
-    CursorShape,
-    apply_cursor_style,
-    hex_color,
+    TextInputState,
+    TextInputStyle,
 };
 
+// --- multi_choice ---
+pub use widgets::multi_choice::{
+    MultiChoice,
+    MultiChoiceEvent,
+    MultiChoiceKeymap,
+    MultiChoiceState,
+    MultiChoiceStyle,
+};

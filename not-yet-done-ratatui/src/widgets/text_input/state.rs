@@ -1,5 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use super::keymap::{KeyBinding, TextInputKeymap};
+use crate::widgets::common::keymap::KeyBinding;
+use super::keymap::TextInputKeymap;
 
 #[derive(Debug, Clone)]
 pub enum TextInputEvent {
