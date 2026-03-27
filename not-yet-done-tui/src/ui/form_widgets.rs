@@ -1,5 +1,3 @@
-// not-yet-done-tui/src/ui/form_widgets.rs
-//
 // Theme adapter — translates `Theme` into the style types expected by
 // `ratatui-form-widgets`.  Keep all widget-crate imports here so the rest
 // of the TUI crate never needs to know about `TextFieldStyle` etc.

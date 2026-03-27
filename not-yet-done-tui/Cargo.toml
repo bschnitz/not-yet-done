@@ -23,4 +23,4 @@ fuzzy-matcher        = { workspace = true }
 unicode-width        = { workspace = true }
 not-yet-done-core    = { path = "../not-yet-done-core" }
 not-yet-done-forest  = { path = "../not-yet-done-forest" }
-ratatui-form-widgets = { path = "../ratatui-form-widgets" }
+ratatui-form-widgets = { path = "../ratatui_form_widgets" }

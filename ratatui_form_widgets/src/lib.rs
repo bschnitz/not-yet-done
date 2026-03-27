@@ -1,5 +1,3 @@
-// ratatui-form-widgets/src/lib.rs
-
 mod multiple_choice;
 mod text_field;
 mod toggle_field;

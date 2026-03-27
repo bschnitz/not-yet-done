@@ -5,8 +5,10 @@ members = [
   "not-yet-done-core",
   "not-yet-done-tui",
   "not-yet-done-macros",
-  "ratatui-form-widgets"
-, "not-yet-done-forest"]
+  "not-yet-done-forest",
+  "not-yet-done-ratatui",
+  "ratatui_form_widgets"
+]
 
 [workspace.dependencies]
 sea-orm = { version = "2.0.0-rc", features = [
@@ -38,3 +40,4 @@ fuzzy-matcher = "0.3.7"
 unicode-width = "0.2.2"
 not-yet-done-macros = { path = "not-yet-done-macros" }
 not-yet-done-forest = { path = "not-yet-done-forest" }
+not-yet-done-ratatui = { path = "../not-yet-done-ratatui" }
