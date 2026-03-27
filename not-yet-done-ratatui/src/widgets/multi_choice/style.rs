@@ -1,17 +1,43 @@
-use ratatui::style::Color;
-use crate::widgets::common::LineStyle;
+use ratatui::style::{Color, Style};
+
+/// Enum für die verschiedenen Zustände eines MultiChoice-Eintrags.
+#[repr(u8)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultiChoiceStyleType {
+    /// Titelzeile
+    Title = 0,
+    /// Nicht ausgewählt, nicht aktiv (collapsed)
+    Normal = 1,
+    /// Ausgewählt (collapsed)
+    Active = 2,
+    /// Nicht ausgewählt (expanded)
+    Selected = 3,
+    /// Ausgewählt (expanded)
+    SelectedActive = 4,
+    /// Line after MC
+    LastLine = 5,
+}
+
+impl MultiChoiceStyleType {
+    const COUNT: usize = 6;
+}
 
 /// Styling-Konfiguration für das MultiChoice-Widget.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MultiChoiceStyle {
     /// Farbe des Prefix-Balkens (`▍ `)
-    pub prefix_color:     Option<Color>,
-    /// Stil der Titelzeile
-    pub title_style:      LineStyle,
-    /// Stil einer *nicht* ausgewählten Choice (collapsed + expanded)
-    pub item_style:       LineStyle,
-    /// Stil einer *ausgewählten* Choice (collapsed + expanded)
-    pub item_selected_style: LineStyle,
+    pub prefix_color: Option<Color>,
+    /// Linienstile je Zustand
+    pub styles: [Style; MultiChoiceStyleType::COUNT],
+}
+
+impl Default for MultiChoiceStyle {
+    fn default() -> Self {
+        Self {
+            prefix_color: None,
+            styles: core::array::from_fn(|_| Style::default()),
+        }
+    }
 }
 
 impl MultiChoiceStyle {
@@ -24,18 +50,12 @@ impl MultiChoiceStyle {
         self
     }
 
-    pub fn title_style(mut self, style: LineStyle) -> Self {
-        self.title_style = style;
+    pub fn set_style(mut self, style_type: MultiChoiceStyleType, style: Style) -> Self {
+        self.styles[style_type as usize] = style;
         self
     }
 
-    pub fn item_style(mut self, style: LineStyle) -> Self {
-        self.item_style = style;
-        self
-    }
-
-    pub fn item_selected_style(mut self, style: LineStyle) -> Self {
-        self.item_selected_style = style;
-        self
+    pub fn style(&self, style_type: MultiChoiceStyleType) -> &Style {
+        &self.styles[style_type as usize]
     }
 }

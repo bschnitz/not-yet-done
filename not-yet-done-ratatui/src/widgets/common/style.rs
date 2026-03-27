@@ -1,23 +1,5 @@
 use ratatui::style::Color;
 
-#[derive(Debug, Clone, Default)]
-pub struct LineStyle {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-}
-
-impl LineStyle {
-    pub fn fg(mut self, color: Color) -> Self {
-        self.fg = Some(color);
-        self
-    }
-
-    pub fn bg(mut self, color: Color) -> Self {
-        self.bg = Some(color);
-        self
-    }
-}
-
 /// "#RRGGBB" → Color::Rgb
 pub fn hex_color(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');

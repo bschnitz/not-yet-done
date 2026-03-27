@@ -1,6 +1,6 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use crate::widgets::common::keymap::KeyBinding;
 use super::keymap::TextInputKeymap;
+use crate::widgets::common::keymap::KeyBinding;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone)]
 pub enum TextInputEvent {
@@ -32,12 +32,11 @@ impl TextInputState {
         &self.value
     }
 
-    pub fn handle_event(
-        &mut self,
-        event: &Event,
-        keymap: &TextInputKeymap,
-    ) -> TextInputEvent {
-        let Event::Key(KeyEvent { code, modifiers, .. }) = event else {
+    pub fn handle_event(&mut self, event: &Event, keymap: &TextInputKeymap) -> TextInputEvent {
+        let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event
+        else {
             return TextInputEvent::Ignored;
         };
 

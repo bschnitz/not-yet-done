@@ -1,5 +1,5 @@
+use crate::{widgets::common::keymap::KeyBinding, MultiChoiceKeymap};
 use crossterm::event::{Event, KeyEvent};
-use crate::{MultiChoiceKeymap, widgets::common::keymap::KeyBinding};
 
 /// Events, die das Widget an die App zurückgibt.
 #[derive(Debug, Clone)]
@@ -58,13 +58,12 @@ impl MultiChoiceState {
 
     /// Verarbeitet ein Terminal-Event gemäß dem konfigurierten Keymap.
     /// Gibt zurück, was sich geändert hat.
-    pub fn handle_event(
-        &mut self,
-        event: &Event,
-        keymap: &MultiChoiceKeymap
-    ) -> MultiChoiceEvent {
+    pub fn handle_event(&mut self, event: &Event, keymap: &MultiChoiceKeymap) -> MultiChoiceEvent {
         // Nur Key-Events interessieren uns
-        let Event::Key(KeyEvent { code, modifiers, .. }) = event else {
+        let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event
+        else {
             return MultiChoiceEvent::Ignored;
         };
 

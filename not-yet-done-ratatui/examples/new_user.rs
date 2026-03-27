@@ -1,9 +1,9 @@
-//! Beispiel: "New Server" Formular
+//! Beispiel: "New User Profile" Formular
 //!
 //! Felder:
-//!   • Hostname  — darf nicht leer sein, keine Leerzeichen
-//!   • Port      — muss eine Zahl 1–65535 sein
-//!   • API Key   — mindestens 8 Zeichen
+//!   • Rolle       — Mehrfachauswahl aus ["Admin", "Editor", "Viewer", "Guest"]
+//!   • Benutzername — mindestens 3 Zeichen
+//!   • E-Mail      — muss ein gültiges E-Mail-Format haben
 //!
 //! Tab / Shift+Tab wechselt das aktive Feld.
 //! Enter zeigt die gesammelten Werte an (simulierter Submit).
@@ -15,7 +15,9 @@ use crossterm::{
     execute,
 };
 use not_yet_done_ratatui::{
-    TextInput, TextInputEvent, TextInputKeymap, TextInputState, TextInputStyle, TextInputStyleType,
+    MultiChoice, MultiChoiceEvent, MultiChoiceKeymap, MultiChoiceState, MultiChoiceStyle,
+    MultiChoiceStyleType, TextInput, TextInputEvent, TextInputKeymap, TextInputState,
+    TextInputStyle, TextInputStyleType,
 };
 
 use ratatui::{
@@ -34,6 +36,8 @@ const ACCENT: Color = Color::Rgb(100, 180, 255); // hellblau — Prefix & Titel
 const INPUT_FG: Color = Color::Rgb(230, 230, 255); // Eingabetext
 const INPUT_BG: Color = Color::Rgb(28, 28, 50); // Eingabe-Hintergrund
 const PLACEHOLDER: Color = Color::Rgb(80, 80, 110); // gedimmter Placeholder-Text
+const SELECTED_MC_BG: Color = Color::Rgb(35, 45, 65);
+const ACTIVE_INPUT_FG: Color = Color::Rgb(255, 215, 0);
 
 const ERROR_FG: Color = Color::Rgb(255, 100, 80); // Rot für Fehler
 const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180); // Grün für aktives Feld
@@ -45,87 +49,74 @@ const DIM: Color = Color::Rgb(80, 80, 110);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
-    Hostname,
-    Port,
-    ApiKey,
+    Role,
+    Username,
+    Email,
 }
 
 impl Field {
     fn next(self) -> Self {
         match self {
-            Self::Hostname => Self::Port,
-            Self::Port => Self::ApiKey,
-            Self::ApiKey => Self::Hostname,
+            Self::Role => Self::Username,
+            Self::Username => Self::Email,
+            Self::Email => Self::Role,
         }
     }
     fn prev(self) -> Self {
         match self {
-            Self::Hostname => Self::ApiKey,
-            Self::Port => Self::Hostname,
-            Self::ApiKey => Self::Port,
+            Self::Role => Self::Email,
+            Self::Username => Self::Role,
+            Self::Email => Self::Username,
         }
     }
 }
 
 struct App {
     active: Field,
-    hostname: TextInputState,
-    port: TextInputState,
-    api_key: TextInputState,
+    role: MultiChoiceState,
+    username: TextInputState,
+    email: TextInputState,
     submitted: Option<String>, // gesammelter Submit-Text
 }
 
 impl App {
     fn new() -> Self {
         Self {
-            active: Field::Hostname,
-            hostname: TextInputState::new(),
-            port: TextInputState::new(),
-            api_key: TextInputState::new(),
+            active: Field::Role,
+            role: MultiChoiceState::new(4),
+            username: TextInputState::new(),
+            email: TextInputState::new(),
             submitted: None,
         }
     }
 
-    fn state_mut(&mut self, f: Field) -> &mut TextInputState {
+    fn state_mut(&mut self, f: Field) -> &mut dyn std::any::Any {
         match f {
-            Field::Hostname => &mut self.hostname,
-            Field::Port => &mut self.port,
-            Field::ApiKey => &mut self.api_key,
+            Field::Role => &mut self.role as &mut dyn std::any::Any,
+            Field::Username => &mut self.username as &mut dyn std::any::Any,
+            Field::Email => &mut self.email as &mut dyn std::any::Any,
         }
     }
 
     fn validate_all(&mut self) -> bool {
         let mut ok = true;
 
-        // Hostname
-        let h = self.hostname.value().to_string();
-        if h.is_empty() {
-            self.hostname.set_error("Hostname darf nicht leer sein");
-            ok = false;
-        } else if h.contains(' ') {
-            self.hostname.set_error("Keine Leerzeichen erlaubt");
+        // Benutzername
+        let u = self.username.value().to_string();
+        if u.len() < 3 {
+            self.username.set_error("Mindestens 3 Zeichen erforderlich");
             ok = false;
         } else {
-            self.hostname.clear_error();
+            self.username.clear_error();
         }
 
-        // Port
-        let p = self.port.value().to_string();
-        match p.parse::<u16>() {
-            Ok(n) if n >= 1 => self.port.clear_error(),
-            _ => {
-                self.port.set_error("Muss eine Zahl 1–65535 sein");
-                ok = false;
-            }
-        }
-
-        // API Key
-        let k = self.api_key.value().to_string();
-        if k.len() < 8 {
-            self.api_key.set_error("Mindestens 8 Zeichen erforderlich");
+        // E-Mail
+        let e = self.email.value().to_string();
+        if !e.contains('@') || !e.contains('.') {
+            self.email.set_error("Ungültiges E-Mail-Format");
             ok = false;
         } else {
-            self.api_key.clear_error();
+            self.email.clear_error();
         }
 
         ok
@@ -133,34 +124,27 @@ impl App {
 
     fn validate_field(&mut self, f: Field) {
         match f {
-            Field::Hostname => {
-                let h = self.hostname.value().to_string();
-                if h.is_empty() || h.contains(' ') {
-                    // Fehler erst beim Submit, beim Tippen nur löschen
+            Field::Username => {
+                let u = self.username.value().to_string();
+                if u.is_empty() {
+                    self.username.clear_error();
+                } else if u.len() < 3 {
+                    self.username.set_error("Mindestens 3 Zeichen erforderlich");
                 } else {
-                    self.hostname.clear_error();
+                    self.username.clear_error();
                 }
             }
-            Field::Port => {
-                let p = self.port.value().to_string();
-                if p.is_empty() {
-                    self.port.clear_error();
-                } else if p.parse::<u16>().map(|n| n < 1).unwrap_or(true) {
-                    self.port.set_error("Muss eine Zahl 1–65535 sein");
+            Field::Email => {
+                let e = self.email.value().to_string();
+                if e.is_empty() {
+                    self.email.clear_error();
+                } else if !e.contains('@') || !e.contains('.') {
+                    self.email.set_error("Ungültiges E-Mail-Format");
                 } else {
-                    self.port.clear_error();
+                    self.email.clear_error();
                 }
             }
-            Field::ApiKey => {
-                let k = self.api_key.value().to_string();
-                if k.is_empty() {
-                    self.api_key.clear_error();
-                } else if k.len() < 8 {
-                    self.api_key.set_error("Mindestens 8 Zeichen erforderlich");
-                } else {
-                    self.api_key.clear_error();
-                }
-            }
+            Field::Role => {}
         }
     }
 }
@@ -188,6 +172,40 @@ fn make_style(is_active: bool) -> TextInputStyle {
             .set_style(TextInputStyleType::Input, Style::default().fg(INPUT_FG))
             .placeholder_color(Color::Rgb(45, 45, 65))
             .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
+    }
+}
+
+fn make_mc_style(is_active: bool) -> MultiChoiceStyle {
+    if is_active {
+        MultiChoiceStyle::new()
+            .prefix_color(ACTIVE_ACCENT)
+            // Titel
+            .set_style(
+                MultiChoiceStyleType::Title,
+                Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG),
+            )
+            // Einträge
+            .set_style(
+                MultiChoiceStyleType::Normal,
+                Style::default().fg(INPUT_FG).bg(INPUT_BG),
+            )
+            .set_style(
+                MultiChoiceStyleType::Active,
+                Style::default().fg(ACTIVE_INPUT_FG).bg(INPUT_BG),
+            )
+            .set_style(
+                MultiChoiceStyleType::Selected,
+                Style::default().fg(INPUT_FG).bg(SELECTED_MC_BG),
+            )
+            .set_style(
+                MultiChoiceStyleType::SelectedActive,
+                Style::default().fg(ACTIVE_INPUT_FG).bg(SELECTED_MC_BG),
+            )
+    } else {
+        MultiChoiceStyle::new()
+            .prefix_color(ACCENT)
+            // Titel
+            .set_style(MultiChoiceStyleType::Title, Style::default().fg(ACCENT))
     }
 }
 
@@ -220,11 +238,11 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         .constraints([
             Constraint::Length(1), // Überschrift
             Constraint::Length(1), // Leerzeile
-            Constraint::Length(3), // Hostname
+            Constraint::Length(3), // Rolle (MC, immer 3 Zeilen!)
             Constraint::Length(1), // Abstand
-            Constraint::Length(3), // Port
+            Constraint::Length(3), // Benutzername
             Constraint::Length(1), // Abstand
-            Constraint::Length(3), // API Key
+            Constraint::Length(3), // E-Mail
             Constraint::Length(1), // Abstand
             Constraint::Length(1), // Submit-Button
             Constraint::Min(0),    // Rest
@@ -235,36 +253,47 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("✦ ", Style::default().fg(ACTIVE_ACCENT)),
-            Span::styled("New Server", Style::default().fg(ACCENT).bold()),
+            Span::styled("New User Profile", Style::default().fg(ACCENT).bold()),
         ])),
         chunks[0],
     );
 
     // Widgets rendern
     let keymap = TextInputKeymap::default();
-
+    let mc_keymap = MultiChoiceKeymap::default();
     let widget_width = inner.width;
 
-    TextInput::new("Hostname")
-        .placeholder("z.B. api.example.com")
-        .width(widget_width)
-        .style(make_style(app.active == Field::Hostname))
-        .keymap(keymap.clone())
-        .render_with_state(chunks[2], frame.buffer_mut(), &app.hostname);
+    // Rolle (MultiChoice)
+    let roles = ["Admin", "Editor", "Viewer", "Guest"];
+    let mc_area = chunks[2];
 
-    TextInput::new("Port")
-        .placeholder("z.B. 8080")
+    // Benutzername
+    TextInput::new("Benutzername")
+        .placeholder("mind. 3 Zeichen")
         .width(widget_width)
-        .style(make_style(app.active == Field::Port))
+        .style(make_style(app.active == Field::Username))
         .keymap(keymap.clone())
-        .render_with_state(chunks[4], frame.buffer_mut(), &app.port);
+        .render_with_state(chunks[4], frame.buffer_mut(), &app.username);
 
-    TextInput::new("API Key")
-        .placeholder("min. 8 Zeichen")
+    MultiChoice::new("Rolle", &roles)
+        .placeholder("Wähle eine oder mehrere Rollen")
+        .style(make_mc_style(app.active == Field::Role))
+        .keymap(mc_keymap.clone())
+        .render_with_state(
+            mc_area.x,
+            mc_area.y,
+            mc_area.width,
+            frame.buffer_mut(),
+            &app.role,
+        );
+
+    // E-Mail
+    TextInput::new("E-Mail")
+        .placeholder("z.B. user@example.com")
         .width(widget_width)
-        .style(make_style(app.active == Field::ApiKey))
+        .style(make_style(app.active == Field::Email))
         .keymap(keymap.clone())
-        .render_with_state(chunks[6], frame.buffer_mut(), &app.api_key);
+        .render_with_state(chunks[6], frame.buffer_mut(), &app.email);
 
     // Submit-Button
     let btn_text = "  [ Enter → Submit ]  ";
@@ -309,22 +338,25 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         );
     }
 
-    // Aktives Widget nochmal konstruieren um cursor_position zu berechnen
-    let active_state = match app.active {
-        Field::Hostname => &app.hostname,
-        Field::Port => &app.port,
-        Field::ApiKey => &app.api_key,
-    };
-
-    if !active_state.value().is_empty() {
-        let active_area = match app.active {
-            Field::Hostname => chunks[2],
-            Field::Port => chunks[4],
-            Field::ApiKey => chunks[6],
+    // Aktives Widget: Cursor-Position
+    if app.active == Field::Role && app.role.open {
+        // TODO: MC-Cursor-Position
+    } else if app.active != Field::Role {
+        let active_state = match app.active {
+            Field::Username => &app.username,
+            Field::Email => &app.email,
+            _ => return,
         };
-        let active_widget = TextInput::new("").width(inner.width);
-        let pos = active_widget.cursor_position(active_area, active_state);
-        frame.set_cursor_position(pos);
+        if !active_state.value().is_empty() {
+            let active_area = match app.active {
+                Field::Username => chunks[4],
+                Field::Email => chunks[6],
+                _ => return,
+            };
+            let active_widget = TextInput::new("").width(inner.width);
+            let pos = active_widget.cursor_position(active_area, active_state);
+            frame.set_cursor_position(pos);
+        }
     }
 }
 
@@ -335,6 +367,7 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
     execute!(std::io::stdout(), SetCursorStyle::BlinkingBar)?;
 
     let keymap = TextInputKeymap::default();
+    let mc_keymap = MultiChoiceKeymap::default();
     let mut app = App::new();
 
     loop {
@@ -362,18 +395,37 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
 
                 KeyCode::Tab => {
                     app.active = app.active.next();
+                    if app.active == Field::Role {
+                        app.role.open();
+                    } else {
+                        app.role.close();
+                    }
                 }
                 KeyCode::BackTab => {
                     app.active = app.active.prev();
+                    if app.active == Field::Role {
+                        app.role.open();
+                    } else {
+                        app.role.close();
+                    }
                 }
 
                 KeyCode::Enter => {
-                    if app.validate_all() {
+                    if app.active == Field::Role {
+                        app.role.open = !app.role.open;
+                    } else if app.validate_all() {
+                        let selected_roles = app
+                            .role
+                            .selected_indices()
+                            .into_iter()
+                            .map(|i| ["Admin", "Editor", "Viewer", "Guest"][i])
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         app.submitted = Some(format!(
-                            "\n  Hostname : {}\n  Port     : {}\n  API Key  : {}\n\n  (beliebige Taste schließt)",
-                            app.hostname.value(),
-                            app.port.value(),
-                            app.api_key.value(),
+                            "\n  Rolle      : {}\n  Benutzername: {}\n  E-Mail     : {}\n\n  (beliebige Taste schließt)",
+                            selected_roles,
+                            app.username.value(),
+                            app.email.value(),
                         ));
                     }
                 }
@@ -381,10 +433,21 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                 _ => {
                     // Aktives Feld bekommt den Event
                     let active = app.active;
-                    let state = app.state_mut(active);
-                    if let TextInputEvent::Changed(_) = state.handle_event(&event, &keymap) {
-                        // Live-Validierung bei jeder Änderung
-                        app.validate_field(active);
+                    if active == Field::Role {
+                        if let MultiChoiceEvent::SelectionChanged(_) =
+                            app.role.handle_event(&event, &mc_keymap)
+                        {
+                            // Auswahl geändert
+                        }
+                    } else {
+                        let state = app
+                            .state_mut(active)
+                            .downcast_mut::<TextInputState>()
+                            .unwrap();
+                        if let TextInputEvent::Changed(_) = state.handle_event(&event, &keymap) {
+                            // Live-Validierung bei jeder Änderung
+                            app.validate_field(active);
+                        }
                     }
                 }
             }

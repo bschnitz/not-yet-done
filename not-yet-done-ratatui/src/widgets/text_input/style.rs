@@ -1,13 +1,40 @@
-use ratatui::style::Color;
-use crate::widgets::common::LineStyle;
+use ratatui::style::{Color, Style};
 
-#[derive(Debug, Clone, Default)]
+/// Enum für die verschiedenen Zustände eines TextInput-Elements.
+#[repr(u8)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextInputStyleType {
+    /// Titelzeile
+    Title = 0,
+    /// Eingabezeile
+    Input = 1,
+    /// Fehlerzeile
+    Error = 2,
+}
+
+impl TextInputStyleType {
+    const COUNT: usize = 3;
+}
+
+/// Styling-Konfiguration für das TextInput-Widget.
+#[derive(Debug, Clone)]
 pub struct TextInputStyle {
-    pub prefix_color:      Option<Color>,
-    pub title_style:       LineStyle,
-    pub input_style:       LineStyle,
-    pub error_style:       LineStyle,
+    /// Farbe des Prefix-Balkens (`▍ `)
+    pub prefix_color: Option<Color>,
+    /// Farben je Zustand
+    pub styles: [Style; TextInputStyleType::COUNT],
+    /// Placeholder-Farbe
     pub placeholder_color: Option<Color>,
+}
+
+impl Default for TextInputStyle {
+    fn default() -> Self {
+        Self {
+            prefix_color: None,
+            styles: core::array::from_fn(|_| Style::default()),
+            placeholder_color: None,
+        }
+    }
 }
 
 impl TextInputStyle {
@@ -20,19 +47,13 @@ impl TextInputStyle {
         self
     }
 
-    pub fn title_style(mut self, style: LineStyle) -> Self {
-        self.title_style = style;
+    pub fn set_style(mut self, style_type: TextInputStyleType, style: Style) -> Self {
+        self.styles[style_type as usize] = style;
         self
     }
 
-    pub fn input_style(mut self, style: LineStyle) -> Self {
-        self.input_style = style;
-        self
-    }
-
-    pub fn error_style(mut self, style: LineStyle) -> Self {
-        self.error_style = style;
-        self
+    pub fn style(&self, style_type: TextInputStyleType) -> &Style {
+        &self.styles[style_type as usize]
     }
 
     pub fn placeholder_color(mut self, color: Color) -> Self {

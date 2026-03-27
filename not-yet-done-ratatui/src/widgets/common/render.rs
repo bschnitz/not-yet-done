@@ -1,8 +1,10 @@
-use ratatui::{buffer::Buffer, style::{Color, Style}};
-use super::style::LineStyle;
+use ratatui::{
+    buffer::Buffer,
+    style::{Color, Style},
+};
 
 pub const PREFIX: &str = "▍ ";
-pub const PREFIX_CURSOR: &str = "▶ ";
+pub const PREFIX_CURSOR: &str = "▍▶";
 pub const PREFIX_LEN: u16 = 2;
 
 /// Rendert eine Zeile mit Prefix (`▍ ` oder `▶ `) und anschließendem Text.
@@ -12,12 +14,13 @@ pub const PREFIX_LEN: u16 = 2;
 /// - `line_style`: Farben für Text und Hintergrund der gesamten Zeile.
 pub fn render_prefixed_line(
     buf: &mut Buffer,
-    x: u16, y: u16,
+    x: u16,
+    y: u16,
     total_width: u16,
     text: &str,
     text_width: usize,
     prefix_color: &Option<Color>,
-    line_style: &LineStyle,
+    line_style: &Style,
     highlight_cursor: bool,
 ) {
     // Hintergrund über gesamte Breite
@@ -30,7 +33,11 @@ pub fn render_prefixed_line(
     }
 
     // Prefix
-    let prefix = if highlight_cursor { PREFIX_CURSOR } else { PREFIX };
+    let prefix = if highlight_cursor {
+        PREFIX_CURSOR
+    } else {
+        PREFIX
+    };
     let mut px = x;
     for ch in prefix.chars() {
         if let Some(cell) = buf.cell_mut((px, y)) {
@@ -58,6 +65,22 @@ pub fn render_prefixed_line(
                 s = s.bg(bg);
             }
             cell.set_char(ch);
+            cell.set_style(s);
+        }
+        px += 1;
+    }
+
+    // Padding: Rest der Zeile mit Leerzeichen auffüllen
+    while px < x + total_width {
+        if let Some(cell) = buf.cell_mut((px, y)) {
+            let mut s = Style::default();
+            if let Some(fg) = line_style.fg {
+                s = s.fg(fg);
+            }
+            if let Some(bg) = line_style.bg {
+                s = s.bg(bg);
+            }
+            cell.set_char(' ');
             cell.set_style(s);
         }
         px += 1;

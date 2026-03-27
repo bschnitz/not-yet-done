@@ -4,24 +4,19 @@ pub mod style;
 
 pub use keymap::TextInputKeymap;
 pub use state::{TextInputEvent, TextInputState};
-pub use style::TextInputStyle;
+pub use style::{TextInputStyle, TextInputStyleType};
 
-use crate::widgets::common::{render_prefixed_line, truncate_to_width, LineStyle, PREFIX_LEN};
+use crate::widgets::common::{render_prefixed_line, truncate_to_width, PREFIX_LEN};
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Style,
-    widgets::Widget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
 
 #[derive(Debug, Clone)]
 pub struct TextInput<'a> {
-    pub title:       &'a str,
+    pub title: &'a str,
     pub placeholder: &'a str,
-    pub width:       Option<u16>,
-    pub style:       TextInputStyle,
-    pub keymap:      TextInputKeymap,
+    pub width: Option<u16>,
+    pub style: TextInputStyle,
+    pub keymap: TextInputKeymap,
 }
 
 impl<'a> TextInput<'a> {
@@ -62,12 +57,13 @@ impl<'a> TextInput<'a> {
         // Zeile 0: Titel
         render_prefixed_line(
             buf,
-            area.x, area.y,
+            area.x,
+            area.y,
             total_width,
             self.title,
             text_width,
             &self.style.prefix_color,
-            &self.style.title_style,
+            self.style.style(TextInputStyleType::Title),
             false,
         );
 
@@ -80,19 +76,18 @@ impl<'a> TextInput<'a> {
 
         let effective_input_style = if state.value.is_empty() {
             if let Some(ph_color) = self.style.placeholder_color {
-                let mut s = self.style.input_style.clone();
-                s.fg = Some(ph_color);
-                s
+                self.style.style(TextInputStyleType::Input).fg(ph_color)
             } else {
-                self.style.input_style.clone()
+                *self.style.style(TextInputStyleType::Input)
             }
         } else {
-            self.style.input_style.clone()
+            *self.style.style(TextInputStyleType::Input)
         };
 
         render_prefixed_line(
             buf,
-            area.x, area.y + 1,
+            area.x,
+            area.y + 1,
             total_width,
             input_text,
             text_width,
@@ -109,10 +104,11 @@ impl<'a> TextInput<'a> {
             };
             render_plain_line(
                 buf,
-                area.x, area.y + 2,
+                area.x,
+                area.y + 2,
                 total_width,
                 &error_text,
-                &self.style.error_style,
+                self.style.style(TextInputStyleType::Error),
             );
         }
     }
@@ -136,10 +132,11 @@ impl Widget for TextInput<'_> {
 /// Zeile ohne Prefix – nur für die Fehlerzeile des TextInput.
 fn render_plain_line(
     buf: &mut Buffer,
-    x: u16, y: u16,
+    x: u16,
+    y: u16,
     total_width: u16,
     text: &str,
-    line_style: &LineStyle,
+    line_style: &Style,
 ) {
     if let Some(bg) = line_style.bg {
         for dx in 0..total_width {
