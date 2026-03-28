@@ -10,26 +10,28 @@ use crate::widgets::common::{render_prefixed_line, PREFIX_LEN};
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
 
-/// Ein Multiple-Choice-Widget mit aufklappbarem Menü.
+/// A multiple-choice widget with a drop-down-style expanded list.
 ///
-/// # Collapsed (nicht aktiv / `state.open == false`)
+/// # Collapsed (`state.open == false`)
 /// ```text
-/// ▍ Titel
+/// ▍ Title
 /// ▍ Option 1, Option 2
 /// ```
 ///
-/// # Expanded (aktiv / `state.open == true`)
+/// # Expanded (`state.open == true`)
 /// ```text
-/// ▍ Titel
-/// ▍ Option 1
-/// ▍ Option 2
-/// ▍ Option 3
-///             ← Leerzeile
+/// ▍ Title
+/// ▍▶ Option 1      ← cursor row
+/// ▍  Option 2
+/// ▍  Option 3
+///                  ← blank closing line
 /// ```
 ///
-/// Das Widget **überdeckt** darunterliegende Inhalte im Buffer, wenn es
-/// aufgeklappt ist. Der Aufrufer muss dafür sorgen, dass das `area`-Rect
-/// groß genug ist (mindestens `1 + item_count + 1` Zeilen im Open-Zustand).
+/// When expanded the widget **overwrites** buffer cells below its nominal
+/// `area`, allowing the drop-down to overlap widgets that were rendered
+/// earlier.  The caller is responsible for rendering this widget **last**
+/// among potentially overlapped siblings; the `Form` widget handles this
+/// automatically by rendering the active widget after all inactive ones.
 #[derive(Debug, Clone)]
 pub struct MultiChoice<'a> {
     pub title: &'a str,
@@ -72,24 +74,22 @@ impl<'a> MultiChoice<'a> {
         self
     }
 
-    /// Rendert das Widget unter Berücksichtigung des aktuellen `state`.
+    /// Renders the widget into `buf` at the position given by `area`.
     ///
-    /// Im *closed*-Zustand werden Zeile 0 (Titel) + Zeile 1 (Zusammenfassung) beschrieben.
+    /// **Closed state** writes two rows: title + summary line.
     ///
-    /// Im *open*-Zustand werden Zeile 0 (Titel) + N Zeilen (je eine Choice) +
-    /// eine leere Abschlusszeile beschrieben.
-    pub fn render_with_state(
-        self,
-        x: u16,
-        y: u16,
-        width: u16,
-        buf: &mut Buffer,
-        state: &MultiChoiceState,
-    ) {
-        let total_width = width;
+    /// **Open state** writes `1 + choices.len() + 1` rows starting at
+    /// `area.y`.  When expanded the widget may write *below* `area.bottom()`
+    /// to overlap adjacent widgets — this is intentional (drop-down overlay).
+    /// The width used is `self.width` if set, otherwise `area.width`.
+    pub fn render_with_state(self, area: Rect, buf: &mut Buffer, state: &MultiChoiceState) {
+        let total_width = self.width.unwrap_or(area.width);
         let text_width = total_width.saturating_sub(PREFIX_LEN) as usize;
+        let x = area.x;
+        let y = area.y;
 
-        // Zeile 0: Titel
+        // Row 0: title
+        let title_style = self.style.resolved_style(MultiChoiceStyleType::Title);
         render_prefixed_line(
             buf,
             x,
@@ -98,25 +98,25 @@ impl<'a> MultiChoice<'a> {
             self.title,
             text_width,
             &self.style.prefix_color,
-            self.style.style(MultiChoiceStyleType::Title),
+            &title_style,
             false,
         );
 
         if state.open {
-            // --- Expanded: eine Zeile pro Choice ---
+            // Expanded: one row per choice.
             for (i, &choice) in self.choices.iter().enumerate() {
                 let row = y + 1 + i as u16;
                 let is_selected = state.selected.get(i).copied().unwrap_or(false);
                 let is_cursor = i == state.cursor;
 
-                // Stil für die aktuelle Choice bestimmen
                 let style_type = match (is_selected, is_cursor) {
                     (false, false) => MultiChoiceStyleType::Normal,
-                    (true, false) => MultiChoiceStyleType::Selected,
                     (false, true) => MultiChoiceStyleType::Active,
+                    (true, false) => MultiChoiceStyleType::Selected,
                     (true, true) => MultiChoiceStyleType::SelectedActive,
                 };
 
+                let row_style = self.style.resolved_style(style_type);
                 render_prefixed_line(
                     buf,
                     x,
@@ -125,32 +125,27 @@ impl<'a> MultiChoice<'a> {
                     choice,
                     text_width,
                     &self.style.prefix_color,
-                    self.style.style(style_type),
+                    &row_style,
                     is_cursor,
                 );
             }
 
-            // Abschluss-Leerzeile
-            let empty_row = y + 1 + self.choices.len() as u16;
-            render_empty_line(
-                buf,
-                x,
-                empty_row,
-                total_width,
-                self.style.style(MultiChoiceStyleType::LastLine).clone(),
-            );
+            // Blank closing line.
+            let closing_row = y + 1 + self.choices.len() as u16;
+            let closing_style = self.style.resolved_style(MultiChoiceStyleType::LastLine);
+            render_empty_line(buf, x, closing_row, total_width, closing_style);
         } else {
-            // --- Collapsed: Zusammenfassung der gewählten Einträge ---
+            // Collapsed: show a summary of selected items.
             let summary = self.build_summary(state);
             let (summary_text, summary_style) = if summary.is_empty() {
                 (
                     self.placeholder.to_string(),
-                    self.style.style(MultiChoiceStyleType::Normal),
+                    self.style.resolved_style(MultiChoiceStyleType::Normal),
                 )
             } else {
                 (
                     summary,
-                    self.style.style(MultiChoiceStyleType::SelectedActive),
+                    self.style.resolved_style(MultiChoiceStyleType::SelectedActive),
                 )
             };
 
@@ -162,26 +157,20 @@ impl<'a> MultiChoice<'a> {
                 &summary_text,
                 text_width,
                 &self.style.prefix_color,
-                summary_style,
+                &summary_style,
                 false,
             );
         }
     }
 
-    /// Gibt an, wie viele Buffer-Zeilen das Widget im aktuellen Zustand belegt.
-    ///
-    /// Nützlich, um `area.height` korrekt vorzureserieren.
+    /// Returns the number of buffer rows the widget occupies in its current state.
     pub fn required_height(&self, state: &MultiChoiceState) -> u16 {
         if state.open {
-            1 /* Titel */ + self.choices.len() as u16 + 1 /* Leerzeile */
+            1 + self.choices.len() as u16 + 1
         } else {
-            2 /* Titel + Zusammenfassung */
+            2
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Hilfsmethoden
-    // -----------------------------------------------------------------------
 
     fn build_summary(&self, state: &MultiChoiceState) -> String {
         self.choices
@@ -202,12 +191,11 @@ impl<'a> MultiChoice<'a> {
 impl Widget for MultiChoice<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let state = MultiChoiceState::new(self.choices.len());
-        self.render_with_state(area.x, area.y, area.width, buf, &state);
+        self.render_with_state(area, buf, &state);
     }
 }
 
-/// Rendert eine leere Zeile mit Hintergrundfarbe (die Abschlusszeile im
-/// expanded-Modus).
+/// Renders a blank line with a background colour — the closing line in expanded mode.
 fn render_empty_line(buf: &mut Buffer, x: u16, y: u16, total_width: u16, style: Style) {
     for dx in 0..total_width {
         if let Some(cell) = buf.cell_mut((x + dx, y)) {

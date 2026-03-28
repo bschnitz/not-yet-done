@@ -1,29 +1,30 @@
+use crate::widgets::common::impl_widget_style_base;
 use ratatui::style::{Color, Style};
 
-/// Enum für die verschiedenen Zustände eines TextInput-Elements.
+/// Identifies the visual part of a `TextInput` to be styled.
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextInputStyleType {
-    /// Titelzeile
+    /// Title line
     Title = 0,
-    /// Eingabezeile
+    /// Input line
     Input = 1,
-    /// Fehlerzeile
+    /// Error line
     Error = 2,
 }
 
-impl TextInputStyleType {
-    const COUNT: usize = 3;
-}
-
-/// Styling-Konfiguration für das TextInput-Widget.
+/// Styling configuration for the `TextInput` widget.
+///
+/// Every slot is `Option<Style>`: `None` means "not configured" and allows an
+/// outer form to inject a fallback.  Inside widget render code use
+/// `resolved_style()` which falls back to `Style::default()`.
 #[derive(Debug, Clone)]
 pub struct TextInputStyle {
-    /// Farbe des Prefix-Balkens (`▍ `)
+    /// Colour of the prefix bar (`▍ `).
     pub prefix_color: Option<Color>,
-    /// Farben je Zustand
-    pub styles: [Style; TextInputStyleType::COUNT],
-    /// Placeholder-Farbe
+    /// Per-slot styles — indexed by `TextInputStyleType as usize`.
+    pub styles: [Option<Style>; 3],
+    /// Foreground colour used for placeholder text when the field is empty.
     pub placeholder_color: Option<Color>,
 }
 
@@ -31,7 +32,7 @@ impl Default for TextInputStyle {
     fn default() -> Self {
         Self {
             prefix_color: None,
-            styles: core::array::from_fn(|_| Style::default()),
+            styles: [None; 3],
             placeholder_color: None,
         }
     }
@@ -42,22 +43,11 @@ impl TextInputStyle {
         Self::default()
     }
 
-    pub fn prefix_color(mut self, color: Color) -> Self {
-        self.prefix_color = Some(color);
-        self
-    }
-
-    pub fn set_style(mut self, style_type: TextInputStyleType, style: Style) -> Self {
-        self.styles[style_type as usize] = style;
-        self
-    }
-
-    pub fn style(&self, style_type: TextInputStyleType) -> &Style {
-        &self.styles[style_type as usize]
-    }
-
     pub fn placeholder_color(mut self, color: Color) -> Self {
         self.placeholder_color = Some(color);
         self
     }
 }
+
+// Generates: prefix_color(), set_style(), style(), resolved_style()
+impl_widget_style_base!(TextInputStyle, TextInputStyleType);

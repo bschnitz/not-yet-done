@@ -1,13 +1,13 @@
-//! Beispiel: "New User Profile" Formular
+//! Example: "New User Profile" form
 //!
-//! Felder:
-//!   • Rolle       — Mehrfachauswahl aus ["Admin", "Editor", "Viewer", "Guest"]
-//!   • Benutzername — mindestens 3 Zeichen
-//!   • E-Mail      — muss ein gültiges E-Mail-Format haben
+//! Fields:
+//!   • Role      — multiple choice from ["Admin", "Editor", "Viewer", "Guest"]
+//!   • Username  — at least 3 characters
+//!   • E-mail    — must contain '@' and '.'
 //!
-//! Tab / Shift+Tab wechselt das aktive Feld.
-//! Enter zeigt die gesammelten Werte an (simulierter Submit).
-//! Esc beendet.
+//! Tab / Shift+Tab switches the active field.
+//! Enter shows the collected values (simulated submit).
+//! Esc exits.
 
 use crossterm::{
     cursor::SetCursorStyle,
@@ -28,26 +28,26 @@ use ratatui::{
     DefaultTerminal,
 };
 
-// ── Farben ────────────────────────────────────────────────────────────────────
+// ── Colours ───────────────────────────────────────────────────────────────────
 
-const BG: Color = Color::Rgb(10, 10, 20); // fast schwarz
-const PANEL_BG: Color = Color::Rgb(18, 18, 35); // Panel-Hintergrund
-const ACCENT: Color = Color::Rgb(100, 180, 255); // hellblau — Prefix & Titel
-const INPUT_FG: Color = Color::Rgb(230, 230, 255); // Eingabetext
-const INPUT_BG: Color = Color::Rgb(28, 28, 50); // Eingabe-Hintergrund
-const PLACEHOLDER: Color = Color::Rgb(80, 80, 110); // gedimmter Placeholder-Text
+const BG: Color = Color::Rgb(10, 10, 20);
+const PANEL_BG: Color = Color::Rgb(18, 18, 35);
+const ACCENT: Color = Color::Rgb(100, 180, 255);
+const INPUT_FG: Color = Color::Rgb(230, 230, 255);
+const INPUT_BG: Color = Color::Rgb(28, 28, 50);
+const PLACEHOLDER: Color = Color::Rgb(80, 80, 110);
 const SELECTED_MC_BG: Color = Color::Rgb(35, 45, 65);
 const ACTIVE_INPUT_FG: Color = Color::Rgb(255, 215, 0);
 
-const ERROR_FG: Color = Color::Rgb(255, 100, 80); // Rot für Fehler
-const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180); // Grün für aktives Feld
+const ERROR_FG: Color = Color::Rgb(255, 100, 80);
+const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180);
 const SUBMIT_FG: Color = Color::Rgb(30, 30, 50);
 const SUBMIT_BG: Color = Color::Rgb(140, 255, 180);
 const DIM: Color = Color::Rgb(80, 80, 110);
 const INACTIVE_PH: Color = Color::Rgb(45, 45, 65);
 const OVERLAY_BG: Color = Color::Rgb(20, 40, 30);
 
-// ── App-State ─────────────────────────────────────────────────────────────────
+// ── App state ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
@@ -78,7 +78,7 @@ struct App {
     role: MultiChoiceState,
     username: TextInputState,
     email: TextInputState,
-    submitted: Option<String>, // gesammelter Submit-Text
+    submitted: Option<String>,
 }
 
 impl App {
@@ -103,19 +103,17 @@ impl App {
     fn validate_all(&mut self) -> bool {
         let mut ok = true;
 
-        // Benutzername
         let u = self.username.value().to_string();
         if u.len() < 3 {
-            self.username.set_error("Mindestens 3 Zeichen erforderlich");
+            self.username.set_error("At least 3 characters required");
             ok = false;
         } else {
             self.username.clear_error();
         }
 
-        // E-Mail
         let e = self.email.value().to_string();
         if !e.contains('@') || !e.contains('.') {
-            self.email.set_error("Ungültiges E-Mail-Format");
+            self.email.set_error("Invalid e-mail format");
             ok = false;
         } else {
             self.email.clear_error();
@@ -131,7 +129,7 @@ impl App {
                 if u.is_empty() {
                     self.username.clear_error();
                 } else if u.len() < 3 {
-                    self.username.set_error("Mindestens 3 Zeichen erforderlich");
+                    self.username.set_error("At least 3 characters required");
                 } else {
                     self.username.clear_error();
                 }
@@ -141,7 +139,7 @@ impl App {
                 if e.is_empty() {
                     self.email.clear_error();
                 } else if !e.contains('@') || !e.contains('.') {
-                    self.email.set_error("Ungültiges E-Mail-Format");
+                    self.email.set_error("Invalid e-mail format");
                 } else {
                     self.email.clear_error();
                 }
@@ -151,7 +149,7 @@ impl App {
     }
 }
 
-// ── Styling helper ────────────────────────────────────────────────────────────
+// ── Style helpers ─────────────────────────────────────────────────────────────
 
 fn make_style(is_active: bool) -> TextInputStyle {
     if is_active {
@@ -181,12 +179,10 @@ fn make_mc_style(is_active: bool) -> MultiChoiceStyle {
     if is_active {
         MultiChoiceStyle::new()
             .prefix_color(ACTIVE_ACCENT)
-            // Titel
             .set_style(
                 MultiChoiceStyleType::Title,
                 Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG),
             )
-            // Einträge
             .set_style(
                 MultiChoiceStyleType::Normal,
                 Style::default().fg(INPUT_FG).bg(INPUT_BG),
@@ -206,7 +202,6 @@ fn make_mc_style(is_active: bool) -> MultiChoiceStyle {
     } else {
         MultiChoiceStyle::new()
             .prefix_color(ACCENT)
-            // Titel
             .set_style(MultiChoiceStyleType::Title, Style::default().fg(ACCENT))
     }
 }
@@ -216,10 +211,8 @@ fn make_mc_style(is_active: bool) -> MultiChoiceStyle {
 fn render(app: &App, frame: &mut ratatui::Frame) {
     let area = frame.area();
 
-    // Schwarzer Hintergrund
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    // Zentriertes Panel: 52 breit, 24 hoch
     let panel_w = 52u16;
     let panel_h = 24u16;
     let px = area.x + area.width.saturating_sub(panel_w) / 2;
@@ -238,20 +231,20 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Überschrift
-            Constraint::Length(1), // Leerzeile
-            Constraint::Length(3), // Rolle (MC, immer 3 Zeilen!)
-            Constraint::Length(1), // Abstand
-            Constraint::Length(3), // Benutzername
-            Constraint::Length(1), // Abstand
-            Constraint::Length(3), // E-Mail
-            Constraint::Length(1), // Abstand
-            Constraint::Length(1), // Submit-Button
-            Constraint::Min(0),    // Rest
+            Constraint::Length(1), // heading
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // role (MC, always 3 rows when closed)
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // username
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // e-mail
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // submit button
+            Constraint::Min(0),
         ])
         .split(inner);
 
-    // Überschrift
+    // Heading
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("✦ ", Style::default().fg(ACTIVE_ACCENT)),
@@ -260,63 +253,54 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         chunks[0],
     );
 
-    // Widgets rendern
     let keymap = TextInputKeymap::default();
     let mc_keymap = MultiChoiceKeymap::default();
     let widget_width = inner.width;
-
-    // Rolle (MultiChoice)
     let roles = ["Admin", "Editor", "Viewer", "Guest"];
-    let mc_area = chunks[2];
 
-    // Benutzername
-    TextInput::new("Benutzername")
-        .placeholder("mind. 3 Zeichen")
+    // Username (inactive — rendered before the active widget)
+    TextInput::new("Username")
+        .placeholder("min. 3 characters")
         .width(widget_width)
         .style(make_style(app.active == Field::Username))
         .keymap(keymap.clone())
         .render_with_state(chunks[4], frame.buffer_mut(), &app.username);
 
-    MultiChoice::new("Rolle", &roles)
-        .placeholder("Wähle eine oder mehrere Rollen")
-        .style(make_mc_style(app.active == Field::Role))
-        .keymap(mc_keymap.clone())
-        .render_with_state(
-            mc_area.x,
-            mc_area.y,
-            mc_area.width,
-            frame.buffer_mut(),
-            &app.role,
-        );
-
-    // E-Mail
-    TextInput::new("E-Mail")
-        .placeholder("z.B. user@example.com")
+    // E-mail (inactive or active — rendered before MultiChoice when Role is active)
+    TextInput::new("E-mail")
+        .placeholder("e.g. user@example.com")
         .width(widget_width)
         .style(make_style(app.active == Field::Email))
         .keymap(keymap.clone())
         .render_with_state(chunks[6], frame.buffer_mut(), &app.email);
 
-    // Submit-Button
-    let btn_text = "  [ Enter → Submit ]  ";
+    // Role — rendered last so its expanded overlay covers adjacent widgets.
+    MultiChoice::new("Role", &roles)
+        .placeholder("Choose one or more roles")
+        .style(make_mc_style(app.active == Field::Role))
+        .keymap(mc_keymap.clone())
+        .render_with_state(chunks[2], frame.buffer_mut(), &app.role);
+
+    // Submit button
     frame.render_widget(
-        Paragraph::new(btn_text).style(Style::default().fg(SUBMIT_FG).bg(SUBMIT_BG).bold()),
+        Paragraph::new("  [ Enter → Submit ]  ")
+            .style(Style::default().fg(SUBMIT_FG).bg(SUBMIT_BG).bold()),
         chunks[8],
     );
 
-    // Hilfezeile unten im Panel
+    // Help line
     let help_y = panel.y + panel.height.saturating_sub(1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" Tab", Style::default().fg(ACCENT).bold()),
-            Span::styled(" nächstes  ", Style::default().fg(DIM)),
+            Span::styled(" next  ", Style::default().fg(DIM)),
             Span::styled("Esc", Style::default().fg(ACCENT).bold()),
-            Span::styled(" beenden", Style::default().fg(DIM)),
+            Span::styled(" quit", Style::default().fg(DIM)),
         ])),
         Rect::new(panel.x + 2, help_y, panel.width.saturating_sub(4), 1),
     );
 
-    // Submit-Overlay
+    // Submit overlay
     if let Some(msg) = &app.submitted {
         let ow = 50u16;
         let oh = 10u16;
@@ -330,7 +314,7 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
                 .block(
                     Block::bordered()
                         .title(Span::styled(
-                            " ✓ Gespeichert ",
+                            " ✓ Saved ",
                             Style::default().fg(ACTIVE_ACCENT).bold(),
                         ))
                         .style(Style::default().fg(INPUT_FG).bg(OVERLAY_BG)),
@@ -340,10 +324,8 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         );
     }
 
-    // Aktives Widget: Cursor-Position
-    if app.active == Field::Role && app.role.open {
-        // TODO: MC-Cursor-Position
-    } else if app.active != Field::Role {
+    // Cursor position for text input fields
+    if app.active != Field::Role {
         let active_state = match app.active {
             Field::Username => &app.username,
             Field::Email => &app.email,
@@ -355,17 +337,15 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
                 Field::Email => chunks[6],
                 _ => return,
             };
-            let active_widget = TextInput::new("").width(inner.width);
-            let pos = active_widget.cursor_position(active_area, active_state);
+            let pos = TextInput::new("").width(inner.width).cursor_position(active_area, active_state);
             frame.set_cursor_position(pos);
         }
     }
 }
 
-// ── Main Loop ─────────────────────────────────────────────────────────────────
+// ── Main loop ─────────────────────────────────────────────────────────────────
 
 fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
-    // Cursor-Style einmalig setzen
     execute!(std::io::stdout(), SetCursorStyle::BlinkingBar)?;
 
     let keymap = TextInputKeymap::default();
@@ -377,7 +357,6 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
 
         let event = crossterm::event::read()?;
 
-        // Overlay schließen
         if app.submitted.is_some() {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
@@ -424,7 +403,7 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                             .collect::<Vec<_>>()
                             .join(", ");
                         app.submitted = Some(format!(
-                            "\n  Rolle      : {}\n  Benutzername: {}\n  E-Mail     : {}\n\n  (beliebige Taste schließt)",
+                            "\n  Role    : {}\n  Username: {}\n  E-mail  : {}\n\n  (any key closes)",
                             selected_roles,
                             app.username.value(),
                             app.email.value(),
@@ -433,21 +412,17 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                 }
 
                 _ => {
-                    // Aktives Feld bekommt den Event
                     let active = app.active;
                     if active == Field::Role {
                         if let MultiChoiceEvent::SelectionChanged(_) =
                             app.role.handle_event(&event, &mc_keymap)
-                        {
-                            // Auswahl geändert
-                        }
+                        {}
                     } else {
                         let state = app
                             .state_mut(active)
                             .downcast_mut::<TextInputState>()
                             .unwrap();
                         if let TextInputEvent::Changed(_) = state.handle_event(&event, &keymap) {
-                            // Live-Validierung bei jeder Änderung
                             app.validate_field(active);
                         }
                     }

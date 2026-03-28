@@ -7,6 +7,7 @@ pub use state::{TextInputEvent, TextInputState};
 pub use style::{TextInputStyle, TextInputStyleType};
 
 use crate::widgets::common::{render_prefixed_line, truncate_to_width, PREFIX_LEN};
+use unicode_width::UnicodeWidthChar;
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
 
@@ -54,7 +55,8 @@ impl<'a> TextInput<'a> {
         let total_width = self.width.unwrap_or(area.width);
         let text_width = total_width.saturating_sub(PREFIX_LEN) as usize;
 
-        // Zeile 0: Titel
+        // Row 0: title
+        let title_style = self.style.resolved_style(TextInputStyleType::Title);
         render_prefixed_line(
             buf,
             area.x,
@@ -63,25 +65,26 @@ impl<'a> TextInput<'a> {
             self.title,
             text_width,
             &self.style.prefix_color,
-            self.style.style(TextInputStyleType::Title),
+            &title_style,
             false,
         );
 
-        // Zeile 1: Eingabe
+        // Row 1: input (or placeholder when empty)
         let input_text = if state.value.is_empty() {
             self.placeholder
         } else {
             &state.value
         };
 
+        let input_style = self.style.resolved_style(TextInputStyleType::Input);
         let effective_input_style = if state.value.is_empty() {
             if let Some(ph_color) = self.style.placeholder_color {
-                self.style.style(TextInputStyleType::Input).fg(ph_color)
+                input_style.fg(ph_color)
             } else {
-                *self.style.style(TextInputStyleType::Input)
+                input_style
             }
         } else {
-            *self.style.style(TextInputStyleType::Input)
+            input_style
         };
 
         render_prefixed_line(
@@ -96,20 +99,14 @@ impl<'a> TextInput<'a> {
             false,
         );
 
-        // Zeile 2: Fehler
+        // Row 2: error
         if area.height > 2 {
             let error_text = match &state.error {
                 Some(e) => format!("  ⚠ {}", e),
                 None => String::new(),
             };
-            render_plain_line(
-                buf,
-                area.x,
-                area.y + 2,
-                total_width,
-                &error_text,
-                self.style.style(TextInputStyleType::Error),
-            );
+            let error_style = self.style.resolved_style(TextInputStyleType::Error);
+            render_plain_line(buf, area.x, area.y + 2, total_width, &error_text, &error_style);
         }
     }
 
@@ -129,7 +126,7 @@ impl Widget for TextInput<'_> {
     }
 }
 
-/// Zeile ohne Prefix – nur für die Fehlerzeile des TextInput.
+/// Renders a plain line without a prefix — used for the error row of `TextInput`.
 fn render_plain_line(
     buf: &mut Buffer,
     x: u16,
@@ -159,6 +156,6 @@ fn render_plain_line(
             cell.set_char(ch);
             cell.set_style(s);
         }
-        px += 1;
+        px += ch.width().unwrap_or(1) as u16;
     }
 }
