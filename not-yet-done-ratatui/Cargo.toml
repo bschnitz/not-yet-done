@@ -3,8 +3,20 @@ name = "not-yet-done-ratatui"
 version = "0.1.0"
 edition = "2024"
 
+[[example]]
+name = "new_server"
+path = "examples/new_server.rs"
+ 
+[[example]]
+name = "new_user"
+path = "examples/new_user.rs"
+
+[[example]]
+name = "new_server_form"
+path = "examples/new_server_form.rs"
+
 [dependencies]
-ratatui = { workspace = true }
-crossterm = { workspace = true }
+ratatui.workspace = true
+crossterm.workspace = true
 tempfile.workspace = true
 unicode-width.workspace = true

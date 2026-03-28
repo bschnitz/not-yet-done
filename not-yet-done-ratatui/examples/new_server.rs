@@ -1,13 +1,13 @@
-//! Beispiel: "New Server" Formular
+//! Example: "New Server" form
 //!
-//! Felder:
-//!   • Hostname  — darf nicht leer sein, keine Leerzeichen
-//!   • Port      — muss eine Zahl 1–65535 sein
-//!   • API Key   — mindestens 8 Zeichen
+//! Fields:
+//!   • Hostname  — must not be empty or contain spaces
+//!   • Port      — must be a number 1–65535
+//!   • API Key   — at least 8 characters
 //!
-//! Tab / Shift+Tab wechselt das aktive Feld.
-//! Enter zeigt die gesammelten Werte an (simulierter Submit).
-//! Esc beendet.
+//! Tab / Shift+Tab switches the active field.
+//! Enter shows the collected values (simulated submit).
+//! Esc exits.
 
 use crossterm::{
     cursor::SetCursorStyle,
@@ -26,24 +26,24 @@ use ratatui::{
     DefaultTerminal,
 };
 
-// ── Farben ────────────────────────────────────────────────────────────────────
+// ── Colours ───────────────────────────────────────────────────────────────────
 
-const BG: Color = Color::Rgb(10, 10, 20); // fast schwarz
-const PANEL_BG: Color = Color::Rgb(18, 18, 35); // Panel-Hintergrund
-const ACCENT: Color = Color::Rgb(100, 180, 255); // hellblau — Prefix & Titel
-const INPUT_FG: Color = Color::Rgb(230, 230, 255); // Eingabetext
-const INPUT_BG: Color = Color::Rgb(28, 28, 50); // Eingabe-Hintergrund
-const PLACEHOLDER: Color = Color::Rgb(80, 80, 110); // gedimmter Placeholder-Text
+const BG: Color = Color::Rgb(10, 10, 20);
+const PANEL_BG: Color = Color::Rgb(18, 18, 35);
+const ACCENT: Color = Color::Rgb(100, 180, 255);
+const INPUT_FG: Color = Color::Rgb(230, 230, 255);
+const INPUT_BG: Color = Color::Rgb(28, 28, 50);
+const PLACEHOLDER: Color = Color::Rgb(80, 80, 110);
 
-const ERROR_FG: Color = Color::Rgb(255, 100, 80); // Rot für Fehler
-const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180); // Grün für aktives Feld
+const ERROR_FG: Color = Color::Rgb(255, 100, 80);
+const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180);
 const SUBMIT_FG: Color = Color::Rgb(30, 30, 50);
 const SUBMIT_BG: Color = Color::Rgb(140, 255, 180);
 const DIM: Color = Color::Rgb(80, 80, 110);
 const INACTIVE_PH: Color = Color::Rgb(45, 45, 65);
 const OVERLAY_BG: Color = Color::Rgb(20, 40, 30);
 
-// ── App-State ─────────────────────────────────────────────────────────────────
+// ── App state ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
@@ -74,7 +74,7 @@ struct App {
     hostname: TextInputState,
     port: TextInputState,
     api_key: TextInputState,
-    submitted: Option<String>, // gesammelter Submit-Text
+    submitted: Option<String>,
 }
 
 impl App {
@@ -99,32 +99,29 @@ impl App {
     fn validate_all(&mut self) -> bool {
         let mut ok = true;
 
-        // Hostname
         let h = self.hostname.value().to_string();
         if h.is_empty() {
-            self.hostname.set_error("Hostname darf nicht leer sein");
+            self.hostname.set_error("Hostname must not be empty");
             ok = false;
         } else if h.contains(' ') {
-            self.hostname.set_error("Keine Leerzeichen erlaubt");
+            self.hostname.set_error("No spaces allowed");
             ok = false;
         } else {
             self.hostname.clear_error();
         }
 
-        // Port
         let p = self.port.value().to_string();
         match p.parse::<u16>() {
             Ok(n) if n >= 1 => self.port.clear_error(),
             _ => {
-                self.port.set_error("Muss eine Zahl 1–65535 sein");
+                self.port.set_error("Must be a number 1–65535");
                 ok = false;
             }
         }
 
-        // API Key
         let k = self.api_key.value().to_string();
         if k.len() < 8 {
-            self.api_key.set_error("Mindestens 8 Zeichen erforderlich");
+            self.api_key.set_error("At least 8 characters required");
             ok = false;
         } else {
             self.api_key.clear_error();
@@ -138,7 +135,7 @@ impl App {
             Field::Hostname => {
                 let h = self.hostname.value().to_string();
                 if h.is_empty() || h.contains(' ') {
-                    // Fehler erst beim Submit, beim Tippen nur löschen
+                    // Only show errors on submit, clear when valid
                 } else {
                     self.hostname.clear_error();
                 }
@@ -148,7 +145,7 @@ impl App {
                 if p.is_empty() {
                     self.port.clear_error();
                 } else if p.parse::<u16>().map(|n| n < 1).unwrap_or(true) {
-                    self.port.set_error("Muss eine Zahl 1–65535 sein");
+                    self.port.set_error("Must be a number 1–65535");
                 } else {
                     self.port.clear_error();
                 }
@@ -158,7 +155,7 @@ impl App {
                 if k.is_empty() {
                     self.api_key.clear_error();
                 } else if k.len() < 8 {
-                    self.api_key.set_error("Mindestens 8 Zeichen erforderlich");
+                    self.api_key.set_error("At least 8 characters required");
                 } else {
                     self.api_key.clear_error();
                 }
@@ -167,7 +164,7 @@ impl App {
     }
 }
 
-// ── Styling helper ────────────────────────────────────────────────────────────
+// ── Style helpers ─────────────────────────────────────────────────────────────
 
 fn make_style(is_active: bool) -> TextInputStyle {
     if is_active {
@@ -198,10 +195,8 @@ fn make_style(is_active: bool) -> TextInputStyle {
 fn render(app: &App, frame: &mut ratatui::Frame) {
     let area = frame.area();
 
-    // Schwarzer Hintergrund
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    // Zentriertes Panel: 52 breit, 24 hoch
     let panel_w = 52u16;
     let panel_h = 24u16;
     let px = area.x + area.width.saturating_sub(panel_w) / 2;
@@ -220,20 +215,20 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Überschrift
-            Constraint::Length(1), // Leerzeile
-            Constraint::Length(3), // Hostname
-            Constraint::Length(1), // Abstand
-            Constraint::Length(3), // Port
-            Constraint::Length(1), // Abstand
-            Constraint::Length(3), // API Key
-            Constraint::Length(1), // Abstand
-            Constraint::Length(1), // Submit-Button
-            Constraint::Min(0),    // Rest
+            Constraint::Length(1), // heading
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // hostname
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // port
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // api key
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // submit button
+            Constraint::Min(0),
         ])
         .split(inner);
 
-    // Überschrift
+    // Heading
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("✦ ", Style::default().fg(ACTIVE_ACCENT)),
@@ -242,52 +237,50 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         chunks[0],
     );
 
-    // Widgets rendern
     let keymap = TextInputKeymap::default();
-
     let widget_width = inner.width;
 
     TextInput::new("Hostname")
-        .placeholder("z.B. api.example.com")
+        .placeholder("e.g. api.example.com")
         .width(widget_width)
         .style(make_style(app.active == Field::Hostname))
         .keymap(keymap.clone())
         .render_with_state(chunks[2], frame.buffer_mut(), &app.hostname);
 
     TextInput::new("Port")
-        .placeholder("z.B. 8080")
+        .placeholder("e.g. 8080")
         .width(widget_width)
         .style(make_style(app.active == Field::Port))
         .keymap(keymap.clone())
         .render_with_state(chunks[4], frame.buffer_mut(), &app.port);
 
     TextInput::new("API Key")
-        .placeholder("min. 8 Zeichen")
+        .placeholder("min. 8 characters")
         .width(widget_width)
         .style(make_style(app.active == Field::ApiKey))
         .keymap(keymap.clone())
         .render_with_state(chunks[6], frame.buffer_mut(), &app.api_key);
 
-    // Submit-Button
-    let btn_text = "  [ Enter → Submit ]  ";
+    // Submit button
     frame.render_widget(
-        Paragraph::new(btn_text).style(Style::default().fg(SUBMIT_FG).bg(SUBMIT_BG).bold()),
+        Paragraph::new("  [ Enter → Submit ]  ")
+            .style(Style::default().fg(SUBMIT_FG).bg(SUBMIT_BG).bold()),
         chunks[8],
     );
 
-    // Hilfezeile unten im Panel
+    // Help line
     let help_y = panel.y + panel.height.saturating_sub(1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" Tab", Style::default().fg(ACCENT).bold()),
-            Span::styled(" nächstes  ", Style::default().fg(DIM)),
+            Span::styled(" next  ", Style::default().fg(DIM)),
             Span::styled("Esc", Style::default().fg(ACCENT).bold()),
-            Span::styled(" beenden", Style::default().fg(DIM)),
+            Span::styled(" quit", Style::default().fg(DIM)),
         ])),
         Rect::new(panel.x + 2, help_y, panel.width.saturating_sub(4), 1),
     );
 
-    // Submit-Overlay
+    // Submit overlay
     if let Some(msg) = &app.submitted {
         let ow = 50u16;
         let oh = 10u16;
@@ -301,7 +294,7 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
                 .block(
                     Block::bordered()
                         .title(Span::styled(
-                            " ✓ Gespeichert ",
+                            " ✓ Saved ",
                             Style::default().fg(ACTIVE_ACCENT).bold(),
                         ))
                         .style(Style::default().fg(INPUT_FG).bg(OVERLAY_BG)),
@@ -311,29 +304,26 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         );
     }
 
-    // Aktives Widget nochmal konstruieren um cursor_position zu berechnen
+    // Cursor position
     let active_state = match app.active {
         Field::Hostname => &app.hostname,
         Field::Port => &app.port,
         Field::ApiKey => &app.api_key,
     };
-
     if !active_state.value().is_empty() {
         let active_area = match app.active {
             Field::Hostname => chunks[2],
             Field::Port => chunks[4],
             Field::ApiKey => chunks[6],
         };
-        let active_widget = TextInput::new("").width(inner.width);
-        let pos = active_widget.cursor_position(active_area, active_state);
+        let pos = TextInput::new("").width(inner.width).cursor_position(active_area, active_state);
         frame.set_cursor_position(pos);
     }
 }
 
-// ── Main Loop ─────────────────────────────────────────────────────────────────
+// ── Main loop ─────────────────────────────────────────────────────────────────
 
 fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
-    // Cursor-Style einmalig setzen
     execute!(std::io::stdout(), SetCursorStyle::BlinkingBar)?;
 
     let keymap = TextInputKeymap::default();
@@ -344,7 +334,6 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
 
         let event = crossterm::event::read()?;
 
-        // Overlay schließen
         if app.submitted.is_some() {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
@@ -372,7 +361,7 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                 KeyCode::Enter => {
                     if app.validate_all() {
                         app.submitted = Some(format!(
-                            "\n  Hostname : {}\n  Port     : {}\n  API Key  : {}\n\n  (beliebige Taste schließt)",
+                            "\n  Hostname : {}\n  Port     : {}\n  API Key  : {}\n\n  (any key closes)",
                             app.hostname.value(),
                             app.port.value(),
                             app.api_key.value(),
@@ -381,11 +370,9 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                 }
 
                 _ => {
-                    // Aktives Feld bekommt den Event
                     let active = app.active;
                     let state = app.state_mut(active);
                     if let TextInputEvent::Changed(_) = state.handle_event(&event, &keymap) {
-                        // Live-Validierung bei jeder Änderung
                         app.validate_field(active);
                     }
                 }

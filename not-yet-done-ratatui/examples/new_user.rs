@@ -258,7 +258,7 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
     let widget_width = inner.width;
     let roles = ["Admin", "Editor", "Viewer", "Guest"];
 
-    // Username (inactive — rendered before the active widget)
+    // Inactive fields first, then Role last (so its drop-down overlays the rest).
     TextInput::new("Username")
         .placeholder("min. 3 characters")
         .width(widget_width)
@@ -266,7 +266,6 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         .keymap(keymap.clone())
         .render_with_state(chunks[4], frame.buffer_mut(), &app.username);
 
-    // E-mail (inactive or active — rendered before MultiChoice when Role is active)
     TextInput::new("E-mail")
         .placeholder("e.g. user@example.com")
         .width(widget_width)
@@ -274,7 +273,6 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         .keymap(keymap.clone())
         .render_with_state(chunks[6], frame.buffer_mut(), &app.email);
 
-    // Role — rendered last so its expanded overlay covers adjacent widgets.
     MultiChoice::new("Role", &roles)
         .placeholder("Choose one or more roles")
         .style(make_mc_style(app.active == Field::Role))
@@ -324,7 +322,7 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         );
     }
 
-    // Cursor position for text input fields
+    // Cursor position for active text input fields
     if app.active != Field::Role {
         let active_state = match app.active {
             Field::Username => &app.username,
