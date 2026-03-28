@@ -1,4 +1,7 @@
 pub mod widgets;
+pub mod utils;
+
+pub use utils::open_editor::{open_editor, EditorError};
 
 // --- gemeinsame Primitives ---
 pub use widgets::common::{hex_color, KeyBinding};

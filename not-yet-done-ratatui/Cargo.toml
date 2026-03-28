@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+tempfile.workspace = true

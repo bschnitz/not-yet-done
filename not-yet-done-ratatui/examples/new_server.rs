@@ -40,6 +40,8 @@ const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180); // Grün für aktives Fe
 const SUBMIT_FG: Color = Color::Rgb(30, 30, 50);
 const SUBMIT_BG: Color = Color::Rgb(140, 255, 180);
 const DIM: Color = Color::Rgb(80, 80, 110);
+const INACTIVE_PH: Color = Color::Rgb(45, 45, 65);
+const OVERLAY_BG: Color = Color::Rgb(20, 40, 30);
 
 // ── App-State ─────────────────────────────────────────────────────────────────
 
@@ -186,7 +188,7 @@ fn make_style(is_active: bool) -> TextInputStyle {
             .prefix_color(ACCENT)
             .set_style(TextInputStyleType::Title, Style::default().fg(ACCENT))
             .set_style(TextInputStyleType::Input, Style::default().fg(INPUT_FG))
-            .placeholder_color(Color::Rgb(45, 45, 65))
+            .placeholder_color(INACTIVE_PH)
             .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
     }
 }
@@ -302,7 +304,7 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
                             " ✓ Gespeichert ",
                             Style::default().fg(ACTIVE_ACCENT).bold(),
                         ))
-                        .style(Style::default().fg(INPUT_FG).bg(Color::Rgb(20, 40, 30))),
+                        .style(Style::default().fg(INPUT_FG).bg(OVERLAY_BG)),
                 )
                 .style(Style::default().fg(INPUT_FG)),
             overlay,
