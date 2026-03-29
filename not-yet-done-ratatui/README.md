@@ -14,7 +14,8 @@ This document covers two audiences:
    1. [TextInput](#11-textinput)
    2. [MultiChoice](#12-multichoice)
    3. [Form](#13-form)
-   4. [Utilities](#14-utilities)
+   4. [TwoColumnLayout](#14-twocolumnlayout)
+   5. [Utilities](#15-utilities)
 2. [Developer Guide](#2-developer-guide)
    1. [Project layout](#21-project-layout)
    2. [Design principles](#22-design-principles)
@@ -29,7 +30,6 @@ This document covers two audiences:
 ## 1. User Guide
 
 All public types are re-exported from the crate root:
-
 ```rust
 use not_yet_done_ratatui::{
     TextInput, TextInputState, TextInputStyle, TextInputStyleType, TextInputKeymap, TextInputEvent,
@@ -37,6 +37,8 @@ use not_yet_done_ratatui::{
         MultiChoiceKeymap, MultiChoiceEvent,
     Form, FormState, FormField, FormFieldState, FormStyle, FormWidgetStyle,
         FormKeymap, FormEvent, FieldEvent,
+    TwoColumnLayout, TwoColumnStyle, ColumnWidth, BorderStyleType,
+        HalfBorders, HalfPadding,
     KeyBinding, hex_color,
 };
 ```
@@ -46,7 +48,6 @@ use not_yet_done_ratatui::{
 ### 1.1 TextInput
 
 A single-line text field with a title, input line, and error line.
-
 ```
 ▍ Title
 ▍ value or placeholder text
@@ -57,7 +58,6 @@ A single-line text field with a title, input line, and error line.
 
 `TextInputState` holds the mutable value, cursor position and optional error.
 Create one per field and keep it in your app struct.
-
 ```rust
 let mut state = TextInputState::new();
 
@@ -72,7 +72,6 @@ state.clear_error();
 #### Widget
 
 `TextInput` is stateless and rebuilt every frame.
-
 ```rust
 TextInput::new("Username")
     .placeholder("e.g. alice")
@@ -83,7 +82,6 @@ TextInput::new("Username")
 ```
 
 #### Keymap
-
 ```rust
 // Default bindings
 let keymap = TextInputKeymap::default();
@@ -113,7 +111,6 @@ KeyBinding { code: KeyCode::BackTab, modifiers: KeyModifiers::SHIFT }
 
 Call `state.handle_event(&event, &keymap)` in your event loop and match the
 return value:
-
 ```rust
 match state.handle_event(&event, &keymap) {
     TextInputEvent::Changed(new_value) => { /* live validation */ }
@@ -124,7 +121,6 @@ match state.handle_event(&event, &keymap) {
 #### Cursor position
 
 After rendering, set the terminal cursor:
-
 ```rust
 if !state.value().is_empty() {
     let pos = TextInput::new("").width(area.width)
@@ -134,7 +130,6 @@ if !state.value().is_empty() {
 ```
 
 #### Style
-
 ```rust
 let style = TextInputStyle::new()
     .prefix_color(Color::Rgb(100, 180, 255))
@@ -180,7 +175,6 @@ is beneath it.  Render it last among potentially overlapped siblings (the `Form`
 widget handles this automatically).
 
 #### State
-
 ```rust
 let mut state = MultiChoiceState::new(4); // number of options
 
@@ -193,7 +187,6 @@ let selected: Vec<usize> = state.selected_indices();
 ```
 
 #### Widget
-
 ```rust
 let choices = ["HTTP", "HTTPS", "WS", "WSS"];
 
@@ -205,7 +198,6 @@ MultiChoice::new("Protocol", &choices)
 ```
 
 #### Keymap
-
 ```rust
 // Default bindings
 let keymap = MultiChoiceKeymap::default();
@@ -222,7 +214,6 @@ let keymap = MultiChoiceKeymap {
 ```
 
 #### Events
-
 ```rust
 match state.handle_event(&event, &keymap) {
     MultiChoiceEvent::SelectionChanged(indices) => { /* … */ }
@@ -233,7 +224,6 @@ match state.handle_event(&event, &keymap) {
 ```
 
 #### Style
-
 ```rust
 let style = MultiChoiceStyle::new()
     .prefix_color(ACCENT)
@@ -279,7 +269,6 @@ render order.
 | `FieldEvent` | Per-field event, tagged with field index |
 
 #### Setting up state
-
 ```rust
 let mut form_state = FormState::new(vec![
     FormFieldState::TextInput(TextInputState::new()),
@@ -290,7 +279,6 @@ let mut form_state = FormState::new(vec![
 ```
 
 Accessing field state by index:
-
 ```rust
 // Read
 let text = form_state.field(0)
@@ -305,7 +293,6 @@ if let Some(ts) = form_state.field_mut(0).and_then(|f| f.as_text_input_mut()) {
 ```
 
 #### Building the form
-
 ```rust
 let form = Form::new()
     .style(global_style)    // FormStyle — see below
@@ -327,7 +314,6 @@ Use `.with_height(n)` when you need a different allocation (e.g. to align a
 `MultiChoice` with `TextInput` fields).
 
 #### Rendering
-
 ```rust
 // in your render function:
 form.render_with_state(form_area, frame.buffer_mut(), &form_state);
@@ -339,7 +325,6 @@ if let Some(pos) = form.cursor_position(form_area, &form_state) {
 ```
 
 #### Event handling
-
 ```rust
 match form.handle_event(&event, &mut form_state) {
     FormEvent::Submit => {
@@ -362,7 +347,6 @@ Enter on a `MultiChoice` field toggles its drop-down open/closed (does not
 emit `Submit`).
 
 #### FormKeymap
-
 ```rust
 // Default bindings
 let keymap = FormKeymap::default();
@@ -385,7 +369,6 @@ let form = Form::new().keymap(keymap) /* … */;
 `FormStyle` defines default styles for active and inactive fields.  These are
 merged into each widget's own style before rendering; any slot already set on
 the widget itself is left untouched.
-
 ```rust
 let global_style = FormStyle::new()
     .background(PANEL_BG)   // fills form area before rendering fields
@@ -430,7 +413,6 @@ let global_style = FormStyle::new()
 
 Set style slots on the widget itself to override the form global style for
 that specific field.  Only set slots win; unset slots still inherit.
-
 ```rust
 // Only the title of this one field uses a special cyan colour.
 // Body, error, placeholder all still come from the form global style.
@@ -453,12 +435,142 @@ belongs logically; the form handles the rest.
 
 ---
 
-### 1.4 Utilities
+### 1.4 TwoColumnLayout
+
+A layout helper that splits a [`Rect`] into two panels with optional borders,
+headers, per-panel padding, and independent background colouring.  It returns
+the two inner content rects so the caller can render into them directly.
+```text
+┌─ Header L ──┬─ Header R ──┐
+│ content     │ content     │
+└─────────────┴─────────────┘
+```
+
+#### Basic usage
+```rust
+let (left, right) = TwoColumnLayout::new()
+    .header_left("Tasks")
+    .header_right("Details")
+    .collapse(true)
+    .render_layout(area, frame.buffer_mut());
+
+// render panel content into `left` and `right`
+Paragraph::new("…").render(left,  frame.buffer_mut());
+Paragraph::new("…").render(right, frame.buffer_mut());
+```
+
+`render_layout` draws all decoration into `buf` and returns
+`(left_inner, right_inner)` — both rects are already shrunk by borders and
+padding.
+
+#### Column widths
+
+By default the two panels share the available width evenly.  Use `left_width`
+to override:
+```rust
+// Left panel fixed to 24 columns.
+TwoColumnLayout::new()
+    .left_width(ColumnWidth::Fixed(24))
+    …
+
+// Left panel takes 30 % of the available width.
+TwoColumnLayout::new()
+    .left_width(ColumnWidth::Percent(30))
+    …
+```
+
+The right panel always receives the remaining columns.  In collapse mode the
+shared center divider is excluded before the ratio is applied.
+
+#### Borders
+```rust
+// Default: all four sides on both panels.
+TwoColumnLayout::new()
+
+// Same configuration for both panels.
+.borders(HalfBorders::all())        // all four sides (default)
+.borders(HalfBorders::none())       // no borders at all
+.borders(HalfBorders::none().horizontal(true))  // top + bottom only
+
+// Different configuration per panel.
+.left_borders(HalfBorders::all().right(false))  // no inner edge on left
+.right_borders(HalfBorders::all().left(false))  // no inner edge on right
+```
+
+When `collapse(true)` is set the inner edges of both panels are replaced by a
+single shared column.  Junction characters (`┬` / `┴`) are drawn automatically
+based on which surrounding borders are enabled.
+
+#### Border drawing style
+```rust
+.border_type(BorderStyleType::Plain)    // ┌─┐│└┘  (default)
+.border_type(BorderStyleType::Rounded)  // ╭─╮│╰╯
+.border_type(BorderStyleType::Double)   // ╔═╗║╚╝
+.border_type(BorderStyleType::Thick)    // ┏━┓┃┗┛
+```
+
+#### Padding
+
+Padding is applied inside the borders.  The content rect returned by
+`render_layout` is shrunk accordingly.
+```rust
+// Same padding on both panels.
+.padding(HalfPadding::all(1))
+.padding(HalfPadding::new().left(2).right(2))
+
+// Per-panel padding.
+.left_padding(HalfPadding::new().left(2).right(1).top(2).bottom(2))
+.right_padding(HalfPadding::new().left(1).right(2).top(2).bottom(2))
+```
+
+#### Styling
+
+`TwoColumnStyle` has independent slots for borders, headers, padding areas, and
+content areas.  Padding and content are separate layers — both default to
+`None` (transparent), so they can be coloured independently or left alone.
+```rust
+TwoColumnStyle::new()
+    // Border characters and header text.
+    .border(Style::default().fg(Color::Cyan))
+    .header_left(Style::default().fg(Color::Yellow).bold())
+    .header_right(Style::default().fg(Color::Yellow).bold())
+    .headers(Style::default().fg(Color::Yellow))  // sets both at once
+
+    // Padding layer: fills the band of cells between the border and the
+    // content rect.  Setting a background here colours the padding cells.
+    .padding_style_left(Style::default().bg(Color::Rgb(40, 20, 10)))
+    .padding_style_right(Style::default().bg(Color::Rgb(10, 40, 30)))
+    .padding_style(s)  // sets both at once
+
+    // Content layer: fills the inner rect (inside the padding).
+    // Setting a background here colours only the content area, not the padding.
+    .content_left(Style::default().bg(Color::Rgb(18, 18, 32)))
+    .content_right(Style::default().bg(Color::Rgb(18, 18, 32)))
+    .content(s)        // sets both at once
+```
+
+Rendering order per panel: padding layer first, content layer on top.  This
+means the content background overwrites the padding background in the content
+area, which is the expected behaviour.
+
+#### `Widget` impl
+
+`TwoColumnLayout` also implements `ratatui::widgets::Widget` for cases where
+you only need the decoration and do not need the inner rects:
+```rust
+frame.render_widget(
+    TwoColumnLayout::new().header_left("A").header_right("B"),
+    area,
+);
+```
+
+---
+
+### 1.5 Utilities
 
 #### `hex_color`
 
 Parses a CSS hex string into a `ratatui::style::Color::Rgb`:
-
 ```rust
 let blue = hex_color("#64B4FF");
 ```
@@ -466,7 +578,6 @@ let blue = hex_color("#64B4FF");
 #### `open_editor`
 
 Suspends the TUI, opens `$EDITOR` for the given path, and resumes:
-
 ```rust
 use not_yet_done_ratatui::{open_editor, EditorError};
 
@@ -480,7 +591,6 @@ let terminal = ratatui::init();
 ## 2. Developer Guide
 
 ### 2.1 Project layout
-
 ```
 src/
 ├── lib.rs                   — public re-exports
@@ -504,6 +614,10 @@ src/
     │   ├── keymap.rs        — MultiChoiceKeymap
     │   ├── state.rs         — MultiChoiceState, MultiChoiceEvent
     │   └── style.rs         — MultiChoiceStyle, MultiChoiceStyleType
+    ├── two_column/
+    │   ├── mod.rs           — TwoColumnLayout widget + render_layout
+    │   └── style.rs         — BorderStyleType, BorderChars, HalfBorders,
+    │                          HalfPadding, TwoColumnStyle, ColumnWidth
     └── form/
         ├── mod.rs           — Form widget, render_with_state, handle_event
         ├── field.rs         — FormField, FormFieldWidget
@@ -559,7 +673,6 @@ A complete widget consists of four files:
 
 Defines `MyWidgetKeymap` with one `KeyBinding` field per action and a
 `Default` impl with sensible defaults.
-
 ```rust
 #[derive(Debug, Clone)]
 pub struct MyWidgetKeymap {
@@ -581,7 +694,6 @@ impl Default for MyWidgetKeymap {
 
 Defines `MyWidgetState` (pure data, `Default` + `Clone`) and `MyWidgetEvent`
 (enum of observable outcomes).
-
 ```rust
 #[derive(Debug, Clone)]
 pub enum MyWidgetEvent {
@@ -615,7 +727,6 @@ impl MyWidgetState {
 #### `style.rs`
 
 Defines `MyWidgetStyleType` (repr(u8) enum) and `MyWidgetStyle`.
-
 ```rust
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,7 +760,6 @@ impl_widget_style_base!(MyWidgetStyle, MyWidgetStyleType);
 
 Defines the stateless `MyWidget` struct with a builder API and
 `render_with_state`.
-
 ```rust
 pub mod keymap;
 pub mod state;
@@ -701,7 +811,6 @@ Finally, export from `src/widgets/mod.rs` and `src/lib.rs`.
 
 Every style slot is `Option<Style>` (or `Option<Color>` for colour-only
 fields).  `None` means "not configured by this level".
-
 ```
 widget.style(SlotType)           → Option<&Style>   (None = not set)
 widget.resolved_style(SlotType)  → Style             (falls back to default)
@@ -714,14 +823,12 @@ configured a slot before filling it in from the global style.
 #### impl_widget_style_base! macro
 
 Any widget style struct with the following two public fields:
-
 ```rust
 pub prefix_color: Option<Color>,
 pub styles: [Option<Style>; N],
 ```
 
 can derive the standard accessor methods with one line:
-
 ```rust
 impl_widget_style_base!(MyWidgetStyle, MyWidgetStyleType);
 ```
@@ -731,7 +838,6 @@ This generates `prefix_color()`, `set_style()`, `style()`, and
 `placeholder_color`) must be added manually in `impl MyWidgetStyle`.
 
 #### Precedence chain
-
 ```
 widget-level set_style(...)   ← highest priority (Some wins)
         ↓
@@ -772,7 +878,6 @@ pub enum FormFieldState {
 ```
 
 #### 2. Add a merge function in `form/style.rs`
-
 ```rust
 pub(crate) fn merge_my_widget(
     mut widget: MyWidgetStyle,
@@ -798,7 +903,6 @@ mapping table in the doc comment).
 #### 3. Handle the new variant in `Form::render_field` and `Form::handle_event`
 
 In `form/mod.rs`, add match arms:
-
 ```rust
 // render_field
 (FormFieldWidget::MyWidget(w), FormFieldState::MyWidget(s)) => {

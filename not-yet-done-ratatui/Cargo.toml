@@ -15,6 +15,14 @@ path = "examples/new_user.rs"
 name = "new_server_form"
 path = "examples/new_server_form.rs"
 
+[[example]]
+name = "two_column"
+path = "examples/two_column.rs"
+
+[[example]]
+name = "two_column_form"
+path = "examples/two_column_form.rs"
+
 [dependencies]
 ratatui.workspace = true
 crossterm.workspace = true

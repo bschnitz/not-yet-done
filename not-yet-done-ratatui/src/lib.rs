@@ -22,3 +22,7 @@ pub use widgets::form::{
     FieldEvent, Form, FormEvent, FormField, FormFieldState, FormFieldWidget, FormKeymap,
     FormState, FormStyle, FormWidgetStyle,
 };
+
+pub use widgets::two_column::{
+    BorderStyleType, ColumnWidth, HalfBorders, HalfPadding, TwoColumnLayout, TwoColumnStyle,
+};
