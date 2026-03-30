@@ -1,161 +1,132 @@
+mod component;
+mod render;
 pub mod keymap;
 pub mod state;
 pub mod style;
 
+pub use component::ATTR_ERROR;
 pub use keymap::TextInputKeymap;
-pub use state::{TextInputEvent, TextInputState};
+pub use state::TextInputEvent;
 pub use style::{TextInputStyle, TextInputStyleType};
 
-use crate::widgets::common::{render_prefixed_line, truncate_to_width, PREFIX_LEN};
-use unicode_width::UnicodeWidthChar;
+/// A single-line text input field implementing tuirealm's [`MockComponent`] and
+/// [`tuirealm::Component<TextInputEvent, NoUserEvent>`].
+///
+/// All state is owned by the component.  Construct once and mount into a
+/// tuirealm [`Application`](tuirealm::Application); do not rebuild per frame.
+///
+/// ```rust
+/// let input = TextInput::default()
+///     .with_title("Username")
+///     .with_placeholder("e.g. alice")
+///     .with_inactive_style(inactive)
+///     .with_active_style(active)
+///     .with_keymap(keymap);
+///
+/// app.mount(Id::Username, Box::new(input), vec![])?;
+/// ```
+pub struct TextInput {
+    // --- framework state ---
+    pub(crate) focused: bool,
 
-use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
+    // --- editing state ---
+    pub(crate) value:   String,
+    /// Byte offset of the cursor within `value`.
+    pub(crate) cursor:  usize,
+    pub(crate) error:   Option<String>,
 
-#[derive(Debug, Clone)]
-pub struct TextInput<'a> {
-    pub title: &'a str,
-    pub placeholder: &'a str,
-    pub width: Option<u16>,
-    pub style: TextInputStyle,
-    pub keymap: TextInputKeymap,
+    // --- configuration (set once at construction) ---
+    pub(crate) title:           String,
+    pub(crate) placeholder:     String,
+    pub(crate) inactive_style:  TextInputStyle,
+    pub(crate) active_style:    TextInputStyle,
+    pub(crate) keymap:          TextInputKeymap,
 }
 
-impl<'a> TextInput<'a> {
-    pub fn new(title: &'a str) -> Self {
+impl Default for TextInput {
+    fn default() -> Self {
         Self {
-            title,
-            placeholder: "",
-            width: None,
-            style: TextInputStyle::default(),
-            keymap: TextInputKeymap::default(),
+            focused:        false,
+            value:          String::new(),
+            cursor:         0,
+            error:          None,
+            title:          String::new(),
+            placeholder:    String::new(),
+            inactive_style: TextInputStyle::default(),
+            active_style:   TextInputStyle::default(),
+            keymap:         TextInputKeymap::default(),
         }
-    }
-
-    pub fn placeholder(mut self, text: &'a str) -> Self {
-        self.placeholder = text;
-        self
-    }
-
-    pub fn width(mut self, w: u16) -> Self {
-        self.width = Some(w);
-        self
-    }
-
-    pub fn style(mut self, s: TextInputStyle) -> Self {
-        self.style = s;
-        self
-    }
-
-    pub fn keymap(mut self, km: TextInputKeymap) -> Self {
-        self.keymap = km;
-        self
-    }
-
-    pub fn render_with_state(self, area: Rect, buf: &mut Buffer, state: &TextInputState) {
-        let total_width = self.width.unwrap_or(area.width);
-        let text_width = total_width.saturating_sub(PREFIX_LEN) as usize;
-
-        // Row 0: title
-        let title_style = self.style.resolved_style(TextInputStyleType::Title);
-        render_prefixed_line(
-            buf,
-            area.x,
-            area.y,
-            total_width,
-            self.title,
-            text_width,
-            &self.style.prefix_color,
-            &title_style,
-            false,
-        );
-
-        // Row 1: input (or placeholder when empty)
-        let input_text = if state.value.is_empty() {
-            self.placeholder
-        } else {
-            &state.value
-        };
-
-        let input_style = self.style.resolved_style(TextInputStyleType::Input);
-        let effective_input_style = if state.value.is_empty() {
-            if let Some(ph_color) = self.style.placeholder_color {
-                input_style.fg(ph_color)
-            } else {
-                input_style
-            }
-        } else {
-            input_style
-        };
-
-        render_prefixed_line(
-            buf,
-            area.x,
-            area.y + 1,
-            total_width,
-            input_text,
-            text_width,
-            &self.style.prefix_color,
-            &effective_input_style,
-            false,
-        );
-
-        // Row 2: error
-        if area.height > 2 {
-            let error_text = match &state.error {
-                Some(e) => format!("  ⚠ {}", e),
-                None => String::new(),
-            };
-            let error_style = self.style.resolved_style(TextInputStyleType::Error);
-            render_plain_line(buf, area.x, area.y + 2, total_width, &error_text, &error_style);
-        }
-    }
-
-    pub fn cursor_position(&self, area: Rect, state: &TextInputState) -> (u16, u16) {
-        let chars_before = state.value[..state.cursor].chars().count();
-        let total_width = self.width.unwrap_or(area.width);
-        let max_x = area.x + total_width - 1;
-        let x = (area.x + PREFIX_LEN + chars_before as u16).min(max_x);
-        (x, area.y + 1)
     }
 }
 
-impl Widget for TextInput<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let state = TextInputState::default();
-        self.render_with_state(area, buf, &state);
+impl TextInput {
+    /// Sets the title displayed above the input field.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = title.into();
+        self
     }
-}
 
-/// Renders a plain line without a prefix — used for the error row of `TextInput`.
-fn render_plain_line(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    total_width: u16,
-    text: &str,
-    line_style: &Style,
-) {
-    if let Some(bg) = line_style.bg {
-        for dx in 0..total_width {
-            if let Some(cell) = buf.cell_mut((x + dx, y)) {
-                cell.set_bg(bg);
-            }
+    /// Sets the placeholder shown when the value is empty.
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Style applied when this component does not have focus.
+    pub fn with_inactive_style(mut self, style: TextInputStyle) -> Self {
+        self.inactive_style = style;
+        self
+    }
+
+    /// Style applied when this component has focus.
+    pub fn with_active_style(mut self, style: TextInputStyle) -> Self {
+        self.active_style = style;
+        self
+    }
+
+    /// Overrides the default key bindings.
+    pub fn with_keymap(mut self, keymap: TextInputKeymap) -> Self {
+        self.keymap = keymap;
+        self
+    }
+
+    // --- internal editing helpers (used by component.rs) ---
+
+    pub(crate) fn push_char(&mut self, c: char) {
+        self.value.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    pub(crate) fn pop_char(&mut self) {
+        if self.cursor == 0 { return; }
+        let mut pos = self.cursor - 1;
+        while !self.value.is_char_boundary(pos) { pos -= 1; }
+        self.value.remove(pos);
+        self.cursor = pos;
+    }
+
+    pub(crate) fn delete_forward(&mut self) {
+        if self.cursor < self.value.len() {
+            self.value.remove(self.cursor);
         }
     }
 
-    let mut px = x;
-    for ch in truncate_to_width(text, total_width as usize).chars() {
-        if let Some(cell) = buf.cell_mut((px, y)) {
-            let mut s = Style::default();
-            if let Some(fg) = line_style.fg {
-                s = s.fg(fg);
-            }
-            if let Some(bg) = line_style.bg {
-                s = s.bg(bg);
-            }
-            cell.set_char(ch);
-            cell.set_style(s);
-        }
-        px += ch.width().unwrap_or(1) as u16;
+    pub(crate) fn move_cursor_left(&mut self) {
+        if self.cursor == 0 { return; }
+        let mut pos = self.cursor - 1;
+        while !self.value.is_char_boundary(pos) { pos -= 1; }
+        self.cursor = pos;
+    }
+
+    pub(crate) fn move_cursor_right(&mut self) {
+        if self.cursor >= self.value.len() { return; }
+        let mut pos = self.cursor + 1;
+        while pos <= self.value.len() && !self.value.is_char_boundary(pos) { pos += 1; }
+        self.cursor = pos;
+    }
+
+    pub(crate) fn clear_value(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
     }
 }

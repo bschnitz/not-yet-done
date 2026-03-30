@@ -2,9 +2,23 @@
 
 This document covers two audiences:
 
-- **Users** — how to include and use the existing widgets and form in an application
+- **Users** — how to include and use the existing widgets in an application
 - **Contributors** — how new widgets are structured, what conventions to follow,
-  and how to integrate them with the form layer
+  and how to extend the library
+
+> **Note on design.** The conventions documented here are a starting point, not
+> a fixed specification.  If you see a better way to structure something —
+> a cleaner API, a smarter split of concerns, a more idiomatic Rust pattern —
+> proposals and pull requests are welcome.  Good design evolves through
+> discussion.
+
+> **Migration status.**
+> | Widget | Status |
+> |---|---|
+> | `TextInput` | ✅ tui-realm `MockComponent` |
+> | `MultiChoice` | 🔄 pending migration |
+> | `Form` | 🔄 pending migration |
+> | `TwoColumnLayout` | 🔄 pending migration |
 
 ---
 
@@ -21,25 +35,29 @@ This document covers two audiences:
    2. [Design principles](#22-design-principles)
    3. [Anatomy of a widget](#23-anatomy-of-a-widget)
    4. [Styling system](#24-styling-system)
-   5. [Form integration](#25-form-integration)
-   6. [Adding a new widget](#26-adding-a-new-widget)
-   7. [Common pitfalls](#27-common-pitfalls)
+   5. [Adding a new widget — checklist](#25-adding-a-new-widget--checklist)
+   6. [Common pitfalls](#26-common-pitfalls)
 
 ---
 
 ## 1. User Guide
 
-All public types are re-exported from the crate root:
+Public types re-exported from the crate root:
 ```rust
 use not_yet_done_ratatui::{
-    TextInput, TextInputState, TextInputStyle, TextInputStyleType, TextInputKeymap, TextInputEvent,
-    MultiChoice, MultiChoiceState, MultiChoiceStyle, MultiChoiceStyleType,
-        MultiChoiceKeymap, MultiChoiceEvent,
+    // tui-realm components
+    TextInput, TextInputEvent, TextInputKeymap,
+    TextInputStyle, TextInputStyleType, ATTR_ERROR,
+
+    // pending migration
+    MultiChoice, MultiChoiceEvent, MultiChoiceKeymap, MultiChoiceState,
+        MultiChoiceStyle, MultiChoiceStyleType,
     Form, FormState, FormField, FormFieldState, FormStyle, FormWidgetStyle,
         FormKeymap, FormEvent, FieldEvent,
     TwoColumnLayout, TwoColumnStyle, ColumnWidth, BorderStyleType,
         HalfBorders, HalfPadding,
-    KeyBinding, hex_color,
+
+    hex_color,
 };
 ```
 
@@ -47,96 +65,127 @@ use not_yet_done_ratatui::{
 
 ### 1.1 TextInput
 
-A single-line text field with a title, input line, and error line.
+A single-line text field.
 ```
 ▍ Title
 ▍ value or placeholder text
   ⚠ error message (only when an error is set)
 ```
 
-#### State
+`TextInput` implements:
+- `tuirealm::MockComponent` — low-level `view` / `perform` / `attr` / `query` / `state`
+- `tuirealm::Component<TextInputEvent, NoUserEvent>` — maps keyboard events to messages
 
-`TextInputState` holds the mutable value, cursor position and optional error.
-Create one per field and keep it in your app struct.
+The component owns all its state.  No external state struct is needed.
+
+#### Construction
+
+Create once, mount into a tuirealm `Application`.  Do not rebuild per frame.
 ```rust
-let mut state = TextInputState::new();
+let input = TextInput::default()
+    .with_title("Username")
+    .with_placeholder("e.g. alice")
+    .with_inactive_style(inactive_style)
+    .with_active_style(active_style)
+    .with_keymap(keymap);          // optional — defaults to TextInputKeymap::default()
 
-// Read the current value
-let v = state.value();
-
-// Errors (set/clear by your validation code)
-state.set_error("At least 3 characters required");
-state.clear_error();
+app.mount(Id::Username, Box::new(input), vec![])?;
 ```
 
-#### Widget
+#### Focus and style selection
 
-`TextInput` is stateless and rebuilt every frame.
+The `Application` manages focus.  When it sets focus on this component,
+`attr(Attribute::Focus, AttrValue::Flag(true))` is called internally.
+The component then renders with `active_style` and shows the terminal cursor on
+the input row.  `inactive_style` is used otherwise.
+
+#### Reading the value
 ```rust
-TextInput::new("Username")
-    .placeholder("e.g. alice")
-    .width(40)                      // optional; defaults to area width
-    .style(my_style)
-    .keymap(my_keymap)
-    .render_with_state(area, frame.buffer_mut(), &state);
+if let Ok(State::One(StateValue::String(val))) = app.state(&Id::Username) {
+    println!("current value: {}", val);
+}
+```
+
+#### Setting and clearing errors
+```rust
+// Set an error:
+app.attr(
+    &Id::Username,
+    Attribute::Custom(ATTR_ERROR),
+    AttrValue::String("At least 3 characters required".into()),
+)?;
+
+// Clear the error:
+app.attr(&Id::Username, Attribute::Custom(ATTR_ERROR), AttrValue::Flag(false))?;
 ```
 
 #### Keymap
 ```rust
+use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
 // Default bindings
 let keymap = TextInputKeymap::default();
-// ← / →       move cursor
-// Backspace   delete backwards
-// Delete      delete forwards
-// Ctrl+U      clear
+// ←            move cursor left
+// →            move cursor right
+// Backspace    delete backwards   (→ Cmd::Delete)
+// Delete       delete forwards    (→ Cmd::Custom("delete_fwd"))
+// Ctrl+U       clear all         (→ Cmd::Custom("clear"))
 
-// Custom bindings (Emacs-style example)
+// Emacs-style override via struct update syntax:
 let keymap = TextInputKeymap {
-    move_left:   KeyBinding::ctrl(KeyCode::Char('b')),
-    move_right:  KeyBinding::ctrl(KeyCode::Char('f')),
-    delete_back: KeyBinding::ctrl(KeyCode::Char('h')),
-    delete_fwd:  KeyBinding::ctrl(KeyCode::Char('d')),
-    clear:       KeyBinding::ctrl(KeyCode::Char('k')),
+    move_left:  KeyEvent { code: Key::Char('b'), modifiers: KeyModifiers::CONTROL },
+    move_right: KeyEvent { code: Key::Char('f'), modifiers: KeyModifiers::CONTROL },
+    ..TextInputKeymap::default()
 };
 ```
 
-`KeyBinding::new(code)` — no modifiers.
-`KeyBinding::ctrl(code)` — Ctrl+key.
-For other modifiers, build the struct directly:
-```rust
-KeyBinding { code: KeyCode::BackTab, modifiers: KeyModifiers::SHIFT }
-```
-
 #### Events
-
-Call `state.handle_event(&event, &keymap)` in your event loop and match the
-return value:
 ```rust
-match state.handle_event(&event, &keymap) {
-    TextInputEvent::Changed(new_value) => { /* live validation */ }
-    TextInputEvent::Ignored => {}
+// In your Application::update():
+match msg {
+    Some(TextInputEvent::Changed(new_value)) => {
+        // live validation, store value, etc.
+    }
 }
 ```
 
-#### Cursor position
+#### `perform` command reference
 
-After rendering, set the terminal cursor:
-```rust
-if !state.value().is_empty() {
-    let pos = TextInput::new("").width(area.width)
-        .cursor_position(area, &state);
-    frame.set_cursor_position(pos);
-}
-```
+| `Cmd` | Effect |
+|---|---|
+| `Cmd::Move(Direction::Left)` | Move cursor left |
+| `Cmd::Move(Direction::Right)` | Move cursor right |
+| `Cmd::Delete` | Delete character before cursor (Backspace) |
+| `Cmd::Custom("delete_fwd")` | Delete character after cursor (Delete key) |
+| `Cmd::Custom("clear")` | Clear entire input |
+| `Cmd::Type(char)` | Insert character at cursor |
+
+Commands that change the value return
+`CmdResult::Changed(State::One(StateValue::String(new_value)))`.
+Cursor-only movement returns `CmdResult::None`.
 
 #### Style
+
+Two independent `TextInputStyle` instances control appearance depending on
+focus state:
 ```rust
-let style = TextInputStyle::new()
+let inactive = TextInputStyle::new()
+    .prefix_color(Color::Rgb(60, 60, 120))
+    .set_style(TextInputStyleType::Title, Style::default().fg(BLUE))
+    .set_style(TextInputStyleType::Input, Style::default().fg(WHITE))
+    .set_style(TextInputStyleType::Error, Style::default().fg(RED))
+    .placeholder_color(Color::Rgb(60, 60, 100));
+
+let active = TextInputStyle::new()
     .prefix_color(Color::Rgb(100, 180, 255))
-    .set_style(TextInputStyleType::Title, Style::default().fg(ACCENT))
-    .set_style(TextInputStyleType::Input, Style::default().fg(INPUT_FG).bg(INPUT_BG))
+    .set_style(TextInputStyleType::Title, Style::default().fg(ACCENT).bold())
+    .set_style(TextInputStyleType::Input, Style::default().fg(WHITE).bg(FIELD_BG))
     .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
     .placeholder_color(Color::Rgb(80, 80, 110));
+
+TextInput::default()
+    .with_inactive_style(inactive)
+    .with_active_style(active)
 ```
 
 | `TextInputStyleType` | Affects |
@@ -145,424 +194,49 @@ let style = TextInputStyle::new()
 | `Input` | Input row (text and background) |
 | `Error` | Error row |
 
-Unset slots fall back to `Style::default()`.  When used inside a `Form`, unset
-slots are filled in by the form's global style (see [Form](#13-form)).
+Unset slots fall back to `Style::default()`.
 
 ---
 
 ### 1.2 MultiChoice
 
+> **Pending tui-realm migration.**  Still uses the original stateless ratatui
+> approach; API will change when migrated.
+
 A dropdown-style multi-select widget.
 
-**Collapsed** (field is not active):
+**Collapsed:**
 ```
 ▍ Protocol
 ▍ HTTP, HTTPS
 ```
 
-**Expanded** (field is active, `state.open == true`):
+**Expanded** (`state.open == true`):
 ```
 ▍ Protocol
-▍▶ HTTP         ← cursor row
+▍▶ HTTP
 ▍  HTTPS
 ▍  WS
-▍  WSS
               ← blank closing line
 ```
 
-When expanded the widget **writes below its layout slot**, overlapping whatever
-is beneath it.  Render it last among potentially overlapped siblings (the `Form`
-widget handles this automatically).
-
-#### State
-```rust
-let mut state = MultiChoiceState::new(4); // number of options
-
-// Open / close from outside (e.g. on focus change)
-state.open();
-state.close();
-
-// Read selected indices
-let selected: Vec<usize> = state.selected_indices();
-```
-
-#### Widget
-```rust
-let choices = ["HTTP", "HTTPS", "WS", "WSS"];
-
-MultiChoice::new("Protocol", &choices)
-    .placeholder("Choose protocol(s)")
-    .style(my_style)
-    .keymap(my_keymap)
-    .render_with_state(area, frame.buffer_mut(), &state);
-```
-
-#### Keymap
-```rust
-// Default bindings
-let keymap = MultiChoiceKeymap::default();
-// Ctrl+J   move cursor down
-// Ctrl+K   move cursor up
-// Space    toggle selection
-
-// Custom bindings (arrow keys)
-let keymap = MultiChoiceKeymap {
-    move_down: KeyBinding::new(KeyCode::Down),
-    move_up:   KeyBinding::new(KeyCode::Up),
-    toggle:    KeyBinding::new(KeyCode::Char(' ')),
-};
-```
-
-#### Events
-```rust
-match state.handle_event(&event, &keymap) {
-    MultiChoiceEvent::SelectionChanged(indices) => { /* … */ }
-    MultiChoiceEvent::Opened  => {}
-    MultiChoiceEvent::Closed  => {}
-    MultiChoiceEvent::Ignored => {}
-}
-```
-
-#### Style
-```rust
-let style = MultiChoiceStyle::new()
-    .prefix_color(ACCENT)
-    .set_style(MultiChoiceStyleType::Title,          Style::default().fg(ACCENT))
-    .set_style(MultiChoiceStyleType::Normal,         Style::default().fg(BODY_FG))
-    .set_style(MultiChoiceStyleType::Active,         Style::default().fg(YELLOW))
-    .set_style(MultiChoiceStyleType::Selected,       Style::default().bg(SEL_BG))
-    .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(YELLOW).bg(SEL_BG))
-    .set_style(MultiChoiceStyleType::LastLine,       Style::default().bg(PANEL_BG));
-```
-
-| `MultiChoiceStyleType` | Affects |
-|---|---|
-| `Title` | Title row |
-| `Normal` | Item row — not selected, cursor elsewhere |
-| `Active` | Item row — not selected, cursor here (keyboard focus) |
-| `Selected` | Item row — selected, cursor elsewhere |
-| `SelectedActive` | Item row — selected and cursor here |
-| `LastLine` | Blank closing line below the expanded list |
-
-`LastLine` should match the panel background so the drop-down closes cleanly.
+See the previous API documentation for full usage until migration is complete.
 
 ---
 
 ### 1.3 Form
 
-`Form` composes multiple `TextInput` and `MultiChoice` widgets into a managed
-form with automatic layout, focus handling, style inheritance, and correct
-render order.
+> **Pending tui-realm migration.**
 
-#### Overview of types
-
-| Type | Role |
-|---|---|
-| `Form` | Stateless widget, rebuilt every frame |
-| `FormState` | Mutable runtime state (active field, per-field states) |
-| `FormField` | Descriptor for one field (widget + layout height) |
-| `FormFieldState` | Enum wrapping `TextInputState` or `MultiChoiceState` |
-| `FormStyle` | Global active/inactive style defaults |
-| `FormWidgetStyle` | Style for one focus state (active or inactive) |
-| `FormKeymap` | Form-level keybindings (focus next/prev, confirm) |
-| `FormEvent` | Event returned by `Form::handle_event` |
-| `FieldEvent` | Per-field event, tagged with field index |
-
-#### Setting up state
-```rust
-let mut form_state = FormState::new(vec![
-    FormFieldState::TextInput(TextInputState::new()),
-    FormFieldState::MultiChoice(MultiChoiceState::new(CHOICES.len())),
-    FormFieldState::TextInput(TextInputState::new()),
-]);
-// The first field receives focus; if it is a MultiChoice it opens automatically.
-```
-
-Accessing field state by index:
-```rust
-// Read
-let text = form_state.field(0)
-    .and_then(|f| f.as_text_input())
-    .map(|ts| ts.value())
-    .unwrap_or_default();
-
-// Mutate (e.g. validation)
-if let Some(ts) = form_state.field_mut(0).and_then(|f| f.as_text_input_mut()) {
-    ts.set_error("Required");
-}
-```
-
-#### Building the form
-```rust
-let form = Form::new()
-    .style(global_style)    // FormStyle — see below
-    .spacing(1)             // blank rows between fields (default: 1)
-    .keymap(form_keymap)    // FormKeymap — see below
-    .field(FormField::text_input(
-        TextInput::new("Username").placeholder("…"),
-    ))
-    .field(FormField::multi_choice(
-        MultiChoice::new("Role", &ROLES).placeholder("…"),
-    ).with_height(3))       // override layout height when needed
-    .field(FormField::text_input(
-        TextInput::new("E-mail").placeholder("…"),
-    ));
-```
-
-Default layout heights: `TextInput` = 3 rows, `MultiChoice` = 2 rows.
-Use `.with_height(n)` when you need a different allocation (e.g. to align a
-`MultiChoice` with `TextInput` fields).
-
-#### Rendering
-```rust
-// in your render function:
-form.render_with_state(form_area, frame.buffer_mut(), &form_state);
-
-// terminal cursor for the active TextInput:
-if let Some(pos) = form.cursor_position(form_area, &form_state) {
-    frame.set_cursor_position(pos);
-}
-```
-
-#### Event handling
-```rust
-match form.handle_event(&event, &mut form_state) {
-    FormEvent::Submit => {
-        // Enter was pressed on a TextInput field — validate and act.
-    }
-    FormEvent::FocusChanged { from, to } => {
-        // Tab / Shift+Tab moved focus. form_state.active is already updated.
-    }
-    FormEvent::FieldEvent { index, event } => {
-        // A widget-level event occurred in field `index`.
-        if let FieldEvent::TextInput(TextInputEvent::Changed(_)) = event {
-            validate_field(index, &mut form_state);
-        }
-    }
-    FormEvent::Ignored => {}
-}
-```
-
-Enter on a `MultiChoice` field toggles its drop-down open/closed (does not
-emit `Submit`).
-
-#### FormKeymap
-```rust
-// Default bindings
-let keymap = FormKeymap::default();
-// Tab          focus next
-// Shift+Tab    focus previous
-// Enter        submit (TextInput) / toggle MC (MultiChoice)
-
-// Custom bindings
-let keymap = FormKeymap {
-    focus_next: KeyBinding::ctrl(KeyCode::Char('n')),
-    focus_prev: KeyBinding::ctrl(KeyCode::Char('p')),
-    confirm:    KeyBinding::ctrl(KeyCode::Char('s')),
-};
-
-let form = Form::new().keymap(keymap) /* … */;
-```
-
-#### FormStyle — global style defaults
-
-`FormStyle` defines default styles for active and inactive fields.  These are
-merged into each widget's own style before rendering; any slot already set on
-the widget itself is left untouched.
-```rust
-let global_style = FormStyle::new()
-    .background(PANEL_BG)   // fills form area before rendering fields
-    .active(
-        FormWidgetStyle::new()
-            .prefix_color(GREEN)
-            .title(Style::default().fg(GREEN).bg(FIELD_BG))
-            .body(Style::default().fg(WHITE).bg(FIELD_BG))
-            .placeholder(Color::Rgb(80, 100, 80))
-            .error(Style::default().fg(RED))
-            // MultiChoice-specific active slots:
-            .mc_cursor(Style::default().fg(YELLOW).bg(FIELD_BG))
-            .mc_selected(Style::default().bg(SEL_BG))
-            .mc_selected_cursor(Style::default().fg(YELLOW).bg(SEL_BG))
-            .mc_closing_line(Style::default().bg(PANEL_BG)),
-    )
-    .inactive(
-        FormWidgetStyle::new()
-            .prefix_color(BLUE)
-            .title(Style::default().fg(BLUE))
-            .body(Style::default().fg(WHITE))
-            .placeholder(Color::Rgb(50, 50, 80))
-            .error(Style::default().fg(RED)),
-    );
-```
-
-`FormWidgetStyle` → widget style slot mapping:
-
-| `FormWidgetStyle` field | `TextInputStyleType` | `MultiChoiceStyleType` |
-|---|---|---|
-| `prefix_color` | `prefix_color` | `prefix_color` |
-| `title` | `Title` | `Title` |
-| `body` | `Input` | `Normal` |
-| `error` | `Error` | — |
-| `placeholder` | `placeholder_color` | — |
-| `mc_cursor` | — | `Active` |
-| `mc_selected` | — | `Selected` |
-| `mc_selected_cursor` | — | `SelectedActive` |
-| `mc_closing_line` | — | `LastLine` |
-
-#### Per-widget style overrides
-
-Set style slots on the widget itself to override the form global style for
-that specific field.  Only set slots win; unset slots still inherit.
-```rust
-// Only the title of this one field uses a special cyan colour.
-// Body, error, placeholder all still come from the form global style.
-FormField::text_input(
-    TextInput::new("Server Name")
-        .style(
-            TextInputStyle::new()
-                .set_style(TextInputStyleType::Title,
-                    Style::default().fg(CYAN).bg(FIELD_BG)),
-        ),
-)
-```
-
-#### Render order and MultiChoice overlay
-
-`Form` always renders inactive fields first, then the active field last.
-This means an open `MultiChoice` drop-down can safely overlap any fields below
-it — no manual z-ordering is needed.  Place a `MultiChoice` wherever it
-belongs logically; the form handles the rest.
+See the previous API documentation for full usage until migration is complete.
 
 ---
 
 ### 1.4 TwoColumnLayout
 
-A layout helper that splits a [`Rect`] into two panels with optional borders,
-headers, per-panel padding, and independent background colouring.  It returns
-the two inner content rects so the caller can render into them directly.
-```text
-┌─ Header L ──┬─ Header R ──┐
-│ content     │ content     │
-└─────────────┴─────────────┘
-```
+> **Pending tui-realm migration.**
 
-#### Basic usage
-```rust
-let (left, right) = TwoColumnLayout::new()
-    .header_left("Tasks")
-    .header_right("Details")
-    .collapse(true)
-    .render_layout(area, frame.buffer_mut());
-
-// render panel content into `left` and `right`
-Paragraph::new("…").render(left,  frame.buffer_mut());
-Paragraph::new("…").render(right, frame.buffer_mut());
-```
-
-`render_layout` draws all decoration into `buf` and returns
-`(left_inner, right_inner)` — both rects are already shrunk by borders and
-padding.
-
-#### Column widths
-
-By default the two panels share the available width evenly.  Use `left_width`
-to override:
-```rust
-// Left panel fixed to 24 columns.
-TwoColumnLayout::new()
-    .left_width(ColumnWidth::Fixed(24))
-    …
-
-// Left panel takes 30 % of the available width.
-TwoColumnLayout::new()
-    .left_width(ColumnWidth::Percent(30))
-    …
-```
-
-The right panel always receives the remaining columns.  In collapse mode the
-shared center divider is excluded before the ratio is applied.
-
-#### Borders
-```rust
-// Default: all four sides on both panels.
-TwoColumnLayout::new()
-
-// Same configuration for both panels.
-.borders(HalfBorders::all())        // all four sides (default)
-.borders(HalfBorders::none())       // no borders at all
-.borders(HalfBorders::none().horizontal(true))  // top + bottom only
-
-// Different configuration per panel.
-.left_borders(HalfBorders::all().right(false))  // no inner edge on left
-.right_borders(HalfBorders::all().left(false))  // no inner edge on right
-```
-
-When `collapse(true)` is set the inner edges of both panels are replaced by a
-single shared column.  Junction characters (`┬` / `┴`) are drawn automatically
-based on which surrounding borders are enabled.
-
-#### Border drawing style
-```rust
-.border_type(BorderStyleType::Plain)    // ┌─┐│└┘  (default)
-.border_type(BorderStyleType::Rounded)  // ╭─╮│╰╯
-.border_type(BorderStyleType::Double)   // ╔═╗║╚╝
-.border_type(BorderStyleType::Thick)    // ┏━┓┃┗┛
-```
-
-#### Padding
-
-Padding is applied inside the borders.  The content rect returned by
-`render_layout` is shrunk accordingly.
-```rust
-// Same padding on both panels.
-.padding(HalfPadding::all(1))
-.padding(HalfPadding::new().left(2).right(2))
-
-// Per-panel padding.
-.left_padding(HalfPadding::new().left(2).right(1).top(2).bottom(2))
-.right_padding(HalfPadding::new().left(1).right(2).top(2).bottom(2))
-```
-
-#### Styling
-
-`TwoColumnStyle` has independent slots for borders, headers, padding areas, and
-content areas.  Padding and content are separate layers — both default to
-`None` (transparent), so they can be coloured independently or left alone.
-```rust
-TwoColumnStyle::new()
-    // Border characters and header text.
-    .border(Style::default().fg(Color::Cyan))
-    .header_left(Style::default().fg(Color::Yellow).bold())
-    .header_right(Style::default().fg(Color::Yellow).bold())
-    .headers(Style::default().fg(Color::Yellow))  // sets both at once
-
-    // Padding layer: fills the band of cells between the border and the
-    // content rect.  Setting a background here colours the padding cells.
-    .padding_style_left(Style::default().bg(Color::Rgb(40, 20, 10)))
-    .padding_style_right(Style::default().bg(Color::Rgb(10, 40, 30)))
-    .padding_style(s)  // sets both at once
-
-    // Content layer: fills the inner rect (inside the padding).
-    // Setting a background here colours only the content area, not the padding.
-    .content_left(Style::default().bg(Color::Rgb(18, 18, 32)))
-    .content_right(Style::default().bg(Color::Rgb(18, 18, 32)))
-    .content(s)        // sets both at once
-```
-
-Rendering order per panel: padding layer first, content layer on top.  This
-means the content background overwrites the padding background in the content
-area, which is the expected behaviour.
-
-#### `Widget` impl
-
-`TwoColumnLayout` also implements `ratatui::widgets::Widget` for cases where
-you only need the decoration and do not need the inner rects:
-```rust
-frame.render_widget(
-    TwoColumnLayout::new().header_left("A").header_right("B"),
-    area,
-);
-```
+See the previous API documentation for full usage until migration is complete.
 
 ---
 
@@ -570,14 +244,14 @@ frame.render_widget(
 
 #### `hex_color`
 
-Parses a CSS hex string into a `ratatui::style::Color::Rgb`:
+Parses a CSS hex string into `ratatui::style::Color::Rgb`:
 ```rust
 let blue = hex_color("#64B4FF");
 ```
 
 #### `open_editor`
 
-Suspends the TUI, opens `$EDITOR` for the given path, and resumes:
+Suspends the TUI, opens `$EDITOR` for the given path, then resumes:
 ```rust
 use not_yet_done_ratatui::{open_editor, EditorError};
 
@@ -601,90 +275,99 @@ src/
     ├── mod.rs
     ├── common/              — shared primitives (no widget logic)
     │   ├── mod.rs
-    │   ├── keymap.rs        — KeyBinding
     │   ├── render.rs        — render_prefixed_line, truncate_to_width
     │   └── style.rs         — hex_color, impl_widget_style_base! macro
-    ├── text_input/
-    │   ├── mod.rs           — TextInput widget + render_with_state
-    │   ├── keymap.rs        — TextInputKeymap
-    │   ├── state.rs         — TextInputState, TextInputEvent
-    │   └── style.rs         — TextInputStyle, TextInputStyleType
-    ├── multi_choice/
-    │   ├── mod.rs           — MultiChoice widget + render_with_state
-    │   ├── keymap.rs        — MultiChoiceKeymap
-    │   ├── state.rs         — MultiChoiceState, MultiChoiceEvent
-    │   └── style.rs         — MultiChoiceStyle, MultiChoiceStyleType
-    ├── two_column/
-    │   ├── mod.rs           — TwoColumnLayout widget + render_layout
-    │   └── style.rs         — BorderStyleType, BorderChars, HalfBorders,
-    │                          HalfPadding, TwoColumnStyle, ColumnWidth
-    └── form/
-        ├── mod.rs           — Form widget, render_with_state, handle_event
-        ├── field.rs         — FormField, FormFieldWidget
-        ├── keymap.rs        — FormKeymap
-        ├── state.rs         — FormState, FormFieldState, FormEvent, FieldEvent
-        └── style.rs         — FormStyle, FormWidgetStyle, merge_* helpers
+    ├── text_input/          — tui-realm MockComponent ✅
+    │   ├── mod.rs           — TextInput struct + builder
+    │   ├── keymap.rs        — TextInputKeymap (tuirealm KeyEvent fields)
+    │   ├── state.rs         — TextInputEvent
+    │   ├── style.rs         — TextInputStyle, TextInputStyleType
+    │   ├── render.rs        — TextInputViewData + render() free function
+    │   └── component.rs     — impl MockComponent + impl Component
+    ├── multi_choice/        — stateless ratatui (pending migration)
+    ├── two_column/          — stateless ratatui (pending migration)
+    └── form/                — stateless ratatui (pending migration)
 ```
 
-Each widget is fully self-contained in its own subdirectory.  `common/` is the
-only shared dependency; widgets must not import each other (the form layer is
-the only place that knows about multiple widget types).
+`common/` is the only shared dependency.  Widgets must not import each other
+directly; the form layer is the only place that knows about multiple widget
+types.
 
 ---
 
 ### 2.2 Design principles
 
-**Separation of state and widget.**
-The widget struct (`TextInput`, `MultiChoice`, `Form`) is stateless and
-rebuilt on every frame.  All mutable data lives in a separate `*State` struct
-owned by the application.  This follows Ratatui conventions and avoids borrow
-conflicts between rendering and event handling.
+**tui-realm component model.**
+Each widget implements `MockComponent` (low-level) and optionally
+`Component<Msg, UserEvent>` (high-level event-to-message mapping).  The
+component owns all its mutable state; the `Application` manages focus via
+`attr(Attribute::Focus, …)`.
 
-**Builder API for configuration.**
-Widget and style structs use consuming builder methods (`fn foo(mut self, …) -> Self`).
-Every method call returns `Self`, enabling chaining.  Fields that are optional
-are stored as `Option<T>`; the absence of a value is meaningful (see styling).
+**Focus-driven style selection.**
+Each component holds two style instances — `inactive_style` and
+`active_style`.  `view` selects between them based on `self.focused`, which
+is kept in sync by the framework.
 
-**Widgets own their keyboard logic.**
-Each widget defines its own keymap struct and processes events via
-`state.handle_event(&event, &keymap)`.  The form layer wraps this — it does
-not re-implement widget key handling.
+**Render logic as a free function.**
+The actual drawing code lives in `render.rs` as a free function accepting a
+plain data struct (`*ViewData`).  This separates the render logic from the
+framework plumbing in `component.rs`, making it independently testable.
+
+**`perform` is the single mutation point.**
+All state changes go through `perform(Cmd) → CmdResult`.  `on` (and any
+direct callers) map inputs to `Cmd` values and delegate — never mutating
+`self` directly.  This keeps unit tests of `perform` reliable.
+
+**Keymaps use tuirealm types directly.**
+Keymap fields are `tuirealm::event::KeyEvent` — no custom wrapper type is
+needed.  Comparison in `on` is a plain `==` check.
 
 **Events, not callbacks.**
-`handle_event` returns an event enum value rather than calling closures.  The
-application decides what to do with each event (validation, side-effects, etc.).
+`Component::on` returns `Option<Msg>` rather than calling closures.
 
 **Unicode-correct rendering.**
-All text is measured and truncated using display width (`unicode-width`), not
-byte or character count.  Truncated strings get a `…` suffix.  All `px`
-advances in render code use `ch.width().unwrap_or(1)`.
+All text is measured and truncated using display width (`unicode-width`),
+not byte or character count.
 
 **English only.**
-All code comments, doc comments, error messages, placeholder text, and example
-strings are in English.
+All code comments, doc comments, error messages, placeholder text, and
+example strings must be in English.
+
+**Design is not final.**
+If you see a better approach — cleaner API, smarter module boundary, more
+idiomatic pattern — open a discussion.  These conventions exist to provide
+consistency, not to prevent improvement.
 
 ---
 
-### 2.3 Anatomy of a widget
+### 2.3 Anatomy of a tui-realm widget
 
-A complete widget consists of four files:
+A complete widget spans five files:
+```
+my_widget/
+├── mod.rs           — struct definition + builder methods + pub re-exports
+├── keymap.rs        — MyWidgetKeymap with tuirealm KeyEvent fields
+├── state.rs         — MyWidgetEvent (PartialEq + Eq required)
+├── style.rs         — MyWidgetStyle, MyWidgetStyleType
+├── render.rs        — MyWidgetViewData + render() free function (pub(super))
+└── component.rs     — impl MockComponent + impl Component (pub(super) mod)
+```
 
 #### `keymap.rs`
-
-Defines `MyWidgetKeymap` with one `KeyBinding` field per action and a
-`Default` impl with sensible defaults.
 ```rust
+use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
 #[derive(Debug, Clone)]
 pub struct MyWidgetKeymap {
-    pub confirm: KeyBinding,
-    pub cancel:  KeyBinding,
+    pub confirm: KeyEvent,
+    pub cancel:  KeyEvent,
 }
 
 impl Default for MyWidgetKeymap {
     fn default() -> Self {
         Self {
-            confirm: KeyBinding::new(KeyCode::Enter),
-            cancel:  KeyBinding::new(KeyCode::Esc),
+            confirm: KeyEvent { code: Key::Enter, modifiers: KeyModifiers::NONE },
+            cancel:  KeyEvent { code: Key::Esc,   modifiers: KeyModifiers::NONE },
         }
     }
 }
@@ -692,116 +375,96 @@ impl Default for MyWidgetKeymap {
 
 #### `state.rs`
 
-Defines `MyWidgetState` (pure data, `Default` + `Clone`) and `MyWidgetEvent`
-(enum of observable outcomes).
+Only the event enum — no external state struct.
 ```rust
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MyWidgetEvent {
     Confirmed(String),
     Cancelled,
-    Ignored,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct MyWidgetState {
-    pub value: String,
-    // internal fields are pub(crate) or private
-}
-
-impl MyWidgetState {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn handle_event(
-        &mut self,
-        event: &Event,
-        keymap: &MyWidgetKeymap,
-    ) -> MyWidgetEvent {
-        // match pressed key against keymap bindings
-        // mutate self as needed
-        // return the appropriate event variant
-        MyWidgetEvent::Ignored
-    }
 }
 ```
 
 #### `style.rs`
 
-Defines `MyWidgetStyleType` (repr(u8) enum) and `MyWidgetStyle`.
+Unchanged from the original design — `repr(u8)` enum + style struct +
+`impl_widget_style_base!`.
+
+#### `render.rs`
 ```rust
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MyWidgetStyleType {
-    Title = 0,
-    Body  = 1,
+pub(super) struct MyWidgetViewData<'a> {
+    pub title:   &'a str,
+    pub value:   &'a str,
+    pub focused: bool,
+    pub style:   &'a MyWidgetStyle,
 }
 
-#[derive(Debug, Clone)]
-pub struct MyWidgetStyle {
-    pub prefix_color: Option<Color>,
-    pub styles: [Option<Style>; 2],   // length must match variant count
-}
-
-impl Default for MyWidgetStyle {
-    fn default() -> Self {
-        Self { prefix_color: None, styles: [None; 2] }
+pub(super) fn render(frame: &mut Frame, area: Rect, data: &MyWidgetViewData<'_>) {
+    // draw rows using render_prefixed_line from common::render
+    if data.focused {
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
+```
 
-impl MyWidgetStyle {
-    pub fn new() -> Self { Self::default() }
-    // Any widget-specific builder methods (e.g. placeholder_color) go here.
+#### `component.rs`
+```rust
+use super::{MyWidget, render::{MyWidgetViewData, render}, state::MyWidgetEvent};
+
+impl MockComponent for MyWidget {
+    fn view(&mut self, frame: &mut Frame, area: Rect) {
+        let style = if self.focused { &self.active_style } else { &self.inactive_style };
+        render(frame, area, &MyWidgetViewData { style, focused: self.focused, /* … */ });
+    }
+    fn state(&self) -> State { State::One(StateValue::String(self.value.clone())) }
+    fn perform(&mut self, cmd: Cmd) -> CmdResult { /* mutations here */ }
+    fn query(&self, attr: Attribute) -> Option<AttrValue> { /* … */ }
+    fn attr(&mut self, attr: Attribute, value: AttrValue) { /* … */ }
 }
 
-// Generates: prefix_color(), set_style(), style(), resolved_style()
-impl_widget_style_base!(MyWidgetStyle, MyWidgetStyleType);
+impl tuirealm::Component<MyWidgetEvent, NoUserEvent> for MyWidget {
+    fn on(&mut self, ev: Event<NoUserEvent>) -> Option<MyWidgetEvent> {
+        let Event::Keyboard(key_ev) = ev else { return None; };
+        let cmd = /* map key_ev against keymap fields */;
+        match self.perform(cmd) {
+            CmdResult::Changed(State::One(StateValue::String(s))) => {
+                Some(MyWidgetEvent::Confirmed(s))
+            }
+            _ => None,
+        }
+    }
+}
 ```
 
 #### `mod.rs`
-
-Defines the stateless `MyWidget` struct with a builder API and
-`render_with_state`.
 ```rust
+mod component;
+mod render;
 pub mod keymap;
 pub mod state;
 pub mod style;
 
+pub use component::ATTR_MY_WIDGET;  // if needed
 pub use keymap::MyWidgetKeymap;
-pub use state::{MyWidgetEvent, MyWidgetState};
+pub use state::MyWidgetEvent;
 pub use style::{MyWidgetStyle, MyWidgetStyleType};
 
-#[derive(Debug, Clone)]
-pub struct MyWidget<'a> {
-    pub title:   &'a str,
-    pub style:   MyWidgetStyle,
-    pub keymap:  MyWidgetKeymap,
+pub struct MyWidget {
+    pub(crate) focused:         bool,
+    pub(crate) value:           String,
+    pub(crate) title:           String,
+    pub(crate) inactive_style:  MyWidgetStyle,
+    pub(crate) active_style:    MyWidgetStyle,
+    pub(crate) keymap:          MyWidgetKeymap,
 }
 
-impl<'a> MyWidget<'a> {
-    pub fn new(title: &'a str) -> Self {
-        Self { title, style: MyWidgetStyle::default(), keymap: MyWidgetKeymap::default() }
-    }
-    pub fn style(mut self, s: MyWidgetStyle) -> Self { self.style = s; self }
-    pub fn keymap(mut self, k: MyWidgetKeymap) -> Self { self.keymap = k; self }
-
-    pub fn render_with_state(self, area: Rect, buf: &mut Buffer, state: &MyWidgetState) {
-        let total_width = area.width;
-        let text_width = total_width.saturating_sub(PREFIX_LEN) as usize;
-
-        let title_style = self.style.resolved_style(MyWidgetStyleType::Title);
-        render_prefixed_line(buf, area.x, area.y, total_width, self.title,
-            text_width, &self.style.prefix_color, &title_style, false);
-        // … further rows
-    }
-}
-
-impl Widget for MyWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        self.render_with_state(area, buf, &MyWidgetState::default());
-    }
+impl Default for MyWidget { /* … */ }
+impl MyWidget {
+    pub fn with_title(mut self, t: impl Into<String>) -> Self { /* … */ }
+    // … other builder methods …
+    // internal helpers used by component.rs:
+    pub(crate) fn some_mutation(&mut self) { /* … */ }
 }
 ```
-
-Finally, export from `src/widgets/mod.rs` and `src/lib.rs`.
 
 ---
 
@@ -810,178 +473,82 @@ Finally, export from `src/widgets/mod.rs` and `src/lib.rs`.
 #### Option-based slots
 
 Every style slot is `Option<Style>` (or `Option<Color>` for colour-only
-fields).  `None` means "not configured by this level".
+fields).  `None` means "not configured".
 ```
-widget.style(SlotType)           → Option<&Style>   (None = not set)
-widget.resolved_style(SlotType)  → Style             (falls back to default)
+resolved_style(SlotType)  → Style   — falls back to Style::default()
+style(SlotType)           → Option<&Style>  — None if not set (for merge logic)
 ```
 
-Render code always calls `resolved_style` — it never unwraps `style()` directly.
-The form's merge logic calls `style()` to check whether the widget has already
-configured a slot before filling it in from the global style.
+Render code always calls `resolved_style`.
 
-#### impl_widget_style_base! macro
+#### `impl_widget_style_base!` macro
 
-Any widget style struct with the following two public fields:
+Any style struct with these two fields:
 ```rust
 pub prefix_color: Option<Color>,
 pub styles: [Option<Style>; N],
 ```
-
-can derive the standard accessor methods with one line:
+derives the standard accessors with:
 ```rust
 impl_widget_style_base!(MyWidgetStyle, MyWidgetStyleType);
 ```
+Generated: `prefix_color()`, `set_style()`, `style()`, `resolved_style()`.
 
-This generates `prefix_color()`, `set_style()`, `style()`, and
-`resolved_style()`.  All other widget-specific builder methods (e.g.
-`placeholder_color`) must be added manually in `impl MyWidgetStyle`.
+#### Per-component precedence
 
-#### Precedence chain
+Each component has two style instances.  Within each instance:
 ```
-widget-level set_style(...)   ← highest priority (Some wins)
-        ↓
-form global style (active / inactive FormWidgetStyle)
-        ↓
-Style::default()              ← fallback when everything is None
+set_style(...)    ← highest (Some wins)
+      ↓
+Style::default()  ← fallback
 ```
 
-The merge happens in `form/style.rs` (`merge_text_input` /
-`merge_multi_choice`).  It only writes to slots that are still `None` on the
-widget.
+The selection between the two instances is based on `self.focused`.
 
 ---
 
-### 2.5 Form integration
+### 2.5 Adding a new widget — checklist
 
-To make a new widget usable inside `Form`, three things are needed:
-
-#### 1. Add a variant to `FormFieldWidget` and `FormFieldState`
-
-In `form/field.rs`:
-```rust
-pub enum FormFieldWidget<'a> {
-    TextInput(TextInput<'a>),
-    MultiChoice(MultiChoice<'a>),
-    MyWidget(MyWidget<'a>),         // ← new
-}
-```
-
-In `form/state.rs`:
-```rust
-pub enum FormFieldState {
-    TextInput(TextInputState),
-    MultiChoice(MultiChoiceState),
-    MyWidget(MyWidgetState),        // ← new
-}
-// Add as_my_widget() / as_my_widget_mut() accessors.
-```
-
-#### 2. Add a merge function in `form/style.rs`
-```rust
-pub(crate) fn merge_my_widget(
-    mut widget: MyWidgetStyle,
-    form_slot: &FormWidgetStyle,
-) -> MyWidgetStyle {
-    if widget.prefix_color.is_none() {
-        widget.prefix_color = form_slot.prefix_color;
-    }
-    if widget.style(MyWidgetStyleType::Title).is_none() {
-        if let Some(s) = form_slot.title {
-            widget = widget.set_style(MyWidgetStyleType::Title, s);
-        }
-    }
-    // … map other FormWidgetStyle fields to your style types
-    widget
-}
-```
-
-Map `FormWidgetStyle` fields to your `StyleType` variants.  If none of the
-existing `FormWidgetStyle` fields fit, add new ones there (and update the
-mapping table in the doc comment).
-
-#### 3. Handle the new variant in `Form::render_field` and `Form::handle_event`
-
-In `form/mod.rs`, add match arms:
-```rust
-// render_field
-(FormFieldWidget::MyWidget(w), FormFieldState::MyWidget(s)) => {
-    let merged = MyWidget {
-        style: merge_my_widget(w.style.clone(), form_slot),
-        ..w.clone()
-    };
-    merged.render_with_state(rect, buf, s);
-}
-
-// handle_event
-(FormFieldWidget::MyWidget(w), FormFieldState::MyWidget(s)) => {
-    if pressed == self.keymap.confirm {
-        return FormEvent::Submit;
-    }
-    let ev = s.handle_event(event, &w.keymap);
-    FormEvent::FieldEvent { index: active, event: FieldEvent::MyWidget(ev) }
-}
-```
-
-Also add the `MyWidget` variant to `FieldEvent` in `form/state.rs`.
-
-#### Overlay-aware widgets
-
-If the new widget can render outside its layout slot (like `MultiChoice`
-when expanded), no special handling is needed — `Form` already renders the
-active field last.  The widget just writes to whatever buffer cells it needs.
-
----
-
-### 2.6 Adding a new widget — checklist
-
-- [ ] Create `src/widgets/my_widget/` with `keymap.rs`, `state.rs`, `style.rs`, `mod.rs`
-- [ ] `StyleType` enum: `#[repr(u8)]`, variants start at 0, `COUNT` associated constant
+- [ ] Create `src/widgets/my_widget/` with all five files
+- [ ] `StyleType` enum: `#[repr(u8)]`, variants start at 0
 - [ ] Style struct: `pub prefix_color: Option<Color>`, `pub styles: [Option<Style>; N]`,
       `Default` initialises everything to `None`, call `impl_widget_style_base!`
-- [ ] Widget struct: stateless, builder API, `render_with_state(area, buf, state)`
-      takes `Rect` (not `x, y, width` separately)
-- [ ] Render code: use `resolved_style()`, advance `px` by `ch.width().unwrap_or(1)`,
-      truncate text with `truncate_to_width(text, width)` from `common::render`
-- [ ] `handle_event` lives on the state struct, takes `(&Event, &Keymap) -> Event`
-- [ ] Implement `ratatui::widgets::Widget` as a thin wrapper around
-      `render_with_state` with a default state
+- [ ] `MyWidgetEvent` derives `PartialEq` and `Eq`
+- [ ] Widget struct fields: `pub(crate)`, two style instances, keymap field
+- [ ] `render.rs`: free function, takes `*ViewData` with `&style` already selected
+- [ ] `component.rs`: all mutations go through `perform`; `on` only maps events to `Cmd`
+- [ ] `MockComponent::state` returns the primary value as `State::One(StateValue::…)`
+- [ ] Cursor set inside `render()` via `frame.set_cursor_position()` when `data.focused`
 - [ ] Re-export from `src/widgets/mod.rs` and `src/lib.rs`
-- [ ] If form integration is needed, follow [§2.5](#25-form-integration)
-- [ ] Add an example under `examples/` demonstrating the widget standalone
+- [ ] Add an example under `examples/`
 
 ---
 
-### 2.7 Common pitfalls
+### 2.6 Common pitfalls
 
 **`px` advance must use display width.**
-CJK characters are 2 columns wide.  Always use `ch.width().unwrap_or(1) as u16`
-when advancing the cursor, never `+= 1`.
+CJK characters are 2 columns wide.  Always use `ch.width().unwrap_or(1) as u16`,
+never `+= 1`.
 
 **`truncate_to_width` returns a `String`.**
-Unlike a naive `&str` slice, it measures display width and appends `…` when
-truncated.  Do not cache the return value across frames.
+Do not cache across frames; measure and truncate fresh each render.
 
-**`resolved_style` vs `style`.**
-Render code must always call `resolved_style()` (returns `Style`, never panics).
-Use `style()` (returns `Option<&Style>`) only in form merge logic where `None`
-is meaningful.
+**`resolved_style` in render code, `style` in merge logic.**
+Render code calls `resolved_style()` (always returns a `Style`).
+`style()` returns `Option<&Style>` and is only meaningful where `None` has
+semantic value (e.g. future form-level merge logic).
 
-**`render_with_state` takes `Rect`.**
-Both `TextInput` and `MultiChoice` take a `Rect` for their area.  A
-`MultiChoice` may render below `area.bottom()` when expanded — that is
-intentional and must not be guarded against.
+**`perform` is the single mutation point.**
+Never mutate component state directly in `on` — always delegate to `perform`.
+This keeps unit tests of `perform` reliable.
 
-**State and widget types must match.**
-`Form` silently skips a field whose `FormFieldWidget` variant does not match
-its `FormFieldState` variant.  Keep them aligned when constructing `FormState`.
-
-**`SkimMatcherV2` or similar per-frame allocations.**
-If a widget performs fuzzy matching or other expensive computation, create the
-matcher once (e.g. in the app struct or a `FormState` companion) and reuse it.
-Do not construct it inside render functions or `handle_event`.
+**`Cmd::Custom` keys are `&'static str`.**
+Use named constants for custom command strings to avoid silent typo mismatches:
+```rust
+const CMD_DELETE_FWD: &str = "delete_fwd";
+// Cmd::Custom(CMD_DELETE_FWD)
+```
 
 **`block_on` inside a Tokio runtime panics.**
-If the application uses async, delegate async work through channels.  Never
-call `block_on` from within a render or event-handling call stack that is
-already inside a Tokio runtime.
+Delegate async work through channels; never call `block_on` from within a
+tui-realm event-handling or render call stack running inside a Tokio runtime.
