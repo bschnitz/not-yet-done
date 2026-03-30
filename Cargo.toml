@@ -6,9 +6,9 @@ members = [
   "not-yet-done-tui",
   "not-yet-done-macros",
   "not-yet-done-forest",
-  "not-yet-done-ratatui",
   "ratatui_form_widgets"
 ]
+exclude = ["not-yet-done-ratatui"]
 
 [workspace.dependencies]
 sea-orm = { version = "2.0.0-rc", features = [

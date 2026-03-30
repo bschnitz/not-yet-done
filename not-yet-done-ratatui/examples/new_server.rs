@@ -1,5 +1,7 @@
 //! Example: "New Server" form
 //!
+//! Demonstrates the tui-realm TextInput MockComponent.
+//!
 //! Fields:
 //!   • Hostname  — must not be empty or contain spaces
 //!   • Port      — must be a number 1–65535
@@ -15,7 +17,11 @@ use crossterm::{
     execute,
 };
 use not_yet_done_ratatui::{
-    TextInput, TextInputEvent, TextInputKeymap, TextInputState, TextInputStyle, TextInputStyleType,
+    TextInput, TextInputEvent, TextInputStyle, TextInputStyleType, ATTR_ERROR,
+};
+use tuirealm::{
+    AttrValue, Attribute, Component, MockComponent, State, StateValue,
+    event::{Key, KeyEvent, NoUserEvent},
 };
 
 use ratatui::{
@@ -25,25 +31,26 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph},
     DefaultTerminal,
 };
+use ratatui::prelude::Stylize;
+
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 
-const BG: Color = Color::Rgb(10, 10, 20);
-const PANEL_BG: Color = Color::Rgb(18, 18, 35);
-const ACCENT: Color = Color::Rgb(100, 180, 255);
-const INPUT_FG: Color = Color::Rgb(230, 230, 255);
-const INPUT_BG: Color = Color::Rgb(28, 28, 50);
+const BG: Color         = Color::Rgb(10, 10, 20);
+const PANEL_BG: Color   = Color::Rgb(18, 18, 35);
+const ACCENT: Color     = Color::Rgb(100, 180, 255);
+const INPUT_FG: Color   = Color::Rgb(230, 230, 255);
+const INPUT_BG: Color   = Color::Rgb(28, 28, 50);
 const PLACEHOLDER: Color = Color::Rgb(80, 80, 110);
-
-const ERROR_FG: Color = Color::Rgb(255, 100, 80);
+const ERROR_FG: Color   = Color::Rgb(255, 100, 80);
 const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180);
-const SUBMIT_FG: Color = Color::Rgb(30, 30, 50);
-const SUBMIT_BG: Color = Color::Rgb(140, 255, 180);
-const DIM: Color = Color::Rgb(80, 80, 110);
+const SUBMIT_FG: Color  = Color::Rgb(30, 30, 50);
+const SUBMIT_BG: Color  = Color::Rgb(140, 255, 180);
+const DIM: Color        = Color::Rgb(80, 80, 110);
 const INACTIVE_PH: Color = Color::Rgb(45, 45, 65);
 const OVERLAY_BG: Color = Color::Rgb(20, 40, 30);
 
-// ── App state ─────────────────────────────────────────────────────────────────
+// ── Field enum ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
@@ -56,143 +63,220 @@ impl Field {
     fn next(self) -> Self {
         match self {
             Self::Hostname => Self::Port,
-            Self::Port => Self::ApiKey,
-            Self::ApiKey => Self::Hostname,
+            Self::Port     => Self::ApiKey,
+            Self::ApiKey   => Self::Hostname,
         }
     }
+
     fn prev(self) -> Self {
         match self {
             Self::Hostname => Self::ApiKey,
-            Self::Port => Self::Hostname,
-            Self::ApiKey => Self::Port,
+            Self::Port     => Self::Hostname,
+            Self::ApiKey   => Self::Port,
         }
     }
 }
 
+// ── Style constructors ────────────────────────────────────────────────────────
+
+fn inactive_style() -> TextInputStyle {
+    TextInputStyle::new()
+        .prefix_color(ACCENT)
+        .set_style(TextInputStyleType::Title, Style::default().fg(ACCENT))
+        .set_style(TextInputStyleType::Input, Style::default().fg(INPUT_FG))
+        .placeholder_color(INACTIVE_PH)
+        .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
+}
+
+fn active_style() -> TextInputStyle {
+    TextInputStyle::new()
+        .prefix_color(ACTIVE_ACCENT)
+        .set_style(TextInputStyleType::Title,
+            Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG))
+        .set_style(TextInputStyleType::Input,
+            Style::default().fg(INPUT_FG).bg(INPUT_BG))
+        .placeholder_color(PLACEHOLDER)
+        .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
+}
+
+/// Creates a [`TextInput`] component with both focus styles already applied.
+fn make_input(title: &str, placeholder: &str) -> TextInput {
+    TextInput::default()
+        .with_title(title)
+        .with_placeholder(placeholder)
+        .with_inactive_style(inactive_style())
+        .with_active_style(active_style())
+}
+
+// ── App state ─────────────────────────────────────────────────────────────────
+
 struct App {
-    active: Field,
-    hostname: TextInputState,
-    port: TextInputState,
-    api_key: TextInputState,
+    active:    Field,
+    hostname:  TextInput,
+    port:      TextInput,
+    api_key:   TextInput,
     submitted: Option<String>,
 }
 
 impl App {
     fn new() -> Self {
-        Self {
-            active: Field::Hostname,
-            hostname: TextInputState::new(),
-            port: TextInputState::new(),
-            api_key: TextInputState::new(),
+        let mut app = Self {
+            active:    Field::Hostname,
+            hostname:  make_input("Hostname", "e.g. api.example.com"),
+            port:      make_input("Port", "e.g. 8080"),
+            api_key:   make_input("API Key", "min. 8 characters"),
             submitted: None,
-        }
+        };
+        // Grant initial focus to the first field.
+        app.hostname.attr(Attribute::Focus, AttrValue::Flag(true));
+        app
     }
 
-    fn state_mut(&mut self, f: Field) -> &mut TextInputState {
-        match f {
+    /// Moves focus to `field`, updating both the internal flag and the
+    /// components' focus attributes.
+    fn set_focus(&mut self, field: Field) {
+        self.hostname.attr(Attribute::Focus, AttrValue::Flag(false));
+        self.port    .attr(Attribute::Focus, AttrValue::Flag(false));
+        self.api_key .attr(Attribute::Focus, AttrValue::Flag(false));
+        self.component_mut(field).attr(Attribute::Focus, AttrValue::Flag(true));
+        self.active = field;
+    }
+
+    fn component_mut(&mut self, field: Field) -> &mut TextInput {
+        match field {
             Field::Hostname => &mut self.hostname,
-            Field::Port => &mut self.port,
-            Field::ApiKey => &mut self.api_key,
+            Field::Port     => &mut self.port,
+            Field::ApiKey   => &mut self.api_key,
         }
     }
 
+    /// Reads the current string value from a component.
+    fn value_of(&self, field: Field) -> String {
+        let component = match field {
+            Field::Hostname => &self.hostname,
+            Field::Port     => &self.port,
+            Field::ApiKey   => &self.api_key,
+        };
+        match component.state() {
+            State::One(StateValue::String(s)) => s,
+            _ => String::new(),
+        }
+    }
+
+    fn set_error(&mut self, field: Field, msg: &str) {
+        self.component_mut(field)
+            .attr(Attribute::Custom(ATTR_ERROR), AttrValue::String(msg.into()));
+    }
+
+    fn clear_error(&mut self, field: Field) {
+        self.component_mut(field)
+            .attr(Attribute::Custom(ATTR_ERROR), AttrValue::Flag(false));
+    }
+
+    /// Validates all fields. Returns `true` when every field is valid.
     fn validate_all(&mut self) -> bool {
         let mut ok = true;
 
-        let h = self.hostname.value().to_string();
+        let h = self.value_of(Field::Hostname);
         if h.is_empty() {
-            self.hostname.set_error("Hostname must not be empty");
+            self.set_error(Field::Hostname, "Hostname must not be empty");
             ok = false;
         } else if h.contains(' ') {
-            self.hostname.set_error("No spaces allowed");
+            self.set_error(Field::Hostname, "No spaces allowed");
             ok = false;
         } else {
-            self.hostname.clear_error();
+            self.clear_error(Field::Hostname);
         }
 
-        let p = self.port.value().to_string();
+        let p = self.value_of(Field::Port);
         match p.parse::<u16>() {
-            Ok(n) if n >= 1 => self.port.clear_error(),
+            Ok(n) if n >= 1 => self.clear_error(Field::Port),
             _ => {
-                self.port.set_error("Must be a number 1–65535");
+                self.set_error(Field::Port, "Must be a number 1–65535");
                 ok = false;
             }
         }
 
-        let k = self.api_key.value().to_string();
+        let k = self.value_of(Field::ApiKey);
         if k.len() < 8 {
-            self.api_key.set_error("At least 8 characters required");
+            self.set_error(Field::ApiKey, "At least 8 characters required");
             ok = false;
         } else {
-            self.api_key.clear_error();
+            self.clear_error(Field::ApiKey);
         }
 
         ok
     }
 
-    fn validate_field(&mut self, f: Field) {
-        match f {
+    /// Live-validates the currently active field after each keystroke.
+    fn validate_active(&mut self) {
+        let field = self.active;
+        match field {
             Field::Hostname => {
-                let h = self.hostname.value().to_string();
-                if h.is_empty() || h.contains(' ') {
-                    // Only show errors on submit, clear when valid
-                } else {
-                    self.hostname.clear_error();
+                let h = self.value_of(Field::Hostname);
+                if !h.is_empty() && !h.contains(' ') {
+                    self.clear_error(Field::Hostname);
                 }
             }
             Field::Port => {
-                let p = self.port.value().to_string();
+                let p = self.value_of(Field::Port);
                 if p.is_empty() {
-                    self.port.clear_error();
+                    self.clear_error(Field::Port);
                 } else if p.parse::<u16>().map(|n| n < 1).unwrap_or(true) {
-                    self.port.set_error("Must be a number 1–65535");
+                    self.set_error(Field::Port, "Must be a number 1–65535");
                 } else {
-                    self.port.clear_error();
+                    self.clear_error(Field::Port);
                 }
             }
             Field::ApiKey => {
-                let k = self.api_key.value().to_string();
+                let k = self.value_of(Field::ApiKey);
                 if k.is_empty() {
-                    self.api_key.clear_error();
+                    self.clear_error(Field::ApiKey);
                 } else if k.len() < 8 {
-                    self.api_key.set_error("At least 8 characters required");
+                    self.set_error(Field::ApiKey, "At least 8 characters required");
                 } else {
-                    self.api_key.clear_error();
+                    self.clear_error(Field::ApiKey);
                 }
             }
         }
     }
 }
 
-// ── Style helpers ─────────────────────────────────────────────────────────────
+// ── Event conversion ──────────────────────────────────────────────────────────
 
-fn make_style(is_active: bool) -> TextInputStyle {
-    if is_active {
-        TextInputStyle::new()
-            .prefix_color(ACTIVE_ACCENT)
-            .set_style(
-                TextInputStyleType::Title,
-                Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG),
-            )
-            .set_style(
-                TextInputStyleType::Input,
-                Style::default().fg(INPUT_FG).bg(INPUT_BG),
-            )
-            .placeholder_color(PLACEHOLDER)
-            .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
-    } else {
-        TextInputStyle::new()
-            .prefix_color(ACCENT)
-            .set_style(TextInputStyleType::Title, Style::default().fg(ACCENT))
-            .set_style(TextInputStyleType::Input, Style::default().fg(INPUT_FG))
-            .placeholder_color(INACTIVE_PH)
-            .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
-    }
+/// Converts a crossterm [`KeyEvent`](crossterm::event::KeyEvent) into a
+/// tuirealm [`Event`] so it can be dispatched to a [`Component`].
+fn to_tuirealm_event(
+    k: &crossterm::event::KeyEvent,
+) -> tuirealm::event::Event<NoUserEvent> {
+    let code = match k.code {
+        KeyCode::Char(c)  => Key::Char(c),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete   => Key::Delete,
+        KeyCode::Left     => Key::Left,
+        KeyCode::Right    => Key::Right,
+        KeyCode::Up       => Key::Up,
+        KeyCode::Down     => Key::Down,
+        KeyCode::Enter    => Key::Enter,
+        KeyCode::Esc      => Key::Esc,
+        KeyCode::Tab      => Key::Tab,
+        KeyCode::BackTab  => Key::BackTab,
+        KeyCode::Home     => Key::Home,
+        KeyCode::End      => Key::End,
+        KeyCode::PageUp   => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::F(n)     => Key::Function(n),
+        _                 => Key::Null,
+    };
+    tuirealm::event::Event::Keyboard(KeyEvent { code, modifiers: k.modifiers.into() })
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
-fn render(app: &App, frame: &mut ratatui::Frame) {
+/// Renders the entire UI.
+///
+/// `app` must be `&mut` because [`MockComponent::view`] takes `&mut self`.
+fn render(app: &mut App, frame: &mut ratatui::Frame) {
     let area = frame.area();
 
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
@@ -237,29 +321,10 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
         chunks[0],
     );
 
-    let keymap = TextInputKeymap::default();
-    let widget_width = inner.width;
-
-    TextInput::new("Hostname")
-        .placeholder("e.g. api.example.com")
-        .width(widget_width)
-        .style(make_style(app.active == Field::Hostname))
-        .keymap(keymap.clone())
-        .render_with_state(chunks[2], frame.buffer_mut(), &app.hostname);
-
-    TextInput::new("Port")
-        .placeholder("e.g. 8080")
-        .width(widget_width)
-        .style(make_style(app.active == Field::Port))
-        .keymap(keymap.clone())
-        .render_with_state(chunks[4], frame.buffer_mut(), &app.port);
-
-    TextInput::new("API Key")
-        .placeholder("min. 8 characters")
-        .width(widget_width)
-        .style(make_style(app.active == Field::ApiKey))
-        .keymap(keymap.clone())
-        .render_with_state(chunks[6], frame.buffer_mut(), &app.api_key);
+    // Fields — view() selects active/inactive style internally and places the cursor.
+    app.hostname.view(frame, chunks[2]);
+    app.port    .view(frame, chunks[4]);
+    app.api_key .view(frame, chunks[6]);
 
     // Submit button
     frame.render_widget(
@@ -303,22 +368,6 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
             overlay,
         );
     }
-
-    // Cursor position
-    let active_state = match app.active {
-        Field::Hostname => &app.hostname,
-        Field::Port => &app.port,
-        Field::ApiKey => &app.api_key,
-    };
-    if !active_state.value().is_empty() {
-        let active_area = match app.active {
-            Field::Hostname => chunks[2],
-            Field::Port => chunks[4],
-            Field::ApiKey => chunks[6],
-        };
-        let pos = TextInput::new("").width(inner.width).cursor_position(active_area, active_state);
-        frame.set_cursor_position(pos);
-    }
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
@@ -326,11 +375,10 @@ fn render(app: &App, frame: &mut ratatui::Frame) {
 fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
     execute!(std::io::stdout(), SetCursorStyle::BlinkingBar)?;
 
-    let keymap = TextInputKeymap::default();
     let mut app = App::new();
 
     loop {
-        terminal.draw(|f| render(&app, f))?;
+        terminal.draw(|f| render(&mut app, f))?;
 
         let event = crossterm::event::read()?;
 
@@ -343,38 +391,42 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
             continue;
         }
 
-        if let Event::Key(k) = &event {
-            if k.kind != KeyEventKind::Press {
-                continue;
+        let Event::Key(k) = event else { continue };
+        if k.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match k.code {
+            KeyCode::Esc => break,
+
+            KeyCode::Tab => {
+                let next = app.active.next();
+                app.set_focus(next);
+            }
+            KeyCode::BackTab => {
+                let prev = app.active.prev();
+                app.set_focus(prev);
             }
 
-            match k.code {
-                KeyCode::Esc => break,
-
-                KeyCode::Tab => {
-                    app.active = app.active.next();
+            KeyCode::Enter => {
+                if app.validate_all() {
+                    app.submitted = Some(format!(
+                        "\n  Hostname : {}\n  Port     : {}\n  API Key  : {}\n\n  (any key closes)",
+                        app.value_of(Field::Hostname),
+                        app.value_of(Field::Port),
+                        app.value_of(Field::ApiKey),
+                    ));
                 }
-                KeyCode::BackTab => {
-                    app.active = app.active.prev();
-                }
+            }
 
-                KeyCode::Enter => {
-                    if app.validate_all() {
-                        app.submitted = Some(format!(
-                            "\n  Hostname : {}\n  Port     : {}\n  API Key  : {}\n\n  (any key closes)",
-                            app.hostname.value(),
-                            app.port.value(),
-                            app.api_key.value(),
-                        ));
-                    }
-                }
-
-                _ => {
-                    let active = app.active;
-                    let state = app.state_mut(active);
-                    if let TextInputEvent::Changed(_) = state.handle_event(&event, &keymap) {
-                        app.validate_field(active);
-                    }
+            _ => {
+                // Dispatch all other keys to the active component.
+                // on() returns Some(TextInputEvent::Changed) when the value changed.
+                let tui_ev = to_tuirealm_event(&k);
+                if let Some(TextInputEvent::Changed(_)) =
+                    app.component_mut(app.active).on(tui_ev)
+                {
+                    app.validate_active();
                 }
             }
         }

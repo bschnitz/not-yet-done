@@ -4,3 +4,4 @@ ignored
 nyd
 nyd-tui
 prompt*.md
+/not-yet-done-ratatui/target/

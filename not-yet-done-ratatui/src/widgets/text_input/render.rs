@@ -27,8 +27,8 @@ pub(super) struct TextInputViewData<'a> {
 /// - Row 1: value, or placeholder text when the value is empty
 /// - Row 2: error message (only when `data.error` is `Some` and `area.height > 2`)
 ///
-/// When `data.focused` is `true`, the terminal cursor is placed on row 1 at
-/// the current cursor position.
+/// When `data.focused` is `true` and there is already input in the field, the terminal cursor is
+/// placed on row 1 at the current cursor position.
 pub(super) fn render(frame: &mut Frame, area: Rect, data: &TextInputViewData<'_>) {
     let total_width = area.width;
     let text_width  = total_width.saturating_sub(PREFIX_LEN) as usize;
@@ -73,7 +73,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &TextInputViewData<'_>
     }
 
     // Place terminal cursor on the input row when focused.
-    if data.focused {
+    if data.focused && !data.value.is_empty() {
         let col: u16 = data.value[..data.cursor_byte_offset]
             .chars()
             .map(|c| c.width().unwrap_or(1) as u16)

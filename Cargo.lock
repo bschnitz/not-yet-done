@@ -1885,16 +1885,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "not-yet-done-ratatui"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "ratatui",
- "tempfile",
- "unicode-width",
-]
-
-[[package]]
 name = "not-yet-done-tui"
 version = "0.1.0"
 dependencies = [

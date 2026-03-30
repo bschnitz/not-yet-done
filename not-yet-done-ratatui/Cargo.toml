@@ -24,5 +24,8 @@ name = "two_column_form"
 path = "examples/two_column_form.rs"
 
 [dependencies]
-crossterm.workspace = true
+ratatui = "0.29"
+unicode-width = "0.2.0"
 tuirealm = { version = "3.3.0", features = ["crossterm"] }
+crossterm = "0.29.0"
+tempfile = "3.27.0"

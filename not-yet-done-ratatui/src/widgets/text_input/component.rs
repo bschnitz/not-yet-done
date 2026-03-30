@@ -1,7 +1,7 @@
 use ratatui::{Frame, layout::Rect};
 use tuirealm::{
-    AttrValue, Attribute, CmdResult, MockComponent, State, StateValue,
-    command::{Cmd, Direction},
+    AttrValue, Attribute, MockComponent, State, StateValue,
+    command::{Cmd, CmdResult, Direction},
     event::{Event, Key, KeyEvent, KeyModifiers, NoUserEvent},
 };
 
