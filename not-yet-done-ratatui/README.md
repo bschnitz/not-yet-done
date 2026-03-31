@@ -16,7 +16,7 @@ This document covers two audiences:
 > | Widget | Status |
 > |---|---|
 > | `TextInput` | ✅ tui-realm `MockComponent` |
-> | `MultiChoice` | 🔄 pending migration |
+> | `MultiChoice` | ✅ tui-realm `MockComponent` |
 > | `Form` | 🔄 pending migration |
 > | `TwoColumnLayout` | 🔄 pending migration |
 
@@ -200,9 +200,6 @@ Unset slots fall back to `Style::default()`.
 
 ### 1.2 MultiChoice
 
-> **Pending tui-realm migration.**  Still uses the original stateless ratatui
-> approach; API will change when migrated.
-
 A dropdown-style multi-select widget.
 
 **Collapsed:**
@@ -211,7 +208,7 @@ A dropdown-style multi-select widget.
 ▍ HTTP, HTTPS
 ```
 
-**Expanded** (`state.open == true`):
+**Expanded** (while focused — the dropdown opens automatically on focus):
 ```
 ▍ Protocol
 ▍▶ HTTP
@@ -220,7 +217,140 @@ A dropdown-style multi-select widget.
               ← blank closing line
 ```
 
-See the previous API documentation for full usage until migration is complete.
+`MultiChoice` implements:
+- `tuirealm::MockComponent` — low-level `view` / `perform` / `attr` / `query` / `state`
+- `tuirealm::Component<MultiChoiceEvent, NoUserEvent>` — convenience impl for
+  standalone use (see note on Application integration below)
+
+#### Construction
+```rust
+let mc = MultiChoice::default()
+    .with_title("Protocol")
+    .with_choices(vec!["HTTP", "HTTPS", "WS"])
+    .with_placeholder("none selected")
+    .with_inactive_style(inactive_style)
+    .with_active_style(active_style)
+    .with_keymap(keymap);   // optional — defaults to MultiChoiceKeymap::default()
+```
+
+#### Focus and style selection
+
+`MultiChoice` holds two style instances, selected automatically based on focus,
+exactly like `TextInput`.  The `Application` calls `attr(Attribute::Focus, …)`
+when focus changes; no manual style switching is needed.
+
+The dropdown opens when `attr(Attribute::Focus, AttrValue::Flag(true))` is
+called, and closes on blur.
+
+#### Reading selected indices
+```rust
+// Via query:
+if let Some(AttrValue::String(s)) = component.query(Attribute::Custom(ATTR_SELECTED)) {
+    let indices: Vec<usize> = s.split(',').filter_map(|p| p.parse().ok()).collect();
+}
+
+// Via state (same format):
+if let State::One(StateValue::String(s)) = component.state() { /* … */ }
+```
+
+#### Setting selected indices programmatically
+```rust
+component.attr(Attribute::Custom(ATTR_SELECTED), AttrValue::String("0,2".into()));
+```
+
+#### Keymap
+```rust
+use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+let keymap = MultiChoiceKeymap {
+    move_up:   KeyEvent { code: Key::Up,       modifiers: KeyModifiers::NONE },
+    move_down: KeyEvent { code: Key::Down,      modifiers: KeyModifiers::NONE },
+    toggle:    KeyEvent { code: Key::Char(' '), modifiers: KeyModifiers::NONE },
+};
+```
+
+#### Events
+```rust
+match msg {
+    Some(MultiChoiceEvent::SelectionChanged(indices)) => { /* selection toggled */ }
+    Some(MultiChoiceEvent::HighlightChanged(idx)) => { /* cursor moved */ }
+    Some(MultiChoiceEvent::Opened)  => {}
+    Some(MultiChoiceEvent::Closed)  => {}
+}
+```
+
+#### `perform` command reference
+
+| `Cmd` | Effect |
+|---|---|
+| `Cmd::Move(Direction::Up)` | Move cursor up |
+| `Cmd::Move(Direction::Down)` | Move cursor down |
+| `Cmd::Custom("toggle")` | Toggle selection on cursor row |
+| `Cmd::Custom("open")` | Open dropdown |
+| `Cmd::Custom("close")` | Close dropdown |
+
+#### Style
+```rust
+let style = MultiChoiceStyle::new()
+    .prefix_color(ACCENT)
+    .set_style(MultiChoiceStyleType::Title,          Style::default().fg(ACCENT))
+    .set_style(MultiChoiceStyleType::Normal,         Style::default().fg(FG))
+    .set_style(MultiChoiceStyleType::Active,         Style::default().fg(FG).bg(HIGHLIGHT))
+    .set_style(MultiChoiceStyleType::Selected,       Style::default().fg(FG).bg(SEL_BG))
+    .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(ACCENT).bg(SEL_BG))
+    .set_style(MultiChoiceStyleType::LastLine,       Style::default());
+
+MultiChoice::default()
+    .with_inactive_style(inactive_style)
+    .with_active_style(active_style)
+```
+
+| `MultiChoiceStyleType` | Affects |
+|---|---|
+| `Title` | Title row |
+| `Normal` | Item: not selected, cursor elsewhere |
+| `Active` | Item: not selected, cursor here |
+| `Selected` | Item: selected, cursor elsewhere |
+| `SelectedActive` | Item: selected and cursor here |
+| `LastLine` | Blank closing line below expanded list |
+
+Unset slots fall back to `Style::default()`.
+
+#### Note on tuirealm Application integration
+
+`Component<MultiChoiceEvent, NoUserEvent>` is a convenience impl for standalone
+use.  When using `tuirealm::Application`, components must implement
+`Component<AppMsg, UserEvent>` for the *application's* `Msg` type.  The
+idiomatic pattern is a thin wrapper:
+```rust
+struct ProtocolComp(MultiChoice);
+
+// Delegate all MockComponent methods via a macro or manually.
+
+impl Component<AppMsg, NoUserEvent> for ProtocolComp {
+    fn on(&mut self, ev: Event<NoUserEvent>) -> Option<AppMsg> {
+        if let Event::Keyboard(key_ev) = ev {
+            match key_ev.code {
+                Key::Tab => return Some(AppMsg::FocusNext),
+                // … other global keys …
+                _ => {}
+            }
+            // Forward component-specific keys to the inner widget.
+            return match self.0.on(Event::Keyboard(key_ev)) {
+                Some(MultiChoiceEvent::SelectionChanged(_)) => Some(AppMsg::ProtocolChanged),
+                _ => None,
+            };
+        }
+        None
+    }
+}
+```
+
+`KeyEvent` and `Key` are both `Copy`, so reconstructing `Event::Keyboard(key_ev)`
+for the inner `on()` call requires no clone.
+
+See `examples/playlist_builder.rs` for a complete working example using
+`tuirealm::Application`.
 
 ---
 

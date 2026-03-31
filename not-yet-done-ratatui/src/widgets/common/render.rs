@@ -118,3 +118,13 @@ pub fn truncate_to_width(s: &str, max_display_width: usize) -> String {
 
     format!("{}…", &s[..end])
 }
+
+/// Renders a blank line with a background colour — used e.g. for the closing line in expanded mode.
+pub fn render_empty_line(buf: &mut Buffer, x: u16, y: u16, total_width: u16, style: Style) {
+    for dx in 0..total_width {
+        if let Some(cell) = buf.cell_mut((x + dx, y)) {
+            cell.set_char(' ');
+            cell.set_style(style);
+        }
+    }
+}
