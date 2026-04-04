@@ -5,3 +5,4 @@ nyd
 nyd-tui
 prompt*.md
 /not-yet-done-ratatui/target/
+/not-yet-done-ratatui/tui-realm/
