@@ -3,6 +3,7 @@ use tuirealm::{
     AttrValue, Attribute, MockComponent, State, StateValue,
     command::{Cmd, CmdResult, Direction},
     event::{Event, NoUserEvent},
+    props::{PropPayload, PropValue},
 };
 
 use super::{
@@ -15,12 +16,20 @@ use super::{
 /// [`Attribute::Custom`] key for the selected indices slot.
 ///
 /// ```rust
-/// // Get selected indices as a comma-separated string:
-/// if let AttrValue::String(s) = component.query(Attribute::Custom(ATTR_SELECTED)) {
-///     let indices: Vec<usize> = s.split(',').filter_map(|p| p.parse().ok()).collect();
+/// // Get selected indices:
+/// if let Some(AttrValue::Payload(PropPayload::Vec(values))) =
+///     component.query(Attribute::Custom(ATTR_SELECTED))
+/// {
+///     let indices: Vec<usize> = values
+///         .iter()
+///         .filter_map(|v| if let PropValue::Usize(i) = v { Some(*i) } else { None })
+///         .collect();
 /// }
-/// // Set selected indices from a comma-separated string:
-/// component.attr(Attribute::Custom(ATTR_SELECTED), AttrValue::String("0,2".into()));
+/// // Set selected indices:
+/// component.attr(
+///     Attribute::Custom(ATTR_SELECTED),
+///     AttrValue::Payload(PropPayload::Vec(vec![PropValue::Usize(0), PropValue::Usize(2)])),
+/// );
 /// ```
 pub const ATTR_SELECTED: &str = "selected";
 
@@ -111,7 +120,19 @@ impl MultiChoice {
         self
     }
 
-    // --- internal helpers (used by component.rs) ---
+    /// Applies the style used when the component is not focused.
+    pub fn with_inactive_style(mut self, style: MultiChoiceStyle) -> Self {
+        self.inactive_style = style;
+        self
+    }
+
+    /// Applies the style used when the component is focused.
+    pub fn with_active_style(mut self, style: MultiChoiceStyle) -> Self {
+        self.active_style = style;
+        self
+    }
+
+    // --- internal helpers ---
 
     fn selected_indices(&self) -> Vec<usize> {
         self.selected
@@ -138,30 +159,6 @@ impl MultiChoice {
             self.cursor += 1;
         }
     }
-
-    fn open_dropdown(&mut self) {
-        if !self.open {
-            self.open = true;
-        }
-    }
-
-    fn close_dropdown(&mut self) {
-        if self.open {
-            self.open = false;
-        }
-    }
-
-    /// Applies the style used when the component is not focused.
-    pub fn with_inactive_style(mut self, style: MultiChoiceStyle) -> Self {
-        self.inactive_style = style;
-        self
-    }
-
-    /// Applies the style used when the component is focused.
-    pub fn with_active_style(mut self, style: MultiChoiceStyle) -> Self {
-        self.active_style = style;
-        self
-    }
 }
 
 impl MockComponent for MultiChoice {
@@ -184,9 +181,12 @@ impl MockComponent for MultiChoice {
         match attr {
             Attribute::Focus => Some(AttrValue::Flag(self.focused)),
             Attribute::Custom(key) if key == ATTR_SELECTED => {
-                let indices = self.selected_indices();
-                let s = indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-                Some(AttrValue::String(s))
+                Some(AttrValue::Payload(PropPayload::Vec(
+                    self.selected_indices()
+                        .into_iter()
+                        .map(PropValue::Usize)
+                        .collect(),
+                )))
             }
             _ => None,
         }
@@ -197,24 +197,17 @@ impl MockComponent for MultiChoice {
             Attribute::Focus => {
                 if let AttrValue::Flag(f) = value {
                     self.focused = f;
-                    if f {
-                        self.open_dropdown();
-                    } else {
-                        self.close_dropdown();
-                    }
+                    self.open = f;
                 }
             }
             Attribute::Custom(key) if key == ATTR_SELECTED => {
-                if let AttrValue::String(s) = value {
-                    let indices: Vec<usize> = s
-                        .split(',')
-                        .filter_map(|part| part.parse::<usize>().ok())
-                        .collect();
-                    // Clear existing selection and set the given indices.
+                if let AttrValue::Payload(PropPayload::Vec(values)) = value {
                     self.selected.fill(false);
-                    for i in indices {
-                        if i < self.selected.len() {
-                            self.selected[i] = true;
+                    for v in values {
+                        if let PropValue::Usize(i) = v {
+                            if i < self.selected.len() {
+                                self.selected[i] = true;
+                            }
                         }
                     }
                 }
@@ -224,9 +217,12 @@ impl MockComponent for MultiChoice {
     }
 
     fn state(&self) -> State {
-        let indices = self.selected_indices();
-        let s = indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-        State::One(StateValue::String(s))
+        State::Vec(
+            self.selected_indices()
+                .into_iter()
+                .map(StateValue::Usize)
+                .collect(),
+        )
     }
 
     fn perform(&mut self, cmd: Cmd) -> CmdResult {
@@ -239,18 +235,16 @@ impl MockComponent for MultiChoice {
                 self.move_cursor_down();
                 CmdResult::Changed(State::One(StateValue::Usize(self.cursor)))
             }
-            Cmd::Custom("toggle") => {
+            Cmd::Toggle => {
                 self.toggle_selection();
-                let indices = self.selected_indices();
-                let s = indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-                CmdResult::Changed(State::One(StateValue::String(s)))
+                CmdResult::Changed(self.state())
             }
-            Cmd::Custom("open") => {
-                self.open_dropdown();
+            Cmd::Submit => {
+                self.open = true;
                 CmdResult::None
             }
-            Cmd::Custom("close") => {
-                self.close_dropdown();
+            Cmd::Cancel => {
+                self.open = false;
                 CmdResult::None
             }
             _ => CmdResult::None,
@@ -268,19 +262,28 @@ impl tuirealm::Component<MultiChoiceEvent, NoUserEvent> for MultiChoice {
             return None;
         }
 
+        // Close key is checked before the general dispatch so it always works.
+        if key_ev == self.keymap.close {
+            self.open = false;
+            return Some(MultiChoiceEvent::Closed);
+        }
+
         let cmd = if key_ev == self.keymap.move_up {
             Cmd::Move(Direction::Up)
         } else if key_ev == self.keymap.move_down {
             Cmd::Move(Direction::Down)
         } else if key_ev == self.keymap.toggle {
-            Cmd::Custom("toggle")
+            Cmd::Toggle
         } else {
             return None;
         };
 
         match self.perform(cmd) {
-            CmdResult::Changed(State::One(StateValue::String(s))) => {
-                let indices: Vec<usize> = s.split(',').filter_map(|p| p.parse().ok()).collect();
+            CmdResult::Changed(State::Vec(values)) => {
+                let indices = values
+                    .into_iter()
+                    .filter_map(|v| if let StateValue::Usize(i) = v { Some(i) } else { None })
+                    .collect();
                 Some(MultiChoiceEvent::SelectionChanged(indices))
             }
             CmdResult::Changed(State::One(StateValue::Usize(idx))) => {

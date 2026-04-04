@@ -48,7 +48,7 @@ pub fn render_prefixed_line(
             cell.set_char(ch);
             cell.set_style(s);
         }
-        px += 1;
+        px += ch.width().unwrap_or(1) as u16;
     }
 
     // Text (already truncated to `text_width` display columns).

@@ -5,8 +5,6 @@ pub enum MultiChoiceEvent {
     SelectionChanged(Vec<usize>),
     /// The highlighted item changed; the new cursor index is provided.
     HighlightChanged(usize),
-    /// The dropdown was opened.
-    Opened,
-    /// The dropdown was closed.
+    /// The dropdown was closed by the user (e.g. via the close key binding).
     Closed,
 }

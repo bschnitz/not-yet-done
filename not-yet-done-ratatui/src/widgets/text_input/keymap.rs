@@ -21,6 +21,7 @@ pub struct TextInputKeymap {
     pub delete_back: KeyEvent,
     pub delete_fwd:  KeyEvent,
     pub clear:       KeyEvent,
+    pub submit:      KeyEvent,
 }
 
 impl Default for TextInputKeymap {
@@ -31,6 +32,7 @@ impl Default for TextInputKeymap {
             delete_back: KeyEvent { code: Key::Backspace, modifiers: KeyModifiers::NONE },
             delete_fwd:  KeyEvent { code: Key::Delete,    modifiers: KeyModifiers::NONE },
             clear:       KeyEvent { code: Key::Char('u'), modifiers: KeyModifiers::CONTROL },
+            submit:      KeyEvent { code: Key::Enter,     modifiers: KeyModifiers::NONE },
         }
     }
 }

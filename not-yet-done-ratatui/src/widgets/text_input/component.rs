@@ -21,6 +21,9 @@ use super::{
 /// ```
 pub const ATTR_ERROR: &str = "error";
 
+const CMD_DELETE_FWD: &str = "delete_fwd";
+const CMD_CLEAR: &str = "clear";
+
 impl MockComponent for TextInput {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let style = if self.focused { &self.active_style } else { &self.inactive_style };
@@ -88,14 +91,15 @@ impl MockComponent for TextInput {
                 self.pop_char();
                 CmdResult::Changed(State::One(StateValue::String(self.value.clone())))
             }
-            Cmd::Custom("delete_fwd") => {
+            Cmd::Custom(CMD_DELETE_FWD) => {
                 self.delete_forward();
                 CmdResult::Changed(State::One(StateValue::String(self.value.clone())))
             }
-            Cmd::Custom("clear") => {
+            Cmd::Custom(CMD_CLEAR) => {
                 self.clear_value();
                 CmdResult::Changed(State::One(StateValue::String(self.value.clone())))
             }
+            Cmd::Submit => CmdResult::Submit(self.state()),
             Cmd::Type(c) => {
                 self.push_char(c);
                 CmdResult::Changed(State::One(StateValue::String(self.value.clone())))
@@ -118,9 +122,11 @@ impl tuirealm::Component<TextInputEvent, NoUserEvent> for TextInput {
         } else if key_ev == self.keymap.delete_back {
             Cmd::Delete
         } else if key_ev == self.keymap.delete_fwd {
-            Cmd::Custom("delete_fwd")
+            Cmd::Custom(CMD_DELETE_FWD)
         } else if key_ev == self.keymap.clear {
-            Cmd::Custom("clear")
+            Cmd::Custom(CMD_CLEAR)
+        } else if key_ev == self.keymap.submit {
+            Cmd::Submit
         } else {
             match key_ev {
                 KeyEvent { code: Key::Char(c), modifiers: KeyModifiers::NONE }
@@ -134,6 +140,9 @@ impl tuirealm::Component<TextInputEvent, NoUserEvent> for TextInput {
         match self.perform(cmd) {
             CmdResult::Changed(State::One(StateValue::String(s))) => {
                 Some(TextInputEvent::Changed(s))
+            }
+            CmdResult::Submit(State::One(StateValue::String(s))) => {
+                Some(TextInputEvent::Submitted(s))
             }
             _ => None,
         }

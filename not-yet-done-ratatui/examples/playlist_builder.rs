@@ -31,6 +31,7 @@ use ratatui::{
 };
 use tuirealm::{
     application::PollStrategy,
+    command::{Cmd, CmdResult},
     event::{Event, Key, NoUserEvent},
     Application, AttrValue, Attribute, Component, EventListenerCfg, MockComponent, State,
     StateValue, Update,
@@ -146,10 +147,36 @@ enum Msg {
 
 /// Generic wrapper around MultiChoice. The type parameter H determines which
 /// Msg is emitted when the selection changes.
-#[derive(MockComponent)]
 struct MultiChoiceWrapper {
     component: MultiChoice,
-    changed_msg: fn() -> Msg,   // Funktionszeiger, der die zu sendende Msg liefert
+    changed_msg: fn() -> Msg,
+    /// Mirrors the component's open/closed state so the wrapper can toggle on Enter.
+    is_open: bool,
+}
+
+// Manual MockComponent impl — forwards everything to the inner component but
+// intercepts Focus changes so we can keep `is_open` in sync.
+impl MockComponent for MultiChoiceWrapper {
+    fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        self.component.view(frame, area)
+    }
+    fn query(&self, attr: Attribute) -> Option<AttrValue> {
+        self.component.query(attr)
+    }
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        if attr == Attribute::Focus {
+            if let AttrValue::Flag(f) = value {
+                self.is_open = f; // component opens on focus gain, closes on focus loss
+            }
+        }
+        self.component.attr(attr, value)
+    }
+    fn state(&self) -> State {
+        self.component.state()
+    }
+    fn perform(&mut self, cmd: Cmd) -> CmdResult {
+        self.component.perform(cmd)
+    }
 }
 
 impl Component<Msg, NoUserEvent> for MultiChoiceWrapper {
@@ -159,11 +186,24 @@ impl Component<Msg, NoUserEvent> for MultiChoiceWrapper {
                 Key::Tab => return Some(Msg::FocusNext),
                 Key::BackTab => return Some(Msg::FocusPrev),
                 Key::Esc => return Some(Msg::Quit),
-                Key::Enter => return Some(Msg::Submit),
+                Key::Enter => {
+                    if self.is_open {
+                        self.component.perform(Cmd::Cancel);
+                        self.is_open = false;
+                    } else {
+                        self.component.perform(Cmd::Submit);
+                        self.is_open = true;
+                    }
+                    return Some(Msg::Redraw);
+                }
                 _ => {}
             }
             return match self.component.on(Event::Keyboard(key_ev)) {
                 Some(MultiChoiceEvent::SelectionChanged(_)) => Some((self.changed_msg)()),
+                Some(MultiChoiceEvent::Closed) => {
+                    self.is_open = false;
+                    Some(Msg::Redraw)
+                }
                 Some(_) => Some(Msg::Redraw),
                 None => None,
             };
@@ -186,11 +226,11 @@ impl Component<Msg, NoUserEvent> for PlaylistNameComp {
                 Key::Tab => return Some(Msg::FocusNext),
                 Key::BackTab => return Some(Msg::FocusPrev),
                 Key::Esc => return Some(Msg::Quit),
-                Key::Enter => return Some(Msg::Submit),
                 _ => {}
             }
             return match self.component.on(Event::Keyboard(key_ev)) {
                 Some(TextInputEvent::Changed(s)) => Some(Msg::PlaylistNameChanged(s)),
+                Some(TextInputEvent::Submitted(_)) => Some(Msg::Submit),
                 None => None,
             };
         }
@@ -211,6 +251,7 @@ fn make_genres() -> MultiChoiceWrapper {
             .with_active_style(active_mc_style())
             .with_keymap(MultiChoiceKeymap::default()),
         changed_msg: changed,
+        is_open: false,
     }
 }
 
@@ -225,6 +266,7 @@ fn make_mood() -> MultiChoiceWrapper {
             .with_active_style(active_mc_style())
             .with_keymap(MultiChoiceKeymap::default()),
         changed_msg: changed,
+        is_open: false,
     }
 }
 
@@ -277,16 +319,19 @@ impl Model {
     }
 
     fn is_valid(&self) -> bool {
-        let state_non_empty = |id: &Id| {
+        let mc_selected = |id: &Id| {
+            if let Ok(State::Vec(v)) = self.app.state(id) { !v.is_empty() } else { false }
+        };
+        let text_non_empty = |id: &Id| {
             if let Ok(State::One(StateValue::String(s))) = self.app.state(id) {
                 !s.is_empty()
             } else {
                 false
             }
         };
-        state_non_empty(&Id::Genres)
-            && state_non_empty(&Id::Mood)
-            && state_non_empty(&Id::PlaylistName)
+        mc_selected(&Id::Genres)
+            && mc_selected(&Id::Mood)
+            && text_non_empty(&Id::PlaylistName)
     }
 
     fn validate(&mut self) -> bool {
@@ -320,12 +365,10 @@ impl Model {
 
     fn collect_result(&self) -> Option<String> {
         let indices_from_state = |id: &Id| -> Vec<usize> {
-            if let Ok(State::One(StateValue::String(s))) = self.app.state(id) {
-                if s.is_empty() {
-                    return vec![];
-                }
-                s.split(',')
-                    .filter_map(|p| p.trim().parse::<usize>().ok())
+            if let Ok(State::Vec(values)) = self.app.state(id) {
+                values
+                    .into_iter()
+                    .filter_map(|v| if let StateValue::Usize(i) = v { Some(i) } else { None })
                     .collect()
             } else {
                 vec![]

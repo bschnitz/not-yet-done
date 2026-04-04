@@ -15,17 +15,20 @@ use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 /// ```
 #[derive(Debug, Clone)]
 pub struct MultiChoiceKeymap {
-    pub move_up: KeyEvent,
+    pub move_up:  KeyEvent,
     pub move_down: KeyEvent,
-    pub toggle: KeyEvent,
+    pub toggle:   KeyEvent,
+    /// Closes the dropdown without moving focus away.
+    pub close:    KeyEvent,
 }
 
 impl Default for MultiChoiceKeymap {
     fn default() -> Self {
         Self {
-            move_up: KeyEvent { code: Key::Up, modifiers: KeyModifiers::NONE },
-            move_down: KeyEvent { code: Key::Down, modifiers: KeyModifiers::NONE },
-            toggle: KeyEvent { code: Key::Char(' '), modifiers: KeyModifiers::NONE },
+            move_up:   KeyEvent { code: Key::Up,          modifiers: KeyModifiers::NONE },
+            move_down: KeyEvent { code: Key::Down,        modifiers: KeyModifiers::NONE },
+            toggle:    KeyEvent { code: Key::Char(' '),   modifiers: KeyModifiers::NONE },
+            close:     KeyEvent { code: Key::Esc,         modifiers: KeyModifiers::NONE },
         }
     }
 }

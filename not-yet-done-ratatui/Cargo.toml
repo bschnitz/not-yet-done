@@ -2,26 +2,15 @@
 name = "not-yet-done-ratatui"
 version = "0.1.0"
 edition = "2024"
+autoexamples = false
 
 [[example]]
 name = "new_server"
 path = "examples/new_server.rs"
- 
-[[example]]
-name = "new_user"
-path = "examples/new_user.rs"
 
 [[example]]
-name = "new_server_form"
-path = "examples/new_server_form.rs"
-
-[[example]]
-name = "two_column"
-path = "examples/two_column.rs"
-
-[[example]]
-name = "two_column_form"
-path = "examples/two_column_form.rs"
+name = "playlist_builder"
+path = "examples/playlist_builder.rs"
 
 [dependencies]
 ratatui = "0.29"
