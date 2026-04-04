@@ -5,6 +5,87 @@
 
 ---
 
+## Inhaltsverzeichnis
+
+- [1. Feature-Übersicht](#1-feature-übersicht)
+- [2. Grundkonzepte](#2-grundkonzepte)
+  - [2.1 Layout: Zellen und Constraints](#21-layout-zellen-und-constraints)
+  - [2.2 Gaps und Borders](#22-gaps-und-borders)
+  - [2.3 Cell Groups](#23-cell-groups)
+  - [2.4 Fokus, Navigation und Events](#24-fokus-navigation-und-events)
+  - [2.5 GridChild-Trait](#25-gridchild-trait)
+- [3. Layout & ASCII-Beispiele](#3-layout--ascii-beispiele)
+  - [3.1 Gaps und Groups](#31-gaps-und-groups)
+  - [3.2 Borders](#32-borders-globale-konfiguration)
+- [4. Konfiguration (API-Referenz)](#4-konfiguration)
+  - [4.1 Grid-Größe](#41-grid-größe)
+  - [4.2 Constraints](#42-constraints)
+  - [4.3 Borders](#43-borders)
+  - [4.4 Gaps](#44-gaps)
+  - [4.5 Cell Groups](#45-cell-groups)
+  - [4.6 Border Text](#46-border-text)
+  - [4.7 Styling](#47-styling)
+  - [4.8 Fokus und Navigation](#48-fokus)
+- [5. Technische Details](#5-technische-details)
+  - [5.1 Layout-Algorithmus](#51-layout-algorithmus)
+  - [5.2 Rendering-Pipeline](#52-rendering-pipeline)
+  - [5.3 Event-Flow](#53-event-flow)
+  - [5.4 Corner-Berechnung](#54-corner-berechnung-bei-gap-kreuzungen)
+  - [5.5 Gap-Breite und Platzberechnung](#55-gap-breite-und-platzberechnung)
+  - [5.6 Groups und Gaps](#56-groups-und-gaps)
+- [6. Zukunfts-Ideen](#6-zukunfts-ideen)
+- [Anhang A: KI-Instruktionen](#anhang-a-ki-instruktionen-für-zukünftige-ki-sessions)
+
+---
+
+## Schnelleinstieg
+
+Ein minimales 2×2 Grid mit zwei TextInput-Feldern nebeneinander und einem Titel darunter:
+
+```rust
+use grid::{Grid, CellGroup, GapPos, BorderPos, GridKeymap, BORDER_SIMPLE};
+
+let mut grid = Grid::new(2, 2); // 2 Zeilen, 2 Spalten
+
+// Spaltenbreiten und Zeilenhöhen
+grid.with_column_constraints([Constraint::Percentage(50), Constraint::Percentage(50)]);
+grid.with_row_constraints([Constraint::Length(3), Constraint::Length(3)]);
+
+// Leerzeichen-Gap zwischen den Spalten
+grid.set_gap(GapPos::AfterCol(0));
+
+// Untere Zeile als Titelzeile zusammenfassen
+grid.group_cells(CellGroup::Row(1));
+
+// Äußerer Rahmen
+grid.set_border(BorderPos::Grid, &BORDER_SIMPLE);
+
+// Keyboard-Navigation
+grid.set_keymap(GridKeymap {
+    next_cell: Some(KeyEvent::from(KeyCode::Tab)),
+    prev_cell: Some(KeyEvent::from(KeyCode::BackTab)),
+    ..Default::default()
+});
+
+// Kind-Komponenten einfügen
+grid.set_child(0, 0, Box::new(TextInput::new("Name")));
+grid.set_child(0, 1, Box::new(TextInput::new("Vorname")));
+grid.set_child(1, 0, Box::new(Label::new("Personendaten eingeben")));
+```
+
+Ergebnis:
+
+```
+┌───────────────────────────────┐
+│ Name          │ Vorname       │
+│               │               │
+├───────────────────────────────┤
+│ Personendaten eingeben        │
+└───────────────────────────────┘
+```
+
+---
+
 ## 1. Feature-Übersicht
 
 Das Grid ist eine `MockComponent`-basierte Layout-Komponente, die beliebig viele Kind-Komponenten in einem n×m-Raster anordnet.
@@ -13,10 +94,10 @@ Das Grid ist eine `MockComponent`-basierte Layout-Komponente, die beliebig viele
 |--------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
 | **n×m Raster**                             | Beliebig viele Zeilen und Spalten                                                                                                 |
 | **Constraints**                            | Spaltenbreiten-/Zeilenhöhen-Constraints wie in ratatui (`Length`, `Min`, `Max`, `Percentage`, `Ratio`)                            |
-| **Gaps / Borders**                         | Konfigurierbare Separatoren zwischen Zellen: `None` (kein Abstand), Leerzeichen, oder Border-Varianten (Simple, Double, Thick, Custom) |
-| **BorderChars**                          | Vordefinierte Unicode Box-Drawing-Sets + benutzerdefinierte Sets als `pub static` |
-| **3-Ebenen-Gap-Konfiguration**             | Global → pro Spalte/Zeile → partiell (Abschnitt eines Gaps)                                                                       |
-| **Cell Groups (Merges)**                   | Statische und dynamische Zusammenführung von Zellen (`Row`, `Col`, `ColSpan`, `RowSpan`, `Span`)                                  |
+| **Gaps / Borders**                         | Konfigurierbare Separatoren zwischen Zellen: kein Gap (Zellen direkt aneinander), Gap (Leerzeichen), Border (Unicode Box-Drawing-Zeichen) |
+| **BorderChars**                            | Vordefinierte Unicode Box-Drawing-Sets + benutzerdefinierte Sets als `pub static`                                                  |
+| **2-Ebenen-Gap-Konfiguration**             | Global (für das gesamte Grid) → pro Spalte/Zeile                                                                                   |
+| **Cell Groups**                            | Statische und dynamische Gruppierung von Zellen (`Row`, `Col`, `ColSpan`, `RowSpan`, `Span`)                                       |
 | **Fokus-Management**                       | Grid verwaltet die aktive Zelle intern                                                                                            |
 | **Keyboard-Navigation**                    | Konfigurierbare Shortcuts für Zeilen-/Spaltenwechsel und sequenzielle Zell-Navigation                                             |
 | **Event-Forwarding**                       | Keys werden an aktives Kind weitergeleitet; unkonsumierte Keys vom Grid verarbeiten                                               |
@@ -29,92 +110,100 @@ Das Grid ist eine `MockComponent`-basierte Layout-Komponente, die beliebig viele
 
 ## 2. Grundkonzepte
 
-### 2.1 Zellen (Rows × Cols)
+### 2.1 Layout: Zellen und Constraints
 
 Ein Grid besteht aus `rows` Zeilen und `cols` Spalten. Jede Zelle wird durch ihren nullbasierten Index `(row, col)` identifiziert.
 
-### 2.2 Constraints
-
 Spaltenbreiten und Zeilenhöhen werden über `Constraint`-Werte bestimmt, analog zu ratatui:
-- `Length(n)` – Feste Breite/Höhe
-- `Min(n)` – Mindestens n Zeichen
-- `Max(n)` – Maximal n Zeichen
-- `Percentage(p)` – Prozentualer Anteil
-- `Ratio(n, d)` – Verhältnis n:d
 
-Gaps verbrauchen 0 oder 1 Zeichen Breite/Höhe.
+| Constraint | Bedeutung |
+|---|---|
+| `Length(n)` | Feste Breite/Höhe von n Zeichen |
+| `Min(n)` | Mindestens n Zeichen |
+| `Max(n)` | Maximal n Zeichen |
+| `Percentage(p)` | Prozentualer Anteil der verfügbaren Fläche |
+| `Ratio(n, d)` | Verhältnis n:d der verfügbaren Fläche |
 
-### 2.3 Gaps / Borders
+Gaps verbrauchen 0 oder 1 Zeichen Breite/Höhe und werden vor der Constraint-Berechnung von der verfügbaren Fläche abgezogen (→ [5.1 Layout-Algorithmus](#51-layout-algorithmus)).
 
-Gaps sind Separatoren zwischen Zellen (1 Leerzeichen). Borders sind Unicode Box-Drawing-Trennlinien (1 Zeichen).
+Es gibt zwei Konfigurationsebenen (Ebene 2 hat Vorrang):
+1. **Global** – `GapPos::Grid`: alle inneren Spalten- und Zeilengaps auf einmal
+2. **Pro Spalte/Zeile** – `GapPos::AfterCol(i)` etc.: einzelner Gap
 
-| Gap-Typ                         | Breite/Höhe | Beschreibung                               |
-|---------------------------------|-------------|--------------------------------------------|
-| `None`                          | 0           | Kein Gap, Zellen grenzen direkt aneinander |
-| `Gap`                           | 1           | Ein Leerzeichen als Abstand                |
-| `Border` (beliebige `BorderChars`) | 1           | Unicode Box-Drawing-Zeichen als Trennlinie |
+→ API: [4.1 Grid-Größe](#41-grid-größe), [4.2 Constraints](#42-constraints)
 
-Jeder Gap ist maximal 1 Zeichen breit/hoch.
+### 2.2 Gaps und Borders
 
-### 2.4 BorderChars
+Zwischen zwei Zeilen oder Spalten kann optional ein **Gap** existieren. Jeder Gap nimmt genau 1 Zeichen Breite (vertikaler Gap) bzw. 1 Zeichen Höhe (horizontaler Gap) ein. Fehlt ein Gap, grenzen die Zellen direkt aneinander.
 
-Ein `BorderChars` definiert die Zeichen für horizontale Linien, vertikale Linien, Verbindungen und Ecken. Vordefinierte Konstanten stehen zur Verfügung, benutzerdefinierte Sets können als `pub static` erstellt werden.
+Unabhängig vom Gap kann an derselben Position ein **Border** gesetzt werden. Ein Border besteht aus Unicode Box-Drawing-Zeichen und belegt denselben 1-Zeichen-Raum wie der Gap.
 
-### 2.5 Gap-Konfiguration (3 Ebenen)
+| Zustand | Inhalt |
+|---|---|
+| Kein Gap | Zellen grenzen direkt aneinander (0 Zeichen) |
+| Gap, kein Border | Leerzeichen (1 Zeichen) |
+| Gap mit Border | Box-Drawing-Zeichen, z.B. `│` (1 Zeichen) |
 
-Konfigurationsebenen mit Priorität: **Ebene 3 > Ebene 2 > Ebene 1**
+Wichtige Regeln:
+- `set_border` setzt implizit einen Gap, falls noch keiner existiert
+- `remove_border` entfernt nur die Border-Zeichen; der Gap bleibt als Leerzeichen
+- `remove_gap` entfernt den gesamten Raum inklusive aller Borders
+- Gaps erstrecken sich immer über die **gesamte** Höhe einer Spalte bzw. Breite einer Zeile
 
-1. **Ebene 1 – Global**: Für das gesamte Grid (horizontal und/oder vertikal gemeinsam)
-2. **Ebene 2 – Voll**: Für einen kompletten Spalten-/Zeilengap
-3. **Ebene 3 – Partiell**: Für einen Abschnitt eines Gaps (z.B. nur bestimmte Zeilen eines Spaltengaps)
+Ein **`BorderChars`**-Set definiert alle Zeichen eines Border-Stils: horizontale/vertikale Linien, Kreuzungen, Ecken, T-Stücke und Halb-Enden. Vordefinierte Konstanten (z.B. `BORDER_SIMPLE`, `BORDER_ROUNDED`) stehen zur Verfügung; eigene Sets können als `pub static` erstellt werden.
 
-### 2.6 Cell Groups (Merges)
+Wenn sich ein horizontaler und ein vertikaler Border kreuzen, wird automatisch das passende Corner-Zeichen gesetzt (z.B. `─` + `│` → `┼`). Bei unterschiedlichen Border-Typen werden die Linien nicht verbunden.
 
-Zellen können zu größeren Zellen zusammengefasst werden. Merges können statisch (bei Erstellung) und dynamisch (zur Laufzeit) definiert werden.
+→ API: [4.3 Borders](#43-borders), [4.4 Gaps](#44-gaps), visuelle Beispiele: [3.1](#31-gaps-und-groups), [3.2](#32-borders-globale-konfiguration)
 
-### 2.7 Fokus-Management
+### 2.3 Cell Groups
 
-Das Grid verwaltet die aktive Zelle intern. Die Fokus-Reihenfolge ist zeilenweise von links nach rechts (Zick-Zack).
+Zellen können zu einer größeren Einheit gruppiert werden. Die Gruppe verhält sich wie eine einzelne Zelle — für Layout, Fokus und Rendering.
 
-### 2.8 Keyboard-Navigation
+| `CellGroup`-Variante | Bedeutung |
+|---|---|
+| `Row(r)` | Alle Spalten in Zeile `r` |
+| `Col(c)` | Alle Zeilen in Spalte `c` |
+| `ColSpan { row, first_col, last_col }` | Mehrere Spalten in einer Zeile |
+| `RowSpan { col, first_row, last_row }` | Mehrere Zeilen in einer Spalte |
+| `Span { first_row, first_col, last_row, last_col }` | Rechteckiger Bereich |
 
-- Navigations-Shortcuts sind vollständig konfigurierbar (keine Default-Konfiguration für Navigation)
-- Kind-Komponenten können Keys konsumieren und so das Grid blockieren
-- Unkonsumierte Keys werden vom Grid auf Navigations-Shortcuts geprüft
+Gaps und Borders **innerhalb** einer Gruppe werden nicht gerendert; am Rand bleiben sie erhalten. Wenn eine neue Gruppe eine bestehende vollständig umschließt, gewinnt die größere. Partielle Überschneidungen führen zu einem Panic.
 
-### 2.9 Event-Forwarding
+→ API: [4.5 Cell Groups](#45-cell-groups), visuelle Beispiele: [3.1](#31-gaps-und-groups)
+
+### 2.4 Fokus, Navigation und Events
+
+Das Grid verwaltet die aktive Zelle intern. Die Standard-Navigationsreihenfolge ist zeilenweise von links nach rechts (Zick-Zack). Navigations-Shortcuts sind vollständig konfigurierbar — standardmäßig sind **keine** gesetzt.
+
+**Event-Flow** für jeden eingehenden `KeyEvent`:
 
 ```
-Grid::on(KeyEvent)
-  ├─ 1. Leite KeyEvent an aktives Kind: child.on_key(key)
-  │     ├─ true  → Kind hat konsumiert. Grid macht nichts weiter.
-  │     └─ false → Kind hat nicht konsumiert. Weiter bei 2.
-  └─ 2. Prüfe Grid-Keymap: Ist es ein Navigations-Key?
-        ├─ Ja  → Grid navigiert (nächste/vorherige Zelle)
-        └─ Nein → Event wird ignoriert
+1. Grid leitet Event an fokussiertes Kind: child.on_key(key)
+   ├── true  → Kind hat konsumiert → fertig
+   └── false → Kind hat nicht konsumiert
+2. Grid prüft eigene Keymap
+   ├── Navigations-Key → Focus wechseln
+   └── Kein Match     → Event ignorieren
 ```
 
-### 2.10 Rendering-Reihenfolge
+Die fokussierte Zelle wird beim Rendering **zuletzt** gerendert, damit Overlay-Widgets (z.B. Dropdowns) über benachbarte Zellen ragen können (→ [5.2 Rendering-Pipeline](#52-rendering-pipeline)).
 
-1. Zellen werden zeilenweise von links nach rechts gerendert (Zick-Zack)
-2. Ausnahme: Das aktuell fokussierte Widget wird **ganz zum Schluss** gerendert
-   (wichtig für Overlay-Widgets wie MultiChoice-Dropdowns)
+→ API: [4.8 Fokus und Navigation](#48-fokus)
 
-### 2.11 Corner-Berechnung
-
-Wenn ein horizontaler Gap (Row-Gap) und ein vertikaler Gap (Column-Gap) sich kreuzen:
-- **Beide Gaps haben Border** → Corner-Zeichen wird gesetzt (z.B. `─` + `│` → `┼`)
-- **Mindestens ein Gap hat `None` oder ist ein Leerzeichen** → Kein Corner, die Linie geht durch
-
-### 2.12 GridChild-Trait
+### 2.5 GridChild-Trait
 
 ```rust
 pub trait GridChild: MockComponent {
+    /// Gibt `true` zurück, wenn der Key vom Kind konsumiert wurde.
+    /// Gibt `false` zurück, wenn der Key nicht verarbeitet wurde — das Grid prüft ihn dann als Navigations-Key.
     fn on_key(&mut self, key: KeyEvent) -> bool;
 }
 ```
 
-Jede Komponente, die in eine Grid-Zelle eingefügt wird, muss `GridChild` implementieren. Bestehende Komponenten implementieren das trivial:
+Jede Komponente, die in eine Grid-Zelle eingefügt wird, muss `GridChild` implementieren. Der `MockComponent`-Supertrait wird vom Grid für `render()` und `attr()`/`state()` genutzt. Das Grid ruft niemals `MockComponent::on()` auf Kind-Komponenten auf — das Keyboard-Routing läuft ausschließlich über `on_key()`. `on()` wird nur benötigt, wenn die Komponente auch außerhalb eines Grids im tui-realm-Event-Loop verwendet werden soll.
+
+Bestehende Komponenten implementieren das trivial:
 
 ```rust
 impl GridChild for TextInput {
@@ -129,19 +218,25 @@ impl GridChild for TextInput {
 ## 3. Layout & ASCII-Beispiele
 
 In allen Beispielen:
-- `▓` = Hintergrund der Zelle A
-- `░` = Hintergrund der Zelle B
-- `▒` = Hintergrund der Zelle C (in Fokus-Beispielen)
-- `╳` = Hintergrund der Zelle D (in Fokus-Beispielen)
-- `A`, `B`, `C` = Zellinhalt
-- `X` = Fokus-Rahmen
-- `│`, `─`, `┼`, `╷`, `╵`, etc. = Border-Zeichen
 
-### 3.1 Gaps und Merges
+| Symbol | Bedeutung |
+|---|---|
+| `▓` | Hintergrund der Zelle A (und jeder 3n-ten Zelle) |
+| `░` | Hintergrund der Zelle B (und jeder 3n+1-ten Zelle) |
+| `█` | Hintergrund der Zelle C (kein Fokus-Beispiel) |
+| `▒` | Hintergrund der Zelle C (in Fokus-Beispielen) |
+| `╳` | Hintergrund der Zelle D (in Fokus-Beispielen) |
+| `A`, `B`, `C` … | Zellinhalt (Platzhalter) |
+| `▛▀▜▌▐▙▄▟` | Fokus-Rahmen (Unicode Block-Elemente) |
+| `│`, `─`, `┼`, `╷`, `╵`, `╶`, `╴` | Border-Zeichen |
+
+Zellen in normalen Beispielen: 7 Zeichen breit × 3 Zeichen hoch. In Fokus-Beispielen: 9 × 5.
+
+### 3.1 Gaps und Groups
 
 Zellen grenzen direkt aneinander.
 
-**2×1 Grid (2 Spalten, 1 Zeile):**
+**1×2 Grid (1 Zeile, 2 Spalten):**
 
 ```
 ▓▓▓▓▓▓▓░░░░░░░
@@ -149,9 +244,9 @@ Zellen grenzen direkt aneinander.
 ▓▓▓▓▓▓▓░░░░░░░
 ```
 
-**2×2 Grid (2 Spalten, 2 Zeile), C+D gemerget:**
+**2×2 Grid (2 Zeilen, 2 Spalten), C+D gruppiert:**
 
-4 Zellen (A–D), jeweils 7×3 Zeichen, keine Gaps. C und D sind über `CellGroup::Col(1)` zu einer Zelle zusammengefasst.
+4 Zellen (A–D), jeweils 7×3 Zeichen, keine Gaps. C und D sind über `CellGroup::Col(1)` zu einer Zelle gruppiert.
 
 ```
 ▓▓▓▓▓▓▓░░░░░░░
@@ -162,7 +257,7 @@ Zellen grenzen direkt aneinander.
 ██████████████
 ```
 
-**5×3 Grid (5 Spalten, 3 Zeilen):**
+**3×5 Grid (3 Zeilen, 5 Spalten):**
 
 15 Zellen (A–O), alle gleich breit (7 Zeichen) und gleich hoch (3 Zeichen), keine Gaps.
 Der zyklische Wechsel des Hintergrundzeichens (▓ → ░ → █) dient nur der Verdeutlichung der Zellgrenzen; in der tatsächlichen Komponente ist der Hintergrund jeder Zelle frei konfigurierbar. In Fokus-Beispielen wird `▒` statt `█` verwendet.
@@ -179,7 +274,7 @@ Der zyklische Wechsel des Hintergrundzeichens (▓ → ░ → █) dient nur de
 ░░░░░░░███████▓▓▓▓▓▓▓░░░░░░░███████
 ```
 
-**5×3 Grid – Gap zwischen Spalte 2 und 3:**
+**3×5 Grid – Gap zwischen Spalte 2 und 3:**
 
 Gleiche Zellen wie oben, mit einem Gap (Leerzeichen) zwischen Spalte 2 (C, H, M) und Spalte 3 (D, I, N).
 
@@ -195,7 +290,7 @@ Gleiche Zellen wie oben, mit einem Gap (Leerzeichen) zwischen Spalte 2 (C, H, M)
 ░░░░░░░███████▓▓▓▓▓▓▓ ░░░░░░░███████
 ```
 
-**5×3 Grid – Gap zwischen Zeile 1 und 2:**
+**3×5 Grid – Gap zwischen Zeile 1 und 2:**
 
 Gleiche Zellen wie oben, mit einem Gap (Leerzeichen) zwischen Zeile 1 (F–J) und Zeile 2 (K–O).
 
@@ -212,7 +307,7 @@ Gleiche Zellen wie oben, mit einem Gap (Leerzeichen) zwischen Zeile 1 (F–J) un
 ░░░░░░░███████▓▓▓▓▓▓▓░░░░░░░███████
 ```
 
-**5×3 Grid – Gap zwischen Spalte 2/3 und zwischen Zeile 1/2:**
+**3×5 Grid – Gap zwischen Spalte 2/3 und zwischen Zeile 1/2:**
 
 Gleiche Zellen wie oben, mit beiden Gaps kombiniert.
 
@@ -229,7 +324,7 @@ Gleiche Zellen wie oben, mit beiden Gaps kombiniert.
 ░░░░░░░███████▓▓▓▓▓▓▓ ░░░░░░░███████
 ```
 
-**2×2 Grid mit Gaps:**
+**2×2 Grid (2 Zeilen, 2 Spalten) mit Gaps:**
 
 4 Zellen (A–D), jeweils 7×3 Zeichen, mit Gaps (Leerzeichen) zwischen Spalten und Zeilen.
 Veranschaulicht, dass Gaps zwischen Zellen konfigurierbar sind.
@@ -244,9 +339,9 @@ Veranschaulicht, dass Gaps zwischen Zellen konfigurierbar sind.
 ███████ ▓▓▓▓▓▓▓
 ```
 
-**2×2 Grid – C und D als ColSpan zusammengefasst:**
+**2×2 Grid – C und D als ColSpan gruppiert:**
 
-Gleiche Zellen wie oben, aber C und D sind zu einer Zelle zusammengefasst (`CellGroup::Col(1)` bzw. äquivalent `ColSpan(row=1, first_col=0, last_col=1)`).
+Gleiche Zellen wie oben, aber C und D sind zu einer Zelle gruppiert (`CellGroup::Col(1)` bzw. äquivalent `CellGroup::ColSpan { row: 1, first_col: 0, last_col: 1 }`).
 Der vertikale Gap zwischen C und D entfällt, da beide nun eine einzige Zelle bilden.
 Der horizontale Gap zwischen Zeile 0 und Zeile 1 bleibt erhalten.
 
@@ -260,14 +355,16 @@ Der horizontale Gap zwischen Zeile 0 und Zeile 1 bleibt erhalten.
 ███████████████
 ```
 
-**4×3 Grid – Header, Sidebar, ColSpan und Col:**
+**3×4 Grid – Header, Sidebar, ColSpan und Col:**
 
-Ein 4×3 Grid ohne Gaps, das alle Merge-Typen zeigt:
-- `CellGroup::Row(0)` → A überspannt Spalte 0–2 in Zeile 0
-- `CellGroup::Col(3)` → G überspannt die gesamte Spalte 3 (alle Zeilen)
-- `CellGroup::RowSpan(col=0, 1, 2)` → B überspannt Zeile 1 und 2 in Spalte 0
-- `ColSpan(row=1, 1, 2)` → C und D sind zu einer Zelle zusammengefasst
+Ein 3×4 Grid ohne Gaps, das alle Group-Typen zeigt:
+- `CellGroup::Row(0)` → A gruppiert alle Spalten in Zeile 0
+- `CellGroup::Col(3)` → G gruppiert die gesamte Spalte 3 (alle Zeilen)
+- `CellGroup::RowSpan { col: 0, first_row: 1, last_row: 2 }` → B überspannt Zeilen 1 und 2 in Spalte 0
+- `CellGroup::ColSpan { row: 1, first_col: 1, last_col: 2 }` → C und D sind zu einer Zelle gruppiert
 - E, F sind einzelne Zellen
+
+**Überlappungsregel**: `CellGroup::Row(0)` und `CellGroup::Col(3)` überlappen in Zelle (0, 3). Da `Col(3)` die gesamte Spalte 3 umfasst und `Row(0)` die gesamte Zeile 0 — keine Gruppe umfasst die andere vollständig, es handelt sich um eine reine Überschneidung. **Hier gilt**: Wenn eine Gruppe die andere vollständig umschließt, gewinnt die umschließende; überschneiden sie sich nur partiell, führt die zweite `group_cells`-Zuweisung zu einem Panic. Das Beispiel ist daher nur korrekt, wenn `Col(3)` zuerst definiert wird und `Row(0)` anschließend — in diesem Fall umfasst `Row(0)` (Zeile 0, alle 4 Spalten) die Zelle (0, 3), die bereits Teil von `Col(3)` ist. Da weder die eine die andere vollständig enthält, ist diese Kombination in der Praxis ein **ungültiger Zustand** und sollte vermieden werden. Empfehlung: Statt `Row(0)` ein `ColSpan { row: 0, first_col: 0, last_col: 2 }` verwenden.
 
 ```
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓╬╬╬╬╬╬╬
@@ -281,9 +378,9 @@ Ein 4×3 Grid ohne Gaps, das alle Merge-Typen zeigt:
 ░░░░░░░▒▒▒▒▒▒▒╳╳╳╳╳╳╳╬╬╬╬╬╬╬
 ```
 
-**5×3 Grid – `Span(1, 1, 2, 3)`:**
+**3×5 Grid – `Span { first_row: 1, first_col: 1, last_row: 2, last_col: 3 }`:**
 
-`Span(first_row=1, first_col=1, last_row=2, last_col=3)` → Zellen B, C, D, G, H, I werden zu einer Zelle zusammengefasst (3 Spalten × 2 Zeilen). Der Hintergrund der ersten Zelle (░, Zelle B) wird verwendet.
+`CellGroup::Span { first_row: 1, first_col: 1, last_row: 2, last_col: 3 }` → Zellen B, C, D, G, H, I werden zu einer Zelle gruppiert (3 Spalten × 2 Zeilen). Der Hintergrund der ersten Zelle (░, Zelle B) wird verwendet.
 
 ```
 ▓▓▓▓▓▓▓╬╬╬╬╬╬╬███████▓▓▓▓▓▓▓░░░░░░░
@@ -299,9 +396,9 @@ Ein 4×3 Grid ohne Gaps, das alle Merge-Typen zeigt:
 
 ### 3.2 Borders (globale Konfiguration)
 
-**5×3 Grid – Simple Borders global (`BorderPos::Grid`):**
+**3×5 Grid – Simple Borders global (`BorderPos::Grid`):**
 
-Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
+Basis: Gleiche Zellen wie das 3×5 Grid (A–O), 7×3 Zeichen pro Zelle.
 `set_border(BorderPos::Grid, &BORDER_SIMPLE)` setzt Simple Borders zwischen allen Spalten und Zeilen sowie einen äußeren Rahmen.
 
 ```
@@ -320,9 +417,9 @@ Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
 └───────┴───────┴───────┴───────┴───────┘
 ```
 
-**5×3 Grid – Selektive Borders (`AfterCol(1)` + `BeforeRow(2)`):**
+**3×5 Grid – Selektive Borders (`AfterCol(1)` + `BeforeRow(2)`):**
 
-Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
+Basis: Gleiche Zellen wie das 3×5 Grid (A–O), 7×3 Zeichen pro Zelle.
 - `set_border(BorderPos::AfterCol(1), &BORDER_SIMPLE)` → Vertikaler Border zwischen Spalte 1 (B, G, L) und Spalte 2 (C, H, M). Endet oben halb (`╷`) und unten halb (`╵`).
 - `set_border(BorderPos::BeforeRow(2), &BORDER_SIMPLE)` → Horizontaler Border vor Zeile 2 (zwischen F–J und K–O). Endet links halb (`╶`) und rechts halb (`╴`).
 - Beide Borders kreuzen sich → Corner-Zeichen `┼`.
@@ -340,7 +437,7 @@ Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
 ░░░░░░░███████╵▓▓▓▓▓▓▓░░░░░░░███████
 ```
 
-**5×3 Grid – `BORDER_SIMPLE_EXTENDED` (`AfterCol(1)` + `BeforeRow(2)`):**
+**3×5 Grid – `BORDER_SIMPLE_EXTENDED` (`AfterCol(1)` + `BeforeRow(2)`):**
 
 Gleiche Positionen wie oben, aber mit `&BORDER_SIMPLE_EXTENDED` statt `&BORDER_SIMPLE`.
 Bei `SimpleExtended` gehen die Linien an den Endstellen durch (volle Enden statt halber Enden).
@@ -359,11 +456,11 @@ Unterschied zu `Simple`: Keine `╷`/`╵`/`╶`/`╴`, sondern `│`/`─` bis 
 ░░░░░░░███████│▓▓▓▓▓▓▓░░░░░░░███████
 ```
 
-**5×3 Grid – Partielle Borders (`AfterRowSpanned(1, 0, 1)` + `BeforeColSpanned(4, 1, 2)`):**
+**3×5 Grid – Partielle Borders (`AfterRowSpanned` + `BeforeColSpanned`):**
 
-Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
-- `set_border(BorderPos::AfterRowSpanned(1, 0, 1), &BORDER_SIMPLE)` → Horizontaler Border nach Zeile 1, nur unter Spalte 0 (F, K) und Spalte 1 (G, L). Endet halb (`╶`/`╴`).
-- `set_border(BorderPos::BeforeColSpanned(4, 1, 2), &BORDER_SIMPLE)` → Vertikaler Border vor Spalte 4, nur in Zeile 1 (I, J) und Zeile 2 (N, O). Endet halb (`╷`/`╵`).
+Basis: Gleiche Zellen wie das 3×5 Grid (A–O), 7×3 Zeichen pro Zelle.
+- `set_border(BorderPos::AfterRowSpanned { row: 1, col_start: 0, col_end: 1 }, &BORDER_SIMPLE)` → Horizontaler Border nach Zeile 1, nur unter Spalte 0 (F, K) und Spalte 1 (G, L). Endet halb (`╶`/`╴`).
+- `set_border(BorderPos::BeforeColSpanned { col: 4, row_start: 1, row_end: 2 }, &BORDER_SIMPLE)` → Vertikaler Border vor Spalte 4, nur in Zeile 1 (I, J) und Zeile 2 (N, O). Endet halb (`╷`/`╵`).
 - Die Borders kreuzen sich nicht (horizontaler Border reicht nur bis Spalte 1, vertikaler Border beginnt bei Spalte 4).
 
 ```
@@ -379,10 +476,10 @@ Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
 ░░░░░░░███████▓▓▓▓▓▓▓░░░░░░░╵███████
 ```
 
-**5×3 Grid – `AfterRowSpanned(1, 2, 3)` (Simple) + `BeforeColSpanned(4, 1, 2)` (Double):**
+**3×5 Grid – `AfterRowSpanned` (Simple) + `BeforeColSpanned` (Double):**
 
-- `set_border(BorderPos::AfterRowSpanned(1, 2, 3), &BORDER_SIMPLE)` → Horizontaler Border (─) nach Zeile 1, nur unter Spalte 2 (C, H) und Spalte 3 (D, I). Endet halb (`╶`/`╴`).
-- `set_border(BorderPos::BeforeColSpanned(4, 1, 2), &BORDER_DOUBLE_EXTENDED)` → Vertikaler Border (║) vor Spalte 4, nur in Zeile 1 (I, J) und Zeile 2 (N, O). Da es keine halben Enden für ║ gibt, wird `&BORDER_DOUBLE_EXTENDED` verwendet (volle Enden).
+- `set_border(BorderPos::AfterRowSpanned { row: 1, col_start: 2, col_end: 3 }, &BORDER_SIMPLE)` → Horizontaler Border (─) nach Zeile 1, nur unter Spalte 2 (C, H) und Spalte 3 (D, I). Endet halb (`╶`/`╴`).
+- `set_border(BorderPos::BeforeColSpanned { col: 4, row_start: 1, row_end: 2 }, &BORDER_DOUBLE_EXTENDED)` → Vertikaler Border (║) vor Spalte 4, nur in Zeile 1 (I, J) und Zeile 2 (N, O). Da es keine halben Enden für ║ gibt, wird `&BORDER_DOUBLE_EXTENDED` verwendet (volle Enden).
 - Beide Borders sind **unterschiedlicher** Typ (Simple vs. Double) → sie grenzen zwar aneinander, werden aber **nicht** gejoint.
 
 ```
@@ -400,8 +497,8 @@ Basis: Gleiche Zellen wie das 5×3 Grid (A–O), 7×3 Zeichen pro Zelle.
 
 **Gleiche Konfiguration + `set_border_text`:**
 
-Zusätzlich: `set_border_text(BorderPos::AfterRowSpanned { row: 1, col_start: 2, col_end: 3 }, TextAnchor::End, offset=0, "─╢")`.
-Der Text "─╢" wird von links nach rechts geschrieben, endend am Ende des horizontalen Borders: ─ ersetzt das halbe Ende ╴ (pos 27), ╢ ersetzt das ║ (pos 28). Der horizontale Border läuft nun durch und mündet mit ╢ in die Spaltenspalte.
+Zusätzlich: `set_border_text(BorderPos::AfterRowSpanned { row: 1, col_start: 2, col_end: 3 }, TextAnchor::End, 0, "─╢")`.
+Der Text "─╢" wird von links nach rechts geschrieben, endend am Ende des horizontalen Borders: ─ ersetzt das halbe Ende ╴ (pos 27), ╢ ersetzt das ║ (pos 28). Der horizontale Border läuft nun durch und mündet mit ╢ in die Spalte.
 
 ```
 ▓▓▓▓▓▓▓░░░░░░░███████▓▓▓▓▓▓▓ ░░░░░░░
@@ -432,13 +529,13 @@ Der Text "─╢" wird von links nach rechts geschrieben, endend am Ende des hor
 ▓▓▓▓▓▓▓ ░░░░░░░ ███████
 ```
 
-**5×3 Grid – Verschiedene Border-Konfigurationen kombiniert:**
+**3×5 Grid – Verschiedene Border-Konfigurationen kombiniert:**
 
 Dieses Beispiel zeigt verschiedene Border-Arten und Konfigurationsebenen in einem einzigen Grid:
 - `set_border(BorderPos::AfterRow(0), &BORDER_DOUBLE_EXTENDED)` → Vollständiger horizontaler Double-Border (═) über die gesamte Breite nach Zeile 0
-- `set_border(BorderPos::AfterRowSpanned(1, 2, 3), &BORDER_ROUNDED)`
-- `set_border(BorderPos::AfterColSpanned(1, 2, 2), &BORDER_ROUNDED)`
-- `set_border(BorderPos::AfterColSpanned(3, 2, 2), &BORDER_ROUNDED)`
+- `set_border(BorderPos::AfterRowSpanned { row: 1, col_start: 2, col_end: 3 }, &BORDER_ROUNDED)`
+- `set_border(BorderPos::AfterColSpanned { col: 1, row_start: 2, row_end: 2 }, &BORDER_ROUNDED)`
+- `set_border(BorderPos::AfterColSpanned { col: 3, row_start: 2, row_end: 2 }, &BORDER_ROUNDED)`
 ```
 ▓▓▓▓▓▓▓░░░░░░░ ███████▓▓▓▓▓▓▓ ░░░░░░░
 ▓▓▓A▓▓▓░░░B░░░ ███C███▓▓▓D▓▓▓ ░░░E░░░
@@ -455,7 +552,7 @@ Dieses Beispiel zeigt verschiedene Border-Arten und Konfigurationsebenen in eine
 
 **Gleiche Konfiguration + `set_border_text`:**
 
-Zusätzlich: `set_border_text(BorderPos::AfterColSpanned { col: 1, row_start: 2, row_end: 2 }, TextAnchor::Start, offset=0, "Down")` und `set_border_text(BorderPos::AfterRow(0), TextAnchor::Start, offset=2, " My Header ")`.
+Zusätzlich: `set_border_text(BorderPos::AfterColSpanned { col: 1, row_start: 2, row_end: 2 }, TextAnchor::Start, 0, "Down")` und `set_border_text(BorderPos::AfterRow(0), TextAnchor::Start, 2, " My Header ")`.
 - `set_border_text` schreibt Text in einen Bereich (Leerzeichen oder Border-Zeichen) und überschreibt die dortigen Zeichen.
 - " My Header " wird horizontal in den Gap nach Zeile 0 geschrieben, beginnend an Position 2. Die ═-Zeichen werden durch die Textzeichen überschrieben.
 - "Do…" wird vertikal in den Spaltengap nach Spalte 1 geschrieben (nur in Zeile 2). Der Gap hat 3 Zeilen Höhe, der Text "Down" hat 4 Zeichen → wird mit Ellipsis abgeschnitten. Die ╭-Zeichen werden durch die Textzeichen überschrieben.
@@ -477,6 +574,33 @@ Zusätzlich: `set_border_text(BorderPos::AfterColSpanned { col: 1, row_start: 2,
 ---
 
 ## 4. Konfiguration
+
+Alle öffentlichen Methoden von `Grid` auf einen Blick:
+
+| Methode | Beschreibung |
+|---|---|
+| `Grid::new(rows, cols)` | Grid erstellen |
+| `with_column_constraints([..])` | Spaltenbreiten-Constraints setzen |
+| `with_row_constraints([..])` | Zeilenhöhen-Constraints setzen |
+| `set_border(pos, chars)` | Border setzen (erzeugt implizit Gap) |
+| `remove_border(pos)` | Border entfernen (Gap bleibt) |
+| `set_border_style(pos, style)` | Style für Border/Gap setzen |
+| `set_border_text(pos, anchor, offset, text)` | Text in Border/Gap-Bereich schreiben |
+| `remove_border_text(pos)` | Border-Text entfernen |
+| `set_gap(pos)` | Gap setzen |
+| `remove_gap(pos)` | Gap und Border entfernen |
+| `set_style(style)` | Globalen Default-Style setzen |
+| `configure_cell_style(row, col, style)` | Zell-Style setzen |
+| `with_focus_style(style)` | Style der fokussierten Zelle |
+| `with_focus_frame_style(style)` | Style des Fokus-Rahmens |
+| `group_cells(group)` | Zellen gruppieren |
+| `ungroup_cells(row, col)` | Gruppe auflösen |
+| `set_keymap(keymap)` | Keyboard-Navigation konfigurieren |
+| `set_child(row, col, child)` | Kind-Komponente einfügen |
+| `focused_cell()` | Aktuelle Fokusposition abfragen |
+| `focus_next()` / `focus_prev()` | Fokus sequenziell bewegen |
+| `focus_next_in_row()` / `focus_prev_in_row()` | Fokus in Zeile bewegen |
+| `focus_next_in_col()` / `focus_prev_in_col()` | Fokus in Spalte bewegen |
 
 ### 4.1 Grid-Größe
 
@@ -511,6 +635,22 @@ grid.with_row_constraints([
 ### 4.3 Borders
 
 #### `BorderPos` – Wo wird der Border gesetzt?
+
+Schnellreferenz aller Varianten:
+
+| Variante | Richtung | Bereich | Enden |
+|---|---|---|---|
+| `Grid` | beide | äußerer Rahmen | Ecken |
+| `AfterCol(i)` | vertikal | zwischen Spalte i und i+1, alle Zeilen | volle Linie |
+| `BeforeCol(i)` | vertikal | zwischen Spalte i-1 und i, alle Zeilen | volle Linie |
+| `AfterRow(i)` | horizontal | zwischen Zeile i und i+1, alle Spalten | volle Linie |
+| `BeforeRow(i)` | horizontal | zwischen Zeile i-1 und i, alle Spalten | volle Linie |
+| `AfterColSpanned { col, row_start, row_end }` | vertikal | nur in Zeilen row_start..=row_end | halbe Enden (`╷`/`╵`) |
+| `BeforeColSpanned { col, row_start, row_end }` | vertikal | nur in Zeilen row_start..=row_end | halbe Enden |
+| `AfterRowSpanned { row, col_start, col_end }` | horizontal | nur in Spalten col_start..=col_end | halbe Enden (`╶`/`╴`) |
+| `BeforeRowSpanned { row, col_start, col_end }` | horizontal | nur in Spalten col_start..=col_end | halbe Enden |
+
+> `After` und `Before` adressieren dieselbe physische Position — `AfterCol(i)` ist identisch mit `BeforeCol(i+1)`. Beide Varianten existieren für lesbareren Code.
 
 ```rust
 pub enum BorderPos {
@@ -666,7 +806,7 @@ Gaps definieren den Platz zwischen Zellen. Jeder Gap nimmt genau 1 Zeichen Breit
 
 ```rust
 pub enum GapPos {
-    /// Gaps zwischen allen Spalten und Zeilen
+    /// Gaps zwischen allen inneren Spalten und Zeilen (kein äußerer Rahmen)
     Grid,
 
     /// Vertikaler Gap nach Spalte i (zwischen Spalte i und i+1)
@@ -680,6 +820,8 @@ pub enum GapPos {
     BeforeRow(usize),
 }
 ```
+
+> **Hinweis**: `GapPos::Grid` und `BorderPos::Grid` haben unterschiedliche Semantik. `GapPos::Grid` setzt Gaps zwischen allen inneren Spalten und Zeilen (ohne äußeren Rahmen). `BorderPos::Grid` setzt einen geschlossenen äußeren Rahmen um das gesamte Grid. `AfterCol(i)` in `GapPos` und `AfterCol(i)` in `BorderPos` adressieren dieselbe physische Position — `set_border(BorderPos::AfterCol(i), ...)` setzt automatisch auch einen Gap an dieser Position, falls noch keiner existiert.
 
 #### `set_gap` / `remove_gap`
 
@@ -768,10 +910,17 @@ grid.ungroup_cells(1, 1);
 
 #### Verhalten bei Grouping
 
-- Die zusammengefassten Zellen teilen sich den kombinierten Platz aller Einzelzellen (ohne interne Gaps/Borders).
-- Die erste Zelle (oben-links) bestimmt den Hintergrund der zusammengefassten Zelle.
+- Die gruppierten Zellen teilen sich den kombinierten Platz aller Einzelzellen (ohne interne Gaps/Borders).
+- Die erste Zelle (oben-links) bestimmt den Hintergrund der gruppierten Zelle.
 - Ein Kind-Widget wird der gesamten Fläche der Gruppe zugewiesen.
 - Fokus springt über die Gruppe als Ganzes.
+
+#### Überlappungsverhalten
+
+Wenn `group_cells` aufgerufen wird und die neue Gruppe mit einer bestehenden Gruppe überlappt, gelten folgende Regeln:
+
+- **Vollständige Umschließung**: Wenn die neue Gruppe eine bestehende vollständig umschließt (oder umgekehrt), wird die kleinere ignoriert — die größere Gruppe gewinnt. `ungroup_cells` auf die kleinere hat dann keine Wirkung mehr.
+- **Partielle Überschneidung**: Wenn sich zwei Gruppen nur teilweise überschneiden (ohne dass eine die andere vollständig enthält), **panic!** in Debug-Builds. In Release-Builds ist das Verhalten undefiniert. Partielle Überschneidungen müssen vom Aufrufer vermieden werden.
 
 #### Zusammenspiel mit Gaps und Borders
 
@@ -782,7 +931,7 @@ Gaps und Borders, die **innerhalb** einer Gruppe verlaufen würden, werden unter
 - Borders und Gaps, die am **Rand** der Gruppe verlaufen, werden normal gezeichnet.
 - Es folgt, dass die Gruppendimensionen mit darin verlaufenden Borders/Gaps entsprechend breiter/höher sind als nur die Summe ihrer Bestandteile und das auch, wenn sie eine Border/Gap komplett überdecken.
 
-Siehe Abschnitt [3.1](#31-gaps-und-merges) für visuelle Beispiele.
+Siehe Abschnitt [3.1](#31-gaps-und-groups) für visuelle Beispiele.
 
 ### 4.6 Border Text
 
@@ -799,7 +948,7 @@ pub enum TextAnchor {
 }
 ```
 
-Bei `BorderPos::Grid` bezieht sich `Start`/`End` auf die obere linke bzw. untere rechte Ecke des Rahmens. Bei `Spanned`-Varianten bezieht sich `Start`/`End` auf den Bereich des Spans.
+Bei `BorderPos::Grid` wird **ausschließlich die obere Kante** des Rahmens beschriftet. `Start` = Text beginnt links, `End` = Text endet rechts. Bei allen anderen `BorderPos`-Varianten bezieht sich `Start`/`End` auf den Anfang bzw. das Ende der Linie (horizontal: links/rechts; vertikal: oben/unten). Bei `Spanned`-Varianten bezieht sich `Start`/`End` auf den Bereich des Spans.
 
 #### `set_border_text` / `remove_border_text`
 
@@ -936,8 +1085,8 @@ grid.set_keymap(GridKeymap {
     prev_in_row: Some(KeyEvent::from(KeyCode::Left)),
     next_in_col: Some(KeyEvent::from(KeyCode::Down)),
     prev_in_col: Some(KeyEvent::from(KeyCode::Up)),
-    next_cell: Some(KeyEvent::from(Code::Tab)),
-    prev_cell: Some(KeyEvent::from(Code::BackTab)),
+    next_cell: Some(KeyEvent::from(KeyCode::Tab)),
+    prev_cell: Some(KeyEvent::from(KeyCode::BackTab)),
 });
 ```
 
@@ -946,13 +1095,13 @@ grid.set_keymap(GridKeymap {
 ```rust
 grid.set_key_next(KeyEvent::from(KeyCode::Right));
 grid.set_key_prev(KeyEvent::from(KeyCode::Left));
-grid.set_key_next_row(KeyEvent::from(Code::Tab));
-grid.set_key_prev_row(KeyEvent::from(Code::BackTab));
+grid.set_key_next_row(KeyEvent::from(KeyCode::Tab));
+grid.set_key_prev_row(KeyEvent::from(KeyCode::BackTab));
 grid.set_key_next_col(KeyEvent::from(KeyCode::Down));
 grid.set_key_prev_col(KeyEvent::from(KeyCode::Up));
 ```
 
-Merged Zellen werden bei der Navigation als eine einzige Position behandelt und übersprungen.
+Gruppierte Zellen werden bei der Navigation als eine einzige Position behandelt und übersprungen.
 
 #### Programmatische Navigation
 
@@ -1017,13 +1166,13 @@ Das Kind-Widget bestimmt über seinen `GridChild::on_key()`-Rückgabewert, ob ei
 - `true` → Grid verarbeitet den Key nicht weiter
 - `false` → Grid prüft, ob der Key ein Navigations-Shortcut ist
 
-#### Fokus bei gemergten Zellen
+#### Fokus bei gruppierten Zellen
 
-Wenn der Fokus von einer nicht-gemergten Zelle auf eine gemergte Zelle wechselt, berechnet das Grid zunächst die Zelle, die den Fokus annehmen würde (basierend auf der aktuellen Zeile/Spalte des Fokus). Der Fokus wird dann auf die gesamte gemergte Zelle gesetzt, aber das Grid merkt sich intern die Position der berechneten Zelle.
+Wenn der Fokus von einer nicht-gruppierten Zelle auf eine gruppierte Zelle wechselt, berechnet das Grid zunächst die Zelle, die den Fokus annehmen würde (basierend auf der aktuellen Zeile/Spalte des Fokus). Der Fokus wird dann auf die gesamte gruppierte Zelle gesetzt, aber das Grid merkt sich intern die Position der berechneten Zelle.
 
 Wenn der Fokus erneut gewechselt wird, wird anhand der gespeicherten Zellposition bestimmt, welche Zelle als Nächstes angesteuert wird. Dadurch ergibt sich ein natürliches Navigationsverhalten, das die geometrische Position des ursprünglichen Ziels respektiert.
 
-Beispiel: In einem 2×3 Grid mit B und E gemerget zu BE (Spalte 1, Zeilen 0–1):
+Beispiel: In einem 2×3 Grid mit B und E gruppiert zu BE (Spalte 1, Zeilen 0–1):
 
 1. Fokus liegt auf A (Zeile 0, Spalte 0)
 2. `focus_next_in_row()` → Grid berechnet Ziel (Zeile 0, Spalte 1), erkennt dass (1, 0) Teil von BE ist → Fokus auf BE, gespeicherte Position: (Zeile 0, Spalte 1)
@@ -1044,7 +1193,7 @@ Beispiel: In einem 2×3 Grid mit B und E gemerget zu BE (Spalte 1, Zeilen 0–1)
 ╳╳╳╳╳╳╳╳╳░░░░░░░░░▓▓▓▓▓▓▓▓▓  ╳╳╳╳╳╳╳╳╳▙ ▄▄▄▄▄ ▟▓▓▓▓▓▓▓▓▓  ╳╳╳╳╳╳╳╳╳░░░░░░░░░▓▓▓▓▓▓▓▓▓
 ```
 
-Hinweis: Der Fokus-Rahmen einer gemergten Zelle erstreckt sich über die gesamte Höhe der gemergten Zelle. Die Lücken zwischen Rahmen und Seitenrahmen verwenden das gleiche Muster wie bei nicht-gemergten Zellen (` ░░░░░░░ ` — Leerzeichen an den Rändern, Interior-BG im Innenraum).
+Hinweis: Der Fokus-Rahmen einer gruppierten Zelle erstreckt sich über die gesamte Höhe der gruppierten Zelle. Die Lücken zwischen Rahmen und Seitenrahmen verwenden das gleiche Muster wie bei nicht-gruppierten Zellen (` ░░░░░░░ ` — Leerzeichen an den Rändern, Interior-BG im Innenraum).
 
 Gleiches Beispiel, aber Fokus startet auf D (Zeile 1, Spalte 0): `focus_next_in_row()` berechnet Ziel (Zeile 1, Spalte 1) → Fokus auf BE, gespeicherte Position: (Zeile 1, Spalte 1) → erneut `focus_next_in_row()` → nächste Zelle in Zeile 1 ist F:
 
@@ -1063,31 +1212,46 @@ Gleiches Beispiel, aber Fokus startet auf D (Zeile 1, Spalte 0): `focus_next_in_
 ▙ ▄▄▄▄▄ ▟░░░░░░░░░▓▓▓▓▓▓▓▓▓  ╳╳╳╳╳╳╳╳╳▙ ▄▄▄▄▄ ▟▓▓▓▓▓▓▓▓▓  ╳╳╳╳╳╳╳╳╳░░░░░░░░░▙ ▄▄▄▄▄ ▟
 ```
 
-#### Rendering-Reihenfolge
+> **Rendering und Event-Flow** sind in [5.2 Rendering-Pipeline](#52-rendering-pipeline) und [5.3 Event-Flow](#53-event-flow) beschrieben.
 
-1. Alle Zellen werden in natürlicher Reihenfolge gerendert (Zick-Zack: Zeilenweise, spaltenweise)
-2. **Ausnahme**: Die aktive (fokussierte) Zelle wird **ganz zum Schluss** gerendert
+---
 
-**Warum?** Overlay-Widgets (wie MultiChoice-Dropdowns) können über benachbarte Zellen ragen. Durch das späte Rendern wird das Dropdown über den anderen Zellen angezeigt.
+## 5. Technische Details
+
+### 5.1 Layout-Algorithmus
+
+Die verfügbare Fläche wird vor der Constraint-Berechnung um alle Gaps reduziert:
 
 ```
-Rendere: Zelle A → Zelle B → Zelle C → [Zelle D übersprungen] → Zelle E → Zelle F
-Danach: Zelle D (fokussiert, mit Dropdown)
+Verfügbare Breite für Zellen = Gesamtbreite − Σ(Gap-Breiten)
+Verfügbare Höhe für Zellen  = Gesamthöhe  − Σ(Gap-Höhen)
 ```
 
-#### Event-Forwarding
+Anschließend werden die Constraints (ratatui-Logik: `Length`, `Min`, `Max`, `Percentage`, `Ratio`) auf die verbleibende Fläche angewendet. Jede Zelle erhält ein `Rect`, das ihre absolute Position und Größe innerhalb des Grid-Bereichs beschreibt.
+
+Gruppierte Zellen erhalten ein `Rect`, das alle ihre Einzelflächen sowie die Gaps zwischen ihnen umfasst.
+
+### 5.2 Rendering-Pipeline
+
+1. Alle Gaps und Borders werden gerendert (Hintergrundfarbe, Border-Zeichen)
+2. Alle Zellen werden in natürlicher Reihenfolge gerendert (Zick-Zack: zeilenweise, spaltenweise)
+3. **Ausnahme**: Die aktive (fokussierte) Zelle wird **ganz zum Schluss** gerendert
+
+Der späte Render der fokussierten Zelle ermöglicht Overlay-Widgets (z.B. MultiChoice-Dropdowns), die über benachbarte Zellen ragen.
+
+### 5.3 Event-Flow
 
 ```
 1. KeyEvent kommt im Grid an
-2. Grid leitet KeyEvent an aktives Kind weiter: child.on_key(key)
-   ├── Kind return true  → Event konsumiert. Grid macht nichts.
-   └── Kind return false → Event nicht konsumiert.
+2. Grid leitet KeyEvent an aktives Kind: child.on_key(key)
+   ├── true  → Event konsumiert. Grid macht nichts.
+   └── false → Event nicht konsumiert.
 3. Grid prüft eigene Keymap:
-   ├── Match mit Navigations-Key → Navigation ausführen
-   └── Kein Match → Event ignorieren (None zurückgeben)
+   ├── Match → Navigation ausführen
+   └── Kein Match → Event ignorieren
 ```
 
-**Wichtig**: Der Entwickler ist verantwortlich für die Keymap-Konfiguration. Standardmäßig sind keine Navigations-Keys definiert.
+Das Grid ruft `MockComponent::on()` auf Kinder **nicht** auf — nur `GridChild::on_key()`.
 
 ### 5.4 Corner-Berechnung bei Gap-Kreuzungen
 
@@ -1117,7 +1281,7 @@ Die Platzberechnung berücksichtigt alle Gaps, bevor die verbleibende Fläche au
 Gesamtbreite = Gap_0 + Zelle_0 + Gap_1 + Zelle_1 + ... + Gap_n-1 + Zelle_n-1
 ```
 
-### 5.6 Merges und Gaps
+### 5.6 Groups und Gaps
 
 Wenn Zellen zusammengefasst sind, werden Gaps, die **innerhalb** des zusammengefassten Bereichs liegen, nicht gezeichnet. Gaps, die am **Rand** des zusammengefassten Bereichs liegen, werden normal gezeichnet.
 
@@ -1127,7 +1291,7 @@ Normal:
 │ A │ B │ C │
 └───┴───┴───┘
 
-A+B gemerget (ColSpan):
+A+B gruppiert (ColSpan):
 ┌───────┬───┐
 │ A + B │ C │
 └───────┴───┘
@@ -1148,7 +1312,7 @@ Die folgenden Ideen werden **nicht** in die erste Version aufgenommen, sind aber
 - **Cell-Header/Labels**: Konfigurierbare Titel pro Zelle (oben oder links)
 - **Overflow-Verhalten**: Konfigurierbares Verhalten wenn Zellinhalt größer als der zugewiesene Platz (Truncate, Wrap, Scroll)
 - **Sticky Rows/Columns**: Fixierte Kopfzeilen/-spalten bei großen Grids
-- **Animation**: Animierte Übergänge bei Fokuswechsel oder Merge-Änderungen
+- **Animation**: Animierte Übergänge bei Fokuswechsel oder Group-Änderungen
 - **Accessibility**: Screen-Reader-Unterstützung, konfigurierbare Labels
 - **Gap-Styles pro Zeile/Spalte**: Verschiedene Styles für unterschiedliche Zeilen oder Spalten
 
@@ -1164,8 +1328,8 @@ Dieser Abschnitt enthält Konventionen und Referenzen, die für die KI-gestützt
 - **Spaltenanzahl**: Immer ungerade Anzahl Spalten.
 - **Hintergrund-Zeichen**: Zyklen pro Zelle von links nach rechts, oben nach unten: ▓ → ░ → █. In Fokus-Beispielen: ▓, ░, ▒, ╳ (keine zwei benachbarten Zellen teilen denselben Hintergrund).
 - **Fokus-Rahmen**: ▛(U+259B) ▀(U+2580) ▜(U+259C) ▙(U+2599) ▄(U+2584) ▟(U+259F) ▌(U+258C) ▐(U+2590) — immer diese exakten Codepoints verwenden, nicht ╛(U+255B), ╙(U+2559), ╒(U+2552) etc.
-- **Gap-Typen**: Nur `GapType::None` (0 Zeichen) und `GapType::Border(...)` (1 Zeichen). Es gibt kein `GapType::Empty`. Default-Gap = Leerzeichen.
-- **Border-Half-Endings**: Borders haben standardmäßig Half-Endings (╷/╵/╶/╴). `Border::SimpleExtended`/`Border::DoubleExtended` haben Full-Endings. Für ║ gibt es kein Half-Ending → `Border::DoubleExtended` ist die einzige Option für Double.
+- **Gap-Konzept**: Es gibt kein `GapType`-Enum. Eine Gap-Position hat zwei unabhängige Zustände: *Gap vorhanden* (ja/nein, je 0 oder 1 Zeichen) und *Border gesetzt* (ja/nein, belegt denselben 1-Zeichen-Raum). `set_gap` setzt den Raum, `set_border` füllt ihn mit Zeichen (und setzt ihn ggf. implizit). Default ohne `set_gap`: kein Gap.
+- **Border-Half-Endings**: Borders haben standardmäßig Half-Endings (╷/╵/╶/╴). `BORDER_SIMPLE_EXTENDED` / `BORDER_DOUBLE_EXTENDED` haben Full-Endings. Für ║ gibt es kein Half-Ending → `BORDER_DOUBLE_EXTENDED` ist die einzige Option für Double.
 - **Auto-Join**: Gleiche Border-Typen, die aufeinandertreffen, werden automatisch verbunden (z.B. ─ + │ → ┼). Verschiedene Border-Typen werden NICHT verbunden.
 - **Pixel-Perfect**: Jede Zeile in einem Code-Block muss exakt dieselbe Länge haben. Niemals Hand-Schreiben — immer Python-Scripts verwenden.
 
@@ -1176,17 +1340,17 @@ Scripts liegen unter `ai/scripts/`. Vor jedem Grid-Beispiel das entsprechende Sc
 | Script | Zweck |
 |--------|-------|
 | `focus_grids.py 2x2` | 2×2 Grid, 9×5 Zellen, 4 Fokus-Zustände (A/B/C/D), 78 Zeichen breit |
-| `focus_grids.py 2x3_merged` | 2×3 Grid, 9×5 Zellen, B+E gemerget, Fokus A/BE/C (Zeile 0), 85 Zeichen breit |
-| `focus_grids.py 2x3_merged_from_d` | 2×3 Grid, 9×5 Zellen, B+E gemerget, Fokus D/BE/F (Zeile 1), 85 Zeichen breit |
+| `focus_grids.py 2x3_grouped` | 2×3 Grid, 9×5 Zellen, B+E gruppiert, Fokus A/BE/C (Zeile 0), 85 Zeichen breit |
+| `focus_grids.py 2x3_grouped_from_d` | 2×3 Grid, 9×5 Zellen, B+E gruppiert, Fokus D/BE/F (Zeile 1), 85 Zeichen breit |
 
 ### API-Konventionen
 
 - `BorderChars` sind `pub static` Konstanten, kein Trait, kein Enum.
 - `set_border` nimmt `&'static BorderChars` (kein Style-Parameter). Style wird separat via `set_border_style` gesetzt.
 - `set_gap` nimmt keinen Style-Parameter. Style via `set_border_style`.
-- Border-Syntax in Code-Beispielen: `&BORDER_SIMPLE`, `&BORDER_DOUBLE`, etc.
+- Border-Syntax in Code-Beispielen: `&BORDER_SIMPLE`, `&BORDER_DOUBLE_EXTENDED`, `&BORDER_THICK_EXTENDED`, etc. (es gibt kein `BORDER_DOUBLE` ohne `_EXTENDED`).
 - `set_border_text` mit `BorderPos`/`TextAnchor`, nicht `write_to_gap`.
-- `CellGroup` statt Merge-Begriff in der API.
+- `CellGroup` in der API — kein "Merge"-Begriff verwenden.
 
 ### Workflow
 
