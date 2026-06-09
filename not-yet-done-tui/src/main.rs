@@ -80,12 +80,19 @@ async fn main() -> Result<()> {
     let tui_config = TuiConfigService::load()?;
     let theme      = Theme::new(tui_config.theme.clone());
 
+    // Core domain-event bus: services announce changes here, adapters
+    // bridge them into their invalidation streams. One sender lives in
+    // the CoreHandle for the whole process, so subscribers never see a
+    // spurious "closed".
+    let domain_events = not_yet_done_core::events::new_bus(256);
+
     // In-process handle into the host's own core services, threaded into
     // the local adapters (Tasks/Trackings). Captured by the factory
     // builder closure so config reloads rebuild the same factory set.
     let core_handle = not_yet_done_local_adapter::CoreHandle::new(
         Arc::clone(&task_service),
         Arc::clone(&tracking_repo),
+        domain_events.clone(),
     );
     let factory_builder: Box<
         dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>

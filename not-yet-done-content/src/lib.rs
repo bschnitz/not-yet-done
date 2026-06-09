@@ -647,6 +647,13 @@ pub enum Invalidation {
     /// snapshot, or a structural change). The frontend reloads the
     /// current level of every view bound to this adapter.
     All,
+    /// Redraw only — **no** refetch. The adapter's data is unchanged but a
+    /// time-derived rendering (e.g. a live "elapsed since" cell) needs to
+    /// re-render. The dirty-gated render loop is otherwise parked, so this
+    /// is the wake that makes such cells tick. Bridged from a periodic
+    /// domain heartbeat (`DomainEvent::TrackingTick`); cheap by design, so
+    /// adapters may send it at ~1 Hz without touching their backend.
+    Repaint,
 }
 
 // ---------------------------------------------------------------------------

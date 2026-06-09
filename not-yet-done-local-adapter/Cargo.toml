@@ -8,3 +8,7 @@ tokio       = { workspace = true }
 async-trait = { workspace = true }
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-core    = { path = "../not-yet-done-core" }
+
+[dev-dependencies]
+uuid  = { workspace = true }
+tokio = { workspace = true }
