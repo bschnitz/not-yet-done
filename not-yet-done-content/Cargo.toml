@@ -1,0 +1,22 @@
+[package]
+name = "not-yet-done-content"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+mock = []
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+keyring = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process", "sync", "time"] }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "process", "rt", "sync", "time"] }

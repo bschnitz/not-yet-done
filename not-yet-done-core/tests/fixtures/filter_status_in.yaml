@@ -1,0 +1,10 @@
+# not-yet-done-core/tests/fixtures/filter_status_in.yaml
+
+description: "IN operator filters by a set of status values"
+
+filter:
+  [status, in, [done, cancelled]]
+
+expected:
+  - "Fix the login bug"
+  - "High priority cancelled task"

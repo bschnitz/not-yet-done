@@ -1,0 +1,234 @@
+# Example: Stoat view configuration
+#
+# Place in: ~/.config/not_yet_done/views/stoat.yaml
+# Adapter config: ~/.config/not_yet_done/views/stoat-adapter.yaml
+#
+# Read-only browsing as a TREE + live updates. Tree shape:
+#
+#   Server
+#   ├─ (uncategorized channels)        ← channels in no category
+#   └─ Category
+#      └─ Channel
+#         → drill into messages (flat list, preview with `p`)
+#
+# Opening this tab logs in, discovers the WebSocket URL, and connects the
+# gateway in the background (status banner: Connecting → Ready, or
+# NeedsCreds → … → Ready). The tree fills from the WS `Ready` snapshot
+# automatically (no manual `r`). Server/category/channel structure is read
+# live from gateway state; message bodies are pulled over REST on demand.
+#
+# LIVE: while a channel's messages are open, new/edited/deleted messages
+# and reactions refresh on arrival; a reconnect resyncs every view.
+# Structural changes are live too: a channel created/renamed/deleted and
+# any category change (add/remove/rename/reassign/reorder) update the tree
+# without a reload. (Only joining/leaving a whole server still needs a
+# reconnect.) `r` still works as a manual reload.
+#
+# WRITE (Phase 3): in a channel's message list, `a` composes a new message
+# (empty $EDITOR, Markdown), `e` edits the selected message, `d` deletes
+# it, and `+` opens an emoji picker to react. Editing/deleting another
+# user's message is rejected by the server with a clean error. Sent/edited/
+# deleted messages also arrive as live events, so the list refreshes either
+# way.
+#
+# Tree notes (validator rules):
+#  - Each level's `tree_label` must be a key in that level's own `columns`
+#    (the only rule the validator enforces). The renderer resolves the
+#    label cell per row via the node_type_chain, so label keys need NOT
+#    match across levels — see docs/decisions/0003-*. Here `name` happens
+#    to be the key on server, channel and category alike.
+#  - `tree_find` / `fuzzy_filter` / `search` live ONCE, at the view root.
+#  - The same `stoat:channel` type appears at two depths (under the server
+#    as uncategorized, and under a category). That's fine: the
+#    duplicate-node_type rule only forbids duplicates among *sibling*
+#    tree branches at one level.
+#  - `stoat:message` carries no `tree_label`, so a channel is not
+#    expandable inline — Enter DRILLS into the flat message list instead.
+
+tab:
+  name: Stoat
+  order: 7
+  icon: "󰭹"
+
+adapter:
+  type: stoat
+  id: chat
+  config: stoat-adapter.yaml
+  # Connect on tab open (default). Set true to require a manual `r`
+  # before the adapter logs in / opens the socket.
+  manual_connect: false
+
+views:
+  - name: chats
+    node_type: "stoat:server"
+    default: true
+    tree_label: name
+    columns:
+      - { key: name, label: Name, source: label, sizing: "flex(1)" }
+    actions:
+      - { name: refresh, key: r, type: reload }
+      - name: tree find
+        key: /
+        type: tree_find
+        tree_find:
+          prompt: Search channels
+    children:
+      # Branch order = render order at the server level: uncategorized
+      # channels first, then categories.
+      - name: channels
+        node_type: "stoat:channel"
+        tree_label: name
+        columns:
+          - { key: name, label: Channel, source: label, sizing: "flex(1)" }
+        # Enter on a channel has no tree-continuing child (messages carry
+        # no tree_label), so it DRILLS into the message list. `split` opens
+        # that list in a focused pane to the right (80%) while the channel
+        # tree stays on the left (20%).
+        children:
+          - name: messages
+            node_type: "stoat:message"
+            split: { direction: right, ratio: 0.8 }
+            # `smooth_scroll: true` makes this (long, multi-line) list scroll
+            # one physical line at a time over the whole content instead of
+            # jumping message-to-message — the body "glides" continuously.
+            # The highlight (what `e`/`d`/`+`/`p` act on) is sticky: it stays
+            # on its message and glides along with the content, only handing
+            # off to a neighbour once that message scrolls fully off an edge.
+            # Default is `false` (classic row-by-row scrolling).
+            smooth_scroll: true
+            # `columns:` defines the data + sizing + per-column fg color
+            # (`style:` is a theme reference). `row_layout:` arranges those
+            # columns onto multiple physical lines per message — a chat look:
+            #   line 1: author + time  (highlighted via the column styles)
+            #   line 2: the message body
+            #   line 3: a blank spacer ([])
+            # Without `row_layout:` this would render as a normal one-line
+            # table (Author | Time | Message). In multi-line mode the column
+            # header is suppressed. An empty line is a spacer and stays
+            # outside the selection block; any other line can opt out too via
+            # `{ columns: [...], highlight_on_select: false }`.
+            columns:
+              - { key: author, source: author, style: accent, sizing: max }
+              - { key: time, source: time, style: text_dim, sizing: max }
+              # `markdown: true` renders the body as multiple soft-wrapped
+              # lines (headings, lists, inline emphasis, code). `source:
+              # content` reads the raw, unflattened body (the adapter's
+              # `content` metadata field) rather than the collapsed `label`.
+              # A markdown column must be the only column on its row_layout
+              # line — hence `[content]` stands alone below.
+              - {
+                  key: content,
+                  source: content,
+                  markdown: true,
+                  sizing: "flex(1)",
+                }
+            row_layout:
+              - [author, time]
+              - [content]
+              - []
+            actions:
+              # Compose a new message in this channel (create: parent =
+              # channel, child = stoat:message). `id` is the channel
+              # node's action id. `editor: compose-below` selects a named
+              # editor profile from `editors:` in tui.yaml (here: a chat
+              # composer in a horizontal split below the terminal, e.g.
+              # `kitty @ launch --location=hsplit --bias 20` for an 80:20
+              # split-down). Define that profile in tui.yaml, or drop
+              # `editor:` to use `default`. `key: n` keeps Enter on the
+              # message list free; `n`/search-next only claims the key
+              # while a search is active.
+              #
+              # `commit_on_save: true` → the first `:w` sends, each later
+              # `:w` edits the just-sent message in place; an unchanged save
+              # (or the editor close) is a no-op, so nothing is sent twice.
+              # Needs a detached editor profile (inline: false).
+              - {
+                  name: new,
+                  key: n,
+                  type: create,
+                  id: send_message,
+                  editor: compose-below,
+                  commit_on_save: true,
+                }
+              # Edit / delete / react operate on the SELECTED message node.
+              # `commit_on_save` here means every `:w` edits the message live.
+              - {
+                  name: edit,
+                  key: e,
+                  type: edit,
+                  id: edit_message,
+                  editor: compose-below,
+                  commit_on_save: true,
+                }
+              - { name: delete, key: d, type: custom, id: delete_message }
+              - { name: react, key: "+", type: custom, id: react }
+              - { name: refresh, key: r, type: reload }
+            # `p` previews the selected message's full body (Markdown) —
+            # the same text the table row shows collapsed to one line.
+            preview:
+              enabled: true
+              source: content
+              markdown: true # render the body as soft-wrapped markdown
+              keybinding: p
+
+      - name: categories
+        node_type: "stoat:category"
+        tree_label: name
+        columns:
+          - { key: name, label: Category, source: label, sizing: "flex(1)" }
+        children:
+          - name: channels
+            node_type: "stoat:channel"
+            tree_label: name
+            columns:
+              - { key: name, label: Channel, source: label, sizing: "flex(1)" }
+            children:
+              - name: messages
+                node_type: "stoat:message"
+                split: { direction: right, ratio: 0.8 }
+                # Smooth line-wise scrolling + same chat layout as the
+                # uncategorized-channels branch above.
+                smooth_scroll: true
+                columns:
+                  - { key: author, source: author, style: accent, sizing: max }
+                  - { key: time, source: time, style: text_dim, sizing: max }
+                  # `markdown: true` — soft-wrapped multi-line body; `source:
+                  # content` reads the raw body (not the collapsed `label`).
+                  - {
+                      key: content,
+                      source: content,
+                      markdown: true,
+                      sizing: "flex(1)",
+                    }
+                row_layout:
+                  - [author, time]
+                  - [content]
+                  - []
+                actions:
+                  - {
+                      name: new,
+                      key: n,
+                      type: create,
+                      id: send_message,
+                      editor: compose-below,
+                      commit_on_save: true,
+                    }
+                  - {
+                      name: edit,
+                      key: e,
+                      type: edit,
+                      id: edit_message,
+                      editor: compose-below,
+                      commit_on_save: true,
+                    }
+                  - { name: delete, key: d, type: custom, id: delete_message }
+                  - { name: react, key: "+", type: custom, id: react }
+                  - { name: refresh, key: r, type: reload }
+                preview:
+                  enabled: true
+                  source: content
+                  markdown: true # render the body as soft-wrapped markdown
+                  keybinding: p
+
+  # To browse direct-message / group channels instead of servers, point a
+  # second view's top level at stoat:channel (the root lists DMs there).

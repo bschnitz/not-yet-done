@@ -1,0 +1,177 @@
+# Example: Jira view configuration
+#
+# Place in: ~/.config/not_yet_done/views/jira.yaml
+# Adapter config: ~/.config/not_yet_done/views/jira-adapter.yaml
+
+tab:
+  name: Jira
+  order: 3
+  icon: "󰌃"
+
+adapter:
+  type: jira
+  config: jira-adapter.yaml
+
+views:
+  - name: tickets
+    node_type: "jira:issue"
+    default: true
+
+    query:
+      default: "assignee = currentUser() ORDER BY updated DESC"
+      editable: true
+      # `menu_key` opens the q-menu that lists *all* saved queries for
+      # this view. Saved-query bodies are no longer carried in this
+      # file — manage them with `:query new <name>` / `:query edit
+      # <name>` / `:query delete <name>` (the body file is owned by
+      # the adapter, one YAML/JQL file per query under the adapter's
+      # per-instance data dir). Keyboard shortcuts for saved queries
+      # are bound via Ctrl+f in the q-menu and stored in the
+      # `query_shortcut` table — they survive across YAML edits.
+      menu_key: q
+
+    columns:
+      - key: key
+        label: Key
+        style: accent
+        sizing: max
+      - key: type
+        label: Type
+        sizing: max
+      - key: status
+        label: Status
+        style: success
+        sizing: max
+      - key: priority
+        label: Priority
+        style: warning
+        sizing: max
+      - key: summary
+        label: Summary
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+
+    preview:
+      enabled: true
+      source: content
+      split: horizontal
+      ratio: 50
+      keybinding: p
+
+    actions:
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [key, summary] # only search these fields (omit for all)
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [summary, key] # /-search target fields (omit for all)
+      - name: free text
+        key: s
+        type: text_search
+        text_search:
+          # Optional prompt shown in the action bar while the input is open
+          # (defaults to "free-text search…").
+          prompt: "Jira-Suche"
+          # `{q}` is replaced by the user's input ("\" and `"` get escaped).
+          # `{key_or}` expands to `issuekey = "{q}" OR ` when the input matches
+          # `PROJECT-123`, and to the empty string otherwise — so the same
+          # template works for both free-text searches and direct key lookups.
+          # No `ORDER BY` clause → Jira sorts `text ~`-matches by relevance
+          # (Lucene score), like the in-product search field does.
+          query_template: '{key_or}text ~ "{q}"'
+      - name: edit + comments
+        key: e
+        type: edit
+        id: edit_with_comments # body + all comments inline; `--- add ---` to post
+      - name: edit
+        key: E
+        type: edit
+        id: edit_full # Node-side action id (see jira adapter)
+      - name: refresh
+        key: r
+        type: reload
+      - name: comments
+        key: c
+        type: navigate
+        navigate_to: "jira:comment"
+      - name: attachments
+        key: a
+        type: navigate
+        navigate_to: "jira:attachment"
+      - name: transition
+        key: t
+        type: custom
+        id: transition # InputSpec::Picker — adapter supplies options
+      - name: toggle watch
+        key: w
+        type: custom
+        id: toggle_watch # InputSpec::None — toggles current user's watch state
+
+    children:
+      - name: Comments
+        key: c
+        node_type: "jira:comment"
+        columns:
+          - key: author
+            label: Author
+            style: accent
+            sizing: max
+          - key: created
+            label: Created
+            sizing: max
+          - key: body
+            label: Comment
+            source: label
+            sizing: "flex(1)"
+
+        preview:
+          enabled: true
+          source: content
+          split: horizontal
+          ratio: 50
+          keybinding: p
+
+        actions:
+          - name: fuzzy filter
+            key: f
+            type: fuzzy_filter
+          - name: edit
+            key: e
+            type: edit
+            id: edit_full
+          - name: add
+            key: a
+            type: create
+            id: create_comment
+
+      - name: Attachments
+        key: a
+        node_type: "jira:attachment"
+        columns:
+          - key: filename
+            label: Filename
+            source: label
+            style: accent
+            sizing: "flex(1)"
+          - key: author
+            label: Author
+            sizing: max
+          - key: size
+            label: Size
+            sizing: max
+          - key: mime_type
+            label: Type
+            sizing: max
+          - key: created
+            label: Created
+            sizing: max
+        actions:
+          - name: open
+            key: o
+            type: custom
+            id: open # downloads + xdg-open in background

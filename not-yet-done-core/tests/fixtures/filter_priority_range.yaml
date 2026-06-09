@@ -1,0 +1,13 @@
+# not-yet-done-core/tests/fixtures/filter_priority_range.yaml
+
+description: "AND combines lower and upper priority bounds"
+
+filter:
+  and:
+    - [priority, '>=', 3]
+    - [priority, '<=', 6]
+
+expected:
+  - "Gustav works on the parser"
+  - "Augustava reviews the PR"
+  - "Child task with parent"

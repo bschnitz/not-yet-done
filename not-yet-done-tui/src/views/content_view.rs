@@ -1,0 +1,9926 @@
+//! ContentView — generic adapter-driven tab.
+//!
+//! Replaces JiraView with a config-driven component that works with
+//! any ContentAdapter. Configuration comes from ViewFileConfig (YAML).
+//!
+//! Per-drill state (items, drill stack, filter/search/sort/page/preview,
+//! table widget) lives on [`ContentPane`]. `ContentView` is the tab-level
+//! container — it owns the adapter, view definitions, action bar /
+//! cmdline / query menu, and one [`PaneTree`] per `ViewDef`. Each tree
+//! starts as a single leaf and (Phase 2 onwards) can be split into a
+//! recursive `Leaf | Branch` structure. `active_subtab` selects the
+//! tree; the tree's own `focus` selects the focused leaf.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
+
+use tuirealm::command::{Cmd, CmdResult, Direction, Position};
+use tuirealm::component::Component;
+
+use not_yet_done_ratatui::{
+    ColumnStyles, StyleMap, TableStyle, TableStyleType, TableWidgetCell, TableWidgetLine,
+    TableWidgetRow,
+};
+use not_yet_done_table::{
+    ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer, Row as TRow, RowTemplate,
+    TableConfig, compute_multiline_table, compute_table,
+};
+
+use not_yet_done_content::{
+    AdapterStatus, ContentAdapter, CursorIntent, NodeSummary, PageInfo, PageRequest, SortKey,
+    TreeFindHit,
+};
+
+use crate::components::action_bar::ActionBarComponent;
+use crate::components::cmdline::CmdlineComponent;
+use crate::components::data_table::DataTable;
+use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
+use crate::components::search::SearchComponent;
+use crate::config::keybindings::{
+    CommonAction, ContentAction, KeyBinding, KeyBindingConfig, KeyBindingSection, KeyIconMap,
+    QueryMenuAction, WindowAction,
+};
+use crate::config::view_config::{
+    ActionDef, ChildDef, ColumnDef, LineLayout, PaginationMode, PreviewConfig, SplitDirection,
+    ViewDef, ViewFileConfig,
+};
+use crate::keymap::{
+    KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
+};
+use crate::ui::theme::Theme;
+use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
+use crate::views::content_tree::{
+    child_def_for_type_chain, tree_child_def_at_depth, tree_level_at_depth,
+    effective_child_children, tree_level_children, tree_level_children_for_chain,
+    tree_level_for_chain, tree_row_glyph,
+    tree_self_at_depth, TreeLevel, TreeState,
+};
+use crate::views::{
+    BarHint, CmdlineKeyResult, CmdlineState, HasCmdline, PaginatedView, SearchKeyResult,
+    SearchState, Searchable, SortableView, SubViewMessage, ViewRequest,
+};
+
+// ── Navigation stack ─────────────────────────────────────────────────
+
+/// Snapshot of a previous navigation level (pushed when drilling down).
+struct NavFrame {
+    /// Breadcrumb label for this level.
+    label: String,
+    /// Node ID of the item we drilled into (parent for child-level actions).
+    parent_node_id: String,
+    /// Items that were displayed.
+    items: Vec<NodeSummary>,
+    /// Selected row index.
+    selected_row: usize,
+    /// Selected column index, or `None` if the column cursor was off
+    /// at this level. Restored on nav_back so that drilling between
+    /// column-cursor-enabled levels preserves the column position.
+    selected_column: Option<usize>,
+    /// The active_child at this level (None = root ViewDef level).
+    active_child: Option<ChildDef>,
+    /// Preview state.
+    preview_open: bool,
+    preview_key: String,
+    preview_description: String,
+    preview_scroll: u16,
+    /// Whether this level's preview renders as Markdown.
+    preview_markdown: bool,
+    /// Tree state stashed when drilling out of a tree-mode level into a
+    /// non-tree child. `None` for frames pushed from flat-mode panes.
+    /// Restored on `nav_back` so the resurrected level resumes with the
+    /// same expanded set, cached children, and cursor depth.
+    tree: Option<TreeState>,
+}
+
+/// Parameters for an outgoing `FetchContentPreview` request.
+pub struct PreviewFetchParams {
+    /// Pane-side cache key — equal to the row's own id, used by
+    /// `set_preview_description` to match the reply against the
+    /// currently selected row regardless of any redirect.
+    pub cache_key: String,
+    /// Node id passed to `adapter.get_by_id`. Equals `cache_key` unless
+    /// `preview.node_id_from` redirects to a linked node.
+    pub node_id: String,
+    /// Adapter-side action id (from `preview.action`); when `Some` the
+    /// fetcher uses `Node::prepare(action)` instead of `content()`.
+    pub action_id: Option<String>,
+}
+
+/// What the search input bar feeds into.
+#[derive(Debug, Clone)]
+enum SearchMode {
+    /// Local: filter visible items as the user types (existing `/`-search).
+    Local,
+    /// Adapter: on Enter, render the user's input through `template` (with
+    /// `{q}` replaced) and reload the view with the resulting query.
+    Adapter {
+        template: String,
+        prompt: Option<String>,
+    },
+    /// CT-7: tree-find — on Enter, dispatch
+    /// [`crate::views::ViewRequest::TreeFindStart`] with the raw
+    /// query string. The adapter performs a server-side search and
+    /// the pane's [`TreeFindState`] cache (CT-5) drives the
+    /// subsequent `n`/`N` navigation. Only registered on
+    /// tree-enabled views; the validator rejects `tree_find` outside
+    /// a tree chain.
+    TreeFind { prompt: Option<String> },
+}
+
+/// What [`ContentPane::root_load_request`] / drill-down handlers feed
+/// into the adapter call. Bundles the pieces an adapter's `list()` needs.
+///
+/// `query` is the **raw** saved-query string (still containing any
+/// `${var:default}` placeholders the adapter understands). The caller
+/// is responsible for running `adapter.render_query(query, &vars)`
+/// before passing the result into `ListParams::query`.
+#[derive(Clone, Debug)]
+pub struct LoadRequest {
+    pub node_type_id: String,
+    pub query: Option<String>,
+    pub sort: Vec<SortKey>,
+    pub page: Option<PageRequest>,
+    /// Variable bindings to substitute into `query` via
+    /// `ContentAdapter::render_query`. Empty when no variables are in
+    /// play.
+    pub vars: std::collections::HashMap<String, String>,
+}
+
+/// State remembered when a pane is showing the result of a custom
+/// adapter query (e.g. raw SQL via the Postgres Q-editor). Lets
+/// next/prev-page keys re-execute the same query with a new offset
+/// instead of falling back to `list()`. Cleared on any non-custom
+/// item load (drill, back, regular reload).
+#[derive(Clone, Debug)]
+pub struct CustomQueryRunState {
+    /// SQL/query text exactly as the user wrote it (no LIMIT/OFFSET
+    /// wrap — the adapter applies its own pagination wrap).
+    pub query: String,
+    /// Adapter-specific context (postgres: target database name).
+    pub database: String,
+    /// Pagination strategy for follow-up `>` / `<` keys. Resolved
+    /// from the active view's `pagination.mode` when the result
+    /// lands (see [`ContentView::apply_custom_query_result`]).
+    /// `Server` → offset/limit re-issue; `Cursor` → adapter-side
+    /// cursor lifecycle; `All` → no follow-up paging.
+    pub mode: PaginationMode,
+    /// Server-side cursor handle from the adapter's most recent
+    /// open / continue response. `Some` only while `mode == Cursor`
+    /// and an active cursor is held; cleared on close and replaced
+    /// when a new cursor is opened. The pane uses this to issue
+    /// [`not_yet_done_content::CursorIntent::Continue`] on `>` and
+    /// to re-issue [`Open`] on `<` (NO SCROLL cursor can't fetch
+    /// backwards, so prev re-opens — leaving the old cursor for the
+    /// pane-close cleanup hook to tear down).
+    pub cursor_id: Option<String>,
+}
+
+/// A saved query made available to a content view. Body comes from
+/// the adapter-managed `SavedQueryStore` (filesystem); shortcut comes
+/// from the DB `query_shortcut` table.
+#[derive(Debug, Clone)]
+pub struct MergedSavedQuery {
+    pub name: String,
+    pub query: String,
+    pub shortcut: Option<String>,
+}
+
+// ── ContentPane ──────────────────────────────────────────────────────
+
+/// In-flight retry information for a failed load. `attempt` is the
+/// 1-based index of the **next** attempt the loader is about to start;
+/// `max_attempts` is `1 + ViewDef::retries` (the total cap including
+/// the original try). `last_error` is the message from the most
+/// recent failure, surfaced in the banner so the user knows what's
+/// being retried.
+#[derive(Debug, Clone)]
+pub struct RetryState {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub last_error: String,
+}
+
+/// CT-7: one step in the lazy-expand-to-current-hit walk.
+///
+/// Returned by [`ContentPane::advance_tree_find`]. The App-side
+/// caller dispatches the embedded request (if any), waits for the
+/// matching response to land in `poll_load`, and re-invokes the
+/// walker until it terminates with `Ready` or `NotInTree`.
+#[derive(Debug, Clone)]
+pub enum TreeFindAdvance {
+    /// All ancestors are cached + expanded; cursor positioned on
+    /// `row`. State stays active so `n`/`N` keeps working.
+    Ready(usize),
+    /// Root-level items haven't been loaded yet — the caller should
+    /// dispatch [`crate::views::ViewRequest::SpawnContentLoad`].
+    NeedRootLoad,
+    /// Lazy-load the next chain level. Caller dispatches
+    /// [`crate::views::ViewRequest::ExpandTreeNode`] with these
+    /// fields verbatim.
+    NeedTreeExpand {
+        parent_path: Vec<String>,
+        parent_node_id: String,
+        child_node_type: String,
+        page_size: u32,
+    },
+    /// A load is already in flight (or the result is still being
+    /// processed). No-op — re-poll after the next `TreeChildren`
+    /// settles.
+    Waiting,
+    /// The path can't be reached in the current view (filter,
+    /// pagination cap, deleted ancestor, missing ChildDef). Surface
+    /// the message to the user.
+    NotInTree(String),
+    /// No active tree-find or no hits. Caller drops the walk.
+    Idle,
+}
+
+/// Pane-local state for the `tree_find` action — server-side search
+/// over a tree-mode view (CT-5).
+///
+/// Lifecycle:
+/// - `tree_find_begin(query)` → `loading = true`, `hits` empty.
+/// - On adapter response, `tree_find_complete(hits, truncated)` lands
+///   pre-sorted hits in tree-render order; `current` resets to `0`.
+/// - `tree_find_next` / `tree_find_prev` wrap around `hits.len()`.
+/// - `tree_find_clear` drops the state entirely (Esc, reload, fresh
+///   search input).
+///
+/// Survives manual expand/collapse: nothing here references
+/// `TreeState`; the cached path lookup happens at jump-time. The
+/// state is invalidated only by explicit user actions (CT-9).
+#[derive(Debug, Clone)]
+pub struct TreeFindState {
+    /// Raw user query as it was sent to the adapter. Surfaced in the
+    /// status-bar hint (CT-8); kept here so re-renders don't have to
+    /// reach into a separate component.
+    pub query: String,
+    /// Hits in tree-render order. Empty while `loading`, and stays
+    /// empty when the search returns no matches.
+    pub hits: Vec<TreeFindHit>,
+    /// Cursor into `hits`. Always `< hits.len()` when `hits` is
+    /// non-empty; clamped to `0` when empty. Wrap-around on
+    /// next/prev keeps it valid.
+    pub current: usize,
+    /// `true` between `tree_find_begin` and the matching
+    /// complete/fail call. Used to render the "Loading…" hint and to
+    /// reject duplicate dispatches.
+    pub loading: bool,
+    /// Server reported more matches than fit in `hits`. UI surfaces
+    /// this so the user knows to refine the query.
+    pub truncated: bool,
+    /// Walker has reached the current hit and positioned the cursor.
+    /// Subsequent `TreeChildren` lands (e.g. the user expanded a node
+    /// by hand with Enter) must NOT re-run the walker — otherwise the
+    /// cursor snaps back to the hit on every drill. `next`/`prev` and
+    /// a fresh `tree_find_complete` re-arm by clearing this flag.
+    pub settled: bool,
+}
+
+/// Per-drill state for one navigation context. A pane shows one
+/// [`ViewDef`] (and optionally a drilled-down child level), owns its
+/// own table widget, drill stack, filter/search/sort/page state, and
+/// preview pane. `ContentView` holds a vector of these — one per
+/// [`ViewDef`] for now; future split work will replace the flat vector
+/// with a tree of panes.
+pub struct ContentPane {
+    /// Index into `ContentView.view_defs`. Stays fixed for this pane's
+    /// lifetime — switching subtab moves the active-pane pointer
+    /// instead of re-pointing a single pane at a new ViewDef.
+    view_def_index: usize,
+    theme: Arc<Theme>,
+    pub table: DataTable,
+
+    pub items: Vec<NodeSummary>,
+    pub fetch_error: Option<String>,
+    /// Maps table row index → items index when fuzzy filter is active.
+    filtered_indices: Vec<usize>,
+
+    // Navigation stack (drill-down into children)
+    nav_stack: Vec<NavFrame>,
+    /// When drilled into a child, this holds the ChildDef config.
+    active_child: Option<ChildDef>,
+
+    /// Active query override (set by editor or saved query selection).
+    /// Holds the **raw** string; if the adapter understands inline
+    /// variable syntax (e.g. Taiga's `${name:default}`), substitution
+    /// happens at load time via `ContentAdapter::render_query`.
+    active_query: Option<String>,
+    /// Name of the active saved query (for status bar display).
+    active_query_name: Option<String>,
+    /// Variable bindings for the active query. Empty when the query
+    /// has no variables (or the adapter doesn't support them).
+    active_query_vars: std::collections::HashMap<String, String>,
+
+    // Preview pane
+    preview_open: bool,
+    preview_description: String,
+    preview_key: String,
+    preview_scroll: u16,
+    preview_loading: bool,
+    /// Whether the current level's preview renders its text as Markdown
+    /// (set from `PreviewConfig.markdown` when a preview is resolved).
+    preview_markdown: bool,
+    /// Last rendered inner height of the preview pane (without borders).
+    /// Drives ctrl+u/ctrl+d half-page scrolling.
+    preview_visible_height: u16,
+
+    /// Text search component (driven by configured search action).
+    pub search: SearchComponent,
+    /// Which fields to search in fuzzy filter. Empty = all fields + label.
+    fuzzy_filter_fields: Vec<String>,
+    /// Which fields to search in `/`-search. Empty = label + all fields.
+    search_fields: Vec<String>,
+    /// Key that jumps to the next search match while results exist.
+    /// Set by the latest `search`-type action; defaults to `n`.
+    search_next_key: String,
+    /// Key that jumps to the previous search match while results exist.
+    /// Set by the latest `search`-type action; defaults to `N`.
+    search_prev_key: String,
+    /// What pressing Enter in the search bar should do.
+    search_mode: SearchMode,
+
+    // ── Sort + pagination state ─────────────────────────────────────
+    /// Sort the user has requested. Empty = let the adapter pick.
+    current_sort: Vec<SortKey>,
+    /// Page request the user is currently on.
+    current_page: Option<PageRequest>,
+    /// Sort the adapter actually applied to the last result.
+    last_applied_sort: Vec<SortKey>,
+    /// Pagination state of the last result, if the adapter returned one.
+    last_page_info: Option<PageInfo>,
+    /// Sortable columns advertised by the adapter for the active node
+    /// type at the time of the last load.
+    last_sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+
+    /// When the pane is showing the result of an adapter-native custom
+    /// query (e.g. raw SQL from the Postgres Q-editor), this holds the
+    /// query text + addressing data needed to re-run with a new page
+    /// offset. `None` when the pane's items came from a regular
+    /// `list()` call — next/prev-page falls back to the normal reload
+    /// path.
+    active_custom_query: Option<CustomQueryRunState>,
+
+    /// Column widths from the most recent layout. Used to position the
+    /// sort-mode direction-picker overlay correctly across the header.
+    last_col_widths: Vec<usize>,
+    /// Column keys in display order from the most recent rebuild_table.
+    last_column_keys: Vec<String>,
+
+    /// Whether this pane has ever been loaded from the adapter — controls
+    /// whether activating it triggers an automatic SpawnContentLoad.
+    loaded: bool,
+
+    /// Backlink for a coupled split-drill: when this pane drilled into a
+    /// child via a `SplitDef { coupled: true, .. }`, this stores the
+    /// `ChildDef.name` and the [`PaneId`] of the spawned child pane.
+    /// Re-drilling from the same parent into a child with the same name
+    /// hot-replaces the linked child in place. Closing the parent
+    /// cascades to the child; closing the child clears the backlink
+    /// here. Treated as lazy/optimistic: a stale `PaneId` (no longer
+    /// present in the tree) is silently ignored and overwritten.
+    linked_child: Option<(String, PaneId)>,
+
+    /// Snapshot of [`App::link_refs`] for rendering the `has_links`
+    /// YAML column source. Synced by [`ContentView::set_link_refs`].
+    link_refs: std::collections::HashSet<String>,
+    /// Cached NodeRef prefix `"{kind}/{instance_id}"` for items in this
+    /// pane. Used together with `item.id` to build a full NodeRef for
+    /// the `has_links` column lookup. `None` until the parent
+    /// `ContentView` pushes the adapter context via
+    /// [`ContentView::set_link_refs`].
+    link_node_ref_prefix: Option<String>,
+
+    /// In-flight retry state for the most recent failed load. `Some`
+    /// only while a retry is queued/running; cleared when a load
+    /// succeeds or all retries are exhausted (in which case
+    /// `fetch_error` becomes the sticky banner instead). Drives the
+    /// "Retrying… (n/total): {err}" banner.
+    pub retry_state: Option<RetryState>,
+
+    /// Tree-mode state, populated when the active `ViewDef` declares
+    /// `tree_label`. `None` for the legacy flat-list mode. While
+    /// `Some(...)`, `items`/`nav_stack`/`active_child` are unused —
+    /// the flattened tree drives rendering and cursor positioning.
+    pub tree: Option<TreeState>,
+    /// Maps table row index → `tree.entries` index in tree mode.
+    /// Computed by `refresh_tree_visible_indices` from the active
+    /// fuzzy filter (which only narrows entries at
+    /// `tree_filter_depth`). Empty outside tree mode.
+    tree_visible_indices: Vec<usize>,
+    /// Depth at which a `fuzzy_filter` action is configured in the
+    /// tree chain. Set when the action fires; resolved by walking the
+    /// tree levels. `None` when no level defines fuzzy_filter (filter
+    /// then can't be opened) or outside tree mode.
+    tree_filter_depth: Option<usize>,
+
+    /// CT-5: pane-local cache for the active `tree_find` (server-side
+    /// tree search). `Some` from `tree_find_begin` until the user
+    /// clears it (Esc, reload, or a fresh search). When `Some`, the
+    /// pane's `n`/`N` keys jump between `hits` instead of the local
+    /// `/`-search match list — wire-up happens in CT-7. Independent
+    /// of `tree` cache contents so expand/collapse leaves it intact.
+    pub tree_find: Option<TreeFindState>,
+
+}
+
+// ── Pane tree ────────────────────────────────────────────────────────
+
+/// Stable per-leaf identifier scoped to a [`ContentView`]. The counter
+/// never recycles inside a tab's lifetime, so async load callbacks can
+/// route back to the original pane even after siblings have been closed.
+pub type PaneId = u32;
+
+/// How a [`PaneNode::Branch`] divides its area between its two children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitOrientation {
+    /// Side-by-side split: `first` on the left, `second` on the right
+    /// (`Layout::horizontal`).
+    Horizontal,
+    /// Stacked split: `first` on top, `second` on the bottom
+    /// (`Layout::vertical`).
+    Vertical,
+}
+
+/// Where the new leaf lands when splitting an existing leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitSide {
+    /// New leaf becomes `first` (left for Horizontal / top for Vertical).
+    First,
+    /// New leaf becomes `second` (right for Horizontal / bottom for Vertical).
+    Second,
+}
+
+/// A leaf node in the pane tree — owns one [`ContentPane`].
+pub struct LeafEntry {
+    pub id: PaneId,
+    pub pane: ContentPane,
+}
+
+/// Recursive binary pane tree. Branch nodes carry no id of their own
+/// because routing only ever lands on a leaf.
+pub enum PaneNode {
+    Leaf(LeafEntry),
+    Branch {
+        orientation: SplitOrientation,
+        /// Share allocated to `first` (e.g. `0.5` for an even split).
+        ratio: f32,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
+    /// Internal placeholder used during structural mutations
+    /// ([`PaneTree::split_focus`] / [`PaneTree::close_focus`]). Should
+    /// never be observable via the public API.
+    #[doc(hidden)]
+    Hole,
+}
+
+impl PaneNode {
+    pub fn find_leaf(&self, id: PaneId) -> Option<&LeafEntry> {
+        match self {
+            PaneNode::Leaf(leaf) if leaf.id == id => Some(leaf),
+            PaneNode::Leaf(_) | PaneNode::Hole => None,
+            PaneNode::Branch { first, second, .. } => {
+                first.find_leaf(id).or_else(|| second.find_leaf(id))
+            }
+        }
+    }
+
+    pub fn find_leaf_mut(&mut self, id: PaneId) -> Option<&mut LeafEntry> {
+        match self {
+            PaneNode::Leaf(leaf) if leaf.id == id => Some(leaf),
+            PaneNode::Leaf(_) | PaneNode::Hole => None,
+            PaneNode::Branch { first, second, .. } => {
+                first.find_leaf_mut(id).or_else(|| second.find_leaf_mut(id))
+            }
+        }
+    }
+
+    pub fn collect_leaf_ids(&self, out: &mut Vec<PaneId>) {
+        match self {
+            PaneNode::Leaf(leaf) => out.push(leaf.id),
+            PaneNode::Hole => {}
+            PaneNode::Branch { first, second, .. } => {
+                first.collect_leaf_ids(out);
+                second.collect_leaf_ids(out);
+            }
+        }
+    }
+
+    /// Replace the leaf with id `target` with a Branch wrapping the old
+    /// leaf and `new_leaf`. `side` decides where the new leaf lands;
+    /// `ratio` is the share allocated to `first` of the resulting branch.
+    /// Returns `Err(new_leaf)` if `target` was not found in this subtree —
+    /// the caller can retry on a sibling subtree.
+    fn split_leaf(
+        &mut self,
+        target: PaneId,
+        orientation: SplitOrientation,
+        ratio: f32,
+        new_leaf: LeafEntry,
+        side: SplitSide,
+    ) -> Result<(), LeafEntry> {
+        match self {
+            PaneNode::Leaf(leaf) if leaf.id == target => {
+                let old = std::mem::replace(self, PaneNode::Hole);
+                let (first, second) = match side {
+                    SplitSide::Second => (Box::new(old), Box::new(PaneNode::Leaf(new_leaf))),
+                    SplitSide::First => (Box::new(PaneNode::Leaf(new_leaf)), Box::new(old)),
+                };
+                *self = PaneNode::Branch { orientation, ratio, first, second };
+                Ok(())
+            }
+            PaneNode::Leaf(_) | PaneNode::Hole => Err(new_leaf),
+            PaneNode::Branch { first, second, .. } => {
+                match first.split_leaf(target, orientation, ratio, new_leaf, side) {
+                    Ok(()) => Ok(()),
+                    Err(returned) => second.split_leaf(target, orientation, ratio, returned, side),
+                }
+            }
+        }
+    }
+
+    /// Recursively render this subtree, allocating a `Rect` per leaf
+    /// according to the orientation/ratio of the branches above it.
+    /// `multi` is `true` when the tree has 2+ leaves overall — leaves
+    /// then get a focus-coloured border around their content.
+    fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        focused_id: PaneId,
+        multi: bool,
+        last_rects: &mut HashMap<PaneId, Rect>,
+        pane_tags: &HashMap<PaneId, char>,
+        theme: &Theme,
+        header_overlay: &crate::components::sort_header::HeaderOverlay,
+    ) {
+        match self {
+            PaneNode::Leaf(leaf) => {
+                last_rects.insert(leaf.id, area);
+                let is_focused = leaf.id == focused_id;
+                let inner = if multi {
+                    let border_style = if is_focused {
+                        Style::default().fg(theme.accent())
+                    } else {
+                        Style::default().fg(theme.text_dim())
+                    };
+                    let mut block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    if let Some(&letter) = pane_tags.get(&leaf.id) {
+                        let title_style = if is_focused {
+                            Style::default().fg(theme.accent()).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.text_dim())
+                        };
+                        block = block.title(Span::styled(format!(" {letter} "), title_style));
+                    }
+                    let inner_area = block.inner(area);
+                    frame.render_widget(block, area);
+                    inner_area
+                } else {
+                    area
+                };
+                let table_area = leaf.pane.render_table_and_preview(frame, inner);
+                if is_focused && header_overlay.is_active() {
+                    let keys: Vec<&str> = leaf
+                        .pane
+                        .last_column_keys
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    let style = Style::default().fg(theme.accent());
+                    crate::components::sort_header::render_direction_picker_overlay(
+                        frame,
+                        table_area,
+                        &keys,
+                        &leaf.pane.last_col_widths,
+                        2,
+                        header_overlay,
+                        style,
+                    );
+                }
+            }
+            PaneNode::Branch { orientation, ratio, first, second } => {
+                let r1 = (*ratio * 100.0).clamp(1.0, 99.0) as u16;
+                let r2 = 100u16.saturating_sub(r1);
+                let constraints = [Constraint::Percentage(r1), Constraint::Percentage(r2)];
+                let chunks = match orientation {
+                    SplitOrientation::Horizontal => Layout::horizontal(constraints).split(area),
+                    SplitOrientation::Vertical => Layout::vertical(constraints).split(area),
+                };
+                first.render(frame, chunks[0], focused_id, multi, last_rects, pane_tags, theme, header_overlay);
+                second.render(frame, chunks[1], focused_id, multi, last_rects, pane_tags, theme, header_overlay);
+            }
+            PaneNode::Hole => {}
+        }
+    }
+
+    /// Remove the leaf with id `target`. The parent branch is replaced
+    /// by its surviving sibling. Returns `true` if the target was found
+    /// and removed somewhere in the subtree.
+    fn close_leaf(&mut self, target: PaneId) -> bool {
+        // Branch-with-target-as-direct-child case: hoist the surviving sibling.
+        let drain_first = matches!(
+            self,
+            PaneNode::Branch { first, .. }
+                if matches!(first.as_ref(), PaneNode::Leaf(leaf) if leaf.id == target)
+        );
+        let drain_second = matches!(
+            self,
+            PaneNode::Branch { second, .. }
+                if matches!(second.as_ref(), PaneNode::Leaf(leaf) if leaf.id == target)
+        );
+        if drain_first || drain_second {
+            let owned = std::mem::replace(self, PaneNode::Hole);
+            if let PaneNode::Branch { first, second, .. } = owned {
+                let surviving = if drain_first { *second } else { *first };
+                *self = surviving;
+                return true;
+            }
+            unreachable!();
+        }
+
+        if let PaneNode::Branch { first, second, .. } = self {
+            first.close_leaf(target) || second.close_leaf(target)
+        } else {
+            false
+        }
+    }
+}
+
+/// Per-subtab pane tree.
+pub struct PaneTree {
+    /// Index into `ContentView.view_defs` that this subtab represents.
+    /// Fixed for the lifetime of the tree.
+    pub view_def_index: usize,
+    pub root: PaneNode,
+    /// Currently focused leaf within this tree.
+    pub focus: PaneId,
+    /// Cached screen rect of each leaf from the most recent render.
+    /// Populated by the render path; consumed by future geometric
+    /// focus-movement.
+    pub last_rects: HashMap<PaneId, Rect>,
+    /// Letter assigned to each leaf — drives the `Ctrl-w <letter>` focus
+    /// switcher and the tag glyph rendered top-left in the pane border.
+    /// Persistent for the lifetime of a `PaneId`; freed slots are reused
+    /// on the next allocation.
+    pub pane_tags: HashMap<PaneId, char>,
+}
+
+impl PaneTree {
+    fn new(view_def_index: usize, leaf_id: PaneId, pane: ContentPane) -> Self {
+        Self {
+            view_def_index,
+            root: PaneNode::Leaf(LeafEntry { id: leaf_id, pane }),
+            focus: leaf_id,
+            last_rects: HashMap::new(),
+            pane_tags: HashMap::new(),
+        }
+    }
+
+    /// Reserve the lowest still-free letter from `alphabet` for `pane_id`.
+    /// Idempotent: re-assigning a pane that already has a tag is a no-op.
+    /// Returns `None` if the alphabet is exhausted (every letter is in
+    /// use by another live pane in this tree).
+    fn assign_tag(&mut self, pane_id: PaneId, alphabet: &str) -> Option<char> {
+        if let Some(&existing) = self.pane_tags.get(&pane_id) {
+            return Some(existing);
+        }
+        let used: std::collections::HashSet<char> = self.pane_tags.values().copied().collect();
+        let next = alphabet.chars().find(|c| !used.contains(c))?;
+        self.pane_tags.insert(pane_id, next);
+        Some(next)
+    }
+
+    fn release_tag(&mut self, pane_id: PaneId) {
+        self.pane_tags.remove(&pane_id);
+    }
+
+    /// Look up the leaf wearing this letter.
+    pub fn pane_id_for_tag(&self, letter: char) -> Option<PaneId> {
+        self.pane_tags.iter().find_map(|(id, &c)| (c == letter).then_some(*id))
+    }
+
+    pub fn focused_leaf(&self) -> &LeafEntry {
+        self.root
+            .find_leaf(self.focus)
+            .expect("PaneTree.focus must point to a valid leaf")
+    }
+
+    pub fn focused_leaf_mut(&mut self) -> &mut LeafEntry {
+        let id = self.focus;
+        self.root
+            .find_leaf_mut(id)
+            .expect("PaneTree.focus must point to a valid leaf")
+    }
+
+    pub fn leaf_count(&self) -> usize {
+        let mut ids = Vec::new();
+        self.root.collect_leaf_ids(&mut ids);
+        ids.len()
+    }
+
+    /// Find the structural sibling of `id`: the first leaf inside the
+    /// **other** side of the deepest branch that contains `id`. Returns
+    /// `None` when `id` is the only leaf in the tree (or absent).
+    pub fn sibling_of(&self, id: PaneId) -> Option<PaneId> {
+        fn find_other<'a>(node: &'a PaneNode, target: PaneId) -> Option<&'a PaneNode> {
+            if let PaneNode::Branch { first, second, .. } = node {
+                if let PaneNode::Leaf(l) = first.as_ref() {
+                    if l.id == target {
+                        return Some(second);
+                    }
+                }
+                if let PaneNode::Leaf(l) = second.as_ref() {
+                    if l.id == target {
+                        return Some(first);
+                    }
+                }
+                return find_other(first, target).or_else(|| find_other(second, target));
+            }
+            None
+        }
+        let other = find_other(&self.root, id)?;
+        let mut leaves = Vec::new();
+        other.collect_leaf_ids(&mut leaves);
+        leaves.into_iter().next()
+    }
+
+    /// Split the focused leaf along `orientation`. The new leaf becomes
+    /// the focus. `side` decides whether the new leaf lands as `first`
+    /// (left/top) or `second` (right/bottom). `ratio` is the share given
+    /// to the resulting branch's `first` child.
+    fn split_focus(
+        &mut self,
+        orientation: SplitOrientation,
+        ratio: f32,
+        side: SplitSide,
+        new_id: PaneId,
+        new_pane: ContentPane,
+    ) {
+        let focus_id = self.focus;
+        let new_leaf = LeafEntry { id: new_id, pane: new_pane };
+        // The closest-to-leaf split fits because we only split the focused
+        // leaf and `focus_id` exists exactly once in the tree.
+        let _ = self.root.split_leaf(focus_id, orientation, ratio, new_leaf, side);
+        self.focus = new_id;
+    }
+
+    /// Close a specific leaf by id. Used both for the user's "close
+    /// focused pane" action and for the coupled-pane cascade where the
+    /// parent close needs to take its linked child with it. Returns
+    /// `false` if the leaf was not in this tree or it would have been
+    /// the last surviving leaf.
+    fn close_specific(&mut self, id: PaneId) -> bool {
+        if self.leaf_count() <= 1 {
+            return false;
+        }
+        if !self.root.close_leaf(id) {
+            return false;
+        }
+        if self.focus == id {
+            let mut ids = Vec::new();
+            self.root.collect_leaf_ids(&mut ids);
+            if let Some(&first) = ids.first() {
+                self.focus = first;
+            }
+        }
+        true
+    }
+}
+
+// ── ContentView ──────────────────────────────────────────────────────
+
+/// Which kind of menu the shared [`QueryMenuComponent`] is currently
+/// presenting. The component itself is data-agnostic; this enum tells
+/// `handle_query_popup_key` which persistence layer to hit.
+#[derive(Debug, Clone)]
+pub enum QueryMenuMode {
+    /// Default: DB-backed saved-query picker (Jira / Taiga / Tasks).
+    SavedQueries,
+    /// Postgres `.sql` scripts persisted under
+    /// `<instance_data_dir>/queries/<db>/<schema>/<table>/`. The
+    /// tuple identifies the table the menu was opened for.
+    PostgresScripts {
+        database: String,
+        schema: String,
+        table: String,
+    },
+}
+
+pub struct ContentView {
+    pub theme: Arc<Theme>,
+    pub action_bar: ActionBarComponent,
+    /// Command-line component, driven by `:`. Tab-global — operates
+    /// on the active pane.
+    pub cmdline: CmdlineComponent,
+    pub tab_name: String,
+    pub tab_icon: String,
+    pub tab_order: i32,
+    /// Tab id within the App's `content_views` vector. Set by App
+    /// after construction. Used as the `view_index` field on the
+    /// outgoing `ViewRequest`s.
+    pub view_index: usize,
+
+    pub adapter: Option<Arc<dyn ContentAdapter>>,
+    pub view_defs: Vec<ViewDef>,
+    /// One [`PaneTree`] per `view_defs` entry. Each tree starts as a
+    /// single leaf; Phase 2 splits push a `Branch` over the focused
+    /// leaf and add a sibling.
+    pane_trees: Vec<PaneTree>,
+    /// Index into both `view_defs` and `pane_trees` for the active subtab.
+    active_subtab: usize,
+    /// Counter for the next-allocated [`PaneId`]. Monotonic across the
+    /// lifetime of this `ContentView` so async fetches keep routing
+    /// even after siblings close.
+    next_pane_id: PaneId,
+
+    /// Live auth/connection status pushed by the App's status watcher.
+    pub auth_status: AdapterStatus,
+    /// Permanent error captured at adapter-construction time.
+    pub adapter_init_error: Option<String>,
+
+    /// Query menu popup (saved query picker OR adapter-native script
+    /// manager). Tab-level overlay; the [`query_menu_mode`] field
+    /// decides how `handle_query_popup_key` routes the emitted
+    /// [`QueryMenuMessage`].
+    query_menu: QueryMenuComponent,
+    /// Current routing for `query_menu`. `SavedQueries` is the default
+    /// (DB-backed list); `PostgresScripts` means the popup is showing
+    /// per-table on-disk `.sql` scripts.
+    query_menu_mode: QueryMenuMode,
+    /// Query menu keybindings (from global tui config).
+    query_menu_kb: KeyBindingSection<QueryMenuAction>,
+    /// Common keybindings shared with Tasks/Trackings: list navigation,
+    /// scroll, column-config, etc. ContentView routes table cursor moves
+    /// through this section so user-overrides in `tui.yaml` take effect.
+    common_kb: KeyBindingSection<CommonAction>,
+    /// Content-level keybindings: back, open, prev/next page, edit query.
+    content_kb: KeyBindingSection<ContentAction>,
+    /// Window/split keybindings. Each binding is a chord
+    /// (e.g. `wv` = leader `w`, action key `v`).
+    window_kb: KeyBindingSection<WindowAction>,
+    /// `Some(leader)` while the user has pressed the window-leader and
+    /// we are waiting for the resolution key. Stores the actual leader
+    /// string so the chord lookup works for any user-configured prefix.
+    window_pending: Option<String>,
+    /// Alphabet from which per-pane letter tags are drawn, with letters
+    /// reserved by the static `window_kb` bindings (v/s/q in defaults)
+    /// already filtered out so chord-action keys never collide with
+    /// pane-switch tags. Each leaf in the active subtab tree wears the
+    /// lowest still-free letter; pressing `<leader><letter>` switches
+    /// focus to that leaf.
+    pane_tag_alphabet: String,
+    /// Glyph map for status/action-bar hints (e.g. backspace → ⌫).
+    key_icons: KeyIconMap,
+    /// DB-persisted saved queries (merged with YAML defaults).
+    pub db_saved_queries: Vec<MergedSavedQuery>,
+    /// `NodeRef`-style scope string for DB-side saved-query shortcuts
+    /// (e.g. `"jira/jira/tickets"`). Today set once to the view-root
+    /// NodeRef; future work may track the drill-down level.
+    pub query_scope: String,
+
+    /// Visual overlay applied to the column header row — drives the
+    /// sort-hint mode (column picker / direction picker). Pushed in by
+    /// `App` before each `rebuild_table` via the public field.
+    pub header_overlay: crate::components::sort_header::HeaderOverlay,
+
+    /// Path of the YAML config file this view was constructed from.
+    /// `None` for the fallback Jira view created when no view yamls
+    /// were found. Drives granular `:config` reload — the App finds
+    /// the slot to replace by matching this path.
+    pub source_path: Option<std::path::PathBuf>,
+
+    /// Mirrors `AdapterConfig.manual_connect`. When `true`, App-level
+    /// auto-load and subtab-switch loads are suppressed for this tab;
+    /// the user must trigger a `reload` action to populate the pane.
+    pub manual_connect: bool,
+
+    /// Cursor ids harvested when panes that hold an
+    /// `active_custom_query.cursor_id` are destroyed (CP-6). Drained
+    /// by the App after every interaction with this view — each id
+    /// turns into a `ViewRequest::CloseAdapterCursor` so the adapter
+    /// tears down the idle TX. Per-pane harvest happens in
+    /// [`ContentView::close_focused`].
+    pending_cursor_closes: Vec<String>,
+
+    /// Lazy cache of Postgres per-table script shortcuts, keyed by the
+    /// adapter-internal table node id (e.g. `live/schemas/public/tables/users`)
+    /// and holding `(script_name, key_chord)` pairs (SQ-8d). Populated
+    /// by the App when a Postgres table comes into focus and consulted
+    /// by [`build_view_claims`] to register global apply-on-chord
+    /// handlers symmetric to Jira/Taiga saved-query shortcuts. Cleared
+    /// on bind / delete via [`Self::invalidate_postgres_table_shortcuts`].
+    pub postgres_table_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+impl ContentPane {
+    /// Construct an empty pane for `view_def_index`. Pass
+    /// `tree_enabled = true` when the matching `ViewDef` declares
+    /// `tree_label`; the pane's [`TreeState`] is then initialized to
+    /// an empty tree and rendering switches to tree mode.
+    fn new(theme: Arc<Theme>, view_def_index: usize, tree_enabled: bool) -> Self {
+        Self {
+            view_def_index,
+            theme,
+            table: DataTable::new(),
+            items: Vec::new(),
+            fetch_error: None,
+            filtered_indices: Vec::new(),
+            nav_stack: Vec::new(),
+            active_child: None,
+            active_query: None,
+            active_query_name: None,
+            active_query_vars: std::collections::HashMap::new(),
+            preview_open: false,
+            preview_description: String::new(),
+            preview_key: String::new(),
+            preview_scroll: 0,
+            preview_loading: false,
+            preview_markdown: false,
+            preview_visible_height: 0,
+            search: SearchComponent::new(),
+            fuzzy_filter_fields: Vec::new(),
+            search_fields: Vec::new(),
+            search_next_key: "n".to_string(),
+            search_prev_key: "N".to_string(),
+            search_mode: SearchMode::Local,
+            current_sort: Vec::new(),
+            current_page: None,
+            last_applied_sort: Vec::new(),
+            last_page_info: None,
+            last_sortable_columns: Vec::new(),
+            active_custom_query: None,
+            last_col_widths: Vec::new(),
+            last_column_keys: Vec::new(),
+            loaded: false,
+            linked_child: None,
+            link_refs: std::collections::HashSet::new(),
+            link_node_ref_prefix: None,
+            retry_state: None,
+            tree: tree_enabled.then(TreeState::new),
+            tree_visible_indices: Vec::new(),
+            tree_filter_depth: None,
+            tree_find: None,
+        }
+    }
+
+    // ── Tree-find lifecycle (CT-5) ───────────────────────────────────
+    //
+    // These wrap the `tree_find` field so the App-side dispatch
+    // (CT-6/CT-7) never has to spell out the state shape. Each helper
+    // is a one-liner today; the centralised wrappers keep the
+    // "begin/complete/clear" contract obvious and let later phases
+    // grow the state (e.g. last-seen path for "next from cursor")
+    // without touching the call sites.
+
+    /// Begin a fresh tree-find: stash the query, mark loading, clear
+    /// any previous hits. Idempotent — a second call replaces the
+    /// in-flight state (last writer wins; the App is responsible for
+    /// ignoring stale completions if it queues parallel searches,
+    /// which CT-6 doesn't).
+    pub fn tree_find_begin(&mut self, query: String) {
+        self.tree_find = Some(TreeFindState {
+            query,
+            hits: Vec::new(),
+            current: 0,
+            loading: true,
+            truncated: false,
+            settled: false,
+        });
+    }
+
+    /// Land hits from a successful adapter response. No-op when the
+    /// state was cleared in the meantime (CT-9: Esc/r/new-search wipe
+    /// `tree_find` before the in-flight call returns).
+    pub fn tree_find_complete(&mut self, hits: Vec<TreeFindHit>, truncated: bool) {
+        if let Some(state) = self.tree_find.as_mut() {
+            state.hits = hits;
+            state.current = 0;
+            state.loading = false;
+            state.truncated = truncated;
+            state.settled = false;
+        }
+    }
+
+    /// Mark the in-flight search as failed: drop the loading flag but
+    /// keep the (empty) hits + query so the status-bar hint can show
+    /// "no matches". No-op when the state was cleared meanwhile.
+    pub fn tree_find_fail(&mut self) {
+        if let Some(state) = self.tree_find.as_mut() {
+            state.loading = false;
+            state.hits.clear();
+            state.truncated = false;
+        }
+    }
+
+    /// Drop the entire tree-find state. Called on Esc, reload, or
+    /// when the user opens a new search input (CT-9).
+    pub fn tree_find_clear(&mut self) {
+        self.tree_find = None;
+    }
+
+    /// Advance the cursor to the next hit with wrap-around. Returns
+    /// the newly-selected hit (or `None` when there are no hits / no
+    /// active state — caller should no-op).
+    pub fn tree_find_next(&mut self) -> Option<&TreeFindHit> {
+        let state = self.tree_find.as_mut()?;
+        if state.hits.is_empty() {
+            return None;
+        }
+        state.current = (state.current + 1) % state.hits.len();
+        state.settled = false;
+        state.hits.get(state.current)
+    }
+
+    /// Step the cursor to the previous hit with wrap-around. Returns
+    /// the newly-selected hit (or `None` when empty / no state).
+    pub fn tree_find_prev(&mut self) -> Option<&TreeFindHit> {
+        let state = self.tree_find.as_mut()?;
+        if state.hits.is_empty() {
+            return None;
+        }
+        state.current = if state.current == 0 {
+            state.hits.len() - 1
+        } else {
+            state.current - 1
+        };
+        state.settled = false;
+        state.hits.get(state.current)
+    }
+
+    /// Reference to the hit at the current cursor — i.e. what `n`/`N`
+    /// would land on if pressed without movement. `None` when no
+    /// state is active or `hits` is empty.
+    pub fn tree_find_current(&self) -> Option<&TreeFindHit> {
+        let state = self.tree_find.as_ref()?;
+        state.hits.get(state.current)
+    }
+
+    /// `true` while a tree-find cache (loading or hits) is live. CT-7
+    /// gates `n`/`N` on this so the keys jump tree-find hits instead
+    /// of the local `/`-search match list.
+    pub fn tree_find_active(&self) -> bool {
+        self.tree_find.is_some()
+    }
+
+    /// CT-7: locate the visible-table row of a hit's leaf node, only
+    /// if the path is already fully expanded + cached. Returns the
+    /// row index into the rendered table (post fuzzy-filter) when
+    /// found, else `None`. The full lazy-expand driver lives in
+    /// [`Self::advance_tree_find`]; this helper is the read-only
+    /// part used by both the driver's terminal step and tests.
+    ///
+    /// Matches on `(parent_path, leaf_id)` rather than `leaf_id`
+    /// alone so two pages with the same id under different parents
+    /// stay distinguishable.
+    pub fn find_tree_find_visible_row(&self, hit: &TreeFindHit) -> Option<usize> {
+        let tree = self.tree.as_ref()?;
+        let (leaf_id, ancestors) = hit.path.split_last()?;
+        for (row_idx, &entry_idx) in self.tree_visible_indices.iter().enumerate() {
+            let entry = tree.entries.get(entry_idx)?;
+            if entry.is_more_placeholder {
+                continue;
+            }
+            if entry.node.id == *leaf_id && entry.parent_path.as_slice() == ancestors {
+                return Some(row_idx);
+            }
+        }
+        None
+    }
+
+    /// CT-7: wrap [`Self::advance_tree_find`] into a single
+    /// `SubViewMessage` for the pane's key dispatch + App-side
+    /// drivers. `Ready` collapses into a `SelectionChanged` (cursor
+    /// already moved), `NeedRootLoad` / `NeedTreeExpand` into the
+    /// matching `ViewRequest`, `Waiting` / `Idle` into a no-op
+    /// `SelectionChanged`, and `NotInTree` into a status-bar notice.
+    pub fn tree_find_dispatch_step(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> SubViewMessage {
+        match self.advance_tree_find(view_index, pane_id, view_defs) {
+            TreeFindAdvance::Ready(_) | TreeFindAdvance::Waiting | TreeFindAdvance::Idle => {
+                SubViewMessage::SelectionChanged(None)
+            }
+            TreeFindAdvance::NeedRootLoad => {
+                SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id })
+            }
+            TreeFindAdvance::NeedTreeExpand {
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                page_size,
+            } => SubViewMessage::Request(ViewRequest::ExpandTreeNode {
+                view_index,
+                pane_id,
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                page_size,
+                page: None,
+                append: false,
+            }),
+            TreeFindAdvance::NotInTree(reason) => {
+                SubViewMessage::Request(ViewRequest::Notify(format!(
+                    "Tree find: {reason}",
+                )))
+            }
+        }
+    }
+
+    /// CT-7: drive one step of the "expand-to-current-hit" walk for
+    /// the active tree-find. The App-side caller consumes the result:
+    /// dispatch the returned [`ViewRequest`] (if any), then re-poll
+    /// once the response lands. Mutates `self` along the way (marks
+    /// ancestor prefixes as expanded, rebuilds entries, positions
+    /// cursor on `Ready`).
+    ///
+    /// Limitations of this first cut:
+    /// - Single-load only (multi-load fan-out for heterogeneous tree
+    ///   levels is reserved for the `Schemas + Scripts` pattern;
+    ///   Confluence — the only adapter with `search_in_tree` — is
+    ///   single-load).
+    /// - The hit's path must address nodes in the current root list;
+    ///   if the root pane hasn't loaded yet, it returns
+    ///   `NeedRootLoad` and the caller must dispatch
+    ///   `SpawnContentLoad` (re-poll after the items land).
+    /// - When an ancestor `id` isn't present in its cached parent's
+    ///   children, returns `NotInTree(reason)` — typical cause: a
+    ///   filter / pagination cap excludes it. CT-9 will retry after
+    ///   the user re-reloads.
+    pub fn advance_tree_find(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> TreeFindAdvance {
+        let state = match self.tree_find.as_ref() {
+            Some(s) => s,
+            None => return TreeFindAdvance::Idle,
+        };
+        // Loading state — nothing to advance against yet.
+        if state.loading {
+            return TreeFindAdvance::Waiting;
+        }
+        // Already landed the cursor on the current hit — any later
+        // TreeChildren (e.g. user expanded a node by hand) must not
+        // snap the cursor back. `next`/`prev` (or a fresh search)
+        // clear `settled` to re-arm.
+        if state.settled {
+            return TreeFindAdvance::Idle;
+        }
+        let hit = match state.hits.get(state.current) {
+            Some(h) => h.clone(),
+            None => return TreeFindAdvance::Idle,
+        };
+        let path = hit.path.clone();
+        if path.is_empty() {
+            return TreeFindAdvance::NotInTree(
+                "Tree-find hit has an empty path — adapter bug".into(),
+            );
+        }
+        let view_def = match self.view_def(view_defs).cloned() {
+            Some(v) => v,
+            None => return TreeFindAdvance::Idle,
+        };
+        let _ = view_index; // reserved for future per-view dispatch differentiation
+        let _ = pane_id;
+        if view_def.tree_label.is_none() || self.tree.is_none() {
+            return TreeFindAdvance::NotInTree(
+                "Tree-find requires a tree-mode view".into(),
+            );
+        }
+
+        // Walk each prefix of `path`. For depth d, the parent's
+        // node-id list is `path[..d]` (empty for d=0 = root). We
+        // need `cache[parent_path]` to be loaded and to contain
+        // `path[d]` among its children. The first level that isn't
+        // cached/loaded yields the next dispatch step.
+        for d in 0..path.len() {
+            let parent_path: Vec<String> = path[..d].to_vec();
+            let tree = self.tree.as_ref().expect("checked above");
+            match tree.cache.get(&parent_path) {
+                None => {
+                    if d == 0 {
+                        return TreeFindAdvance::NeedRootLoad;
+                    }
+                    // We need the ChildDef whose own level *is* `d`
+                    // — its `node_type` is what we'll request from
+                    // the parent's `list()`. `tree_self_at_depth`
+                    // does this lookup correctly across recursive
+                    // ChildDefs (where every depth ≥ 1 resolves to
+                    // the same recursive def), unlike the
+                    // depth-shifted `tree_child_def_at_depth`.
+                    let Some(child_def) = tree_self_at_depth(&view_def, d) else {
+                        return TreeFindAdvance::NotInTree(format!(
+                            "View config has no tree-continuing child at depth {d}",
+                        ));
+                    };
+                    return TreeFindAdvance::NeedTreeExpand {
+                        parent_path,
+                        parent_node_id: path[d - 1].clone(),
+                        child_node_type: child_def.node_type.clone(),
+                        page_size: 50,
+                    };
+                }
+                Some(entry) if !entry.loaded => return TreeFindAdvance::Waiting,
+                Some(entry) => {
+                    if !entry.children.iter().any(|c| c.id == path[d]) {
+                        // CT-9 hint: typical cause is pagination cap
+                        // or a stale cache — re-reload usually fixes
+                        // it. We report `NotInTree` so the App can
+                        // surface a clear message.
+                        return TreeFindAdvance::NotInTree(format!(
+                            "Hit's ancestor '{}' at depth {d} not in loaded children",
+                            path[d],
+                        ));
+                    }
+                }
+            }
+        }
+
+        // All ancestor prefixes are cached + path is addressable.
+        // Mark every strict ancestor prefix as expanded so the
+        // renderer surfaces the leaf, then rebuild + locate the row.
+        {
+            let tree = self.tree.as_mut().expect("checked above");
+            for d in 0..path.len() {
+                let prefix: Vec<String> = path[..d].to_vec();
+                tree.expanded.insert(prefix);
+            }
+            tree.rebuild_entries(&view_def);
+        }
+        self.rebuild_table(view_defs);
+        if let Some(row) = self.find_tree_find_visible_row(&hit) {
+            self.table.set_selected(row);
+            if let Some(state) = self.tree_find.as_mut() {
+                state.settled = true;
+            }
+            TreeFindAdvance::Ready(row)
+        } else {
+            // Defensive: rebuild succeeded but the row isn't in the
+            // visible-indices map. Usually means a fuzzy filter is
+            // active and hides this leaf — surface as NotInTree so
+            // the user knows to clear the filter.
+            TreeFindAdvance::NotInTree(
+                "Hit's leaf row is hidden (active fuzzy filter?)".into(),
+            )
+        }
+    }
+
+    /// Replace the link cache + adapter NodeRef prefix used by the
+    /// `has_links` column. Called by [`ContentView::set_link_refs`].
+    pub fn set_link_context(&mut self, link_refs: &std::collections::HashSet<String>, prefix: Option<String>) {
+        self.link_refs = link_refs.clone();
+        self.link_node_ref_prefix = prefix;
+    }
+
+    // ── Shortcut hints ───────────────────────────────────────────────
+
+    /// Collect every YAML `shortcuts:` entry visible at the current
+    /// chain position — chain-aware in tree mode, drill-aware in flat
+    /// mode. Deeper levels win on duplicate keys, mirroring
+    /// `app::node_actions::resolve_shortcut`'s precedence. Returned
+    /// entries are `(key, raw_value)`: the raw value still carries
+    /// the `parent:` prefix when present, so the caller decides which
+    /// node_id to look up actions on.
+    fn current_shortcuts(&self, view_defs: &[ViewDef]) -> Vec<(char, String)> {
+        let Some(vd) = self.view_def(view_defs) else {
+            return Vec::new();
+        };
+        let chain = self.selected_node_type_chain(view_defs);
+        // BTreeMap (not HashMap): callers feed the result straight into
+        // the action / status bar in iteration order, so the order must
+        // be stable across frames. HashMap::new() seeds its hasher per
+        // instance — every per-frame rebuild would shuffle the hint
+        // positions and the bar flickers visibly (3 actions on a
+        // postgres db_script node was the trigger that surfaced this).
+        // Sorted-by-char gives a deterministic, predictable layout.
+        let mut out: std::collections::BTreeMap<char, String> =
+            std::collections::BTreeMap::new();
+        // Walk from deepest to root — first-seen wins. `resolve_shortcut`
+        // does the same and `entry().or_insert_with()` keeps the
+        // deeper-level binding.
+        for end in (1..=chain.len()).rev() {
+            if let Some(child) = crate::views::content_tree::child_def_for_type_chain(
+                vd,
+                &chain[..end],
+            ) {
+                for (k, v) in &child.shortcuts {
+                    out.entry(*k).or_insert_with(|| v.clone());
+                }
+            }
+        }
+        for (k, v) in &vd.shortcuts {
+            out.entry(*k).or_insert_with(|| v.clone());
+        }
+        out.into_iter().collect()
+    }
+
+    /// Resolve a YAML shortcut target to `(node_id, node_type)`. The
+    /// `node_id` is the concrete instance to fetch from (any row of
+    /// the right type works, the selected row is the cheapest choice);
+    /// the `node_type` is the cache key under which the resulting
+    /// actions list is stored. Returns `None` when the target isn't
+    /// addressable from the current pane state (e.g. parent shortcut
+    /// at root level, empty list, …).
+    fn shortcut_target_ref(
+        &self,
+        raw_value: &str,
+        view_defs: &[ViewDef],
+    ) -> Option<(String, String)> {
+        use crate::app::node_actions::{ShortcutTarget, parse_shortcut_value};
+        let (target, _action_name) = parse_shortcut_value(raw_value);
+        match target {
+            ShortcutTarget::Selected => {
+                let id = self.selected_item_id()?.to_string();
+                let ty = self.selected_target_node_type(view_defs)?;
+                Some((id, ty))
+            }
+            ShortcutTarget::Parent => {
+                let id = self.selected_parent_node_id_for_shortcut()?;
+                let ty = self.parent_target_node_type(view_defs)?;
+                Some((id, ty))
+            }
+        }
+    }
+
+    /// Node-type id of the row currently under the cursor. Tree mode
+    /// reads it from the entry's `node_type_chain`; flat mode from the
+    /// selected `NodeSummary` (falling back to the chain's leaf when
+    /// the items list is empty — e.g. while the first load is in
+    /// flight).
+    fn selected_target_node_type(&self, view_defs: &[ViewDef]) -> Option<String> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            return entry.node_type_chain.last().cloned();
+        }
+        let row = self.table.selected_row();
+        if let Some(item) = self.items.get(row) {
+            return Some(item.node_type.type_id.clone());
+        }
+        self.view_path_node_types(view_defs).last().cloned()
+    }
+
+    /// Node-type id of the *parent* of the row currently under the
+    /// cursor (for `parent:`-prefixed shortcuts). Tree mode walks the
+    /// entry's `node_type_chain` back one step; flat mode uses the
+    /// view-path chain (the level above the active child).
+    fn parent_target_node_type(&self, view_defs: &[ViewDef]) -> Option<String> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            let n = entry.node_type_chain.len();
+            return if n >= 2 {
+                entry.node_type_chain.get(n - 2).cloned()
+            } else {
+                None
+            };
+        }
+        let chain = self.view_path_node_types(view_defs);
+        let n = chain.len();
+        if n >= 2 { chain.get(n - 2).cloned() } else { None }
+    }
+
+    /// Cousin of the private `selected_parent_node_id` in
+    /// [`Self::handle_key`]'s neighbourhood — same logic, exposed
+    /// inside this `impl` for the cache-trigger and hint-render
+    /// paths. Returns `None` at root (no parent to look up).
+    fn selected_parent_node_id_for_shortcut(&self) -> Option<String> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            return entry.parent_path.last().cloned();
+        }
+        self.parent_node_id().map(str::to_string)
+    }
+
+    /// Render shortcut hints for the current chain position by
+    /// joining each visible YAML `shortcuts:` entry with the
+    /// adapter's `actions_for_type()` lookup. Returns `(key, label,
+    /// placement)` triples (unknown node_type or action_id → drop
+    /// silently). Caller splits by placement for the action / status
+    /// bars.
+    ///
+    /// Synchronous: the adapter is required to answer without I/O
+    /// (`actions_for_type` is instance-free and type-keyed). No
+    /// `get_by_id` walk, no DB round-trip per cursor move.
+    fn collect_shortcut_hints(
+        &self,
+        view_defs: &[ViewDef],
+        adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
+    ) -> Vec<(String, String, not_yet_done_content::HintPlacement)> {
+        use crate::app::node_actions::parse_shortcut_value;
+        let Some(adapter) = adapter else {
+            return Vec::new();
+        };
+        let shortcuts = self.current_shortcuts(view_defs);
+        if shortcuts.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (key, raw) in shortcuts {
+            let (_target, action_name) = parse_shortcut_value(&raw);
+            let Some((_id, node_type)) = self.shortcut_target_ref(&raw, view_defs) else {
+                continue;
+            };
+            let nt = not_yet_done_content::NodeType {
+                type_id: node_type,
+                mime_type: String::new(),
+                syntax: None,
+                file_extension: String::new(),
+                display_name: String::new(),
+            };
+            let actions = adapter.actions_for_type(&nt);
+            if let Some(action) = actions.iter().find(|a| a.id == action_name) {
+                out.push((key.to_string(), action.label.clone(), action.placement));
+            }
+        }
+        out
+    }
+
+    /// Lookup helper for the `has_links` column. Returns `true` if a
+    /// link row exists for `"{prefix}/{item_id}"`. `false` when the
+    /// adapter context isn't set yet.
+    fn item_has_link(&self, item_id: &str) -> bool {
+        let Some(prefix) = self.link_node_ref_prefix.as_deref() else {
+            return false;
+        };
+        self.link_refs.contains(&format!("{prefix}/{item_id}"))
+    }
+
+    pub fn view_def_index(&self) -> usize {
+        self.view_def_index
+    }
+
+    fn view_def<'a>(&self, view_defs: &'a [ViewDef]) -> Option<&'a ViewDef> {
+        view_defs.get(self.view_def_index)
+    }
+
+    // ── Current-level config (respects nav depth) ───────────────────
+
+    fn current_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
+        if self.tree.is_some() {
+            // Chain-based: the cursor row's own branch decides the column
+            // set, so a multi-branch tree shows the right columns at a
+            // given depth instead of the first branch's.
+            return self
+                .cursor_tree_level(view_defs)
+                .map(|l| l.columns.to_vec())
+                .unwrap_or_default();
+        }
+        let configured: &[ColumnDef] = if let Some(ref child) = self.active_child {
+            &child.columns
+        } else if let Some(vd) = self.view_def(view_defs) {
+            &vd.columns
+        } else {
+            &[]
+        };
+        if !configured.is_empty() {
+            return configured.to_vec();
+        }
+        // Auto-fallback: derive one ColumnDef per metadata field of the
+        // first item, all evenly sized. Used by the postgres rows view
+        // (and any other dynamic-schema adapter) where the YAML cannot
+        // enumerate columns ahead of time.
+        let Some(first) = self.items.first() else {
+            return Vec::new();
+        };
+        first
+            .metadata
+            .fields
+            .iter()
+            .map(|f| ColumnDef {
+                key: f.key.clone(),
+                label: Some(f.display_label.clone()),
+                source: None,
+                style: None,
+                sizing: "auto".into(),
+                markdown: false,
+            })
+            .collect()
+    }
+
+    /// The active level's multi-line `row_layout`, if any. Tree mode never
+    /// uses it (multi-line rendering targets flat drill lists for now, e.g.
+    /// the Stoat message list), so it returns `None` there.
+    fn current_row_layout(&self, view_defs: &[ViewDef]) -> Option<Vec<LineLayout>> {
+        if self.tree.is_some() {
+            return None;
+        }
+        if let Some(ref child) = self.active_child {
+            child.row_layout.clone()
+        } else {
+            self.view_def(view_defs).and_then(|vd| vd.row_layout.clone())
+        }
+    }
+
+    /// Whether the active level opts into smooth (line-wise) scrolling.
+    /// Read from the same level as [`current_row_layout`](Self::current_row_layout)
+    /// (active `ChildDef`, else the root `ViewDef`); defaults to `false`.
+    fn current_smooth_scroll(&self, view_defs: &[ViewDef]) -> bool {
+        if let Some(ref child) = self.active_child {
+            child.smooth_scroll
+        } else {
+            self.view_def(view_defs).map(|vd| vd.smooth_scroll).unwrap_or(false)
+        }
+    }
+
+    // ── Tree mode helpers ────────────────────────────────────────────
+
+    /// Depth of the currently selected tree entry. Drives the column
+    /// set / header used for rendering. Defaults to `0` (root level)
+    /// when no row is selected or the tree is empty.
+    fn tree_active_depth(&self) -> usize {
+        self.tree_entry_at_row(self.table.selected_row())
+            .map(|e| e.depth)
+            .unwrap_or(0)
+    }
+
+    /// Resolve a visible-row index to its entry in `tree.entries`,
+    /// going through `tree_visible_indices` so an active fuzzy filter
+    /// (which hides some entries) doesn't desync row → entry.
+    fn tree_entry_at_row(&self, row: usize) -> Option<&crate::views::content_tree::TreeEntry> {
+        let tree = self.tree.as_ref()?;
+        let eidx = self.tree_visible_indices.get(row).copied()?;
+        tree.entries.get(eidx)
+    }
+
+    /// `node_type_chain` of the cursor row — its exact coordinate in a
+    /// (possibly multi-branch) tree. Empty when the tree is empty or no
+    /// row is selected. Per-row config lookups key off this instead of
+    /// the lossy `depth`, which can't tell branches apart.
+    fn cursor_node_type_chain(&self) -> Vec<String> {
+        self.tree_entry_at_row(self.table.selected_row())
+            .map(|e| e.node_type_chain.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolve the [`TreeLevel`] of the cursor row via its
+    /// `node_type_chain`. Single source of truth for the active column
+    /// set, label column, actions and preview in tree mode — replaces
+    /// the `*_at_depth(tree_active_depth())` lookups that silently
+    /// follow the *first* branch and so mis-resolve on multi-branch
+    /// trees (the root cause of the recurring blank-label-row bug).
+    fn cursor_tree_level<'a>(&self, view_defs: &'a [ViewDef]) -> Option<TreeLevel<'a>> {
+        let vd = self.view_def(view_defs)?;
+        let entry = self.tree_entry_at_row(self.table.selected_row())?;
+        tree_level_for_chain(vd, &entry.node_type_chain)
+    }
+
+    /// Walk the tree chain to find the depth whose level defines a
+    /// `fuzzy_filter` action. Validator ensures at most one level has
+    /// one, so the first match is the answer. Returns `None` outside
+    /// tree mode or when no level configures fuzzy_filter.
+    fn resolve_tree_filter_depth(&self, view_defs: &[ViewDef]) -> Option<usize> {
+        let vd = self.view_def(view_defs)?;
+        self.tree.as_ref()?;
+        for depth in 0..32 {
+            let level = tree_level_at_depth(vd, depth)?;
+            if level.actions.iter().any(|a| a.action_type == "fuzzy_filter") {
+                return Some(depth);
+            }
+        }
+        None
+    }
+
+    /// Recompute `tree_visible_indices` from `tree.entries`, applying
+    /// the active fuzzy filter (if any) only to entries at
+    /// `tree_filter_depth`. Entries at other depths pass through;
+    /// hiding an entry at the filter depth also hides its expanded
+    /// subtree (DFS-ordered, so we just skip until the depth bounces
+    /// back up to or above the hidden ancestor's depth). Pagination
+    /// placeholders are always visible — they belong to the parent
+    /// they trail, not to the filtered level itself.
+    fn refresh_tree_visible_indices(&mut self, view_defs: &[ViewDef]) {
+        let Some(tree) = self.tree.as_ref() else {
+            self.tree_visible_indices.clear();
+            return;
+        };
+        let filter = self.table.filter_text.clone();
+        let fd = self.tree_filter_depth;
+        if filter.is_empty() || fd.is_none() {
+            self.tree_visible_indices = (0..tree.entries.len()).collect();
+            return;
+        }
+        let fd = fd.unwrap();
+        let level_columns: Vec<ColumnDef> = self
+            .view_def(view_defs)
+            .and_then(|v| tree_level_at_depth(v, fd))
+            .map(|l| l.columns.to_vec())
+            .unwrap_or_default();
+        let filter_fields = self.fuzzy_filter_fields.clone();
+        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+        let tokens: Vec<String> = filter.split_whitespace().map(String::from).collect();
+
+        let mut visible = Vec::with_capacity(tree.entries.len());
+        let mut hidden_under: Option<usize> = None;
+        for (idx, entry) in tree.entries.iter().enumerate() {
+            if let Some(hd) = hidden_under {
+                if entry.depth <= hd {
+                    hidden_under = None;
+                }
+            }
+            if hidden_under.is_some() {
+                continue;
+            }
+            if entry.is_more_placeholder {
+                visible.push(idx);
+                continue;
+            }
+            if entry.depth == fd {
+                let haystack = build_field_haystack(&entry.node, &level_columns, &filter_fields);
+                use fuzzy_matcher::FuzzyMatcher;
+                let matches = if tokens.is_empty() {
+                    true
+                } else {
+                    tokens
+                        .iter()
+                        .all(|t| matcher.fuzzy_match(&haystack, t).is_some())
+                };
+                if matches {
+                    visible.push(idx);
+                } else {
+                    hidden_under = Some(fd);
+                }
+            } else {
+                visible.push(idx);
+            }
+        }
+        self.tree_visible_indices = visible;
+    }
+
+
+    /// Tree-mode handler for `content.open`. Toggles expand on a row
+    /// whose level has a tree-continuing child; on first expand emits
+    /// an async [`ViewRequest::ExpandTreeNode`]. Falls through to the
+    /// legacy drill (Split/in-place) when the cursor is on a tree-leaf
+    /// row with a non-tree-continuing child available. Returns `None`
+    /// when nothing actionable is configured for this row.
+    fn try_tree_open(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> Option<SubViewMessage> {
+        let row = self.table.selected_row();
+        let (depth, parent_path, node_id, node_label, node_type_chain, is_placeholder) = {
+            let entry = self.tree_entry_at_row(row)?;
+            (
+                entry.depth,
+                entry.parent_path.clone(),
+                entry.node.id.clone(),
+                entry.node.label.clone(),
+                entry.node_type_chain.clone(),
+                entry.is_more_placeholder,
+            )
+        };
+        let view_def = self.view_def(view_defs)?;
+        if is_placeholder {
+            // "… weitere laden" pagination row: parent_path is the
+            // path of the parent whose children we're paginating.
+            // Pagination is only armed in single-load mode (multi-load
+            // doesn't paginate), so the first-chain lookup at
+            // `parent_depth` is correct here.
+            let parent_depth = depth.checked_sub(1)?;
+            let tree_child = tree_child_def_at_depth(view_def, parent_depth)?;
+            let child_node_type = tree_child.node_type.clone();
+            let parent_node_id = parent_path.last()?.clone();
+            let next_page = {
+                let tree = self.tree.as_ref()?;
+                tree.cache.get(&parent_path).and_then(|s| s.next_page)?
+            };
+            return Some(SubViewMessage::Request(ViewRequest::ExpandTreeNode {
+                view_index,
+                pane_id,
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                page_size: next_page.limit.max(1),
+                page: Some(next_page),
+                append: true,
+            }));
+        }
+        let mut own_path = parent_path.clone();
+        own_path.push(node_id.clone());
+
+        // Look up the entry's producing ChildDef from its node_type
+        // chain (chain length == depth + 1, so this disambiguates
+        // multi-branch siblings at the same depth). Falls back to a
+        // first-chain depth walk only at depth 0 when an unknown root
+        // type slips through — in that case the legacy lookup gives
+        // the same answer.
+        let entry_child: Option<&ChildDef> = child_def_for_type_chain(view_def, &node_type_chain);
+        // YAML override: if the entry's ChildDef declares an
+        // `enter_action`, route Enter through `Node::invoke_action`
+        // instead of the drill / expand branches below. Used for rows
+        // whose only "child" is a synthetic anchor for split +
+        // pagination config — e.g. `postgres:db_script` → execute path
+        // opens the result pane via the same dispatch as `x`.
+        if let Some(action_name) = entry_child.and_then(|c| c.enter_action.as_deref()) {
+            return Some(SubViewMessage::Request(ViewRequest::InvokeNodeAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_name: action_name.to_string(),
+            }));
+        }
+        // Children of the entry's ChildDef — the candidates we may
+        // expand into / drill into. Empty when entry is a true leaf.
+        // For a `recursive: true` ChildDef, self is an implicit member
+        // of its own children (DSF-3), so expand re-loads the same
+        // type one level deeper.
+        let kids: Vec<&ChildDef> = match entry_child {
+            Some(c) => effective_child_children(c),
+            None => tree_level_children(view_def, depth)
+                .unwrap_or(&[])
+                .iter()
+                .collect(),
+        };
+        let tree_children: Vec<&ChildDef> =
+            kids.iter().copied().filter(|c| c.tree_label.is_some()).collect();
+
+        // Branch 1: there is at least one tree-continuing child at
+        // this entry — expand/collapse. With one tree-continuing
+        // sibling: single load (legacy path). With N > 1: fan out
+        // N loads via ExpandTreeNodeMulti.
+        if !tree_children.is_empty() {
+            let need_load: bool;
+            {
+                let tree = self.tree.as_mut()?;
+                if tree.expanded.contains(&own_path) {
+                    tree.expanded.remove(&own_path);
+                    tree.rebuild_entries(view_def);
+                    need_load = false;
+                } else {
+                    tree.expanded.insert(own_path.clone());
+                    let cached = tree
+                        .cache
+                        .get(&own_path)
+                        .map(|s| s.loaded)
+                        .unwrap_or(false);
+                    if cached {
+                        tree.rebuild_entries(view_def);
+                        need_load = false;
+                    } else {
+                        need_load = true;
+                    }
+                }
+            }
+            self.rebuild_table(view_defs);
+            if need_load {
+                if tree_children.len() == 1 {
+                    return Some(SubViewMessage::Request(ViewRequest::ExpandTreeNode {
+                        view_index,
+                        pane_id,
+                        parent_path: own_path,
+                        parent_node_id: node_id,
+                        child_node_type: tree_children[0].node_type.clone(),
+                        page_size: 50,
+                        page: None,
+                        append: false,
+                    }));
+                }
+                let types: Vec<String> = tree_children.iter().map(|c| c.node_type.clone()).collect();
+                return Some(SubViewMessage::Request(ViewRequest::ExpandTreeNodeMulti {
+                    view_index,
+                    pane_id,
+                    parent_path: own_path,
+                    parent_node_id: node_id,
+                    child_node_types: types,
+                    page_size: 50,
+                }));
+            }
+            return Some(SubViewMessage::SelectionChanged(None));
+        }
+
+        // Branch 2: tree-leaf — drill the first non-tree-continuing
+        // child of the entry's ChildDef (e.g. `Rows` with `split:
+        // right` from a table row). Returns ContentDrill so
+        // `dispatch_content_drill` does its split/in-place magic.
+        let child_def = kids
+            .iter()
+            .copied()
+            .find(|c| c.tree_label.is_none())?
+            .clone();
+        Some(SubViewMessage::ContentDrill {
+            item_id: node_id,
+            item_label: node_label,
+            child_def: Box::new(child_def),
+        })
+    }
+
+    /// Tree-mode handler for `content.tree_collapse` (default `c`).
+    /// Smart-collapse: when the selected row's own node is currently
+    /// expanded, collapse it (cursor stays on the same row).
+    /// Otherwise fall through to [`try_tree_back`] so the parent
+    /// collapses and the cursor jumps up to it. Returns `None` for
+    /// non-tree panes and at depth 0 on a collapsed node — the
+    /// caller treats it as `SubViewMessage::Unhandled`.
+    pub(crate) fn try_tree_smart_collapse(
+        &mut self,
+        view_defs: &[ViewDef],
+    ) -> Option<SubViewMessage> {
+        let view_def_owned = self.view_def(view_defs)?.clone();
+        let row = self.table.selected_row();
+        let (own_path, is_expanded) = {
+            let entry = self.tree_entry_at_row(row)?;
+            let mut own = entry.parent_path.clone();
+            own.push(entry.node.id.clone());
+            let tree = self.tree.as_ref()?;
+            let expanded = tree.expanded.contains(&own);
+            (own, expanded)
+        };
+        if is_expanded {
+            {
+                let tree = self.tree.as_mut()?;
+                tree.expanded.remove(&own_path);
+                tree.rebuild_entries(&view_def_owned);
+            }
+            self.rebuild_table(view_defs);
+            return Some(SubViewMessage::SelectionChanged(None));
+        }
+        self.try_tree_back(view_defs)
+    }
+
+    /// Tree-mode handler for `content.tree_collapse_all` (default `zm`).
+    /// Drops every expanded path so the listing snaps back to the root
+    /// rows. Loaded children stay in `tree.cache`, so reopening a node
+    /// reuses the cached children instead of refetching. Cursor moves
+    /// to the first visible row. Returns `None` on non-tree panes.
+    pub(crate) fn try_tree_collapse_all(
+        &mut self,
+        view_defs: &[ViewDef],
+    ) -> Option<SubViewMessage> {
+        let view_def_owned = self.view_def(view_defs)?.clone();
+        {
+            let tree = self.tree.as_mut()?;
+            if tree.expanded.is_empty() {
+                return Some(SubViewMessage::SelectionChanged(None));
+            }
+            tree.expanded.clear();
+            tree.rebuild_entries(&view_def_owned);
+        }
+        self.rebuild_table(view_defs);
+        self.table.set_selected(0);
+        Some(SubViewMessage::SelectionChanged(None))
+    }
+
+    /// Tree-mode handler for `content.back`. Collapses the cursor's
+    /// parent path and moves the cursor up to that parent row. Depth-0
+    /// rows (no parent in the tree) return `None` so the caller can
+    /// fall through to `SubViewMessage::Unhandled` instead of beeping.
+    fn try_tree_back(&mut self, view_defs: &[ViewDef]) -> Option<SubViewMessage> {
+        let view_def_owned = self.view_def(view_defs)?.clone();
+        let row = self.table.selected_row();
+        let parent_path: Vec<String>;
+        let parent_parent_path: Vec<String>;
+        let parent_node_id: String;
+        {
+            let entry = self.tree_entry_at_row(row)?;
+            if entry.parent_path.is_empty() {
+                return None;
+            }
+            parent_path = entry.parent_path.clone();
+            let (last, head) = parent_path.split_last()?;
+            parent_node_id = last.clone();
+            parent_parent_path = head.to_vec();
+        }
+        {
+            let tree = self.tree.as_mut()?;
+            tree.expanded.remove(&parent_path);
+            tree.rebuild_entries(&view_def_owned);
+        }
+        // Position of the parent in the (post-collapse) entry list; the
+        // row index we feed `set_selected` must come through the
+        // visible-indices map so an active fuzzy filter doesn't desync
+        // the cursor.
+        let new_eidx = self.tree.as_ref().and_then(|t| {
+            t.entries
+                .iter()
+                .position(|e| e.parent_path == parent_parent_path && e.node.id == parent_node_id)
+        })?;
+        self.rebuild_table(view_defs);
+        let new_row = self.tree_visible_indices.iter().position(|&i| i == new_eidx)?;
+        self.table.set_selected(new_row);
+        Some(SubViewMessage::SelectionChanged(None))
+    }
+
+    /// Move the row cursor and, when in tree mode, refresh the table
+    /// if the active depth changed (header / column set switches with
+    /// cursor level). Flat-list panes skip the rebuild.
+    fn nav_and_refresh(&mut self, cmd: Cmd, view_defs: &[ViewDef]) {
+        let before = self.tree_active_depth();
+        self.table.handle_nav(cmd);
+        if self.tree.is_some() && self.tree_active_depth() != before {
+            self.rebuild_table(view_defs);
+        }
+    }
+
+    /// Build the table rows for the tree-mode pane. The column set comes
+    /// from the cursor row's level (resolved via its `node_type_chain`,
+    /// so the header switches branch-correctly as the user moves across
+    /// levels). Each entry contributes one row:
+    /// - the **designated label column** — the cursor level's
+    ///   `tree_label` key, a fixed slot of the active column set — gets
+    ///   `<indent><glyph> <label>` for *every* row, regardless of that
+    ///   row's own level. This is the structural fix for the recurring
+    ///   blank-label bug: the label column is chosen once from the same
+    ///   level that supplies the columns, so it is always present in the
+    ///   set. It no longer requires `tree_label` keys to align across
+    ///   levels (the old, fragile convention).
+    /// - other cells hold the entry's `column_value` only when the entry
+    ///   sits on the cursor's exact level (same `node_type_chain`) — rows
+    ///   on other levels show only their label cell, everything else
+    ///   blank, since the column set isn't theirs.
+    fn build_tree_data_rows(
+        &self,
+        columns: &[ColumnDef],
+        view_defs: &[ViewDef],
+    ) -> Vec<TRow<u32>> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Vec::new();
+        };
+        // Label column + active level resolved once from the cursor row's
+        // chain — never per-entry by depth (which can't tell branches
+        // apart and blanks rows whose depth maps to a different type).
+        let label_col_key = self
+            .cursor_tree_level(view_defs)
+            .map(|l| l.tree_label.to_string());
+        let cursor_chain = self.cursor_node_type_chain();
+        self.tree_visible_indices
+            .iter()
+            .enumerate()
+            .filter_map(|(row_idx, &eidx)| {
+                let entry = tree.entries.get(eidx)?;
+                let mut row = TRow::new(row_idx as u32);
+                for col in columns {
+                    let is_label_cell = label_col_key.as_deref() == Some(col.key.as_str());
+                    let value: String = if is_label_cell {
+                        let glyph = self
+                            .view_def(view_defs)
+                            .map(|vd| tree_row_glyph(entry, tree, vd))
+                            .unwrap_or("·");
+                        let indent = "  ".repeat(entry.depth);
+                        format!("{indent}{glyph} {}", entry.node.label)
+                    } else if entry.node_type_chain == cursor_chain
+                        && !entry.is_more_placeholder
+                    {
+                        if col.source.as_deref() == Some("has_links") {
+                            if self.item_has_link(&entry.node.id) { "🔗".into() } else { " ".into() }
+                        } else {
+                            column_value(&entry.node, col).to_string()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    row = row.cell(&col.key, value);
+                }
+                Some(row)
+            })
+            .collect()
+    }
+
+    /// Actions registered as YAML keybindings at the active level. In
+    /// tree mode this resolves to the **cursor-depth** level's
+    /// `actions:` list, with globally-scoped action types
+    /// (`fuzzy_filter`, `search`, `text_search`) discovered on other
+    /// chain levels appended so they remain reachable regardless of
+    /// where the cursor sits. Same-key entries at the active level take
+    /// precedence over a duplicate further up/down the chain.
+    fn current_actions<'a>(&'a self, view_defs: &'a [ViewDef]) -> Vec<&'a ActionDef> {
+        if self.tree.is_some() {
+            return self.tree_current_actions(view_defs);
+        }
+        let slice: &[ActionDef] = if let Some(ref child) = self.active_child {
+            &child.actions
+        } else if let Some(vd) = self.view_def(view_defs) {
+            &vd.actions
+        } else {
+            &[]
+        };
+        slice.iter().collect()
+    }
+
+    /// Tree-mode resolution of `current_actions`. Splits into two
+    /// passes: first the cursor-depth level's own actions, then a
+    /// chain-wide sweep for action types the user expects to work
+    /// regardless of cursor depth.
+    fn tree_current_actions<'a>(&'a self, view_defs: &'a [ViewDef]) -> Vec<&'a ActionDef> {
+        let mut out: Vec<&'a ActionDef> = Vec::new();
+        let Some(vd) = self.view_def(view_defs) else {
+            return out;
+        };
+        let active_depth = self.tree_active_depth();
+        // Active level's own actions, resolved via the cursor row's chain
+        // so a multi-branch level dispatches its own actions. When the
+        // tree is empty there is no cursor row (e.g. the initial load
+        // failed, or `manual_connect` hasn't loaded yet) — fall back to
+        // the root (depth-0) level so its actions stay reachable. Without
+        // this the `reload` action vanishes on an empty tree and the user
+        // can't retry a failed load.
+        if let Some(level) = self
+            .cursor_tree_level(view_defs)
+            .or_else(|| tree_level_at_depth(vd, 0))
+        {
+            out.extend(level.actions.iter());
+        }
+        // Pull globally-scoped action types from other chain levels.
+        // Validator already warns about multi-level definition, so a
+        // first-seen wins approach is enough.
+        const GLOBAL: &[&str] = &["fuzzy_filter", "search", "text_search"];
+        for depth in 0..32 {
+            if depth == active_depth {
+                continue;
+            }
+            let Some(level) = tree_level_at_depth(vd, depth) else {
+                break;
+            };
+            for action in level.actions {
+                if !GLOBAL.contains(&action.action_type.as_str()) {
+                    continue;
+                }
+                if out.iter().any(|a| a.key == action.key) {
+                    continue;
+                }
+                out.push(action);
+            }
+        }
+        out
+    }
+
+    fn current_preview_config<'a>(&'a self, view_defs: &'a [ViewDef]) -> Option<&'a PreviewConfig> {
+        if self.tree.is_some() {
+            // Tree mode: preview lives on the cursor-depth level. Depth
+            // 0 has no ChildDef — fall back to the ViewDef's preview.
+            if let Some(child) = self.tree_active_child_def(view_defs) {
+                return child.preview.as_ref();
+            }
+            return self.view_def(view_defs).and_then(|vd| vd.preview.as_ref());
+        }
+        if let Some(ref child) = self.active_child {
+            child.preview.as_ref()
+        } else {
+            self.view_def(view_defs).and_then(|vd| vd.preview.as_ref())
+        }
+    }
+
+    fn current_children<'a>(&'a self, view_defs: &'a [ViewDef]) -> &'a [ChildDef] {
+        if self.tree.is_some() {
+            if let Some(vd) = self.view_def(view_defs) {
+                if let Some(entry) = self.tree_entry_at_row(self.table.selected_row()) {
+                    if let Some(kids) =
+                        tree_level_children_for_chain(vd, &entry.node_type_chain)
+                    {
+                        return kids;
+                    }
+                }
+                return tree_level_children(vd, self.tree_active_depth()).unwrap_or(&[]);
+            }
+            return &[];
+        }
+        if let Some(ref child) = self.active_child {
+            &child.children
+        } else if let Some(vd) = self.view_def(view_defs) {
+            &vd.children
+        } else {
+            &[]
+        }
+    }
+
+    /// In tree mode, the `ChildDef` whose level is the cursor's active
+    /// depth. Depth 0 has no ChildDef (it is the ViewDef) — so this
+    /// returns `None` at root. Outside tree mode it always returns
+    /// `None`; callers should fall through to `active_child`.
+    fn tree_active_child_def<'a>(&self, view_defs: &'a [ViewDef]) -> Option<&'a ChildDef> {
+        let vd = self.view_def(view_defs)?;
+        // Chain-based: the cursor row's own ChildDef (its preview config),
+        // not the first branch's at that depth. Empty chain (root) → None,
+        // matching the old depth-0 behaviour (caller falls back to ViewDef).
+        child_def_for_type_chain(vd, &self.cursor_node_type_chain())
+    }
+
+    pub fn nav_depth(&self) -> usize {
+        self.nav_stack.len()
+    }
+
+    pub fn breadcrumbs(&self) -> Vec<&str> {
+        let mut crumbs: Vec<&str> = self.nav_stack.iter().map(|f| f.label.as_str()).collect();
+        if let Some(ref child) = self.active_child {
+            crumbs.push(&child.name);
+        }
+        crumbs
+    }
+
+    pub fn parent_node_id(&self) -> Option<&str> {
+        self.nav_stack.last().map(|f| f.parent_node_id.as_str())
+    }
+
+    pub fn current_child_node_type(&self) -> Option<&str> {
+        self.active_child.as_ref().map(|c| c.node_type.as_str())
+    }
+
+    /// View-hierarchy node_types from the root ViewDef down to the
+    /// currently drilled-into ChildDef. Used to scope on-disk artefacts
+    /// (e.g. the `:script` menu directory) to the *pane path* rather
+    /// than the item-type currently selected — so the menu stays stable
+    /// when a pane mixes node types (e.g. Taiga items mixing issues /
+    /// userstories / tasks under a single `taiga:item` view).
+    /// Node-type chain for the row currently under the cursor (or for
+    /// the current level when in flat mode without a selection). Tree
+    /// mode returns the selected entry's `node_type_chain` directly;
+    /// flat mode falls back to [`Self::view_path_node_types`] which
+    /// covers root → active_child. Used by the per-node shortcut
+    /// resolver (`app::node_actions::resolve_shortcut`).
+    pub fn selected_node_type_chain(&self, view_defs: &[ViewDef]) -> Vec<String> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            if let Some(entry) = self.tree_entry_at_row(row) {
+                return entry.node_type_chain.clone();
+            }
+            return Vec::new();
+        }
+        self.view_path_node_types(view_defs)
+    }
+
+    pub fn view_path_node_types(&self, view_defs: &[ViewDef]) -> Vec<String> {
+        let mut path: Vec<String> = Vec::new();
+        if let Some(vd) = self.view_def(view_defs) {
+            path.push(vd.node_type.clone());
+        }
+        // Frame 0 captures the pre-first-drill state (active_child = None);
+        // every later frame holds the active_child that *was* current
+        // before drilling deeper, i.e. the prior level's identity.
+        for frame in self.nav_stack.iter().skip(1) {
+            if let Some(ac) = &frame.active_child {
+                path.push(ac.node_type.clone());
+            }
+        }
+        if let Some(ac) = &self.active_child {
+            path.push(ac.node_type.clone());
+        }
+        path
+    }
+
+    pub fn selected_item_id(&self) -> Option<&str> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            if entry.is_more_placeholder {
+                return None;
+            }
+            return Some(entry.node.id.as_str());
+        }
+        let row = self.table.selected_row();
+        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        self.items.get(item_idx).map(|item| item.id.as_str())
+    }
+
+    /// CF-11: companion of [`Self::selected_item_id`] returning the row's
+    /// human-readable label (the `NodeSummary.label` set by the adapter).
+    /// Used by generic confirm popups where the id alone (e.g. a numeric
+    /// Confluence page id) isn't recognisable to the user.
+    pub fn selected_item_label(&self) -> Option<&str> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            if entry.is_more_placeholder {
+                return None;
+            }
+            return Some(entry.node.label.as_str());
+        }
+        let row = self.table.selected_row();
+        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        self.items.get(item_idx).map(|item| item.label.as_str())
+    }
+
+    /// Position the table cursor on the row whose node id matches
+    /// `node_id`. Works in flat and tree mode and honours an active
+    /// fuzzy filter via `filtered_indices` / `tree_visible_indices`.
+    /// Returns `true` if a matching visible row was found.
+    pub fn focus_item_by_id(&mut self, node_id: &str) -> bool {
+        if self.tree.is_some() {
+            for row in 0..self.table.row_count() {
+                if let Some(entry) = self.tree_entry_at_row(row) {
+                    if !entry.is_more_placeholder && entry.node.id == node_id {
+                        self.table.set_selected(row);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        if self.filtered_indices.is_empty() {
+            if let Some(idx) = self.items.iter().position(|i| i.id == node_id) {
+                self.table.set_selected(idx);
+                return true;
+            }
+            return false;
+        }
+        for (row, item_idx) in self.filtered_indices.iter().enumerate() {
+            if self.items.get(*item_idx).map(|i| i.id.as_str()) == Some(node_id) {
+                self.table.set_selected(row);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Resolve the `node_id` an adapter-routed action should target.
+    fn resolve_action_node_id(&self, action: &ActionDef) -> Option<String> {
+        let row = self.table.selected_row();
+        if self.tree.is_some() {
+            let entry = self.tree_entry_at_row(row)?;
+            if entry.is_more_placeholder {
+                return None;
+            }
+            if let Some(key) = action.node_id_from.as_deref() {
+                let value = entry.node.metadata.fields.iter()
+                    .find(|f| f.key == key)
+                    .map(|f| f.value.as_str())
+                    .unwrap_or("");
+                if value.is_empty() {
+                    return None;
+                }
+                return Some(value.to_string());
+            }
+            return Some(entry.node.id.clone());
+        }
+        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        let item = self.items.get(item_idx)?;
+        if let Some(key) = action.node_id_from.as_deref() {
+            let value = item.metadata.fields.iter()
+                .find(|f| f.key == key)
+                .map(|f| f.value.as_str())
+                .unwrap_or("");
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+        Some(item.id.clone())
+    }
+
+    // ── Navigation (drill-down / back) ──────────────────────────────
+
+    /// Prepare drill-down: snapshot current level, set child config.
+    /// Returns the child_node_type so the caller can spawn the load.
+    fn drill_down_prepare(&mut self, item_id: &str, item_label: &str, child_def: &ChildDef, view_defs: &[ViewDef]) -> String {
+        // Tree mode terminates at any child without `tree_label`. Drop the
+        // tree state into the frame so the leaf level renders flat, then
+        // restore it on nav_back. For flat-mode panes this is a no-op
+        // (`self.tree` is already None).
+        let stashed_tree = if child_def.tree_label.is_none() {
+            self.tree.take()
+        } else {
+            None
+        };
+        let frame = NavFrame {
+            label: item_label.to_string(),
+            parent_node_id: item_id.to_string(),
+            items: std::mem::take(&mut self.items),
+            selected_row: self.table.selected_row(),
+            selected_column: self.table.selected_column(),
+            active_child: self.active_child.take(),
+            preview_open: self.preview_open,
+            preview_key: std::mem::take(&mut self.preview_key),
+            preview_description: std::mem::take(&mut self.preview_description),
+            preview_scroll: self.preview_scroll,
+            preview_markdown: self.preview_markdown,
+            tree: stashed_tree,
+        };
+        self.nav_stack.push(frame);
+
+        let node_type_id = child_def.node_type.clone();
+        self.active_child = Some(child_def.clone());
+
+        self.preview_open = false;
+        self.preview_scroll = 0;
+        self.preview_loading = false;
+        self.items.clear();
+        self.table.set_selected(0);
+        // Initialize column cursor based on the new level's opt-in.
+        self.table.set_selected_column(if child_def.column_cursor {
+            Some(0)
+        } else {
+            None
+        });
+        self.rebuild_table(view_defs);
+
+        node_type_id
+    }
+
+    /// Hot-replace path for coupled split-panes: drop any nav stack, paste
+    /// in the source pane's current items/active_child/selected_row so
+    /// `nav_back` from inside the child returns to the same parent-level
+    /// snapshot the source is showing now, then drill into the new
+    /// `child_def` target. The result is identical to spawning a fresh
+    /// coupled child, except the [`PaneId`] is preserved.
+    fn coupled_replace_with_source(
+        &mut self,
+        source_items: Vec<NodeSummary>,
+        source_selected_row: usize,
+        source_active_child: Option<ChildDef>,
+        item_id: &str,
+        item_label: &str,
+        child_def: &ChildDef,
+        view_defs: &[ViewDef],
+    ) -> String {
+        self.nav_stack.clear();
+        self.items = source_items;
+        self.active_child = source_active_child;
+        self.table.set_selected(source_selected_row);
+        self.preview_open = false;
+        self.preview_description.clear();
+        self.preview_key.clear();
+        self.preview_scroll = 0;
+        self.preview_loading = false;
+        self.drill_down_prepare(item_id, item_label, child_def, view_defs)
+    }
+
+    fn nav_back(&mut self, view_defs: &[ViewDef]) -> bool {
+        let Some(frame) = self.nav_stack.pop() else {
+            return false;
+        };
+
+        self.items = frame.items;
+        self.active_child = frame.active_child;
+        self.preview_open = frame.preview_open;
+        self.preview_key = frame.preview_key;
+        self.preview_description = frame.preview_description;
+        self.preview_scroll = frame.preview_scroll;
+        self.preview_markdown = frame.preview_markdown;
+        self.preview_loading = false;
+        // Restore the tree state stashed when we drilled into a non-tree
+        // child. `rebuild_table` below re-runs through the tree path
+        // and refreshes `tree_visible_indices` against the restored entries.
+        if frame.tree.is_some() {
+            self.tree = frame.tree;
+        }
+
+        self.rebuild_table(view_defs);
+        self.table.set_selected(frame.selected_row);
+        self.table.set_selected_column(frame.selected_column);
+
+        true
+    }
+
+    // ── Preview ──────────────────────────────────────────────────────
+
+    pub fn set_preview_description(&mut self, key: &str, description: String) {
+        if self.preview_key == key {
+            self.preview_description = description;
+            self.preview_loading = false;
+            self.preview_scroll = 0;
+        }
+    }
+
+    /// If a new preview should be fetched for the current selection,
+    /// return the parameters and update the cache; otherwise None.
+    /// `cache_key` is the row's own id (matches `preview_key` for the
+    /// reply); `node_id` is what the adapter looks up — they differ
+    /// when `preview.node_id_from` redirects to a linked node.
+    /// `action_id` carries `preview.action` so the App can route
+    /// through `Node::prepare` instead of `content().read_text()`.
+    pub fn update_preview_for_selection(
+        &mut self,
+        view_defs: &[ViewDef],
+    ) -> Option<PreviewFetchParams> {
+        if !self.preview_open {
+            return None;
+        }
+        let row_id = self.selected_item_id().map(|s| s.to_string())?;
+        if row_id == self.preview_key {
+            return None;
+        }
+
+        let cfg = self.current_preview_config(view_defs);
+        let action_id = cfg.and_then(|c| c.action.clone());
+        let node_id_from = cfg.and_then(|c| c.node_id_from.clone());
+        self.preview_markdown = cfg.map(|c| c.markdown).unwrap_or(false);
+
+        let node_id = if let Some(key) = node_id_from {
+            let row = self.table.selected_row();
+            let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+            let value = self
+                .items
+                .get(item_idx)
+                .and_then(|item| {
+                    item.metadata
+                        .fields
+                        .iter()
+                        .find(|f| f.key == key)
+                        .map(|f| f.value.clone())
+                })
+                .filter(|v| !v.is_empty());
+            match value {
+                Some(v) => v,
+                None => return None,
+            }
+        } else {
+            row_id.clone()
+        };
+
+        self.preview_key = row_id.clone();
+        self.preview_description.clear();
+        self.preview_scroll = 0;
+        self.preview_loading = true;
+        Some(PreviewFetchParams { cache_key: row_id, node_id, action_id })
+    }
+
+    fn render_breadcrumbs(&self, frame: &mut Frame, area: Rect, view_defs: &[ViewDef]) {
+        let t = &*self.theme;
+        let mut spans = Vec::new();
+
+        let root_label = self.view_def(view_defs).map(|v| v.name.as_str()).unwrap_or("root");
+        spans.push(Span::styled(root_label, Style::default().fg(t.accent())));
+
+        for f in &self.nav_stack {
+            spans.push(Span::styled(" › ", Style::default().fg(t.text_dim())));
+            spans.push(Span::styled(&f.label, Style::default().fg(t.text_med())));
+        }
+
+        if let Some(ref child) = self.active_child {
+            spans.push(Span::styled(" › ", Style::default().fg(t.text_dim())));
+            spans.push(Span::styled(&child.name, Style::default().fg(t.text_high())));
+        }
+
+        let line = Line::from(spans);
+        let paragraph = Paragraph::new(line).style(Style::default().bg(t.surface()));
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+        // Track inner height (without the two border rows) so ctrl+u/d
+        // can scroll by the actual visible half-page.
+        self.preview_visible_height = area.height.saturating_sub(2);
+
+        let t = &*self.theme;
+        let title = if self.preview_loading {
+            format!(" {} (loading…) ", self.preview_key)
+        } else {
+            format!(" {} ", self.preview_key)
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.text_dim()))
+            .title(Span::styled(title, Style::default().fg(t.accent())));
+
+        if self.preview_markdown {
+            // Markdown preview: the body is already soft-wrapped to the inner
+            // width by the renderer, so no Paragraph wrap (which would re-wrap
+            // and double-count). Reuses the Phase-1 render module.
+            let inner_w = (area.width.saturating_sub(2) as usize).max(1);
+            let lines = render_markdown_lines(&self.preview_description, inner_w, t);
+            let paragraph = Paragraph::new(lines)
+                .block(block)
+                .scroll((self.preview_scroll, 0));
+            frame.render_widget(paragraph, area);
+            return;
+        }
+
+        let text: Vec<Line> = self
+            .preview_description
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(t.text_med()))))
+            .collect();
+
+        let paragraph = Paragraph::new(text)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((self.preview_scroll, 0));
+
+        frame.render_widget(paragraph, area);
+    }
+
+    /// Render the pane's table and optional preview within `area`.
+    /// Returns the `Rect` actually occupied by the table — callers can
+    /// use that to position the sort-header overlay on the focused pane.
+    fn render_table_and_preview(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+        if self.preview_open {
+            let chunks = Layout::horizontal([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(area);
+            self.table.view(frame, chunks[0]);
+            self.render_preview(frame, chunks[1]);
+            chunks[0]
+        } else {
+            self.table.view(frame, area);
+            area
+        }
+    }
+
+    fn render_page_footer(&self, frame: &mut Frame, area: Rect) {
+        let Some(info) = self.last_page_info else {
+            return;
+        };
+        let text = format_page_footer(info, &self.last_applied_sort);
+        let style = Style::default().fg(self.theme.text_dim()).bg(self.theme.bg());
+        let paragraph = Paragraph::new(Line::from(Span::styled(text, style)));
+        frame.render_widget(paragraph, area);
+    }
+
+    // ── Loading ──────────────────────────────────────────────────────
+
+    pub fn root_load_request(&self, view_defs: &[ViewDef]) -> Option<LoadRequest> {
+        let view_def = self.view_def(view_defs)?;
+        let query = self
+            .active_query
+            .clone()
+            .or_else(|| view_def.query.as_ref().and_then(|q| q.default.clone()));
+        let page = self.current_page.or_else(|| {
+            view_def.pagination.as_ref().and_then(|p| match p.mode {
+                PaginationMode::Server | PaginationMode::Cursor => Some(PageRequest {
+                    offset: 0,
+                    limit: p.page_size.unwrap_or(0),
+                }),
+                PaginationMode::All => None,
+            })
+        });
+        Some(LoadRequest {
+            node_type_id: view_def.node_type.clone(),
+            query,
+            sort: self.current_sort.clone(),
+            page,
+            vars: self.active_query_vars.clone(),
+        })
+    }
+
+    pub fn current_sort(&self) -> &[SortKey] {
+        &self.current_sort
+    }
+
+    pub fn set_current_sort(&mut self, sort: Vec<SortKey>) -> bool {
+        if self.current_sort == sort {
+            return false;
+        }
+        self.current_sort = sort;
+        // Changing sort resets the page offset (a different ordering
+        // makes the prior offset meaningless).
+        self.current_page = self
+            .current_page
+            .map(|p| PageRequest { offset: 0, limit: p.limit });
+        true
+    }
+
+    pub fn last_applied_sort(&self) -> &[SortKey] {
+        &self.last_applied_sort
+    }
+
+    pub fn set_current_page(&mut self, page: Option<PageRequest>) -> bool {
+        if self.current_page == page {
+            return false;
+        }
+        self.current_page = page;
+        true
+    }
+
+    pub fn current_page(&self) -> Option<PageRequest> {
+        self.current_page
+    }
+
+    /// Effective pagination mode for the current drill level. Used by
+    /// the custom-query lifecycle (CP-5) to decide whether `>` / `<`
+    /// re-issue a LIMIT/OFFSET query or step a server-side cursor.
+    /// Falls back to [`PaginationMode::Server`] when no `pagination`
+    /// block is configured — matches the legacy default.
+    pub fn resolve_pagination_mode(&self, view_defs: &[ViewDef]) -> PaginationMode {
+        if let Some(child) = self.active_child.as_ref() {
+            if let Some(p) = child.pagination.as_ref() {
+                return p.mode;
+            }
+        }
+        if let Some(vd) = self.view_def(view_defs) {
+            if let Some(p) = vd.pagination.as_ref() {
+                return p.mode;
+            }
+        }
+        PaginationMode::Server
+    }
+
+    /// What page to ask the adapter for when (re)loading a drill-down
+    /// level. Falls back to the active child's pagination config and
+    /// finally to `None`, letting the caller pick a default.
+    pub fn drill_load_page(&self) -> Option<PageRequest> {
+        if let Some(p) = self.current_page {
+            return Some(p);
+        }
+        let pagination = self.active_child.as_ref().and_then(|c| c.pagination.as_ref())?;
+        match pagination.mode {
+            PaginationMode::Server | PaginationMode::Cursor => Some(PageRequest {
+                offset: 0,
+                limit: pagination.page_size.unwrap_or(0),
+            }),
+            PaginationMode::All => None,
+        }
+    }
+
+    pub fn last_page_info(&self) -> Option<PageInfo> {
+        self.last_page_info
+    }
+
+    pub fn next_page_request(&self) -> Option<PageRequest> {
+        let info = self.last_page_info?;
+        if !info.has_next || info.limit == 0 {
+            return None;
+        }
+        let next_offset = (info.offset as u64).saturating_add(info.limit as u64);
+        Some(PageRequest {
+            offset: u32::try_from(next_offset).unwrap_or(u32::MAX),
+            limit: info.limit,
+        })
+    }
+
+    pub fn prev_page_request(&self) -> Option<PageRequest> {
+        let info = self.last_page_info?;
+        if !info.has_prev || info.limit == 0 {
+            return None;
+        }
+        let prev_offset = info.offset.saturating_sub(info.limit);
+        Some(PageRequest { offset: prev_offset, limit: info.limit })
+    }
+
+    /// Effective binding for `action` at the current drill level.
+    /// Returns `None` when the level explicitly disables the binding
+    /// (`keybindings: { back: null }`) or when no global default
+    /// exists. Falls back to the global content keybindings when the
+    /// active child has no override entry for `action`.
+    fn level_binding(
+        &self,
+        action: &ContentAction,
+        content_kb: &KeyBindingSection<ContentAction>,
+        view_defs: &[ViewDef],
+    ) -> Option<KeyBinding> {
+        // Tree mode: per-level keybinding overrides live on the
+        // cursor-depth ChildDef. Depth 0 is the ViewDef (no overrides);
+        // fall through to the global content keybindings.
+        if self.tree.is_some() {
+            if let Some(child) = self.tree_active_child_def(view_defs) {
+                if let Some(over) = child.keybindings.get(action) {
+                    return over.clone();
+                }
+            }
+            return content_kb.get(action).cloned();
+        }
+        if let Some(child) = self.active_child.as_ref() {
+            if let Some(over) = child.keybindings.get(action) {
+                return over.clone();
+            }
+        }
+        content_kb.get(action).cloned()
+    }
+
+    fn level_hint_label(
+        &self,
+        action: &ContentAction,
+        content_kb: &KeyBindingSection<ContentAction>,
+        icons: &KeyIconMap,
+        view_defs: &[ViewDef],
+    ) -> Option<String> {
+        self.level_binding(action, content_kb, view_defs)
+            .map(|b| b.hint_label(icons))
+    }
+
+    /// Build the request that re-fetches items at the **current**
+    /// drill level. At root → `SpawnContentLoad` (uses ViewDef). Inside
+    /// a drill → `DrillDown` (uses `active_child` + parent id) so the
+    /// reload doesn't fall back to the root view's `node_type`.
+    fn reload_current_level(&self, view_index: usize, pane_id: PaneId) -> SubViewMessage {
+        match (self.parent_node_id(), self.current_child_node_type()) {
+            (Some(parent_id), Some(child_type)) => {
+                SubViewMessage::Request(ViewRequest::DrillDown {
+                    view_index,
+                    pane_id,
+                    node_id: parent_id.to_string(),
+                    node_label: String::new(),
+                    child_node_type: child_type.to_string(),
+                })
+            }
+            _ => SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id }),
+        }
+    }
+
+    pub fn current_query_text(&self, view_defs: &[ViewDef]) -> String {
+        if let Some(ref q) = self.active_query {
+            return q.clone();
+        }
+        self.default_query_text(view_defs)
+    }
+
+    pub fn default_query_text(&self, view_defs: &[ViewDef]) -> String {
+        self.view_def(view_defs)
+            .and_then(|vd| vd.query.as_ref())
+            .and_then(|q| q.default.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn is_query_editable(&self, view_defs: &[ViewDef]) -> bool {
+        self.view_def(view_defs)
+            .and_then(|vd| vd.query.as_ref())
+            .map(|q| q.editable)
+            .unwrap_or(false)
+    }
+
+    pub fn set_query(&mut self, query: String, name: Option<String>) {
+        self.active_query = Some(query);
+        self.active_query_name = name;
+        self.active_query_vars.clear();
+    }
+
+    /// Variant of [`set_query`] that also stores variable bindings to
+    /// substitute into the raw query via `ContentAdapter::render_query`
+    /// at load time.
+    pub fn set_query_with_vars(
+        &mut self,
+        query: String,
+        name: Option<String>,
+        vars: std::collections::HashMap<String, String>,
+    ) {
+        self.active_query = Some(query);
+        self.active_query_name = name;
+        self.active_query_vars = vars;
+    }
+
+    pub fn active_query_vars(&self) -> &std::collections::HashMap<String, String> {
+        &self.active_query_vars
+    }
+
+    /// Apply loaded items.
+    pub fn set_items(
+        &mut self,
+        items: Vec<NodeSummary>,
+        applied_sort: Vec<SortKey>,
+        page: Option<PageInfo>,
+        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        error: Option<String>,
+        view_defs: &[ViewDef],
+    ) {
+        let was_loaded = self.loaded;
+        self.fetch_error = error;
+        // Final result lands — clear the in-flight retry banner. On
+        // success the pane shows fresh data; on exhausted retries the
+        // `fetch_error` we just set becomes the sticky banner instead.
+        self.retry_state = None;
+        self.items = items;
+        self.last_applied_sort = applied_sort;
+        self.last_page_info = page;
+        self.last_sortable_columns = sortable_columns;
+        self.loaded = true;
+        // Tree mode: the freshly-loaded list is the depth-0 children.
+        // Feed them into the cache + re-flatten so the renderer has
+        // entries to walk. (Drill-down panes use the same view_def, so
+        // tree mode is only active at the root — `active_child` is
+        // unused while `tree.is_some()`.)
+        if let Some(tree) = self.tree.as_mut() {
+            // Root-level pagination via the tree placeholder is not yet
+            // wired (Phase 5 covers child-level pagination only). The
+            // flat-list NextPage/PrevPage keys still page root.
+            tree.set_cached_children(Vec::new(), self.items.clone(), None);
+            if let Some(vd) = view_defs.get(self.view_def_index) {
+                tree.rebuild_entries(vd);
+            }
+        }
+        // Regular list() results clear any custom-query state — page
+        // navigation now goes through the normal reload path again.
+        // Callers that want the pane to stay in custom-query mode
+        // (i.e. ContentView::apply_custom_query_result) restore the
+        // state after this call.
+        self.active_custom_query = None;
+        // First-time load at root level: apply the top-level ViewDef's
+        // `column_cursor` opt-in. Drill-down levels are initialized from
+        // `drill_down_prepare`. Subsequent reloads (page change, refresh)
+        // leave the cursor alone — the user's column position persists.
+        if !was_loaded
+            && self.nav_stack.is_empty()
+            && self.active_child.is_none()
+            && self.table.selected_column().is_none()
+        {
+            if let Some(vd) = self.view_def(view_defs) {
+                if vd.column_cursor {
+                    self.table.set_selected_column(Some(0));
+                }
+            }
+        }
+        self.rebuild_table(view_defs);
+    }
+
+    pub fn rebuild_table(&mut self, view_defs: &[ViewDef]) {
+        self.rebuild_table_with(view_defs, &crate::components::sort_header::HeaderOverlay::None);
+    }
+
+    /// Variant that takes the active header overlay so the sort-mode
+    /// picker (column / direction) renders correctly. The simple
+    /// [`rebuild_table`] is kept for callers that don't have an
+    /// overlay handy (no overlay = no picker visible).
+    fn rebuild_table_with(
+        &mut self,
+        view_defs: &[ViewDef],
+        header_overlay: &crate::components::sort_header::HeaderOverlay,
+    ) {
+        // Tree mode: refresh visible-indices before borrowing `theme`
+        // immutably — `current_columns` reads them (active depth lookup
+        // goes through the visible map) and the build below needs them
+        // primed too.
+        if self.tree.is_some() {
+            self.refresh_tree_visible_indices(view_defs);
+        }
+        let t = &*self.theme;
+        let columns: Vec<ColumnDef> = self.current_columns(view_defs);
+        if columns.is_empty() {
+            return;
+        }
+
+        // Snapshot the link cache + adapter prefix into a closure so the
+        // flat-mode `map(...)` can stay free of `&self` borrows (it needs
+        // `&mut self.filtered_indices`).
+        let link_refs_snapshot = self.link_refs.clone();
+        let link_prefix = self.link_node_ref_prefix.clone();
+        let has_link_lookup = |item_id: &str| -> bool {
+            let Some(prefix) = link_prefix.as_deref() else {
+                return false;
+            };
+            link_refs_snapshot.contains(&format!("{prefix}/{item_id}"))
+        };
+
+        let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
+
+        let mut strategies = std::collections::HashMap::new();
+        for col in &columns {
+            let strategy = parse_sizing(&col.sizing);
+            strategies.insert(TColumnId::new(&col.key), strategy);
+        }
+
+        let config = TableConfig {
+            max_width: 300,
+            separator: "  ".to_string(),
+            sizer: Box::new(MixedColSizer { strategies }),
+        };
+
+        let mut header = TRow::new(0u32).not_selectable();
+        for col in &columns {
+            let label = col.label.as_deref().unwrap_or(&col.key);
+            let label = crate::components::sort_header::header_text(
+                label, &col.key, &self.last_applied_sort, header_overlay,
+            );
+            header = header.cell(&col.key, label);
+        }
+
+        self.filtered_indices.clear();
+        let data_rows: Vec<TRow<u32>> = if self.tree.is_some() {
+            // Tree mode renders from `tree.entries` through
+            // `tree_visible_indices` (refreshed above). Fuzzy filter
+            // only narrows entries at `tree_filter_depth`; `/`-search
+            // steps over the same visible rows.
+            self.build_tree_data_rows(&columns, view_defs)
+        } else {
+            // Fuzzy filter: SkimMatcherV2 (same matcher as the Tasks Tree).
+            // The pattern is split on whitespace — every token must match
+            // (AND), each independently fuzzy. Without this, the literal
+            // space in "foo bar" would have to appear in the haystack.
+            // Configured fields are joined with spaces so a single token
+            // can still span across fields.
+            let filter = self.table.filter_text.clone();
+            let filter_fields = &self.fuzzy_filter_fields;
+            let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+            self.items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    if filter.is_empty() {
+                        return true;
+                    }
+                    let haystack = if filter_fields.is_empty() {
+                        let mut s = item.label.clone();
+                        for f in &item.metadata.fields {
+                            s.push(' ');
+                            s.push_str(&f.value);
+                        }
+                        s
+                    } else {
+                        let mut s = String::new();
+                        for key in filter_fields {
+                            let value = columns.iter()
+                                .find(|c| c.key == *key)
+                                .map(|c| column_value(item, c))
+                                .unwrap_or_else(|| {
+                                    if key == "label" {
+                                        &item.label
+                                    } else {
+                                        item.metadata.fields.iter()
+                                            .find(|f| f.key == *key)
+                                            .map(|f| f.value.as_str())
+                                            .unwrap_or("")
+                                    }
+                                });
+                            if !s.is_empty() {
+                                s.push(' ');
+                            }
+                            s.push_str(value);
+                        }
+                        s
+                    };
+                    use fuzzy_matcher::FuzzyMatcher;
+                    let tokens: Vec<&str> = filter.split_whitespace().collect();
+                    if tokens.is_empty() {
+                        true
+                    } else {
+                        tokens
+                            .iter()
+                            .all(|tok| matcher.fuzzy_match(&haystack, tok).is_some())
+                    }
+                })
+                .enumerate()
+                .map(|(row_idx, (item_idx, item))| {
+                    self.filtered_indices.push(item_idx);
+                    let mut row = TRow::new(row_idx as u32);
+                    for col in &columns {
+                        if col.source.as_deref() == Some("has_links") {
+                            let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
+                            row = row.cell(&col.key, icon);
+                        } else {
+                            let value = column_value(item, col);
+                            row = row.cell(&col.key, value);
+                        }
+                    }
+                    row
+                })
+                .collect()
+        };
+
+        self.last_column_keys = columns.iter().map(|c| c.key.clone()).collect();
+
+        // Apply the active level's scroll mode before set_data: set_data →
+        // set_rows consults the flag to preserve a line-wise scroll position.
+        self.table.set_smooth_scroll(self.current_smooth_scroll(view_defs));
+
+        // Multi-line (chat) layout: render each row as a stack of physical
+        // lines per `row_layout` instead of one table row. No column header,
+        // and the column cursor / horizontal scroll are unused here.
+        if let Some(layout) = self.current_row_layout(view_defs) {
+            let (rows, style_map) =
+                build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, t);
+            self.last_col_widths = Vec::new();
+            self.table.set_data(
+                rows,
+                vec![],
+                vec![],
+                vec![],
+                ColumnStyles::default(),
+                build_content_table_style(t),
+                style_map,
+                "  ",
+            );
+            return;
+        }
+
+        let computed = compute_table(&data_rows, &config, &col_ids, Some(&header));
+        self.last_col_widths = computed.col_widths.clone();
+
+        let computed_header = computed.header.map(|h| {
+            let cells: Vec<TableWidgetCell> = h.cells.into_iter().enumerate().map(|(i, fitted)| {
+                let key = columns.get(i).map(|c| c.key.as_str()).unwrap_or("");
+                crate::components::sort_header::header_cell(&fitted, key, header_overlay)
+            }).collect();
+            TableWidgetRow::new(cells).not_selectable()
+        });
+
+        let widget_rows: Vec<TableWidgetRow> = computed
+            .rows
+            .into_iter()
+            .map(|cr| {
+                let cells: Vec<TableWidgetCell> =
+                    cr.cells.into_iter().map(TableWidgetCell::plain).collect();
+                TableWidgetRow::new(cells)
+            })
+            .collect();
+
+        let col_style_list: Vec<Style> = columns
+            .iter()
+            .map(|col| {
+                let color = col
+                    .style
+                    .as_deref()
+                    .map(|s| resolve_theme_color(t, s))
+                    .unwrap_or(t.text_med());
+                Style::default().fg(color)
+            })
+            .collect();
+
+        let table_style = build_content_table_style(t);
+
+        let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
+        // Slot 0 (DIM_STYLE_ID) holds the dim color for sort-mode overlay.
+        let style_map = StyleMap::new(vec![Style::default().fg(t.text_dim())]);
+        self.table.set_data(
+            widget_rows,
+            vec![],
+            headers,
+            vec![],
+            ColumnStyles::new(col_style_list),
+            table_style,
+            style_map,
+            "  ",
+        );
+    }
+
+    // ── Bar hints ────────────────────────────────────────────────────
+
+    pub fn action_bar_hints(
+        &self,
+        view_defs: &[ViewDef],
+        query_menu_key: Option<&str>,
+        content_kb: &KeyBindingSection<ContentAction>,
+        key_icons: &KeyIconMap,
+        adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
+    ) -> Vec<BarHint> {
+        let mut hints = Vec::new();
+        for action in self.current_actions(view_defs) {
+            if action.shows_in_action_bar() {
+                hints.push((action.key.clone(), action.name.clone()));
+            }
+        }
+        // SH: YAML `shortcuts:` entries whose adapter action declares
+        // `placement: ActionBar`. Unknown adapter or unknown
+        // node_type → drop silently. Deduplicate against the
+        // `actions:`-derived entries above to avoid double-display
+        // when the user binds both `actions:` and `shortcuts:` to the
+        // same key (rare but possible).
+        for (key, label, placement) in self.collect_shortcut_hints(view_defs, adapter) {
+            if placement != not_yet_done_content::HintPlacement::ActionBar {
+                continue;
+            }
+            if hints.iter().any(|(k, _)| k == &key) {
+                continue;
+            }
+            hints.push((key, label));
+        }
+        if self.nav_stack.is_empty() {
+            if let Some(mk) = query_menu_key {
+                if !hints.iter().any(|(k, _)| k == mk) {
+                    hints.push((mk.to_string(), "queries".into()));
+                }
+            }
+        }
+        if self.nav_stack.is_empty() && self.is_query_editable(view_defs) {
+            if !hints.iter().any(|(_, v)| v == "edit query") {
+                hints.push((
+                    content_kb.hint_label(&ContentAction::EditQuery, key_icons),
+                    "edit query".into(),
+                ));
+            }
+        }
+        hints
+    }
+
+    pub fn status_bar_hints(
+        &self,
+        view_defs: &[ViewDef],
+        content_kb: &KeyBindingSection<ContentAction>,
+        key_icons: &KeyIconMap,
+        adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
+    ) -> Vec<BarHint> {
+        let mut hints = Vec::new();
+        // CT-8: persistent tree-find status. Placed first so the
+        // user sees it on the leftmost slot — once you've kicked off
+        // a tree search the only useful action keys are n/N
+        // anyway. Drops back to default hints when CT-9 (Esc /
+        // reload / new search) clears the cache.
+        if let Some(state) = self.tree_find.as_ref() {
+            let body = if state.loading {
+                format!("Tree find \"{}\": loading…", state.query)
+            } else if state.hits.is_empty() {
+                format!("Tree find \"{}\": no matches", state.query)
+            } else {
+                let suffix = if state.truncated { ", truncated" } else { "" };
+                format!(
+                    "Tree find \"{}\": {}/{}{}",
+                    state.query,
+                    state.current + 1,
+                    state.hits.len(),
+                    suffix,
+                )
+            };
+            // Use the configured search-next/prev keys so the hint
+            // matches the user's actual bindings (they'd be n/N by
+            // default, but a `search.next_key` override in YAML
+            // would surface here too).
+            let keys = format!("{}/{}", self.search_next_key, self.search_prev_key);
+            hints.push((keys, body));
+        }
+        if !self.nav_stack.is_empty() {
+            if let Some(label) =
+                self.level_hint_label(&ContentAction::Back, content_kb, key_icons, view_defs)
+            {
+                hints.push((label, "back".into()));
+            }
+        }
+        for action in self.current_actions(view_defs) {
+            if !action.shows_in_action_bar() {
+                hints.push((action.key.clone(), action.name.clone()));
+            }
+        }
+        // SH: YAML `shortcuts:` entries whose adapter action declares
+        // `placement: StatusBar`. Mirror of the action-bar branch
+        // above, with the same dedup-against-existing-key guard.
+        for (key, label, placement) in self.collect_shortcut_hints(view_defs, adapter) {
+            if placement != not_yet_done_content::HintPlacement::StatusBar {
+                continue;
+            }
+            if hints.iter().any(|(k, _)| k == &key) {
+                continue;
+            }
+            hints.push((key, label));
+        }
+        if let Some(preview) = self.current_preview_config(view_defs) {
+            if let Some(ref kb) = preview.keybinding {
+                hints.push((kb.clone(), "preview".into()));
+            }
+        }
+        if !self.current_children(view_defs).is_empty() {
+            if let Some(label) =
+                self.level_hint_label(&ContentAction::Open, content_kb, key_icons, view_defs)
+            {
+                hints.push((label, "open".into()));
+            }
+        }
+        if let Some(info) = self.last_page_info {
+            if info.has_prev {
+                if let Some(label) = self.level_hint_label(
+                    &ContentAction::PrevPage,
+                    content_kb,
+                    key_icons,
+                    view_defs,
+                ) {
+                    hints.push((label, "prev page".into()));
+                }
+            }
+            if info.has_next {
+                if let Some(label) = self.level_hint_label(
+                    &ContentAction::NextPage,
+                    content_kb,
+                    key_icons,
+                    view_defs,
+                ) {
+                    hints.push((label, "next page".into()));
+                }
+            }
+        }
+        hints
+    }
+
+    // ── Action-chain entry points ────────────────────────────────────
+    // Phase-2 chains call into these methods directly instead of going
+    // through the key-binding match in [`handle_key`]. They mirror the
+    // semantics of the Open/Back/NextPage/PrevPage arms there but never
+    // consult any keymap — the caller has already decided which action to
+    // run. Each returns the same kind of [`SubViewMessage`] the key path
+    // produces so the App-side handler is shared.
+
+    pub(crate) fn try_drill_open(&self, view_defs: &[ViewDef]) -> SubViewMessage {
+        let children = self.current_children(view_defs).to_vec();
+        if children.is_empty() {
+            return SubViewMessage::Unhandled;
+        }
+        let row = self.table.selected_row();
+        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        let Some(item) = self.items.get(item_idx) else {
+            return SubViewMessage::Unhandled;
+        };
+        let id = item.id.clone();
+        let label = item.label.clone();
+        let child_def = children.into_iter().next().unwrap();
+        SubViewMessage::ContentDrill {
+            item_id: id,
+            item_label: label,
+            child_def: Box::new(child_def),
+        }
+    }
+
+    pub(crate) fn try_back(&mut self, view_defs: &[ViewDef]) -> SubViewMessage {
+        if self.tree.is_some() {
+            return self
+                .try_tree_back(view_defs)
+                .unwrap_or(SubViewMessage::Unhandled);
+        }
+        if self.nav_stack.is_empty() {
+            return SubViewMessage::Unhandled;
+        }
+        self.nav_back(view_defs);
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    pub(crate) fn try_next_page(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> SubViewMessage {
+        let Some(req) = self.next_page_request() else {
+            return SubViewMessage::Unhandled;
+        };
+        self.set_current_page(Some(req));
+        if let Some(cq) = self.active_custom_query.clone() {
+            let cursor = match cq.mode {
+                PaginationMode::Cursor => Some(match cq.cursor_id.clone() {
+                    Some(id) => CursorIntent::Continue { cursor_id: id },
+                    None => CursorIntent::Open,
+                }),
+                PaginationMode::Server | PaginationMode::All => None,
+            };
+            return SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+                view_index,
+                pane_id,
+                database: cq.database,
+                query: cq.query,
+                page: req,
+                cursor,
+            });
+        }
+        self.reload_current_level(view_index, pane_id)
+    }
+
+    pub(crate) fn try_prev_page(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> SubViewMessage {
+        let Some(req) = self.prev_page_request() else {
+            return SubViewMessage::Unhandled;
+        };
+        self.set_current_page(Some(req));
+        if let Some(cq) = self.active_custom_query.clone() {
+            // NO SCROLL cursors don't fetch backward — `prev` re-opens
+            // a fresh cursor (= back to page 1). The old cursor leaks
+            // until pane-close cleanup (CP-6); acceptable for the
+            // single-pane case and explicitly documented in the plan.
+            let cursor = match cq.mode {
+                PaginationMode::Cursor => Some(CursorIntent::Open),
+                PaginationMode::Server | PaginationMode::All => None,
+            };
+            return SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+                view_index,
+                pane_id,
+                database: cq.database,
+                query: cq.query,
+                page: req,
+                cursor,
+            });
+        }
+        self.reload_current_level(view_index, pane_id)
+    }
+
+    // ── Key handling ─────────────────────────────────────────────────
+
+    /// Resolve a single-char keypress against the YAML `shortcuts:`
+    /// maps for the selected row's node-type chain (Phase CP-1c). On
+    /// hit, emits a [`ViewRequest::InvokeNodeAction`] so the App can
+    /// drive the async `Node::invoke_action` call. Returns `None` when
+    /// the key has no shortcut binding, no node is selected, or the
+    /// shortcut targets `parent:` but the cursor sits at root.
+    pub(super) fn try_node_action_shortcut(
+        &self,
+        key: &str,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> Option<ViewRequest> {
+        use crate::app::node_actions::{ShortcutTarget, resolve_shortcut};
+        if key.chars().count() != 1 {
+            return None;
+        }
+        let ch = key.chars().next()?;
+        let view_def = self.view_def(view_defs)?;
+        let chain = self.selected_node_type_chain(view_defs);
+        let resolved = resolve_shortcut(view_def, &chain, ch)?;
+        let action_name = resolved.action_name.to_string();
+        let node_id = match resolved.target {
+            ShortcutTarget::Selected => self.selected_item_id()?.to_string(),
+            ShortcutTarget::Parent => self.selected_parent_node_id()?,
+        };
+        Some(ViewRequest::InvokeNodeAction {
+            view_index,
+            pane_id,
+            node_id,
+            action_name,
+        })
+    }
+
+    /// Immediate parent node id of the currently selected row — used
+    /// by `parent:`-prefixed shortcuts. In tree mode this walks the
+    /// selected entry's `parent_path`; in flat mode it returns
+    /// [`Self::parent_node_id`]. Returns `None` at the root level
+    /// (the user is on a row whose container has no addressable id).
+    fn selected_parent_node_id(&self) -> Option<String> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            return entry.parent_path.last().cloned();
+        }
+        self.parent_node_id().map(str::to_string)
+    }
+
+    /// Handle a key press for this pane. Tab-level concerns (subtab
+    /// switch, query menu open, saved-query shortcuts, query popup
+    /// input routing) are handled by [`ContentView::handle_key`] before
+    /// the key reaches here.
+    fn handle_key(
+        &mut self,
+        key: &str,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+        common_kb: &KeyBindingSection<CommonAction>,
+        content_kb: &KeyBindingSection<ContentAction>,
+    ) -> SubViewMessage {
+        // Input-mode intercepts. These are not key bindings in the usual
+        // sense — the active component absorbs every keystroke until it
+        // exits, so they live outside the keymap.
+        if self.table.fuzzy_active {
+            return self.handle_fuzzy_key(key, view_defs);
+        }
+        if self.search.active() {
+            return self.handle_search_key(key, view_index, pane_id, view_defs);
+        }
+
+        // Hardcoded preview-scroll on ctrl+u/d while the preview is open.
+        // Not user-configurable, kept outside the keymap.
+        if self.preview_open && (key == "ctrl+u" || key == "ctrl+d") {
+            let step = (self.preview_visible_height / 2).max(1);
+            let max_scroll = self.preview_description.lines().count().saturating_sub(1) as u16;
+            self.preview_scroll = if key == "ctrl+d" {
+                self.preview_scroll.saturating_add(step).min(max_scroll)
+            } else {
+                self.preview_scroll.saturating_sub(step)
+            };
+            return SubViewMessage::SelectionChanged(None);
+        }
+
+        // Per-node shortcuts (Phase CP-1c). Resolved before the claims
+        // loop so a YAML `shortcuts:` binding wins over any matching
+        // ContentAction / ActionDef key. Only single-char keys are
+        // eligible — modifier-bearing keys (`ctrl+e`) never trigger.
+        if let Some(req) = self.try_node_action_shortcut(key, view_index, pane_id, view_defs) {
+            return SubViewMessage::Request(req);
+        }
+
+        // Build the active claims for this pane state and dispatch.
+        // The same builder feeds the validator (Phase 3); see keymap.rs.
+        let claims = self.build_claims(view_defs, common_kb, content_kb);
+        for claim in &claims.claims {
+            if !claim.key.matches(key) {
+                continue;
+            }
+            if let Some(msg) =
+                self.dispatch_claim(&claim.source, view_index, pane_id, view_defs)
+            {
+                return msg;
+            }
+        }
+        SubViewMessage::Unhandled
+    }
+
+    /// Emit the [`KeyClaim`]s active for this pane right now. Order is
+    /// dispatch priority (earlier wins). Dynamic guards (`nav_stack`
+    /// empty, `preview_open`, …) gate which claims appear, so the
+    /// dispatcher itself does not need to re-check them.
+    fn build_claims(
+        &self,
+        view_defs: &[ViewDef],
+        common_kb: &KeyBindingSection<CommonAction>,
+        content_kb: &KeyBindingSection<ContentAction>,
+    ) -> KeyMap {
+        let mut km = KeyMap::new();
+        // Phase 2 uses a placeholder TabRef — Phase 3's validator will
+        // plumb the real tab name through from above.
+        let scope = KeyScope::Pane(
+            TabRef::new(""),
+            PaneStateProfile::Normal { drilldown: None },
+        );
+
+        // Column cursor: when active, `h`/`l` move the cursor and are
+        // stripped from any Content binding below so the user's
+        // `content.back = [backspace, h]` etc. doesn't shadow them.
+        let column_cursor_on = self.table.selected_column().is_some();
+        let reserved_column_keys: &[&str] = if column_cursor_on {
+            &[
+                crate::keymap::COLUMN_CURSOR_LEFT_KEY,
+                crate::keymap::COLUMN_CURSOR_RIGHT_KEY,
+            ]
+        } else {
+            &[]
+        };
+        let strip_reserved = |mut b: KeyBinding| -> Option<KeyBinding> {
+            if reserved_column_keys.is_empty() {
+                return Some(b);
+            }
+            b.0.retain(|k| !reserved_column_keys.contains(&k.as_str()));
+            (!b.0.is_empty()).then_some(b)
+        };
+
+        // Back — only meaningful when drilled in.
+        if !self.nav_stack.is_empty() {
+            if let Some(b) = self
+                .level_binding(&ContentAction::Back, content_kb, view_defs)
+                .and_then(strip_reserved)
+            {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ContentAction::Back),
+                ));
+            }
+        }
+
+        // Tree smart-collapse — only on tree-mode panes (root has
+        // `tree_label`). Defaults to `c`; `strip_reserved` keeps it
+        // out of the way if column_cursor ever co-exists with a
+        // tree leaf.
+        if self.tree.is_some() {
+            if let Some(b) = content_kb
+                .get(&ContentAction::TreeCollapse)
+                .cloned()
+                .and_then(strip_reserved)
+            {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ContentAction::TreeCollapse),
+                ));
+            }
+        }
+
+        // Drill-down — only when the current level has children.
+        if !self.current_children(view_defs).is_empty() {
+            if let Some(b) = self
+                .level_binding(&ContentAction::Open, content_kb, view_defs)
+                .and_then(strip_reserved)
+            {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ContentAction::Open),
+                ));
+            }
+        }
+
+        // Common navigation. Always active.
+        for ca in [
+            CommonAction::ListNext,
+            CommonAction::ListPrev,
+            CommonAction::ListFirst,
+            CommonAction::ListLast,
+        ] {
+            if let Some(b) = common_kb.bindings.get(&ca) {
+                km.push(KeyClaim::handler(
+                    b.clone(),
+                    scope.clone(),
+                    KeySource::Common(ca),
+                ));
+            }
+        }
+
+        // Column cursor. h/l are hardcoded today; if a leaf wants
+        // different keys, add fields on ViewDef / ChildDef and keep the
+        // keymap.rs constants in sync.
+        if column_cursor_on {
+            km.push(KeyClaim::handler(
+                KeyBinding::new(crate::keymap::COLUMN_CURSOR_LEFT_KEY),
+                scope.clone(),
+                KeySource::Common(CommonAction::ColumnLeft),
+            ));
+            km.push(KeyClaim::handler(
+                KeyBinding::new(crate::keymap::COLUMN_CURSOR_RIGHT_KEY),
+                scope.clone(),
+                KeySource::Common(CommonAction::ColumnRight),
+            ));
+        }
+
+        // Half-page scroll. Suppressed while the preview is open so the
+        // hardcoded preview-scroll handler above can claim ctrl+u/d.
+        if !self.preview_open {
+            for ca in [
+                CommonAction::ScrollHalfUp,
+                CommonAction::ScrollHalfDown,
+                CommonAction::ScrollPageUp,
+                CommonAction::ScrollPageDown,
+            ] {
+                if let Some(b) = common_kb.bindings.get(&ca) {
+                    km.push(KeyClaim::handler(
+                        b.clone(),
+                        scope.clone(),
+                        KeySource::Common(ca),
+                    ));
+                }
+            }
+        }
+
+        // Pagination — `level_binding` honours per-child overrides.
+        for ca in [ContentAction::NextPage, ContentAction::PrevPage] {
+            if let Some(b) = self.level_binding(&ca, content_kb, view_defs) {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ca),
+                ));
+            }
+        }
+
+        // Edit-query — root level + editable.
+        if self.nav_stack.is_empty() && self.is_query_editable(view_defs) {
+            if let Some(b) = content_kb.get(&ContentAction::EditQuery) {
+                km.push(KeyClaim::handler(
+                    b.clone(),
+                    scope.clone(),
+                    KeySource::Content(ContentAction::EditQuery),
+                ));
+            }
+        }
+
+        // Search-result navigation. Registered while either the
+        // local `/`-search has matches OR a tree-find cache (CT-5)
+        // is live with hits. Dispatch (`PaneSearchJump` arm in
+        // `dispatch_claim`) picks the right backend at press time:
+        // tree-find wins when active. Otherwise n/N stays free for
+        // an action binding.
+        let tree_find_has_hits = self
+            .tree_find
+            .as_ref()
+            .is_some_and(|s| !s.hits.is_empty());
+        if !self.search.matches().is_empty() || tree_find_has_hits {
+            km.push(KeyClaim::handler(
+                KeyBinding::new(self.search_next_key.clone()),
+                scope.clone(),
+                KeySource::PaneSearchJump { direction: SearchJump::Next },
+            ));
+            km.push(KeyClaim::handler(
+                KeyBinding::new(self.search_prev_key.clone()),
+                scope.clone(),
+                KeySource::PaneSearchJump { direction: SearchJump::Prev },
+            ));
+        }
+
+        // YAML actions for the active level.
+        for action in self.current_actions(view_defs) {
+            km.push(KeyClaim::handler(
+                KeyBinding::new(action.key.clone()),
+                scope.clone(),
+                KeySource::YamlAction {
+                    view: String::new(),
+                    child_path: Vec::new(),
+                    name: action.name.clone(),
+                },
+            ));
+        }
+
+        // Preview toggle.
+        if let Some(kb) = self
+            .current_preview_config(view_defs)
+            .and_then(|p| p.keybinding.as_deref())
+        {
+            km.push(KeyClaim::handler(
+                KeyBinding::new(kb.to_string()),
+                scope.clone(),
+                KeySource::YamlPreviewKey {
+                    view: String::new(),
+                    child_path: Vec::new(),
+                },
+            ));
+        }
+
+        km
+    }
+
+    /// Run the handler for `source`. Returns `None` only on YAML-action
+    /// lookup miss (config drift), which the caller treats as
+    /// `SubViewMessage::Unhandled`.
+    fn dispatch_claim(
+        &mut self,
+        source: &KeySource,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> Option<SubViewMessage> {
+        match source {
+            KeySource::Content(ContentAction::Back) => {
+                if self.tree.is_some() {
+                    return self.try_tree_back(view_defs);
+                }
+                self.nav_back(view_defs);
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::Content(ContentAction::Open) => {
+                if self.tree.is_some() {
+                    return self.try_tree_open(view_index, pane_id, view_defs);
+                }
+                // Same `enter_action` override as the tree path — the
+                // row's producing ChildDef is `self.active_child` in
+                // flat mode. Root-level (active_child == None) has no
+                // ChildDef to consult, so the legacy drill path runs.
+                if let Some(action_name) = self
+                    .active_child
+                    .as_ref()
+                    .and_then(|c| c.enter_action.as_deref())
+                {
+                    let row = self.table.selected_row();
+                    let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                    let item = self.items.get(item_idx)?;
+                    return Some(SubViewMessage::Request(ViewRequest::InvokeNodeAction {
+                        view_index,
+                        pane_id,
+                        node_id: item.id.clone(),
+                        action_name: action_name.to_string(),
+                    }));
+                }
+                let children = self.current_children(view_defs).to_vec();
+                if children.is_empty() {
+                    return None;
+                }
+                let row = self.table.selected_row();
+                let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                let item = self.items.get(item_idx)?;
+                let id = item.id.clone();
+                let label = item.label.clone();
+                let child_def = children.into_iter().next().unwrap();
+                Some(SubViewMessage::ContentDrill {
+                    item_id: id,
+                    item_label: label,
+                    child_def: Box::new(child_def),
+                })
+            }
+            KeySource::Content(ContentAction::NextPage) => {
+                let req = self.next_page_request()?;
+                self.set_current_page(Some(req));
+                Some(self.reload_current_level(view_index, pane_id))
+            }
+            KeySource::Content(ContentAction::PrevPage) => {
+                let req = self.prev_page_request()?;
+                self.set_current_page(Some(req));
+                Some(self.reload_current_level(view_index, pane_id))
+            }
+            KeySource::Content(ContentAction::EditQuery) => {
+                Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+                    view_index,
+                    pane_id,
+                    save_name: None,
+                    is_new: false,
+                }))
+            }
+            KeySource::Content(ContentAction::TreeCollapse) => {
+                self.try_tree_smart_collapse(view_defs)
+            }
+            KeySource::Content(ContentAction::TreeCollapseAll) => {
+                self.try_tree_collapse_all(view_defs)
+            }
+            KeySource::Common(CommonAction::ListNext) => {
+                self.nav_and_refresh(Cmd::Move(Direction::Down), view_defs);
+                Some(self.preview_after_nav(view_index, pane_id, view_defs))
+            }
+            KeySource::Common(CommonAction::ListPrev) => {
+                self.nav_and_refresh(Cmd::Move(Direction::Up), view_defs);
+                Some(self.preview_after_nav(view_index, pane_id, view_defs))
+            }
+            KeySource::Common(CommonAction::ListFirst) => {
+                self.nav_and_refresh(Cmd::GoTo(Position::Begin), view_defs);
+                Some(self.preview_after_nav(view_index, pane_id, view_defs))
+            }
+            KeySource::Common(CommonAction::ListLast) => {
+                self.nav_and_refresh(Cmd::GoTo(Position::End), view_defs);
+                Some(self.preview_after_nav(view_index, pane_id, view_defs))
+            }
+            KeySource::Common(CommonAction::ColumnLeft) => {
+                self.table.move_column_left();
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::Common(CommonAction::ColumnRight) => {
+                self.table.move_column_right();
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::Common(CommonAction::ScrollHalfUp)
+            | KeySource::Common(CommonAction::ScrollPageUp) => {
+                self.table.scroll_half_page(false);
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::Common(CommonAction::ScrollHalfDown)
+            | KeySource::Common(CommonAction::ScrollPageDown) => {
+                self.table.scroll_half_page(true);
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::PaneSearchJump { direction } => {
+                // CT-7: tree-find wins over local /-search when its
+                // cache is live. The walker handles cursor bumping +
+                // lazy expansion (it may dispatch ExpandTreeNode
+                // requests; the App re-invokes the walker after each
+                // child-load settles).
+                if self.tree_find_active() {
+                    if matches!(direction, SearchJump::Next) {
+                        self.tree_find_next();
+                    } else {
+                        self.tree_find_prev();
+                    }
+                    return Some(self.tree_find_dispatch_step(view_index, pane_id, view_defs));
+                }
+                let step = match direction {
+                    SearchJump::Next => 1,
+                    SearchJump::Prev => -1,
+                };
+                if let Some(row) = self.search.jump(step) {
+                    self.table.set_selected(row);
+                }
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::YamlAction { name, .. } => {
+                let action = self
+                    .current_actions(view_defs)
+                    .into_iter()
+                    .find(|a| a.name == *name)
+                    .cloned()?;
+                Some(self.execute_action(&action, view_index, pane_id, view_defs))
+            }
+            KeySource::YamlPreviewKey { .. } => {
+                self.preview_open = !self.preview_open;
+                if self.preview_open {
+                    if let Some(p) = self.update_preview_for_selection(view_defs) {
+                        return Some(SubViewMessage::Request(ViewRequest::FetchContentPreview {
+                            view_index,
+                            pane_id,
+                            cache_key: p.cache_key,
+                            node_id: p.node_id,
+                            action_id: p.action_id,
+                        }));
+                    }
+                }
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            // Sources the pane never emits — defensive default; reaching
+            // this would mean `build_claims` and `dispatch_claim` drifted.
+            _ => None,
+        }
+    }
+
+    /// Helper used after every cursor move: emit a preview-fetch request
+    /// when the new selection has no preview yet, otherwise just notify.
+    fn preview_after_nav(&mut self, view_index: usize, pane_id: PaneId, view_defs: &[ViewDef]) -> SubViewMessage {
+        if let Some(p) = self.update_preview_for_selection(view_defs) {
+            return SubViewMessage::Request(ViewRequest::FetchContentPreview {
+                view_index,
+                pane_id,
+                cache_key: p.cache_key,
+                node_id: p.node_id,
+                action_id: p.action_id,
+            });
+        }
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    fn handle_fuzzy_key(&mut self, key: &str, view_defs: &[ViewDef]) -> SubViewMessage {
+        match key {
+            "enter" => {
+                self.table.fuzzy_close();
+                self.rebuild_table(view_defs);
+            }
+            "esc" => {
+                if self.table.fuzzy_query.is_empty() {
+                    self.table.fuzzy_close();
+                } else {
+                    self.table.fuzzy_query.clear();
+                    self.table.fuzzy_cursor = 0;
+                    self.table.filter_text.clear();
+                    self.rebuild_table(view_defs);
+                }
+            }
+            "ctrl+u" => {
+                self.table.fuzzy_query.clear();
+                self.table.fuzzy_cursor = 0;
+                self.table.filter_text.clear();
+                self.rebuild_table(view_defs);
+            }
+            "backspace" => {
+                self.table.fuzzy_backspace();
+                self.rebuild_table(view_defs);
+            }
+            "left" => {
+                self.table.fuzzy_cursor_left();
+            }
+            "right" => {
+                self.table.fuzzy_cursor_right();
+            }
+            ch if ch.chars().count() == 1 && !ch.chars().next().unwrap().is_control() => {
+                self.table.fuzzy_insert(ch.chars().next().unwrap());
+                self.rebuild_table(view_defs);
+            }
+            _ => {}
+        }
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    fn handle_search_key(
+        &mut self,
+        key: &str,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> SubViewMessage {
+        let result = self.search.handle_key(key);
+        let mode = self.search_mode.clone();
+        match (result, mode) {
+            (SearchKeyResult::QueryChanged, SearchMode::Local) => {
+                let descs = self.search_descriptions(view_defs);
+                let refs: Vec<(usize, &str)> = descs.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                self.search.update_matches(&refs);
+                if let Some(row) = self.search.first_match() {
+                    self.table.set_selected(row);
+                }
+            }
+            (SearchKeyResult::Accepted, SearchMode::Adapter { ref template, .. }) => {
+                let q = self.search.state().query;
+                self.search.clear();
+                self.search_mode = SearchMode::Local;
+                let query = render_text_search(template, &q);
+                self.set_query(query, None);
+                return SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id });
+            }
+            (SearchKeyResult::Cancelled, SearchMode::Adapter { .. }) => {
+                self.search_mode = SearchMode::Local;
+            }
+            (SearchKeyResult::Accepted, SearchMode::TreeFind { .. }) => {
+                let q = self.search.state().query;
+                self.search.clear();
+                self.search_mode = SearchMode::Local;
+                // Empty query → no point dispatching; act like Cancel.
+                if q.trim().is_empty() {
+                    self.tree_find_clear();
+                    return SubViewMessage::SelectionChanged(None);
+                }
+                return SubViewMessage::Request(ViewRequest::TreeFindStart {
+                    view_index,
+                    pane_id,
+                    query: q,
+                });
+            }
+            (SearchKeyResult::Cancelled, SearchMode::TreeFind { .. }) => {
+                self.search_mode = SearchMode::Local;
+                // CT-9: cancelling the input also drops any cached
+                // hits so n/N revert to the local /-search dispatch.
+                self.tree_find_clear();
+            }
+            _ => {}
+        }
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    fn search_descriptions(&self, view_defs: &[ViewDef]) -> Vec<(usize, String)> {
+        if let Some(tree) = self.tree.as_ref() {
+            // Tree mode: iterate visible (post-fuzzy-filter) entries so
+            // `/`-search only steps over what the user can actually see.
+            // Pagination placeholders are skipped — searching the
+            // literal "weitere laden" string would only ever land the
+            // cursor on the loader row.
+            let vd = self.view_def(view_defs);
+            let mut out = Vec::new();
+            for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
+                let Some(entry) = tree.entries.get(eidx) else { continue };
+                if entry.is_more_placeholder {
+                    continue;
+                }
+                let level_columns: Vec<ColumnDef> = vd
+                    .and_then(|v| tree_level_for_chain(v, &entry.node_type_chain))
+                    .map(|l| l.columns.to_vec())
+                    .unwrap_or_default();
+                let text = build_field_haystack(&entry.node, &level_columns, &self.search_fields);
+                out.push((row_idx, text));
+            }
+            return out;
+        }
+        let columns: Vec<ColumnDef> = self.current_columns(view_defs);
+        let mut out = Vec::new();
+        for (row_idx, &item_idx) in self.filtered_indices.iter().enumerate() {
+            let Some(item) = self.items.get(item_idx) else { continue };
+            let text = build_field_haystack(item, &columns, &self.search_fields);
+            out.push((row_idx, text));
+        }
+        out
+    }
+
+    fn execute_action(
+        &mut self,
+        action: &ActionDef,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> SubViewMessage {
+        match action.action_type.as_str() {
+            "edit" => {
+                if let Some(id) = self.resolve_action_node_id(action) {
+                    let action_id = action.id.clone().unwrap_or_else(|| "edit_full".into());
+                    return SubViewMessage::Request(ViewRequest::OpenContentEditor {
+                        view_index,
+                        pane_id,
+                        node_id: id,
+                        action_id,
+                        label: action.name.clone(),
+                        editor_profile: action.editor.clone(),
+                        commit_on_save: action.commit_on_save,
+                    });
+                }
+            }
+            "navigate" => {
+                if let Some(ref target) = action.navigate_to {
+                    let children = self.current_children(view_defs).to_vec();
+                    if let Some(child_def) = children.into_iter().find(|c| c.node_type == *target) {
+                        let row = self.table.selected_row();
+                        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                        if let Some(item) = self.items.get(item_idx) {
+                            let id = item.id.clone();
+                            let label = item.label.clone();
+                            return SubViewMessage::ContentDrill {
+                                item_id: id,
+                                item_label: label,
+                                child_def: Box::new(child_def),
+                            };
+                        }
+                    }
+                }
+            }
+            "query_edit" => {
+                if self.is_query_editable(view_defs) {
+                    return SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+                        view_index,
+                        pane_id,
+                        save_name: None,
+                        is_new: false,
+                    });
+                }
+            }
+            "reload" => {
+                // CT-9: the tree cache about to be rebuilt may
+                // invalidate the hit's ancestor ids (stale page
+                // copies, deleted parents, …). Drop tree_find so
+                // the user gets clean n/N + status hints again.
+                self.tree_find_clear();
+                return SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id });
+            }
+            "open_url" => {
+                // TODO: open node URL in browser
+            }
+            "download" => {
+                // TODO: download node content to file
+            }
+            "create" => {
+                let Some(action_id) = action.id.clone() else {
+                    return SubViewMessage::Request(ViewRequest::Notify(format!(
+                        "create action '{}' missing `id` (e.g. id: create_comment)",
+                        action.name
+                    )));
+                };
+                if let (Some(parent_id), Some(child_type)) = (self.parent_node_id(), self.current_child_node_type()) {
+                    return SubViewMessage::Request(ViewRequest::CreateContentChild {
+                        view_index,
+                        pane_id,
+                        parent_node_id: parent_id.to_string(),
+                        child_node_type: child_type.to_string(),
+                        action_id,
+                        label: action.name.clone(),
+                        editor_profile: action.editor.clone(),
+                        commit_on_save: action.commit_on_save,
+                    });
+                }
+            }
+            "custom" => {
+                if let (Some(id), Some(action_id)) = (self.resolve_action_node_id(action), &action.id) {
+                    return SubViewMessage::Request(ViewRequest::ExecuteContentAction {
+                        view_index,
+                        pane_id,
+                        node_id: id,
+                        action_id: action_id.clone(),
+                    });
+                }
+            }
+            "script" => {
+                return SubViewMessage::Request(ViewRequest::OpenScriptMenuForNode {
+                    view_index,
+                    pane_id,
+                });
+            }
+            "invalidate_session" => {
+                return SubViewMessage::Request(ViewRequest::InvalidateContentSession { view_index });
+            }
+            "invalidate_credentials" => {
+                return SubViewMessage::Request(ViewRequest::InvalidateContentCredentials { view_index });
+            }
+            "fuzzy_filter" => {
+                self.fuzzy_filter_fields = action
+                    .fuzzy_filter
+                    .as_ref()
+                    .map(|c| c.fields.clone())
+                    .unwrap_or_default();
+                if self.tree.is_some() {
+                    self.tree_filter_depth = self.resolve_tree_filter_depth(view_defs);
+                }
+                self.table.fuzzy_open();
+                return SubViewMessage::SelectionChanged(None);
+            }
+            "search" => {
+                let cfg = action.search.as_ref();
+                self.search_fields = cfg.map(|c| c.fields.clone()).unwrap_or_default();
+                self.search_next_key = cfg
+                    .and_then(|c| c.next_key.clone())
+                    .unwrap_or_else(|| "n".to_string());
+                self.search_prev_key = cfg
+                    .and_then(|c| c.prev_key.clone())
+                    .unwrap_or_else(|| "N".to_string());
+                self.search_mode = SearchMode::Local;
+                self.search.clear();
+                self.search.open();
+                return SubViewMessage::SelectionChanged(None);
+            }
+            "text_search" => {
+                let (template, prompt) = action
+                    .text_search
+                    .as_ref()
+                    .map(|c| (c.query_template.clone(), c.prompt.clone()))
+                    .unwrap_or_else(|| ("{q}".to_string(), None));
+                self.search_mode = SearchMode::Adapter { template, prompt };
+                self.search.clear();
+                self.search.open();
+                return SubViewMessage::SelectionChanged(None);
+            }
+            "tree_find" => {
+                // CT-7: open the search input in tree-find mode.
+                // The optional `tree_find: { prompt: ... }` YAML
+                // block labels the bar ("Search pages"); falls back
+                // to "tree search…" if absent. Wipe any stale
+                // tree-find cache so re-opening doesn't surface
+                // yesterday's hits.
+                let prompt = action
+                    .tree_find
+                    .as_ref()
+                    .and_then(|c| c.prompt.clone());
+                self.tree_find_clear();
+                self.search_mode = SearchMode::TreeFind { prompt };
+                self.search.clear();
+                self.search.open();
+                return SubViewMessage::SelectionChanged(None);
+            }
+            _ => {}
+        }
+        SubViewMessage::Unhandled
+    }
+}
+
+impl ContentView {
+    pub fn new(
+        theme: Arc<Theme>,
+        config: &ViewFileConfig,
+        adapter: Option<Arc<dyn ContentAdapter>>,
+        keybindings: &KeyBindingConfig,
+    ) -> Self {
+        let query_menu_kb = keybindings.query_menu.clone();
+        let common_kb = keybindings.common.clone();
+        let content_kb = keybindings.content.clone();
+        let window_kb = keybindings.window.clone();
+        // Pane-tag alphabet, filtered against the chord-action keys
+        // configured on `window_kb` so a tag like `s` can never shadow
+        // a chord like `ws` (close).
+        let reserved: std::collections::HashSet<char> = window_kb
+            .bindings
+            .values()
+            .flat_map(|kb| kb.0.iter())
+            .filter_map(|s| s.chars().last())
+            .collect();
+        let pane_tag_alphabet: String = keybindings
+            .pane_tags
+            .0
+            .chars()
+            .filter(|c| !reserved.contains(c))
+            .collect();
+        let key_icons = keybindings.key_icons.clone();
+        let action_bar = ActionBarComponent::new(Arc::clone(&theme));
+
+        let default_view = config.views.iter().find(|v| v.default).or(config.views.first());
+        // Scope: NodeRef of the view root, structurally `<adapter>/<instance>/<view_name>`
+        // (e.g. "jira/jira/tickets"). Path-segment form mirrors the
+        // app-wide `NodeRef` convention so a shortcut row can in
+        // principle live on any level of the hierarchy, identified by
+        // its full path. Default instance_id falls back to adapter_type
+        // for single-instance configs.
+        let view_name = default_view.map(|vd| vd.name.as_str()).unwrap_or("default");
+        let query_scope = format!(
+            "{}/{}/{}",
+            config.adapter.adapter_type,
+            config.adapter.effective_instance_id(),
+            view_name,
+        );
+
+        let active_subtab = config.views.iter().position(|v| v.default).unwrap_or(0);
+
+        // One single-leaf pane tree per ViewDef. Splits add leaves later.
+        let mut next_pane_id: PaneId = 0;
+        let pane_trees: Vec<PaneTree> = (0..config.views.len())
+            .map(|i| {
+                let id = next_pane_id;
+                next_pane_id += 1;
+                let tree_enabled = config.views[i].tree_label.is_some();
+                let pane = ContentPane::new(Arc::clone(&theme), i, tree_enabled);
+                let mut tree = PaneTree::new(i, id, pane);
+                tree.assign_tag(id, &pane_tag_alphabet);
+                tree
+            })
+            .collect();
+
+        let query_menu = QueryMenuComponent::new(Arc::clone(&theme), "Queries")
+            .with_popup_kb(keybindings.popup.clone(), keybindings.key_icons.clone());
+        let mut cv = Self {
+            action_bar,
+            theme,
+            cmdline: CmdlineComponent::new(),
+            tab_name: config.tab.name.clone(),
+            tab_icon: config.tab.icon.clone().unwrap_or_default(),
+            tab_order: config.tab.order,
+            view_index: 0, // set by App after construction
+            adapter,
+            view_defs: config.views.clone(),
+            pane_trees,
+            active_subtab,
+            next_pane_id,
+            auth_status: AdapterStatus::Ready,
+            adapter_init_error: None,
+            query_menu,
+            query_menu_mode: QueryMenuMode::SavedQueries,
+            query_menu_kb,
+            common_kb,
+            content_kb,
+            window_kb,
+            window_pending: None,
+            pane_tag_alphabet,
+            key_icons,
+            db_saved_queries: Vec::new(),
+            query_scope,
+            header_overlay: crate::components::sort_header::HeaderOverlay::default(),
+            source_path: None,
+            manual_connect: config.adapter.manual_connect,
+            pending_cursor_closes: Vec::new(),
+            postgres_table_shortcuts: std::collections::HashMap::new(),
+        };
+        cv.sync_action_bar_hints();
+        cv
+    }
+
+    /// Drain the queue of cursor ids that the App should close on the
+    /// adapter (CP-6). Populated by [`Self::close_focused`] when panes
+    /// that were paginating via a server-side cursor get destroyed.
+    /// The App calls this after every interaction with the view and
+    /// emits one `ViewRequest::CloseAdapterCursor` per id.
+    pub fn take_pending_cursor_closes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_cursor_closes)
+    }
+
+    pub fn has_adapter(&self) -> bool {
+        self.adapter.is_some()
+    }
+
+    /// Borrow the active pane (the focused leaf in the active subtab tree).
+    pub fn active_pane(&self) -> &ContentPane {
+        &self.pane_trees[self.active_subtab].focused_leaf().pane
+    }
+
+    /// Mutably borrow the active pane.
+    pub fn active_pane_mut(&mut self) -> &mut ContentPane {
+        &mut self.pane_trees[self.active_subtab].focused_leaf_mut().pane
+    }
+
+    /// [`PaneId`] of the focused leaf in the active subtab.
+    pub fn active_pane_id(&self) -> PaneId {
+        self.pane_trees[self.active_subtab].focus
+    }
+
+    /// Walk every pane tree and return the leaf with the given id, if any.
+    pub fn find_pane(&self, id: PaneId) -> Option<&ContentPane> {
+        self.pane_trees
+            .iter()
+            .find_map(|tree| tree.root.find_leaf(id).map(|leaf| &leaf.pane))
+    }
+
+    /// Every leaf pane id across all subtab split-trees. Used by the
+    /// App's live-invalidation handler to decide which panes to reload.
+    pub fn all_pane_ids(&self) -> Vec<PaneId> {
+        let mut ids = Vec::new();
+        for tree in self.pane_trees.iter() {
+            tree.root.collect_leaf_ids(&mut ids);
+        }
+        ids
+    }
+
+    /// Mutable variant of [`find_pane`].
+    pub fn find_pane_mut(&mut self, id: PaneId) -> Option<&mut ContentPane> {
+        self.pane_trees
+            .iter_mut()
+            .find_map(|tree| tree.root.find_leaf_mut(id).map(|leaf| &mut leaf.pane))
+    }
+
+    /// CT-7: advance the lazy-expand walk for the pane's active
+    /// tree-find. Returns the next [`SubViewMessage`] to process,
+    /// or `None` when the pane has no active tree-find / doesn't
+    /// exist. Used by the App after `TreeFindResult` and after each
+    /// `TreeChildren` to drive the chain forward until the leaf is
+    /// reached (or the walk reports `NotInTree`).
+    ///
+    /// The disjoint-field access (`&self.view_defs` +
+    /// `&mut self.pane_trees`) sidesteps the `find_pane_mut`
+    /// shorthand because the borrow checker can only see disjoint
+    /// borrows through direct field projection.
+    pub fn drive_tree_find(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> Option<SubViewMessage> {
+        let view_defs: &[ViewDef] = &self.view_defs;
+        let pane: &mut ContentPane = self
+            .pane_trees
+            .iter_mut()
+            .find_map(|tree| tree.root.find_leaf_mut(pane_id).map(|leaf| &mut leaf.pane))?;
+        if !pane.tree_find_active() {
+            return None;
+        }
+        Some(pane.tree_find_dispatch_step(view_index, pane_id, view_defs))
+    }
+
+    /// Push current view state into the bar. Called by App once per frame.
+    pub fn sync_action_bar(&mut self, active_editor: Option<&str>) {
+        // Snapshot every pane-derived value into locals before touching
+        // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
+        // before the mutable borrow on `action_bar` begins.
+        let hints = self.action_bar_hints();
+        let active_filter_name = self.active_pane().active_query_name.clone();
+        let favs: Vec<(String, String)> = self.db_saved_queries.iter()
+            .filter_map(|sq| sq.shortcut.as_ref().map(|s| (sq.name.clone(), s.clone())))
+            .collect();
+        let (fuzzy_active, fuzzy_query, fuzzy_cursor) = {
+            let p = self.active_pane();
+            (p.table.fuzzy_active, p.table.fuzzy_query.clone(), p.table.fuzzy_cursor)
+        };
+        let search_state = self.active_pane().search.state();
+        let cmdline_state = self.cmdline.state();
+        let (chrome_prefix, chrome_placeholder, chrome_local) = match &self.active_pane().search_mode {
+            SearchMode::Local => (None, None, true),
+            SearchMode::Adapter { prompt, .. } => {
+                let placeholder = prompt
+                    .clone()
+                    .unwrap_or_else(|| "free-text search…".to_string());
+                (Some("? ".to_string()), Some(placeholder), false)
+            }
+            SearchMode::TreeFind { prompt } => {
+                let placeholder = prompt
+                    .clone()
+                    .unwrap_or_else(|| "tree search…".to_string());
+                (Some("? ".to_string()), Some(placeholder), false)
+            }
+        };
+
+        let mode_label = self.action_bar_mode_label();
+        self.action_bar.set_hints(hints);
+        self.action_bar.set_mode_label(mode_label);
+        self.action_bar.set_active_editor(active_editor);
+        self.action_bar.set_active_filter_name(active_filter_name);
+        self.action_bar.set_favorites(favs);
+        self.action_bar.set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);
+        self.action_bar.set_search(
+            search_state.active,
+            &search_state.query,
+            search_state.cursor,
+            search_state.current,
+            search_state.match_count,
+        );
+        self.action_bar.set_cmdline(cmdline_state.active, &cmdline_state.query, cmdline_state.cursor);
+        self.action_bar.set_search_chrome(chrome_prefix, chrome_placeholder, chrome_local);
+    }
+
+    pub fn action_bar_height(&self, width: u16) -> u16 {
+        self.action_bar.required_height(width)
+    }
+
+    pub fn render_action_bar(&mut self, frame: &mut Frame, area: Rect) {
+        self.action_bar.view(frame, area);
+    }
+
+    /// Refresh action bar hints from the active pane's nav-level config.
+    fn sync_action_bar_hints(&mut self) {
+        self.action_bar.set_hints(self.action_bar_hints());
+    }
+
+    pub fn active_view_def(&self) -> Option<&ViewDef> {
+        self.view_defs.get(self.active_subtab)
+    }
+
+    pub fn active_view_index(&self) -> usize {
+        self.active_subtab
+    }
+
+    /// Switch the active subtab by view name (case-insensitive). Returns
+    /// `Ok(())` on success; `Err(available)` lists view names when the
+    /// requested name doesn't exist. Drives the `<view>` half of
+    /// `:focus-node <tab>:<view>` and is intentionally a no-op when the
+    /// requested view is already active.
+    pub fn switch_to_view_by_name(&mut self, name: &str) -> Result<bool, Vec<String>> {
+        let idx = self
+            .view_defs
+            .iter()
+            .position(|vd| vd.name.eq_ignore_ascii_case(name));
+        match idx {
+            Some(i) => Ok(self.switch_to_view(i)),
+            None => Err(self.view_defs.iter().map(|vd| vd.name.clone()).collect()),
+        }
+    }
+
+    /// Walk the active pane's items with a parsed [`focus_node::FocusSegment`]
+    /// sequence (currently single-segment only — see
+    /// [`focus_node::FocusError::MultiSegmentUnsupported`]). Parks the
+    /// table cursor on the matched row.
+    pub fn focus_node_in_active_pane(
+        &mut self,
+        segments: &[crate::views::focus_node::FocusSegment],
+    ) -> Result<(), crate::views::focus_node::FocusError> {
+        let pane = self.active_pane();
+        let item_id = crate::views::focus_node::focus_in_flat_items(&pane.items, segments)?;
+        self.active_pane_mut().focus_item_by_id(&item_id);
+        Ok(())
+    }
+
+    /// True when the items currently shown in the active pane are
+    /// `postgres:table` nodes — either at the flat `tables` subtab
+    /// root, or drilled into a schema. Used to decide whether
+    /// `q` (scripts menu) and `Q` (SQL editor) should be claimed.
+    fn displays_postgres_tables(&self) -> bool {
+        let pane = self.active_pane();
+        match pane.active_child.as_ref() {
+            Some(child) => child.node_type == "postgres:table",
+            None => self
+                .active_view_def()
+                .map(|vd| vd.node_type == "postgres:table")
+                .unwrap_or(false),
+        }
+    }
+
+    /// Postgres-table node id targeted by `q` (scripts menu) in the
+    /// active pane. `selected_item_id()` when the displayed items are
+    /// tables; `parent_node_id()` when we've drilled into a table and
+    /// are looking at its rows (detected by the active child's
+    /// `node_type == "postgres:row"`).
+    pub fn target_postgres_table_node_id(&self) -> Option<String> {
+        let pane = self.active_pane();
+        if self.displays_postgres_tables() {
+            pane.selected_item_id().map(str::to_string)
+        } else if pane.current_child_node_type() == Some("postgres:row") {
+            pane.parent_node_id().map(str::to_string)
+        } else {
+            None
+        }
+    }
+
+    /// Subtab labels in `view_defs` order, paired with whether each is the
+    /// currently-active subtab.
+    pub fn subtab_labels(&self) -> Vec<(String, bool)> {
+        let active = self.active_subtab;
+        self.view_defs.iter().enumerate().map(|(i, vd)| {
+            let label = match vd.key.as_deref() {
+                Some(k) => format!("{} {}", vd.name, k),
+                None => vd.name.clone(),
+            };
+            (label, i == active)
+        }).collect()
+    }
+
+    /// Switch the active subtab. Returns whether a load is needed for
+    /// the focused pane of the destination tree (true when that pane has
+    /// never been populated).
+    fn switch_to_view(&mut self, target: usize) -> bool {
+        if target >= self.pane_trees.len() || target == self.active_subtab {
+            return false;
+        }
+        self.active_subtab = target;
+        self.sync_action_bar_hints();
+        !self.pane_trees[target].focused_leaf().pane.loaded
+    }
+
+    /// Allocate a fresh [`PaneId`].
+    fn alloc_pane_id(&mut self) -> PaneId {
+        let id = self.next_pane_id;
+        self.next_pane_id = self.next_pane_id.wrapping_add(1);
+        id
+    }
+
+    /// Whether the active pane is currently consuming keystrokes as
+    /// text input (fuzzy filter or `/`-search). Outside callers
+    /// (App-level chord/chain interceptor) check this to avoid
+    /// shadowing characters that belong in the input buffer.
+    pub fn is_text_input_active(&self) -> bool {
+        self.active_pane().table.fuzzy_active || self.active_pane().search.active()
+    }
+
+    /// Window-leader chord (configurable, default `w`). Consumes the
+    /// leader on first press and the action key on second press.
+    /// Returns `None` to fall through (no chord in progress and `key`
+    /// isn't a leader, or the active pane is in a text-input mode and
+    /// must see the key untouched).
+    fn handle_window_chord(&mut self, key: &str) -> Option<SubViewMessage> {
+        // Don't intercept while the user is typing into a text input —
+        // matters for short leaders like `w` that double as ordinary
+        // letters in search / cmdline / fuzzy buffers.
+        if self.cmdline.active()
+            || self.active_pane().search.active()
+            || self.active_pane().table.fuzzy_active
+        {
+            return None;
+        }
+        if let Some(leader) = self.window_pending.take() {
+            // Compose the full chord and look up against the static
+            // WindowAction bindings first.
+            for (action, binding) in &self.window_kb.bindings {
+                if binding.matches_chord(&leader, key) {
+                    return Some(self.execute_window_action(action.clone()));
+                }
+            }
+            // Not a static action — try interpreting `key` as a pane tag
+            // letter and switch focus to that pane.
+            if let Some(letter) = key.chars().next().filter(|_| key.chars().count() == 1) {
+                if self.try_switch_pane_by_tag(letter) {
+                    return Some(SubViewMessage::SelectionChanged(None));
+                }
+            }
+            // Unmapped resolution key cancels the chord with no effect.
+            return Some(SubViewMessage::SelectionChanged(None));
+        }
+        // Are any window bindings prefixed with this key?
+        let is_prefix = self
+            .window_kb
+            .bindings
+            .values()
+            .any(|b| b.is_prefix(key));
+        if is_prefix {
+            self.window_pending = Some(key.to_string());
+            return Some(SubViewMessage::SelectionChanged(None));
+        }
+        None
+    }
+
+    /// Switch focus inside the active subtab tree to the pane wearing
+    /// `letter`. Returns `false` if no pane in this tree carries that
+    /// tag — caller should then treat the key as unhandled.
+    fn try_switch_pane_by_tag(&mut self, letter: char) -> bool {
+        let tree = &mut self.pane_trees[self.active_subtab];
+        let Some(pane_id) = tree.pane_id_for_tag(letter) else {
+            return false;
+        };
+        if pane_id == tree.focus {
+            return true;
+        }
+        tree.focus = pane_id;
+        self.sync_action_bar_hints();
+        true
+    }
+
+    /// Phase-2 entry point: dispatch a [`WindowAction`] requested by an
+    /// action chain. Re-uses the same code path as the chord handler.
+    pub fn dispatch_window_action(&mut self, action: WindowAction) -> SubViewMessage {
+        self.execute_window_action(action)
+    }
+
+    /// Local action-chain scope stack of the focused pane, innermost
+    /// first. App appends the global map to this list and feeds it to
+    /// [`crate::action::resolve_chain_in_scopes`] so the "child wins
+    /// over view wins over global" rule lives in a single place. In
+    /// tree mode the innermost scope is the cursor-depth `ChildDef`'s
+    /// `action_chains` (depth 0 has no ChildDef so we go straight to
+    /// the view).
+    pub fn action_chain_scopes(&self) -> Vec<&crate::action::ActionChains> {
+        let mut out = Vec::new();
+        let pane = self.active_pane();
+        if pane.tree.is_some() {
+            if let Some(child) = pane.tree_active_child_def(&self.view_defs) {
+                out.push(&child.action_chains);
+            }
+        } else if let Some(child) = pane.active_child.as_ref() {
+            out.push(&child.action_chains);
+        }
+        if let Some(view) = self.view_defs.get(self.active_subtab) {
+            out.push(&view.action_chains);
+        }
+        out
+    }
+
+    /// Phase-2 entry point: dispatch a [`ContentAction`] requested by an
+    /// action chain. Routes through the active pane's `try_*` helpers and
+    /// post-processes a `ContentDrill` exactly like the key path so the
+    /// split / coupled-replace logic is shared.
+    pub fn dispatch_content_action(&mut self, action: ContentAction) -> SubViewMessage {
+        let view_index = self.view_index;
+        let pane_id = self.active_pane_id();
+        let view_defs = self.view_defs.clone();
+        let msg = match action {
+            ContentAction::Open => self.active_pane().try_drill_open(&view_defs),
+            ContentAction::Back => self.active_pane_mut().try_back(&view_defs),
+            ContentAction::NextPage => self.active_pane_mut().try_next_page(view_index, pane_id),
+            ContentAction::PrevPage => self.active_pane_mut().try_prev_page(view_index, pane_id),
+            ContentAction::EditQuery => SubViewMessage::Unhandled,
+            ContentAction::OpenScriptsMenu => SubViewMessage::Unhandled,
+            ContentAction::TreeCollapse => self
+                .active_pane_mut()
+                .try_tree_smart_collapse(&view_defs)
+                .unwrap_or(SubViewMessage::Unhandled),
+            ContentAction::TreeCollapseAll => self
+                .active_pane_mut()
+                .try_tree_collapse_all(&view_defs)
+                .unwrap_or(SubViewMessage::Unhandled),
+        };
+        if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
+            return self.dispatch_content_drill(item_id, item_label, *child_def);
+        }
+        msg
+    }
+
+    fn execute_window_action(&mut self, action: WindowAction) -> SubViewMessage {
+        match action {
+            WindowAction::SplitRight => self.split_focused(SplitOrientation::Horizontal),
+            WindowAction::SplitDown => self.split_focused(SplitOrientation::Vertical),
+            WindowAction::Close => self.close_focused(),
+            WindowAction::FocusParent => self.focus_parent_pane(),
+            WindowAction::FocusChild => self.focus_child_pane(),
+        }
+    }
+
+    /// Move focus to the pane that owns the focused pane via `linked_child`
+    /// (the source side of a coupled split). When no parent backlink exists,
+    /// fall back to the structural sibling — the other leaf produced by the
+    /// most recent ancestor split — so plain (non-coupled) splits still get
+    /// a useful "back to neighbour" move. Returns the standard
+    /// `SelectionChanged(None)` so the App refreshes hints/breadcrumbs.
+    fn focus_parent_pane(&mut self) -> SubViewMessage {
+        let active_subtab = self.active_subtab;
+        let focus_id = self.pane_trees[active_subtab].focus;
+        let parent_via_backlink = {
+            let mut leaf_ids = Vec::new();
+            self.pane_trees[active_subtab]
+                .root
+                .collect_leaf_ids(&mut leaf_ids);
+            leaf_ids.into_iter().find(|&id| {
+                self.find_pane(id)
+                    .and_then(|p| p.linked_child.as_ref().map(|(_, child)| *child == focus_id))
+                    .unwrap_or(false)
+            })
+        };
+        let target = parent_via_backlink
+            .or_else(|| self.pane_trees[active_subtab].sibling_of(focus_id));
+        if let Some(t) = target {
+            self.pane_trees[active_subtab].focus = t;
+            self.sync_action_bar_hints();
+        }
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    /// Move focus to the pane this one opened — preferring the coupled
+    /// `linked_child` when present, falling back to the structural sibling.
+    /// Symmetric to `focus_parent_pane`; mainly useful as a chain tail to
+    /// return to the just-replaced child after a `content.open`.
+    fn focus_child_pane(&mut self) -> SubViewMessage {
+        let active_subtab = self.active_subtab;
+        let focus_id = self.pane_trees[active_subtab].focus;
+        let child_via_backlink = self
+            .find_pane(focus_id)
+            .and_then(|p| p.linked_child.as_ref().map(|(_, child)| *child));
+        let target = child_via_backlink
+            .or_else(|| self.pane_trees[active_subtab].sibling_of(focus_id));
+        if let Some(t) = target {
+            self.pane_trees[active_subtab].focus = t;
+            self.sync_action_bar_hints();
+        }
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    /// Split the focused pane along `orientation`. The new pane is empty
+    /// but inherits sort / page / active query from the source so its
+    /// initial fetch matches.
+    fn split_focused(&mut self, orientation: SplitOrientation) -> SubViewMessage {
+        let new_pane_id = self.alloc_pane_id();
+        let view_def_index = self.active_subtab;
+        let tree_enabled = self.view_defs[view_def_index].tree_label.is_some();
+        let new_pane = {
+            let theme = Arc::clone(&self.theme);
+            let source = self.active_pane();
+            let mut p = ContentPane::new(theme, view_def_index, tree_enabled);
+            p.active_query = source.active_query.clone();
+            p.active_query_name = source.active_query_name.clone();
+            p.active_query_vars = source.active_query_vars.clone();
+            p.current_sort = source.current_sort.clone();
+            p.current_page = source.current_page;
+            p
+        };
+        let tree = &mut self.pane_trees[self.active_subtab];
+        tree.split_focus(orientation, 0.5, SplitSide::Second, new_pane_id, new_pane);
+        tree.assign_tag(new_pane_id, &self.pane_tag_alphabet);
+        self.sync_action_bar_hints();
+        SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+            view_index: self.view_index,
+            pane_id: new_pane_id,
+        })
+    }
+
+    /// Resolve a `ContentDrill` message produced by the focused pane:
+    /// either drill in-place (today's behavior) or open the child level
+    /// in a split pane next to the source, depending on `child_def.split`.
+    /// In both cases, returns a `ViewRequest::DrillDown` for the App to
+    /// dispatch to the adapter — the difference is which pane id the
+    /// async response routes back to.
+    fn dispatch_content_drill(
+        &mut self,
+        item_id: String,
+        item_label: String,
+        child_def: ChildDef,
+    ) -> SubViewMessage {
+        let view_index = self.view_index;
+        match child_def.split.clone() {
+            None => {
+                // In-place drill — mutate the focused pane.
+                let view_defs = self.view_defs.clone();
+                let pane_id = self.active_pane_id();
+                let child_node_type = self
+                    .active_pane_mut()
+                    .drill_down_prepare(&item_id, &item_label, &child_def, &view_defs);
+                SubViewMessage::Request(ViewRequest::DrillDown {
+                    view_index,
+                    pane_id,
+                    node_id: item_id,
+                    node_label: item_label,
+                    child_node_type,
+                })
+            }
+            Some(split_def) => {
+                // Coupled hot-replace path: if the source pane already owns
+                // a linked child for this ChildDef and the child is still
+                // in the tree, re-drill the existing child in place
+                // instead of opening another split. Focus stays on the
+                // source so chains like `[list_next, open]` keep firing
+                // from the parent.
+                if split_def.coupled {
+                    let source_id = self.active_pane_id();
+                    let linked = self
+                        .find_pane(source_id)
+                        .and_then(|p| p.linked_child.clone())
+                        .filter(|(name, child_id)| {
+                            name == &child_def.name && self.find_pane(*child_id).is_some()
+                        });
+                    if let Some((_, child_pane_id)) = linked {
+                        let view_defs = self.view_defs.clone();
+                        let (source_items, source_selected_row, source_active_child) = {
+                            let s = self.find_pane(source_id).expect("source alive");
+                            (s.items.clone(), s.table.selected_row(), s.active_child.clone())
+                        };
+                        let child_node_type = self
+                            .find_pane_mut(child_pane_id)
+                            .expect("alive checked above")
+                            .coupled_replace_with_source(
+                                source_items,
+                                source_selected_row,
+                                source_active_child,
+                                &item_id,
+                                &item_label,
+                                &child_def,
+                                &view_defs,
+                            );
+                        return SubViewMessage::Request(ViewRequest::DrillDown {
+                            view_index,
+                            pane_id: child_pane_id,
+                            node_id: item_id,
+                            node_label: item_label,
+                            child_node_type,
+                        });
+                    }
+                    // Linked child stale or never existed — fall through
+                    // to fresh spawn below and set the backlink afterwards.
+                }
+
+                // Split-drill — allocate a new pane next to the focused one.
+                // Map split direction to (orientation, side):
+                //   Right  → Horizontal, new pane second
+                //   Left   → Horizontal, new pane first
+                //   Bottom → Vertical,   new pane second
+                //   Top    → Vertical,   new pane first
+                let (orientation, side) = match split_def.direction {
+                    SplitDirection::Right => (SplitOrientation::Horizontal, SplitSide::Second),
+                    SplitDirection::Left => (SplitOrientation::Horizontal, SplitSide::First),
+                    SplitDirection::Bottom => (SplitOrientation::Vertical, SplitSide::Second),
+                    SplitDirection::Top => (SplitOrientation::Vertical, SplitSide::First),
+                };
+                // `split_def.ratio` is the share of the **new** pane.
+                // `Branch.ratio` is the share of `first`. Convert based on side.
+                let branch_ratio = match side {
+                    SplitSide::Second => 1.0 - split_def.ratio,
+                    SplitSide::First => split_def.ratio,
+                };
+
+                let new_pane_id = self.alloc_pane_id();
+                let view_def_index = self.active_subtab;
+                let theme = Arc::clone(&self.theme);
+                let view_defs = self.view_defs.clone();
+                let source_id = self.active_pane_id();
+                let coupled = split_def.coupled;
+                // Tree mode in the new pane depends on the *target* child,
+                // not the source view: drilling out of a tree into a leaf
+                // child (no tree_label) yields a flat pane.
+                let tree_enabled = child_def.tree_label.is_some();
+
+                let mut new_pane = {
+                    let source = self.active_pane();
+                    let mut p = ContentPane::new(theme, view_def_index, tree_enabled);
+                    // Inherit query/sort/page so any child-level fetch params
+                    // line up with what the source had.
+                    p.active_query = source.active_query.clone();
+                    p.active_query_name = source.active_query_name.clone();
+                    p.active_query_vars = source.active_query_vars.clone();
+                    p.current_sort = source.current_sort.clone();
+                    p.current_page = source.current_page;
+                    // Mirror the source's level + items so back-nav from
+                    // inside the new pane returns to the parent listing.
+                    p.active_child = source.active_child.clone();
+                    p.items = source.items.clone();
+                    p
+                };
+                let child_node_type =
+                    new_pane.drill_down_prepare(&item_id, &item_label, &child_def, &view_defs);
+
+                let tree = &mut self.pane_trees[self.active_subtab];
+                tree.split_focus(orientation, branch_ratio, side, new_pane_id, new_pane);
+                tree.assign_tag(new_pane_id, &self.pane_tag_alphabet);
+                if coupled {
+                    if let Some(source) = self.find_pane_mut(source_id) {
+                        source.linked_child = Some((child_def.name.clone(), new_pane_id));
+                    }
+                }
+                self.sync_action_bar_hints();
+
+                SubViewMessage::Request(ViewRequest::DrillDown {
+                    view_index,
+                    pane_id: new_pane_id,
+                    node_id: item_id,
+                    node_label: item_label,
+                    child_node_type,
+                })
+            }
+        }
+    }
+
+    /// Mirror Enter-on-table for a Postgres script run: figure out the
+    /// right pane (split-allocated Rows child, or in-place if we're
+    /// already inside a Rows pane) and emit `RunPostgresScript` against
+    /// it. Without this, the script result would land in the source
+    /// pane (e.g. the flat tables list) whose columns can't display
+    /// dynamic `qrow:*` items, leaving an empty-looking pane.
+    fn dispatch_postgres_script_apply(
+        &mut self,
+        database: String,
+        schema: String,
+        table: String,
+        script: String,
+    ) -> SubViewMessage {
+        let view_index = self.view_index;
+        let view_defs = self.view_defs.clone();
+        let table_node_id = format!("{database}/schemas/{schema}/tables/{table}");
+        let table_label = table.clone();
+        let target_pane_id = self.split_for_query_into_child(&table_node_id, &table_label, &view_defs);
+        SubViewMessage::Request(ViewRequest::RunPostgresScript {
+            view_index,
+            pane_id: target_pane_id,
+            database,
+            schema,
+            table,
+            script,
+        })
+    }
+
+    /// Public wrapper around [`Self::split_for_query_into_child`] for the
+    /// App-side `RunAdapterDbScript` dispatcher (CP-8). The dispatcher
+    /// supplies the source script's `node_id` + label; the helper
+    /// allocates / reuses the result-pane child per the active level's
+    /// first `ChildDef`, and returns its `PaneId`.
+    pub fn open_db_script_result_pane(
+        &mut self,
+        source_node_id: &str,
+        source_label: &str,
+    ) -> PaneId {
+        let view_defs = self.view_defs.clone();
+        self.split_for_query_into_child(source_node_id, source_label, &view_defs)
+    }
+
+    /// Shared split-and-prepare helper for "run a custom query against
+    /// the postgres:table the user is looking at". Picks the first
+    /// child-def of the active level — typically the `Rows` child with
+    /// `split: right`. When split-config is present, allocates a new
+    /// pane and drills it into the Rows level. When empty (already
+    /// inside a Rows pane) or no split, returns the active pane id so
+    /// the result replaces items in place.
+    fn split_for_query_into_child(
+        &mut self,
+        table_node_id: &str,
+        table_label: &str,
+        view_defs: &[ViewDef],
+    ) -> PaneId {
+        let children = self.active_pane().current_children(view_defs).to_vec();
+        let Some(child_def) = children.into_iter().next() else {
+            return self.active_pane_id();
+        };
+        let Some(split_def) = child_def.split.clone() else {
+            self.active_pane_mut()
+                .drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
+            return self.active_pane_id();
+        };
+        // Reuse an existing coupled child pane if one is alive for the
+        // same child name — matches Enter-on-table's hot-replace path so
+        // repeated `q`→Apply doesn't stack new splits.
+        if split_def.coupled {
+            let source_id = self.active_pane_id();
+            let linked = self
+                .find_pane(source_id)
+                .and_then(|p| p.linked_child.clone())
+                .filter(|(name, child_id)| {
+                    name == &child_def.name && self.find_pane(*child_id).is_some()
+                });
+            if let Some((_, child_pane_id)) = linked {
+                if let Some(child) = self.find_pane_mut(child_pane_id) {
+                    child.drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
+                }
+                return child_pane_id;
+            }
+        }
+        let (orientation, side) = match split_def.direction {
+            SplitDirection::Right => (SplitOrientation::Horizontal, SplitSide::Second),
+            SplitDirection::Left => (SplitOrientation::Horizontal, SplitSide::First),
+            SplitDirection::Bottom => (SplitOrientation::Vertical, SplitSide::Second),
+            SplitDirection::Top => (SplitOrientation::Vertical, SplitSide::First),
+        };
+        let branch_ratio = match side {
+            SplitSide::Second => 1.0 - split_def.ratio,
+            SplitSide::First => split_def.ratio,
+        };
+        let new_pane_id = self.alloc_pane_id();
+        let view_def_index = self.active_subtab;
+        let theme = Arc::clone(&self.theme);
+        let source_id = self.active_pane_id();
+        let coupled = split_def.coupled;
+        // The new pane represents the leaf level — its tree state must
+        // come from the target child, not the source ViewDef.
+        let tree_enabled = child_def.tree_label.is_some();
+        let mut new_pane = {
+            let source = self.active_pane();
+            let mut p = ContentPane::new(theme, view_def_index, tree_enabled);
+            p.active_query = source.active_query.clone();
+            p.active_query_name = source.active_query_name.clone();
+            p.active_query_vars = source.active_query_vars.clone();
+            p.current_sort = source.current_sort.clone();
+            p.current_page = source.current_page;
+            p.active_child = source.active_child.clone();
+            p.items = source.items.clone();
+            p
+        };
+        new_pane.drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
+        let tree = &mut self.pane_trees[self.active_subtab];
+        tree.split_focus(orientation, branch_ratio, side, new_pane_id, new_pane);
+        tree.assign_tag(new_pane_id, &self.pane_tag_alphabet);
+        if coupled {
+            if let Some(source) = self.find_pane_mut(source_id) {
+                source.linked_child = Some((child_def.name.clone(), new_pane_id));
+            }
+        }
+        self.sync_action_bar_hints();
+        new_pane_id
+    }
+
+    /// Close the focused pane. Cascades through any coupled
+    /// `linked_child` chain so closing a parent also closes the child it
+    /// owns. Refuses the close if the cascade would empty the tree (the
+    /// user must close one of the linked panes manually first). After
+    /// the cascade, surviving panes that referenced any closed pane
+    /// have their `linked_child` backlink cleared.
+    fn close_focused(&mut self) -> SubViewMessage {
+        let active_subtab = self.active_subtab;
+        let focus_id = self.pane_trees[active_subtab].focus;
+
+        // Build the cascade chain in parent → child order. Stop on a
+        // dead/cyclic backlink so a stale reference can never trap us.
+        let mut chain: Vec<PaneId> = Vec::new();
+        let mut cur = focus_id;
+        loop {
+            if chain.contains(&cur) {
+                break;
+            }
+            chain.push(cur);
+            let next = self.find_pane(cur).and_then(|p| {
+                p.linked_child
+                    .as_ref()
+                    .map(|(_, child)| *child)
+                    .filter(|child| self.find_pane(*child).is_some())
+            });
+            match next {
+                Some(c) => cur = c,
+                None => break,
+            }
+        }
+
+        let tree_leaf_count = self.pane_trees[active_subtab].leaf_count();
+        if chain.len() >= tree_leaf_count {
+            // Cascade would empty the tree — refuse.
+            return SubViewMessage::SelectionChanged(None);
+        }
+
+        // Harvest cursor ids of every pane about to be destroyed so the
+        // App can tear them down on the adapter (CP-6). Must run BEFORE
+        // `close_specific` since the pane state vanishes with the leaf.
+        for &id in &chain {
+            if let Some(pane) = self.find_pane(id) {
+                if let Some(cq) = pane.active_custom_query.as_ref() {
+                    if let Some(cursor_id) = cq.cursor_id.clone() {
+                        self.pending_cursor_closes.push(cursor_id);
+                    }
+                }
+            }
+        }
+
+        // Close children first, parent last so each `close_specific` call
+        // sees a non-empty tree.
+        for &id in chain.iter().rev() {
+            let tree = &mut self.pane_trees[active_subtab];
+            if tree.close_specific(id) {
+                tree.release_tag(id);
+            }
+        }
+
+        // Clear any stale backlink in surviving panes of the same tree.
+        let closed: std::collections::HashSet<PaneId> = chain.iter().copied().collect();
+        let mut surviving_ids = Vec::new();
+        self.pane_trees[active_subtab]
+            .root
+            .collect_leaf_ids(&mut surviving_ids);
+        for id in surviving_ids {
+            if let Some(leaf) = self.pane_trees[active_subtab].root.find_leaf_mut(id) {
+                let stale = leaf
+                    .pane
+                    .linked_child
+                    .as_ref()
+                    .map(|(_, child)| closed.contains(child))
+                    .unwrap_or(false);
+                if stale {
+                    leaf.pane.linked_child = None;
+                }
+            }
+        }
+
+        self.sync_action_bar_hints();
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    pub fn selected_item_id(&self) -> Option<&str> {
+        self.active_pane().selected_item_id()
+    }
+
+    pub fn nav_depth(&self) -> usize {
+        self.active_pane().nav_depth()
+    }
+
+    pub fn breadcrumbs(&self) -> Vec<&str> {
+        self.active_pane().breadcrumbs()
+    }
+
+    pub fn parent_node_id(&self) -> Option<&str> {
+        self.active_pane().parent_node_id()
+    }
+
+    pub fn current_child_node_type(&self) -> Option<&str> {
+        self.active_pane().current_child_node_type()
+    }
+
+    pub fn set_preview_description(&mut self, key: &str, description: String) {
+        self.active_pane_mut().set_preview_description(key, description);
+    }
+
+    /// Returns the load parameters needed for the root-level adapter call.
+    pub fn root_load_request(&self) -> Option<LoadRequest> {
+        self.active_pane().root_load_request(&self.view_defs)
+    }
+
+    pub fn current_sort(&self) -> &[SortKey] {
+        self.active_pane().current_sort()
+    }
+
+    pub fn set_current_sort(&mut self, sort: Vec<SortKey>) -> bool {
+        self.active_pane_mut().set_current_sort(sort)
+    }
+
+    pub fn last_applied_sort(&self) -> &[SortKey] {
+        self.active_pane().last_applied_sort()
+    }
+
+    pub fn set_current_page(&mut self, page: Option<PageRequest>) -> bool {
+        self.active_pane_mut().set_current_page(page)
+    }
+
+    pub fn current_page(&self) -> Option<PageRequest> {
+        self.active_pane().current_page()
+    }
+
+    pub fn last_page_info(&self) -> Option<PageInfo> {
+        self.active_pane().last_page_info()
+    }
+
+    pub fn next_page_request(&self) -> Option<PageRequest> {
+        self.active_pane().next_page_request()
+    }
+
+    pub fn prev_page_request(&self) -> Option<PageRequest> {
+        self.active_pane().prev_page_request()
+    }
+
+    pub fn current_query_text(&self) -> String {
+        self.active_pane().current_query_text(&self.view_defs)
+    }
+
+    pub fn default_query_text(&self) -> String {
+        self.active_pane().default_query_text(&self.view_defs)
+    }
+
+    pub fn is_query_editable(&self) -> bool {
+        self.active_pane().is_query_editable(&self.view_defs)
+    }
+
+    pub fn set_query(&mut self, query: String, name: Option<String>) {
+        self.active_pane_mut().set_query(query, name);
+    }
+
+    pub fn set_query_with_vars(
+        &mut self,
+        query: String,
+        name: Option<String>,
+        vars: std::collections::HashMap<String, String>,
+    ) {
+        self.active_pane_mut().set_query_with_vars(query, name, vars);
+    }
+
+    /// Pane-targeted variant of `set_query_with_vars`. The App-side
+    /// `:query apply` dispatcher applies to whichever pane the saved
+    /// query was bound to, which may not be the active one when
+    /// switching tabs.
+    pub fn set_query_for_pane_with_vars(
+        &mut self,
+        pane_id: PaneId,
+        query: String,
+        name: Option<String>,
+        vars: std::collections::HashMap<String, String>,
+    ) {
+        if let Some(pane) = self.find_pane_mut(pane_id) {
+            pane.set_query_with_vars(query, name, vars);
+        }
+    }
+
+    /// The query-menu key from the *active* ViewDef. Pulled from config
+    /// dynamically because each subtab can carry its own menu key.
+    pub fn query_menu_key(&self) -> Option<&str> {
+        self.active_view_def()
+            .and_then(|vd| vd.query.as_ref())
+            .and_then(|q| q.menu_key.as_deref())
+    }
+
+    // ── Query popup ─────────────────────────────────────────────────
+
+    pub fn has_query_popup(&self) -> bool {
+        self.query_menu.is_open()
+    }
+
+    /// Open the query menu popup with merged YAML + DB queries.
+    pub fn open_query_popup(&mut self) {
+        let entries: Vec<QueryMenuEntry> = self.db_saved_queries.iter().map(|sq| QueryMenuEntry {
+            name: sq.name.clone(),
+            query: sq.query.clone(),
+            shortcut: sq.shortcut.clone(),
+        }).collect();
+        self.query_menu_mode = QueryMenuMode::SavedQueries;
+        self.query_menu.open(&entries, &self.query_menu_kb);
+    }
+
+    /// Open the Postgres-specific scripts menu for the given table.
+    /// Called by the App after it has listed `.sql` files in the
+    /// per-table directory. The `query` field on each entry is unused
+    /// for the script menu but kept non-empty so the popup widget
+    /// treats the row as selectable.
+    pub fn open_postgres_scripts_popup(
+        &mut self,
+        database: String,
+        schema: String,
+        table: String,
+        entries: Vec<QueryMenuEntry>,
+    ) {
+        self.query_menu_mode = QueryMenuMode::PostgresScripts {
+            database,
+            schema,
+            table,
+        };
+        self.query_menu.open(&entries, &self.query_menu_kb);
+    }
+
+    /// Handle key events when the query popup is open.
+    pub fn handle_query_popup_key(&mut self, key: &str) -> Option<SubViewMessage> {
+        if !self.query_menu.is_open() {
+            return None;
+        }
+        let view_index = self.view_index;
+        let pane_id = self.active_pane_id();
+        let mode = self.query_menu_mode.clone();
+        let msg = self.query_menu.handle_key(key, &self.query_menu_kb);
+        let noop = Some(SubViewMessage::SelectionChanged(None));
+        match (mode, msg) {
+            // Closed / unhandled / handled — route shared regardless of mode.
+            (_, QueryMenuMessage::Unhandled)
+            | (_, QueryMenuMessage::Handled)
+            | (_, QueryMenuMessage::Closed) => noop,
+
+            // ── Saved queries (existing behaviour) ────────────────────
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::Apply { name, query }) => {
+                Some(SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
+                    view_index,
+                    pane_id,
+                    query,
+                    name,
+                }))
+            }
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::EditExisting { name, query }) => {
+                let pane = self.active_pane_mut();
+                pane.active_query = Some(query);
+                pane.active_query_name = Some(name.clone());
+                Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+                    view_index,
+                    pane_id,
+                    save_name: Some(name),
+                    is_new: false,
+                }))
+            }
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::Delete { name }) => {
+                let scope = self.query_scope.clone();
+                Some(SubViewMessage::Request(ViewRequest::DeleteContentQuery {
+                    view_index, scope, name,
+                }))
+            }
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::EditShortcut { name, query }) => {
+                let scope = self.query_scope.clone();
+                Some(SubViewMessage::Request(ViewRequest::PromptContentQueryShortcut {
+                    view_index, scope, name, query,
+                }))
+            }
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::CreateNew { name }) => {
+                Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+                    view_index,
+                    pane_id,
+                    save_name: Some(name),
+                    is_new: true,
+                }))
+            }
+
+            // ── Postgres table scripts (new) ──────────────────────────
+            (
+                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMessage::Apply { name, .. },
+            ) => Some(self.dispatch_postgres_script_apply(database, schema, table, name)),
+            (
+                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMessage::EditExisting { name, .. },
+            ) => Some(SubViewMessage::Request(ViewRequest::EditPostgresScript {
+                view_index, pane_id, database, schema, table, script: name, is_new: false,
+            })),
+            (
+                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMessage::Delete { name },
+            ) => Some(SubViewMessage::Request(ViewRequest::DeletePostgresScript {
+                view_index, pane_id, database, schema, table, script: name,
+            })),
+            (
+                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMessage::EditShortcut { name, .. },
+            ) => Some(SubViewMessage::Request(ViewRequest::PromptPostgresScriptShortcut {
+                view_index, pane_id, database, schema, table, script: name,
+            })),
+            (
+                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMessage::CreateNew { name },
+            ) => Some(SubViewMessage::Request(ViewRequest::EditPostgresScript {
+                view_index, pane_id, database, schema, table, script: name, is_new: true,
+            })),
+        }
+    }
+
+    pub fn render_query_popup(&mut self, frame: &mut Frame, area: Rect) {
+        self.query_menu.render(frame, area);
+    }
+
+    /// Apply DB-loaded saved queries (body + optional shortcut). Body
+    /// will move to adapter-managed `SavedQueryStore` in SQ-4; for now
+    /// this still reads `saved_query` rows via the legacy repository.
+    pub fn merge_saved_queries(&mut self, db_models: Vec<(String, String, Option<String>)>) {
+        self.db_saved_queries = db_models
+            .into_iter()
+            .map(|(name, query, shortcut)| MergedSavedQuery { name, query, shortcut })
+            .collect();
+    }
+
+    /// Apply loaded items to the active pane (used by tests and code
+    /// paths without an explicit [`PaneId`]).
+    pub fn set_items(
+        &mut self,
+        items: Vec<NodeSummary>,
+        applied_sort: Vec<SortKey>,
+        page: Option<PageInfo>,
+        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        error: Option<String>,
+    ) {
+        let pane_id = self.active_pane_id();
+        self.set_items_for_pane(
+            pane_id,
+            items,
+            applied_sort,
+            page,
+            sortable_columns,
+            error,
+        );
+    }
+
+    /// Apply the result of a custom adapter query (e.g. raw SQL from
+    /// the Postgres Q-editor) to a specific pane. Distinguishes from
+    /// `set_items_for_pane` in two ways:
+    ///
+    /// 1. The pane remembers `custom_query` so its next/prev-page keys
+    ///    can re-execute the same query with a new offset instead of
+    ///    falling back to `list()`.
+    /// 2. The pane's `current_page` is synced to whatever the adapter
+    ///    reports (so a freshly-run SELECT correctly shows page 0
+    ///    even if the user previously paged into a regular list).
+    ///
+    /// Dropped silently if the pane has been closed.
+    /// Apply children loaded for an expanded tree node. Updates the
+    /// pane's `tree.cache[parent_path]`, re-flattens `tree.entries`,
+    /// and rebuilds the visible table so the new rows show up. Dropped
+    /// silently if the pane has been closed or is no longer in tree
+    /// mode.
+    pub fn apply_tree_children(
+        &mut self,
+        pane_id: PaneId,
+        parent_path: Vec<String>,
+        items: Vec<NodeSummary>,
+        page_info: Option<not_yet_done_content::PageInfo>,
+        append: bool,
+        child_node_type: String,
+    ) {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return;
+        };
+        let view_defs = self.view_defs.clone();
+        let next_page = next_page_after(page_info);
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            let Some(state) = leaf.pane.tree.as_mut() else {
+                return;
+            };
+            // Multi-load mode (heterogeneous fan-out): route each
+            // per-type response into its own bucket. The merged
+            // `children` list is rebuilt in YAML order so arrival
+            // order doesn't shuffle the rendered tree.
+            let is_multi = state
+                .cache
+                .get(&parent_path)
+                .map(|s| s.expected_types.is_some())
+                .unwrap_or(false);
+            if is_multi {
+                state.apply_multi_load_result(parent_path, child_node_type, items);
+            } else if append {
+                state.extend_cached_children(parent_path, items, next_page);
+            } else {
+                state.set_cached_children(parent_path, items, next_page);
+            }
+            if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
+                state.rebuild_entries(vd);
+            }
+            leaf.pane.rebuild_table(&view_defs);
+        }
+        self.sync_action_bar_hints();
+    }
+
+    /// Initialise the tree cache entry for a parent that expects N
+    /// per-type loads (heterogeneous fan-out). Called by the
+    /// `ExpandTreeNodeMulti` dispatch before firing per-type loads.
+    pub fn begin_tree_multi_load(
+        &mut self,
+        pane_id: PaneId,
+        parent_path: Vec<String>,
+        expected_types: Vec<String>,
+    ) {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return;
+        };
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            if let Some(state) = leaf.pane.tree.as_mut() {
+                state.begin_multi_load(parent_path, expected_types);
+            }
+        }
+    }
+
+    /// Roll back a pending expand when the async load failed: drop
+    /// the parent_path from `expanded` so the row appears collapsed
+    /// again. Cache stays empty (no `loaded` flip), so the next
+    /// expand attempt re-issues the request.
+    pub fn cancel_tree_expand(&mut self, pane_id: PaneId, parent_path: Vec<String>) {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return;
+        };
+        let view_defs = self.view_defs.clone();
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            let Some(state) = leaf.pane.tree.as_mut() else {
+                return;
+            };
+            state.expanded.remove(&parent_path);
+            if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
+                state.rebuild_entries(vd);
+            }
+            leaf.pane.rebuild_table(&view_defs);
+        }
+    }
+
+    pub fn apply_custom_query_result(
+        &mut self,
+        pane_id: PaneId,
+        items: Vec<NodeSummary>,
+        page: Option<PageInfo>,
+        custom_query: Option<CustomQueryRunState>,
+    ) {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return;
+        };
+        let view_defs = &self.view_defs;
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            // Resolve the pane's effective pagination mode from its
+            // active view/child config *before* set_items so the
+            // restored CustomQueryRunState carries the right mode for
+            // subsequent `>` / `<` keys (the spawn closure stamps a
+            // placeholder `Server` because it has no view-config
+            // reference).
+            let mode = leaf.pane.resolve_pagination_mode(view_defs);
+            leaf.pane.set_items(items, Vec::new(), page, Vec::new(), None, view_defs);
+            if let Some(info) = page {
+                leaf.pane.set_current_page(Some(PageRequest {
+                    offset: info.offset,
+                    limit: info.limit,
+                }));
+            }
+            // set_items wipes active_custom_query — restore it after,
+            // patching `mode` from the resolved view config.
+            leaf.pane.active_custom_query = custom_query.map(|mut cq| {
+                cq.mode = mode;
+                cq
+            });
+        }
+        self.sync_action_bar_hints();
+    }
+
+    /// Apply loaded items to a specific pane by id. Drops the response
+    /// silently if the pane has been closed.
+    pub fn set_items_for_pane(
+        &mut self,
+        pane_id: PaneId,
+        items: Vec<NodeSummary>,
+        applied_sort: Vec<SortKey>,
+        page: Option<PageInfo>,
+        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        error: Option<String>,
+    ) {
+        // ContentPane::set_items needs &[ViewDef] for rebuild_table. Two
+        // disjoint mutable borrows from `self` would clash, so split via
+        // raw indexing — locate the pane's tree first, then borrow
+        // `view_defs` and `pane_trees[i]` as separate fields of `self`.
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return;
+        };
+        let view_defs = &self.view_defs;
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            leaf.pane.set_items(items, applied_sort, page, sortable_columns, error, view_defs);
+        }
+        self.sync_action_bar_hints();
+    }
+
+    /// Apply a preview-fetch result to a specific pane by id.
+    pub fn set_preview_description_for_pane(&mut self, pane_id: PaneId, key: &str, description: String) {
+        if let Some(pane) = self.find_pane_mut(pane_id) {
+            pane.set_preview_description(key, description);
+        }
+    }
+
+    /// After a list reload (e.g. post-`mark_as_read`) the row at the
+    /// cursor may now point at a different item than the one being
+    /// previewed. Returns a follow-up `FetchContentPreview` request when
+    /// the pane's preview is open and the selected row's id has drifted
+    /// away from `preview_key`; the caller dispatches it like any other
+    /// `ViewRequest`.
+    pub fn pending_preview_request(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> Option<ViewRequest> {
+        let tree_idx = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())?;
+        let view_defs = &self.view_defs;
+        let tree = &mut self.pane_trees[tree_idx];
+        let leaf = tree.root.find_leaf_mut(pane_id)?;
+        let p = leaf.pane.update_preview_for_selection(view_defs)?;
+        Some(ViewRequest::FetchContentPreview {
+            view_index,
+            pane_id,
+            cache_key: p.cache_key,
+            node_id: p.node_id,
+            action_id: p.action_id,
+        })
+    }
+
+    pub fn set_auth_status(&mut self, status: AdapterStatus) {
+        self.auth_status = status;
+    }
+
+    /// True while the adapter is `Busy` — the only banner state whose
+    /// text advances purely with wall-clock time. The main loop polls
+    /// this to keep the elapsed-seconds counter ticking when idle.
+    pub fn is_busy(&self) -> bool {
+        matches!(self.auth_status, AdapterStatus::Busy { .. })
+    }
+
+    pub fn set_adapter_init_error(&mut self, err: String) {
+        self.adapter_init_error = Some(err);
+    }
+
+    /// Format the auth-status banner text (or `None` when no banner
+    /// should render). The fetch_error fallback consults the active
+    /// pane so each pane can surface its own per-load error.
+    ///
+    /// Precedence (top → bottom): adapter init error, Connecting /
+    /// NeedsCreds / Failed auth states, in-flight pane retry
+    /// (combined with adapter Busy countdown when both apply), bare
+    /// adapter Busy, `manual_connect` not-yet-loaded hint, sticky
+    /// `fetch_error`.
+    fn auth_status_banner(&self) -> Option<String> {
+        if let Some(err) = &self.adapter_init_error {
+            return Some(format!("Configuration error: {err}"));
+        }
+        match &self.auth_status {
+            AdapterStatus::Connecting { retry, max_retries, timeout_secs } => Some(format!(
+                "Connecting… ({retry}/{max_retries}) Timeout: {timeout_secs}s"
+            )),
+            AdapterStatus::NeedsCreds { .. } => {
+                Some("Login required (press the action key to enter credentials)".into())
+            }
+            AdapterStatus::Failed { reason } => {
+                Some(format!("Connection failed: {reason}"))
+            }
+            AdapterStatus::Busy {
+                label,
+                started_at_unix_ms,
+                timeout_secs,
+            } => {
+                let busy = busy_banner(label, *started_at_unix_ms, *timeout_secs);
+                Some(match self.active_pane().retry_state.as_ref() {
+                    Some(rs) => format!(
+                        "Retrying ({}/{}) — {busy}: {}",
+                        rs.attempt, rs.max_attempts, rs.last_error
+                    ),
+                    None => busy,
+                })
+            }
+            AdapterStatus::Idle | AdapterStatus::Ready => {
+                if let Some(rs) = self.active_pane().retry_state.as_ref() {
+                    return Some(format!(
+                        "Retrying ({}/{}): {}",
+                        rs.attempt, rs.max_attempts, rs.last_error
+                    ));
+                }
+                if let Some(banner) = self.manual_connect_banner() {
+                    return Some(banner);
+                }
+                self.active_pane()
+                    .fetch_error
+                    .as_ref()
+                    .map(|e| format!("Fetch failed: {e}"))
+            }
+        }
+    }
+
+    /// Banner shown when `manual_connect: true` and the active pane
+    /// has not yet been loaded. Tells the user which key triggers
+    /// the connection (the first `type: reload` action of the active
+    /// subtab's ViewDef). Falls back to a generic message when no
+    /// reload action is configured — the YAML is still consistent
+    /// (the user can connect via the cmdline-equivalent), but the
+    /// banner can't name a specific key.
+    fn manual_connect_banner(&self) -> Option<String> {
+        if !self.manual_connect {
+            return None;
+        }
+        if self.active_pane().loaded {
+            return None;
+        }
+        let reload_key = self
+            .view_defs
+            .get(self.active_subtab)
+            .and_then(|vd| {
+                vd.actions
+                    .iter()
+                    .find(|a| a.action_type == "reload")
+                    .map(|a| a.key.clone())
+            });
+        Some(match reload_key {
+            Some(k) => format!("Auto-connect disabled — press `{k}` to connect"),
+            None => "Auto-connect disabled — no `reload` action configured for this view".into(),
+        })
+    }
+
+    pub fn rebuild_table(&mut self) {
+        // Forward the live header overlay (column / direction picker)
+        // so the active pane's table reflects it.
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        self.pane_trees[self.active_subtab]
+            .focused_leaf_mut()
+            .pane
+            .rebuild_table_with(view_defs, &overlay);
+    }
+
+    /// Push a refreshed `link_refs` snapshot — plus the adapter NodeRef
+    /// prefix (`"{kind}/{instance_id}"`) — down to every pane in this
+    /// tab. Called by the App whenever its own `App::link_refs` cache
+    /// changes, so the `has_links` YAML column always reads from a
+    /// current set without going through App on every rebuild.
+    pub fn set_link_refs(&mut self, link_refs: &std::collections::HashSet<String>) {
+        let prefix = self.adapter.as_ref().map(|a| {
+            format!("{}/{}", a.adapter_type(), a.instance_id())
+        });
+        for tree in self.pane_trees.iter_mut() {
+            let mut ids = Vec::new();
+            tree.root.collect_leaf_ids(&mut ids);
+            for id in ids {
+                if let Some(leaf) = tree.root.find_leaf_mut(id) {
+                    leaf.pane.set_link_context(link_refs, prefix.clone());
+                }
+            }
+        }
+    }
+
+    // ── Key handling ─────────────────────────────────────────────────
+
+    pub fn handle_key(&mut self, key: &str) -> SubViewMessage {
+        if self.active_view_def().is_none() {
+            return SubViewMessage::Unhandled;
+        }
+
+        // Query popup mode — intercepts every key. Outside the keymap.
+        if self.query_menu.is_open() {
+            return self.handle_query_popup_key(key).unwrap_or(SubViewMessage::Unhandled);
+        }
+
+        // Window-leader chord runs before any other key handler so that
+        // once the leader is consumed, the resolution key is interpreted
+        // strictly as a window action (split / close / pane-tag switch)
+        // and never falls through to subtab / popup / saved-query
+        // shortcuts. The chord handler still defers to text-input modes
+        // via its own input-mode guard. Outside the keymap because chord
+        // resolution depends on a multi-step state machine.
+        if let Some(msg) = self.handle_window_chord(key) {
+            return msg;
+        }
+
+        // Text-input intercept — fuzzy or `/`-search consumes characters
+        // on the active pane. We still reach the pane (which dispatches
+        // the input), but skip any tab-level claim that would steal a
+        // single letter from the input buffer.
+        let in_text_input =
+            self.active_pane().table.fuzzy_active || self.active_pane().search.active();
+
+        // Per-node YAML `shortcuts:` win over tab-level claims (subtab
+        // switch, query-menu key, saved-query / per-table chords). The
+        // user binds these on the deepest reachable ChildDef, so they
+        // are by definition the most-specific binding visible at the
+        // cursor — and the action-bar hint we surface to the user
+        // commits to them being live. Without this pre-check, a subtab
+        // key like `d` for the "databases" view in postgres.yaml
+        // shadows the leaf-level `d: delete` on `postgres:db_script`
+        // and the hint silently lies. Single-char keys only; modifier-
+        // bearing keys (`ctrl+e`, …) can't collide with subtab keys
+        // and don't need this fast-path.
+        if !in_text_input {
+            let view_index = self.view_index;
+            let pane_id = self.active_pane_id();
+            let view_defs_ref = &self.view_defs;
+            let req = self.pane_trees[self.active_subtab]
+                .focused_leaf()
+                .pane
+                .try_node_action_shortcut(key, view_index, pane_id, view_defs_ref);
+            if let Some(req) = req {
+                return SubViewMessage::Request(req);
+            }
+        }
+
+        if !in_text_input {
+            let claims = self.build_view_claims();
+            for claim in &claims.claims {
+                if !claim.key.matches(key) {
+                    continue;
+                }
+                if let Some(msg) = self.dispatch_view_claim(&claim.source) {
+                    return msg;
+                }
+            }
+        }
+
+        // Delegate the rest to the active pane.
+        let view_index = self.view_index;
+        let pane_id = self.active_pane_id();
+        let msg = {
+            let view_defs = &self.view_defs;
+            let common_kb = &self.common_kb;
+            let content_kb = &self.content_kb;
+            self.pane_trees[self.active_subtab]
+                .focused_leaf_mut()
+                .pane
+                .handle_key(key, view_index, pane_id, view_defs, common_kb, content_kb)
+        };
+        if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
+            return self.dispatch_content_drill(item_id, item_label, *child_def);
+        }
+        msg
+    }
+
+    /// Tab-level claims (subtab switch, query menu, saved-query
+    /// shortcuts, adapter query editor). Mirrors the conditions of the
+    /// original if-chain — claims are emitted only when their dynamic
+    /// guards are satisfied, so the dispatcher itself can stay
+    /// condition-free.
+    fn build_view_claims(&self) -> KeyMap {
+        let mut km = KeyMap::new();
+        let scope = KeyScope::Tab(TabRef::new(""));
+
+        // Subtab switch — active in every leaf of the focused pane
+        // (root or drilldown). The validator (Phase 3) guarantees no
+        // key conflicts between subtab keys and drilled-level actions
+        // because subtab claims are pushed into every leaf's KeyMap.
+        for vd in &self.view_defs {
+            if let Some(k) = vd.key.as_deref() {
+                km.push(KeyClaim::handler(
+                    KeyBinding::new(k.to_string()),
+                    scope.clone(),
+                    KeySource::YamlSubtab { view: vd.name.clone() },
+                ));
+            }
+        }
+
+        // Query popup menu key — active in every leaf of the focused
+        // view (root or drilldown). Validator enforces non-collision.
+        if let Some(mk) = self.query_menu_key() {
+            km.push(KeyClaim::handler(
+                KeyBinding::new(mk.to_string()),
+                scope.clone(),
+                KeySource::YamlMenuKey {
+                    view: self.active_view_name(),
+                },
+            ));
+        }
+
+        // Saved-query shortcuts — active in every leaf of the focused
+        // view (root or drilldown). Validator enforces non-collision.
+        for sq in &self.db_saved_queries {
+            if let Some(sc) = sq.shortcut.as_deref() {
+                km.push(KeyClaim::handler(
+                    KeyBinding::new(sc.to_string()),
+                    scope.clone(),
+                    KeySource::SavedQueryShortcut {
+                        view: self.active_view_name(),
+                        name: sq.name.clone(),
+                    },
+                ));
+            }
+        }
+
+        // Postgres-table-scoped scripts menu. Gated on a postgres-table
+        // node being in focus — either the selected item (flat tables
+        // subtab, or drilled into a schema) or the pane's parent
+        // (drilled into a table; rows being displayed). The SQL editor
+        // (`Q sql`) lives in the new per-node-action shortcut path via
+        // YAML `shortcuts:` on the postgres view config.
+        if let Some(table_node_id) = self.target_postgres_table_node_id() {
+            if let Some(b) = self.content_kb.get(&ContentAction::OpenScriptsMenu) {
+                km.push(KeyClaim::handler(
+                    b.clone(),
+                    scope.clone(),
+                    KeySource::Content(ContentAction::OpenScriptsMenu),
+                ));
+            }
+            // Per-table script shortcuts (SQ-8d). Mirrors the
+            // SavedQueryShortcut path above, but data lives in a
+            // separate cache populated by the App when this table
+            // comes into focus.
+            if let Some(entries) = self.postgres_table_shortcuts.get(&table_node_id) {
+                for (script, chord) in entries {
+                    km.push(KeyClaim::handler(
+                        KeyBinding::new(chord.clone()),
+                        scope.clone(),
+                        KeySource::PostgresTableScriptShortcut {
+                            table_node_id: table_node_id.clone(),
+                            script: script.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        km
+    }
+
+    fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
+        match source {
+            KeySource::YamlSubtab { view } => {
+                let target = self
+                    .view_defs
+                    .iter()
+                    .position(|vd| vd.name == *view)?;
+                if target == self.active_subtab {
+                    // Already on this subtab — consume the key.
+                    return Some(SubViewMessage::SelectionChanged(None));
+                }
+                let needs_load = self.switch_to_view(target);
+                if needs_load && !self.manual_connect {
+                    let pane_id = self.active_pane_id();
+                    Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                        view_index: self.view_index,
+                        pane_id,
+                    }))
+                } else {
+                    Some(SubViewMessage::SelectionChanged(None))
+                }
+            }
+            KeySource::YamlMenuKey { .. } => {
+                self.open_query_popup();
+                Some(SubViewMessage::SelectionChanged(None))
+            }
+            KeySource::SavedQueryShortcut { name, .. } => {
+                let sq = self
+                    .db_saved_queries
+                    .iter()
+                    .find(|sq| sq.name == *name)
+                    .cloned()?;
+                let pane_id = self.active_pane_id();
+                Some(SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
+                    view_index: self.view_index,
+                    pane_id,
+                    query: sq.query,
+                    name: sq.name,
+                }))
+            }
+            KeySource::Content(ContentAction::OpenScriptsMenu) => {
+                let view_index = self.view_index;
+                let pane_id = self.active_pane_id();
+                let table_node_id = self.target_postgres_table_node_id()?;
+                Some(SubViewMessage::Request(ViewRequest::OpenPostgresScriptsMenu {
+                    view_index,
+                    pane_id,
+                    table_node_id,
+                }))
+            }
+            KeySource::PostgresTableScriptShortcut { table_node_id, script } => {
+                let (db, schema, table) = parse_postgres_table_node_id(table_node_id)?;
+                Some(self.dispatch_postgres_script_apply(db, schema, table, script.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    fn active_view_name(&self) -> String {
+        self.view_defs
+            .get(self.active_subtab)
+            .map(|vd| vd.name.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn action_bar_hints(&self) -> Vec<BarHint> {
+        if self.window_pending.is_some() {
+            return self.window_mode_hints();
+        }
+        let mut hints = self.active_pane().action_bar_hints(
+            &self.view_defs,
+            self.query_menu_key(),
+            &self.content_kb,
+            &self.key_icons,
+            self.adapter.as_deref(),
+        );
+        // Postgres scripts-menu (`q queries`) hint — gated on the same
+        // condition as the keybinding claim in `build_view_claims`.
+        // Per-node-action shortcut hints (e.g. `Q sql`) are not yet
+        // surfaced here; the bindings work via the async shortcut
+        // dispatcher in `ContentPane::try_node_action_shortcut`.
+        if self.target_postgres_table_node_id().is_some() {
+            let q_key = self
+                .content_kb
+                .hint_label(&ContentAction::OpenScriptsMenu, &self.key_icons);
+            if !hints.iter().any(|(k, _)| k == &q_key) {
+                hints.push((q_key, "queries".to_string()));
+            }
+        }
+        hints
+    }
+
+    /// Hints rendered while the window-leader chord is pending. Lists
+    /// the resolution key for each `WindowAction` plus a pane-tag-switch
+    /// reminder when the active subtab has more than one pane.
+    fn window_mode_hints(&self) -> Vec<BarHint> {
+        let mut hints: Vec<BarHint> = Vec::new();
+        for (action, binding) in &self.window_kb.bindings {
+            let Some(last) = binding.0.first().and_then(|s| s.chars().last()) else {
+                continue;
+            };
+            let label = match action {
+                WindowAction::SplitRight => "split right",
+                WindowAction::SplitDown => "split down",
+                WindowAction::Close => "close pane",
+                WindowAction::FocusParent => "focus parent",
+                WindowAction::FocusChild => "focus child",
+            };
+            hints.push((last.to_string(), label.to_string()));
+        }
+        hints.sort_by(|a, b| a.1.cmp(&b.1));
+        let tree = &self.pane_trees[self.active_subtab];
+        if tree.pane_tags.len() > 1 {
+            let mut tags: Vec<char> = tree.pane_tags.values().copied().collect();
+            tags.sort();
+            let tags_str: String = tags.iter().collect();
+            hints.push((tags_str, "switch pane".to_string()));
+        }
+        hints
+    }
+
+    /// Mode label shown at the very start of the action bar — currently
+    /// only `Some("WINDOW")` while the window-leader chord is pending.
+    fn action_bar_mode_label(&self) -> Option<String> {
+        self.window_pending.as_ref().map(|_| "WINDOW".to_string())
+    }
+
+    pub fn status_bar_hints(&self) -> Vec<BarHint> {
+        self.active_pane().status_bar_hints(
+            &self.view_defs,
+            &self.content_kb,
+            &self.key_icons,
+            self.adapter.as_deref(),
+        )
+    }
+}
+
+// ── SortableView / PaginatedView ─────────────────────────────────────
+
+impl SortableView for ContentView {
+    fn sortable_columns(&self) -> Vec<not_yet_done_content::SortableColumn> {
+        self.active_pane().last_sortable_columns.clone()
+    }
+
+    fn current_sort(&self) -> &[SortKey] {
+        ContentView::current_sort(self)
+    }
+
+    fn set_current_sort(&mut self, sort: Vec<SortKey>) -> bool {
+        ContentView::set_current_sort(self, sort)
+    }
+
+    fn last_applied_sort(&self) -> &[SortKey] {
+        ContentView::last_applied_sort(self)
+    }
+}
+
+impl PaginatedView for ContentView {
+    fn current_page(&self) -> Option<PageRequest> {
+        ContentView::current_page(self)
+    }
+
+    fn set_current_page(&mut self, page: Option<PageRequest>) -> bool {
+        ContentView::set_current_page(self, page)
+    }
+
+    fn last_page_info(&self) -> Option<PageInfo> {
+        ContentView::last_page_info(self)
+    }
+
+    fn next_page_request(&self) -> Option<PageRequest> {
+        ContentView::next_page_request(self)
+    }
+
+    fn prev_page_request(&self) -> Option<PageRequest> {
+        ContentView::prev_page_request(self)
+    }
+}
+
+// ── Searchable ───────────────────────────────────────────────────────
+
+impl Searchable for ContentView {
+    fn search_active(&self) -> bool {
+        self.active_pane().search.active()
+    }
+    fn search_state(&self) -> SearchState {
+        self.active_pane().search.state()
+    }
+    fn search_open(&mut self) {
+        self.active_pane_mut().search.open();
+    }
+    fn search_close(&mut self) {
+        self.active_pane_mut().search.close();
+    }
+    fn search_clear(&mut self) {
+        self.active_pane_mut().search.clear();
+    }
+    fn search_handle_key(&mut self, key: &str) -> SearchKeyResult {
+        let view_defs = &self.view_defs;
+        let pane = &mut self.pane_trees[self.active_subtab].focused_leaf_mut().pane;
+        let result = pane.search.handle_key(key);
+        if matches!(result, SearchKeyResult::QueryChanged) {
+            let descs = pane.search_descriptions(view_defs);
+            let refs: Vec<(usize, &str)> = descs.iter().map(|(i, s)| (*i, s.as_str())).collect();
+            pane.search.update_matches(&refs);
+            if let Some(row) = pane.search.first_match() {
+                pane.table.set_selected(row);
+            }
+        }
+        result
+    }
+    fn search_jump(&mut self, direction: isize) {
+        let pane = self.active_pane_mut();
+        if let Some(row) = pane.search.jump(direction) {
+            pane.table.set_selected(row);
+        }
+    }
+}
+
+// ── HasCmdline ───────────────────────────────────────────────────────
+
+impl HasCmdline for ContentView {
+    fn cmdline_active(&self) -> bool {
+        self.cmdline.active()
+    }
+
+    fn cmdline_state(&self) -> CmdlineState {
+        self.cmdline.state()
+    }
+
+    fn cmdline_open(&mut self) {
+        self.cmdline.open();
+    }
+
+    fn cmdline_open_with(&mut self, prefill: &str) {
+        self.cmdline.open_with(prefill);
+    }
+
+    fn cmdline_close(&mut self) {
+        self.cmdline.close();
+    }
+
+    fn cmdline_handle_key(&mut self, key: &str) -> CmdlineKeyResult {
+        self.cmdline.handle_key(key)
+    }
+}
+
+// ── Component ────────────────────────────────────────────────────────
+
+impl Component for ContentView {
+    fn view(&mut self, frame: &mut Frame, area: Rect) {
+        // Reserve a top line for the auth-status banner when set.
+        let banner_text = self.auth_status_banner();
+        let (banner_area, after_banner) = if banner_text.is_some() {
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(area);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, area)
+        };
+
+        // Reserve a line for breadcrumbs when drilled down (active pane).
+        let drilled = !self.active_pane().nav_stack.is_empty();
+        let (breadcrumb_area, content_area) = if drilled {
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(after_banner);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, after_banner)
+        };
+
+        // Render auth-status banner.
+        if let (Some(bn_area), Some(text)) = (banner_area, banner_text) {
+            let t = &*self.theme;
+            let is_failure = self.adapter_init_error.is_some()
+                || matches!(self.auth_status, AdapterStatus::Failed { .. })
+                || self.active_pane().fetch_error.is_some();
+            let style = if is_failure {
+                Style::default().fg(t.error())
+            } else {
+                Style::default().fg(t.accent())
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(text, style))),
+                bn_area,
+            );
+        }
+
+        // Render breadcrumbs.
+        if let Some(bc_area) = breadcrumb_area {
+            self.active_pane().render_breadcrumbs(frame, bc_area, &self.view_defs);
+        }
+
+        // Reserve one line at the bottom for the pagination footer when set.
+        let (content_area, page_footer_area) = if self.active_pane().last_page_info.is_some() {
+            let chunks = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(content_area);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (content_area, None)
+        };
+
+        // Recursively render the pane tree. Multi-leaf trees get focus
+        // borders; single-leaf trees render unchanged.
+        let theme = Arc::clone(&self.theme);
+        let overlay = self.header_overlay.clone();
+        let active_subtab = self.active_subtab;
+        let tree = &mut self.pane_trees[active_subtab];
+        let multi = tree.leaf_count() > 1;
+        let focused_id = tree.focus;
+        tree.last_rects.clear();
+        let PaneTree { root, last_rects, pane_tags, .. } = tree;
+        root.render(
+            frame,
+            content_area,
+            focused_id,
+            multi,
+            last_rects,
+            pane_tags,
+            &theme,
+            &overlay,
+        );
+
+        // Render pagination footer (driven by focused pane).
+        if let Some(area) = page_footer_area {
+            self.active_pane().render_page_footer(frame, area);
+        }
+
+        // Overlay: query popup (tab-level).
+        self.render_query_popup(frame, area);
+    }
+
+    fn query(&self, attr: tuirealm::props::Attribute) -> Option<tuirealm::props::QueryResult<'_>> {
+        self.active_pane().table.query(attr)
+    }
+
+    fn attr(&mut self, attr: tuirealm::props::Attribute, value: tuirealm::props::AttrValue) {
+        self.active_pane_mut().table.attr(attr, value);
+    }
+
+    fn state(&self) -> tuirealm::state::State {
+        self.active_pane().table.state()
+    }
+
+    fn perform(&mut self, cmd: Cmd) -> CmdResult {
+        self.active_pane_mut().table.perform(cmd)
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Resolve a column's value from the underlying [`NodeSummary`]. Returns
+/// `&'a str` so the result can be threaded into the table-build pipeline
+/// without allocation.
+///
+/// Note: the synthetic `source: "has_links"` column is *not* handled
+/// here — it depends on the pane's `link_refs` cache + adapter NodeRef
+/// prefix, neither of which this stateless helper has access to.
+/// Call sites that build render rows special-case `"has_links"`
+/// upstream of the call to this function (see flat-mode and tree-mode
+/// row builders inside `rebuild_table_with` / `build_tree_data_rows`).
+fn column_value<'a>(item: &'a NodeSummary, col: &ColumnDef) -> &'a str {
+    if col.source.as_deref() == Some("label") {
+        return &item.label;
+    }
+    item.metadata
+        .fields
+        .iter()
+        .find(|f| f.key == col.key)
+        .map(|f| f.value.as_str())
+        .unwrap_or("")
+}
+
+/// Build the haystack string used by both fuzzy_filter and `/`-search.
+/// With no `fields` configured the haystack is `label` followed by every
+/// metadata field value (space-joined). With explicit fields, only those
+/// values are joined — column resolution falls back to `label` for the
+/// special key and to raw metadata otherwise. Kept as a free helper so
+/// tree mode and flat mode share the same matcher input.
+fn build_field_haystack(node: &NodeSummary, columns: &[ColumnDef], fields: &[String]) -> String {
+    if fields.is_empty() {
+        let mut s = node.label.clone();
+        for f in &node.metadata.fields {
+            s.push(' ');
+            s.push_str(&f.value);
+        }
+        return s;
+    }
+    let mut s = String::new();
+    for key in fields {
+        let value = columns
+            .iter()
+            .find(|c| c.key == *key)
+            .map(|c| column_value(node, c))
+            .unwrap_or_else(|| {
+                if key == "label" {
+                    &node.label
+                } else {
+                    node.metadata
+                        .fields
+                        .iter()
+                        .find(|f| f.key == *key)
+                        .map(|f| f.value.as_str())
+                        .unwrap_or("")
+                }
+            });
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(value);
+    }
+    s
+}
+
+/// Render a free-text search query by substituting placeholders in `template`.
+///
+/// Two placeholder syntaxes coexist so a single function handles both
+/// JQL-style adapters (Jira) and structured adapters (Taiga):
+///
+/// **Curly-brace form (Jira):**
+/// - `{q}` → escaped user input (safe inside JQL `"..."` literals).
+/// - `{key_or}` → expands to `issuekey = "{q}" OR ` when the input looks
+///   like a Jira issue key (`PROJECT-123`), otherwise to the empty
+///   string.
+///
+/// **Angle-bracket form (Taiga and other adapters that consume YAML
+/// query templates):**
+/// - `<input>` → escaped user input.
+/// - `<input_if_numeric>` → escaped input if it's all ASCII digits;
+///   otherwise the sentinel `__OMIT__` so the adapter can drop the
+///   containing query entry.
+fn render_text_search(template: &str, input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"'  => escaped.push_str("\\\""),
+            other => escaped.push(other),
+        }
+    }
+    let trimmed = input.trim();
+    let key_or = if looks_like_issue_key(trimmed) {
+        format!(r#"issuekey = "{}" OR "#, escaped.trim())
+    } else {
+        String::new()
+    };
+    let input_if_numeric = if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        trimmed.to_string()
+    } else {
+        "__OMIT__".to_string()
+    };
+    template
+        .replace("{key_or}", &key_or)
+        .replace("{q}", &escaped)
+        .replace("<input_if_numeric>", &input_if_numeric)
+        .replace("<input>", &escaped)
+}
+
+/// True if `s` parses as a Jira issue-key shape: one or more letters/digits/`_`
+/// (starting with a letter), then `-`, then one or more digits. Case-insensitive
+/// on the prefix; whitespace must already be trimmed by the caller.
+fn looks_like_issue_key(s: &str) -> bool {
+    let Some((prefix, suffix)) = s.split_once('-') else { return false };
+    if prefix.is_empty() || suffix.is_empty() {
+        return false;
+    }
+    if !prefix.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && suffix.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Parse the adapter-internal Postgres table node id form
+/// `<database>/schemas/<schema>/tables/<table>` back into its three
+/// segments. Returns `None` for any other shape so callers can detect
+/// mismatches against an evolving id layout instead of silently
+/// dispatching with wrong data. Mirrors the format produced in
+/// [`ContentView::dispatch_postgres_script_apply`].
+pub(crate) fn parse_postgres_table_node_id(node_id: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = node_id.split('/').collect();
+    if parts.len() != 5 || parts[1] != "schemas" || parts[3] != "tables" {
+        return None;
+    }
+    if parts[0].is_empty() || parts[2].is_empty() || parts[4].is_empty() {
+        return None;
+    }
+    Some((parts[0].to_string(), parts[2].to_string(), parts[4].to_string()))
+}
+
+const DEFAULT_AUTO_MIN: usize = 5;
+const DEFAULT_AUTO_MAX: usize = 11;
+
+fn parse_sizing(s: &str) -> ColStrategy {
+    let trimmed = s.trim();
+    if trimmed == "max" {
+        return ColStrategy::Max;
+    }
+    if trimmed == "auto" {
+        return ColStrategy::Auto {
+            min: DEFAULT_AUTO_MIN,
+            max: DEFAULT_AUTO_MAX,
+        };
+    }
+    if let Some(inner) = trimmed.strip_prefix("flex(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(n) = inner.parse::<usize>() {
+            return ColStrategy::Flex(n);
+        }
+    }
+    if let Some(inner) = trimmed.strip_prefix("auto(").and_then(|s| s.strip_suffix(')')) {
+        let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+        if parts.len() == 2 {
+            if let (Ok(min), Ok(max)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                return ColStrategy::Auto { min, max };
+            }
+        }
+        return ColStrategy::Auto {
+            min: DEFAULT_AUTO_MIN,
+            max: DEFAULT_AUTO_MAX,
+        };
+    }
+    ColStrategy::Max
+}
+
+/// Derive the next-page request from a result's `PageInfo`. Mirrors
+/// [`ContentPane::next_page_request`]; lifted into a free function so
+/// tree-mode callers can compute it from raw `PageInfo` without a pane.
+fn next_page_after(info: Option<PageInfo>) -> Option<PageRequest> {
+    let info = info?;
+    if !info.has_next || info.limit == 0 {
+        return None;
+    }
+    let next_offset = (info.offset as u64).saturating_add(info.limit as u64);
+    Some(PageRequest {
+        offset: u32::try_from(next_offset).unwrap_or(u32::MAX),
+        limit: info.limit,
+    })
+}
+
+/// Build the right-hand status text for the pagination footer.
+///
+/// The function is split out from the renderer so it can be unit-tested
+/// without spinning up a Frame.
+fn format_page_footer(info: PageInfo, applied_sort: &[SortKey]) -> String {
+    let returned_end_inclusive = (info.offset as u64).saturating_add(info.limit as u64);
+    let mut parts: Vec<String> = Vec::new();
+    match info.total {
+        Some(0) => parts.push("0 items".to_string()),
+        Some(total) if total <= info.limit as u64 && info.offset == 0 => {
+            parts.push(format!("{total} items"));
+        }
+        Some(total) => {
+            let last = returned_end_inclusive.min(total);
+            let first = (info.offset as u64) + 1;
+            parts.push(format!("Items {first}\u{2013}{last} of {total}"));
+            if info.limit > 0 {
+                let total_pages = ((total + info.limit as u64 - 1) / info.limit as u64).max(1);
+                let current_page = (info.offset as u64 / info.limit as u64) + 1;
+                parts.push(format!("Page {current_page}/{total_pages}"));
+            }
+        }
+        None => {
+            let first = (info.offset as u64) + 1;
+            parts.push(format!("Items {first}\u{2013}{returned_end_inclusive}"));
+            if info.has_next || info.has_prev {
+                let current_page = if info.limit > 0 {
+                    (info.offset as u64 / info.limit as u64) + 1
+                } else {
+                    1
+                };
+                parts.push(format!("Page {current_page}"));
+            }
+        }
+    }
+    if !applied_sort.is_empty() {
+        let sort_text = applied_sort
+            .iter()
+            .map(|k| {
+                let arrow = match k.direction {
+                    not_yet_done_content::SortDirection::Asc => '\u{25B2}',
+                    not_yet_done_content::SortDirection::Desc => '\u{25BC}',
+                };
+                format!("{}{arrow}", k.column)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("Sort: {sort_text}"));
+    }
+    parts.join(" \u{00B7} ")
+}
+
+/// Format the auth-status banner text for `AdapterStatus::Busy`.
+/// Renders elapsed/timeout side-by-side so the user can watch the
+/// deadline count down on each render-tick: e.g. `"DB: rows of … (3s/7s)"`.
+///
+/// `timeout_secs == 0` means "no configured timeout" — show elapsed only.
+/// If the wall-clock has somehow gone backwards (`now < started_at`) we
+/// clamp elapsed to 0 instead of showing a giant negative.
+fn busy_banner(label: &str, started_at_unix_ms: u64, timeout_secs: u64) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(started_at_unix_ms);
+    let elapsed_secs = now_ms.saturating_sub(started_at_unix_ms) / 1000;
+    if timeout_secs == 0 {
+        format!("{label}… ({elapsed_secs}s)")
+    } else {
+        format!("{label}… ({elapsed_secs}s/{timeout_secs}s)")
+    }
+}
+
+fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
+    match name {
+        "accent" => t.accent(),
+        "text_high" => t.text_high(),
+        "text_med" => t.text_med(),
+        "text_dim" => t.text_dim(),
+        "success" => t.success(),
+        "warning" => t.warning(),
+        "error" => t.error(),
+        _ => t.text_med(),
+    }
+}
+
+/// The shared content-table style (row / selection / header / scroll colors),
+/// derived purely from the theme. Used by both the single-line and multi-line
+/// render paths.
+fn build_content_table_style(t: &Theme) -> TableStyle {
+    TableStyle::new()
+        .set_style(TableStyleType::Header, Style::default().bg(t.surface()))
+        .set_style(
+            TableStyleType::Row,
+            Style::default().fg(t.text_med()).bg(t.bg()),
+        )
+        .set_style(
+            TableStyleType::RowSelected,
+            Style::default().fg(t.text_high()).bg(t.surface_2()),
+        )
+        .set_style(
+            TableStyleType::ColumnSelected,
+            Style::default().fg(t.text_high()).bg(t.surface()),
+        )
+        .set_style(
+            TableStyleType::CellSelected,
+            Style::default()
+                .fg(t.on_primary())
+                .bg(t.primary())
+                .add_modifier(Modifier::BOLD),
+        )
+        .set_style(TableStyleType::Highlight, Style::default().fg(t.accent()))
+        .set_style(
+            TableStyleType::ScrollIndicator,
+            Style::default()
+                .fg(t.accent())
+                .bg(t.surface())
+                .add_modifier(Modifier::BOLD),
+        )
+}
+
+/// Build the widget rows for a multi-line (chat) layout.
+///
+/// Each [`LineLayout`] entry becomes one physical line of every row; an empty
+/// line is a blank spacer. Column foreground colors come from each
+/// `ColumnDef.style` (theme reference) and are carried per cell via a
+/// `StyleMap` style id, so they apply regardless of the cell's position on
+/// its line. The column header is suppressed by the caller. Returns the rows
+/// plus the style map their cells index into.
+fn build_multiline_widget_rows(
+    data_rows: &[TRow<u32>],
+    columns: &[ColumnDef],
+    _col_ids: &[TColumnId],
+    config: &TableConfig,
+    layout: &[LineLayout],
+    t: &Theme,
+) -> (Vec<TableWidgetRow>, StyleMap) {
+    // One style slot per declared column (fg from `style:` or `text_med`),
+    // keyed by column name so any line can look its column's slot up.
+    let mut style_styles: Vec<Style> = Vec::with_capacity(columns.len());
+    let mut style_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for col in columns {
+        let color = col
+            .style
+            .as_deref()
+            .map(|s| resolve_theme_color(t, s))
+            .unwrap_or(t.text_med());
+        style_idx.insert(col.key.as_str(), style_styles.len());
+        style_styles.push(Style::default().fg(color));
+    }
+
+    let template = RowTemplate {
+        lines: layout
+            .iter()
+            .map(|line| {
+                let cols = line.columns.iter().map(TColumnId::new).collect();
+                LineTemplate::new(cols).with_highlight_on_select(line.highlight_on_select)
+            })
+            .collect(),
+    };
+
+    // For each layout line, the key of its lone column when that column is
+    // `markdown: true`. The validator guarantees a markdown column stands
+    // alone on its line, so a one-column line is the only candidate. Such a
+    // line is expanded from the raw body into N soft-wrapped markdown lines
+    // instead of a single fitted cell.
+    let markdown_line_key: Vec<Option<&str>> = layout
+        .iter()
+        .map(|line| {
+            if line.columns.len() != 1 {
+                return None;
+            }
+            let key = line.columns[0].as_str();
+            columns
+                .iter()
+                .find(|c| c.key == key && c.markdown)
+                .map(|c| c.key.as_str())
+        })
+        .collect();
+
+    let computed = compute_multiline_table(data_rows, config, &template, None);
+    let line_col_widths = computed.line_col_widths;
+    let computed_rows = computed.rows;
+
+    // Markdown span styles are appended to the per-column styles in a single
+    // shared map, so segment style ids don't collide with column style ids.
+    let mut builder = StyleMapBuilder::from_styles(style_styles);
+
+    let rows: Vec<TableWidgetRow> = computed_rows
+        .into_iter()
+        .enumerate()
+        .map(|(ri, mr)| {
+            let selectable = mr.selectable;
+            let mut lines: Vec<TableWidgetLine> = Vec::with_capacity(mr.lines.len());
+            for (li, cl) in mr.lines.into_iter().enumerate() {
+                if let Some(md_key) = markdown_line_key.get(li).copied().flatten() {
+                    // Soft-wrap the raw (un-fitted) body to the column's width.
+                    let width = line_col_widths
+                        .get(li)
+                        .and_then(|w| w.first())
+                        .copied()
+                        .unwrap_or(config.max_width)
+                        .max(1);
+                    let body = data_rows
+                        .get(ri)
+                        .and_then(|r| r.cells.get(&TColumnId::new(md_key)))
+                        .map(|c| c.text.as_str())
+                        .unwrap_or("");
+                    let md_lines = render_markdown_lines(body, width, t);
+                    let widget_lines =
+                        lines_to_widget_lines(md_lines, &mut builder, cl.highlight_on_select);
+                    if widget_lines.is_empty() {
+                        // Empty body: keep one (empty) line so the row's shape
+                        // stays stable rather than collapsing the body block.
+                        lines.push(
+                            TableWidgetLine::new(vec![TableWidgetCell::from_segments(vec![])])
+                                .with_highlight_on_select(cl.highlight_on_select),
+                        );
+                    } else {
+                        lines.extend(widget_lines);
+                    }
+                    continue;
+                }
+                let line_keys = &layout[li].columns;
+                let cells: Vec<TableWidgetCell> = cl
+                    .cells
+                    .into_iter()
+                    .zip(cl.highlights.into_iter())
+                    .enumerate()
+                    .map(|(ci, (text, hl))| {
+                        let mut cell = TableWidgetCell::with_highlights(text, hl);
+                        if let Some(idx) = line_keys.get(ci).and_then(|k| style_idx.get(k.as_str())) {
+                            cell = cell.with_style(*idx);
+                        }
+                        cell
+                    })
+                    .collect();
+                lines.push(TableWidgetLine {
+                    cells,
+                    highlight_on_select: cl.highlight_on_select,
+                });
+            }
+            let row = TableWidgetRow::multiline(lines);
+            if selectable { row } else { row.not_selectable() }
+        })
+        .collect();
+
+    (rows, StyleMap::new(builder.into_styles()))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use not_yet_done_content::mock::*;
+    use crate::config::ThemeConfig;
+    use crate::config::view_config::*;
+
+    fn test_theme() -> Arc<Theme> {
+        Arc::new(Theme::new(ThemeConfig::default()))
+    }
+
+    #[test]
+    fn multiline_widget_rows_chat_layout() {
+        let theme = test_theme();
+        let columns = vec![
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false },
+            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false },
+            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+        ];
+        let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
+        let mut strategies = std::collections::HashMap::new();
+        for c in &columns {
+            strategies.insert(TColumnId::new(&c.key), parse_sizing(&c.sizing));
+        }
+        let config = TableConfig {
+            max_width: 80,
+            separator: "  ".into(),
+            sizer: Box::new(MixedColSizer { strategies }),
+        };
+        let data_rows = vec![
+            TRow::new(0u32)
+                .cell("author", "alice")
+                .cell("time", "12:00")
+                .cell("content", "hello"),
+        ];
+        let layout = vec![
+            LineLayout { columns: vec!["author".into(), "time".into()], highlight_on_select: true },
+            LineLayout { columns: vec!["content".into()], highlight_on_select: true },
+            LineLayout { columns: vec![], highlight_on_select: false },
+        ];
+
+        let (rows, _style_map) =
+            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme);
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.height(), 3);
+        // Line 0: author + time, both styled (style_id set from `style:`).
+        assert_eq!(row.lines[0].cells.len(), 2);
+        assert!(row.lines[0].cells[0].text.starts_with("alice"));
+        assert!(row.lines[0].cells[0].style_id.is_some());
+        assert!(row.lines[0].cells[1].style_id.is_some());
+        assert!(row.lines[0].highlight_on_select);
+        // Line 1: the message body.
+        assert_eq!(row.lines[1].cells.len(), 1);
+        assert!(row.lines[1].cells[0].text.starts_with("hello"));
+        // Line 2: spacer — empty and outside the selection block.
+        assert!(row.lines[2].cells.is_empty());
+        assert!(!row.lines[2].highlight_on_select);
+    }
+
+    #[test]
+    fn multiline_widget_rows_markdown_expands_body() {
+        let theme = test_theme();
+        let columns = vec![
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false },
+            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true },
+        ];
+        let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
+        let mut strategies = std::collections::HashMap::new();
+        for c in &columns {
+            strategies.insert(TColumnId::new(&c.key), parse_sizing(&c.sizing));
+        }
+        let config = TableConfig {
+            max_width: 30,
+            separator: "  ".into(),
+            sizer: Box::new(MixedColSizer { strategies }),
+        };
+        // Two paragraphs, the second long enough to wrap at width 30.
+        let body = "First paragraph.\n\nSecond paragraph that is deliberately long \
+                    so it has to wrap across several physical lines.";
+        let data_rows = vec![
+            TRow::new(0u32).cell("author", "alice").cell("content", body),
+        ];
+        let layout = vec![
+            LineLayout { columns: vec!["author".into()], highlight_on_select: true },
+            LineLayout { columns: vec!["content".into()], highlight_on_select: true },
+            LineLayout { columns: vec![], highlight_on_select: false },
+        ];
+
+        let (rows, style_map) =
+            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme);
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        // author (1) + several body lines (>1) + spacer (1) => height > 3.
+        assert!(row.height() > 3, "height was {}", row.height());
+        // Body lines are built from styled segments (markdown path), not the
+        // plain fitted cell.
+        let body_lines = &row.lines[1..row.lines.len() - 1];
+        assert!(body_lines.len() > 1, "body should span multiple lines");
+        assert!(
+            body_lines
+                .iter()
+                .any(|l| l.cells.first().map(|c| !c.segments.is_empty()).unwrap_or(false)),
+            "at least one body line carries markdown segments"
+        );
+        // Every interned segment id is valid in the returned StyleMap.
+        for l in body_lines {
+            for cell in &l.cells {
+                for (_t, id) in &cell.segments {
+                    if let Some(id) = id {
+                        assert!(style_map.get(*id).is_some(), "segment id {id} in map");
+                    }
+                }
+            }
+        }
+        // Last line is still the spacer.
+        assert!(row.lines.last().unwrap().cells.is_empty());
+    }
+
+    #[test]
+    fn parse_postgres_table_node_id_accepts_canonical_form() {
+        assert_eq!(
+            parse_postgres_table_node_id("live/schemas/public/tables/users"),
+            Some(("live".into(), "public".into(), "users".into())),
+        );
+    }
+
+    #[test]
+    fn parse_postgres_table_node_id_rejects_wrong_markers() {
+        assert_eq!(parse_postgres_table_node_id("live/x/public/tables/users"), None);
+        assert_eq!(parse_postgres_table_node_id("live/schemas/public/y/users"), None);
+    }
+
+    #[test]
+    fn parse_postgres_table_node_id_rejects_arity_mismatch() {
+        assert_eq!(parse_postgres_table_node_id("live/schemas/public/tables"), None);
+        assert_eq!(
+            parse_postgres_table_node_id("live/schemas/public/tables/users/extra"),
+            None,
+        );
+    }
+
+    #[test]
+    fn parse_postgres_table_node_id_rejects_empty_segments() {
+        assert_eq!(parse_postgres_table_node_id("/schemas/public/tables/users"), None);
+        assert_eq!(parse_postgres_table_node_id("live/schemas//tables/users"), None);
+        assert_eq!(parse_postgres_table_node_id("live/schemas/public/tables/"), None);
+    }
+
+    #[test]
+    fn render_text_search_escapes_quotes_and_backslashes() {
+        let tpl = r#"text ~ "{q}" ORDER BY updated DESC"#;
+        assert_eq!(
+            render_text_search(tpl, "memory leak"),
+            r#"text ~ "memory leak" ORDER BY updated DESC"#,
+        );
+        assert_eq!(
+            render_text_search(tpl, r#"the "real" issue"#),
+            r#"text ~ "the \"real\" issue" ORDER BY updated DESC"#,
+        );
+        assert_eq!(
+            render_text_search(tpl, r"path\to\file"),
+            r#"text ~ "path\\to\\file" ORDER BY updated DESC"#,
+        );
+        assert_eq!(render_text_search("status = Open", "anything"), "status = Open");
+    }
+
+    #[test]
+    fn render_text_search_key_or_placeholder() {
+        let tpl = r#"({key_or}text ~ "{q}") ORDER BY updated DESC"#;
+        assert_eq!(
+            render_text_search(tpl, "memory leak"),
+            r#"(text ~ "memory leak") ORDER BY updated DESC"#,
+        );
+        assert_eq!(
+            render_text_search(tpl, "ABC-123"),
+            r#"(issuekey = "ABC-123" OR text ~ "ABC-123") ORDER BY updated DESC"#,
+        );
+        assert_eq!(
+            render_text_search(tpl, "abc-1"),
+            r#"(issuekey = "abc-1" OR text ~ "abc-1") ORDER BY updated DESC"#,
+        );
+        assert_eq!(
+            render_text_search(tpl, "  ABC-7  "),
+            r#"(issuekey = "ABC-7" OR text ~ "  ABC-7  ") ORDER BY updated DESC"#,
+        );
+    }
+
+    #[test]
+    fn render_text_search_taiga_input_placeholder() {
+        let tpl = "- { type: task,  q: \"<input>\" }\n- { type: issue, q: \"<input>\" }";
+        let rendered = render_text_search(tpl, "memory leak");
+        assert!(rendered.contains(r#"q: "memory leak""#));
+        assert!(rendered.contains("type: task"));
+        assert!(rendered.contains("type: issue"));
+    }
+
+    #[test]
+    fn render_text_search_input_if_numeric_substitutes_when_digits() {
+        let tpl = "- { type: task,  ref: <input_if_numeric> }";
+        let rendered = render_text_search(tpl, "42");
+        assert_eq!(rendered, "- { type: task,  ref: 42 }");
+    }
+
+    #[test]
+    fn render_text_search_input_if_numeric_emits_omit_for_non_digits() {
+        let tpl = "- { type: task,  ref: <input_if_numeric> }";
+        let rendered = render_text_search(tpl, "hello");
+        assert_eq!(rendered, "- { type: task,  ref: __OMIT__ }");
+    }
+
+    #[test]
+    fn render_text_search_input_escapes_quotes_for_yaml() {
+        let tpl = r#"- { type: task,  q: "<input>" }"#;
+        let rendered = render_text_search(tpl, r#"the "real" issue"#);
+        assert_eq!(rendered, r#"- { type: task,  q: "the \"real\" issue" }"#);
+    }
+
+    #[test]
+    fn looks_like_issue_key_detects_jira_keys() {
+        assert!(looks_like_issue_key("ABC-123"));
+        assert!(looks_like_issue_key("A-1"));
+        assert!(looks_like_issue_key("PRJ_42-7"));
+        assert!(looks_like_issue_key("abc-9"));
+        assert!(!looks_like_issue_key("hello"));
+        assert!(!looks_like_issue_key("ABC-"));
+        assert!(!looks_like_issue_key("-123"));
+        assert!(!looks_like_issue_key("123-456"));
+        assert!(!looks_like_issue_key("ABC-12a"));
+        assert!(!looks_like_issue_key(""));
+        assert!(!looks_like_issue_key("foo bar"));
+    }
+
+    fn test_config_with_children() -> ViewFileConfig {
+        ViewFileConfig {
+            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
+            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "issues".into(),
+                node_type: "mock:issue".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false },
+                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                ],
+                preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
+                actions: vec![
+                    ActionDef { name: "edit".into(), key: "e".into(), action_type: "edit".into(), id: None, node_id_from: None, navigate_to: None, fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: false, editor: None, commit_on_save: false},
+                ],
+                children: vec![
+                    ChildDef {
+                        row_layout: None,
+                smooth_scroll: false,
+                        name: "Comments".into(),
+                        node_type: "mock:comment".into(),
+                        columns: vec![
+                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                        ],
+                        preview: None,
+                        actions: vec![],
+                        children: vec![],
+                        split: None,
+                        pagination: None,
+                        keybindings: HashMap::new(),
+                        action_chains: Default::default(),
+                        column_cursor: false,
+                        tree_label: None,
+                        shortcuts: HashMap::new(),
+                        enter_action: None,
+                        recursive: false,
+            editor_in_place: false,
+                        leaf_glyph: None,
+                    },
+                ],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: None,
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+            }],
+        }
+    }
+
+    fn mock_issues() -> Vec<NodeSummary> {
+        vec![
+            NodeSummary {
+                id: "ISS-1".into(), label: "First issue".into(),
+                node_type: issue_type(), metadata: not_yet_done_content::Metadata {
+                    fields: vec![not_yet_done_content::MetadataField {
+                        key: "key".into(), value: "ISS-1".into(), display_label: "Key".into(),
+                        editable: false, allowed_values: None,
+                    }],
+                },
+                has_children: None,
+            },
+            NodeSummary {
+                id: "ISS-2".into(), label: "Second issue".into(),
+                node_type: issue_type(), metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+        ]
+    }
+
+    fn mock_comments() -> Vec<NodeSummary> {
+        vec![
+            NodeSummary {
+                id: "COM-1".into(), label: "Great work".into(),
+                node_type: comment_type(), metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+            NodeSummary {
+                id: "COM-2".into(), label: "Needs fix".into(),
+                node_type: comment_type(), metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn new_content_view_starts_at_root() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.nav_depth(), 0);
+        assert!(view.breadcrumbs().is_empty());
+        assert!(view.active_pane().active_child.is_none());
+    }
+
+    #[test]
+    fn current_columns_at_root() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let cols = view.active_pane().current_columns(&view.view_defs);
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].key, "key");
+        assert_eq!(cols[1].key, "summary");
+    }
+
+    #[test]
+    fn current_actions_at_root() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].key, "e");
+    }
+
+    #[test]
+    fn current_children_at_root() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let children = view.active_pane().current_children(&view.view_defs);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].node_type, "mock:comment");
+    }
+
+    #[test]
+    fn current_preview_at_root() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let preview = view.active_pane().current_preview_config(&view.view_defs).unwrap();
+        assert_eq!(preview.keybinding.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn set_items_populates_table() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        assert_eq!(view.active_pane().items.len(), 2);
+        assert_eq!(view.active_pane().items[0].id, "ISS-1");
+        assert_eq!(view.active_pane().items[1].id, "ISS-2");
+        assert!(view.active_pane().fetch_error.is_none());
+    }
+
+    /// Flat (root-level) view with `smooth_scroll: true` and a 2-line
+    /// `row_layout` (body + spacer) — a minimal stand-in for the chat
+    /// message list.
+    fn smooth_chat_config() -> ViewFileConfig {
+        ViewFileConfig {
+            tab: TabConfig { name: "Chat".into(), order: 0, icon: None },
+            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            views: vec![ViewDef {
+                row_layout: Some(vec![
+                    LineLayout { columns: vec!["body".into()], highlight_on_select: true },
+                    LineLayout { columns: vec![], highlight_on_select: false },
+                ]),
+                smooth_scroll: true,
+                name: "messages".into(),
+                node_type: "mock:msg".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![
+                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                ],
+                preview: None,
+                actions: vec![],
+                children: vec![],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: None,
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+            }],
+        }
+    }
+
+    /// End-to-end reproduction of the "j/k does not scroll the chat" report:
+    /// drive the real key path (`handle_key("j")`) and the per-frame rebuild
+    /// (`rebuild_table`, what `sync_components` runs every frame), rendering
+    /// to a real backend in between, and assert the rendered buffer actually
+    /// scrolls. The per-frame rebuild used to re-select the sticky row and
+    /// undo the one-line scroll.
+    #[test]
+    fn smooth_pane_scrolls_on_j_across_per_frame_rebuild() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let config = smooth_chat_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // 30 two-line messages = 60 physical lines, far past a 12-row view.
+        let items: Vec<_> = (0..30).map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg")).collect();
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let render = |view: &mut ContentView, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    view.active_pane_mut().table.view(f, area);
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        let before = render(&mut view, &mut terminal);
+        // Real key dispatch: `j` → ListNext → nav → scroll_lines(1).
+        view.handle_key("j");
+        // The frame loop rebuilds the active content table every frame.
+        view.rebuild_table();
+        let after = render(&mut view, &mut terminal);
+
+        assert_ne!(
+            before, after,
+            "pressing `j` must scroll the smooth pane (content shifts up one line)"
+        );
+    }
+
+    /// The reported dead-zone: when the whole chat fits on screen there is
+    /// nothing to scroll, so `j`/`k` used to do nothing at all. The virtual
+    /// cursor must still step the focus message-by-message. Drives the real
+    /// key path and per-frame rebuild, like the test above.
+    #[test]
+    fn smooth_pane_steps_focus_when_everything_fits() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let config = smooth_chat_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // Only 3 two-line messages = 6 physical lines, well within a 20-row view.
+        let items: Vec<_> = (0..3).map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg")).collect();
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let render = |view: &mut ContentView, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    view.active_pane_mut().table.view(f, area);
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        // Render once so the table learns its line budget.
+        let before = render(&mut view, &mut terminal);
+        assert_eq!(view.active_pane_mut().table.selected_row(), 0);
+
+        view.handle_key("j");
+        view.rebuild_table();
+        let after = render(&mut view, &mut terminal);
+
+        assert_eq!(
+            view.active_pane_mut().table.selected_row(),
+            1,
+            "`j` must move the focus to the next message even when nothing scrolls"
+        );
+        assert_ne!(before, after, "the moved highlight must be visible");
+    }
+
+    /// Like above, but through the **split** path the chat actually uses:
+    /// a channel list whose `messages` child carries `split: right` +
+    /// `smooth_scroll` + `row_layout`. Drilling opens (and focuses) a new
+    /// split pane; `j` must scroll *that* pane.
+    #[test]
+    fn smooth_split_pane_scrolls_on_j() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        // Root channel list + a messages child opened in a right split.
+        let mut config = smooth_chat_config();
+        let root = &mut config.views[0];
+        root.node_type = "mock:channel".into();
+        root.row_layout = None;
+        root.smooth_scroll = false;
+        root.children = vec![ChildDef {
+            row_layout: Some(vec![
+                LineLayout { columns: vec!["body".into()], highlight_on_select: true },
+                LineLayout { columns: vec![], highlight_on_select: false },
+            ]),
+            smooth_scroll: true,
+            name: "messages".into(),
+            node_type: "mock:msg".into(),
+            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false }],
+            preview: None,
+            actions: Vec::new(),
+            children: Vec::new(),
+            split: Some(SplitDef { direction: SplitDirection::Right, ratio: 0.8, coupled: false }),
+            pagination: None,
+            keybindings: HashMap::new(),
+            action_chains: Default::default(),
+            column_cursor: false,
+            tree_label: None,
+            shortcuts: HashMap::new(),
+            enter_action: None,
+            recursive: false,
+            editor_in_place: false,
+            leaf_glyph: None,
+        }];
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![tnode("chan1", "general", "mock:channel")], Vec::new(), None, Vec::new(), None);
+        let child_def = view.view_defs[0].children[0].clone();
+
+        // Drill into the channel → split messages pane (focused).
+        let result = view.dispatch_content_drill("chan1".into(), "general".into(), child_def);
+        let pane_id = match result {
+            SubViewMessage::Request(ViewRequest::DrillDown { pane_id, .. }) => pane_id,
+            other => panic!("expected DrillDown, got {other:?}"),
+        };
+        // Load 30 two-line messages into the split pane.
+        let items: Vec<_> = (0..30).map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg")).collect();
+        view.set_items_for_pane(pane_id, items, Vec::new(), None, Vec::new(), None);
+        assert_eq!(view.active_pane_id(), pane_id, "split pane is focused after drill");
+        assert!(view.active_pane().current_smooth_scroll(&view.view_defs), "messages pane is smooth");
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let render = |view: &mut ContentView, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    view.active_pane_mut().table.view(f, area);
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        let before = render(&mut view, &mut terminal);
+        view.handle_key("j");
+        view.rebuild_table();
+        let after = render(&mut view, &mut terminal);
+
+        assert_ne!(before, after, "pressing `j` must scroll the split smooth pane");
+    }
+
+    /// The real chat uses a `markdown: true` column that expands into N
+    /// soft-wrapped physical lines (a different multiline build path than a
+    /// plain column). Make sure smooth scrolling still pans line-by-line
+    /// there.
+    #[test]
+    fn smooth_markdown_pane_scrolls_on_j() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = smooth_chat_config();
+        // Turn the body column into a markdown column (stands alone on its
+        // row_layout line, as the validator requires).
+        config.views[0].columns[0].markdown = true;
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // Long, multi-paragraph bodies so each message wraps to several lines.
+        let body = "# Heading\n\nFirst paragraph with enough words to wrap across the narrow pane width.\n\n- bullet one\n- bullet two";
+        let items: Vec<_> = (0..20).map(|i| tnode(&format!("m{i}"), &format!("{body} ({i})"), "mock:msg")).collect();
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let render = |view: &mut ContentView, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    view.active_pane_mut().table.view(f, area);
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        let before = render(&mut view, &mut terminal);
+        view.handle_key("j");
+        view.rebuild_table();
+        let after = render(&mut view, &mut terminal);
+
+        assert_ne!(before, after, "pressing `j` must scroll the markdown smooth pane");
+    }
+
+    #[test]
+    fn set_items_with_error() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![], Vec::new(), None, Vec::new(), Some("connection failed".into()));
+        assert!(view.active_pane().items.is_empty());
+        assert_eq!(view.active_pane().fetch_error.as_deref(), Some("connection failed"));
+    }
+
+    #[test]
+    fn drill_down_prepare_changes_level() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        let child_type = view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        assert_eq!(child_type, "mock:comment");
+        assert_eq!(view.nav_depth(), 1);
+        assert!(view.active_pane().active_child.is_some());
+        assert_eq!(view.active_pane().active_child.as_ref().unwrap().node_type, "mock:comment");
+        assert!(view.active_pane().items.is_empty());
+
+        view.set_items(mock_comments(), Vec::new(), None, Vec::new(), None);
+        assert_eq!(view.active_pane().items.len(), 2);
+        assert_eq!(view.active_pane().items[0].id, "COM-1");
+    }
+
+    #[test]
+    fn drill_down_changes_columns() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let cols = view.active_pane().current_columns(&view.view_defs);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].key, "body");
+    }
+
+    #[test]
+    fn drill_down_no_children_at_child_level() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        assert!(view.active_pane().current_children(&view.view_defs).is_empty());
+    }
+
+    #[test]
+    fn breadcrumbs_after_drill_down() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let crumbs = view.breadcrumbs();
+        assert_eq!(crumbs.len(), 2);
+        assert_eq!(crumbs[0], "First issue");
+        assert_eq!(crumbs[1], "Comments");
+    }
+
+    #[test]
+    fn nav_back_restores_previous_level() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        assert_eq!(view.active_pane().items.len(), 2);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.set_items(mock_comments(), Vec::new(), None, Vec::new(), None);
+        assert_eq!(view.active_pane().items.len(), 2);
+
+        let view_defs = view.view_defs.clone();
+        let went_back = view.active_pane_mut().nav_back(&view_defs);
+        assert!(went_back);
+        assert_eq!(view.nav_depth(), 0);
+        assert!(view.active_pane().active_child.is_none());
+        assert_eq!(view.active_pane().items.len(), 2);
+        assert_eq!(view.active_pane().items[0].id, "ISS-1");
+    }
+
+    #[test]
+    fn nav_back_at_root_returns_false() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = view.view_defs.clone();
+        assert!(!view.active_pane_mut().nav_back(&view_defs));
+    }
+
+    fn test_config_with_tree() -> ViewFileConfig {
+        ViewFileConfig {
+            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
+            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "databases".into(),
+                node_type: "mock:db".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![
+                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                ],
+                preview: None,
+                actions: vec![],
+                children: vec![
+                    ChildDef {
+                        row_layout: None,
+                smooth_scroll: false,
+                        name: "Schemas".into(),
+                        node_type: "mock:schema".into(),
+                        columns: vec![
+                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                        ],
+                        preview: None,
+                        actions: vec![],
+                        children: vec![],
+                        split: None,
+                        pagination: None,
+                        keybindings: HashMap::new(),
+                        action_chains: Default::default(),
+                        column_cursor: false,
+                        tree_label: Some("name".into()),
+                        shortcuts: HashMap::new(),
+                        enter_action: None,
+                        recursive: false,
+            editor_in_place: false,
+                        leaf_glyph: None,
+                    },
+                ],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: Some("name".into()),
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+            }],
+        }
+    }
+
+    fn mock_dbs() -> Vec<NodeSummary> {
+        vec![
+            NodeSummary {
+                id: "db1".into(), label: "db1".into(),
+                node_type: not_yet_done_content::NodeType {
+                    type_id: "mock:db".into(), mime_type: "text/plain".into(),
+                    syntax: None, file_extension: ".txt".into(),
+                    display_name: "DB".into(),
+                },
+                metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+            NodeSummary {
+                id: "db2".into(), label: "db2".into(),
+                node_type: not_yet_done_content::NodeType {
+                    type_id: "mock:db".into(), mime_type: "text/plain".into(),
+                    syntax: None, file_extension: ".txt".into(),
+                    display_name: "DB".into(),
+                },
+                metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+        ]
+    }
+
+    fn mock_schemas() -> Vec<NodeSummary> {
+        vec![
+            NodeSummary {
+                id: "public".into(), label: "public".into(),
+                node_type: not_yet_done_content::NodeType {
+                    type_id: "mock:schema".into(), mime_type: "text/plain".into(),
+                    syntax: None, file_extension: ".txt".into(),
+                    display_name: "Schema".into(),
+                },
+                metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+            NodeSummary {
+                id: "private".into(), label: "private".into(),
+                node_type: not_yet_done_content::NodeType {
+                    type_id: "mock:schema".into(), mime_type: "text/plain".into(),
+                    syntax: None, file_extension: ".txt".into(),
+                    display_name: "Schema".into(),
+                },
+                metadata: not_yet_done_content::Metadata::default(),
+                has_children: None,
+            },
+        ]
+    }
+
+    // ── Multi-branch render regression (chain-based label column) ────
+
+    fn hcol(key: &str) -> ColumnDef {
+        ColumnDef {
+            key: key.into(),
+            label: Some(key.into()),
+            source: Some("label".into()),
+            style: None,
+            sizing: "max".into(),
+            markdown: false,
+        }
+    }
+
+    fn hchild(
+        name: &str,
+        node_type: &str,
+        tree_label: Option<&str>,
+        columns: Vec<ColumnDef>,
+        children: Vec<ChildDef>,
+    ) -> ChildDef {
+        ChildDef {
+            row_layout: None,
+            smooth_scroll: false,
+            name: name.into(),
+            node_type: node_type.into(),
+            columns,
+            preview: None,
+            actions: vec![],
+            children,
+            split: None,
+            pagination: None,
+            keybindings: HashMap::new(),
+            action_chains: Default::default(),
+            column_cursor: false,
+            tree_label: tree_label.map(String::from),
+            shortcuts: HashMap::new(),
+            enter_action: None,
+            recursive: false,
+            editor_in_place: false,
+            leaf_glyph: None,
+        }
+    }
+
+    fn tnode(id: &str, label: &str, type_id: &str) -> NodeSummary {
+        NodeSummary {
+            id: id.into(),
+            label: label.into(),
+            node_type: not_yet_done_content::NodeType {
+                type_id: type_id.into(),
+                mime_type: "text/plain".into(),
+                syntax: None,
+                file_extension: ".txt".into(),
+                display_name: type_id.into(),
+            },
+            metadata: not_yet_done_content::Metadata::default(),
+            has_children: None,
+        }
+    }
+
+    /// server ─┬─ dm (key `name`)  ── msg  (leaf)          [shallow 1st branch]
+    ///         └─ cat (key `title`) ── chan (key `title`) ── msg (leaf)  [deeper, divergent key]
+    fn heterogeneous_uneven_tree_config() -> ViewFileConfig {
+        let dm_msg = hchild("dm_msg", "mock:dmmsg", None, vec![hcol("body")], vec![]);
+        let dm = hchild("dm", "mock:dm", Some("name"), vec![hcol("name")], vec![dm_msg]);
+        let chan_msg = hchild("chan_msg", "mock:msg", None, vec![hcol("body")], vec![]);
+        let chan = hchild("chan", "mock:chan", Some("title"), vec![hcol("title")], vec![chan_msg]);
+        let cat = hchild("cat", "mock:cat", Some("title"), vec![hcol("title")], vec![chan]);
+        ViewFileConfig {
+            tab: TabConfig { name: "Chat".into(), order: 0, icon: None },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "servers".into(),
+                node_type: "mock:server".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![hcol("name")],
+                preview: None,
+                actions: vec![],
+                children: vec![dm, cat],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: Some("name".into()),
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn tree_renders_deep_branch_label_despite_divergent_keys() {
+        // Regression for the recurring blank-label bug. A multi-branch
+        // tree with unevenly-deep branches that use *different*
+        // tree_label keys. The old renderer resolved the label column by
+        // walking the FIRST branch by depth, so the deeper second branch
+        // (whose depth maps to a leaf in the first branch) blanked out —
+        // exactly the Stoat "channels under a category render empty"
+        // case. The chain-based renderer paints every row's label into
+        // the cursor level's designated label column.
+        let config = heterogeneous_uneven_tree_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode("srv1", "srv1", "mock:server")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            // server → DM (first branch) + category (second branch)
+            tree.set_cached_children(
+                vec!["srv1".into()],
+                vec![tnode("dm1", "dm1", "mock:dm"), tnode("cat1", "Cat", "mock:cat")],
+                None,
+            );
+            tree.expanded.insert(vec!["srv1".into()]);
+            // category → channel (the deep, divergent-key row)
+            tree.set_cached_children(
+                vec!["srv1".into(), "cat1".into()],
+                vec![tnode("chan1", "general", "mock:chan")],
+                None,
+            );
+            tree.expanded.insert(vec!["srv1".into(), "cat1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        // Cursor on the server (depth 0) — the realistic "just expanded".
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(0);
+
+        let pane = view.active_pane();
+        // DFS order: srv1, dm1, cat1, chan1.
+        let tree = pane.tree.as_ref().unwrap();
+        assert_eq!(
+            tree.entries.iter().map(|e| e.node.id.as_str()).collect::<Vec<_>>(),
+            vec!["srv1", "dm1", "cat1", "chan1"],
+        );
+
+        let columns = pane.current_columns(&view_defs);
+        // Cursor level is the root → its label column key is "name".
+        let label_key = TColumnId::new("name");
+        let rows = pane.build_tree_data_rows(&columns, &view_defs);
+        assert_eq!(rows.len(), 4, "every visible entry produces a row");
+
+        // Every row — including the deep, divergent-key channel — must
+        // carry a non-empty label cell in the designated label column.
+        for (i, label) in ["srv1", "dm1", "Cat", "general"].iter().enumerate() {
+            let cell = rows[i]
+                .cells
+                .get(&label_key)
+                .map(|c| c.text.as_str())
+                .unwrap_or("");
+            assert!(
+                cell.contains(label),
+                "row {i} label cell empty/wrong: {cell:?} (expected to contain {label:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn tree_back_at_depth_zero_unhandled() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        match view.active_pane_mut().try_back(&view_defs) {
+            SubViewMessage::Unhandled => {}
+            other => panic!("expected Unhandled at depth 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_page_after_arms_when_has_next() {
+        use not_yet_done_content::PageInfo;
+        let info = PageInfo {
+            offset: 0,
+            limit: 50,
+            total: Some(125),
+            has_next: true,
+            has_prev: false,
+        };
+        let np = next_page_after(Some(info)).expect("has_next → Some");
+        assert_eq!(np.offset, 50);
+        assert_eq!(np.limit, 50);
+    }
+
+    #[test]
+    fn next_page_after_returns_none_when_done() {
+        use not_yet_done_content::PageInfo;
+        let info = PageInfo {
+            offset: 50,
+            limit: 50,
+            total: Some(100),
+            has_next: false,
+            has_prev: true,
+        };
+        assert!(next_page_after(Some(info)).is_none());
+        assert!(next_page_after(None).is_none());
+    }
+
+    #[test]
+    fn tree_open_on_placeholder_requests_append_next_page() {
+        use not_yet_done_content::PageRequest;
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Pre-seed: db1 is expanded, schemas loaded with a pending
+        // next_page; rebuild entries → placeholder appears.
+        {
+            let tree = view.active_pane_mut().tree.as_mut().unwrap();
+            tree.set_cached_children(
+                vec!["db1".into()],
+                mock_schemas(),
+                Some(PageRequest { offset: 2, limit: 2 }),
+            );
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        // Entries: db1 (0), public (1), private (2), <more> (3).
+        // Cursor onto the placeholder.
+        view.active_pane_mut().table.set_selected(3);
+
+        let msg = view
+            .active_pane_mut()
+            .try_tree_open(view_index, pane_id, &view_defs)
+            .expect("placeholder yields a request");
+        match msg {
+            SubViewMessage::Request(ViewRequest::ExpandTreeNode {
+                parent_path,
+                parent_node_id,
+                page,
+                append,
+                ..
+            }) => {
+                assert_eq!(parent_path, vec!["db1".to_string()]);
+                assert_eq!(parent_node_id, "db1");
+                assert!(append, "placeholder activation must append");
+                let p = page.expect("page request carried through");
+                assert_eq!(p.offset, 2);
+                assert_eq!(p.limit, 2);
+            }
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tree_smart_collapse_on_expanded_collapses_self_keeps_cursor() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+
+        // Expand db1 so the cursor sits on an *expanded* node at depth 0.
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(0);
+
+        match view.active_pane_mut().try_tree_smart_collapse(&view_defs) {
+            Some(SubViewMessage::SelectionChanged(_)) => {}
+            other => panic!("expected SelectionChanged, got {other:?}"),
+        }
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        assert!(
+            !tree.expanded.contains(&vec!["db1".to_string()]),
+            "db1 stayed expanded after smart-collapse on self",
+        );
+        // Cursor stays put on db1 (still row 0); entries shrunk back to roots.
+        assert_eq!(tree.entries.len(), 2);
+        assert_eq!(pane.table.selected_row(), 0);
+        assert_eq!(tree.entries[0].node.id, "db1");
+    }
+
+    #[test]
+    fn tree_smart_collapse_on_unexpanded_child_collapses_parent() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+
+        // db1 expanded, schemas loaded; cursor on "public" (depth 1, unexpanded).
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(1);
+
+        match view.active_pane_mut().try_tree_smart_collapse(&view_defs) {
+            Some(SubViewMessage::SelectionChanged(_)) => {}
+            other => panic!("expected SelectionChanged, got {other:?}"),
+        }
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        assert!(
+            !tree.expanded.contains(&vec!["db1".to_string()]),
+            "parent db1 should have collapsed",
+        );
+        assert_eq!(pane.table.selected_row(), 0, "cursor jumped up to db1");
+    }
+
+    #[test]
+    fn tree_collapse_all_drops_every_expanded_path() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+
+        // Expand both top-level rows so we have something to collapse.
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.set_cached_children(vec!["db2".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.expanded.insert(vec!["db2".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(2);
+
+        match view.active_pane_mut().try_tree_collapse_all(&view_defs) {
+            Some(SubViewMessage::SelectionChanged(_)) => {}
+            other => panic!("expected SelectionChanged, got {other:?}"),
+        }
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        assert!(tree.expanded.is_empty(), "all expanded paths cleared");
+        assert!(
+            tree.cache.contains_key(&vec!["db1".to_string()]),
+            "cached children kept (no refetch needed on next expand)",
+        );
+        assert_eq!(pane.table.selected_row(), 0, "cursor reset to first row");
+    }
+
+    #[test]
+    fn tree_smart_collapse_at_depth_zero_unexpanded_is_unhandled() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().table.set_selected(0);
+        assert!(view.active_pane_mut().try_tree_smart_collapse(&view_defs).is_none());
+    }
+
+    #[test]
+    fn tree_back_collapses_parent_and_moves_cursor() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+
+        // Pre-populate db1's children + mark expanded, then rebuild entries
+        // so the cursor can land on a depth-1 row.
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode enabled");
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            let vd = &view_defs[0];
+            tree.rebuild_entries(vd);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        // Entries: [db1, public, private, db2]; cursor on "public" (depth 1).
+        view.active_pane_mut().table.set_selected(1);
+
+        match view.active_pane_mut().try_back(&view_defs) {
+            SubViewMessage::SelectionChanged(_) => {}
+            other => panic!("expected SelectionChanged, got {other:?}"),
+        }
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        assert!(!tree.expanded.contains(&vec!["db1".to_string()]), "db1 stayed expanded");
+        assert_eq!(tree.entries.len(), 2, "only db1 + db2 remain");
+        assert_eq!(tree.entries[0].node.id, "db1");
+        assert_eq!(tree.entries[1].node.id, "db2");
+        assert_eq!(pane.table.selected_row(), 0, "cursor moved to db1");
+    }
+
+    /// Tree config like `test_config_with_tree`, plus a `fuzzy_filter`
+    /// action mounted at the requested depth (`0` = ViewDef root, `1` =
+    /// the schemas ChildDef). Used by Phase 6 filter tests so each can
+    /// place the filter at a single level and assert depth-scoped
+    /// behavior.
+    fn test_config_with_tree_filter_at(depth: usize) -> ViewFileConfig {
+        let filter_action = crate::config::view_config::ActionDef {
+            name: "filter".into(),
+            key: "f".into(),
+            action_type: "fuzzy_filter".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig { fields: Vec::new() }),
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        };
+        let mut config = test_config_with_tree();
+        match depth {
+            0 => config.views[0].actions.push(filter_action),
+            1 => config.views[0].children[0].actions.push(filter_action),
+            _ => panic!("test helper only places filter at depth 0 or 1"),
+        }
+        config
+    }
+
+    #[test]
+    fn tree_resolve_filter_depth_finds_root_action() {
+        let config = test_config_with_tree_filter_at(0);
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane = view.active_pane();
+        assert_eq!(pane.resolve_tree_filter_depth(&view.view_defs), Some(0));
+    }
+
+    #[test]
+    fn tree_resolve_filter_depth_finds_child_action() {
+        let config = test_config_with_tree_filter_at(1);
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane = view.active_pane();
+        assert_eq!(pane.resolve_tree_filter_depth(&view.view_defs), Some(1));
+    }
+
+    #[test]
+    fn tree_resolve_filter_depth_none_when_unset() {
+        let config = test_config_with_tree();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane = view.active_pane();
+        assert_eq!(pane.resolve_tree_filter_depth(&view.view_defs), None);
+    }
+
+    #[test]
+    fn tree_visible_indices_all_when_filter_empty() {
+        let config = test_config_with_tree_filter_at(0);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let pane = view.active_pane();
+        assert_eq!(pane.tree_visible_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn tree_filter_hides_non_matching_at_filter_depth() {
+        // Filter at depth 1 (schemas). db1 expanded with [public, private];
+        // db2 collapsed. Filter "pub" should hide "private" but keep both
+        // depth-0 dbs visible.
+        let config = test_config_with_tree_filter_at(1);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().tree_filter_depth = Some(1);
+        view.active_pane_mut().table.filter_text = "pub".into();
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        // Full entries: [db1, public, private, db2]; visible:
+        // [db1 (depth 0, kept), public (depth 1, matches), db2 (depth 0, kept)].
+        let visible_ids: Vec<&str> = pane
+            .tree_visible_indices
+            .iter()
+            .map(|&i| tree.entries[i].node.id.as_str())
+            .collect();
+        assert_eq!(visible_ids, vec!["db1", "public", "db2"]);
+    }
+
+    #[test]
+    fn tree_filter_hides_subtree_of_non_matching_parent() {
+        // Filter at depth 0. db1 expanded — when db1 is filtered out,
+        // its expanded children must also disappear.
+        let config = test_config_with_tree_filter_at(0);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().tree_filter_depth = Some(0);
+        view.active_pane_mut().table.filter_text = "db2".into();
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        let visible_ids: Vec<&str> = pane
+            .tree_visible_indices
+            .iter()
+            .map(|&i| tree.entries[i].node.id.as_str())
+            .collect();
+        // db1 hidden → public/private vanish with it; only db2 stays.
+        assert_eq!(visible_ids, vec!["db2"]);
+    }
+
+    #[test]
+    fn tree_filter_keeps_pagination_placeholder_visible() {
+        // Placeholder rows must stay visible even when the filter is
+        // active — they belong to the parent and are the user's only
+        // path to the next page.
+        use not_yet_done_content::PageRequest;
+        let config = test_config_with_tree_filter_at(1);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(
+                vec!["db1".into()],
+                mock_schemas(),
+                Some(PageRequest { offset: 2, limit: 2 }),
+            );
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().tree_filter_depth = Some(1);
+        view.active_pane_mut().table.filter_text = "pub".into();
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        // Full: [db1, public, private, <more>, db2]; with `pub` filter
+        // at depth 1: private gets hidden, the placeholder bounces the
+        // hidden-subtree state back open (same depth as the filter
+        // level, by design), and depth-0 db2 stays visible.
+        let visible: Vec<(&str, bool)> = pane
+            .tree_visible_indices
+            .iter()
+            .map(|&i| (tree.entries[i].node.id.as_str(), tree.entries[i].is_more_placeholder))
+            .collect();
+        assert_eq!(visible.len(), 4);
+        assert_eq!(visible[0].0, "db1");
+        assert_eq!(visible[1].0, "public");
+        assert!(visible[2].1, "placeholder kept in the schemas group");
+        assert_eq!(visible[3].0, "db2");
+    }
+
+    #[test]
+    fn tree_search_descriptions_iterates_visible_entries() {
+        // `/`-search must see exactly the rows the user can see, after
+        // fuzzy filter has narrowed them — and must skip pagination
+        // placeholders so cursor never lands on the loader row.
+        use not_yet_done_content::PageRequest;
+        let config = test_config_with_tree_filter_at(1);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(
+                vec!["db1".into()],
+                mock_schemas(),
+                Some(PageRequest { offset: 2, limit: 2 }),
+            );
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().tree_filter_depth = Some(1);
+        view.active_pane_mut().table.filter_text = "pub".into();
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let descs = pane.search_descriptions(&view_defs);
+        // Visible rows are db1 (row 0), public (row 1), <more> (row 2),
+        // db2 (row 3). search_descriptions drops the placeholder, so
+        // /-search sees three rows — and the surviving row indices map
+        // back into the visible-row list, not the raw tree.entries.
+        assert_eq!(descs.len(), 3);
+        assert_eq!(descs[0].0, 0);
+        assert!(descs[0].1.contains("db1"));
+        assert_eq!(descs[1].0, 1);
+        assert!(descs[1].1.contains("public"));
+        assert_eq!(descs[2].0, 3);
+        assert!(descs[2].1.contains("db2"));
+    }
+
+    #[test]
+    fn tree_apply_children_respects_active_filter_at_load_time() {
+        // Fuzzy filter at depth 1 with text "pub" is active before db1's
+        // schemas finish loading. When apply_tree_children lands them,
+        // the depth-1 filter must apply to the freshly cached rows too
+        // (not just to pre-loaded ones).
+        let config = test_config_with_tree_filter_at(1);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+
+        // Filter armed; db1 is marked expanded but has no cached children
+        // yet — simulates the gap between Enter on db1 and the async load
+        // returning.
+        view.active_pane_mut().tree_filter_depth = Some(1);
+        view.active_pane_mut().table.filter_text = "pub".into();
+        {
+            let tree = view.active_pane_mut().tree.as_mut().unwrap();
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        // Now the async load lands. apply_tree_children re-flattens
+        // entries and rebuilds the table — refresh_tree_visible_indices
+        // runs against the new rows.
+        view.apply_tree_children(
+            pane_id,
+            vec!["db1".into()],
+            mock_schemas(),
+            None,
+            false,
+            "mock:schema".into(),
+        );
+
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        let visible_ids: Vec<&str> = pane
+            .tree_visible_indices
+            .iter()
+            .map(|&i| tree.entries[i].node.id.as_str())
+            .collect();
+        assert_eq!(
+            visible_ids,
+            vec!["db1", "public", "db2"],
+            "freshly loaded schemas must be filtered: private is hidden"
+        );
+    }
+
+    #[test]
+    fn tree_split_drill_into_leaf_creates_flat_pane() {
+        // Cursor on a tree row whose level only has a non-tree child (a
+        // leaf with `split: right`) — Enter falls through to
+        // `dispatch_content_drill`. The new split pane represents the
+        // leaf level and MUST be flat; carrying tree state into it would
+        // render the leaf rows through the tree-pane code paths.
+        let mut config = test_config_with_tree();
+        // test_config_with_tree gives databases(tree) → Schemas(tree).
+        // Add a "Rows" leaf as Schemas' only child, with split: right.
+        config.views[0].children[0].children.push(ChildDef {
+            row_layout: None,
+            smooth_scroll: false,
+            name: "Rows".into(),
+            node_type: "mock:row".into(),
+            columns: vec![ColumnDef {
+                key: "id".into(),
+                label: Some("Id".into()),
+                source: Some("label".into()),
+                style: None,
+                sizing: "max".into(),
+                markdown: false,
+            }],
+            preview: None,
+            actions: Vec::new(),
+            children: Vec::new(),
+            split: Some(SplitDef {
+                direction: SplitDirection::Right,
+                ratio: 0.5,
+                coupled: false,
+            }),
+            pagination: None,
+            keybindings: HashMap::new(),
+            action_chains: Default::default(),
+            column_cursor: false,
+            tree_label: None,
+            shortcuts: HashMap::new(),
+            enter_action: None,
+            recursive: false,
+            editor_in_place: false,
+            leaf_glyph: None,
+        });
+
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        let source_pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Expand db1, cache schemas, cursor onto a schema row at depth 1.
+        {
+            let tree = view.active_pane_mut().tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(1);
+
+        // Branch 2 of try_tree_open: no tree-continuing child at depth 1,
+        // so it returns ContentDrill for the Rows leaf.
+        let msg = view
+            .active_pane_mut()
+            .try_tree_open(view_index, source_pane_id, &view_defs)
+            .expect("schema row yields a drill message");
+        let (item_id, item_label, child_def) = match msg {
+            SubViewMessage::ContentDrill { item_id, item_label, child_def } => {
+                (item_id, item_label, *child_def)
+            }
+            other => panic!("expected ContentDrill, got {other:?}"),
+        };
+        assert!(child_def.tree_label.is_none(), "leaf has no tree_label");
+        assert!(child_def.split.is_some(), "leaf uses split");
+
+        // Dispatch the drill → split pane spawned for the leaf.
+        let result = view.dispatch_content_drill(item_id, item_label, child_def);
+        let new_pane_id = match result {
+            SubViewMessage::Request(ViewRequest::DrillDown { pane_id, .. }) => pane_id,
+            other => panic!("expected DrillDown request, got {other:?}"),
+        };
+        assert_ne!(new_pane_id, source_pane_id);
+
+        let new_pane = view.find_pane(new_pane_id).expect("split pane exists");
+        assert!(
+            new_pane.tree.is_none(),
+            "split-drill into a leaf must yield a flat pane, not tree-mode"
+        );
+        let source = view.find_pane(source_pane_id).expect("source alive");
+        assert!(source.tree.is_some(), "source pane keeps its tree state");
+    }
+
+    #[test]
+    fn tree_in_place_drill_into_leaf_disables_tree_and_nav_back_restores() {
+        // In-place drill (leaf without `split`) must terminate the tree
+        // chain on the same pane: `self.tree` goes to None for the
+        // duration, and `nav_back` resurrects it (with the same expanded
+        // set and entries) when leaving the leaf.
+        let mut config = test_config_with_tree();
+        config.views[0].children[0].children.push(ChildDef {
+            row_layout: None,
+            smooth_scroll: false,
+            name: "Rows".into(),
+            node_type: "mock:row".into(),
+            columns: vec![ColumnDef {
+                key: "id".into(),
+                label: Some("Id".into()),
+                source: Some("label".into()),
+                style: None,
+                sizing: "max".into(),
+                markdown: false,
+            }],
+            preview: None,
+            actions: Vec::new(),
+            children: Vec::new(),
+            split: None,
+            pagination: None,
+            keybindings: HashMap::new(),
+            action_chains: Default::default(),
+            column_cursor: false,
+            tree_label: None,
+            shortcuts: HashMap::new(),
+            enter_action: None,
+            recursive: false,
+            editor_in_place: false,
+            leaf_glyph: None,
+        });
+
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Expand db1, cache schemas, cursor on the public row (depth 1).
+        {
+            let tree = view.active_pane_mut().tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(1);
+
+        let msg = view
+            .active_pane_mut()
+            .try_tree_open(view_index, pane_id, &view_defs)
+            .expect("depth-1 row yields drill");
+        let (item_id, item_label, child_def) = match msg {
+            SubViewMessage::ContentDrill { item_id, item_label, child_def } => {
+                (item_id, item_label, *child_def)
+            }
+            other => panic!("expected ContentDrill, got {other:?}"),
+        };
+        assert!(child_def.split.is_none(), "leaf is in-place");
+
+        // In-place drill mutates the SAME pane.
+        let result = view.dispatch_content_drill(item_id, item_label, child_def);
+        match result {
+            SubViewMessage::Request(ViewRequest::DrillDown { pane_id: p, .. }) => {
+                assert_eq!(p, pane_id, "in-place drill keeps the source pane id");
+            }
+            other => panic!("expected DrillDown, got {other:?}"),
+        }
+        let pane = view.active_pane();
+        assert!(
+            pane.tree.is_none(),
+            "in-place drill into a leaf must turn off tree mode"
+        );
+        assert!(
+            pane.active_child.as_ref().map(|c| c.name == "Rows").unwrap_or(false),
+            "active_child set to leaf"
+        );
+
+        // try_back: tree is None → falls to nav_back, which restores tree.
+        let _ = view.active_pane_mut().try_back(&view_defs);
+        let pane = view.active_pane();
+        assert!(pane.tree.is_some(), "nav_back resurrects the tree state");
+        let tree = pane.tree.as_ref().unwrap();
+        assert!(
+            tree.expanded.contains(&vec!["db1".to_string()]),
+            "expanded set survives drill+back"
+        );
+        assert!(
+            pane.active_child.is_none(),
+            "active_child cleared back to tree-root scope"
+        );
+    }
+
+    // ── Phase 7: per-level keymap ────────────────────────────────────
+
+    /// Tree config with an `edit` action on the root view and an `inspect`
+    /// action on the schemas ChildDef. Some tests also add a `fuzzy_filter`
+    /// at root to verify global-action discovery.
+    fn test_config_with_tree_per_level_actions() -> ViewFileConfig {
+        let mut config = test_config_with_tree();
+        // Root view: edit + global fuzzy_filter.
+        config.views[0].actions.push(ActionDef {
+            name: "edit".into(),
+            key: "e".into(),
+            action_type: "edit".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        config.views[0].actions.push(ActionDef {
+            name: "filter".into(),
+            key: "f".into(),
+            action_type: "fuzzy_filter".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig {
+                fields: Vec::new(),
+            }),
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        // Schemas child: inspect (level-only) action.
+        config.views[0].children[0].actions.push(ActionDef {
+            name: "inspect".into(),
+            key: "i".into(),
+            action_type: "custom".into(),
+            id: Some("inspect_schema".into()),
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        config
+    }
+
+    /// Expand `db1` so the entry list is `[db1, public, private, db2]` and
+    /// land the cursor on the requested row. Used by the depth-aware tests.
+    fn expand_db1_and_select(view: &mut ContentView, row: usize) {
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode enabled");
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(row);
+    }
+
+    #[test]
+    fn tree_current_actions_at_root_depth_returns_view_actions() {
+        let config = test_config_with_tree_per_level_actions();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        // Cursor on db1 (depth 0).
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["edit", "filter"]);
+    }
+
+    #[test]
+    fn tree_current_actions_on_empty_tree_falls_back_to_root_actions() {
+        // Regression: a `tree_label` view is in tree mode from
+        // construction (TreeState::new), so before any successful load
+        // the tree is empty and has no cursor row. `tree_current_actions`
+        // must still surface the root-level actions (notably `reload`) so
+        // the user can retry a failed initial load — otherwise pressing
+        // the refresh key is silently Unhandled.
+        let config = test_config_with_tree_per_level_actions();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // No set_items: tree is Some but empty, cursor resolves to nothing.
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["edit", "filter"],
+            "empty tree must still expose the root level's actions"
+        );
+    }
+
+    #[test]
+    fn tree_current_actions_at_child_depth_returns_level_plus_globals() {
+        let config = test_config_with_tree_per_level_actions();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        expand_db1_and_select(&mut view, 1); // cursor on "public" (depth 1)
+
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        // depth-1 own action first, root global fuzzy_filter appended.
+        // root `edit` is not global → stays hidden at depth 1.
+        assert_eq!(names, vec!["inspect", "filter"]);
+    }
+
+    #[test]
+    fn tree_current_actions_prefers_active_level_on_key_collision() {
+        let mut config = test_config_with_tree();
+        // Both levels define an action under key "x"; only the active
+        // level's should win.
+        config.views[0].actions.push(ActionDef {
+            name: "root_x".into(),
+            key: "x".into(),
+            action_type: "custom".into(),
+            id: Some("root_x".into()),
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        // root_x is NOT a global type, so without the dedup rule it
+        // wouldn't show up at depth 1 anyway. Use search (global) to
+        // force the collision path: same key "x" exists at child.
+        config.views[0].actions.push(ActionDef {
+            name: "root_search".into(),
+            key: "x".into(),
+            action_type: "search".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: Some(crate::config::view_config::SearchConfig {
+                fields: Vec::new(),
+                next_key: None,
+                prev_key: None,
+            }),
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        config.views[0].children[0].actions.push(ActionDef {
+            name: "child_x".into(),
+            key: "x".into(),
+            action_type: "custom".into(),
+            id: Some("child_x".into()),
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        expand_db1_and_select(&mut view, 1);
+
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        // Active level wins for key "x"; root's global search is skipped.
+        assert_eq!(names, vec!["child_x"]);
+    }
+
+    #[test]
+    fn tree_current_children_switches_with_depth() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        // Depth 0: view has one tree-continuing child (schemas).
+        assert_eq!(view.active_pane().current_children(&view.view_defs).len(), 1);
+        expand_db1_and_select(&mut view, 1);
+        // Depth 1: schemas has no children at all.
+        assert_eq!(view.active_pane().current_children(&view.view_defs).len(), 0);
+    }
+
+    #[test]
+    fn tree_level_binding_uses_child_overrides() {
+        let mut config = test_config_with_tree();
+        // Override Back on the schemas level: at depth 1 the user must
+        // press X instead of the global back keybinding.
+        config.views[0].children[0]
+            .keybindings
+            .insert(ContentAction::Back, Some(KeyBinding::new("X")));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+
+        let content_kb = KeyBindingConfig::default().content;
+        let view_defs = view.view_defs.clone();
+        let pane = view.active_pane();
+        // Depth 0: falls through to global content_kb (no per-level
+        // override on the ViewDef — that field doesn't exist there).
+        let root = pane.level_binding(&ContentAction::Back, &content_kb, &view_defs);
+        assert!(root.is_some(), "root depth falls through to global");
+        assert!(!root.unwrap().matches("X"));
+
+        expand_db1_and_select(&mut view, 1);
+        let content_kb = KeyBindingConfig::default().content;
+        let view_defs = view.view_defs.clone();
+        let pane = view.active_pane();
+        let depth1 = pane
+            .level_binding(&ContentAction::Back, &content_kb, &view_defs)
+            .expect("depth-1 override present");
+        assert!(depth1.matches("X"));
+    }
+
+    #[test]
+    fn tree_action_chain_scopes_pushes_active_child_first() {
+        let mut config = test_config_with_tree();
+        config.views[0]
+            .children[0]
+            .action_chains
+            .0
+            .insert("ctrl+x".into(), None);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+
+        // Depth 0: no active child → only the view's chains scope.
+        let scopes = view.action_chain_scopes();
+        assert_eq!(scopes.len(), 1);
+        assert!(scopes[0].lookup("ctrl+x").is_none());
+
+        expand_db1_and_select(&mut view, 1);
+        let scopes = view.action_chain_scopes();
+        assert_eq!(scopes.len(), 2, "child + view in tree mode at depth 1");
+        // Innermost first: the depth-1 ChildDef's `ctrl+x` override.
+        assert!(scopes[0].lookup("ctrl+x").is_some());
+    }
+
+    fn test_config_with_query() -> ViewFileConfig {
+        ViewFileConfig {
+            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
+            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "issues".into(),
+                node_type: "mock:issue".into(),
+                default: true,
+                key: None,
+                query: Some(QueryConfig {
+                    default: Some("assignee = me".into()),
+                    editable: true,
+                    menu_key: Some("q".into()),
+                }),
+                columns: vec![
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false },
+                ],
+                preview: None,
+                actions: vec![],
+                children: vec![],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: None,
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn root_load_request_includes_sort_and_page_state() {
+        use not_yet_done_content::SortDirection;
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let changed = view.set_current_sort(vec![SortKey {
+            column: "modified".into(),
+            direction: SortDirection::Desc,
+        }]);
+        assert!(changed);
+        let changed = view.set_current_page(Some(PageRequest { offset: 50, limit: 50 }));
+        assert!(changed);
+        let req = view.root_load_request().unwrap();
+        assert_eq!(req.sort.len(), 1);
+        assert_eq!(req.sort[0].column, "modified");
+        assert_eq!(req.page, Some(PageRequest { offset: 50, limit: 50 }));
+    }
+
+    #[test]
+    fn root_load_request_seeds_page_from_pagination_config() {
+        use crate::config::view_config::PaginationConfig;
+        let mut config = test_config_with_query();
+        config.views[0].pagination = Some(PaginationConfig {
+            mode: PaginationMode::Server,
+            page_size: Some(30),
+        });
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let req = view.root_load_request().unwrap();
+        assert_eq!(req.page, Some(PageRequest { offset: 0, limit: 30 }));
+    }
+
+    #[test]
+    fn root_load_request_server_pagination_without_page_size_uses_zero_sentinel() {
+        use crate::config::view_config::PaginationConfig;
+        let mut config = test_config_with_query();
+        config.views[0].pagination = Some(PaginationConfig {
+            mode: PaginationMode::Server,
+            page_size: None,
+        });
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let req = view.root_load_request().unwrap();
+        assert_eq!(req.page, Some(PageRequest { offset: 0, limit: 0 }));
+    }
+
+    #[test]
+    fn root_load_request_pagination_all_leaves_page_none() {
+        use crate::config::view_config::PaginationConfig;
+        let mut config = test_config_with_query();
+        config.views[0].pagination = Some(PaginationConfig {
+            mode: PaginationMode::All,
+            page_size: None,
+        });
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let req = view.root_load_request().unwrap();
+        assert_eq!(req.page, None);
+    }
+
+    #[test]
+    fn changing_sort_resets_page_offset_to_zero() {
+        use not_yet_done_content::SortDirection;
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_current_page(Some(PageRequest { offset: 100, limit: 50 }));
+        view.set_current_sort(vec![SortKey {
+            column: "modified".into(),
+            direction: SortDirection::Desc,
+        }]);
+        assert_eq!(view.current_page(), Some(PageRequest { offset: 0, limit: 50 }));
+    }
+
+    #[test]
+    fn format_page_footer_with_total_and_pages() {
+        let info = PageInfo {
+            offset: 50,
+            limit: 25,
+            total: Some(100),
+            has_next: true,
+            has_prev: true,
+        };
+        let text = format_page_footer(info, &[]);
+        assert!(text.contains("Items 51\u{2013}75 of 100"), "{text}");
+        assert!(text.contains("Page 3/4"), "{text}");
+    }
+
+    #[test]
+    fn format_page_footer_collapses_single_page() {
+        let info = PageInfo {
+            offset: 0,
+            limit: 50,
+            total: Some(12),
+            has_next: false,
+            has_prev: false,
+        };
+        let text = format_page_footer(info, &[]);
+        assert_eq!(text, "12 items");
+    }
+
+    #[test]
+    fn format_page_footer_appends_sort_indicator() {
+        use not_yet_done_content::SortDirection;
+        let info = PageInfo {
+            offset: 0,
+            limit: 50,
+            total: Some(12),
+            has_next: false,
+            has_prev: false,
+        };
+        let sort = vec![SortKey { column: "modified".into(), direction: SortDirection::Desc }];
+        let text = format_page_footer(info, &sort);
+        assert!(text.contains("Sort: modified\u{25BC}"), "{text}");
+    }
+
+    #[test]
+    fn next_page_request_uses_last_page_info() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let info = PageInfo {
+            offset: 50,
+            limit: 25,
+            total: Some(100),
+            has_next: true,
+            has_prev: true,
+        };
+        view.set_items(vec![], Vec::new(), Some(info), Vec::new(), None);
+        let next = view.next_page_request().unwrap();
+        assert_eq!(next, PageRequest { offset: 75, limit: 25 });
+        let prev = view.prev_page_request().unwrap();
+        assert_eq!(prev, PageRequest { offset: 25, limit: 25 });
+    }
+
+    #[test]
+    fn next_page_request_none_at_last_page() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let info = PageInfo {
+            offset: 75,
+            limit: 25,
+            total: Some(100),
+            has_next: false,
+            has_prev: true,
+        };
+        view.set_items(vec![], Vec::new(), Some(info), Vec::new(), None);
+        assert!(view.next_page_request().is_none());
+        assert!(view.prev_page_request().is_some());
+    }
+
+    fn test_config_with_cursor_pagination() -> ViewFileConfig {
+        use crate::config::view_config::PaginationConfig;
+        let mut config = test_config_with_query();
+        config.views[0].pagination = Some(PaginationConfig {
+            mode: PaginationMode::Cursor,
+            page_size: Some(100),
+        });
+        config
+    }
+
+    fn cursor_pane_with_state(
+        view: &mut ContentView,
+        cursor_id: Option<String>,
+    ) {
+        let info = PageInfo {
+            offset: 0,
+            limit: 100,
+            total: None,
+            has_next: true,
+            has_prev: true,
+        };
+        let pane_id = view.active_pane_id();
+        view.apply_custom_query_result(
+            pane_id,
+            Vec::new(),
+            Some(info),
+            Some(CustomQueryRunState {
+                query: "SELECT 1".into(),
+                database: "db".into(),
+                // Placeholder — apply_custom_query_result patches it.
+                mode: PaginationMode::Server,
+                cursor_id,
+            }),
+        );
+    }
+
+    #[test]
+    fn apply_custom_query_result_patches_mode_from_view_config() {
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        cursor_pane_with_state(&mut view, Some("c1".into()));
+        let cq = view
+            .active_pane()
+            .active_custom_query
+            .as_ref()
+            .expect("custom query state restored");
+        assert_eq!(cq.mode, PaginationMode::Cursor);
+        assert_eq!(cq.cursor_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn try_next_page_emits_continue_when_cursor_id_present() {
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        cursor_pane_with_state(&mut view, Some("c1".into()));
+        let view_index = view.view_index;
+        let pane_id = view.active_pane_id();
+        let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
+        match msg {
+            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+                cursor: Some(CursorIntent::Continue { cursor_id }),
+                ..
+            }) => assert_eq!(cursor_id, "c1"),
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_next_page_emits_open_when_cursor_id_missing() {
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        cursor_pane_with_state(&mut view, None);
+        let view_index = view.view_index;
+        let pane_id = view.active_pane_id();
+        let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
+        assert!(matches!(
+            msg,
+            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+                cursor: Some(CursorIntent::Open),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn try_prev_page_reissues_open_in_cursor_mode() {
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        cursor_pane_with_state(&mut view, Some("c1".into()));
+        let view_index = view.view_index;
+        let pane_id = view.active_pane_id();
+        let msg = view.active_pane_mut().try_prev_page(view_index, pane_id);
+        assert!(matches!(
+            msg,
+            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+                cursor: Some(CursorIntent::Open),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn close_focused_harvests_cursor_id_into_pending_queue() {
+        // Two-pane setup so close_focused doesn't refuse the close as
+        // "would empty the tree". Focused pane has a cursor; the other
+        // pane is plain. Expect exactly one harvested id.
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.split_focused(SplitOrientation::Horizontal);
+        // After split, focus stays on the source pane (first leaf).
+        cursor_pane_with_state(&mut view, Some("c-harvest".into()));
+
+        view.execute_window_action(WindowAction::Close);
+
+        let drained = view.take_pending_cursor_closes();
+        assert_eq!(drained, vec!["c-harvest".to_string()]);
+        // Second drain yields empty — no stale state.
+        assert!(view.take_pending_cursor_closes().is_empty());
+    }
+
+    #[test]
+    fn close_focused_no_cursor_yields_empty_queue() {
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.split_focused(SplitOrientation::Horizontal);
+        // Focused pane has no active custom-query — nothing to harvest.
+
+        view.execute_window_action(WindowAction::Close);
+
+        assert!(view.take_pending_cursor_closes().is_empty());
+    }
+
+    #[test]
+    fn close_focused_refused_when_single_pane_does_not_harvest() {
+        // close_focused refuses the close when the cascade would empty
+        // the tree. The cursor must NOT be harvested in that case — the
+        // pane is still alive and still owns the cursor.
+        let config = test_config_with_cursor_pagination();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        cursor_pane_with_state(&mut view, Some("c-keep".into()));
+
+        view.execute_window_action(WindowAction::Close);
+
+        assert!(view.take_pending_cursor_closes().is_empty());
+        // Pane still holds the cursor.
+        let cq = view
+            .active_pane()
+            .active_custom_query
+            .as_ref()
+            .expect("pane still alive");
+        assert_eq!(cq.cursor_id.as_deref(), Some("c-keep"));
+    }
+
+    #[test]
+    fn try_next_page_server_mode_keeps_limit_offset_path() {
+        let config = test_config_with_query();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let info = PageInfo {
+            offset: 0,
+            limit: 100,
+            total: None,
+            has_next: true,
+            has_prev: false,
+        };
+        let pane_id = view.active_pane_id();
+        view.apply_custom_query_result(
+            pane_id,
+            Vec::new(),
+            Some(info),
+            Some(CustomQueryRunState {
+                query: "SELECT 1".into(),
+                database: "db".into(),
+                mode: PaginationMode::Server,
+                cursor_id: None,
+            }),
+        );
+        let view_index = view.view_index;
+        let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
+        assert!(matches!(
+            msg,
+            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+                cursor: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn set_items_persists_applied_sort_and_page_info() {
+        use not_yet_done_content::SortDirection;
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let applied = vec![SortKey {
+            column: "ref".into(),
+            direction: SortDirection::Asc,
+        }];
+        let page = PageInfo {
+            offset: 0,
+            limit: 25,
+            total: Some(83),
+            has_next: true,
+            has_prev: false,
+        };
+        view.set_items(mock_issues(), applied.clone(), Some(page), Vec::new(), None);
+        assert_eq!(view.last_applied_sort(), applied.as_slice());
+        assert_eq!(view.last_page_info(), Some(page));
+    }
+
+    #[test]
+    fn root_load_request_uses_default_query() {
+        let config = test_config_with_query();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let req = view.root_load_request().unwrap();
+        assert_eq!(req.node_type_id, "mock:issue");
+        assert_eq!(req.query.as_deref(), Some("assignee = me"));
+        assert!(req.sort.is_empty());
+        assert!(req.page.is_none());
+    }
+
+    #[test]
+    fn set_query_overrides_default() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_query("type = Bug".into(), Some("My Bugs".into()));
+        let req = view.root_load_request().unwrap();
+        assert_eq!(req.query.as_deref(), Some("type = Bug"));
+        assert_eq!(view.active_pane().active_query_name.as_deref(), Some("My Bugs"));
+    }
+
+    #[test]
+    fn current_query_text_returns_active_or_default() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.current_query_text(), "assignee = me");
+        view.set_query("custom query".into(), None);
+        assert_eq!(view.current_query_text(), "custom query");
+    }
+
+    #[test]
+    fn is_query_editable_from_config() {
+        let config = test_config_with_query();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(view.is_query_editable());
+
+        let config2 = test_config_with_children();
+        let view2 = ContentView::new(test_theme(), &config2, None, &KeyBindingConfig::default());
+        assert!(!view2.is_query_editable());
+    }
+
+    #[test]
+    fn saved_query_shortcut_dispatches_apply_request() {
+        // A DB-stored shortcut bound to a saved query defers the
+        // actual set_query to the App-side dispatcher
+        // (App::start_query_apply) so the adapter can introduce a
+        // variable-input popup before the load. The view's only job
+        // here is to surface the `ApplyContentSavedQuery` request
+        // with the right query/name.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.merge_saved_queries(vec![
+            ("My Bugs".into(), "type = Bug".into(), Some("1".into())),
+        ]);
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let msg = view.handle_key("1");
+        match msg {
+            SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
+                query, name, ..
+            }) => {
+                assert_eq!(query, "type = Bug");
+                assert_eq!(name, "My Bugs");
+            }
+            other => panic!("Expected ApplyContentSavedQuery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn q_key_triggers_query_editor() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let msg = view.handle_key("Q");
+        match msg {
+            SubViewMessage::Request(ViewRequest::OpenContentQueryEditor { .. }) => {}
+            other => panic!("Expected OpenContentQueryEditor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_action_dispatches_open_script_menu_for_node() {
+        // Regression check: a YAML `type: script` action with key `x`
+        // must reach `OpenScriptMenuForNode` via the per-view action
+        // dispatcher. Mirrors the user's taiga.yaml configuration.
+        let mut config = test_config_with_children();
+        config.views[0].actions.push(ActionDef {
+            name: "script".into(),
+            key: "x".into(),
+            action_type: "script".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let msg = view.handle_key("x");
+        match msg {
+            SubViewMessage::Request(ViewRequest::OpenScriptMenuForNode { .. }) => {}
+            other => panic!("Expected OpenScriptMenuForNode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_action_shows_in_action_bar() {
+        // shows_in_action_bar() must return true for `type: script` so the
+        // top action bar lists it alongside `edit` / `create` / etc.
+        let mut config = test_config_with_children();
+        config.views[0].actions.push(ActionDef {
+            name: "script".into(),
+            key: "x".into(),
+            action_type: "script".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            commit_on_save: false,
+        });
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let hints = view.action_bar_hints();
+        assert!(
+            hints.iter().any(|(k, v)| k == "x" && v == "script"),
+            "expected [x] script in action bar, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn action_bar_shows_query_hints() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let hints = view.action_bar_hints();
+        assert!(hints.iter().any(|(k, _)| k == "Q"));
+        assert!(hints.iter().any(|(k, v)| k == "q" && v == "queries"));
+
+        view.set_query("type = Bug".into(), Some("My Bugs".into()));
+        assert_eq!(view.active_pane().active_query_name.as_deref(), Some("My Bugs"));
+
+        view.merge_saved_queries(vec![
+            ("My Bugs".into(), "type = Bug".into(), Some("1".into())),
+            ("Sprint".into(), "sprint in open".into(), Some("2".into())),
+        ]);
+        let favs: Vec<(&str, &str)> = view.db_saved_queries.iter()
+            .filter_map(|sq| sq.shortcut.as_deref().map(|s| (sq.name.as_str(), s)))
+            .collect();
+        assert!(favs.contains(&("My Bugs", "1")));
+        assert!(favs.contains(&("Sprint", "2")));
+    }
+
+    #[test]
+    fn status_bar_hints_include_back_when_drilled() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let hints = view.status_bar_hints();
+        assert!(!hints.iter().any(|(_, v)| v == "back"));
+        assert!(hints.iter().any(|(_, v)| v == "open"));
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let hints = view.status_bar_hints();
+        assert!(hints.iter().any(|(k, v)| v == "back" && k == "⌫"));
+        assert!(!hints.iter().any(|(_, v)| v == "open"));
+    }
+
+    // -- Auth-status banner --
+
+    #[test]
+    fn auth_status_banner_hidden_when_ready() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(view.auth_status_banner().is_none());
+    }
+
+    #[test]
+    fn is_busy_tracks_adapter_status() {
+        let config = test_config_with_children();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(!view.is_busy(), "fresh view is Ready, not Busy");
+        view.set_auth_status(AdapterStatus::Busy {
+            label: "Running query".into(),
+            started_at_unix_ms: 0,
+            timeout_secs: 7,
+        });
+        assert!(view.is_busy(), "Busy drives the ~1 Hz live-banner redraw nudge");
+        // Connecting counts as a static banner, not a wall-clock one.
+        view.set_auth_status(AdapterStatus::Connecting {
+            retry: 1,
+            max_retries: 3,
+            timeout_secs: 30,
+        });
+        assert!(!view.is_busy(), "Connecting banner text is static, not live");
+        view.set_auth_status(AdapterStatus::Ready);
+        assert!(!view.is_busy());
+    }
+
+    #[test]
+    fn auth_status_banner_shows_connecting_with_retry_and_timeout() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_auth_status(AdapterStatus::Connecting {
+            retry: 2,
+            max_retries: 5,
+            timeout_secs: 30,
+        });
+        let banner = view.auth_status_banner().unwrap();
+        assert!(banner.contains("(2/5)"), "got: {banner}");
+        assert!(banner.contains("30s"), "got: {banner}");
+        assert!(banner.starts_with("Connecting"), "got: {banner}");
+    }
+
+    #[test]
+    fn auth_status_banner_shows_failure_reason() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_auth_status(AdapterStatus::Failed {
+            reason: "cookie script failed after 3 attempt(s)".into(),
+        });
+        let banner = view.auth_status_banner().unwrap();
+        assert!(banner.starts_with("Connection failed"), "got: {banner}");
+        assert!(banner.contains("3 attempt(s)"), "got: {banner}");
+    }
+
+    #[test]
+    fn auth_status_banner_shows_init_error() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_adapter_init_error("unknown field `cache`".into());
+        let banner = view.auth_status_banner().unwrap();
+        assert!(banner.starts_with("Configuration error"), "got: {banner}");
+        assert!(banner.contains("unknown field `cache`"), "got: {banner}");
+    }
+
+    #[test]
+    fn auth_status_banner_shows_fetch_error_when_idle_or_ready() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Vec::new(),
+            Some("web-notifications 401: token expired".into()),
+        );
+        let banner = view.auth_status_banner().unwrap();
+        assert!(banner.starts_with("Fetch failed"), "got: {banner}");
+        assert!(banner.contains("401"), "got: {banner}");
+    }
+
+    #[test]
+    fn fetch_error_yields_to_auth_status_when_connecting() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Vec::new(),
+            Some("stale".into()),
+        );
+        view.set_auth_status(AdapterStatus::Connecting {
+            retry: 1,
+            max_retries: 3,
+            timeout_secs: 30,
+        });
+        let banner = view.auth_status_banner().unwrap();
+        assert!(banner.starts_with("Connecting"), "got: {banner}");
+    }
+
+    #[test]
+    fn init_error_takes_precedence_over_auth_status() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_adapter_init_error("bad yaml".into());
+        view.set_auth_status(AdapterStatus::Connecting {
+            retry: 1,
+            max_retries: 3,
+            timeout_secs: 30,
+        });
+        let banner = view.auth_status_banner().unwrap();
+        assert!(banner.starts_with("Configuration error"), "got: {banner}");
+    }
+
+    fn manual_connect_config_with_reload_key(reload_key: Option<&str>) -> ViewFileConfig {
+        let mut config = test_config_with_children();
+        config.adapter.manual_connect = true;
+        if let Some(k) = reload_key {
+            config.views[0].actions.push(ActionDef {
+                name: "refresh".into(),
+                key: k.into(),
+                action_type: "reload".into(),
+                id: None,
+                node_id_from: None,
+                navigate_to: None,
+                fuzzy_filter: None,
+                search: None,
+                text_search: None,
+                tree_find: None,
+                hide_from_bar: false,
+                editor: None,
+            commit_on_save: false,
+            });
+        }
+        config
+    }
+
+    #[test]
+    fn manual_connect_banner_names_reload_key_when_pane_unloaded() {
+        let config = manual_connect_config_with_reload_key(Some("r"));
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let banner = view.auth_status_banner().expect("banner expected");
+        assert!(banner.contains("Auto-connect disabled"), "got: {banner}");
+        assert!(banner.contains("`r`"), "got: {banner}");
+    }
+
+    #[test]
+    fn manual_connect_banner_falls_back_when_no_reload_action() {
+        let config = manual_connect_config_with_reload_key(None);
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let banner = view.auth_status_banner().expect("banner expected");
+        assert!(banner.contains("no `reload` action"), "got: {banner}");
+    }
+
+    #[test]
+    fn manual_connect_banner_disappears_once_loaded() {
+        let config = manual_connect_config_with_reload_key(Some("r"));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(Vec::new(), Vec::new(), None, Vec::new(), None);
+        assert!(view.auth_status_banner().is_none());
+    }
+
+    #[test]
+    fn manual_connect_off_keeps_legacy_behaviour() {
+        let config = test_config_with_children();
+        assert!(!config.adapter.manual_connect, "fixture sanity");
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(view.auth_status_banner().is_none());
+    }
+
+    // ── Shortcut Hints (SH-1..SH-7) ─────────────────────────────────
+
+    use not_yet_done_content::{HintPlacement, InputSpec, NodeAction};
+
+    fn shortcut_config_flat(
+        view_shortcuts: HashMap<char, String>,
+        child_shortcuts: HashMap<char, String>,
+    ) -> ViewFileConfig {
+        ViewFileConfig {
+            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
+            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "issues".into(),
+                node_type: "mock:issue".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![
+                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                ],
+                preview: None,
+                actions: vec![],
+                children: vec![
+                    ChildDef {
+                        row_layout: None,
+                smooth_scroll: false,
+                        name: "Comments".into(),
+                        node_type: "mock:comment".into(),
+                        columns: vec![
+                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                        ],
+                        preview: None,
+                        actions: vec![],
+                        children: vec![],
+                        split: None,
+                        pagination: None,
+                        keybindings: HashMap::new(),
+                        action_chains: Default::default(),
+                        column_cursor: false,
+                        tree_label: None,
+                        shortcuts: child_shortcuts,
+                        enter_action: None,
+                        recursive: false,
+            editor_in_place: false,
+                        leaf_glyph: None,
+                    },
+                ],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: None,
+                retries: 0,
+                script_template: None,
+                shortcuts: view_shortcuts,
+                leaf_glyph: None,
+            }],
+        }
+    }
+
+    fn make_action(id: &str, label: &str, placement: HintPlacement) -> NodeAction {
+        NodeAction::new(id, label, InputSpec::None).with_placement(placement)
+    }
+
+    #[test]
+    fn current_shortcuts_at_root_returns_view_def_entries() {
+        let mut sc = HashMap::new();
+        sc.insert('a', "do_alpha".to_string());
+        sc.insert('b', "parent:do_beta".to_string());
+        let config = shortcut_config_flat(sc, HashMap::new());
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        let mut entries = view.active_pane().current_shortcuts(&view.view_defs);
+        entries.sort_by_key(|(k, _)| *k);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ('a', "do_alpha".to_string()));
+        assert_eq!(entries[1], ('b', "parent:do_beta".to_string()));
+    }
+
+    #[test]
+    fn current_shortcuts_after_drill_child_overrides_view() {
+        let mut view_sc = HashMap::new();
+        view_sc.insert('a', "view_alpha".to_string());
+        view_sc.insert('c', "view_charlie".to_string());
+        let mut child_sc = HashMap::new();
+        // 'a' clashes with view-level — child wins; 'b' is child-only.
+        child_sc.insert('a', "child_alpha".to_string());
+        child_sc.insert('b', "child_bravo".to_string());
+
+        let config = shortcut_config_flat(view_sc, child_sc);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let mut entries = view.active_pane().current_shortcuts(&view.view_defs);
+        entries.sort_by_key(|(k, _)| *k);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], ('a', "child_alpha".to_string())); // child wins
+        assert_eq!(entries[1], ('b', "child_bravo".to_string()));
+        assert_eq!(entries[2], ('c', "view_charlie".to_string())); // inherited
+    }
+
+    /// Tiny `ContentAdapter` stub for the shortcut-hint tests below.
+    /// Mirrors `MockAdapterBuilder::actions_for` (which lives in
+    /// not-yet-done-content) but stays local — the tests need a
+    /// `&dyn ContentAdapter` and the production stub requires more
+    /// boilerplate than is justified here.
+    struct ShortcutTestAdapter {
+        actions: HashMap<String, Vec<NodeAction>>,
+    }
+
+    #[async_trait::async_trait]
+    impl not_yet_done_content::ContentAdapter for ShortcutTestAdapter {
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn adapter_type(&self) -> &str { "mock" }
+        fn instance_id(&self) -> &str { "mock" }
+        async fn root(&self) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
+            Err(not_yet_done_content::ContentError::NotSupported("test stub".into()))
+        }
+        async fn get_by_id(&self, _id: &str) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
+            Err(not_yet_done_content::ContentError::NotSupported("test stub".into()))
+        }
+        fn capabilities(&self) -> not_yet_done_content::AdapterCapabilities {
+            Default::default()
+        }
+        fn actions_for_type(&self, nt: &not_yet_done_content::NodeType) -> Vec<NodeAction> {
+            self.actions.get(&nt.type_id).cloned().unwrap_or_default()
+        }
+    }
+
+    fn test_adapter(map: &[(&str, Vec<NodeAction>)]) -> ShortcutTestAdapter {
+        let mut actions = HashMap::new();
+        for (k, v) in map {
+            actions.insert((*k).to_string(), v.clone());
+        }
+        ShortcutTestAdapter { actions }
+    }
+
+    #[test]
+    fn collect_shortcut_hints_emits_adapter_action_label_and_placement() {
+        let mut sc = HashMap::new();
+        sc.insert('a', "do_alpha".to_string());
+        sc.insert('s', "do_sigma".to_string());
+        let config = shortcut_config_flat(sc, HashMap::new());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let adapter = test_adapter(&[(
+            "mock:issue",
+            vec![
+                make_action("do_alpha", "Alpha", HintPlacement::ActionBar),
+                make_action("do_sigma", "Sigma", HintPlacement::StatusBar),
+                make_action("ignored", "Unused", HintPlacement::ActionBar),
+            ],
+        )]);
+
+        let mut hints = view
+            .active_pane()
+            .collect_shortcut_hints(&view.view_defs, Some(&adapter));
+        hints.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(hints.len(), 2, "exactly the two configured shortcuts");
+        assert_eq!(hints[0], ("a".into(), "Alpha".into(), HintPlacement::ActionBar));
+        assert_eq!(hints[1], ("s".into(), "Sigma".into(), HintPlacement::StatusBar));
+    }
+
+    #[test]
+    fn collect_shortcut_hints_drops_when_action_id_not_in_adapter_set() {
+        // Adapter returns a different action_id than the YAML shortcut
+        // references — mirrors the "a:add on a leaf row whose
+        // actions_for_type omits add" case.
+        let mut sc = HashMap::new();
+        sc.insert('a', "add".to_string());
+        let config = shortcut_config_flat(sc, HashMap::new());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let adapter = test_adapter(&[(
+            "mock:issue",
+            vec![make_action("delete", "Delete", HintPlacement::StatusBar)],
+        )]);
+
+        let hints = view
+            .active_pane()
+            .collect_shortcut_hints(&view.view_defs, Some(&adapter));
+        assert!(hints.is_empty(), "missing action_id → hint dropped silently");
+    }
+
+    #[test]
+    fn collect_shortcut_hints_empty_without_adapter() {
+        let mut sc = HashMap::new();
+        sc.insert('a', "do_alpha".to_string());
+        let config = shortcut_config_flat(sc, HashMap::new());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let hints = view
+            .active_pane()
+            .collect_shortcut_hints(&view.view_defs, None);
+        assert!(hints.is_empty(), "no adapter → no hints");
+    }
+
+    #[test]
+    fn collect_shortcut_hints_parent_target_uses_parent_node_type() {
+        // 'p' on the child references the parent's action — resolver
+        // must look it up under the parent's node_type, not the
+        // currently-selected child's.
+        let mut child_sc = HashMap::new();
+        child_sc.insert('p', "parent:promote".to_string());
+        let config = shortcut_config_flat(HashMap::new(), child_sc);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.set_items(mock_comments(), Vec::new(), None, Vec::new(), None);
+
+        // Adapter advertises `promote` for `mock:issue` (the parent's
+        // type) but nothing for `mock:comment` (the selected child).
+        // A correct lookup honours the `parent:` prefix and finds the
+        // action under the parent type.
+        let adapter = test_adapter(&[(
+            "mock:issue",
+            vec![make_action("promote", "Promote Parent", HintPlacement::ActionBar)],
+        )]);
+
+        let hints = view
+            .active_pane()
+            .collect_shortcut_hints(&view.view_defs, Some(&adapter));
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0], ("p".into(), "Promote Parent".into(), HintPlacement::ActionBar));
+    }
+
+    // ── CT-5: TreeFindState lifecycle ────────────────────────────────
+
+    fn make_hit(path: &[&str], label: &str, space: &str) -> TreeFindHit {
+        TreeFindHit {
+            path: path.iter().map(|s| s.to_string()).collect(),
+            label: label.to_string(),
+            space_key: space.to_string(),
+        }
+    }
+
+    fn empty_pane() -> ContentPane {
+        ContentPane::new(test_theme(), 0, true)
+    }
+
+    #[test]
+    fn tree_find_begin_seeds_loading_state() {
+        let mut pane = empty_pane();
+        assert!(!pane.tree_find_active(), "fresh pane has no tree-find");
+        pane.tree_find_begin("design".to_string());
+        let state = pane.tree_find.as_ref().expect("state set");
+        assert_eq!(state.query, "design");
+        assert!(state.loading);
+        assert!(state.hits.is_empty());
+        assert!(!state.truncated);
+        assert_eq!(state.current, 0);
+        assert!(pane.tree_find_active());
+    }
+
+    #[test]
+    fn tree_find_complete_lands_hits_and_drops_loading() {
+        let mut pane = empty_pane();
+        pane.tree_find_begin("q".to_string());
+        let hits = vec![
+            make_hit(&["DEMO", "100", "200"], "Design", "DEMO"),
+            make_hit(&["DEMO", "300"], "Other", "DEMO"),
+        ];
+        pane.tree_find_complete(hits, true);
+        let state = pane.tree_find.as_ref().unwrap();
+        assert!(!state.loading);
+        assert_eq!(state.hits.len(), 2);
+        assert_eq!(state.current, 0);
+        assert!(state.truncated);
+        // current_hit points at the first one.
+        assert_eq!(pane.tree_find_current().unwrap().label, "Design");
+    }
+
+    #[test]
+    fn tree_find_next_and_prev_wrap_around() {
+        let mut pane = empty_pane();
+        pane.tree_find_begin("q".to_string());
+        pane.tree_find_complete(
+            vec![
+                make_hit(&["DEMO", "100"], "A", "DEMO"),
+                make_hit(&["DEMO", "200"], "B", "DEMO"),
+                make_hit(&["DEMO", "300"], "C", "DEMO"),
+            ],
+            false,
+        );
+
+        assert_eq!(pane.tree_find_next().unwrap().label, "B");
+        assert_eq!(pane.tree_find_next().unwrap().label, "C");
+        // Wrap forward.
+        assert_eq!(pane.tree_find_next().unwrap().label, "A");
+        // Wrap backward.
+        assert_eq!(pane.tree_find_prev().unwrap().label, "C");
+        assert_eq!(pane.tree_find_prev().unwrap().label, "B");
+    }
+
+    #[test]
+    fn tree_find_next_on_empty_hits_returns_none() {
+        let mut pane = empty_pane();
+        pane.tree_find_begin("q".to_string());
+        pane.tree_find_complete(Vec::new(), false);
+        assert!(pane.tree_find_next().is_none());
+        assert!(pane.tree_find_prev().is_none());
+        assert!(pane.tree_find_current().is_none());
+        // State is still active — the empty-hits hint sits in the
+        // status bar until cleared.
+        assert!(pane.tree_find_active());
+    }
+
+    #[test]
+    fn tree_find_fail_clears_loading_keeps_query() {
+        let mut pane = empty_pane();
+        pane.tree_find_begin("design".to_string());
+        pane.tree_find_fail();
+        let state = pane.tree_find.as_ref().unwrap();
+        assert!(!state.loading);
+        assert!(state.hits.is_empty());
+        assert_eq!(state.query, "design", "query stays for status-bar feedback");
+    }
+
+    #[test]
+    fn tree_find_clear_drops_state_entirely() {
+        let mut pane = empty_pane();
+        pane.tree_find_begin("q".to_string());
+        pane.tree_find_complete(vec![make_hit(&["X"], "X", "X")], false);
+        pane.tree_find_clear();
+        assert!(!pane.tree_find_active());
+        assert!(pane.tree_find.is_none());
+    }
+
+    #[test]
+    fn tree_find_complete_after_clear_is_noop() {
+        // Mirrors CT-9: user hit Esc / reloaded between the spawn and
+        // the response. The late response must not resurrect state.
+        let mut pane = empty_pane();
+        pane.tree_find_begin("q".to_string());
+        pane.tree_find_clear();
+        pane.tree_find_complete(vec![make_hit(&["X"], "X", "X")], false);
+        assert!(!pane.tree_find_active());
+    }
+
+    // ── CT-7: advance_tree_find walker ───────────────────────────────
+
+    fn mock_space_nt() -> not_yet_done_content::NodeType {
+        not_yet_done_content::NodeType {
+            type_id: "mock:space".into(),
+            mime_type: "".into(),
+            syntax: None,
+            file_extension: "".into(),
+            display_name: "Space".into(),
+        }
+    }
+
+    fn mock_page_nt() -> not_yet_done_content::NodeType {
+        not_yet_done_content::NodeType {
+            type_id: "mock:page".into(),
+            mime_type: "".into(),
+            syntax: None,
+            file_extension: "".into(),
+            display_name: "Page".into(),
+        }
+    }
+
+    fn tree_view_def() -> ViewDef {
+        // Minimal tree-enabled view: root → recursive page child.
+        // Mirrors confluence.yaml's spaces tree (one space root that
+        // recurses through pages).
+        ViewDef {
+            row_layout: None,
+            smooth_scroll: false,
+            name: "tree-view".into(),
+            node_type: "mock:space".into(),
+            default: true,
+            key: None,
+            query: None,
+            columns: vec![
+                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+            ],
+            preview: None,
+            actions: vec![],
+            children: vec![ChildDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "pages".into(),
+                node_type: "mock:page".into(),
+                columns: vec![
+                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                ],
+                preview: None,
+                actions: vec![],
+                children: vec![],
+                split: None,
+                pagination: None,
+                keybindings: HashMap::new(),
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: Some("label".into()),
+                shortcuts: HashMap::new(),
+                enter_action: None,
+                recursive: true,
+                editor_in_place: false,
+                leaf_glyph: None,
+            }],
+            pagination: None,
+            action_chains: Default::default(),
+            column_cursor: false,
+            tree_label: Some("label".into()),
+            retries: 0,
+            script_template: None,
+            shortcuts: HashMap::new(),
+            leaf_glyph: None,
+        }
+    }
+
+    fn space_node(id: &str, label: &str) -> NodeSummary {
+        NodeSummary {
+            id: id.into(),
+            label: label.into(),
+            node_type: mock_space_nt(),
+            metadata: not_yet_done_content::Metadata::default(),
+            has_children: None,
+        }
+    }
+
+    fn page_node(id: &str, label: &str) -> NodeSummary {
+        NodeSummary {
+            id: id.into(),
+            label: label.into(),
+            node_type: mock_page_nt(),
+            metadata: not_yet_done_content::Metadata::default(),
+            has_children: None,
+        }
+    }
+
+    #[test]
+    fn advance_tree_find_returns_idle_without_state() {
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::Idle => {}
+            other => panic!("expected Idle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_tree_find_needs_root_load_when_cache_empty() {
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        pane.tree_find_complete(vec![make_hit(&["SPACE", "p1"], "P1", "SPACE")], false);
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::NeedRootLoad => {}
+            other => panic!("expected NeedRootLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_tree_find_needs_tree_expand_after_root_loaded() {
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        pane.tree_find_complete(vec![make_hit(&["SPACE", "p1"], "P1", "SPACE")], false);
+        // Land the root (depth 0) but not the page level.
+        pane.tree.as_mut().unwrap().set_cached_children(
+            Vec::new(),
+            vec![space_node("SPACE", "Space")],
+            None,
+        );
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::NeedTreeExpand {
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                ..
+            } => {
+                assert_eq!(parent_path, vec!["SPACE".to_string()]);
+                assert_eq!(parent_node_id, "SPACE");
+                assert_eq!(child_node_type, "mock:page");
+            }
+            other => panic!("expected NeedTreeExpand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_tree_find_reports_not_in_tree_when_ancestor_missing() {
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        // Hit references SPACE but the loaded root has only OTHER.
+        pane.tree_find_complete(vec![make_hit(&["SPACE", "p1"], "P1", "SPACE")], false);
+        pane.tree.as_mut().unwrap().set_cached_children(
+            Vec::new(),
+            vec![space_node("OTHER", "Other")],
+            None,
+        );
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::NotInTree(_) => {}
+            other => panic!("expected NotInTree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_tree_find_ready_when_all_levels_cached() {
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        pane.tree_find_complete(vec![make_hit(&["SPACE", "p1"], "P1", "SPACE")], false);
+        // Land both levels. The space is at depth 0, then its
+        // children at parent_path=[SPACE] are the pages.
+        let tree = pane.tree.as_mut().unwrap();
+        tree.set_cached_children(Vec::new(), vec![space_node("SPACE", "Space")], None);
+        tree.set_cached_children(
+            vec!["SPACE".into()],
+            vec![page_node("p1", "P1")],
+            None,
+        );
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::Ready(_row) => {
+                // SPACE prefix is marked expanded so the page surfaces.
+                assert!(pane.tree.as_ref().unwrap().expanded.contains(&vec!["SPACE".to_string()]));
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_tree_find_idle_after_ready_until_next_or_prev() {
+        // Regression: after the walker lands the cursor on the hit, a
+        // subsequent TreeChildren (e.g. user expanded a node by hand
+        // via Enter) re-ran the walker and snapped the cursor back to
+        // the hit. `settled` blocks that re-run; n/N re-arms.
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        pane.tree_find_complete(
+            vec![
+                make_hit(&["SPACE", "p1"], "P1", "SPACE"),
+                make_hit(&["SPACE", "p2"], "P2", "SPACE"),
+            ],
+            false,
+        );
+        let tree = pane.tree.as_mut().unwrap();
+        tree.set_cached_children(Vec::new(), vec![space_node("SPACE", "Space")], None);
+        tree.set_cached_children(
+            vec!["SPACE".into()],
+            vec![page_node("p1", "P1"), page_node("p2", "P2")],
+            None,
+        );
+
+        // First call: walker lands the first hit.
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::Ready(_) => {}
+            other => panic!("expected Ready, got {other:?}"),
+        }
+        assert!(pane.tree_find.as_ref().unwrap().settled);
+
+        // Second call (simulates a TreeChildren landing later, e.g.
+        // because the user expanded another branch): walker must NOT
+        // re-position — it returns Idle.
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::Idle => {}
+            other => panic!("expected Idle after settled, got {other:?}"),
+        }
+
+        // n re-arms: settled cleared, walker drives again.
+        pane.tree_find_next();
+        assert!(!pane.tree_find.as_ref().unwrap().settled);
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::Ready(_) => {}
+            other => panic!("expected Ready after next, got {other:?}"),
+        }
+    }
+}
+
+/// Create a hardcoded Jira view config (used when no YAML file exists).
+/// Will be replaced by YAML loading in Phase 6.
+pub fn default_jira_view_config() -> ViewFileConfig {
+    use crate::config::view_config::*;
+    ViewFileConfig {
+        tab: TabConfig {
+            name: "Jira".to_string(),
+            order: 3,
+            icon: Some("󰌃".to_string()),
+        },
+        adapter: AdapterConfig {
+            adapter_type: "jira".to_string(),
+            id: None,
+            config: None,
+            config_inline: None,
+            manual_connect: false,
+        },
+        views: vec![ViewDef {
+            row_layout: None,
+            smooth_scroll: false,
+            name: "tickets".to_string(),
+            node_type: "jira:issue".to_string(),
+            default: true,
+            key: None,
+            query: None,
+            columns: vec![
+                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false },
+                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false },
+                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false },
+                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false },
+                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false },
+            ],
+            preview: Some(PreviewConfig {
+                enabled: true,
+                source: "content".to_string(),
+                action: None,
+                node_id_from: None,
+                split: "horizontal".to_string(),
+                ratio: 50,
+                keybinding: Some("p".to_string()),
+                markdown: false,
+            }),
+            actions: vec![
+                ActionDef {
+                    name: "edit".to_string(),
+                    key: "e".to_string(),
+                    action_type: "edit".to_string(),
+                    id: Some("edit_full".into()),
+                    node_id_from: None,
+                    navigate_to: None,
+                    fuzzy_filter: None,
+                    search: None,
+                    text_search: None,
+                    tree_find: None,
+                    hide_from_bar: false,
+                    editor: None,
+            commit_on_save: false,
+                },
+                ActionDef {
+                    name: "refresh".to_string(),
+                    key: "r".to_string(),
+                    action_type: "reload".to_string(),
+                    id: None,
+                    node_id_from: None,
+                    navigate_to: None,
+                    fuzzy_filter: None,
+                    search: None,
+                    text_search: None,
+                    tree_find: None,
+                    hide_from_bar: false,
+                    editor: None,
+            commit_on_save: false,
+                },
+            ],
+            children: vec![],
+            pagination: None,
+            action_chains: Default::default(),
+            column_cursor: false,
+            tree_label: None,
+            retries: 0,
+            script_template: None,
+            shortcuts: HashMap::new(),
+            leaf_glyph: None,
+        }],
+    }
+}

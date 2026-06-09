@@ -1,0 +1,54 @@
+# Example: Stoat (Revolt-fork chat) adapter credentials
+#
+# Place in: ~/.config/not_yet_done/views/stoat-adapter.yaml
+# Referenced by stoat.yaml via: adapter.config: stoat-adapter.yaml
+#
+# Stoat is a chat platform (fork of Revolt). It is the first *streaming*
+# adapter: the server list and live updates arrive push-only over a
+# WebSocket. You only configure the base domain here — the API path
+# (`/api`) and the WebSocket URL are self-discovered via `GET /api/`.
+
+url: https://chat.example.org # base domain only; /api and /ws are discovered
+name: chat # optional human-readable label
+
+auth:
+  # Stoat logs in by email + password against
+  # `POST /api/auth/session/login`, which returns a session token sent as
+  # the `X-Session-Token` header on every request (and to the gateway).
+  #
+  # NOTE on field names: the unified `password-login` mechanism fixes the
+  # binding field names to `username` + `password`. Stoat has no separate
+  # username login, so the `username` field carries your **email address**.
+  # Only the session token is ever persisted — never the password
+  # (session_cache defaults to `until-rejected`: kept until the server
+  # returns 401/403, then a fresh login is triggered).
+  mechanism: password-login
+  bindings:
+    - field: username # ← put your LOGIN EMAIL here (mechanism-fixed name)
+      provider:
+        type: prompt
+        # Optionally pre-fill the email so only the password is asked for:
+        # prefill: me@example.org
+        #
+        # Or read it non-interactively from the environment / a secret
+        # manager instead of prompting:
+        # type: env
+        # var: STOAT_EMAIL
+    - field: password
+      provider:
+        type: prompt
+        # Non-interactive alternatives (same as any password-login adapter):
+        # type: command
+        # script: pass show chat/example/password
+        # timeout_secs: 30
+
+# Multi-factor auth (MFA) is NOT supported yet: if your account requires
+# an MFA ticket the login fails with a clear message. Use an account
+# without MFA for now (see plan §9 / docs).
+
+# Optional override for the backing store (session token + view sort
+# state only — chat state is never cached to disk). Sea-orm-compatible
+# URL; falls back to a private SQLite file under the user's local data
+# directory when omitted.
+# db:
+#   url: "sqlite:///home/me/.local/share/not_yet_done/stoat.sqlite?mode=rwc"

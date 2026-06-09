@@ -1,0 +1,236 @@
+//! StatusBar component: bottom bar showing available keybindings.
+//!
+//! Read-only display — does not produce messages.
+
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::Frame;
+
+use tuirealm::command::{Cmd, CmdResult};
+use tuirealm::props::{Attribute, AttrValue, QueryResult};
+use tuirealm::component::Component;
+use tuirealm::state::{State, StateValue};
+
+use crate::config::{GlobalAction, CommonAction, KeyBindingConfig, TasksAction, TrackingsAction};
+use std::sync::Arc;
+use crate::ui::theme::Theme;
+
+/// Display mode for the status bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusMode {
+    /// Tasks tab with no form open — show all task actions.
+    TasksNormal,
+    /// Tasks tab with a form open — show close hint.
+    TasksFormOpen,
+    /// Trackings tab — show tracking-specific actions.
+    Trackings,
+    /// Non-tasks tab — show tab cycling hints only.
+    Other,
+}
+
+pub struct StatusBarComponent {
+    theme: Arc<Theme>,
+    mode: StatusMode,
+    hints: Vec<(String, String)>, // [(key_label, description), ...]
+    /// Active link-mark label rendered as a leading "📎 marked: <ref>"
+    /// pill on the status bar. `None` hides the marker entirely.
+    link_marker: Option<String>,
+}
+
+impl StatusBarComponent {
+    pub fn new(theme: Arc<Theme>, keybindings: &KeyBindingConfig) -> Self {
+        let mut comp = Self {
+            theme,
+            mode: StatusMode::TasksNormal,
+            hints: Vec::new(),
+            link_marker: None,
+        };
+        comp.rebuild_hints(keybindings);
+        comp
+    }
+
+    /// Set or clear the leading link-mark indicator.
+    pub fn set_link_marker(&mut self, marker: Option<String>) {
+        self.link_marker = marker;
+    }
+
+    /// Update the display mode and rebuild hints.
+    pub fn set_mode(&mut self, mode: StatusMode, keybindings: &KeyBindingConfig) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.rebuild_hints(keybindings);
+        }
+    }
+
+    /// Set custom hints directly (for Content tabs with dynamic keybindings).
+    pub fn set_custom_hints(&mut self, hints: Vec<(String, String)>) {
+        self.mode = StatusMode::Other;
+        self.hints = hints;
+    }
+
+    /// Calculate how many rows the status bar needs at the given width.
+    pub fn required_height(&self, available_width: u16) -> u16 {
+        if self.hints.is_empty() { return 1; }
+        let w = available_width as usize;
+        let mut lines = 1u16;
+        let mut line_used = 1usize; // leading space
+
+        for (key_label, desc) in &self.hints {
+            let hint_w = key_label.chars().count() + 1 + desc.chars().count() + 2;
+            if line_used + hint_w > w && line_used > 1 {
+                lines += 1;
+                line_used = 1;
+            }
+            line_used += hint_w;
+        }
+        lines
+    }
+
+    fn rebuild_hints(&mut self, kb: &KeyBindingConfig) {
+        let gkb = &kb.global;
+
+        let mut hints = vec![
+            (gkb.label(&GlobalAction::Quit), "quit".to_string()),
+        ];
+
+        match self.mode {
+            StatusMode::TasksFormOpen => {
+                hints.push((kb.common.label(&CommonAction::FormClose), "close form".to_string()));
+            }
+            StatusMode::TasksNormal => {
+                hints.push((kb.common.label(&CommonAction::SavedFilterSelect), "queries".to_string()));
+                hints.push((kb.tasks.label(&TasksAction::FormAdd), "add".to_string()));
+                hints.push((kb.tasks.label(&TasksAction::FormEdit), "edit".to_string()));
+                hints.push((kb.tasks.label(&TasksAction::FormEditNode), "edit node".to_string()));
+                hints.push((kb.tasks.label(&TasksAction::Delete), "delete".to_string()));
+                hints.push((kb.common.label(&CommonAction::TrackingToggle), "track".to_string()));
+                hints.push((kb.common.label(&CommonAction::JumpMode), "jump".to_string()));
+                hints.push((kb.common.label(&CommonAction::SortMode), "sort".to_string()));
+                hints.push((kb.common.label(&CommonAction::ColumnConfig), "columns".to_string()));
+                hints.push((
+                    format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
+                    "cycle tabs".to_string(),
+                ));
+                hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
+            }
+            StatusMode::Trackings => {
+                hints.push((kb.common.label(&CommonAction::SavedFilterSelect), "queries".to_string()));
+                hints.push((kb.trackings.label(&TrackingsAction::TrackingGroup), "group".to_string()));
+                hints.push((kb.common.label(&CommonAction::JumpMode), "jump".to_string()));
+                hints.push((kb.common.label(&CommonAction::ColumnConfig), "columns".to_string()));
+                hints.push((kb.trackings.label(&TrackingsAction::TrackingOrderToggle), "order".to_string()));
+                hints.push((kb.trackings.label(&TrackingsAction::TrackingCondensedToggle), "condensed".to_string()));
+                hints.push((kb.trackings.label(&TrackingsAction::TrackingTreeToggle), "tree".to_string()));
+                hints.push((kb.trackings.label(&TrackingsAction::TrackingRestore), "restore".to_string()));
+                hints.push((kb.trackings.label(&TrackingsAction::TrackingRestoreAll), "restore all".to_string()));
+                hints.push((
+                    format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
+                    "cycle tabs".to_string(),
+                ));
+                hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
+            }
+            StatusMode::Other => {
+                hints.push((
+                    format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
+                    "cycle tabs".to_string(),
+                ));
+                hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
+            }
+        }
+
+        self.hints = hints;
+    }
+}
+
+impl Component for StatusBarComponent {
+    fn view(&mut self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 { return; }
+        let t = &self.theme;
+        let bg = t.surface();
+        let buf = frame.buffer_mut();
+        let right = area.right();
+        let left = area.left();
+
+        // Fill background for all rows.
+        for row in 0..area.height {
+            let y = area.top() + row;
+            for x in left..right {
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default().bg(bg));
+                }
+            }
+        }
+
+        let mut x = left + 1;
+        let mut y = area.top();
+
+        // Leading link-mark indicator pill. Drawn before the regular
+        // hints so it's anchored on the first row, in accent fg on the
+        // status-bar bg — purely informational, no key binding hint.
+        if let Some(marker) = self.link_marker.as_deref() {
+            let label = format!("⚓ marked: {marker}");
+            let marker_style = Style::default().fg(t.accent()).bg(bg);
+            for ch in label.chars() {
+                if x >= right || y >= area.bottom() { break; }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(marker_style);
+                }
+                x += 1;
+            }
+            let sep_style = Style::default().fg(t.text_med()).bg(bg);
+            for ch in "  ".chars() {
+                if x >= right || y >= area.bottom() { break; }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(sep_style);
+                }
+                x += 1;
+            }
+        }
+
+        for (key_label, desc) in &self.hints {
+            let hint_w = (key_label.chars().count() + 1 + desc.chars().count() + 2) as u16;
+            if x + hint_w > right && x > left + 1 && y + 1 < area.bottom() {
+                y += 1;
+                x = left + 1;
+            }
+
+            let key_style = Style::default().fg(t.accent()).bg(bg);
+            for ch in key_label.chars() {
+                if x >= right || y >= area.bottom() { break; }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(key_style);
+                }
+                x += 1;
+            }
+
+            let desc_style = Style::default().fg(t.text_med()).bg(bg);
+            let desc_text = format!(" {}  ", desc);
+            for ch in desc_text.chars() {
+                if x >= right || y >= area.bottom() { break; }
+                if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(desc_style);
+                }
+                x += 1;
+            }
+        }
+    }
+
+    fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> {
+        None
+    }
+
+    fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
+
+    fn state(&self) -> State {
+        State::Single(StateValue::String(format!("{:?}", self.mode)))
+    }
+
+    fn perform(&mut self, _cmd: Cmd) -> CmdResult {
+        CmdResult::NoChange
+    }
+}

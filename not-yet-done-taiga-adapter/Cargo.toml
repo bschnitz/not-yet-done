@@ -1,0 +1,22 @@
+[package]
+name = "not-yet-done-taiga-adapter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sea-orm     = { workspace = true }
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+uuid        = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
+serde_json  = { workspace = true }
+reqwest     = { workspace = true }
+chrono      = { workspace = true }
+dirs        = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }

@@ -1,0 +1,15 @@
+# not-yet-done-core/tests/fixtures/filter_col_vs_col.yaml
+
+description: "Column-vs-column: updated_at >= created_at (always true for well-formed rows)"
+
+filter:
+  [.updated_at, '>=', .created_at]
+
+expected:
+  - "Gustav works on the parser"
+  - "Augustava reviews the PR"
+  - "Fix the login bug"
+  - "Write release notes"
+  - "Deleted task should be invisible"
+  - "High priority cancelled task"
+  - "Child task with parent"

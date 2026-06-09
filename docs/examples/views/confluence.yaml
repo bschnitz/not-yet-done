@@ -1,0 +1,542 @@
+# Example: Confluence view configuration
+#
+# Place in: ~/.config/not_yet_done/views/confluence.yaml
+# Adapter config: ~/.config/not_yet_done/views/confluence-adapter.yaml
+#
+# CF-4..CF-14 scope: spaces list + recursive page tree per space + page-detail
+# preview pane + attachments + comments per page + CQL-driven search subtab
+# + storage-format page edit + page-create (top-level on space + child on
+# page) + page-delete (Trash) + comments CRUD (add on page, edit + delete on
+# individual comments). Drill into a space row to inline-expand its
+# top-level pages; drill into a page row to inline-expand its child pages —
+# arbitrarily deep through the same recursive `pages` ChildDef (DSF
+# mechanism). `p` toggles the storage-format preview pane on the focused
+# page row (CF-5 lazy-hydrates `body.storage` on first toggle). Each page
+# also carries an `attachments` branch (CF-6, `d` downloads + opens via
+# `xdg-open`) and a `comments` branch (CF-7, `p` toggles a body preview —
+# body XHTML rides in on the list response, no extra round-trip). The
+# `search` subtab (CF-8) runs CQL via `/rest/api/content/search`; `q` opens
+# the saved-queries menu — bodies live as one CQL string per file under
+# `<XDG_DATA_HOME>/not_yet_done/confluence/<instance_id>/queries/` (see
+# `saved/confluence/recent-pages.yaml` for the seed example). `e` (CF-9)
+# opens the page's `body.storage` in `$EDITOR` (pretty-printed via
+# `xmllint --format`); save writes a new revision via `PUT /content/{id}`
+# with `version + 1`. On 409 (someone edited the page upstream while you
+# were typing), the adapter re-fetches and runs a `diffy` 3-way merge —
+# disjoint changes auto-merge, overlapping changes come back with
+# `<<<<<<< ours` / `>>>>>>> theirs` markers + a banner. `a` (CF-10) on a
+# space row creates a top-level page in that space; `a` on a page row
+# creates a child of that page. Both open the same tiny editor buffer
+# (`title:` line + empty `<p></p>` body); save POSTs to
+# `/rest/api/content` with `type=page` + `space.key` + optional
+# `ancestors=[{id}]`. `D` (Shift+D, CF-11) on a page row moves the page
+# to the Trash via `DELETE /rest/api/content/{id}` — the TUI stages a
+# confirm popup ("Delete '<title>'? y/n") before the request fires, and
+# refreshes the listing on success so the row disappears. The trashed
+# page survives in Confluence's Trash and can be restored from the web
+# UI; permanent purge (`?status=trashed`) is implemented in the client
+# but intentionally not surfaced as a TUI shortcut. `c` (CF-12) on a page
+# row opens an empty XHTML buffer for a new comment that POSTs as
+# `type=comment, container={page_id}`; on a comment row `e` edits the
+# body via `PUT /content/{comment_id}` (with the same 409→Reopen-with-
+# banner short-circuit as pages, but no 3-way merge — comments are
+# small enough that manual re-edit is cheaper) and `D` deletes the
+# comment via the generic `ConfirmDeleteContentNode` pipeline.
+# `A` (Shift+A, CF-13) on a page row opens the FilePicker (multi-select)
+# and POSTs each chosen file to `/rest/api/content/{id}/child/attachment`
+# as multipart (one POST per file). Confluence's XSRF gate is satisfied
+# by the adapter's default `X-Atlassian-Token: no-check` header. Mixed
+# success/failure on a multi-file batch surfaces as an error naming
+# every failed path so nothing silently drops. `y` (CF-14) on a page row
+# opens an editor pre-filled with the source page's title (suffixed with
+# " (Clone)") and pretty-printed body; on save the adapter POSTs a new
+# page under the same parent in the same space. The user can edit the
+# title and body in the buffer before saving — cross-space cloning isn't
+# surfaced at adapter level (move the resulting page via the Confluence
+# UI if you want it elsewhere).
+#
+# Validator rules to keep in mind (CF-15 follow-up, 2026-06-02):
+#  - Inside a `tree_label` chain, `fuzzy_filter` and `search` actions
+#    may only be declared at the tree root. Re-declaring them at a
+#    descendant level is rejected as "defined at multiple tree levels".
+#  - `tree_label` only continues from a tree-active parent; a view root
+#    without `tree_label` cannot have a child with one. (That's why the
+#    `search` subtab below is flat — adding `tree_label` to its
+#    `children.pages` would orphan the chain.)
+
+tab:
+  name: Confluence
+  order: 6
+  icon: ""
+
+adapter:
+  type: confluence
+  config: confluence-adapter.yaml
+  # Suppress automatic root listing on startup + on subtab switch. Useful
+  # when the cookie-extracting command pops a browser auth dialog and you
+  # don't want it firing every time the TUI launches. Press `r` (reload)
+  # to fetch when you're ready.
+  manual_connect: true
+
+views:
+  # CF-8 — CQL search view. Hits `/rest/api/content/search?cql=...`. The
+  # inline `query.default` matches the seed file
+  # `saved/confluence/recent-pages.yaml` so the view shows the last week
+  # of page activity on first load; pressing `q` opens the saved-queries
+  # menu (bodies live under
+  # `<XDG_DATA_HOME>/not_yet_done/confluence/<instance>/queries/`). Each
+  # result row is a page (the default CQL filters `type = page` for
+  # cleanly drillable hits), and drilling into a row inline-expands its
+  # child pages / attachments / comments via the same branches the
+  # spaces view exposes below.
+  #
+  # No `tree_label` on this view — search results are a flat hit list.
+  # If you'd like the drilled-in `pages` branch to render as a tree,
+  # add `tree_label: title` to *this* view AND to `children.pages`
+  # below; the validator requires the chain to be unbroken.
+  - name: search
+    node_type: "confluence:page"
+    # Subtab switch key (`s`) — pressing this anywhere inside the
+    # Confluence tab jumps to this view. Pairs with the `space` key on
+    # the spaces view below so the two subtabs are reachable by single
+    # keypress.
+    key: s
+
+    query:
+      default: 'type = page AND lastModified > now("-7d") ORDER BY lastModified DESC'
+      editable: true
+      # `menu_key` opens the q-menu that lists *all* saved queries for
+      # this view. Bodies are managed via `:query new <name>` /
+      # `:query edit <name>` / `:query delete <name>`; shortcut bindings
+      # via Ctrl+f in the q-menu persist in the `query_shortcut` table.
+      menu_key: q
+
+    columns:
+      - key: title
+        label: Title
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+      - key: type
+        label: Type
+        sizing: max
+      - key: space
+        label: Space
+        style: accent
+        sizing: max
+      - key: modified
+        label: Modified
+        sizing: max
+      - key: id
+        label: ID
+        sizing: max
+
+    preview:
+      enabled: true
+      source: content
+      split: horizontal
+      ratio: 50
+      keybinding: p
+
+    actions:
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [title, space]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [title, space]
+      - name: refresh
+        key: r
+        type: reload
+      - name: open in browser
+        key: o
+        type: custom
+        id: open-in-browser
+
+    children:
+      # Drilling into a search result (a page) inline-expands the same
+      # three branches the spaces view exposes one level deeper. Flat
+      # drill (no `tree_label`) — see the note on the view above.
+      - name: pages
+        node_type: "confluence:page"
+
+        columns:
+          - key: title
+            label: Title
+            source: label
+            style: text_high
+            sizing: "flex(1)"
+          - key: id
+            label: ID
+            sizing: max
+
+        preview:
+          enabled: true
+          source: content
+          split: horizontal
+          ratio: 50
+          keybinding: p
+
+        actions:
+          - name: refresh
+            key: r
+            type: reload
+          # Editor-style actions (`e`, `a`, `c`, `y`) use `type: edit`
+          # — the TUI's editor dispatcher routes via `id` to the
+          # adapter's `prepare(action_id)`. `A` (FilePicker), `D`
+          # (confirm popup) and `o` (no input) use `type: custom`
+          # because they need the adapter's custom-action pipeline.
+          - name: edit
+            key: e
+            type: edit
+            id: edit
+          - name: create child page
+            key: a
+            type: edit
+            id: create-child
+          - name: add comment
+            key: c
+            type: edit
+            id: add-comment
+          - name: upload attachment
+            key: A
+            type: custom
+            id: upload-attachment
+          - name: clone
+            key: y
+            type: edit
+            id: clone
+          - name: delete (Trash)
+            key: D
+            type: custom
+            id: delete
+          - name: open in browser
+            key: o
+            type: custom
+            id: open-in-browser
+
+      - name: attachments
+        node_type: "confluence:attachment"
+
+        columns:
+          - key: filename
+            label: Filename
+            source: label
+            style: text_high
+            sizing: "flex(1)"
+          - key: author
+            label: Author
+            sizing: max
+          - key: size
+            label: Size
+            sizing: max
+          - key: mime_type
+            label: Type
+            sizing: max
+          - key: created
+            label: Created
+            sizing: max
+
+        actions:
+          - name: refresh
+            key: r
+            type: reload
+          - name: download + open
+            key: d
+            type: custom
+            id: download
+
+      - name: comments
+        node_type: "confluence:comment"
+
+        columns:
+          - key: author
+            label: Author
+            sizing: max
+          - key: created
+            label: Created
+            sizing: max
+          - key: body
+            label: Body
+            source: label
+            style: text_high
+            sizing: "flex(1)"
+
+        preview:
+          enabled: true
+          source: content
+          split: horizontal
+          ratio: 50
+          keybinding: p
+
+        actions:
+          - name: refresh
+            key: r
+            type: reload
+          # `e` (edit) uses `type: edit` so the editor dispatcher
+          # routes via `id: edit` to the comment node's `prepare`.
+          # `D` (delete) stays `type: custom` because the adapter
+          # returns `ActionDispatch::DeleteSelf` for the confirm
+          # popup pipeline (no editor).
+          - name: edit
+            key: e
+            type: edit
+            id: edit
+          - name: delete
+            key: D
+            type: custom
+            id: delete
+
+  - name: spaces
+    node_type: "confluence:space"
+    default: true
+    # Subtab switch key — `space` is the YAML alias for the spacebar
+    # (semantic match with the subtab name). Pairs with the search
+    # subtab's `key: s` above.
+    key: space
+    # tree_label enables tree-mode rendering for this view: each space is
+    # rendered with a tree marker and the `pages` ChildDef expands inline.
+    # The value must match a column key below. Once `tree_label` is set
+    # here, `fuzzy_filter` and `search` may only appear at THIS level —
+    # not on the recursive `pages` branch below.
+    #
+    # Important: every tree-continuing level in this chain MUST reuse the
+    # same `tree_label` key (here: `name`). The renderer pulls the
+    # active-depth's column set when drawing the indent + glyph + label
+    # cell, and entries at *other* depths can only fill that cell when
+    # their level's tree_label matches one of those active column keys.
+    # Mismatched keys silently blank the rows at the non-active depth.
+    tree_label: name
+
+    # Column order convention: the tree-label column (the one whose key
+    # matches `tree_label:` above) comes first, so the indent + glyph +
+    # title cell is at the start of every row regardless of cursor depth.
+    # Non-tree columns (Key, Type, …) trail behind it.
+    columns:
+      - key: name
+        label: Name
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+      - key: key
+        label: Key
+        style: accent
+        sizing: max
+      - key: type
+        label: Type
+        sizing: max
+
+    actions:
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [key, name]
+      # CT-10: tree-aware search. Mirrors how Confluence's own
+      # sidebar search works: `/` opens a free-text input that hits
+      # `/rest/api/content/search` server-side (scoped by
+      # `space_keys:` whitelist when configured), returns hits across
+      # all pages, expands the tree to the first hit, and n/N
+      # cycle through the rest in tree-render order. Local `/`-style
+      # filter-while-typing is still on `f` (fuzzy_filter above);
+      # tree_find replaces the obsolete `search` action that could
+      # only step through already-loaded space rows.
+      - name: tree find
+        key: /
+        type: tree_find
+        tree_find:
+          prompt: Search pages
+      - name: refresh
+        key: r
+        type: reload
+      # `a` (create-page) uses `type: edit` so the editor pipeline
+      # routes to the space node's `prepare("create-page")`. `o`
+      # (open-in-browser) stays `type: custom` because the adapter
+      # returns `ActionOutcome::Notify` from execute (no editor).
+      - name: create page
+        key: a
+        type: edit
+        id: create-page
+      - name: open in browser
+        key: o
+        type: custom
+        id: open-in-browser
+
+    children:
+      # Recursive page branch — the same ChildDef serves every depth of the
+      # tree (`recursive: true` makes it an implicit member of its own
+      # `children:`). Top-level pages of a space come from the space's
+      # `list()`; deeper levels come from each page's `list()` against
+      # `/content/{id}/child/page`.
+      #
+      # No `fuzzy_filter` / `search` declarations here — those live once
+      # at the tree root (`spaces` view above) and apply to every node
+      # in this tree chain.
+      - name: pages
+        node_type: "confluence:page"
+        # See the `tree_label` note on the `spaces` view: every chain
+        # level must reuse the same key. The space level uses `name`,
+        # so the page column that carries the title is keyed `name` too
+        # — the visible header is overridden to "Title" via `label:`.
+        tree_label: name
+        recursive: true
+        # Leaf glyph for pages that the API reports as childless
+        # (`children.page.size == 0` on the listing). Without this, the
+        # `recursive: true` ChildDef would force `▶` on every page row
+        # because the static config check has no way to tell leaves
+        # from expandables — the adapter fills `NodeSummary.has_children`
+        # from the API and the renderer picks this glyph instead of the
+        # default `·` for known leaves. (Confluence Server silently
+        # ignores `?expand=childTypes.page` on `/child/page`, so
+        # `children.page.size` is the only listing-side hook that
+        # reliably reports per-row counts.)
+        leaf_glyph: "📄"
+
+        columns:
+          - key: name
+            label: Title
+            source: label
+            style: text_high
+            sizing: "flex(1)"
+          - key: id
+            label: ID
+            sizing: max
+
+        # CF-5 storage-format preview. The first `p` toggle lazy-hydrates the
+        # full page via `GET /content/{id}?expand=body.storage,...`; subsequent
+        # toggles reuse the cached detail. Source `content` routes through the
+        # page node's `Content` impl which returns `body.storage` as bytes.
+        preview:
+          enabled: true
+          source: content
+          split: horizontal
+          ratio: 50
+          keybinding: p
+
+        actions:
+          - name: refresh
+            key: r
+            type: reload
+          # Editor-style actions (`e`, `a`, `c`, `y`) use `type: edit`
+          # — the TUI's editor dispatcher routes via `id` to the
+          # adapter's `prepare(action_id)`. `A` (FilePicker), `D`
+          # (confirm popup) and `o` (no input) use `type: custom`
+          # because they need the adapter's custom-action pipeline.
+          - name: edit
+            key: e
+            type: edit
+            id: edit
+          - name: create child page
+            key: a
+            type: edit
+            id: create-child
+          - name: add comment
+            key: c
+            type: edit
+            id: add-comment
+          - name: upload attachment
+            key: A
+            type: custom
+            id: upload-attachment
+          - name: clone
+            key: y
+            type: edit
+            id: clone
+          - name: delete (Trash)
+            key: D
+            type: custom
+            id: delete
+          - name: open in browser
+            key: o
+            type: custom
+            id: open-in-browser
+
+        children:
+          # CF-6 attachments branch. Drilling into a page row exposes both
+          # the recursive `pages` continuation (declared via `recursive: true`
+          # above) and this `attachments` leaf. The `d` action downloads the
+          # bytes into a temp dir (cached by attachment-id) and spawns
+          # `xdg-open` detached — same shape as the Jira attachment viewer.
+          - name: attachments
+            node_type: "confluence:attachment"
+
+            columns:
+              - key: filename
+                label: Filename
+                source: label
+                style: text_high
+                sizing: "flex(1)"
+              - key: author
+                label: Author
+                sizing: max
+              - key: size
+                label: Size
+                sizing: max
+              - key: mime_type
+                label: Type
+                sizing: max
+              - key: created
+                label: Created
+                sizing: max
+
+            actions:
+              - name: refresh
+                key: r
+                type: reload
+              # The `d` action is bound by the adapter's `actions_for_type` —
+              # listing it here is documentation only; the shortcut already
+              # works whether or not the entry exists.
+              - name: download + open
+                key: d
+                type: custom
+                id: download
+
+          # CF-7 comments branch. Drilling into a page row exposes this
+          # leaf alongside the recursive `pages` continuation (above) and
+          # the `attachments` leaf (above). Body XHTML rides in on the
+          # `list_comments` call (`expand=body.storage,version` is hard-
+          # coded on the request URL), so the preview-pane toggle is
+          # in-memory — no extra round-trip.
+          - name: comments
+            node_type: "confluence:comment"
+
+            columns:
+              - key: author
+                label: Author
+                sizing: max
+              - key: created
+                label: Created
+                sizing: max
+              - key: body
+                label: Body
+                source: label
+                style: text_high
+                sizing: "flex(1)"
+
+            preview:
+              enabled: true
+              source: content
+              split: horizontal
+              ratio: 50
+              keybinding: p
+
+            actions:
+              - name: refresh
+                key: r
+                type: reload
+              # The `e` and `D` actions are bound by the adapter's
+              # `actions_for_type` — listing them here is documentation
+              # only; the shortcuts already work whether or not the
+              # entries exist.
+              - name: edit
+                key: e
+                type: edit
+                id: edit
+              - name: delete
+                key: D
+                type: custom
+                id: delete

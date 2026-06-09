@@ -1,0 +1,16 @@
+# Example Confluence saved query.
+#
+# Deploy this file to your live store as:
+#   <XDG_DATA_HOME>/not_yet_done/confluence/<instance_id>/queries/recent-pages.yaml
+# (typically `~/.local/share/not_yet_done/confluence/...`). The file
+# stem becomes the saved-query name shown in the `q` menu.
+#
+# Body is a raw CQL string — Confluence-side parser, same dialect as
+# the web `Advanced Search`. Multi-line bodies are concatenated with
+# spaces by the adapter so you can split long queries for readability.
+#
+# `type = page` keeps blogposts / attachments / comments out of the
+# result set so each row drills into the page tree cleanly. Drop the
+# clause if you want a heterogeneous content listing.
+
+type = page AND lastModified > now("-7d") ORDER BY lastModified DESC

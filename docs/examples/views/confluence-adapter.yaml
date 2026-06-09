@@ -1,0 +1,56 @@
+# Example: Confluence Server/Data-Center adapter credentials
+#
+# Place in: ~/.config/not_yet_done/views/confluence-adapter.yaml
+# Referenced by confluence.yaml via: adapter.config: confluence-adapter.yaml
+#
+# Tested against Confluence 9.2.19 (Server/DC). Atlassian Cloud's REST
+# shape differs and is not supported — that's a separate adapter.
+#
+# Authentication: only the cookie mechanism is wired today. Use a script
+# that prints the live session cookies (JSESSIONID + crowd.token_key
+# + atlassian.xsrf.token) on stdout — the same pattern the Jira adapter
+# uses for Server/DC Crowd-SSO instances.
+
+url: https://wiki.example.invalid/confluence # base URL incl. context-path
+name: wiki # optional human-readable label
+
+auth:
+  mechanism: cookie
+  bindings:
+    - field: cookie
+      provider:
+        type: command
+        # The script must write a single line to stdout in the format
+        # `JSESSIONID=...; crowd.token_key=...; atlassian.xsrf.token=...`
+        # (semicolon-separated, exactly what the `Cookie:` header expects).
+        script: /usr/local/bin/get-confluence-cookie.sh
+        timeout_secs: 60
+        retries: 5
+
+# Self-signed / internal CAs: flip to true. Defaults to strict
+# verification.
+accept_invalid_certs: false
+
+# Optional override for the cache backing store. Sea-orm-compatible URL
+# (sqlite:///path?mode=rwc, postgres://user:pw@host/db, ...). Falls back
+# to a private SQLite file under the user's local data directory when
+# omitted.
+# db:
+#   url: "sqlite:///home/me/.local/share/not_yet_done/confluence-cache.sqlite?mode=rwc"
+
+# Optional whitelist of space keys (CF-16). Omit to surface every space
+# the user can read (legacy behaviour). When set, the spaces sub-tab is
+# restricted to these keys and they appear in the order listed below —
+# alphabetical-API order is suppressed.
+#
+# Why this exists: large Crowd-SSO Confluence instances routinely expose
+# 100+ spaces, most of which are noise for any given user. Filtering at
+# the adapter trims the initial fetch (server-side via repeated
+# `spaceKey=` query params) AND keeps the tree-mode listing readable.
+# Missing or inaccessible keys are silently skipped so a single typo
+# doesn't brick the whole sub-tab.
+#
+# space_keys:
+#   - DOCS    # docs space, shows up first
+#   - PROD    # production runbooks
+#   - SUPPORT # ticket templates

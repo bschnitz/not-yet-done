@@ -1,0 +1,10 @@
+[package]
+name = "not-yet-done-grid-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# ratatui provides Constraint, Rect, Layout — used for layout computation.
+# Pinned to 0.30 for compatibility with tuirealm 4.1 (which depends on
+# ratatui 0.30). default-features = false keeps this core crate backend-free.
+ratatui = { version = "0.30", default-features = false }
