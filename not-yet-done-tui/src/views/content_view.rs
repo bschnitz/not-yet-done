@@ -53,7 +53,7 @@ use crate::config::view_config::{
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
 };
-use crate::views::column_format::format_typed_value;
+use crate::views::column_format::{format_elapsed_since, format_typed_value};
 use crate::ui::theme::Theme;
 use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
 use crate::views::content_tree::{
@@ -510,6 +510,20 @@ impl PaneNode {
             PaneNode::Branch { first, second, .. } => {
                 first.collect_leaf_ids(out);
                 second.collect_leaf_ids(out);
+            }
+        }
+    }
+
+    /// Visit every leaf pane mutably (depth-first). Used by the repaint
+    /// handler to rebuild live (`kind: elapsed`) panes in place without
+    /// cloning the view defs per pane.
+    pub fn for_each_leaf_mut(&mut self, f: &mut impl FnMut(&mut LeafEntry)) {
+        match self {
+            PaneNode::Leaf(leaf) => f(leaf),
+            PaneNode::Hole => {}
+            PaneNode::Branch { first, second, .. } => {
+                first.for_each_leaf_mut(f);
+                second.for_each_leaf_mut(f);
             }
         }
     }
@@ -1472,6 +1486,16 @@ impl ContentPane {
 
     // ── Current-level config (respects nav depth) ───────────────────
 
+    /// Whether the active level has any live (time-derived) column whose
+    /// rendering changes between frames without a refetch — currently only
+    /// `kind: elapsed` (M5). The App's repaint handler uses this to rebuild
+    /// just the panes that actually tick, leaving the rest's cached rows be.
+    fn has_live_column(&self, view_defs: &[ViewDef]) -> bool {
+        self.current_columns(view_defs)
+            .iter()
+            .any(|c| c.kind == ColumnKind::Elapsed)
+    }
+
     fn current_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
         if self.tree.is_some() {
             // Chain-based: the cursor row's own branch decides the column
@@ -1513,6 +1537,7 @@ impl ContentPane {
                 kind: ColumnKind::Text,
                 format: None,
                 separator: None,
+                elapsed_from: None,
             })
             .collect()
     }
@@ -1953,6 +1978,7 @@ impl ContentPane {
         &self,
         columns: &[ColumnDef],
         view_defs: &[ViewDef],
+        now: chrono::DateTime<chrono::Local>,
     ) -> Vec<TRow<u32>> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -1989,7 +2015,7 @@ impl ContentPane {
                             let icon = if self.item_has_link(&entry.node.id) { "🔗" } else { " " };
                             CellContent::text(icon)
                         } else {
-                            typed_cell_content(column_value(&entry.node, col), col)
+                            cell_content_for(&entry.node, col, now)
                         }
                     } else {
                         CellContent::text(String::new())
@@ -2852,6 +2878,10 @@ impl ContentPane {
         if columns.is_empty() {
             return;
         }
+        // Single `now` for the whole rebuild so every live (`kind: elapsed`)
+        // cell in this frame measures against the same instant. A repaint
+        // tick calls rebuild again with a fresh `now` → the timer advances.
+        let now = chrono::Local::now();
 
         // Snapshot the link cache + adapter prefix into a closure so the
         // flat-mode `map(...)` can stay free of `&self` borrows (it needs
@@ -2894,7 +2924,7 @@ impl ContentPane {
             // `tree_visible_indices` (refreshed above). Fuzzy filter
             // only narrows entries at `tree_filter_depth`; `/`-search
             // steps over the same visible rows.
-            self.build_tree_data_rows(&columns, view_defs)
+            self.build_tree_data_rows(&columns, view_defs, now)
         } else {
             // Fuzzy filter: SkimMatcherV2 (same matcher as the Tasks Tree).
             // The pattern is split on whitespace — every token must match
@@ -2961,7 +2991,7 @@ impl ContentPane {
                             let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
                             row = row.cell(&col.key, icon);
                         } else {
-                            let cell = typed_cell_content(column_value(item, col), col);
+                            let cell = cell_content_for(item, col, now);
                             row = row.cell(&col.key, cell);
                         }
                     }
@@ -5624,6 +5654,26 @@ impl ContentView {
             .rebuild_table_with(view_defs, &overlay);
     }
 
+    /// Repaint-driven recompute of live (time-derived) cells (M5): rebuild
+    /// the table of every pane — across all subtabs' split trees — whose
+    /// active level has a `kind: elapsed` column, so `now − field` advances.
+    /// Purely re-renders the already-loaded items (no refetch); panes
+    /// without a live column are untouched and their cached rows redraw
+    /// unchanged. Driven by `Invalidation::Repaint` from the domain-event
+    /// bus. The disjoint borrow (`&self.view_defs` + `&mut self.pane_trees`)
+    /// avoids cloning the view defs on every tick.
+    pub fn repaint_live_columns(&mut self) {
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        for tree in self.pane_trees.iter_mut() {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                if leaf.pane.has_live_column(view_defs) {
+                    leaf.pane.rebuild_table_with(view_defs, &overlay);
+                }
+            });
+        }
+    }
+
     /// Push a refreshed `link_refs` snapshot — plus the adapter NodeRef
     /// prefix (`"{kind}/{instance_id}"`) — down to every pane in this
     /// tab. Called by the App whenever its own `App::link_refs` cache
@@ -6187,10 +6237,17 @@ fn column_value<'a>(item: &'a NodeSummary, col: &ColumnDef) -> &'a str {
     if col.source.as_deref() == Some("label") {
         return &item.label;
     }
+    metadata_field_value(item, &col.key)
+}
+
+/// Raw value of an arbitrary metadata field by key (`""` when absent).
+/// Used by `column_value` and by the `elapsed` cell, which reads a field
+/// other than the column's own key (`elapsed_from`).
+fn metadata_field_value<'a>(item: &'a NodeSummary, key: &str) -> &'a str {
     item.metadata
         .fields
         .iter()
-        .find(|f| f.key == col.key)
+        .find(|f| f.key == key)
         .map(|f| f.value.as_str())
         .unwrap_or("")
 }
@@ -6209,6 +6266,21 @@ fn typed_cell_content(raw: &str, col: &ColumnDef) -> CellContent {
     let (text, alignment) =
         format_typed_value(raw, col.kind, col.format.as_deref(), path_separator(col));
     CellContent::aligned(text, alignment)
+}
+
+/// Build a data cell, resolving live (time-derived) kinds against `now`
+/// (M5 live-elapsed). For `kind: elapsed` the value is read from the
+/// column's `elapsed_from` field (default: the column's own key) and
+/// rendered as `now − that instant`; every other kind is the pure,
+/// time-independent [`typed_cell_content`]. Called per row build, so
+/// passing a fresh `now` on each repaint tick makes the timer advance.
+fn cell_content_for(item: &NodeSummary, col: &ColumnDef, now: chrono::DateTime<chrono::Local>) -> CellContent {
+    if col.kind == ColumnKind::Elapsed {
+        let src_key = col.elapsed_from.as_deref().unwrap_or(col.key.as_str());
+        let (text, alignment) = format_elapsed_since(metadata_field_value(item, src_key), now);
+        return CellContent::aligned(text, alignment);
+    }
+    typed_cell_content(column_value(item, col), col)
 }
 
 /// StyleMap slot for the taskpath separator in the flat single-line table
@@ -6703,9 +6775,9 @@ mod tests {
     fn multiline_widget_rows_chat_layout() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -6753,8 +6825,8 @@ mod tests {
     fn multiline_widget_rows_markdown_expands_body() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -6936,8 +7008,8 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                 ],
                 preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
                 actions: vec![
@@ -6950,7 +7022,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -7090,7 +7162,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -7210,7 +7282,7 @@ mod tests {
             smooth_scroll: true,
             name: "messages".into(),
             node_type: "mock:msg".into(),
-            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None }],
+            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None }],
             preview: None,
             actions: Vec::new(),
             children: Vec::new(),
@@ -7417,7 +7489,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -7428,7 +7500,7 @@ mod tests {
                         name: "Schemas".into(),
                         node_type: "mock:schema".into(),
                         columns: vec![
-                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -7521,6 +7593,7 @@ mod tests {
             kind: ColumnKind::Text,
             format: None,
             separator: None,
+            elapsed_from: None,
         }
     }
 
@@ -7665,7 +7738,7 @@ mod tests {
         let columns = pane.current_columns(&view_defs);
         // Cursor level is the root → its label column key is "name".
         let label_key = TColumnId::new("name");
-        let rows = pane.build_tree_data_rows(&columns, &view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
         assert_eq!(rows.len(), 4, "every visible entry produces a row");
 
         // Every row — including the deep, divergent-key channel — must
@@ -8201,6 +8274,7 @@ mod tests {
                 kind: ColumnKind::Text,
                 format: None,
                 separator: None,
+                elapsed_from: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -8293,6 +8367,7 @@ mod tests {
                 kind: ColumnKind::Text,
                 format: None,
                 separator: None,
+                elapsed_from: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -8640,7 +8715,7 @@ mod tests {
                     menu_key: Some("q".into()),
                 }),
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9392,7 +9467,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9403,7 +9478,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -9757,7 +9832,7 @@ mod tests {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
             ],
             preview: None,
             actions: vec![],
@@ -9767,7 +9842,7 @@ mod tests {
                 name: "pages".into(),
                 node_type: "mock:page".into(),
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9981,11 +10056,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
-                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
             ],
             preview: Some(PreviewConfig {
                 enabled: true,

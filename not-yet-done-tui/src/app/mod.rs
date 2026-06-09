@@ -1153,16 +1153,27 @@ impl App {
     /// - [`Invalidation::Node`] → only panes whose current level is that
     ///   node's children (a message in the open channel reloads; one in
     ///   any other channel costs nothing).
-    /// - [`Invalidation::Repaint`] → no pane reloads at all; draining the
-    ///   message already marks the frame dirty, which re-renders any
-    ///   time-derived cell (e.g. a live "elapsed" duration) without a
-    ///   refetch.
+    /// - [`Invalidation::Repaint`] → no pane reloads (no refetch), but the
+    ///   live (`kind: elapsed`) panes are rebuilt in place against a fresh
+    ///   `now` so a time-derived cell (e.g. a running "elapsed" duration)
+    ///   advances; the rebuild marks the frame dirty.
     fn handle_adapter_invalidation(
         &mut self,
         view_index: usize,
         inv: not_yet_done_content::Invalidation,
     ) {
         use not_yet_done_content::Invalidation;
+        // Repaint is redraw-only: no refetch. But the table rows are
+        // pre-built and cached, so a dirty frame alone would redraw a stale
+        // string for a time-derived cell. Recompute the live (`kind:
+        // elapsed`) panes in place against a fresh `now`, then fall through
+        // — the rebuild marks the frame dirty so the new value is drawn.
+        if matches!(inv, Invalidation::Repaint) {
+            if let Some(cv) = self.content_view_mut(view_index) {
+                cv.repaint_live_columns();
+            }
+            return;
+        }
         // Collect the affected pane ids first so the immutable borrow of
         // the view ends before `reload_content_pane_current_level`
         // re-borrows `self`.

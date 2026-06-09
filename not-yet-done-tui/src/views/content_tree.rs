@@ -653,6 +653,7 @@ mod tests {
             kind: ColumnKind::Text,
             format: None,
             separator: None,
+            elapsed_from: None,
         }
     }
 

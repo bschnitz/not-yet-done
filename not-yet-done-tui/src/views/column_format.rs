@@ -21,6 +21,12 @@
 //!   root renders as just the separator. The per-segment *styling* (separator
 //!   color) is applied later, in the render layer — see
 //!   `path_cell_segments` in `content_view`.
+//! - `elapsed`  → carries no value of its own; the cell builder reads the
+//!   column's `elapsed_from` field (an RFC 3339 instant) and calls
+//!   [`format_elapsed_since`] with the current time, rendering `now − that`
+//!   as a duration (right-aligned). Recomputed each repaint tick → a live
+//!   timer. Not handled by [`format_typed_value`] (it needs `now` and a
+//!   foreign source field).
 //! - `text`     → returned verbatim, left-aligned (the default).
 //!
 //! A value that fails to parse for its kind is returned verbatim (and left
@@ -57,6 +63,35 @@ pub fn format_typed_value(
         ColumnKind::Duration => (format_duration_secs(raw), CellAlignment::Right),
         ColumnKind::Datetime => (format_datetime(raw, format), CellAlignment::Left),
         ColumnKind::Path => (format_path(raw, separator), CellAlignment::Left),
+        // `elapsed` is time-derived: it needs `now` and reads a *different*
+        // source field, so it is computed by the cell builder via
+        // [`format_elapsed_since`], not here. This arm is only reached if a
+        // view mislabels a plain column `elapsed` — render the raw verbatim,
+        // right-aligned, rather than panicking.
+        ColumnKind::Elapsed => (raw.to_string(), CellAlignment::Right),
+    }
+}
+
+/// Render the time span between `now` and the RFC 3339 instant `raw`
+/// (M5 live-elapsed). The result uses the shared [`format_duration`]
+/// (`H:MM:SS`), right-aligned, so a running timer matches the duration
+/// columns next to it. `now` is a parameter so the computation is
+/// deterministic under test.
+///
+/// - Empty input → empty cell (left-aligned, matching the other kinds).
+/// - Unparseable input → passed through verbatim, left-aligned.
+/// - An instant in the future (clock skew) → `format_duration` clamps the
+///   negative span to zero, so it renders as `00` rather than going negative.
+pub fn format_elapsed_since(raw: &str, now: DateTime<Local>) -> (String, CellAlignment) {
+    if raw.is_empty() {
+        return (String::new(), CellAlignment::Left);
+    }
+    match DateTime::parse_from_rfc3339(raw.trim()) {
+        Ok(dt) => {
+            let span = now.signed_duration_since(dt.with_timezone(&Local));
+            (format_duration(span), CellAlignment::Right)
+        }
+        Err(_) => (raw.to_string(), CellAlignment::Left),
     }
 }
 
@@ -196,5 +231,58 @@ mod tests {
     fn path_is_left_aligned() {
         let (_, align) = format_typed_value("/a/b", ColumnKind::Path, None, "/");
         assert_eq!(align, CellAlignment::Left);
+    }
+
+    /// Build an RFC 3339 instant `secs` seconds before `now`, in `now`'s
+    /// own offset, so the round-trip is timezone-stable.
+    fn instant_before(now: DateTime<Local>, secs: i64) -> String {
+        (now - Duration::seconds(secs)).to_rfc3339()
+    }
+
+    #[test]
+    fn elapsed_renders_now_minus_field_as_duration() {
+        let now = Local::now();
+        // 1h 30m ago → "1:30:00", right-aligned.
+        let (text, align) = format_elapsed_since(&instant_before(now, 5400), now);
+        assert_eq!(text, "1:30:00");
+        assert_eq!(align, CellAlignment::Right);
+    }
+
+    #[test]
+    fn elapsed_empty_stays_empty() {
+        let now = Local::now();
+        assert_eq!(
+            format_elapsed_since("", now),
+            (String::new(), CellAlignment::Left)
+        );
+    }
+
+    #[test]
+    fn elapsed_unparseable_passes_through() {
+        let now = Local::now();
+        let (text, align) = format_elapsed_since("not-a-date", now);
+        assert_eq!(text, "not-a-date");
+        assert_eq!(align, CellAlignment::Left);
+    }
+
+    #[test]
+    fn elapsed_future_instant_clamps_to_zero() {
+        let now = Local::now();
+        // 10s in the future → negative span → clamped to "00".
+        let future = (now + Duration::seconds(10)).to_rfc3339();
+        let (text, _) = format_elapsed_since(&future, now);
+        assert_eq!(text, "00");
+    }
+
+    #[test]
+    fn elapsed_is_deterministic_under_injected_now() {
+        // A fixed instant and a fixed `now` 90s later → exactly "01:30",
+        // independent of wall-clock time.
+        let base = DateTime::parse_from_rfc3339("2026-06-09T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let now = base + Duration::seconds(90);
+        let (text, _) = format_elapsed_since(&base.to_rfc3339(), now);
+        assert_eq!(text, "01:30");
     }
 }

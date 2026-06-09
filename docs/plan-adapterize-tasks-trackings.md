@@ -145,9 +145,14 @@ Im Tree-Mode eine numerische Spalte über den Teilbaum kumulieren
 
 ### M5 — Live-Elapsed-Spalte (E4b)
 
-Spalten-`kind: elapsed_since(<datetime-feld>)`. Der Engine rendert
-`now − feld` **pro Frame** neu (kein Refetch). Sichtbares Ticken kommt vom
-`Repaint`-Signal aus M1. Damit ist die laufende Dauer live ohne Staleness.
+Spalten-`kind: elapsed` mit Begleitfeld `elapsed_from: <datetime-feld>`
+(Default: der eigene `key` der Spalte). Der Engine rendert `now − feld`
+beim Rebuild neu (kein Refetch). Sichtbares Ticken kommt vom `Repaint`-Signal
+aus M1: der App-Repaint-Handler ruft `repaint_live_columns()`, das genau die
+Panes mit einer `elapsed`-Spalte gegen ein frisches `now` neu baut. Damit ist
+die laufende Dauer live ohne Staleness. (Encoding bewusst als eigener `kind` +
+Begleitfeld statt parametrisiertem `elapsed_since(...)` — konsistent mit den
+übrigen Begleitfeldern `format:`/`separator:` und ohne Mini-Parser im YAML.)
 
 ### M6 — Generischer Form-InputSpec (E5)
 
