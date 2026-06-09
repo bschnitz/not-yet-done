@@ -254,6 +254,47 @@ Regeln:
   `preview.markdown: true` (siehe `preview:`-Block) — z. B. um den vollen
   Nachrichtenbody mit `p` schön gerendert zu zeigen.
 
+#### `kind:` — typisierte Spaltenwerte
+
+Eine Spalte deklariert mit `kind:` den **semantischen Typ** ihres Werts. Der
+Adapter liefert weiterhin nur Strings, aber in einer **kanonischen** Form; die
+Tabellen-Engine parst sie und kümmert sich um Formatierung, Ausrichtung und
+Styling. Default ist `text` — jede bestehende (Remote-)Spalte bleibt damit
+unverändert.
+
+```yaml
+- { key: elapsed, source: elapsed, kind: duration } # rechtsbündig, H:MM:SS
+- { key: started, source: started, kind: datetime } # lokalisiert
+- { key: count, source: count, kind: number } # rechtsbündig
+- { key: taskpath, source: taskpath, kind: path, separator: " › " }
+```
+
+| `kind:`    | Kanonische Eingabe des Adapters     | Anzeige                             | Ausrichtung |
+| ---------- | ----------------------------------- | ----------------------------------- | ----------- |
+| `text`     | beliebig                            | unverändert                         | links       |
+| `number`   | Dezimalzahl (`"42"`)                | unverändert                         | rechts      |
+| `duration` | Ganzzahl **Sekunden** (`"5400"`)    | `H:MM:SS` (über `format_duration`)  | rechts      |
+| `datetime` | RFC 3339 (`"2026-06-09T08:15:00Z"`) | lokale Zeitzone, `%Y-%m-%d %H:%M`   | links       |
+| `path`     | `/`-getrennte Segmente (`"/a/b/c"`) | mit `separator:` verbunden, gestylt | links       |
+
+Zwei optionale Begleitfelder:
+
+- **`format:`** — nur für `datetime`: ein strftime-Muster, das das Default
+  `%Y-%m-%d %H:%M` ersetzt (z. B. `format: "%H:%M"`).
+- **`separator:`** — nur für `path`: das Anzeige-Trennzeichen (Default `/`).
+  Es wird im Theme-Stil `taskpath_separator` (fett) gezeichnet, der Pfad führt
+  immer mit einem Separator (eine Wurzel rendert als reines Trennzeichen).
+
+**Warum es das gibt:** Ohne `kind:` müsste jeder Adapter Dauer/Datum/Pfad selbst
+fürs Display vorformatieren — entweder als unausgerichteter Roh-String oder mit
+adapter-spezifischer Layout-Logik, die nicht aggregierbar/sortierbar ist. Mit
+typisierten Spalten bleibt der **maschinenlesbare** Wert die Quelle der Wahrheit
+(Sekunden, RFC 3339, Pfadsegmente), und Ausrichtung, lokalisierte Formatierung
+und das Separator-Styling der Taskpath-Spalte sind ein generisches
+Engine-Feature statt Copy-&-Paste pro Adapter. Der Typ steht bewusst in der
+View-YAML und nicht am `MetadataField` der Adapter, damit Remote-Adapter (Jira,
+Taiga, Postgres, Confluence, Stoat) keine Zeile ändern müssen.
+
 #### `smooth_scroll:` — kontinuierliches zeilenweises Scrollen
 
 Steht auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout`),

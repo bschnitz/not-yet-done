@@ -96,12 +96,35 @@ DomainEvent::TrackingTick            // 1 Hz, solange ein Tracking läuft
 
 ### M2 — Typisierte Spaltenwerte (E1)
 
-`MetadataField` bekommt neben dem Anzeige-String einen optionalen
-**maschinenlesbaren Wert** (z. B. `value_kind: Number(f64) | Duration(secs)
-| DateTime(utc) | Text | Path(segments)`). `ColumnDef` bekommt
-`kind`/`format`, damit der Engine weiß, wie er aggregiert, bucketet,
-formatiert und stylt (u. a. die gestylte Taskpath-Spalte als `Path` mit
-Separator-Style).
+**Entscheidung: deklarativ am `ColumnDef`, nicht am `MetadataField`.**
+Der Typ einer Spalte steht ausschließlich in der View-YAML; die Adapter
+selbst bleiben unberührt. Begründung: `MetadataField` wird an ~50
+Struct-Literal-Stellen über alle fünf Adapter-Crates konstruiert — ein
+neues Pflichtfeld dort wäre Churn quer durch den ganzen Workspace, obwohl
+nur Tasks/Trackings den Typ überhaupt brauchen.
+
+- `ColumnDef` bekommt `kind: ColumnKind` (`text` | `number` | `duration`
+  | `datetime` | `path`; serde-default `text`) plus optionale
+  `format`/`separator`-Felder.
+- Adapter liefern für typisierte Spalten **kanonische Strings**, die der
+  Engine eindeutig zurückparst:
+  - `duration` → Sekunden als Integer (`"3720"`),
+  - `datetime` → RFC 3339 (`"2026-06-09T08:15:00Z"`),
+  - `path` → mit `/` getrennte Segmente (`"/a/b/c"`),
+  - `number` → Dezimalzahl als String.
+- Der Engine-Formatter parst den kanonischen String pro `kind`, formatiert
+  ihn fürs Display (`duration` über den vorhandenen `format_duration`
+  → `H:MM:SS`, identisch zur bisherigen Trackings-Anzeige für Parität;
+  `datetime` → lokalisiert), setzt die Ausrichtung (`number`/`duration`
+  rechtsbündig) und stylt
+  (`path`-Segmente mit Separator-Style über die vorhandene Theme-Farbe
+  `taskpath_separator()`, Vorbild: bisheriger `build_taskpath_segments`).
+- Remote-Adapter (Jira, Taiga, Postgres, Confluence, Stoat) bleiben
+  implizit `kind: text` → **null** Änderung an `MetadataField` und an den
+  Remote-Adaptern.
+- Die kanonische Form ist zugleich die Basis, auf der M3 (Aggregation),
+  M4 (Tree-Fold) und M5 (Live-Elapsed) rechnen, ohne den Anzeige-String
+  rückparsen zu müssen.
 
 ### M3 — Gruppierung + Aggregation (E2)
 
