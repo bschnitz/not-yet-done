@@ -705,6 +705,12 @@ pub struct ColumnDef {
     /// kinds.
     #[serde(default)]
     pub separator: Option<String>,
+    /// Source field key for `kind: elapsed` (M5 live-elapsed). The cell
+    /// renders `now − <this field's datetime>` as a duration, recomputed on
+    /// each repaint tick. Defaults to the column's own `key` when omitted.
+    /// Ignored by every other kind.
+    #[serde(default)]
+    pub elapsed_from: Option<String>,
 }
 
 /// Semantic type of a [`ColumnDef`] value (M2 — typed column values).
@@ -730,6 +736,11 @@ pub enum ColumnKind {
     /// Rendered with the separator drawn in the theme's
     /// `taskpath_separator` style.
     Path,
+    /// A live elapsed duration (M5). The cell holds no value of its own;
+    /// it renders `now − <elapsed_from field>` (an RFC 3339 instant) as a
+    /// duration, right-aligned, recomputed on every repaint tick driven by
+    /// the domain-event bus. See [`ColumnDef::elapsed_from`].
+    Elapsed,
 }
 
 fn default_sizing() -> String {

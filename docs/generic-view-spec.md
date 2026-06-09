@@ -267,23 +267,32 @@ unverändert.
 - { key: started, source: started, kind: datetime } # lokalisiert
 - { key: count, source: count, kind: number } # rechtsbündig
 - { key: taskpath, source: taskpath, kind: path, separator: " › " }
+- { key: running, kind: elapsed, elapsed_from: started } # live now − started
 ```
 
-| `kind:`    | Kanonische Eingabe des Adapters     | Anzeige                             | Ausrichtung |
-| ---------- | ----------------------------------- | ----------------------------------- | ----------- |
-| `text`     | beliebig                            | unverändert                         | links       |
-| `number`   | Dezimalzahl (`"42"`)                | unverändert                         | rechts      |
-| `duration` | Ganzzahl **Sekunden** (`"5400"`)    | `H:MM:SS` (über `format_duration`)  | rechts      |
-| `datetime` | RFC 3339 (`"2026-06-09T08:15:00Z"`) | lokale Zeitzone, `%Y-%m-%d %H:%M`   | links       |
-| `path`     | `/`-getrennte Segmente (`"/a/b/c"`) | mit `separator:` verbunden, gestylt | links       |
+| `kind:`    | Kanonische Eingabe des Adapters      | Anzeige                             | Ausrichtung |
+| ---------- | ------------------------------------ | ----------------------------------- | ----------- |
+| `text`     | beliebig                             | unverändert                         | links       |
+| `number`   | Dezimalzahl (`"42"`)                 | unverändert                         | rechts      |
+| `duration` | Ganzzahl **Sekunden** (`"5400"`)     | `H:MM:SS` (über `format_duration`)  | rechts      |
+| `datetime` | RFC 3339 (`"2026-06-09T08:15:00Z"`)  | lokale Zeitzone, `%Y-%m-%d %H:%M`   | links       |
+| `path`     | `/`-getrennte Segmente (`"/a/b/c"`)  | mit `separator:` verbunden, gestylt | links       |
+| `elapsed`  | _kein eigener Wert_ — liest ein Feld | `now − Feld` als `H:MM:SS`, live    | rechts      |
 
-Zwei optionale Begleitfelder:
+Drei optionale Begleitfelder:
 
 - **`format:`** — nur für `datetime`: ein strftime-Muster, das das Default
   `%Y-%m-%d %H:%M` ersetzt (z. B. `format: "%H:%M"`).
 - **`separator:`** — nur für `path`: das Anzeige-Trennzeichen (Default `/`).
   Es wird im Theme-Stil `taskpath_separator` (fett) gezeichnet, der Pfad führt
   immer mit einem Separator (eine Wurzel rendert als reines Trennzeichen).
+- **`elapsed_from:`** — nur für `kind: elapsed`: der Schlüssel des
+  `datetime`-Feldes (RFC 3339), gegen das gerechnet wird; Default ist der
+  eigene `key` der Spalte. Die Spalte hat keinen eigenen Wert, sie rendert
+  `now − <elapsed_from>` als Dauer und wird **bei jedem Repaint-Tick neu
+  berechnet** (kein Refetch) — so tickt z. B. die laufende Zeit eines aktiven
+  Trackings live. Eine Zukunfts-Instant (Uhren-Drift) wird auf `00` geklemmt,
+  ein leeres Feld bleibt leer, ein unparsbarer Wert wird unverändert gezeigt.
 
 **Warum es das gibt:** Ohne `kind:` müsste jeder Adapter Dauer/Datum/Pfad selbst
 fürs Display vorformatieren — entweder als unausgerichteter Roh-String oder mit
@@ -293,7 +302,11 @@ typisierten Spalten bleibt der **maschinenlesbare** Wert die Quelle der Wahrheit
 und das Separator-Styling der Taskpath-Spalte sind ein generisches
 Engine-Feature statt Copy-&-Paste pro Adapter. Der Typ steht bewusst in der
 View-YAML und nicht am `MetadataField` der Adapter, damit Remote-Adapter (Jira,
-Taiga, Postgres, Confluence, Stoat) keine Zeile ändern müssen.
+Taiga, Postgres, Confluence, Stoat) keine Zeile ändern müssen. `elapsed` ist
+zusätzlich der einzige **zeitabhängige** Typ: sein Wert hängt nur vom
+Anzeige-Zeitpunkt ab, nicht von den geladenen Daten — getrieben durch das
+`Repaint`-Signal des Domain-Event-Bus rendert die Engine die betroffenen Panes
+pro Tick neu, ohne nachzuladen.
 
 #### `smooth_scroll:` — kontinuierliches zeilenweises Scrollen
 
