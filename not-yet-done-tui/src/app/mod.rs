@@ -734,12 +734,17 @@ pub struct App {
     /// regular tab switches or selection changes do not.
     pub jump_history: crate::app::link::JumpHistory,
 
-    /// Factory builder, stored as a `fn` pointer so it survives the
-    /// lifetime checker. Called once in [`App::new`] and again on every
-    /// [`App::reload_config`] — adapter factories are stateless, so
-    /// re-running this is safe.
-    pub adapter_factory_builder:
-        fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>,
+    /// Factory builder, stored as a boxed closure (not a bare `fn`
+    /// pointer) so it can capture the in-process
+    /// [`CoreHandle`](not_yet_done_local_adapter::CoreHandle) the local
+    /// adapter needs. Called once in [`App::new`] and again on every
+    /// [`App::reload_config`] — adapter factories are stateless to build,
+    /// so re-running this is safe.
+    pub adapter_factory_builder: Box<
+        dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>
+            + Send
+            + Sync,
+    >,
 
     /// Active sort-hint mode (column-pick → direction-pick). `Off` when idle.
     pub sort_hint_phase: SortHintPhase,
@@ -781,7 +786,11 @@ impl App {
         settings_repo: Arc<dyn SettingsRepository>,
         tracking_repo: Arc<dyn TrackingRepository>,
         link_repo: Arc<dyn LinkRepository>,
-        adapter_factory_builder: fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>,
+        adapter_factory_builder: Box<
+            dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>
+                + Send
+                + Sync,
+        >,
     ) -> Self {
         let keybindings = config.keybindings.clone();
         let shared_theme = Arc::new(Theme::new(config.theme.clone()));

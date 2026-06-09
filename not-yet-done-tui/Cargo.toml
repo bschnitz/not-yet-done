@@ -43,6 +43,7 @@ not-yet-done-taiga-adapter = { path = "../not-yet-done-taiga-adapter" }
 not-yet-done-postgres-adapter = { path = "../not-yet-done-postgres-adapter" }
 not-yet-done-confluence-adapter = { path = "../not-yet-done-confluence-adapter" }
 not-yet-done-stoat-adapter = { path = "../not-yet-done-stoat-adapter" }
+not-yet-done-local-adapter = { path = "../not-yet-done-local-adapter" }
 not-yet-done-forest  = { path = "../not-yet-done-forest" }
 not-yet-done-table   = { path = "../not-yet-done-table" }
 not-yet-done-ratatui = { path = "../not-yet-done-ratatui" }

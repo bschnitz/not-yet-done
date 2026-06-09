@@ -19,6 +19,7 @@ members = [
   "not-yet-done-postgres-adapter",
   "not-yet-done-confluence-adapter",
   "not-yet-done-stoat-adapter",
+  "not-yet-done-local-adapter",
 ]
 
 [workspace.dependencies]

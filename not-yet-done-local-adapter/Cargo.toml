@@ -1,0 +1,10 @@
+[package]
+name = "not-yet-done-local-adapter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content" }
+not-yet-done-core    = { path = "../not-yet-done-core" }

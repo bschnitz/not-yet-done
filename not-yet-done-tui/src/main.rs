@@ -79,7 +79,24 @@ async fn main() -> Result<()> {
     let link_repo: Arc<dyn not_yet_done_core::repository::LinkRepository> = module.resolve();
     let tui_config = TuiConfigService::load()?;
     let theme      = Theme::new(tui_config.theme.clone());
-    let mut app    = App::new(tui_config, theme, task_service, tag_service, saved_query_repo, query_shortcut_repo, settings_repo, tracking_repo, link_repo, build_adapter_factories);
+
+    // In-process handle into the host's own core services, threaded into
+    // the local adapters (Tasks/Trackings). Captured by the factory
+    // builder closure so config reloads rebuild the same factory set.
+    let core_handle = not_yet_done_local_adapter::CoreHandle::new(
+        Arc::clone(&task_service),
+        Arc::clone(&tracking_repo),
+    );
+    let factory_builder: Box<
+        dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>
+            + Send
+            + Sync,
+    > = {
+        let core = core_handle.clone();
+        Box::new(move || build_adapter_factories(&core))
+    };
+
+    let mut app    = App::new(tui_config, theme, task_service, tag_service, saved_query_repo, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder);
 
     // Load active filter, tracking state, and column config from DB.
     app.load_active_filter().await;
@@ -105,11 +122,19 @@ async fn main() -> Result<()> {
 }
 
 /// Wire up the adapter factories the App will use to construct content views.
-/// Each adapter crate manages its own backing store; nothing from the host
-/// app's DB leaks across the boundary. Passed to [`App::new`] as a function
-/// pointer so [`App::reload_config`] can rebuild the same factory set on
-/// every config reload.
-pub(crate) fn build_adapter_factories() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> {
+///
+/// Remote adapters (Jira, Taiga, Postgres, Confluence, Stoat) manage their
+/// own backing store and are stateless to build. The **local** adapter is
+/// different: it wraps the host's own core services, so it needs the
+/// [`CoreHandle`](not_yet_done_local_adapter::CoreHandle) threaded in.
+///
+/// Wrapped in a capturing closure (rather than the bare `fn` pointer it
+/// used to be) precisely so it can hold that handle while still being
+/// re-invokable on every [`App::reload_config`] to rebuild the same
+/// factory set.
+pub(crate) fn build_adapter_factories(
+    core: &not_yet_done_local_adapter::CoreHandle,
+) -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> {
     let mut factories: std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> = std::collections::HashMap::new();
     factories.insert(
         "jira".to_string(),
@@ -130,6 +155,12 @@ pub(crate) fn build_adapter_factories() -> std::collections::HashMap<String, Box
     factories.insert(
         "stoat".to_string(),
         Box::new(not_yet_done_stoat_adapter::StoatAdapterFactory::new()),
+    );
+    factories.insert(
+        "local".to_string(),
+        Box::new(not_yet_done_local_adapter::LocalAdapterFactory::new(
+            core.clone(),
+        )),
     );
     factories
 }
