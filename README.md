@@ -1379,6 +1379,13 @@ orchestration and the views layer — see
 [`docs/architecture.md`](docs/architecture.md). Architecture decision
 records live under [`docs/decisions/`](docs/decisions/).
 
+A design analysis on whether the native Tasks and Trackings tabs could
+move onto the `ContentAdapter` abstraction (difficulties and possible
+approaches) lives in
+[`docs/adapterize-tasks-trackings.md`](docs/adapterize-tasks-trackings.md);
+the phased implementation plan derived from it is in
+[`docs/plan-adapterize-tasks-trackings.md`](docs/plan-adapterize-tasks-trackings.md).
+
 ```
 not-yet-done-core       # Domain logic, entities, repositories, services (SeaORM + SQLite)
 not-yet-done-cli        # CLI binary (nyd) using tusks for argument parsing
