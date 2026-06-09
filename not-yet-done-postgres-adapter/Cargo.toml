@@ -1,0 +1,19 @@
+[package]
+name = "not-yet-done-postgres-adapter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio          = { workspace = true }
+async-trait    = { workspace = true }
+serde          = { workspace = true }
+serde_yaml     = { workspace = true }
+thiserror      = { workspace = true }
+not-yet-done-content   = { path = "../not-yet-done-content" }
+not-yet-done-transport = { path = "../not-yet-done-transport" }
+tokio-postgres = "0.7"
+regex          = { workspace = true }
+
+[dev-dependencies]
+tokio          = { workspace = true }
+serde_yaml     = { workspace = true }

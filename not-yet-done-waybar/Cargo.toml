@@ -1,0 +1,17 @@
+[package]
+name = "not-yet-done-waybar"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "nyd_waybar"
+crate-type = ["cdylib"]
+
+[dependencies]
+not-yet-done-core = { path = "../not-yet-done-core" }
+waybar-cffi       = "0.1.1"
+serde             = { workspace = true }
+chrono            = { workspace = true }
+tokio             = { workspace = true }
+sea-orm           = { workspace = true }
+shaku             = { workspace = true }

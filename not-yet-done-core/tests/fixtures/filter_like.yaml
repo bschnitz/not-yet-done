@@ -1,0 +1,8 @@
+description: "LIKE filter matches substring in description"
+
+filter:
+  [description, like, '%ustav%']
+
+expected:
+  - "Gustav works on the parser"
+  - "Augustava reviews the PR"

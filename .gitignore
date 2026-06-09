@@ -1,0 +1,18 @@
+/target
+/nyd.db
+ignored
+nyd
+nyd-tui
+prompt*.md
+todo.md
+/not-yet-done-ratatui/target/
+/not-yet-done-ratatui/tui-realm/
+.memsearch/
+
+# CodeGraphContext per-repo index (local, machine-specific)
+/.codegraphcontext/
+# MCP server config holds a machine-specific absolute path
+/.mcp.json
+
+# Privacy-cleanup working area (candidate lists, status, plan — never committed)
+/cleanup/

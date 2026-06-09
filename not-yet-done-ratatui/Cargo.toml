@@ -1,0 +1,44 @@
+[package]
+name = "not-yet-done-ratatui"
+version = "0.1.0"
+edition = "2024"
+autoexamples = false
+ 
+[[example]]
+name = "new_server"
+path = "examples/new_server.rs"
+ 
+[[example]]
+name = "playlist_builder"
+path = "examples/playlist_builder.rs"
+ 
+[[example]]
+name = "new_team_member"
+path = "examples/new_team_member.rs"
+
+[[example]]
+name = "select_list_demo"
+path = "examples/select_list_demo.rs"
+
+[[example]]
+name = "column_ordering"
+path = "examples/column_ordering.rs"
+
+[[example]]
+name = "file_picker_demo"
+path = "examples/file_picker_demo.rs"
+required-features = []
+
+[dev-dependencies]
+arboard = { workspace = true }
+
+[dependencies]
+not-yet-done-grid-core = { path = "../not-yet-done-grid-core" }
+ratatui = "0.30"
+unicode-width = "0.2.0"
+tuirealm = { version = "4.1", features = ["crossterm"] }
+crossterm = "0.29.0"
+tempfile = "3.27.0"
+fuzzy-matcher = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }

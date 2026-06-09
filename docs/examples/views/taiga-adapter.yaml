@@ -1,0 +1,56 @@
+# Example: Taiga adapter credentials
+#
+# Place in: ~/.config/not_yet_done/views/taiga-adapter.yaml
+# Referenced by taiga.yaml via: adapter.config: taiga-adapter.yaml
+#
+# Taiga has no personal-access-token UI: authentication goes through the
+# /auth endpoint with username + password, exchanged for a JWT that the
+# adapter caches (see `session_cache`) until it is rejected.
+
+url: https://taiga.example.com
+
+name: taiga # optional human-readable label
+
+auth:
+  mechanism: password-login
+  # By default the cached JWT is kept until Taiga rejects it (401). Use a
+  # `session_cache: { kind: ttl, ttl_secs: 3600 }` block to expire sooner.
+  bindings:
+    - field: username
+      provider:
+        # `env` reads the named environment variable; swap for
+        # `{ type: prompt }` to ask interactively, or
+        # `{ type: literal, value: alice }` to hard-code.
+        type: env
+        var: TAIGA_USERNAME
+    - field: password
+      provider:
+        type: prompt
+
+# Hard ceiling (seconds) on every HTTP request to the Taiga API,
+# including connection setup. Optional; defaults to 20.
+#
+# Why it exists: without a timeout a dead keep-alive socket (the server
+# silently dropped the connection, or the network went away mid-session)
+# makes the HTTP client wait forever. Because opening the edit editor
+# blocks on a metadata fetch, that previously froze the whole TUI with no
+# way out. The timeout converts "hangs forever" into "fails after N
+# seconds"; on a transport error the adapter reconnects and retries once
+# before surfacing a normal error message. Lower it on a fast LAN, raise
+# it for a slow or high-latency link.
+# request_timeout_secs: 20
+
+# Hard ceiling (seconds) on just the connection-establishment phase
+# (DNS + TCP + TLS), separate from the overall request budget above.
+# Optional; defaults to min(request_timeout_secs, 10) so an unreachable
+# host fails fast. Raise it only on a high-latency / VPN-gated link where
+# the handshake legitimately needs longer than the derived 10s cap —
+# otherwise the cap would abort a healthy-but-slow connection.
+# connect_timeout_secs: 30
+
+# Optional override for the cache backing store. Sea-orm-compatible URL
+# (sqlite:///path?mode=rwc, postgres://user:pw@host/db, ...). Falls back
+# to a private SQLite file under the user's local data directory when
+# omitted.
+# db:
+#   url: "sqlite:///home/me/.local/share/not_yet_done/taiga-cache.sqlite?mode=rwc"

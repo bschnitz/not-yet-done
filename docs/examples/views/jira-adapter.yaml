@@ -1,0 +1,15 @@
+# Example: Jira adapter credentials
+#
+# Place in: ~/.config/not_yet_done/views/jira-adapter.yaml
+# Referenced by jira.yaml via: adapter.config: jira-adapter.yaml
+#
+# Authentication: use EITHER email+token (cloud) OR session_id (server).
+
+url: https://jira.example.com
+
+# Jira Cloud: API token auth
+# email: you@example.com
+# token: your-api-token
+
+# Jira Server: session cookie auth (JSESSIONID + crowd tokens)
+# session_id: "JSESSIONID=abc123; crowd.token_key=xyz"

@@ -1,0 +1,62 @@
+[package]
+name = "not-yet-done-tui"
+version = "0.1.0"
+edition = "2024"
+ 
+[[bin]]
+name = "not-yet-done-tui"
+path = "src/main.rs"
+ 
+[dependencies]
+ratatui              = { workspace = true }
+crossterm            = { workspace = true }
+tokio                = { workspace = true }
+tokio-stream         = "0.1.18"
+anyhow               = { workspace = true }
+serde                = { workspace = true }
+serde_yaml           = { workspace = true }
+dirs                 = { workspace = true }
+chrono-english       = { workspace = true }
+shaku                = { workspace = true }
+chrono               = { workspace = true }
+uuid                 = { workspace = true }
+fuzzy-matcher        = { workspace = true }
+unicode-width        = { workspace = true }
+tuirealm             = { version = "4.1", features = ["crossterm"] }
+# Markdown renderer. Upstream ratatui-markdown (crates.io) caps at 0.3.6 on
+# ratatui 0.29 with no 0.30 release, which blocked this migration. tui-markdown
+# targets 0.30 but renders neither tables nor links/images (experimental PoC),
+# so headings/tables came out unstyled. Instead we use our own fork bumped to
+# ratatui 0.30 — it keeps the full renderer (tables, lists, code, soft-wrap)
+# and pulls every color from our Theme via the RichTextTheme bridge
+# (no-hardcoded-colors rule). default-features = false → only the `markdown`
+# feature (no tree-sitter/image/mermaid). Pinned to a rev for reproducibility.
+# RECHECK on the next ratatui bump: if upstream ratatui-markdown has released a
+# 0.30+ version by then, drop this fork and go back to the crates.io crate.
+ratatui-markdown     = { git = "https://github.com/bschnitz/ratatui-markdown-fork", rev = "1667ea6", default-features = false, features = ["markdown"] }
+async-trait          = { workspace = true }
+arboard              = { workspace = true, optional = true }
+not-yet-done-content = { path = "../not-yet-done-content" }
+not-yet-done-core    = { path = "../not-yet-done-core" }
+not-yet-done-jira-adapter = { path = "../not-yet-done-jira-adapter" }
+not-yet-done-taiga-adapter = { path = "../not-yet-done-taiga-adapter" }
+not-yet-done-postgres-adapter = { path = "../not-yet-done-postgres-adapter" }
+not-yet-done-confluence-adapter = { path = "../not-yet-done-confluence-adapter" }
+not-yet-done-stoat-adapter = { path = "../not-yet-done-stoat-adapter" }
+not-yet-done-forest  = { path = "../not-yet-done-forest" }
+not-yet-done-table   = { path = "../not-yet-done-table" }
+not-yet-done-ratatui = { path = "../not-yet-done-ratatui" }
+ratatui-form-widgets = { path = "../ratatui_form_widgets" }
+serde_json.workspace = true
+slug = "0.1.6"
+regex                = { workspace = true }
+
+[features]
+default = ["clipboard"]
+clipboard = ["dep:arboard"]
+
+[dev-dependencies]
+sea-orm = { workspace = true }
+tokio   = { workspace = true }
+tempfile = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content", features = ["mock"] }
