@@ -2,6 +2,7 @@ pub mod config;
 pub mod db;
 pub mod entity;
 pub mod error;
+pub mod events;
 pub mod filter;
 pub mod local_context;
 pub mod module;

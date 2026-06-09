@@ -1153,6 +1153,10 @@ impl App {
     /// - [`Invalidation::Node`] → only panes whose current level is that
     ///   node's children (a message in the open channel reloads; one in
     ///   any other channel costs nothing).
+    /// - [`Invalidation::Repaint`] → no pane reloads at all; draining the
+    ///   message already marks the frame dirty, which re-renders any
+    ///   time-derived cell (e.g. a live "elapsed" duration) without a
+    ///   refetch.
     fn handle_adapter_invalidation(
         &mut self,
         view_index: usize,
@@ -1174,6 +1178,10 @@ impl App {
                         .find_pane(pid)
                         .and_then(|p| p.parent_node_id())
                         .is_some_and(|parent| parent == id),
+                    // Redraw-only: select no panes (no refetch). The
+                    // repaint itself happens because `handle_load_msg`
+                    // always returns dirty=true for any message it drains.
+                    Invalidation::Repaint => false,
                 })
                 .collect()
         };
