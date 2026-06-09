@@ -687,6 +687,49 @@ pub struct ColumnDef {
     /// the only column on its `row_layout` line (enforced by the validator).
     #[serde(default)]
     pub markdown: bool,
+    /// Semantic type of this column's value (M2). Drives how the table
+    /// engine parses, formats, aligns and styles the cell. The adapter
+    /// emits a *canonical* string for the kind (duration → integer
+    /// seconds, datetime → RFC 3339, path → `/`-separated segments,
+    /// number → decimal); the engine turns it into the display form.
+    /// Defaults to [`ColumnKind::Text`] so every existing (remote) column
+    /// is unaffected.
+    #[serde(default)]
+    pub kind: ColumnKind,
+    /// Optional format override for kinds that support one (e.g. a custom
+    /// strftime-style pattern for `datetime`). `None` = the kind's default
+    /// rendering.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Segment separator for `kind: path` (default `/`). Ignored by other
+    /// kinds.
+    #[serde(default)]
+    pub separator: Option<String>,
+}
+
+/// Semantic type of a [`ColumnDef`] value (M2 — typed column values).
+///
+/// The value lives only in the view YAML; adapters stay untyped and emit a
+/// canonical string per kind (see [`ColumnDef::kind`]). The table engine
+/// parses that string and produces the aligned, formatted, styled cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnKind {
+    /// Plain text, rendered verbatim, left-aligned. The default — every
+    /// remote adapter's columns are this without opting in.
+    #[default]
+    Text,
+    /// A decimal number. Right-aligned.
+    Number,
+    /// A time span. Canonical input: integer seconds. Rendered `Hh Mm`,
+    /// right-aligned.
+    Duration,
+    /// An instant. Canonical input: RFC 3339. Rendered localized.
+    Datetime,
+    /// A hierarchical path. Canonical input: separator-joined segments.
+    /// Rendered with the separator drawn in the theme's
+    /// `taskpath_separator` style.
+    Path,
 }
 
 fn default_sizing() -> String {

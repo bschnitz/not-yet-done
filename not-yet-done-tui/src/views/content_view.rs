@@ -28,8 +28,8 @@ use not_yet_done_ratatui::{
     TableWidgetRow,
 };
 use not_yet_done_table::{
-    ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer, Row as TRow, RowTemplate,
-    TableConfig, compute_multiline_table, compute_table,
+    CellContent, ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer, Row as TRow,
+    RowTemplate, TableConfig, compute_multiline_table, compute_table,
 };
 
 use not_yet_done_content::{
@@ -47,12 +47,13 @@ use crate::config::keybindings::{
     QueryMenuAction, WindowAction,
 };
 use crate::config::view_config::{
-    ActionDef, ChildDef, ColumnDef, LineLayout, PaginationMode, PreviewConfig, SplitDirection,
-    ViewDef, ViewFileConfig,
+    ActionDef, ChildDef, ColumnDef, ColumnKind, LineLayout, PaginationMode, PreviewConfig,
+    SplitDirection, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
 };
+use crate::views::column_format::format_typed_value;
 use crate::ui::theme::Theme;
 use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
 use crate::views::content_tree::{
@@ -1509,6 +1510,9 @@ impl ContentPane {
                 style: None,
                 sizing: "auto".into(),
                 markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
             })
             .collect()
     }
@@ -1968,25 +1972,29 @@ impl ContentPane {
                 let mut row = TRow::new(row_idx as u32);
                 for col in columns {
                     let is_label_cell = label_col_key.as_deref() == Some(col.key.as_str());
-                    let value: String = if is_label_cell {
+                    // The label cell carries the tree glyph + indent and is
+                    // never typed; only the cursor-chain data cells get M2
+                    // formatting. Off-chain rows render blank.
+                    let cell: CellContent = if is_label_cell {
                         let glyph = self
                             .view_def(view_defs)
                             .map(|vd| tree_row_glyph(entry, tree, vd))
                             .unwrap_or("·");
                         let indent = "  ".repeat(entry.depth);
-                        format!("{indent}{glyph} {}", entry.node.label)
+                        CellContent::text(format!("{indent}{glyph} {}", entry.node.label))
                     } else if entry.node_type_chain == cursor_chain
                         && !entry.is_more_placeholder
                     {
                         if col.source.as_deref() == Some("has_links") {
-                            if self.item_has_link(&entry.node.id) { "🔗".into() } else { " ".into() }
+                            let icon = if self.item_has_link(&entry.node.id) { "🔗" } else { " " };
+                            CellContent::text(icon)
                         } else {
-                            column_value(&entry.node, col).to_string()
+                            typed_cell_content(column_value(&entry.node, col), col)
                         }
                     } else {
-                        String::new()
+                        CellContent::text(String::new())
                     };
-                    row = row.cell(&col.key, value);
+                    row = row.cell(&col.key, cell);
                 }
                 Some(row)
             })
@@ -2953,8 +2961,8 @@ impl ContentPane {
                             let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
                             row = row.cell(&col.key, icon);
                         } else {
-                            let value = column_value(item, col);
-                            row = row.cell(&col.key, value);
+                            let cell = typed_cell_content(column_value(item, col), col);
+                            row = row.cell(&col.key, cell);
                         }
                     }
                     row
@@ -2999,12 +3007,31 @@ impl ContentPane {
             TableWidgetRow::new(cells).not_selectable()
         });
 
+        // `path`-kind columns get their separator drawn in the dedicated
+        // style slot (see the StyleMap below); every other cell is plain.
+        // Resolved once into a per-column-index lookup so the row loop stays
+        // a cheap index check.
+        let path_separators: Vec<Option<String>> = columns
+            .iter()
+            .map(|c| (c.kind == ColumnKind::Path).then(|| path_separator(c).to_string()))
+            .collect();
         let widget_rows: Vec<TableWidgetRow> = computed
             .rows
             .into_iter()
             .map(|cr| {
-                let cells: Vec<TableWidgetCell> =
-                    cr.cells.into_iter().map(TableWidgetCell::plain).collect();
+                let cells: Vec<TableWidgetCell> = cr
+                    .cells
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, fitted)| match path_separators.get(i).and_then(|s| s.as_deref()) {
+                        Some(sep) => TableWidgetCell::from_segments(path_cell_segments(
+                            &fitted,
+                            sep,
+                            PATH_SEPARATOR_STYLE_ID,
+                        )),
+                        None => TableWidgetCell::plain(fitted),
+                    })
+                    .collect();
                 TableWidgetRow::new(cells)
             })
             .collect();
@@ -3024,8 +3051,15 @@ impl ContentPane {
         let table_style = build_content_table_style(t);
 
         let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
-        // Slot 0 (DIM_STYLE_ID) holds the dim color for sort-mode overlay.
-        let style_map = StyleMap::new(vec![Style::default().fg(t.text_dim())]);
+        // Slot 0 (DIM_STYLE_ID) holds the dim color for sort-mode overlay;
+        // slot 1 (PATH_SEPARATOR_STYLE_ID) the taskpath-separator style for
+        // `kind: path` columns.
+        let style_map = StyleMap::new(vec![
+            Style::default().fg(t.text_dim()),
+            Style::default()
+                .fg(t.taskpath_separator())
+                .add_modifier(Modifier::BOLD),
+        ]);
         self.table.set_data(
             widget_rows,
             vec![],
@@ -6161,6 +6195,53 @@ fn column_value<'a>(item: &'a NodeSummary, col: &ColumnDef) -> &'a str {
         .unwrap_or("")
 }
 
+/// Display separator for a `path` column (default `/`).
+fn path_separator(col: &ColumnDef) -> &str {
+    col.separator.as_deref().unwrap_or("/")
+}
+
+/// Build the [`CellContent`] for a data cell, applying the column's typed
+/// formatting (M2): `raw` is the adapter's canonical value string, which
+/// [`format_typed_value`] turns into the display text plus alignment.
+/// `kind: text` (every remote column) is the identity case — verbatim,
+/// left-aligned.
+fn typed_cell_content(raw: &str, col: &ColumnDef) -> CellContent {
+    let (text, alignment) =
+        format_typed_value(raw, col.kind, col.format.as_deref(), path_separator(col));
+    CellContent::aligned(text, alignment)
+}
+
+/// StyleMap slot for the taskpath separator in the flat single-line table
+/// (slot 0 is the sort-mode dim overlay). Referenced when building
+/// `kind: path` cells; kept in sync with the `StyleMap::new(...)` in
+/// `rebuild_table_with`.
+const PATH_SEPARATOR_STYLE_ID: usize = 1;
+
+/// Split an already-fitted `path`-column string into render segments,
+/// tagging each run of the display `separator` with `sep_style_id` so the
+/// renderer paints it in the theme's taskpath-separator style. Segment text
+/// (and trailing alignment padding) carries `None` = the cell's default
+/// style. Mirrors the legacy Trackings taskpath styling, but operates on the
+/// post-fit string so column sizing stays the table engine's job.
+fn path_cell_segments(fitted: &str, separator: &str, sep_style_id: usize) -> Vec<(String, Option<usize>)> {
+    if separator.is_empty() {
+        return vec![(fitted.to_string(), None)];
+    }
+    let mut segments: Vec<(String, Option<usize>)> = Vec::new();
+    let mut rest = fitted;
+    while let Some(pos) = rest.find(separator) {
+        if pos > 0 {
+            segments.push((rest[..pos].to_string(), None));
+        }
+        segments.push((separator.to_string(), Some(sep_style_id)));
+        rest = &rest[pos + separator.len()..];
+    }
+    if !rest.is_empty() {
+        segments.push((rest.to_string(), None));
+    }
+    segments
+}
+
 /// Build the haystack string used by both fuzzy_filter and `/`-search.
 /// With no `fields` configured the haystack is `label` followed by every
 /// metadata field value (space-joined). With explicit fields, only those
@@ -6592,12 +6673,39 @@ mod tests {
     }
 
     #[test]
+    fn path_segments_tag_only_separators() {
+        // Fitted, left-aligned, padded: "/a/b   ".
+        let segs = path_cell_segments("/a/b   ", "/", PATH_SEPARATOR_STYLE_ID);
+        assert_eq!(
+            segs,
+            vec![
+                ("/".to_string(), Some(PATH_SEPARATOR_STYLE_ID)),
+                ("a".to_string(), None),
+                ("/".to_string(), Some(PATH_SEPARATOR_STYLE_ID)),
+                ("b   ".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn path_segments_handle_multichar_separator_and_padding() {
+        let segs = path_cell_segments(" › a  ", " › ", PATH_SEPARATOR_STYLE_ID);
+        assert_eq!(
+            segs,
+            vec![
+                (" › ".to_string(), Some(PATH_SEPARATOR_STYLE_ID)),
+                ("a  ".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
     fn multiline_widget_rows_chat_layout() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false },
-            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false },
-            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -6645,8 +6753,8 @@ mod tests {
     fn multiline_widget_rows_markdown_expands_body() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false },
-            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -6828,8 +6936,8 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false },
-                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                 ],
                 preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
                 actions: vec![
@@ -6842,7 +6950,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -6982,7 +7090,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -7102,7 +7210,7 @@ mod tests {
             smooth_scroll: true,
             name: "messages".into(),
             node_type: "mock:msg".into(),
-            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false }],
+            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None }],
             preview: None,
             actions: Vec::new(),
             children: Vec::new(),
@@ -7309,7 +7417,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -7320,7 +7428,7 @@ mod tests {
                         name: "Schemas".into(),
                         node_type: "mock:schema".into(),
                         columns: vec![
-                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -7410,6 +7518,9 @@ mod tests {
             style: None,
             sizing: "max".into(),
             markdown: false,
+            kind: ColumnKind::Text,
+            format: None,
+            separator: None,
         }
     }
 
@@ -8087,6 +8198,9 @@ mod tests {
                 style: None,
                 sizing: "max".into(),
                 markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -8176,6 +8290,9 @@ mod tests {
                 style: None,
                 sizing: "max".into(),
                 markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -8523,7 +8640,7 @@ mod tests {
                     menu_key: Some("q".into()),
                 }),
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9275,7 +9392,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9286,7 +9403,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false },
+                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -9640,7 +9757,7 @@ mod tests {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
             ],
             preview: None,
             actions: vec![],
@@ -9650,7 +9767,7 @@ mod tests {
                 name: "pages".into(),
                 node_type: "mock:page".into(),
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false },
+                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9864,11 +9981,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false },
-                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false },
-                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false },
-                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false },
-                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false },
+                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
+                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None },
             ],
             preview: Some(PreviewConfig {
                 enabled: true,

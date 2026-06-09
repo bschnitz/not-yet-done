@@ -622,7 +622,7 @@ mod tests {
     use not_yet_done_content::{Metadata, NodeType};
 
     use crate::action::ActionChains;
-    use crate::config::view_config::{ColumnDef, PreviewConfig};
+    use crate::config::view_config::{ColumnDef, ColumnKind, PreviewConfig};
 
     use super::*;
 
@@ -650,6 +650,9 @@ mod tests {
             style: None,
             sizing: "max".into(),
             markdown: false,
+            kind: ColumnKind::Text,
+            format: None,
+            separator: None,
         }
     }
 
