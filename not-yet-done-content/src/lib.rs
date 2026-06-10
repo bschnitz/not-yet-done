@@ -83,12 +83,12 @@ pub struct NodeType {
 // Metadata
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
     pub fields: Vec<MetadataField>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetadataField {
     pub key: String,
     pub value: String,
@@ -164,7 +164,7 @@ pub struct SortableColumn {
     pub label: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeSummary {
     pub id: String,
     pub label: String,
@@ -794,6 +794,30 @@ pub enum Invalidation {
     /// domain heartbeat (`DomainEvent::TrackingTick`); cheap by design, so
     /// adapters may send it at ~1 Hz without touching their backend.
     Repaint,
+    /// A single row's **complete** new state (M9 — adapter-driven live
+    /// rows). Carries the full [`NodeSummary`], so the frontend replaces
+    /// the matching row (by `id`) **in place** — no refetch, selection and
+    /// scroll preserved. The push counterpart to [`Repaint`]: where
+    /// `Repaint` re-renders a *time-derived* cell against a fresh `now`,
+    /// `Row` lets the adapter itself compute the new value (e.g. a running
+    /// tracking's elapsed duration, where the *same* column must read live
+    /// for active rows and static for completed ones — something a single
+    /// render-time `kind: elapsed` column cannot express). Generic over any
+    /// adapter: a chat adapter can push an edited message, a CI adapter a
+    /// build-progress row. A row whose `id` matches no visible item is a
+    /// no-op.
+    Row(NodeSummary),
+    /// Re-pace the frontend's per-view **live-refresh timer** (M9). The
+    /// adapter dictates the cadence at which the frontend should pull its
+    /// [`live_rows`](ContentAdapter::live_rows) and patch them; `Some(d)`
+    /// (re)starts the timer at interval `d`, `None` stops it. Sent whenever
+    /// the adapter's set of live rows changes shape — e.g. the tracking
+    /// adapter sends `Some(1s)` when a tracking starts and `None` when the
+    /// last one stops, so the 1 Hz pull only runs while something actually
+    /// ticks. The timer is owned by the frontend (one place to budget
+    /// wake-ups against the dirty-gated render loop); the adapter only
+    /// declares the interval.
+    RefreshInterval(Option<std::time::Duration>),
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +939,23 @@ pub trait ContentAdapter: Send + Sync {
             std::sync::OnceLock::new();
         let tx = SINK_TX.get_or_init(|| tokio::sync::broadcast::channel(1).0);
         tx.subscribe()
+    }
+
+    /// Recompute the adapter's currently-live rows (M9). Called by the
+    /// frontend's per-view refresh timer — whose cadence the adapter sets
+    /// via [`Invalidation::RefreshInterval`] — once per tick; each returned
+    /// [`NodeSummary`] is patched into the matching visible row in place
+    /// (see [`Invalidation::Row`]). The adapter returns *only* the rows
+    /// whose rendering actually changes between ticks (e.g. the entries
+    /// for running trackings, with a freshly-computed elapsed duration),
+    /// not its whole list — a row not returned keeps its current cells.
+    ///
+    /// Pure recompute from already-loaded state: no backend round-trip, so
+    /// it stays cheap at 1 Hz. Default returns an empty list — pull-only
+    /// adapters with no time-derived rows never need to override and their
+    /// timer (if any) patches nothing.
+    async fn live_rows(&self) -> Vec<NodeSummary> {
+        Vec::new()
     }
 
     /// Submit credentials gathered from a [`AdapterStatus::NeedsCreds`]
