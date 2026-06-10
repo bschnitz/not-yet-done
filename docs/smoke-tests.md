@@ -3274,7 +3274,7 @@ Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
 - [ ] `+name<Enter>` legt ein neues Script aus dem Template an; Editor öffnet.
 - [ ] Script ausführen → bekommt den Task als JSON
       `{"node": {"id": <uuid>, "node_type": "task:item", "tab": "tasks",
-  "fields": {description/status/priority/tags/tracking/created…}}}`
+"fields": {description/status/priority/tags/tracking/created…}}}`
       (uniforme Node-Form, NICHT die native `{"task": …}`-Form).
 - [ ] Selektion wechseln (anderer Task, anderer Typ-Mix) → Menü bleibt am
       selben Ordner (kein Shuffle).
@@ -3298,6 +3298,45 @@ Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
       top level", keine Änderung.
 - [ ] `U` und `A` funktionieren im Tree-Mode (Root-View) und nach Drill in
       einen Task (rekursiver Branch).
+
+## TrackingAdapter (adapterisierter Trackings-Tab) — A2a + A2b
+
+Voraussetzung: `views/trackings.yaml` (aus `docs/examples/views/`) nach
+`~/.config/not_yet_done/views/` kopiert. Der Adapter-Tab läuft neben dem
+bespoke nativen Trackings-Tab (bis C1).
+
+### A2a — Read-Path + Live-Dauern + Grouping
+
+- [ ] Trackings-Tab (Adapter) öffnen → flache Liste, neueste zuerst; Spalten
+      Marker (`⏱` nur bei laufenden), Path (gestylt `/a › b`), Task, Started,
+      Ended (leer bei laufend), Duration (`H:MM:SS`, rechtsbündig).
+- [ ] Auf der Tasks-Seite ein Tracking starten → die laufende Zeile zeigt
+      `⏱`, leeres Ended, und die Duration **tickt jede Sekunde** (nur diese
+      Zeile wird gepatcht, kein Voll-Reload-Flackern).
+- [ ] Tracking stoppen → `⏱` weg, Ended gefüllt, Duration statisch; das
+      Sekunden-Ticken stoppt (kein Dauer-CPU mehr).
+- [ ] `zg` zykliert die Gruppierung (Day → Week → Month → Year → None) mit
+      Pro-Gruppe-Summe + Footer-Gesamtsumme.
+- [ ] `q` öffnet das Query-Menü; eine gespeicherte FilterExpr-Query
+      (z. B. `description ~ "<wort>"`) filtert die Liste; löschen zeigt
+      wieder alles.
+
+### A2b — Mutationen
+
+- [ ] `d` auf einer Zeile → Confirm-Dialog; bestätigen → „Tracking deleted",
+      Zeile verschwindet (Zeiten bleiben in der DB erhalten).
+- [ ] War die gelöschte Zeile **aktiv**, verschwindet auch der Tracking-Marker
+      des zugehörigen Tasks auf dem Tasks-Tab (Cross-Tab via `TrackingChanged`).
+- [ ] `t` auf einer Zeile → startet/stoppt Tracking auf dem **Task** der Zeile;
+      bei deaktiviertem `allow_parallel_tracking` wird ein anderes laufendes
+      Tracking zuerst gestoppt (gleiche Politik wie Tasks-Tab).
+- [ ] `R` auf einer sichtbaren (nicht-gelöschten) Zeile → Notification
+      „Restore failed: … not deleted" (bekannte Grenze: die Liste zeigt keine
+      gelöschten Zeilen; Parität mit Native).
+- [ ] `A` (restore-all) ohne gelöschte erreichbare Zeilen → Notification
+      „No deleted trackings to restore".
+- [ ] `x` öffnet das `:script`-Menü; ein Script gegen die selektierte Zeile
+      bekommt deren JSON (`{json_file}`) übergeben.
 
 ## Refinements / Deferred Tasks
 

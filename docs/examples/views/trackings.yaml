@@ -32,10 +32,17 @@
 # repository (`find_filtered`, which understands tracking columns and the
 # joined task description) and thins the list to the matches.
 #
-# Mutations (delete / restore / restore-all, tracking-toggle), the
-# Condensed/Tree sub-views, and scripts land in A2b/A2c. Until the C1 cutover
-# this file is illustrative: the bespoke native Trackings tab still ships;
-# copying this file in stands up the adapter path alongside it for comparison.
+# ## A2b scope (mutations)
+#
+# `d` soft-deletes a tracking (keeping its times) through the confirm flow;
+# `R`/`A` restore deleted trackings; `t` toggles time tracking on the row's
+# task. See the `shortcuts:` block below. Scripts run via the generic
+# `:script` menu (`x`, `type: script`). The Condensed/Tree sub-views land in
+# A2c.
+#
+# Until the C1 cutover this file is illustrative: the bespoke native Trackings
+# tab still ships; copying this file in stands up the adapter path alongside
+# it for comparison.
 
 tab:
   name: Trackings
@@ -117,3 +124,25 @@ views:
       - name: refresh
         key: r
         type: reload
+
+    # Adapter-backed per-row shortcuts (A2b), dispatched via `invoke_action`
+    # against the selected tracking (or, for `restore all`, the list root via
+    # the `parent:` prefix).
+    #
+    #   * `d` delete — soft-delete the tracking, keeping its start/end times,
+    #     through the generic confirm-then-delete flow. The row drops out of
+    #     the list (only non-deleted trackings are shown).
+    #   * `R` restore — undelete a previously deleted tracking (and purge the
+    #     successors a split produced). `A` restore-all does the same across
+    #     every deleted tracking the list can reach.
+    #   * `t` toggle-tracking — start/stop time tracking on the row's *task*
+    #     (shares the host's exclusivity policy with the Tasks tab).
+    #
+    # Note: the list shows only non-deleted rows, so `R`/`A` are recovery
+    # hooks with no visible target today — a "show deleted" sub-view is future
+    # work. This mirrors the bespoke native Trackings tab exactly.
+    shortcuts:
+      d: delete
+      R: restore
+      t: toggle-tracking
+      A: parent:restore-all
