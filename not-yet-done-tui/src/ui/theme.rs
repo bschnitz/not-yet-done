@@ -89,6 +89,13 @@ impl Theme {
         self.cfg.taskpath_separator.to_ratatui()
     }
 
+    // ── Grouping ─────────────────────────────────────────────────────────
+    /// Accent for group-header rows and the grand-total footer in grouped
+    /// content views (M3).
+    pub fn group_header(&self) -> Color {
+        self.cfg.group_header.to_ratatui()
+    }
+
     // ── Tab bar ─────────────────────────────────────────────────────────
     pub fn tab_active(&self) -> Color {
         self.cfg.tab_active.to_ratatui()

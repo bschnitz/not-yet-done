@@ -359,6 +359,69 @@ Verhalten:
   einzeilige Tabellen (dort = zeilenweises Scrollen), entfaltet seinen Nutzen
   aber bei mehrzeiligen Rows.
 
+#### `group_by:` / `aggregates:` / `summary_only:` — Gruppierung & Summen (M3)
+
+Stehen auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout` /
+`smooth_scroll`), alle drei optional. Sie schalten den **gruppierten
+Render-Pfad** der einzeiligen Tabelle ein: die gefilterten Einträge werden nach
+einem Schlüssel partitioniert, jede Partition bekommt eine **Gruppen-Kopfzeile**
+mit Zwischensumme, und unter der ganzen Tabelle steht eine angepinnte
+**Gesamtsumme** (Footer).
+
+```yaml
+- name: trackings
+  node_type: "tracking"
+  group_by: { column: started, bucket: day } # nach Tag bucketn
+  aggregates:
+    - { column: duration, op: sum } # Tages- und Gesamtsumme
+  # summary_only: true # nur die Kopfzeilen, Einzel-Rows ausblenden
+```
+
+**`group_by:`** — wonach gruppiert wird. Pflichtfeld `column:` ist ein
+Spalten-`key` (oder ein roher Metadaten-Feldname, falls keine Spalte ihn
+anzeigt). Optionales `bucket:` fasst einen **`kind: datetime`**-Wert zu einem
+Datums-Eimer zusammen, statt nach dem exakten Zeitstempel zu gruppieren:
+
+| `bucket:` | Label-Format   | Beispiel     |
+| --------- | -------------- | ------------ |
+| `day`     | `%Y-%m-%d`     | `2026-06-09` |
+| `week`    | `%G-W%V` (ISO) | `2026-W23`   |
+| `month`   | `%Y-%m`        | `2026-06`    |
+| `year`    | `%Y`           | `2026`       |
+
+Ohne `bucket:` wird der Spaltenwert **verbatim** als Gruppenschlüssel benutzt
+(z. B. eine Status- oder Kategorie-Spalte). Die Labels sind bewusst
+**ISO-sortierbar** gewählt, sodass die lexikografische Sortierung der Gruppen
+zugleich die chronologische ist.
+
+**`aggregates:`** — Liste der Spalten, die je Gruppe und gesamt summiert werden.
+Jeder Eintrag hat `column:` (ein Spalten-`key`) und `op:` (aktuell nur `sum`,
+der Default). Summiert wird auf dem **kanonischen** Wert (für `kind: duration`
+also die Sekunden-Zahl); die Summe wird durch denselben typisierten Formatter
+gerendert wie die Datenzellen, eine Dauer-Summe erscheint also wieder als
+`H:MM:SS`. Ohne `aggregates:` entfallen Zwischensummen und Footer — es bleibt
+die reine Gruppierung mit Kopfzeilen.
+
+**`summary_only:`** — `true` blendet die einzelnen Daten-Rows aus und lässt nur
+die Gruppen-Kopfzeilen (mit Summen) plus den Gesamt-Footer stehen. Das ist die
+„Condensed"-Ansicht der Trackings: pro Gruppe genau eine Zeile.
+
+**Laufzeit-Umschaltung (`cycle_grouping`, Default `zg`):** Die Aktion
+`cycle_grouping` (in `keybindings.yaml` bindbar, Default `zg`) schaltet die
+Gruppierung der aktiven Ebene durch: ungruppiert → `day` → `week` → `month` →
+`year` → ungruppiert. Sie ist nur aktiv, wenn die Ebene überhaupt ein
+`group_by:` konfiguriert hat. Der Umschalt-Status ist View-State (nicht
+persistiert) und überschreibt das konfigurierte `group_by:` nur für die
+laufende Sitzung.
+
+> **Einschränkungen.** Der gruppierte Pfad gilt nur für **einzeilige**
+> Tabellen — `group_by:` zusammen mit `row_layout:` (mehrzeilig/Chat) wird
+> ignoriert. Gruppierung ist außerdem ein Flat-List-Feature; im Tree-Mode
+> greift sie nicht.
+
+Die Farbe der Gruppen-Kopf- und Footer-Zeilen ist über das Theme konfigurierbar
+(`group_header`, siehe `tui-theme.yaml` / Theme-Referenz).
+
 ### Zweites Beispiel: `confluence.yaml`
 
 ```yaml

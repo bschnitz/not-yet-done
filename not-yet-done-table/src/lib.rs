@@ -12,6 +12,7 @@
 
 pub mod cell;
 pub mod column;
+pub mod group;
 pub mod grouping;
 pub mod layout;
 pub mod row;
@@ -24,5 +25,6 @@ pub use layout::{
     compute_table,
 };
 pub use row::{ComputedLine, ComputedMultiRow, ComputedRow, Row};
+pub use group::{GroupPlan, PlanRow, group};
 pub use grouping::GroupedCell;
 pub use target::{CharBuf, RenderTarget, render_to_target};

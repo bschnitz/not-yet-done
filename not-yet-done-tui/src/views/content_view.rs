@@ -28,8 +28,9 @@ use not_yet_done_ratatui::{
     TableWidgetRow,
 };
 use not_yet_done_table::{
-    CellContent, ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer, Row as TRow,
-    RowTemplate, TableConfig, compute_multiline_table, compute_table,
+    CellAlignment, CellContent, ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer,
+    PlanRow, Row as TRow, RowTemplate, TableConfig, compute_multiline_table, compute_table,
+    fit_aligned, group as group_rows,
 };
 
 use not_yet_done_content::{
@@ -47,13 +48,14 @@ use crate::config::keybindings::{
     QueryMenuAction, WindowAction,
 };
 use crate::config::view_config::{
-    ActionDef, ChildDef, ColumnDef, ColumnKind, LineLayout, PaginationMode, PreviewConfig,
-    SplitDirection, ViewDef, ViewFileConfig,
+    ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, GroupBy, LineLayout,
+    PaginationMode, PreviewConfig, SplitDirection, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
 };
 use crate::views::column_format::{format_elapsed_since, format_typed_value};
+use crate::views::group_aggregate::{agg_value, group_label};
 use crate::ui::theme::Theme;
 use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
 use crate::views::content_tree::{
@@ -428,6 +430,18 @@ pub struct ContentPane {
     /// `/`-search match list — wire-up happens in CT-7. Independent
     /// of `tree` cache contents so expand/collapse leaves it intact.
     pub tree_find: Option<TreeFindState>,
+
+    /// Runtime override of the level's configured `group_by` (M3). The
+    /// `cycle_grouping` action rotates the date-bucket granularity through
+    /// this field without touching the YAML default:
+    ///
+    /// - `None` → use the active level's configured `group_by`.
+    /// - `Some(None)` → explicitly ungrouped (overrides a configured default).
+    /// - `Some(Some(gb))` → explicit grouping (e.g. a coarser bucket).
+    ///
+    /// Reset to `None` whenever the pane drills to another level so each
+    /// level starts from its own configured default.
+    group_by_override: Option<Option<GroupBy>>,
 
 }
 
@@ -985,6 +999,7 @@ impl ContentPane {
             tree_visible_indices: Vec::new(),
             tree_filter_depth: None,
             tree_find: None,
+            group_by_override: None,
         }
     }
 
@@ -1564,6 +1579,117 @@ impl ContentPane {
             child.smooth_scroll
         } else {
             self.view_def(view_defs).map(|vd| vd.smooth_scroll).unwrap_or(false)
+        }
+    }
+
+    /// The active level's configured `group_by` (M3), read from the same
+    /// level as [`current_columns`](Self::current_columns). A runtime
+    /// `cycle_grouping` override (`group_by_override`) takes precedence so
+    /// the user can regroup or turn grouping off without an adapter
+    /// round-trip. Tree mode never groups (tree-fold is a separate
+    /// feature), so it returns `None` there.
+    fn current_group_by(&self, view_defs: &[ViewDef]) -> Option<GroupBy> {
+        if self.tree.is_some() {
+            return None;
+        }
+        if let Some(ovr) = &self.group_by_override {
+            return ovr.clone();
+        }
+        if let Some(ref child) = self.active_child {
+            child.group_by.clone()
+        } else {
+            self.view_def(view_defs).and_then(|vd| vd.group_by.clone())
+        }
+    }
+
+    /// The active level's `aggregates` (M3). Read from the same level as
+    /// [`current_group_by`](Self::current_group_by); empty in tree mode or
+    /// when none are configured.
+    fn current_aggregates(&self, view_defs: &[ViewDef]) -> Vec<AggregateDef> {
+        if self.tree.is_some() {
+            return Vec::new();
+        }
+        if let Some(ref child) = self.active_child {
+            child.aggregates.clone()
+        } else {
+            self.view_def(view_defs).map(|vd| vd.aggregates.clone()).unwrap_or_default()
+        }
+    }
+
+    /// Whether the active level collapses each group to a single summary
+    /// row (M3 `summary_only`). Same level resolution as
+    /// [`current_group_by`](Self::current_group_by).
+    fn current_summary_only(&self, view_defs: &[ViewDef]) -> bool {
+        if self.tree.is_some() {
+            return false;
+        }
+        if let Some(ref child) = self.active_child {
+            child.summary_only
+        } else {
+            self.view_def(view_defs).map(|vd| vd.summary_only).unwrap_or(false)
+        }
+    }
+
+    /// Whether the active level *configures* a `group_by` (M3). Unlike
+    /// [`current_group_by`](Self::current_group_by) this ignores the runtime
+    /// override, so the `cycle_grouping` key stays claimable even after the
+    /// user has cycled the view to "ungrouped". `false` in tree mode.
+    fn level_has_group_by(&self, view_defs: &[ViewDef]) -> bool {
+        if self.tree.is_some() {
+            return false;
+        }
+        if let Some(ref child) = self.active_child {
+            child.group_by.is_some()
+        } else {
+            self.view_def(view_defs).map(|vd| vd.group_by.is_some()).unwrap_or(false)
+        }
+    }
+
+    /// Rotate the runtime date-bucket granularity of the active level's
+    /// grouping (M3, `content.cycle_grouping`). The configured `group_by`
+    /// names the column to bucket; this walks
+    /// `ungrouped → Day → Week → Month → Year → ungrouped`, storing the
+    /// result in [`group_by_override`](Self::group_by_override). A no-op
+    /// when the active level (and override) declare no `group_by` — there
+    /// is then no column to bucket. Returns `true` when the state changed
+    /// (the caller rebuilds the table).
+    fn cycle_grouping(&mut self, view_defs: &[ViewDef]) -> bool {
+        // The column to bucket comes from the *configured* default (or the
+        // current override); without one there is nothing to cycle.
+        let column = self
+            .current_group_by(view_defs)
+            .map(|gb| gb.column.clone())
+            .or_else(|| {
+                if let Some(ref child) = self.active_child {
+                    child.group_by.as_ref().map(|gb| gb.column.clone())
+                } else {
+                    self.view_def(view_defs)
+                        .and_then(|vd| vd.group_by.as_ref().map(|gb| gb.column.clone()))
+                }
+            });
+        let Some(column) = column else {
+            return false;
+        };
+        let current_bucket = self.current_group_by(view_defs).and_then(|gb| gb.bucket);
+        let grouped_now = self.current_group_by(view_defs).is_some();
+        let next = next_bucket_state(grouped_now, current_bucket);
+        self.group_by_override = Some(next.map(|bucket| GroupBy {
+            column,
+            bucket: Some(bucket),
+        }));
+        true
+    }
+
+    /// Dispatch wrapper for `content.cycle_grouping`: rotate the grouping
+    /// granularity and, when it changed, rebuild the table. Returns
+    /// `SelectionChanged(None)` so the bars refresh, or `Unhandled` when the
+    /// active level declares no `group_by` (nothing to cycle).
+    pub(crate) fn try_cycle_grouping(&mut self, view_defs: &[ViewDef]) -> SubViewMessage {
+        if self.cycle_grouping(view_defs) {
+            self.rebuild_table(view_defs);
+            SubViewMessage::SelectionChanged(None)
+        } else {
+            SubViewMessage::Unhandled
         }
     }
 
@@ -2926,73 +3052,69 @@ impl ContentPane {
             // steps over the same visible rows.
             self.build_tree_data_rows(&columns, view_defs, now)
         } else {
-            // Fuzzy filter: SkimMatcherV2 (same matcher as the Tasks Tree).
-            // The pattern is split on whitespace — every token must match
-            // (AND), each independently fuzzy. Without this, the literal
-            // space in "foo bar" would have to appear in the haystack.
-            // Configured fields are joined with spaces so a single token
-            // can still span across fields.
-            let filter = self.table.filter_text.clone();
-            let filter_fields = &self.fuzzy_filter_fields;
-            let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
-            self.items
+            // Flat list. Fuzzy filter first (SkimMatcherV2; whitespace-split
+            // AND of fuzzy tokens — see `fuzzy_filtered_order`), then either
+            // group (M3) or build one plain row per surviving item.
+            let order = fuzzy_filtered_order(
+                &self.items,
+                &columns,
+                &self.table.filter_text,
+                &self.fuzzy_filter_fields,
+            );
+
+            // Grouping (M3): flat list only and never under a multi-line
+            // layout. Builds group-header rows + per-group totals + a pinned
+            // grand-total footer here and returns — the plain row list below
+            // is skipped entirely.
+            if self.current_row_layout(view_defs).is_none() {
+                if let Some(group_by) = self.current_group_by(view_defs) {
+                    let aggregates = self.current_aggregates(view_defs);
+                    let summary_only = self.current_summary_only(view_defs);
+                    self.last_column_keys = columns.iter().map(|c| c.key.clone()).collect();
+                    self.table.set_smooth_scroll(self.current_smooth_scroll(view_defs));
+                    let build = build_grouped_table(
+                        &self.items,
+                        &order,
+                        &columns,
+                        &group_by,
+                        &aggregates,
+                        summary_only,
+                        now,
+                        &has_link_lookup,
+                        &config,
+                        &col_ids,
+                        &header,
+                    );
+                    self.last_col_widths = build.col_widths;
+                    self.filtered_indices = build.filtered_indices;
+                    let headers = vec![build_header_row(build.header_cells, &columns, header_overlay)];
+                    self.table.set_data(
+                        build.widget_rows,
+                        vec![],
+                        headers,
+                        build.footers,
+                        ColumnStyles::new(content_col_styles(&columns, t)),
+                        build_content_table_style(t),
+                        content_style_map(t),
+                        "  ",
+                    );
+                    return;
+                }
+            }
+
+            self.filtered_indices = order.clone();
+            order
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| {
-                    if filter.is_empty() {
-                        return true;
-                    }
-                    let haystack = if filter_fields.is_empty() {
-                        let mut s = item.label.clone();
-                        for f in &item.metadata.fields {
-                            s.push(' ');
-                            s.push_str(&f.value);
-                        }
-                        s
-                    } else {
-                        let mut s = String::new();
-                        for key in filter_fields {
-                            let value = columns.iter()
-                                .find(|c| c.key == *key)
-                                .map(|c| column_value(item, c))
-                                .unwrap_or_else(|| {
-                                    if key == "label" {
-                                        &item.label
-                                    } else {
-                                        item.metadata.fields.iter()
-                                            .find(|f| f.key == *key)
-                                            .map(|f| f.value.as_str())
-                                            .unwrap_or("")
-                                    }
-                                });
-                            if !s.is_empty() {
-                                s.push(' ');
-                            }
-                            s.push_str(value);
-                        }
-                        s
-                    };
-                    use fuzzy_matcher::FuzzyMatcher;
-                    let tokens: Vec<&str> = filter.split_whitespace().collect();
-                    if tokens.is_empty() {
-                        true
-                    } else {
-                        tokens
-                            .iter()
-                            .all(|tok| matcher.fuzzy_match(&haystack, tok).is_some())
-                    }
-                })
-                .enumerate()
-                .map(|(row_idx, (item_idx, item))| {
-                    self.filtered_indices.push(item_idx);
+                .map(|(row_idx, &item_idx)| {
+                    let item = &self.items[item_idx];
                     let mut row = TRow::new(row_idx as u32);
                     for col in &columns {
                         if col.source.as_deref() == Some("has_links") {
                             let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
                             row = row.cell(&col.key, icon);
                         } else {
-                            let cell = cell_content_for(item, col, now);
-                            row = row.cell(&col.key, cell);
+                            row = row.cell(&col.key, cell_content_for(item, col, now));
                         }
                     }
                     row
@@ -3029,13 +3151,8 @@ impl ContentPane {
         let computed = compute_table(&data_rows, &config, &col_ids, Some(&header));
         self.last_col_widths = computed.col_widths.clone();
 
-        let computed_header = computed.header.map(|h| {
-            let cells: Vec<TableWidgetCell> = h.cells.into_iter().enumerate().map(|(i, fitted)| {
-                let key = columns.get(i).map(|c| c.key.as_str()).unwrap_or("");
-                crate::components::sort_header::header_cell(&fitted, key, header_overlay)
-            }).collect();
-            TableWidgetRow::new(cells).not_selectable()
-        });
+        let computed_header =
+            computed.header.map(|h| build_header_row(h.cells, &columns, header_overlay));
 
         // `path`-kind columns get their separator drawn in the dedicated
         // style slot (see the StyleMap below); every other cell is plain.
@@ -3066,38 +3183,15 @@ impl ContentPane {
             })
             .collect();
 
-        let col_style_list: Vec<Style> = columns
-            .iter()
-            .map(|col| {
-                let color = col
-                    .style
-                    .as_deref()
-                    .map(|s| resolve_theme_color(t, s))
-                    .unwrap_or(t.text_med());
-                Style::default().fg(color)
-            })
-            .collect();
-
-        let table_style = build_content_table_style(t);
-
         let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
-        // Slot 0 (DIM_STYLE_ID) holds the dim color for sort-mode overlay;
-        // slot 1 (PATH_SEPARATOR_STYLE_ID) the taskpath-separator style for
-        // `kind: path` columns.
-        let style_map = StyleMap::new(vec![
-            Style::default().fg(t.text_dim()),
-            Style::default()
-                .fg(t.taskpath_separator())
-                .add_modifier(Modifier::BOLD),
-        ]);
         self.table.set_data(
             widget_rows,
             vec![],
             headers,
             vec![],
-            ColumnStyles::new(col_style_list),
-            table_style,
-            style_map,
+            ColumnStyles::new(content_col_styles(&columns, t)),
+            build_content_table_style(t),
+            content_style_map(t),
             "  ",
         );
     }
@@ -3527,6 +3621,23 @@ impl ContentPane {
             }
         }
 
+        // Grouping cycle (M3) — only where the level declares a `group_by`.
+        // Keyed off the *configured* default (not the effective grouping) so
+        // the key stays claimable after the user cycles to "ungrouped".
+        if self.level_has_group_by(view_defs) {
+            if let Some(b) = content_kb
+                .get(&ContentAction::CycleGrouping)
+                .cloned()
+                .and_then(strip_reserved)
+            {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ContentAction::CycleGrouping),
+                ));
+            }
+        }
+
         // Drill-down — only when the current level has children.
         if !self.current_children(view_defs).is_empty() {
             if let Some(b) = self
@@ -3748,6 +3859,9 @@ impl ContentPane {
             }
             KeySource::Content(ContentAction::TreeCollapseAll) => {
                 self.try_tree_collapse_all(view_defs)
+            }
+            KeySource::Content(ContentAction::CycleGrouping) => {
+                Some(self.try_cycle_grouping(view_defs))
             }
             KeySource::Common(CommonAction::ListNext) => {
                 self.nav_and_refresh(Cmd::Move(Direction::Down), view_defs);
@@ -4608,6 +4722,9 @@ impl ContentView {
                 .active_pane_mut()
                 .try_tree_collapse_all(&view_defs)
                 .unwrap_or(SubViewMessage::Unhandled),
+            ContentAction::CycleGrouping => {
+                self.active_pane_mut().try_cycle_grouping(&view_defs)
+            }
         };
         if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
             return self.dispatch_content_drill(item_id, item_label, *child_def);
@@ -6289,6 +6406,11 @@ fn cell_content_for(item: &NodeSummary, col: &ColumnDef, now: chrono::DateTime<c
 /// `rebuild_table_with`.
 const PATH_SEPARATOR_STYLE_ID: usize = 1;
 
+/// StyleMap slot for group-header rows and the grand-total footer in a
+/// grouped content view (M3). Painted in the theme's `group_header` color.
+/// Kept in sync with the `StyleMap::new(...)` in `rebuild_table_with`.
+const GROUP_HEADER_STYLE_ID: usize = 2;
+
 /// Split an already-fitted `path`-column string into render segments,
 /// tagging each run of the display `separator` with `sep_style_id` so the
 /// renderer paints it in the theme's taskpath-separator style. Segment text
@@ -6353,6 +6475,270 @@ fn build_field_haystack(node: &NodeSummary, columns: &[ColumnDef], fields: &[Str
         s.push_str(value);
     }
     s
+}
+
+// ── Grouping + aggregation render path (M3) ──────────────────────────────
+
+/// The next runtime grouping state for the `cycle_grouping` action. Walks
+/// `ungrouped → Day → Week → Month → Year → ungrouped`; `None` means
+/// ungrouped. `grouped_now` distinguishes "currently off" from "currently on
+/// with no bucket" so the very first press always lands on `Day`.
+fn next_bucket_state(grouped_now: bool, current: Option<DateBucket>) -> Option<DateBucket> {
+    if !grouped_now {
+        return Some(DateBucket::Day);
+    }
+    match current {
+        None => Some(DateBucket::Day),
+        Some(DateBucket::Day) => Some(DateBucket::Week),
+        Some(DateBucket::Week) => Some(DateBucket::Month),
+        Some(DateBucket::Month) => Some(DateBucket::Year),
+        Some(DateBucket::Year) => None,
+    }
+}
+
+/// Original `items` indices passing the active fuzzy filter, in input order.
+/// Factored out so the flat row builder and the grouped builder share one
+/// matcher definition (SkimMatcherV2, whitespace-split AND of fuzzy tokens).
+fn fuzzy_filtered_order(
+    items: &[NodeSummary],
+    columns: &[ColumnDef],
+    filter_text: &str,
+    fields: &[String],
+) -> Vec<usize> {
+    use fuzzy_matcher::FuzzyMatcher;
+    let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+    let tokens: Vec<&str> = filter_text.split_whitespace().collect();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            if tokens.is_empty() {
+                return true;
+            }
+            let haystack = build_field_haystack(item, columns, fields);
+            tokens.iter().all(|tok| matcher.fuzzy_match(&haystack, tok).is_some())
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Raw canonical value of a column referenced by `key`. Resolves through the
+/// matching [`ColumnDef`] (so `source: label` is honoured) and falls back to
+/// a bare metadata-field lookup when the key names a field that is not a
+/// displayed column. Used by grouping/aggregation, which address columns by
+/// `key` (the group-by column, the aggregated columns) rather than by index.
+fn raw_value_by_key<'a>(item: &'a NodeSummary, columns: &[ColumnDef], key: &str) -> &'a str {
+    if let Some(col) = columns.iter().find(|c| c.key == key) {
+        column_value(item, col)
+    } else {
+        metadata_field_value(item, key)
+    }
+}
+
+/// Render an aggregate's integer total back through the column's typed
+/// formatter, so a `duration` total prints `H:MM:SS` and a `number` total
+/// prints verbatim — matching the data cells in the same column.
+fn format_total(total: i64, col: &ColumnDef) -> String {
+    let (text, _) =
+        format_typed_value(&total.to_string(), col.kind, col.format.as_deref(), path_separator(col));
+    text
+}
+
+/// One group-header / summary / grand-total row: a spanning label across the
+/// columns left of the first aggregate column, then each aggregate column's
+/// total right-aligned in its own column, with the rest blank. `totals` is
+/// indexed parallel to `agg_cols`. The whole row paints in the group-header
+/// style and is non-selectable.
+fn summary_row(
+    label: String,
+    totals: &[i64],
+    agg_cols: &[usize],
+    columns: &[ColumnDef],
+    col_widths: &[usize],
+) -> TableWidgetRow {
+    let ncols = columns.len();
+    let first_agg = agg_cols.iter().min().copied().unwrap_or(ncols);
+    let label_span = first_agg.max(1);
+    let width_of = |ci: usize| col_widths.get(ci).copied().unwrap_or(0);
+
+    let mut cells = vec![
+        TableWidgetCell::grouped(label, label_span).with_style(GROUP_HEADER_STYLE_ID),
+    ];
+    for ci in label_span..ncols {
+        match agg_cols.iter().position(|&c| c == ci) {
+            Some(slot) => {
+                let text = format_total(totals[slot], &columns[ci]);
+                let fitted = fit_aligned(&text, width_of(ci), CellAlignment::Right);
+                cells.push(TableWidgetCell::plain(fitted).with_style(GROUP_HEADER_STYLE_ID));
+            }
+            None => cells.push(TableWidgetCell::plain(" ".repeat(width_of(ci)))),
+        }
+    }
+    TableWidgetRow::new(cells).not_selectable()
+}
+
+/// Turn one engine-fitted item row into a widget row, applying the same
+/// `kind: path` separator styling as the flat (ungrouped) builder.
+fn item_widget_row(
+    cr: &not_yet_done_table::ComputedRow<u32>,
+    columns: &[ColumnDef],
+) -> TableWidgetRow {
+    let cells: Vec<TableWidgetCell> = cr
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(i, fitted)| match columns.get(i) {
+            Some(col) if col.kind == ColumnKind::Path => TableWidgetCell::from_segments(
+                path_cell_segments(fitted, path_separator(col), PATH_SEPARATOR_STYLE_ID),
+            ),
+            _ => TableWidgetCell::plain(fitted.clone()),
+        })
+        .collect();
+    TableWidgetRow::new(cells)
+}
+
+/// Output of [`build_grouped_table`].
+struct GroupedBuild {
+    /// Interspersed header + item rows (the scrolling body); `filtered_indices`
+    /// aligns to this 1:1.
+    widget_rows: Vec<TableWidgetRow>,
+    /// Pinned grand-total footer rows (empty when no aggregates are declared).
+    footers: Vec<TableWidgetRow>,
+    /// Fitted header-label strings (column widths already applied), for the
+    /// caller to turn into the table header with the sort overlay.
+    header_cells: Vec<String>,
+    /// Row → original `items` index, aligned to `widget_rows`. Header rows
+    /// carry `usize::MAX` — they are non-selectable, so it is never read.
+    filtered_indices: Vec<usize>,
+    /// Column widths from the item-row layout (drives the sort overlay and
+    /// horizontal scroll, like the ungrouped path's `last_col_widths`).
+    col_widths: Vec<usize>,
+}
+
+/// Build the full grouped flat table (M3): partition the filtered items by
+/// the group key, total the aggregate columns, and interleave group-header
+/// rows (plus a pinned grand-total footer) with the engine-fitted item rows.
+///
+/// Items are ordered by their group label first, so groups are contiguous and
+/// — for the ISO-formatted date-bucket labels — chronological. The generic
+/// partition/total mechanism lives in [`not_yet_done_table::group`]; this
+/// function supplies the typed extraction (label + aggregate value) and the
+/// widget-row rendering.
+#[allow(clippy::too_many_arguments)]
+fn build_grouped_table(
+    items: &[NodeSummary],
+    order: &[usize],
+    columns: &[ColumnDef],
+    group_by: &GroupBy,
+    aggregates: &[AggregateDef],
+    summary_only: bool,
+    now: chrono::DateTime<chrono::Local>,
+    has_link_lookup: &dyn Fn(&str) -> bool,
+    config: &TableConfig,
+    col_ids: &[TColumnId],
+    header: &TRow<u32>,
+) -> GroupedBuild {
+    // 1. Group label per filtered item; order items by label.
+    let mut tagged: Vec<(usize, String)> = order
+        .iter()
+        .map(|&i| {
+            let raw = raw_value_by_key(&items[i], columns, &group_by.column);
+            (i, group_label(raw, group_by.bucket))
+        })
+        .collect();
+    tagged.sort_by(|a, b| a.1.cmp(&b.1));
+    let keys: Vec<String> = tagged.iter().map(|(_, l)| l.clone()).collect();
+    let sorted_idx: Vec<usize> = tagged.iter().map(|(i, _)| *i).collect();
+
+    // 2. Aggregate columns + their per-item values (in grouped order).
+    let agg_cols: Vec<usize> = aggregates
+        .iter()
+        .filter_map(|a| columns.iter().position(|c| c.key == a.column))
+        .collect();
+    let values_owned: Vec<Vec<Option<i64>>> = aggregates
+        .iter()
+        .map(|a| {
+            sorted_idx
+                .iter()
+                .map(|&i| agg_value(raw_value_by_key(&items[i], columns, &a.column), a.op))
+                .collect()
+        })
+        .collect();
+    let values_refs: Vec<&[Option<i64>]> = values_owned.iter().map(|v| v.as_slice()).collect();
+
+    let plan = group_rows(&keys, &values_refs, summary_only, !aggregates.is_empty());
+
+    // 3. Fit the item rows (grouped order). `summary_only` yields none.
+    let item_positions: Vec<usize> = plan
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PlanRow::Item { index } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    let data_rows: Vec<TRow<u32>> = item_positions
+        .iter()
+        .enumerate()
+        .map(|(row_idx, &pos)| {
+            let item = &items[sorted_idx[pos]];
+            let mut row = TRow::new(row_idx as u32);
+            for col in columns {
+                if col.source.as_deref() == Some("has_links") {
+                    let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
+                    row = row.cell(&col.key, icon);
+                } else {
+                    row = row.cell(&col.key, cell_content_for(item, col, now));
+                }
+            }
+            row
+        })
+        .collect();
+    let computed = compute_table(&data_rows, config, col_ids, Some(header));
+    let col_widths = computed.col_widths.clone();
+    let header_cells = computed.header.map(|h| h.cells).unwrap_or_default();
+
+    // 4. Interleave header rows with fitted item rows in plan order.
+    let mut widget_rows: Vec<TableWidgetRow> = Vec::new();
+    let mut filtered_indices: Vec<usize> = Vec::new();
+    let mut next_item = 0usize;
+    for prow in &plan.rows {
+        match prow {
+            PlanRow::Header { label, group } => {
+                widget_rows.push(summary_row(
+                    format!("── {label} "),
+                    &plan.group_totals[*group],
+                    &agg_cols,
+                    columns,
+                    &col_widths,
+                ));
+                filtered_indices.push(usize::MAX);
+            }
+            PlanRow::Item { index } => {
+                let cr = &computed.rows[next_item];
+                next_item += 1;
+                widget_rows.push(item_widget_row(cr, columns));
+                filtered_indices.push(sorted_idx[*index]);
+            }
+            // The grand total is pinned as a footer (below), not interleaved.
+            PlanRow::GrandTotal => {}
+        }
+    }
+
+    // 5. Grand-total footer (only when something is aggregated).
+    let footers = if aggregates.is_empty() {
+        Vec::new()
+    } else {
+        vec![summary_row(
+            "── Σ ".to_string(),
+            &plan.grand_totals,
+            &agg_cols,
+            columns,
+            &col_widths,
+        )]
+    };
+
+    GroupedBuild { widget_rows, footers, header_cells, filtered_indices, col_widths }
 }
 
 /// Render a free-text search query by substituting placeholders in `template`.
@@ -6598,6 +6984,62 @@ fn build_content_table_style(t: &Theme) -> TableStyle {
                 .bg(t.surface())
                 .add_modifier(Modifier::BOLD),
         )
+}
+
+/// Per-column foreground styles for the single-line content table, resolved
+/// from each `ColumnDef.style` theme reference (default: `text_med`). Shared
+/// by the ungrouped and grouped (M3) render paths.
+fn content_col_styles(columns: &[ColumnDef], t: &Theme) -> Vec<Style> {
+    columns
+        .iter()
+        .map(|col| {
+            let color = col
+                .style
+                .as_deref()
+                .map(|s| resolve_theme_color(t, s))
+                .unwrap_or(t.text_med());
+            Style::default().fg(color)
+        })
+        .collect()
+}
+
+/// Style-map for the single-line content table. Slot indices are fixed and
+/// referenced by `*_STYLE_ID` constants:
+///
+/// - slot 0 — sort-mode dim overlay,
+/// - slot 1 ([`PATH_SEPARATOR_STYLE_ID`]) — `kind: path` separator,
+/// - slot 2 ([`GROUP_HEADER_STYLE_ID`]) — group headers + grand-total footer.
+///
+/// The group-header slot is always present (harmless when nothing is
+/// grouped) so the same map serves both render paths.
+fn content_style_map(t: &Theme) -> StyleMap {
+    StyleMap::new(vec![
+        Style::default().fg(t.text_dim()),
+        Style::default()
+            .fg(t.taskpath_separator())
+            .add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(t.group_header())
+            .add_modifier(Modifier::BOLD),
+    ])
+}
+
+/// Build the table header row from engine-fitted label strings, applying the
+/// sort-mode overlay per column. Shared by the ungrouped and grouped paths.
+fn build_header_row(
+    fitted_cells: Vec<String>,
+    columns: &[ColumnDef],
+    header_overlay: &crate::components::sort_header::HeaderOverlay,
+) -> TableWidgetRow {
+    let cells: Vec<TableWidgetCell> = fitted_cells
+        .into_iter()
+        .enumerate()
+        .map(|(i, fitted)| {
+            let key = columns.get(i).map(|c| c.key.as_str()).unwrap_or("");
+            crate::components::sort_header::header_cell(&fitted, key, header_overlay)
+        })
+        .collect();
+    TableWidgetRow::new(cells).not_selectable()
 }
 
 /// Build the widget rows for a multi-line (chat) layout.
@@ -7038,6 +7480,9 @@ mod tests {
                         recursive: false,
             editor_in_place: false,
                         leaf_glyph: None,
+                        group_by: None,
+                        aggregates: Vec::new(),
+                        summary_only: false,
                     },
                 ],
                 pagination: None,
@@ -7048,6 +7493,9 @@ mod tests {
                 script_template: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
         }
     }
@@ -7175,6 +7623,9 @@ mod tests {
                 script_template: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
         }
     }
@@ -7297,6 +7748,9 @@ mod tests {
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         }];
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
@@ -7516,6 +7970,9 @@ mod tests {
                         recursive: false,
             editor_in_place: false,
                         leaf_glyph: None,
+                        group_by: None,
+                        aggregates: Vec::new(),
+                        summary_only: false,
                     },
                 ],
                 pagination: None,
@@ -7526,6 +7983,9 @@ mod tests {
                 script_template: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
         }
     }
@@ -7624,6 +8084,9 @@ mod tests {
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         }
     }
 
@@ -7680,6 +8143,9 @@ mod tests {
                 script_template: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
         }
     }
@@ -8294,6 +8760,9 @@ mod tests {
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         });
 
         let mut view =
@@ -8383,6 +8852,9 @@ mod tests {
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         });
 
         let mut view =
@@ -8728,6 +9200,9 @@ mod tests {
                 script_template: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
         }
     }
@@ -9494,6 +9969,9 @@ mod tests {
                         recursive: false,
             editor_in_place: false,
                         leaf_glyph: None,
+                        group_by: None,
+                        aggregates: Vec::new(),
+                        summary_only: false,
                     },
                 ],
                 pagination: None,
@@ -9504,6 +9982,9 @@ mod tests {
                 script_template: None,
                 shortcuts: view_shortcuts,
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
         }
     }
@@ -9858,6 +10339,9 @@ mod tests {
                 recursive: true,
                 editor_in_place: false,
                 leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
             }],
             pagination: None,
             action_chains: Default::default(),
@@ -9867,6 +10351,9 @@ mod tests {
             script_template: None,
             shortcuts: HashMap::new(),
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         }
     }
 
@@ -10028,6 +10515,137 @@ mod tests {
             other => panic!("expected Ready after next, got {other:?}"),
         }
     }
+
+    // ── Grouping + aggregation (M3) render path ──────────────────────────
+
+    fn group_columns() -> Vec<ColumnDef> {
+        vec![
+            ColumnDef { key: "category".into(), label: None, source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "dur".into(), label: None, source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None },
+        ]
+    }
+
+    /// `label` is the group key (read via `source: label`); `dur` is the
+    /// aggregated `kind: number` metadata field.
+    fn group_item(id: &str, label: &str, dur: &str) -> NodeSummary {
+        use not_yet_done_content::{Metadata, MetadataField};
+        NodeSummary {
+            id: id.into(),
+            label: label.into(),
+            node_type: not_yet_done_content::mock::default_node_type(),
+            metadata: Metadata {
+                fields: vec![MetadataField {
+                    key: "dur".into(),
+                    value: dur.into(),
+                    display_label: "dur".into(),
+                    editable: false,
+                    allowed_values: None,
+                }],
+            },
+            has_children: None,
+        }
+    }
+
+    /// Drive [`build_grouped_table`] over a small fixture and return the
+    /// build plus the right-aligned total text per summary row (trimmed).
+    fn run_grouped(summary_only: bool) -> (GroupedBuild, Vec<String>, Vec<String>) {
+        let items = vec![
+            group_item("0", "B", "30"),
+            group_item("1", "A", "10"),
+            group_item("2", "A", "20"),
+            group_item("3", "B", "40"),
+        ];
+        let columns = group_columns();
+        let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
+        let mut strategies = std::collections::HashMap::new();
+        for c in &columns {
+            strategies.insert(TColumnId::new(&c.key), parse_sizing(&c.sizing));
+        }
+        let config = TableConfig {
+            max_width: 300,
+            separator: "  ".into(),
+            sizer: Box::new(MixedColSizer { strategies }),
+        };
+        let mut header = TRow::new(0u32).not_selectable();
+        for c in &columns {
+            header = header.cell(&c.key, c.key.clone());
+        }
+        let group_by = GroupBy { column: "category".into(), bucket: None };
+        let aggregates = vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum }];
+        let no_links = |_: &str| false;
+
+        let build = build_grouped_table(
+            &items,
+            &[0, 1, 2, 3],
+            &columns,
+            &group_by,
+            &aggregates,
+            summary_only,
+            chrono::Local::now(),
+            &no_links,
+            &config,
+            &col_ids,
+            &header,
+        );
+
+        // Total = the trimmed text of the last cell on each summary row.
+        let total_of = |r: &TableWidgetRow| {
+            r.primary_line().last().map(|c| c.text.trim().to_string()).unwrap_or_default()
+        };
+        let header_totals: Vec<String> = build
+            .widget_rows
+            .iter()
+            .filter(|r| !r.selectable)
+            .map(total_of)
+            .collect();
+        let footer_totals: Vec<String> = build.footers.iter().map(total_of).collect();
+        (build, header_totals, footer_totals)
+    }
+
+    #[test]
+    fn grouped_table_interleaves_headers_items_and_footer() {
+        let (build, header_totals, footer_totals) = run_grouped(false);
+
+        // 2 group headers + 4 items, grand total pinned as footer.
+        assert_eq!(build.widget_rows.len(), 6);
+        assert_eq!(build.footers.len(), 1);
+
+        // Rows: headerA, item, item, headerB, item, item — headers are the
+        // non-selectable rows at positions 0 and 3.
+        let selectable: Vec<bool> = build.widget_rows.iter().map(|r| r.selectable).collect();
+        assert_eq!(selectable, vec![false, true, true, false, true, true]);
+
+        // filtered_indices align 1:1 with widget_rows; header rows carry the
+        // sentinel `usize::MAX`. Items are ordered by group label, so the "A"
+        // group (original indices 1, 2) precedes "B" (indices 0, 3).
+        assert_eq!(
+            build.filtered_indices,
+            vec![usize::MAX, 1, 2, usize::MAX, 0, 3]
+        );
+
+        // Per-group totals: A = 10+20 = 30, B = 30+40 = 70; grand = 100.
+        assert_eq!(header_totals, vec!["30".to_string(), "70".to_string()]);
+        assert_eq!(footer_totals, vec!["100".to_string()]);
+
+        // Group-header labels carry the bucket/category text and are styled.
+        let header_a = &build.widget_rows[0];
+        assert!(header_a.primary_line()[0].text.contains('A'));
+        assert_eq!(header_a.primary_line()[0].style_id, Some(GROUP_HEADER_STYLE_ID));
+    }
+
+    #[test]
+    fn grouped_table_summary_only_suppresses_item_rows() {
+        let (build, header_totals, footer_totals) = run_grouped(true);
+
+        // Only the two group-header rows remain; every item row collapses.
+        assert_eq!(build.widget_rows.len(), 2);
+        assert!(build.widget_rows.iter().all(|r| !r.selectable));
+        assert_eq!(build.filtered_indices, vec![usize::MAX, usize::MAX]);
+
+        // Totals are unchanged by collapsing.
+        assert_eq!(header_totals, vec!["30".to_string(), "70".to_string()]);
+        assert_eq!(footer_totals, vec!["100".to_string()]);
+    }
 }
 
 /// Create a hardcoded Jira view config (used when no YAML file exists).
@@ -10113,6 +10731,9 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             script_template: None,
             shortcuts: HashMap::new(),
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         }],
     }
 }
