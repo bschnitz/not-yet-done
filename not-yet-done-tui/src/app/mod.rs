@@ -576,6 +576,14 @@ pub struct App {
     pub load_rx: tokio::sync::mpsc::UnboundedReceiver<LoadMsg>,
     load_tx:     tokio::sync::mpsc::UnboundedSender<LoadMsg>,
 
+    /// Per-view live-refresh timers (M9 — adapter-driven live rows). Key =
+    /// `view_index`. Each handle drives a `tokio::time::interval` that pulls
+    /// the view's adapter `live_rows()` and republishes each as a
+    /// `LoadMsg::AdapterInvalidation { Invalidation::Row }` patch. (Re)paced
+    /// by `Invalidation::RefreshInterval`; at most one timer per view (a
+    /// respawn aborts the previous handle, `None` stops it).
+    live_refresh_timers: std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
+
     /// Channel for results of background commit tasks (see `app::editor`).
     /// The receiver is selected on by the main loop and each message is
     /// applied via `handle_commit_msg`.
@@ -873,6 +881,7 @@ impl App {
             link_repo,
             load_rx,
             load_tx,
+            live_refresh_timers: std::collections::HashMap::new(),
             commit_rx,
             commit_tx,
             commit_in_flight: false,
@@ -1175,6 +1184,54 @@ impl App {
         });
     }
 
+    /// Start, re-pace, or stop the live-refresh timer for `view_index`
+    /// (M9 — adapter-driven live rows). `Some(interval)` (re)spawns a
+    /// `tokio::time::interval` that, on each tick, pulls the view adapter's
+    /// [`live_rows`](not_yet_done_content::ContentAdapter::live_rows) and
+    /// forwards each refreshed row as an
+    /// [`Invalidation::Row`](not_yet_done_content::Invalidation::Row) patch
+    /// through the load channel; `None` stops it. A respawn aborts the
+    /// existing handle first, so the cadence the adapter last declared
+    /// always wins and timers never accumulate across re-pacings.
+    fn set_live_refresh_timer(
+        &mut self,
+        view_index: usize,
+        interval: Option<std::time::Duration>,
+    ) {
+        // Re-pacing replaces the running timer; `None` leaves it stopped.
+        if let Some(handle) = self.live_refresh_timers.remove(&view_index) {
+            handle.abort();
+        }
+        let Some(interval) = interval else { return };
+        if interval.is_zero() {
+            return; // a zero interval would busy-loop
+        }
+        let Some(cv) = self.content_view(view_index) else { return };
+        let Some(adapter) = cv.adapter.as_ref() else { return };
+        let adapter = Arc::clone(adapter);
+        let tx = self.load_tx.clone();
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // `interval()` fires immediately at t=0; skip that tick so the
+            // first refresh lands one interval out, not on the same frame
+            // as the load that declared the cadence.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                for summary in adapter.live_rows().await {
+                    let msg = LoadMsg::AdapterInvalidation {
+                        view_index,
+                        inv: not_yet_done_content::Invalidation::Row(summary),
+                    };
+                    if tx.send(msg).is_err() {
+                        return; // app gone
+                    }
+                }
+            }
+        });
+        self.live_refresh_timers.insert(view_index, handle);
+    }
+
     /// React to a streaming adapter's [`Invalidation`]. Reloads the
     /// current level of each pane in the view that the invalidation
     /// affects:
@@ -1203,6 +1260,20 @@ impl App {
             }
             return;
         }
+        // M9 — a single row's refreshed state: patch it in place (no
+        // refetch). The adapter already computed the new cell values.
+        if let Invalidation::Row(summary) = &inv {
+            if let Some(cv) = self.content_view_mut(view_index) {
+                cv.patch_row(summary);
+            }
+            return;
+        }
+        // M9 — the adapter (re)paces this view's live-refresh timer: start
+        // it at the given interval, or stop it on `None`.
+        if let Invalidation::RefreshInterval(interval) = inv {
+            self.set_live_refresh_timer(view_index, interval);
+            return;
+        }
         // Collect the affected pane ids first so the immutable borrow of
         // the view ends before `reload_content_pane_current_level`
         // re-borrows `self`.
@@ -1221,7 +1292,11 @@ impl App {
                     // Redraw-only: select no panes (no refetch). The
                     // repaint itself happens because `handle_load_msg`
                     // always returns dirty=true for any message it drains.
-                    Invalidation::Repaint => false,
+                    // Row / RefreshInterval are handled by the early returns
+                    // above and never reach this filter.
+                    Invalidation::Repaint
+                    | Invalidation::Row(_)
+                    | Invalidation::RefreshInterval(_) => false,
                 })
                 .collect()
         };

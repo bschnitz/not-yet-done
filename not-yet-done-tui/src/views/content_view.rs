@@ -5939,6 +5939,34 @@ impl ContentView {
         }
     }
 
+    /// Patch a single row's complete state in place (M9 —
+    /// [`Invalidation::Row`](not_yet_done_content::Invalidation::Row)). The
+    /// adapter pushes the refreshed [`NodeSummary`]; every pane in this tab
+    /// that currently shows a row with the same `id` has its loaded item
+    /// replaced and its table rebuilt (which re-derives the cells and, when
+    /// grouping is active, the per-group totals + footer). No refetch and
+    /// no selection/scroll change. A summary matching no visible item is a
+    /// no-op. Returns `true` if at least one pane was patched.
+    ///
+    /// Mirrors [`repaint_live_columns`](Self::repaint_live_columns)'s
+    /// disjoint borrow (`&self.view_defs` + `&mut self.pane_trees`) so the
+    /// view defs aren't cloned per patch.
+    pub fn patch_row(&mut self, summary: &not_yet_done_content::NodeSummary) -> bool {
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        let mut patched = false;
+        for tree in self.pane_trees.iter_mut() {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                if let Some(slot) = leaf.pane.items.iter_mut().find(|it| it.id == summary.id) {
+                    *slot = summary.clone();
+                    leaf.pane.rebuild_table_with(view_defs, &overlay);
+                    patched = true;
+                }
+            });
+        }
+        patched
+    }
+
     /// Push a refreshed `link_refs` snapshot — plus the adapter NodeRef
     /// prefix (`"{kind}/{instance_id}"`) — down to every pane in this
     /// tab. Called by the App whenever its own `App::link_refs` cache
