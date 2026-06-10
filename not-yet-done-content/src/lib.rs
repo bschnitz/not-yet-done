@@ -657,10 +657,40 @@ pub enum ActionDispatch {
     Error(String),
 }
 
-/// Context passed into [`Node::invoke_action`]. Empty for now — extended
-/// in later phases (cursor pagination state, target pane id, …).
+/// A node the user marked for a subsequent move — the "clipboard" of the
+/// generic mark-move / paste-move vocabulary (M7).
+///
+/// Marking is session state owned by the frontend; it travels into the
+/// adapter only when a `paste-move` action fires, via
+/// [`ActionContext::marked`]. The adapter uses it to perform the
+/// structural move (reparent / relocate the marked node under or next to
+/// the invoking node) and is free to reject an incompatible
+/// [`MarkedNode::node_type`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkedNode {
+    /// Adapter-local id of the marked node — the same id accepted by
+    /// [`ContentAdapter::get_by_id`].
+    pub node_id: String,
+    /// Type of the marked node, so a `paste-move` target can validate
+    /// the move (e.g. only accept a task under another task).
+    pub node_type: NodeType,
+    /// Human-readable label, for the frontend's "marked …" indicator.
+    pub label: String,
+}
+
+/// Context passed into [`Node::invoke_action`].
+///
+/// Extended per phase; today it carries the [`MarkedNode`] for the
+/// generic mark/paste-move flow. The frontend populates `marked` only on
+/// a `paste-move` invocation (and only when something is marked); every
+/// other action sees `None`.
 #[derive(Clone, Debug, Default)]
-pub struct ActionContext {}
+pub struct ActionContext {
+    /// The node the user previously marked for a move, if any. Populated
+    /// by the frontend on a `paste-move` invocation so the adapter can
+    /// relocate the marked node relative to the invoking (target) node.
+    pub marked: Option<MarkedNode>,
+}
 
 // ---------------------------------------------------------------------------
 // AdapterStatus (live connection state, observable by frontends)
@@ -1419,5 +1449,121 @@ mod form_contract_tests {
         assert_eq!(recorded.get("title").unwrap(), "new title");
         assert_eq!(recorded.get("status").unwrap(), "todo");
         assert_eq!(recorded.get("urgent").unwrap(), "true");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — mark/paste-move contract round-trip (M7/E6)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mark_move_contract_tests {
+    use super::*;
+
+    /// A node that records the [`MarkedNode`] handed to it via
+    /// [`ActionContext`] when a `paste-move` action is invoked.
+    struct MoveNode {
+        node_type: NodeType,
+        metadata: Metadata,
+        last_marked: std::sync::Mutex<Option<MarkedNode>>,
+    }
+
+    impl MoveNode {
+        fn new() -> Self {
+            Self {
+                node_type: NodeType {
+                    type_id: "test:item".into(),
+                    mime_type: "text/plain".into(),
+                    syntax: None,
+                    file_extension: ".txt".into(),
+                    display_name: "Item".into(),
+                },
+                metadata: Metadata::default(),
+                last_marked: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Node for MoveNode {
+        fn id(&self) -> &str {
+            "target"
+        }
+        fn label(&self) -> &str {
+            "Target"
+        }
+        fn node_type(&self) -> &NodeType {
+            &self.node_type
+        }
+        fn metadata(&self) -> &Metadata {
+            &self.metadata
+        }
+
+        fn actions(&self) -> Vec<NodeAction> {
+            vec![
+                NodeAction::new("mark-move", "Mark for move", InputSpec::None),
+                NodeAction::new("paste-move", "Paste here", InputSpec::None),
+            ]
+        }
+
+        async fn invoke_action(
+            &self,
+            name: &str,
+            ctx: &ActionContext,
+        ) -> Result<ActionDispatch> {
+            match name {
+                // `mark-move` is frontend-owned (records the marked node in
+                // session state); the adapter has nothing to do → Noop.
+                "mark-move" => Ok(ActionDispatch::Noop),
+                // `paste-move` reads the marked node out of the context and
+                // performs the move (here: just records what it received).
+                "paste-move" => {
+                    *self.last_marked.lock().unwrap() = ctx.marked.clone();
+                    if ctx.marked.is_some() {
+                        Ok(ActionDispatch::Reload)
+                    } else {
+                        Ok(ActionDispatch::Error("nothing marked".into()))
+                    }
+                }
+                other => Ok(ActionDispatch::Error(format!("unknown action {other}"))),
+            }
+        }
+    }
+
+    #[test]
+    fn action_context_default_has_no_mark() {
+        let ctx = ActionContext::default();
+        assert!(ctx.marked.is_none());
+    }
+
+    #[tokio::test]
+    async fn paste_move_receives_marked_node_from_context() {
+        let node = MoveNode::new();
+        let marked = MarkedNode {
+            node_id: "src-1".into(),
+            node_type: node.node_type().clone(),
+            label: "Source task".into(),
+        };
+        let ctx = ActionContext {
+            marked: Some(marked.clone()),
+        };
+
+        let dispatch = node.invoke_action("paste-move", &ctx).await.unwrap();
+        assert!(matches!(dispatch, ActionDispatch::Reload));
+
+        let recorded = node.last_marked.lock().unwrap().clone().unwrap();
+        assert_eq!(recorded, marked);
+        assert_eq!(recorded.node_id, "src-1");
+    }
+
+    #[tokio::test]
+    async fn paste_move_without_mark_is_rejected() {
+        let node = MoveNode::new();
+        let dispatch = node
+            .invoke_action("paste-move", &ActionContext::default())
+            .await
+            .unwrap();
+        assert!(matches!(dispatch, ActionDispatch::Error(_)));
+        assert!(node.last_marked.lock().unwrap().is_none());
     }
 }
