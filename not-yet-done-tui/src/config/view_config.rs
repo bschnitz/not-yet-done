@@ -1568,6 +1568,29 @@ views:
     }
 
     #[test]
+    fn example_tasks_yaml_parses_and_validates() {
+        // The shipped `docs/examples/views/tasks.yaml` (plan phase A1) must
+        // stay loadable: it parses into a ViewFileConfig and passes the
+        // semantic validator (tree_label chain, recursive branch, typed
+        // columns, tree_find/fuzzy_filter only at the tree root).
+        let yaml = include_str!("../../../docs/examples/views/tasks.yaml");
+        let cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("tasks.yaml should deserialize");
+        assert_eq!(cfg.adapter.adapter_type, "tasks");
+        assert_eq!(cfg.views[0].tree_label.as_deref(), Some("description"));
+        assert!(
+            cfg.views[0].columns.iter().any(|c| c.key == "priority"
+                && matches!(c.kind, ColumnKind::Number)),
+            "priority column should be kind: number"
+        );
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("tasks.yaml should pass the validator");
+    }
+
+    #[test]
     fn validate_rejects_unknown_editor_profile() {
         let yaml = r#"
 tab: { name: T }

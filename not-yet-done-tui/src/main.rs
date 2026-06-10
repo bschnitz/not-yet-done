@@ -164,8 +164,8 @@ pub(crate) fn build_adapter_factories(
         Box::new(not_yet_done_stoat_adapter::StoatAdapterFactory::new()),
     );
     factories.insert(
-        "local".to_string(),
-        Box::new(not_yet_done_local_adapter::LocalAdapterFactory::new(
+        "tasks".to_string(),
+        Box::new(not_yet_done_local_adapter::TaskAdapterFactory::new(
             core.clone(),
         )),
     );
