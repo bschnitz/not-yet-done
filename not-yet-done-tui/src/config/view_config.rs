@@ -582,6 +582,23 @@ pub struct ViewDef {
     /// sitting under the same `recursive: true` ChildDef.
     #[serde(default)]
     pub leaf_glyph: Option<String>,
+    /// Default grouping for this view (M3). Partitions the flat list into
+    /// groups, each introduced by a header row. Runtime-switchable via
+    /// view-state (this is only the startup default). `None` = ungrouped
+    /// flat list. Ignored in tree mode (tree-fold is a separate feature).
+    #[serde(default)]
+    pub group_by: Option<GroupBy>,
+    /// Per-column aggregations applied when grouping is active (M3). Each
+    /// names a column to total per group; the grand total appears in a
+    /// footer row. Empty → groups are pure label headers with no totals.
+    #[serde(default)]
+    pub aggregates: Vec<AggregateDef>,
+    /// Collapse each group to a single summary row (M3 — Trackings
+    /// "Condensed"). The per-group header (carrying its totals) is then the
+    /// only row shown; individual items are hidden. Only meaningful with
+    /// `group_by` set.
+    #[serde(default)]
+    pub summary_only: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -741,6 +758,64 @@ pub enum ColumnKind {
     /// duration, right-aligned, recomputed on every repaint tick driven by
     /// the domain-event bus. See [`ColumnDef::elapsed_from`].
     Elapsed,
+}
+
+// ---------------------------------------------------------------------------
+// Grouping + aggregation (M3)
+// ---------------------------------------------------------------------------
+
+/// Date-bucket granularity for [`GroupBy`] (M3). When set, the group
+/// column's value is parsed as an RFC 3339 instant and truncated to this
+/// boundary so all items in the same day / week / month / year coalesce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DateBucket {
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+/// Grouping declaration (M3). Partitions the flat row list by a column's
+/// value — verbatim, or, when `bucket` is set, by the date bucket the
+/// column's datetime falls into. This is only the *default*: grouping is
+/// switchable at runtime via view-state (see `cycle_grouping`), so a user
+/// can regroup or turn it off without an adapter round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupBy {
+    /// Column `key` whose value identifies the group (and labels its header).
+    pub column: String,
+    /// When set, parse the column value as an RFC 3339 instant and group by
+    /// the surrounding day/week/month/year instead of the verbatim value.
+    /// A value that fails to parse falls back to verbatim grouping.
+    #[serde(default)]
+    pub bucket: Option<DateBucket>,
+}
+
+/// Aggregation operation for an [`AggregateDef`] (M3). Only `sum` exists
+/// today (totals a `duration` column's seconds); kept as an enum so
+/// `count` / `avg` / … can be added later without a config break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AggregateOp {
+    #[default]
+    Sum,
+}
+
+/// Per-column aggregation (M3). When grouping is active, the named column's
+/// values are combined per group (and grand-totalled in the footer) using
+/// `op`. The total renders in that same column on the group-header / summary
+/// row, so it lines up under the data. Currently only `duration` columns
+/// (canonical integer seconds) sum meaningfully.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateDef {
+    /// Column `key` whose values are aggregated.
+    pub column: String,
+    /// How to combine the values. Default `sum`.
+    #[serde(default)]
+    pub op: AggregateOp,
 }
 
 fn default_sizing() -> String {
@@ -1097,6 +1172,19 @@ pub struct ChildDef {
     /// applies when the entry's level is reached via this ChildDef.
     #[serde(default)]
     pub leaf_glyph: Option<String>,
+    /// Default grouping for this drill level (M3). Same semantics as
+    /// [`ViewDef::group_by`]; applies to the pane that displays this
+    /// child's items. Runtime-switchable. Ignored in tree mode.
+    #[serde(default)]
+    pub group_by: Option<GroupBy>,
+    /// Per-column aggregations for this drill level (M3). Same semantics as
+    /// [`ViewDef::aggregates`].
+    #[serde(default)]
+    pub aggregates: Vec<AggregateDef>,
+    /// Collapse each group to a single summary row at this drill level
+    /// (M3). Same semantics as [`ViewDef::summary_only`].
+    #[serde(default)]
+    pub summary_only: bool,
 }
 
 /// Split direction relative to the source pane: where the new pane lands.

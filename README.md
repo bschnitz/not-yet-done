@@ -1311,32 +1311,34 @@ navigation:
 <details>
 <summary>Full color table (click to expand)</summary>
 
-| Field               | Description                      |
-| ------------------- | -------------------------------- |
-| `bg`                | Main background                  |
-| `surface`           | Panel/bar background             |
-| `surface_2`         | Secondary surface (selected row) |
-| `primary`           | Primary accent                   |
-| `primary_dim`       | Dimmed primary                   |
-| `on_primary`        | Text on primary backgrounds      |
-| `accent`            | Main accent color                |
-| `accent_dim`        | Dimmed accent                    |
-| `text_high`         | High-contrast text               |
-| `text_med`          | Medium-contrast text             |
-| `text_dim`          | Subdued text                     |
-| `success`           | Success indicators               |
-| `error`             | Error indicators                 |
-| `warning`           | Warning indicators               |
-| `secondary`         | Secondary accent                 |
-| `tertiary`          | Tertiary accent                  |
-| `tree_connector`    | Tree branch connector lines      |
-| `tab_active`        | Active main tab FG               |
-| `tab_active_bg`     | Active main tab BG               |
-| `sub_tab_active`    | Active sub-tab FG                |
-| `sub_tab_active_bg` | Active sub-tab BG                |
-| `toolbar_bg`        | Action/status bar background     |
-| `focused_bg`        | Focused element background       |
-| `form_bg`           | Form panel background            |
+| Field                | Description                      |
+| -------------------- | -------------------------------- |
+| `bg`                 | Main background                  |
+| `surface`            | Panel/bar background             |
+| `surface_2`          | Secondary surface (selected row) |
+| `primary`            | Primary accent                   |
+| `primary_dim`        | Dimmed primary                   |
+| `on_primary`         | Text on primary backgrounds      |
+| `accent`             | Main accent color                |
+| `accent_dim`         | Dimmed accent                    |
+| `text_high`          | High-contrast text               |
+| `text_med`           | Medium-contrast text             |
+| `text_dim`           | Subdued text                     |
+| `success`            | Success indicators               |
+| `error`              | Error indicators                 |
+| `warning`            | Warning indicators               |
+| `secondary`          | Secondary accent                 |
+| `tertiary`           | Tertiary accent                  |
+| `tree_connector`     | Tree branch connector lines      |
+| `taskpath_separator` | `kind: path` segment separator   |
+| `group_header`       | Group-header rows + total footer |
+| `tab_active`         | Active main tab FG               |
+| `tab_active_bg`      | Active main tab BG               |
+| `sub_tab_active`     | Active sub-tab FG                |
+| `sub_tab_active_bg`  | Active sub-tab BG                |
+| `toolbar_bg`         | Action/status bar background     |
+| `focused_bg`         | Focused element background       |
+| `form_bg`            | Form panel background            |
 
 </details>
 

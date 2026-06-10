@@ -568,6 +568,12 @@ pub enum ContentAction {
     /// remain cached, so a subsequent re-expand reuses them without
     /// a refetch.
     TreeCollapseAll,
+    /// Rotate the runtime grouping granularity (M3) on a grouped flat view:
+    /// `ungrouped → Day → Week → Month → Year → ungrouped`, bucketing the
+    /// level's configured `group_by` column. A no-op on a level that
+    /// declares no `group_by` (and in tree mode). Lets a user regroup a
+    /// worklog by day/week/month without editing the view YAML.
+    CycleGrouping,
 }
 
 impl ContentAction {
@@ -581,6 +587,7 @@ impl ContentAction {
             Self::OpenScriptsMenu => "open_scripts_menu",
             Self::TreeCollapse => "tree_collapse",
             Self::TreeCollapseAll => "tree_collapse_all",
+            Self::CycleGrouping => "cycle_grouping",
         }
     }
 }
@@ -603,6 +610,7 @@ impl FromStr for ContentAction {
             "open_scripts_menu" => Ok(Self::OpenScriptsMenu),
             "tree_collapse" => Ok(Self::TreeCollapse),
             "tree_collapse_all" => Ok(Self::TreeCollapseAll),
+            "cycle_grouping" => Ok(Self::CycleGrouping),
             other => Err(format!("unknown content action: {}", other)),
         }
     }
@@ -1107,6 +1115,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::OpenScriptsMenu, KeyBinding::new("q"));
         m.insert(ContentAction::TreeCollapse, KeyBinding::new("c"));
         m.insert(ContentAction::TreeCollapseAll, KeyBinding::new("zm"));
+        m.insert(ContentAction::CycleGrouping, KeyBinding::new("zg"));
         Self { bindings: m }
     }
 }

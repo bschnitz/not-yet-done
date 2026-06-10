@@ -137,6 +137,17 @@ nur Tasks/Trackings den Typ überhaupt brauchen.
 - `summary_only`: Gruppen auf eine Zeile pro Gruppe kollabieren
   (= Trackings „Condensed").
 
+> **Umgesetzt (Variante 3, Hybrid).** Der **generische** Partition-/Summen-
+> Mechanismus liegt framework-agnostisch in `not-yet-done-table`
+> (`group.rs`: `GroupPlan`/`PlanRow`/`group()`), die **typisierte** Extraktion
+> (ISO-Datums-Buckets, Duration-Parsing) als reines TUI-Modul
+> `views/group_aggregate.rs` (Spiegel von `column_format.rs`). Der gruppierte
+> Render-Pfad sitzt in `content_view::build_grouped_table`; Laufzeit-Umschaltung
+> via Aktion `cycle_grouping` (Default `zg`). Farbe der Header/Footer-Zeilen über
+> Theme `group_header`. Gilt nur für einzeilige Flat-Tabellen (kein
+> `row_layout`, kein Tree). Capability-only — noch an keine Live-View gebunden
+> (wie E1/E4b bis zum Cutover A1/A2).
+
 ### M4 — Tree-Fold-Aggregation (E3)
 
 Im Tree-Mode eine numerische Spalte über den Teilbaum kumulieren
@@ -201,7 +212,9 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   injizierte `now`).
 - **E2 — Gruppierung + Aggregation (M3).** `group_by` (inkl. Datums-Buckets,
   laufzeit-umschaltbar), `aggregates`, Gruppen-Header/-Total, Grand-Total,
-  `summary_only`. Tests im Table-Engine.
+  `summary_only`. Tests auf drei Ebenen: Engine-Mechanismus
+  (`not-yet-done-table::group`), typisierte Extraktion (`group_aggregate`) und
+  Render-Pfad-Integration (`build_grouped_table` im View-Layer).
 - **E3 — Tree-Fold-Aggregation (M4).** Kumulation über Teilbaum,
   `own`/`cumulated`. Tests.
 - **E5 — Generischer Form-InputSpec (M6).** `InputSpec::Form` +

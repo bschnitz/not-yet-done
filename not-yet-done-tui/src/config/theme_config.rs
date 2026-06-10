@@ -84,6 +84,14 @@ pub struct ThemeConfig {
     #[serde(default = "d_taskpath_separator")]
     pub taskpath_separator: HexColor,
 
+    // ── Grouping ─────────────────────────────────────────────────────────
+    /// Color of group-header rows and the grand-total footer in grouped
+    /// content views (M3 `group_by`). A row introducing a date bucket or a
+    /// category, plus the totals line, render in this accent so they stand
+    /// out from the data rows. Defaults to the same hue as `accent`.
+    #[serde(default = "d_group_header")]
+    pub group_header: HexColor,
+
     // ── Tab bar ─────────────────────────────────────────────────────────
     #[serde(default = "d_tab_active")]
     pub tab_active: HexColor,
@@ -170,6 +178,9 @@ fn d_tree_connector() -> HexColor {
 fn d_taskpath_separator() -> HexColor {
     hex("#fab387")
 }
+fn d_group_header() -> HexColor {
+    hex("#f9e2af")
+}
 fn d_tab_active() -> HexColor {
     hex("#B8BB26")
 }
@@ -214,6 +225,7 @@ impl Default for ThemeConfig {
             tertiary: d_tertiary(),
             tree_connector: d_tree_connector(),
             taskpath_separator: d_taskpath_separator(),
+            group_header: d_group_header(),
             tab_active: d_tab_active(),
             tab_active_bg: d_tab_active_bg(),
             sub_tab_active: d_sub_tab_active(),

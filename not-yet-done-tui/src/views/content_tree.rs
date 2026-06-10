@@ -678,6 +678,9 @@ mod tests {
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         }
     }
 
@@ -702,6 +705,9 @@ mod tests {
             script_template: None,
             shortcuts: HashMap::new(),
             leaf_glyph: None,
+            group_by: None,
+            aggregates: Vec::new(),
+            summary_only: false,
         }
     }
 
