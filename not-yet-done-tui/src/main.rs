@@ -3,12 +3,17 @@ mod app;
 mod components;
 mod config;
 mod edit_session;
-mod editor_templates;
 mod events;
 mod filter_builder;
 mod keymap;
-pub mod notes;
 mod query_filter;
+
+// The task editor-buffer format and notes I/O moved into the
+// `not-yet-done-local-adapter` crate (the `TaskAdapter` owns them, plan
+// phase A1b). Re-export them here so the transitional native task views /
+// edit sessions keep referring to `crate::editor_templates` / `crate::notes`
+// until the C1 cutover removes the native path.
+pub(crate) use not_yet_done_local_adapter::{editor_templates, notes};
 mod tree_edit;
 mod render;
 mod tabs;
@@ -93,6 +98,7 @@ async fn main() -> Result<()> {
         Arc::clone(&task_service),
         Arc::clone(&tracking_repo),
         domain_events.clone(),
+        tui_config.tracking.allow_parallel,
     );
     let factory_builder: Box<
         dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>

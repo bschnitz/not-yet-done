@@ -8,6 +8,8 @@ tokio       = { workspace = true }
 async-trait = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
+dirs        = { workspace = true }
+slug        = "0.1"
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-core    = { path = "../not-yet-done-core" }
 

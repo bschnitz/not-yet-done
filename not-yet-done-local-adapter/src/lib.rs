@@ -26,6 +26,8 @@ use not_yet_done_core::repository::TrackingRepository;
 use not_yet_done_core::service::TaskService;
 use tokio::sync::broadcast;
 
+pub mod editor_templates;
+pub mod notes;
 pub mod task;
 pub use task::{TaskAdapter, TaskAdapterFactory};
 
@@ -54,6 +56,14 @@ pub struct CoreHandle {
     pub task_service: Arc<dyn TaskService>,
     pub tracking_repo: Arc<dyn TrackingRepository>,
     pub events: DomainEventSender,
+    /// Tracking policy mirrored from the host's `tracking.allow_parallel`
+    /// config. When `false` (the default) starting tracking on a task via
+    /// the editor's `tracking: true` field first stops every other active
+    /// tracking, so at most one task tracks at a time; when `true` parallel
+    /// trackings are allowed. The local adapters need it because the
+    /// `tracking:` toggle in the task edit-buffer (A1b) goes through the
+    /// adapter, not the host's native session.
+    pub allow_parallel_tracking: bool,
 }
 
 impl CoreHandle {
@@ -61,11 +71,13 @@ impl CoreHandle {
         task_service: Arc<dyn TaskService>,
         tracking_repo: Arc<dyn TrackingRepository>,
         events: DomainEventSender,
+        allow_parallel_tracking: bool,
     ) -> Self {
         Self {
             task_service,
             tracking_repo,
             events,
+            allow_parallel_tracking,
         }
     }
 }

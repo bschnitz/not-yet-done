@@ -317,9 +317,9 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   (eager-load + cache, `search_in_tree`), Spalten via E1, Filter als
   `FilterExpr` (Query-String → bestehende Core-Übersetzung),
   `saved_query_store` auf den bestehenden DB-Tabellen (Scope `task`,
-  keine Datenmigration). Aktionen: add/edit (Form via E5),
-  reparent (Form oder mark/paste via E6), delete (`DeleteSelf`),
-  undelete/restore (View-Level-Actions am Root-Node), notes, scripts,
+  keine Datenmigration). Aktionen: add/edit (Editor-Buffer statt E5-Form,
+  siehe A1b-Box), reparent (mark/paste via E6), delete (`DeleteSelf`),
+  undelete/restore, notes, scripts,
   tracking-toggle (emittiert `TrackingStarted/Stopped` auf den Bus).
   `views/tasks.yaml`.
 
@@ -343,10 +343,34 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   > damit A1b-Mutationen ohne Cache-Nacharbeit korrekt refetchen.
   > Beispiel + Regressionstest: `docs/examples/views/tasks.yaml`
   > (parst + validiert im Test). Capability-only — die native
-  > `TasksView` läuft bis zum C1-Cutover unangetastet weiter. **Offen
-  > (A1b/A1c):** Mutationen (Form-add/edit, delete/undelete, reparent/E6),
-  > tracking-toggle + Marker-Spalte, Saved Queries (Scope `task`),
-  > Filter via `FilterExpr`, scripts.
+  > `TasksView` läuft bis zum C1-Cutover unangetastet weiter.
+
+  > **A1b umgesetzt (Mutationen).** Add/Edit laufen über
+  > **`InputSpec::Editor`** (nicht die E5-Form): ein Markdown-Buffer mit
+  > `---`-Frontmatter (`status`/`priority`/`tracking`/`parent`) und
+  > `## Description:` / `## Notes:`-Body. Begründung: Tasks haben
+  > mehrzeilige Markdown-Beschreibungen + einen separaten Notes-Abschnitt,
+  > eine Single-Line-Form wäre eine Regression. Buffer-Format ist
+  > **adapter-eigen** (`editor_templates`/`notes` ins Crate
+  > `not-yet-done-local-adapter` verschoben, gemeinsame Quelle mit der
+  > transitorischen nativen Session bis C1). `add` ist eine
+  > `type: create`-Action auf dem Container (Root → Top-Level-Task,
+  > Drill-in-Task → Subtask; das `parent:`-Feld im Buffer gewinnt), `edit`
+  > eine `type: edit`-Action auf dem Task. `delete` (rekursiv, mit
+  > Confirm-Flow → `DeleteSelf` → `execute("delete")`), `undelete`
+  > (`undelete_last`, ignoriert Node-Identität), `mark-move`/`paste-move`
+  > (Reparent mit Zyklus-Guard, M7 — Adapter macht den Move in
+  > `invoke_action` aus `ActionContext::marked`) hängen am generischen
+  > `shortcuts:`-Pfad (`d`/`u`/`m`/`p`). Jede Mutation emittiert ein
+  > `DomainEvent` auf den Bus (`TaskChanged`, plus `Tracking*` beim
+  > Toggle), worauf die Bridge den Snapshot leert. **Tracking-Toggle im
+  > Edit-Buffer vorgezogen** (statt rein A1c): das `tracking:`-Feld im
+  > geteilten Template wäre sonst ein totes Feld; `CoreHandle` trägt jetzt
+  > `allow_parallel_tracking` (aus `tracking.allow_parallel`).
+  > `capabilities`: `supports_create`/`supports_delete` → `true`.
+  > **Offen (A1c):** Tracking-**Marker-Spalte** + dedizierte Start/Stop-
+  > Taste, Saved Queries (Scope `task`), Filter via `FilterExpr`, scripts,
+  > optional „Add-Child unter Selektion im Tree-Mode".
 
 - **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
   Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed
