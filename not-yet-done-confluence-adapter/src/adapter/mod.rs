@@ -178,6 +178,7 @@ impl ContentAdapter for ConfluenceAdapter {
             supports_batch_download: false,
             supports_total_count: false,
             supports_tree_aggregation: false,
+            propagates_query_to_subtree: false,
         }
     }
 

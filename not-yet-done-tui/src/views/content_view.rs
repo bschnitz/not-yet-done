@@ -3001,6 +3001,11 @@ impl ContentPane {
         self.active_query = Some(query);
         self.active_query_name = name;
         self.active_query_vars.clear();
+        // A new query invalidates any expanded subtree (loaded under the
+        // old query): re-derive the tree from the upcoming root reload.
+        if let Some(tree) = self.tree.as_mut() {
+            tree.clear_for_new_query();
+        }
     }
 
     /// Variant of [`set_query`] that also stores variable bindings to
@@ -3015,6 +3020,10 @@ impl ContentPane {
         self.active_query = Some(query);
         self.active_query_name = name;
         self.active_query_vars = vars;
+        // See `set_query`: a query change resets the tree expansion.
+        if let Some(tree) = self.tree.as_mut() {
+            tree.clear_for_new_query();
+        }
     }
 
     pub fn active_query_vars(&self) -> &std::collections::HashMap<String, String> {

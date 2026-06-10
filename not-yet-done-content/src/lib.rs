@@ -233,6 +233,17 @@ pub struct AdapterCapabilities {
     /// cumulate leave this `false` and the `toggle_tree_aggregate` action and
     /// hint stay hidden.
     pub supports_tree_aggregation: bool,
+    /// Whether the active query applies to child node lists at every
+    /// depth, not just the root `list()`. When `true`, the engine
+    /// threads the pane's active (rendered) query into tree-expansion
+    /// and drill-down `list()` calls so a filtered tree stays filtered
+    /// below the root. Adapters whose child node types carry *different*
+    /// query semantics than their parent (e.g. Jira epic → story, where
+    /// the parent's JQL must not leak onto the children) leave this
+    /// `false` — child loads then receive `query: None` as before. Only
+    /// homogeneous trees (the task forest: `task:item` → `task:item`,
+    /// one `FilterExpr` valid at every depth) opt in.
+    pub propagates_query_to_subtree: bool,
 }
 
 // ---------------------------------------------------------------------------

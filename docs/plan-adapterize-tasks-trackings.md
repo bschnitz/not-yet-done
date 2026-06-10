@@ -379,8 +379,44 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   > `apply_tracking(!is_tracked)` → respektiert die Exklusiv-Policy, emittiert
   > `Tracking*`, Bridge invalidiert → Reload. `actions_for_type` + der
   > A1b-Action-Test mitgezogen.
-  > **Offen (A1c):** Saved Queries (Scope `task`), Filter via `FilterExpr`,
-  > scripts, optional „Add-Child unter Selektion im Tree-Mode".
+  > **A1c-2 umgesetzt (Saved Queries + `FilterExpr`-Filter = ein Feature).**
+  > Eine Saved Query ist ohne Auswertung tot, darum zusammen gebaut. Zwei
+  > Design-Entscheidungen: (1) **gefilterter Baum** statt Flach-Liste — die
+  > Treffer plus ihre Vorfahren bleiben als ausgedünnter Tree stehen, damit
+  > tiefe Treffer erreichbar sind; (2) **frischer FS-Store** im generischen
+  > Scope `tasks/<id>/<view>` (`FsSavedQueryStore`, nicht der native
+  > `task`-Scope). Mechanik in fünf Schichten:
+  >
+  > - **A (content):** neues `AdapterCapabilities.propagates_query_to_subtree`
+  >   (Default `false`). Heterogene Adapter (Jira Epic→Story) lassen es aus,
+  >   damit die Parent-JQL nicht auf andersartige Kinder leakt; der homogene
+  >   Task-Forest (`task:item`→`task:item`, ein `FilterExpr` auf jeder Tiefe)
+  >   opt-in `true`.
+  > - **B (engine):** `spawn_tree_expand`/`spawn_content_drill_down` reichten
+  >   bisher hart `query: None` an Kind-`list()`. Neu reicht
+  >   `subtree_query_for_pane` die aktive (gerenderte) Pane-Query bei
+  >   `propagates_query_to_subtree` an jede Tiefe weiter.
+  > - **C (view-state):** `TreeState::clear_for_new_query()` in beiden
+  >   Query-Settern verwirft `expanded`+`cache`+`entries` — sonst Stale-Kinder
+  >   vom alten Filter. Korrekt für alle Tree-Adapter, nicht nur Tasks.
+  > - **D (adapter):** `resolve_visible_set` parst die Query
+  >   (`query_filter::parse`) → `task_service.list_filtered(&expr)` → Treffer,
+  >   dann **In-Memory-Vorfahren-Walk** über `snapshot.by_id[..].parent`
+  >   (Vorfahren strukturell nötig, unabhängig von `options.include_ancestors`).
+  >   `child_summaries`/`summary` nehmen `filter: Option<&HashSet<Uuid>>`
+  >   (`has_children` zählt nur sichtbare Kinder). Stateless pro Call — der
+  >   `ForestSnapshot` bleibt immutable; ein `list_filtered`-DB-Call pro Expand
+  >   ist für eine persönliche Task-DB vernachlässigbar.
+  > - **E (config/doc):** `tasks.yaml` `query:`-Block (Default `open tasks`:
+  >   nicht-`done`, nicht gelöscht), `view_config`-Test parst den Default-Body,
+  >   Smoke-Sektion A1c-2.
+  >
+  > **Akzeptierte Lifecycle-Kante:** Eine strukturelle `DomainEvent`
+  > (add/delete/reparent) leert den Snapshot → der Filter ist verloren, bis
+  > die Pane die Query erneut sendet. Bewusst nicht weiter abgefangen.
+  >
+  > **Offen (A1c):** scripts (`:script` auf dem Tasks-Tab), optional
+  > „Add-Child unter Selektion im Tree-Mode" / Reparent-to-Root-Un-Nest.
 
 - **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
   Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed
