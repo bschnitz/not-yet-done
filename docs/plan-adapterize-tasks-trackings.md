@@ -280,6 +280,40 @@ mark/paste aus dem DB-Script-Folders-Plan (der darauf umgestellt wird).
 Task-/Tracking-Factory captured diese Handles. Erster In-Process-Adapter
 über reine Lokaldaten — Pattern wird hier einmal sauber etabliert.
 
+### M9 — Adapter-driven Live Rows (Variante 1, A2a)
+
+> **Generischer Mechanismus, vom User entworfen.** Ein Adapter kann
+> einzelne Zeilen **pushen** und das Refresh-Intervall **vorgeben +
+> dynamisch ändern**; die TUI patcht die Zeile per `id` in-place. Löst die
+> Tracking-Dauer-Spalte (eine Spalte, live für laufende, statisch für
+> abgeschlossene — was ein render-seitiges `kind: elapsed` nicht kann) und
+> generalisiert über Dauern hinaus (CI-Fortschritt, editierte Chat-Zeilen).
+>
+> Zwei neue `Invalidation`-Varianten in `not-yet-done-content`:
+>
+> - `Invalidation::Row(NodeSummary)` — die **vollständige** neue Zeile.
+>   `ContentView::patch_row` findet sie per `id` in jedem Pane, ersetzt das
+>   geladene Item und ruft `rebuild_table_with` (re-derived Zellen +, bei
+>   aktivem `group_by`, Gruppensummen/Footer). Kein Refetch,
+>   Selektion/Scroll bleiben.
+> - `Invalidation::RefreshInterval(Option<Duration>)` — der Adapter taktet
+>   den **Framework-Timer**: `Some(d)` startet/re-taktet, `None` stoppt.
+>
+> **Variante 1 (Framework-Timer + Pull).** `App.live_refresh_timers:
+HashMap<view_index, JoinHandle>`; `set_live_refresh_timer` (re)spawnt je
+> View einen `tokio::interval`, der pro Tick `adapter.live_rows()` zieht und
+> jede Zeile als `Invalidation::Row` durch den Load-Channel schickt. Neue
+> Trait-Methode `ContentAdapter::live_rows() -> Vec<NodeSummary>` (Default
+> leer) liefert nur die Zeilen, deren Rendering sich ändert. Passt zur
+> bestehenden Push-Signal/Pull-Daten-Trennung; Takten an _einer_ Stelle.
+>
+> `NodeSummary`/`Metadata`/`MetadataField` bekamen `PartialEq, Eq` (damit
+> `Invalidation` seine Derives behält — keine Test-Änderungen).
+>
+> Bootstrap race-frei: der Invalidation-Watcher subscribt **vor** dem ersten
+> Load, also erreicht ein `RefreshInterval`, das der Adapter am Ende seines
+> Snapshot-Loads pusht, garantiert einen Empfänger.
+
 ## Phasen
 
 Jede Phase: implementieren → `cargo build --release` → `cargo install` →
@@ -462,6 +496,24 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   Restore-All, scripts, Filter, tracking-toggle. Brückt `TrackingTick` →
   `Repaint`. `views/trackings.yaml`.
 
+  > **In Unterphasen wie A1 (a/b/c):**
+  >
+  > - **A2a — Read-Path (FERTIG, ungepusht).** `tracking.rs` im
+  >   local-adapter (Vorlage `task.rs`): `TrackingAdapter` +
+  >   `TrackingSnapshot` (alle nicht-gelöschten Trackings, Task-Pfad-Map,
+  >   Active-Set), flache `tracking:root` → `tracking:entry`-Leaves.
+  >   Typisierte Spalten (taskpath `kind: path`, started/ended `datetime`,
+  >   duration `duration`). Live-Dauern über **M9** statt `kind: elapsed`
+  >   (eine Spalte live+statisch). Saved-Query-Filter via
+  >   `TrackingRepository::find_filtered`. `group_by`/`aggregates` rein
+  >   Engine-seitig aus `trackings.yaml`. Factory `trackings` registriert.
+  >   51 adapter + 536 TUI Tests grün, installiert. **Offen A2a:**
+  >   `patch_row`-/Timer-Unit-Test (bisher nur Build + Adapter-Logik-Tests),
+  >   Smoke.
+  > - **A2b — Mutationen.** delete / restore (undelete) / restore-all,
+  >   tracking-toggle, scripts-Action.
+  > - **A2c — Condensed + Tree (own/cumulated, M4) + Capability-Gating.**
+  >
   > **Mitzunehmen (Follow-up aus E3, M4):** Hier den **Capability-Gating-
   > Pfad** sauber etablieren. Heute werden UI-Affordanzen durchgängig über
   > YAML (`actions:`, `tree_aggregate:`, …) gegated, nicht über
