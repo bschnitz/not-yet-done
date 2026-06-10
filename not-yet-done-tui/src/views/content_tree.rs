@@ -654,6 +654,7 @@ mod tests {
             format: None,
             separator: None,
             elapsed_from: None,
+            tree_aggregate: None,
         }
     }
 

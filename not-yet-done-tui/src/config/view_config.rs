@@ -728,6 +728,43 @@ pub struct ColumnDef {
     /// Ignored by every other kind.
     #[serde(default)]
     pub elapsed_from: Option<String>,
+    /// Tree-fold aggregation declaration (M4). When set, this column can show
+    /// either its own per-node value (the `key` field) or the adapter-computed
+    /// subtree-cumulated value (the `cumulated_field`), toggled at runtime via
+    /// `toggle_tree_aggregate`. Only meaningful in tree mode and only when the
+    /// adapter advertises `supports_tree_aggregation`. The TUI never folds the
+    /// tree itself (the tree is lazy-loaded — collapsed branches are not in
+    /// memory); the adapter must supply both values as metadata fields.
+    #[serde(default)]
+    pub tree_aggregate: Option<TreeAggregate>,
+}
+
+/// Tree-fold aggregation for a [`ColumnDef`] (M4). The column reads one of two
+/// adapter-supplied metadata fields depending on the level's toggle state: its
+/// own `key` field (per-node value) or [`cumulated_field`](Self::cumulated_field)
+/// (the adapter's subtree sum). Showing both at once = two columns on two
+/// fields; this is for the *switchable* single column.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeAggregate {
+    /// Metadata field key carrying the adapter-computed subtree-cumulated
+    /// value (canonical for the column's `kind`, e.g. integer seconds for a
+    /// `duration` column). The own value still comes from the column's `key`.
+    pub cumulated_field: String,
+    /// Which value the column shows before the user toggles. Default `own`.
+    #[serde(default)]
+    pub default: TreeAggregateDefault,
+}
+
+/// Initial state for a [`TreeAggregate`] column (M4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeAggregateDefault {
+    /// Show the per-node value (the column's `key` field). The default.
+    #[default]
+    Own,
+    /// Show the adapter's subtree-cumulated value (the `cumulated_field`).
+    Cumulated,
 }
 
 /// Semantic type of a [`ColumnDef`] value (M2 — typed column values).

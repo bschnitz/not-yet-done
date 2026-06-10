@@ -154,6 +154,34 @@ Im Tree-Mode eine numerische Spalte über den Teilbaum kumulieren
 (`own` vs. `cumulated`) — generisch, getrieben durch eine
 `tree_aggregate`-Deklaration auf der Spalte.
 
+> **Umgesetzt (adapter-getrieben).** Der Tree ist **lazy** (`TreeState.cache`
+> hält nur den aufgeklappten Teilbaum) → die TUI kann nicht selbst falten.
+> Deshalb: der **Adapter** liefert pro `NodeSummary` beide Werte als
+> Metadatenfelder (Eigenwert unter dem Spalten-`key`, Summenwert unter
+> `cumulated_field`) und deklariert die Fähigkeit
+> `AdapterCapabilities.supports_tree_aggregation`. Die View-YAML deklariert
+> `tree_aggregate: { cumulated_field, default: own|cumulated }` auf der Spalte;
+> im Tree-Render-Pfad (`build_tree_data_rows`) liest die Spalte je nach
+> Umschalt-Status das eigene oder das kumulierte Feld, formatiert mit der
+> gleichen `kind:`. Laufzeit-Aktion `toggle_tree_aggregate` (Default `zt`,
+> View-State, nicht persistiert) flippt **alle** `tree_aggregate`-Spalten der
+> Ebene. Eigen- **und** Summenwert nebeneinander = zwei normale Spalten auf
+> beide Felder (kein neuer Mechanismus).
+>
+> **Abweichung vom ursprünglichen Design (bewusst):** Das Gate auf die Aktion
+> hängt an der **Config-Präsenz** (`tree_aggregate`-Spalte vorhanden), nicht an
+> `supports_tree_aggregation` — TUI-Panes tragen heute **keine** Adapter-
+> Capabilities (kein einziger `.capabilities()`-Aufruf im View-Layer). Das ist
+> exakt der `cycle_grouping`-Präzedenzfall (M3, gated auf `level_has_group_by`,
+> nicht auf eine Capability). Der View-Autor deklariert `tree_aggregate:` nur
+> für Adapter, die das Summenfeld liefern, also ist Config-Präsenz das
+> wirksame Gate. Capability-Plumbing in die Panes wäre ein eigener Cross-Layer-
+> Pfad und wird, falls nötig, bei A1/A2 (M8-Wiring) nachgezogen.
+>
+> Tests auf zwei Ebenen: Config-Deserialisierung (`tree_aggregate`-Felder) und
+> Render-/Toggle-Integration (`build_tree_data_rows` + `toggle_tree_aggregate`,
+> own↔cumulated, No-op ohne Spalte). Capability-only bis A1/A2.
+
 ### M5 — Live-Elapsed-Spalte (E4b)
 
 Spalten-`kind: elapsed` mit Begleitfeld `elapsed_from: <datetime-feld>`

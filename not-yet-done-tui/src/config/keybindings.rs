@@ -574,6 +574,12 @@ pub enum ContentAction {
     /// declares no `group_by` (and in tree mode). Lets a user regroup a
     /// worklog by day/week/month without editing the view YAML.
     CycleGrouping,
+    /// Toggle `tree_aggregate` columns (M4) between a node's own value and
+    /// the adapter's subtree-cumulated value, in tree mode. A no-op on a
+    /// level whose columns declare no `tree_aggregate` (and in flat mode).
+    /// Lets a user flip a worklog tree between per-node and rolled-up
+    /// durations without editing the view YAML.
+    ToggleTreeAggregate,
 }
 
 impl ContentAction {
@@ -588,6 +594,7 @@ impl ContentAction {
             Self::TreeCollapse => "tree_collapse",
             Self::TreeCollapseAll => "tree_collapse_all",
             Self::CycleGrouping => "cycle_grouping",
+            Self::ToggleTreeAggregate => "toggle_tree_aggregate",
         }
     }
 }
@@ -611,6 +618,7 @@ impl FromStr for ContentAction {
             "tree_collapse" => Ok(Self::TreeCollapse),
             "tree_collapse_all" => Ok(Self::TreeCollapseAll),
             "cycle_grouping" => Ok(Self::CycleGrouping),
+            "toggle_tree_aggregate" => Ok(Self::ToggleTreeAggregate),
             other => Err(format!("unknown content action: {}", other)),
         }
     }
@@ -1116,6 +1124,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::TreeCollapse, KeyBinding::new("c"));
         m.insert(ContentAction::TreeCollapseAll, KeyBinding::new("zm"));
         m.insert(ContentAction::CycleGrouping, KeyBinding::new("zg"));
+        m.insert(ContentAction::ToggleTreeAggregate, KeyBinding::new("zt"));
         Self { bindings: m }
     }
 }

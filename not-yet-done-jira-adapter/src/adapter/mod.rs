@@ -146,6 +146,7 @@ impl ContentAdapter for JiraAdapter {
             supports_search: true,
             supports_batch_download: false,
             supports_total_count: true,
+            supports_tree_aggregation: false,
         }
     }
 

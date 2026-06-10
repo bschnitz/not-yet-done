@@ -226,6 +226,13 @@ pub struct AdapterCapabilities {
     pub supports_batch_download: bool,
     /// Whether list() can return total counts.
     pub supports_total_count: bool,
+    /// Whether the adapter computes subtree-cumulated values for tree nodes
+    /// (M4 tree-fold aggregation). When `true`, a `tree_aggregate` column may
+    /// toggle between a node's own value and the adapter's cumulated field;
+    /// the TUI never folds the (lazy-loaded) tree itself. Adapters that cannot
+    /// cumulate leave this `false` and the `toggle_tree_aggregate` action and
+    /// hint stay hidden.
+    pub supports_tree_aggregation: bool,
 }
 
 // ---------------------------------------------------------------------------
