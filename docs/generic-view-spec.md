@@ -473,8 +473,12 @@ kumulieren, lässt er das Feld weg.
 
 **Laufzeit-Umschaltung (`toggle_tree_aggregate`, Default `zt`):** Die Aktion
 schaltet **alle** `tree_aggregate`-Spalten der aktiven Ebene zwischen Eigen- und
-Summenwert um. Sie ist nur aktiv, wenn die Ebene (im Tree-Mode) überhaupt eine
-`tree_aggregate`-Spalte hat. Der Status ist View-State (nicht persistiert).
+Summenwert um. Sie ist nur aktiv, wenn **zwei** Bedingungen erfüllt sind: die
+Ebene (im Tree-Mode) hat überhaupt eine `tree_aggregate`-Spalte **und** der
+Adapter meldet `supports_tree_aggregation`. Meldet er die Fähigkeit nicht (oder
+ist gar kein Adapter gebunden), bleibt die Taste unbelegt und der Toggle ein
+No-op — eine `tree_aggregate:`-Deklaration allein genügt also nicht. Der Status
+ist View-State (nicht persistiert).
 
 > **Eigen- _und_ Summenwert nebeneinander** braucht keinen neuen Mechanismus —
 > dafür zwei normale Spalten auf die beiden Felder legen (z. B. `key: duration`
