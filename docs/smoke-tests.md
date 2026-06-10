@@ -3367,7 +3367,9 @@ bespoke nativen Trackings-Tab (bis C1).
       bleibt sichtbar).
 - [ ] Die `Duration`-Spalte zeigt zunächst die **kumulierte** Teilbaum-Summe
       (Default `cumulated`). `zt` schaltet alle `tree_aggregate`-Spalten auf
-      die **eigene** Dauer des Tasks um (und zurück).
+      die **eigene** Dauer des Tasks um (und zurück). (`zt` ist nur aktiv, weil
+      der Trackings-Adapter `supports_tree_aggregation` meldet — das
+      Capability-Gate. Ein `tree_aggregate:` in der YAML allein reicht nicht.)
 - [ ] Ein Eltern-Task ohne eigenes Tracking, aber mit getrackten Kindern, zeigt
       cumulated > 0 (Eigenwert 0:00:00 nach `zt`).
 - [ ] Drill-in (Enter/→) klappt die Subtasks auf; auf jeder Tiefe gilt die

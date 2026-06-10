@@ -168,19 +168,30 @@ Im Tree-Mode eine numerische Spalte über den Teilbaum kumulieren
 > Ebene. Eigen- **und** Summenwert nebeneinander = zwei normale Spalten auf
 > beide Felder (kein neuer Mechanismus).
 >
-> **Abweichung vom ursprünglichen Design (bewusst):** Das Gate auf die Aktion
-> hängt an der **Config-Präsenz** (`tree_aggregate`-Spalte vorhanden), nicht an
-> `supports_tree_aggregation` — TUI-Panes tragen heute **keine** Adapter-
-> Capabilities (kein einziger `.capabilities()`-Aufruf im View-Layer). Das ist
-> exakt der `cycle_grouping`-Präzedenzfall (M3, gated auf `level_has_group_by`,
-> nicht auf eine Capability). Der View-Autor deklariert `tree_aggregate:` nur
-> für Adapter, die das Summenfeld liefern, also ist Config-Präsenz das
-> wirksame Gate. Capability-Plumbing in die Panes wäre ein eigener Cross-Layer-
-> Pfad und wird, falls nötig, bei A1/A2 (M8-Wiring) nachgezogen.
+> **Capability-Gating (nachgezogen, A2c-Follow-up).** Das Gate auf die Aktion
+> hängt jetzt an **zwei** Bedingungen, beide nötig: **Config-Präsenz**
+> (`tree_aggregate`-Spalte vorhanden) **und** **Capability**
+> (`supports_tree_aggregation`). Dafür der generische Pfad: `ContentView::new`
+> snapshottet die Adapter-Capabilities **einmal** (`adapter.capabilities()`,
+> ohne Adapter → all-false) und reicht eine Kopie in **jede** `ContentPane`
+> (auch bei Splits, geerbt von der Quell-Pane). `level_has_tree_aggregate`
+> liest `self.capabilities.supports_tree_aggregation` zusätzlich zur
+> Spalten-Präsenz; gegated sind dadurch automatisch sowohl der Claim
+> (`build_claims`, also Key + Hint) als auch der Toggle selbst. Bewusst die
+> **ganze** `AdapterCapabilities` auf der Pane gehalten, nicht nur ein bool —
+> künftige Affordanzen lesen die jeweilige Flag dort, statt den Wert neu
+> abzuleiten. Damit ist die ursprüngliche Design-Linie (Adapter deklariert
+> Fähigkeit, TUI zeigt nur an) vollständig: ein verirrtes `tree_aggregate:`
+> in der YAML bleibt wirkungslos, solange der Adapter die Fähigkeit nicht
+> meldet. (M3 `cycle_grouping` bleibt bewusst config-only — es gibt keine
+> `supports_grouping`-Capability; der Mechanismus steht aber bereit, falls je
+> eine eingeführt wird.)
 >
-> Tests auf zwei Ebenen: Config-Deserialisierung (`tree_aggregate`-Felder) und
+> Tests auf drei Ebenen: Config-Deserialisierung (`tree_aggregate`-Felder),
 > Render-/Toggle-Integration (`build_tree_data_rows` + `toggle_tree_aggregate`,
-> own↔cumulated, No-op ohne Spalte). Capability-only bis A1/A2.
+> own↔cumulated, No-op ohne Spalte, mit Capability-meldendem Mock-Adapter) und
+> das Gate selbst (Spalte vorhanden + Capability fehlt → unclaimable/No-op;
+> Spalte + Capability → claimable).
 
 ### M5 — Live-Elapsed-Spalte (E4b)
 
@@ -528,7 +539,7 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   >   sichtbares Ziel — eine „show deleted"-Subview ist Future-Work. 53
   >   adapter + 536 TUI Tests grün, installiert.
   > - **A2c — Condensed (FERTIG) + Tree (FERTIG, own/cumulated, M4) +
-  >   Capability-Gating (offen).**
+  >   Capability-Gating (FERTIG).**
   >   - **Condensed (FERTIG).** Statt eines Modus-Toggles als zweite `views:`
   >     (`key: v`, zurück mit `a`) auf der **generischen verschachtelten
   >     Gruppierung (M3 `then_by`)**: `group_by` nach Tag + `then_by` nach
@@ -565,19 +576,21 @@ cumulated }` auf der `duration`-Spalte (`zt` toggelt own↔cumulated über
   >     6 neue Adapter-Tests (Fold/Prune/Reroot/Metadata/parse-id/actions) =
   >     59 adapter; neuer `example_trackings_yaml_parses_and_validates` = 539
   >     TUI; installiert.
-  >
-  > **Mitzunehmen (Follow-up aus E3, M4):** Hier den **Capability-Gating-
-  > Pfad** sauber etablieren. Heute werden UI-Affordanzen durchgängig über
-  > YAML (`actions:`, `tree_aggregate:`, …) gegated, nicht über
-  > `AdapterCapabilities` — kein View-Layer-Code ruft `.capabilities()` auf.
-  > Beim In-Process-Wiring (M8) liegt der Adapter ohnehin vor (er wird schon
-  > in `action_bar_hints(... adapter)` durchgereicht); deshalb hier **einmal
-  > generisch**: Capabilities (`supports_tree_aggregation`, `supports_create`,
-  > `supports_delete`, `supports_search`, …) entweder in den Claim-Builder
-  > reichen (analog zu den Hints) **oder** beim Pane-/View-Binding einmal in
-  > ein Pane-Feld snapshotten. Dann `toggle_tree_aggregate` (und künftige
-  > Affordanzen) zusätzlich auf die jeweilige Capability gaten statt nur auf
-  > Config-Präsenz. Narrow-Einzelfix bewusst vermieden — siehe M4-Box.
+  >   - **Capability-Gating (FERTIG).** Der E3/M4-Follow-up: Adapter-
+  >     Capabilities werden jetzt in die Panes geplumbt. `ContentView::new`
+  >     snapshottet `adapter.capabilities()` **einmal** (ohne Adapter →
+  >     all-false) und reicht eine Kopie in jede `ContentPane` (auch bei Splits,
+  >     geerbt von der Quell-Pane). `level_has_tree_aggregate` gated jetzt
+  >     **zweifach**: Config-Präsenz (`tree_aggregate`-Spalte) **und**
+  >     `self.capabilities.supports_tree_aggregation` — damit fallen Claim
+  >     (Key + Hint via `build_claims`) und Toggle gemeinsam, sobald der
+  >     Adapter die Fähigkeit nicht meldet. Bewusst die **ganze**
+  >     `AdapterCapabilities` auf der Pane (nicht nur ein bool), damit künftige
+  >     Affordanzen die jeweilige Flag dort lesen statt sie neu abzuleiten —
+  >     das ist der generische Pfad, kein Narrow-Einzelfix. 2 neue Gate-Tests
+  >     (Spalte ohne Capability → unclaimable/No-op; Spalte + Capability →
+  >     claimable) = 541 TUI; installiert. (M3 `cycle_grouping` bleibt
+  >     config-only — keine `supports_grouping`-Capability existiert.)
 
 ### Cutover (harter Schnitt)
 

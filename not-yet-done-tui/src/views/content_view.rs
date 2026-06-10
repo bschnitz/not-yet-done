@@ -455,6 +455,16 @@ pub struct ContentPane {
     /// Tree-mode only; ignored by flat views. The TUI never folds the tree
     /// itself — the cumulated value is the adapter-supplied `cumulated_field`.
     tree_aggregate_override: Option<bool>,
+
+    /// Capabilities of the owning view's adapter, snapshotted once at pane
+    /// construction (the adapter is fixed for a `ContentView`'s lifetime).
+    /// Lets pane-local logic gate UI affordances on what the adapter can
+    /// actually do, independent of (and in addition to) the YAML config —
+    /// e.g. `toggle_tree_aggregate` requires `supports_tree_aggregation`.
+    /// Defaults to all-false (no adapter), which hides every capability-gated
+    /// affordance. This is the generic capability-gating path: future
+    /// affordances read the relevant flag here rather than re-deriving it.
+    capabilities: not_yet_done_content::AdapterCapabilities,
 }
 
 // ── Pane tree ────────────────────────────────────────────────────────
@@ -968,7 +978,12 @@ impl ContentPane {
     /// `tree_enabled = true` when the matching `ViewDef` declares
     /// `tree_label`; the pane's [`TreeState`] is then initialized to
     /// an empty tree and rendering switches to tree mode.
-    fn new(theme: Arc<Theme>, view_def_index: usize, tree_enabled: bool) -> Self {
+    fn new(
+        theme: Arc<Theme>,
+        view_def_index: usize,
+        tree_enabled: bool,
+        capabilities: not_yet_done_content::AdapterCapabilities,
+    ) -> Self {
         Self {
             view_def_index,
             theme,
@@ -1013,6 +1028,7 @@ impl ContentPane {
             tree_find: None,
             group_by_override: None,
             tree_aggregate_override: None,
+            capabilities,
         }
     }
 
@@ -1746,18 +1762,24 @@ impl ContentPane {
     // ── Tree-fold aggregation (M4) ───────────────────────────────────
 
     /// Whether the active (cursor-depth) tree level declares any
-    /// `tree_aggregate` column. Gates the `toggle_tree_aggregate` action and
-    /// its hint, analogous to [`level_has_group_by`](Self::level_has_group_by)
+    /// `tree_aggregate` column *and* the adapter advertises
+    /// `supports_tree_aggregation`. Gates the `toggle_tree_aggregate` action
+    /// and its hint, analogous to [`level_has_group_by`](Self::level_has_group_by)
     /// for `cycle_grouping`. `false` outside tree mode.
     ///
-    /// Note: this keys off the *view config* (a column declaring
-    /// `tree_aggregate`), not the adapter's `supports_tree_aggregation`
-    /// capability — TUI panes don't carry adapter capabilities today (no
-    /// pane consults them). A view author only declares `tree_aggregate` for
-    /// an adapter that supplies the cumulated field, so config-presence is the
-    /// effective gate until capabilities are plumbed to panes (at A1/A2).
+    /// Two gates, both required (this is the generic capability-gating path):
+    ///
+    /// 1. **Config** — a column declares `tree_aggregate` (the view author
+    ///    opted the column into the fold).
+    /// 2. **Capability** — the adapter's `supports_tree_aggregation` is set,
+    ///    snapshotted into [`capabilities`](Self::capabilities) at pane
+    ///    construction. An adapter that cannot supply a cumulated value (or
+    ///    no adapter at all) leaves this `false`, so the toggle stays a no-op
+    ///    and its key stays unclaimable even if a stray config declares the
+    ///    column. Config alone is not enough.
     fn level_has_tree_aggregate(&self, view_defs: &[ViewDef]) -> bool {
         self.tree.is_some()
+            && self.capabilities.supports_tree_aggregation
             && self
                 .current_columns(view_defs)
                 .iter()
@@ -4487,6 +4509,14 @@ impl ContentView {
 
         let active_subtab = config.views.iter().position(|v| v.default).unwrap_or(0);
 
+        // Snapshot the adapter's capabilities once — the adapter is fixed for
+        // this view's lifetime. Panes read this to gate capability-dependent
+        // affordances (e.g. `toggle_tree_aggregate`). No adapter → all-false.
+        let capabilities = adapter
+            .as_ref()
+            .map(|a| a.capabilities())
+            .unwrap_or_default();
+
         // One single-leaf pane tree per ViewDef. Splits add leaves later.
         let mut next_pane_id: PaneId = 0;
         let pane_trees: Vec<PaneTree> = (0..config.views.len())
@@ -4494,7 +4524,8 @@ impl ContentView {
                 let id = next_pane_id;
                 next_pane_id += 1;
                 let tree_enabled = config.views[i].tree_label.is_some();
-                let pane = ContentPane::new(Arc::clone(&theme), i, tree_enabled);
+                let pane =
+                    ContentPane::new(Arc::clone(&theme), i, tree_enabled, capabilities.clone());
                 let mut tree = PaneTree::new(i, id, pane);
                 tree.assign_tag(id, &pane_tag_alphabet);
                 tree
@@ -4985,7 +5016,8 @@ impl ContentView {
         let new_pane = {
             let theme = Arc::clone(&self.theme);
             let source = self.active_pane();
-            let mut p = ContentPane::new(theme, view_def_index, tree_enabled);
+            let mut p =
+                ContentPane::new(theme, view_def_index, tree_enabled, source.capabilities.clone());
             p.active_query = source.active_query.clone();
             p.active_query_name = source.active_query_name.clone();
             p.active_query_vars = source.active_query_vars.clone();
@@ -5109,7 +5141,8 @@ impl ContentView {
 
                 let mut new_pane = {
                     let source = self.active_pane();
-                    let mut p = ContentPane::new(theme, view_def_index, tree_enabled);
+                    let mut p =
+                        ContentPane::new(theme, view_def_index, tree_enabled, source.capabilities.clone());
                     // Inherit query/sort/page so any child-level fetch params
                     // line up with what the source had.
                     p.active_query = source.active_query.clone();
@@ -5249,7 +5282,8 @@ impl ContentView {
         let tree_enabled = child_def.tree_label.is_some();
         let mut new_pane = {
             let source = self.active_pane();
-            let mut p = ContentPane::new(theme, view_def_index, tree_enabled);
+            let mut p =
+                ContentPane::new(theme, view_def_index, tree_enabled, source.capabilities.clone());
             p.active_query = source.active_query.clone();
             p.active_query_name = source.active_query_name.clone();
             p.active_query_vars = source.active_query_vars.clone();
@@ -8551,6 +8585,20 @@ mod tests {
 
     /// A tree node carrying both the own (`dur`) and cumulated (`dur_cum`)
     /// metadata fields the `tree_aggregate` column toggles between.
+    /// A mock adapter that advertises `supports_tree_aggregation` so the
+    /// capability gate in [`ContentPane::level_has_tree_aggregate`] opens.
+    /// Items are injected via `set_items`, so the node tree is irrelevant.
+    fn tree_aggregating_adapter() -> Arc<dyn ContentAdapter> {
+        Arc::new(
+            MockAdapterBuilder::new("mock")
+                .capabilities(not_yet_done_content::AdapterCapabilities {
+                    supports_tree_aggregation: true,
+                    ..Default::default()
+                })
+                .build(),
+        )
+    }
+
     fn tnode_dur(id: &str, label: &str, own: &str, cumulated: &str) -> NodeSummary {
         use not_yet_done_content::{Metadata, MetadataField};
         let field = |k: &str, v: &str| MetadataField {
@@ -8569,7 +8617,12 @@ mod tests {
     /// `tree_aggregate_config(default)`, optionally after firing the toggle.
     fn tree_aggregate_dur_cell(default: TreeAggregateDefault, toggle: bool) -> String {
         let config = tree_aggregate_config(default);
-        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(
+            test_theme(),
+            &config,
+            Some(tree_aggregating_adapter()),
+            &KeyBindingConfig::default(),
+        );
         view.set_items(
             vec![tnode_dur("t1", "Task 1", "30", "100")],
             Vec::new(),
@@ -8641,6 +8694,59 @@ mod tests {
             SubViewMessage::Unhandled => {}
             other => panic!("expected Unhandled without a tree_aggregate column, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tree_aggregate_gated_off_without_capability() {
+        // The config *does* declare a `tree_aggregate` column, but the
+        // adapter (here: none → all-false capabilities) does not advertise
+        // `supports_tree_aggregation`. The capability gate must keep the
+        // toggle unclaimable and a no-op even though the column is present —
+        // config alone is not enough.
+        let config = tree_aggregate_config(TreeAggregateDefault::Cumulated);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_dur("t1", "Task 1", "30", "100")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        assert!(
+            !view.active_pane().level_has_tree_aggregate(&view_defs),
+            "capability absent → gate closed despite the tree_aggregate column",
+        );
+        assert!(!view.active_pane_mut().toggle_tree_aggregate(&view_defs));
+        match view.active_pane_mut().try_toggle_tree_aggregate(&view_defs) {
+            SubViewMessage::Unhandled => {}
+            other => panic!("expected Unhandled without the capability, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tree_aggregate_claimable_with_capability_and_column() {
+        // Mirror of the gate-off test: column present *and* the adapter
+        // advertises `supports_tree_aggregation` → the toggle is claimable.
+        let config = tree_aggregate_config(TreeAggregateDefault::Cumulated);
+        let mut view = ContentView::new(
+            test_theme(),
+            &config,
+            Some(tree_aggregating_adapter()),
+            &KeyBindingConfig::default(),
+        );
+        view.set_items(
+            vec![tnode_dur("t1", "Task 1", "30", "100")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        assert!(
+            view.active_pane().level_has_tree_aggregate(&view_defs),
+            "capability + column → gate open",
+        );
     }
 
     #[test]
@@ -10641,7 +10747,12 @@ mod tests {
     }
 
     fn empty_pane() -> ContentPane {
-        ContentPane::new(test_theme(), 0, true)
+        ContentPane::new(
+            test_theme(),
+            0,
+            true,
+            not_yet_done_content::AdapterCapabilities::default(),
+        )
     }
 
     #[test]
