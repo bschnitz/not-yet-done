@@ -29,6 +29,11 @@
 #     Respects the host's exclusivity policy (`tracking.allow_parallel`).
 #   * `m` mark-move / `p` paste-move — reparent: mark a task, move onto the
 #     target task (which becomes its new parent). Cycles are rejected.
+#   * `A` add-child — add a subtask under the *selected* node (vs. `a`,
+#     which adds at the container level). Nests under the tree cursor
+#     without drilling in first (`under_selection`).
+#   * `U` un-nest — move the selected task back to the top level. The
+#     target-free inverse of mark/paste-move.
 #
 # ## A1c scope (saved queries + filtering)
 #
@@ -143,6 +148,16 @@ views:
       - name: run script
         key: x
         type: script
+      # Add a subtask directly under the *selected* tree node (vs. `a`,
+      # which adds at the container level — a top-level task at the root).
+      # `under_selection: true` re-targets the create onto the highlighted
+      # row, so in tree mode `A` nests under the cursor without drilling in
+      # first. The editor buffer's `parent:` field still wins if edited.
+      - name: add child
+        key: A
+        type: create
+        id: add
+        under_selection: true
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f
@@ -173,6 +188,10 @@ views:
       t: toggle-tracking
       m: mark-move
       p: paste-move
+      # Un-nest: move the selected task back to the top level (parent_id =
+      # None). The comfort inverse of mark/paste-move — no target needed.
+      # No-op (notification) when the task is already top-level.
+      U: unnest
 
     children:
       # Recursive subtask branch — the same ChildDef serves every depth.
@@ -226,6 +245,12 @@ views:
           - name: run script
             key: x
             type: script
+          # Add a subtask under the selected row (see the root view).
+          - name: add child
+            key: A
+            type: create
+            id: add
+            under_selection: true
           - name: refresh
             key: r
             type: reload
@@ -236,3 +261,4 @@ views:
           t: toggle-tracking
           m: mark-move
           p: paste-move
+          U: unnest

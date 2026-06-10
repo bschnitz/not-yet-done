@@ -1007,6 +1007,16 @@ pub struct ActionDef {
     /// (e.g. a chat compose in a slim split) than the global default.
     #[serde(default)]
     pub editor: Option<String>,
+    /// For `create` actions: take the parent from the **currently selected
+    /// row** instead of the drilled-into container. Lets a tree (or a flat
+    /// list) add a child *under the highlighted node* without first drilling
+    /// into it — e.g. "add subtask under the selected task" in the task tree,
+    /// where the default `create` would otherwise add a sibling at the
+    /// container level (the forest root in tree mode). Default `false` keeps
+    /// the container-parent behaviour every other create relies on. No-op
+    /// when nothing is selected.
+    #[serde(default)]
+    pub under_selection: bool,
     /// Apply the action on every editor save (`:w`) instead of only on
     /// editor close. Requires a detached editor profile (`inline: false`)
     /// so intermediate saves are observable. Built for chat-style compose:
@@ -1468,6 +1478,7 @@ views:
             navigate_to: None,
             fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: false,
             editor: None,
+            under_selection: false,
             commit_on_save: false,
         };
         // Modal/persistent state actions → action bar
@@ -1495,6 +1506,7 @@ views:
             navigate_to: None,
             fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: true,
             editor: None,
+            under_selection: false,
             commit_on_save: false,
         };
         assert!(!action.shows_in_action_bar());
@@ -1627,6 +1639,17 @@ views:
         let root_script = root.actions.iter().find(|a| a.action_type == "script").unwrap();
         assert_eq!(root_script.key, "x");
         assert!(child.actions.iter().any(|a| a.action_type == "script"));
+        // A1c comfort extras: `A` adds a child under the selected node
+        // (`under_selection`), `U` un-nests to the top level. Both on both
+        // levels so they work in tree mode (root view) and when drilled.
+        let add_child = root.actions.iter().find(|a| a.key == "A").unwrap();
+        assert_eq!(add_child.action_type, "create");
+        assert_eq!(add_child.id.as_deref(), Some("add"));
+        assert!(add_child.under_selection);
+        assert_eq!(root.shortcuts.get(&'U'), Some(&"unnest".to_string()));
+        let child_add = child.actions.iter().find(|a| a.key == "A").unwrap();
+        assert!(child_add.under_selection);
+        assert_eq!(child.shortcuts.get(&'U'), Some(&"unnest".to_string()));
 
         cfg.validate(
             &KeyBindingConfig::default(),

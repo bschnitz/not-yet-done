@@ -420,17 +420,41 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   > (`open_script_menu_from_current_tab` routet `Tab::Content` →
   > `open_script_menu_for_content` → `ScriptContext::ContentNode`). Es genügte
   > eine `type: script`-Action (Key `x`) in `tasks.yaml` auf beiden Ebenen
-  > (`script` ist nicht root-only wie search/fuzzy_filter/tree_find). Der Task
+  > (`script` ist nicht root-only wie search/fuzzy*filter/tree_find). Der Task
   > geht als **uniformes** `{"node": …}`-JSON raus (Felder aus `task_metadata`:
   > description/status/priority/tags/tracking/created), Verzeichnis
-  > `scripts/tasks/task_item/` — _nicht_ die native `{"task": …}`-Form +
+  > `scripts/tasks/task_item/` — \_nicht* die native `{"task": …}`-Form +
   > `scripts/tasks/` des bespoke Tabs (der parallel weiterläuft, eigene
   > Skripte migrieren erst bei C1). `view_config`-Test prüft die Action beide
   > Ebenen, Smoke-Sektion A1c-scripts.
   >
-  > **Offen (A1c, optional):** „Add-Child unter Selektion im Tree-Mode" /
-  > Reparent-to-Root-Un-Nest. Damit ist A1 (TaskAdapter) bis auf diese
-  > Komfort-Extras vollständig.
+  > **A1c-Komfort umgesetzt (Add-Child-unter-Selektion + Un-nest).**
+  >
+  > - **Add-Child im Tree (`A`)** — generisch, ein opt-in: neues Bool-Feld
+  >   `ActionDef.under_selection` (default false). Im `create`-Dispatch
+  >   (`content_view`) targetet die Action dann den **selektierten** Node
+  >   (`selected_item_id` + `selected_node_type_chain().last()` als
+  >   child*type) statt des Containers (`parent_node_id` +
+  >   `current_child_node_type`). So nistet `A` im Tree-Mode unter dem Cursor,
+  >   ohne vorher reinzudrillen — die `add`-Action-ID wird wiederverwendet
+  >   (`TaskItemNode::prepare("add")` = `prepare_add(Some(self.id))`), **null
+  >   Adapter-Code**. `a` (Container) bleibt unverändert. Confluence ist der
+  >   einzige andere Tree-View und hat \_keine* create-Action → kein
+  >   Verhaltens-Risiko. Generischer Nutzen: jeder Tree-Adapter kann es
+  >   per YAML opt-in nutzen.
+  > - **Un-nest (`U`)** — adapter-seitige fire-and-forget Action `unnest`
+  >   (`invoke_unnest`): `update_task(id, parent=Some(None))`, kein
+  >   Cycle-Check nötig (Root ist nie Nachfahre), `move_notes` +
+  >   `emit_task_changed` + Reload; friendly Error wenn schon top-level. Der
+  >   target-freie Inverse von mark/paste-move. In `task_item_actions` +
+  >   `invoke_action`-Arm; `actions_for_type` liefert sie für Hints mit.
+  >
+  > `A` + `U: unnest` in `tasks.yaml` auf **beiden** Ebenen (damit sie im
+  > Tree-Mode = Root-View greifen, nicht nur nach Drill). `view_config`-Test
+  > prüft beide; neuer `content_view`-Dispatch-Test
+  > `create_under_selection_targets_selected_node`; Smoke-Sektion A1c-Komfort.
+  >
+  > **A1 (TaskAdapter) ist damit vollständig.**
 
 - **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
   Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed

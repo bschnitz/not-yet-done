@@ -4293,12 +4293,28 @@ impl ContentPane {
                         action.name
                     )));
                 };
-                if let (Some(parent_id), Some(child_type)) = (self.parent_node_id(), self.current_child_node_type()) {
+                // `under_selection`: parent the new node on the highlighted
+                // row (tree or flat) rather than the drilled-into container.
+                // The new child's node_type is the selected node's own type —
+                // correct for a recursive tree (task:item → task:item); the
+                // container path stays the default for every other create.
+                let (parent_id, child_type) = if action.under_selection {
+                    (
+                        self.selected_item_id().map(str::to_string),
+                        self.selected_node_type_chain(view_defs).last().cloned(),
+                    )
+                } else {
+                    (
+                        self.parent_node_id().map(str::to_string),
+                        self.current_child_node_type().map(str::to_string),
+                    )
+                };
+                if let (Some(parent_id), Some(child_type)) = (parent_id, child_type) {
                     return SubViewMessage::Request(ViewRequest::CreateContentChild {
                         view_index,
                         pane_id,
-                        parent_node_id: parent_id.to_string(),
-                        child_node_type: child_type.to_string(),
+                        parent_node_id: parent_id,
+                        child_node_type: child_type,
                         action_id,
                         label: action.name.clone(),
                         editor_profile: action.editor.clone(),
@@ -7587,7 +7603,7 @@ mod tests {
                 ],
                 preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
                 actions: vec![
-                    ActionDef { name: "edit".into(), key: "e".into(), action_type: "edit".into(), id: None, node_id_from: None, navigate_to: None, fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: false, editor: None, commit_on_save: false},
+                    ActionDef { name: "edit".into(), key: "e".into(), action_type: "edit".into(), id: None, node_id_from: None, navigate_to: None, fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: false, editor: None, under_selection: false, commit_on_save: false},
                 ],
                 children: vec![
                     ChildDef {
@@ -8762,7 +8778,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -9228,7 +9244,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
@@ -9245,7 +9261,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
@@ -9261,7 +9277,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         config
     }
@@ -9344,7 +9360,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
@@ -9366,7 +9382,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
@@ -9381,7 +9397,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -9955,7 +9971,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -9963,6 +9979,43 @@ mod tests {
         match msg {
             SubViewMessage::Request(ViewRequest::OpenScriptMenuForNode { .. }) => {}
             other => panic!("Expected OpenScriptMenuForNode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_under_selection_targets_selected_node() {
+        // `under_selection: true` re-targets a `create` onto the highlighted
+        // row instead of the drilled-into container. Backs the task tree's
+        // `A` (add-child-under-cursor) so nesting works without drilling in.
+        let mut config = test_config_with_children();
+        config.views[0].actions.push(ActionDef {
+            name: "add child".into(),
+            key: "A".into(),
+            action_type: "create".into(),
+            id: Some("add".into()),
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            under_selection: true,
+            commit_on_save: false,
+        });
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let issues = mock_issues();
+        let first_id = issues[0].id.clone();
+        view.set_items(issues, Vec::new(), None, Vec::new(), None);
+        match view.handle_key("A") {
+            SubViewMessage::Request(ViewRequest::CreateContentChild { parent_node_id, .. }) => {
+                assert_eq!(
+                    parent_node_id, first_id,
+                    "under_selection create should parent on the selected row"
+                );
+            }
+            other => panic!("Expected CreateContentChild on selection, got {other:?}"),
         }
     }
 
@@ -9984,7 +10037,7 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -10171,7 +10224,7 @@ mod tests {
                 tree_find: None,
                 hide_from_bar: false,
                 editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
             });
         }
         config
@@ -10992,7 +11045,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_find: None,
                     hide_from_bar: false,
                     editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
                 },
                 ActionDef {
                     name: "refresh".to_string(),
@@ -11007,7 +11060,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_find: None,
                     hide_from_bar: false,
                     editor: None,
-            commit_on_save: false,
+            under_selection: false, commit_on_save: false,
                 },
             ],
             children: vec![],
