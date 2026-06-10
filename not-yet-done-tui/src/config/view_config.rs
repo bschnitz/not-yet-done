@@ -705,7 +705,8 @@ pub struct ColumnDef {
     /// Theme color reference (e.g. "accent", "text_med", "success").
     #[serde(default)]
     pub style: Option<String>,
-    /// "max" or "flex(N)".
+    /// "max" (default), "fixed(N)", "flex(N)", "fit", "auto" or
+    /// "auto(min,max)". See docs/generic-view-spec.md `sizing:`.
     #[serde(default = "default_sizing")]
     pub sizing: String,
     /// When `true`, this column's value is Markdown and is rendered as

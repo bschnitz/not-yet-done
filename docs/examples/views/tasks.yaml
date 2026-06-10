@@ -137,7 +137,7 @@ views:
         label: Task
         source: label
         style: text_med
-        sizing: "flex(1)"
+        sizing: fit # only as wide as the task title needs, never crowds out the date columns
       - key: created
         label: Created
         kind: datetime
@@ -262,7 +262,7 @@ views:
             label: Task
             source: label
             style: text_med
-            sizing: "flex(1)"
+            sizing: fit # only as wide as the task title needs, never crowds out the date columns
           - key: created
             label: Created
             kind: datetime

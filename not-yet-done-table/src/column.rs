@@ -22,6 +22,13 @@ pub enum ColStrategy {
     Max,
     /// Gets a proportional share of remaining space.
     Flex(usize),
+    /// `min(content_max, remaining)` — as wide as the content needs, but
+    /// never wider than the space left after all `Fixed`/`Max`/`Auto`
+    /// columns are placed. Unlike `Flex` it does not stretch to fill the
+    /// leftover, and unlike `Max` it is deferred (claims space only after
+    /// every fixed-width column is sized), so a `Fit` column in the middle
+    /// never pushes trailing columns off-screen. Mirrors CSS `fit-content`.
+    Fit,
     /// `clamp(max(header_width, content_max), min, max)`. Auto columns
     /// take their natural width within bounds and ignore the pane-width
     /// budget — overflow is expected to be handled by horizontal scroll.
@@ -100,6 +107,7 @@ impl ColSizer for MixedColSizer {
         let mut used = 0usize;
         let mut flex_total_weight = 0usize;
         let mut flex_indices: Vec<(usize, usize)> = Vec::new();
+        let mut fit_indices: Vec<usize> = Vec::new();
 
         for (i, col) in cols.iter().enumerate() {
             let strategy = self
@@ -123,6 +131,11 @@ impl ColSizer for MixedColSizer {
                     flex_indices.push((i, weight));
                     flex_total_weight += weight;
                 }
+                ColStrategy::Fit => {
+                    // Deferred: sized after the positional pass so trailing
+                    // fixed-width columns are never starved (see enum docs).
+                    fit_indices.push(i);
+                }
                 ColStrategy::Auto { min, max } => {
                     let natural = header_w(col).max(content_max(col));
                     let w = natural.clamp(min, max);
@@ -133,7 +146,19 @@ impl ColSizer for MixedColSizer {
             }
         }
 
-        let remaining = usable.saturating_sub(used);
+        let mut remaining = usable.saturating_sub(used);
+
+        // `Fit` columns take min(content, what's left) before flex fills the
+        // rest, so they cap at their content width without stretching and
+        // without crowding out the proportional flex columns.
+        for &i in &fit_indices {
+            let col = &cols[i];
+            let natural = content_max(col).max(header_w(col));
+            let w = natural.min(remaining);
+            widths[i] = w;
+            remaining -= w;
+        }
+
         if flex_total_weight > 0 {
             let mut distributed = 0usize;
             let flex_count = flex_indices.len();
@@ -236,6 +261,48 @@ mod tests {
         // …and the layout exactly fills the pane budget (no overflow/scroll).
         let sep_total = 2 * (cols.len() - 1);
         assert_eq!(result.iter().sum::<usize>() + sep_total, 20);
+    }
+
+    #[test]
+    fn fit_caps_at_content_and_yields_space_to_others() {
+        // A `fit` column in the middle takes only the width its content needs,
+        // never stretching to fill the leftover (unlike flex) and never
+        // starving the trailing Max columns (unlike a positional Max). Mirrors
+        // CSS fit-content = min(content, available).
+        let mut strategies = HashMap::new();
+        strategies.insert(ColumnId::new("a"), ColStrategy::Max);
+        strategies.insert(ColumnId::new("task"), ColStrategy::Fit);
+        strategies.insert(ColumnId::new("c"), ColStrategy::Max);
+        strategies.insert(ColumnId::new("d"), ColStrategy::Max);
+        let sizer = MixedColSizer { strategies };
+        let cols = vec![
+            ColumnId::new("a"),
+            ColumnId::new("task"),
+            ColumnId::new("c"),
+            ColumnId::new("d"),
+        ];
+        let mut row = HashMap::new();
+        row.insert(ColumnId::new("a"), "AA".to_string()); // 2
+        row.insert(ColumnId::new("task"), "Hello".to_string()); // 5 — fits
+        row.insert(ColumnId::new("c"), "CCCC".to_string()); // 4
+        row.insert(ColumnId::new("d"), "DD".to_string()); // 2
+        let cells = vec![&row];
+        // usable 14; Max a=2,c=4,d=2 (used 8) → remaining 6. fit content=5 ≤ 6
+        // → task=5. Leftover 1 is simply unused (no flex to absorb it), so the
+        // table is *narrower* than the pane — exactly "as wide as needed".
+        let result = sizer.col_widths(&cols, &cells, None, 20, "  ");
+        assert_eq!(result, vec![2, 5, 4, 2]);
+
+        // When the content is wider than the leftover, fit caps at the leftover
+        // (6 here) and the trailing columns still keep their widths.
+        let mut wide = HashMap::new();
+        wide.insert(ColumnId::new("a"), "AA".to_string());
+        wide.insert(ColumnId::new("task"), "a-very-long-task-title".to_string());
+        wide.insert(ColumnId::new("c"), "CCCC".to_string());
+        wide.insert(ColumnId::new("d"), "DD".to_string());
+        let result = sizer.col_widths(&cols, &[&wide], None, 20, "  ");
+        assert_eq!(result, vec![2, 6, 4, 2]);
+        assert!(result[2] > 0 && result[3] > 0);
     }
 
     fn auto_sizer(min: usize, max: usize) -> MixedColSizer {
