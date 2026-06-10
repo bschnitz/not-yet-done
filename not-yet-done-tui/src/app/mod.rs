@@ -24,6 +24,7 @@ use crate::components::view_pane::ViewPaneComponent;
 use crate::components::notification_bar::NotificationBarComponent;
 use crate::components::query_error_bar::QueryErrorBarComponent;
 use crate::components::searchable_popup::{SearchablePopup, PopupItem};
+use crate::components::content_form_popup::{ContentFormPopup, ContentFormEvent};
 use crate::components::status_bar::{StatusBarComponent, StatusMode};
 use crate::components::tab_bar::TabBarComponent;
 use crate::config::{
@@ -427,6 +428,15 @@ pub struct ContentFilePickerPopupState {
     pub action_id: String,
 }
 
+/// State for the generic form popup used by `InputSpec::Form` actions (M6/E5).
+pub struct ContentFormPopupState {
+    pub popup: ContentFormPopup,
+    pub view_index: usize,
+    pub pane_id: crate::views::content_view::PaneId,
+    pub node_id: String,
+    pub action_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Sort-hint mode
 // ---------------------------------------------------------------------------
@@ -704,6 +714,7 @@ pub struct App {
     /// Content action popup (e.g. Jira transitions).
     pub content_action_popup: Option<ContentActionPopupState>,
     pub content_file_picker_popup: Option<ContentFilePickerPopupState>,
+    pub content_form_popup: Option<ContentFormPopupState>,
     pub form_pane: FormPaneComponent,
 
     /// App-wide link-mark slot. Set by `GlobalAction::LinkMark`, cleared
@@ -889,6 +900,7 @@ impl App {
             trackings_view,
             tasks_view,
             content_views,
+            content_form_popup: None,
             content_action_popup: None,
             content_file_picker_popup: None,
             tab_bar,
@@ -3416,6 +3428,31 @@ impl App {
             return EditorRequest::None;
         }
 
+        // Content form popup (generic `InputSpec::Form` actions) — intercepts
+        // every key while open. The popup owns its field focus + in-field
+        // editing; we only act on Submitted/Cancelled.
+        if matches!(self.active_tab, Tab::Content(_)) && self.content_form_popup.is_some() {
+            let popup_state = self.content_form_popup.as_mut().unwrap();
+            match popup_state.popup.handle_key(key) {
+                ContentFormEvent::Submitted(values) => {
+                    let popup = self.content_form_popup.take().unwrap();
+                    self.execute_content_action_form(
+                        popup.view_index,
+                        popup.pane_id,
+                        popup.node_id,
+                        popup.action_id,
+                        values,
+                    );
+                }
+                ContentFormEvent::Cancelled => {
+                    self.content_form_popup = None;
+                }
+                ContentFormEvent::Consumed => {}
+            }
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
         // Content action popup (transitions, etc.) — applies to any content tab.
         // The popup handles Next/Prev/Backspace/Cursor/Typing intrinsically
         // via its own PopupAction bindings; we only dispatch Enter (apply)
@@ -3687,6 +3724,7 @@ impl App {
             || self.query_var_popup.is_some()
             || self.content_action_popup.is_some()
             || self.content_file_picker_popup.is_some()
+            || self.content_form_popup.is_some()
             || self.link_popup.is_some()
             || self.config_picker_popup.is_some()
             || self.tab_set_popup.is_open()
@@ -6052,6 +6090,31 @@ impl App {
                     action_id,
                 });
             }
+            not_yet_done_content::InputSpec::Form { fields } => {
+                // Prefill values from the node (edit flow); falls back to
+                // each field's static `default` inside the popup.
+                let prefill = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let node = adapter.get_by_id(&node_id).await?;
+                        node.form_prep(&action_id).await
+                    })
+                });
+                let prefill = match prefill {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.notify_error(format!("Failed to prepare form: {e}"));
+                        return;
+                    }
+                };
+                let popup = ContentFormPopup::new(action_id.clone(), fields, &prefill);
+                self.content_form_popup = Some(ContentFormPopupState {
+                    popup,
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_id,
+                });
+            }
         }
     }
 
@@ -6081,6 +6144,51 @@ impl App {
                 node.execute(
                     &action_id,
                     not_yet_done_content::ActionInput::Files(paths),
+                )
+                .await
+            }
+            .await;
+            let result = match outcome {
+                Ok(not_yet_done_content::ActionOutcome::Done { message }) => {
+                    Ok(message.unwrap_or_else(|| format!("{aid_for_msg} executed")))
+                }
+                Ok(_) => Ok(format!("{aid_for_msg} executed")),
+                Err(e) => Err(format!("Action failed: {aid_for_msg}: {e}")),
+            };
+            let _ = tx.send(LoadMsg::ContentActionDone {
+                view_index: vi,
+                pane_id: pid,
+                result,
+            });
+        });
+    }
+
+    fn execute_content_action_form(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+        values: std::collections::HashMap<String, String>,
+    ) {
+        let adapter = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone);
+        let Some(adapter) = adapter else {
+            self.notify("No adapter available".to_string());
+            return;
+        };
+        let tx = self.load_tx.clone();
+        let vi = view_index;
+        let pid = pane_id;
+        let aid_for_msg = action_id.clone();
+        tokio::spawn(async move {
+            let outcome = async {
+                let mut node = adapter.get_by_id(&node_id).await?;
+                node.execute(
+                    &action_id,
+                    not_yet_done_content::ActionInput::Form(values),
                 )
                 .await
             }

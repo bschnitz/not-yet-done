@@ -785,6 +785,62 @@ Validator (start-time): leere Action-IDs werden abgelehnt; ein
 `shortcuts:`-Key, der bereits von einem `actions:`-Eintrag der
 gleichen View belegt ist, ebenfalls.
 
+### Strukturierte Eingabe-Formulare (`InputSpec::Form`, M6/E5)
+
+Eine Action kann statt eines externen Editors (`InputSpec::Editor`) ein
+**generisches Formular** im Terminal anfordern. Der Adapter deklariert
+die Felder im Action-Deskriptor; die TUI rendert sie generisch (Text-,
+Select- und Toggle-Widget aus `ratatui_form_widgets`), sammelt die
+Werte und liefert sie über `ActionInput::Form(HashMap<String,String>)`
+an `Node::execute` zurück. Es gibt **kein** YAML hierfür — die
+Feldstruktur ist Adapter-Wissen, nicht View-Konfiguration.
+
+```rust
+// im Adapter, in Node::actions():
+NodeAction::new(
+    "edit",
+    "Edit",
+    InputSpec::Form {
+        fields: vec![
+            FormFieldSpec::text("title", "Title"),
+            FormFieldSpec::select("status", "Status",
+                vec!["todo".into(), "in_progress".into(), "done".into()]),
+            FormFieldSpec::toggle("urgent", "Urgent"),
+        ],
+    },
+)
+```
+
+Feldtypen (`FormFieldKind`):
+
+| Kind     | Widget               | Wert in `ActionInput::Form`        |
+| -------- | -------------------- | ---------------------------------- |
+| `Text`   | einzeiliges Textfeld | freier String                      |
+| `Select` | horizontale Auswahl  | gewählter `allowed_values`-Eintrag |
+| `Toggle` | An/Aus               | `"true"` / `"false"`               |
+
+Pro Feld:
+
+- **`required`** (Default: `text`/`select` = true, `toggle` = false) —
+  die TUI blockiert das Absenden, solange ein Pflichtfeld leer ist, und
+  zeigt einen Hinweis in der Popup-Fußzeile.
+- **`default`** — statischer Initialwert. Für ein Edit-Formular
+  überschreibt der Adapter ihn pro Feld über **`Node::form_prep(action_id)`**
+  (liefert eine `HashMap<key → Initialwert>`; fehlende Keys fallen auf
+  `default` zurück). Der Default-Trait gibt eine leere Map zurück — das
+  passt für ein reines Anlege-Formular.
+
+Bedienung im Popup: `tab`/`↑`/`↓` wechselt das Feld, `←`/`→` bewegt den
+Cursor (Text) bzw. die Auswahl (Select), `space` wählt die Option unter
+dem Cursor bzw. kippt den Toggle, `enter` sendet ab, `esc` bricht ab.
+
+Warum ein Formular statt eines Editor-Templates: für kleine, klar
+typisierte Eingaben (Status-Auswahl, Boolean-Flag, kurzer Titel) ist ein
+strukturiertes Popup schneller und fehlerärmer als ein YAML-Buffer im
+`$EDITOR`. Für lange Freitexte (Issue-Body, Wiki-Seite) bleibt
+`InputSpec::Editor` die richtige Wahl. Beide Wege sind uniform über alle
+Adapter nutzbar.
+
 ## Pagination-Modi (`pagination:`)
 
 Jede ChildDef kann ihren Pagination-Mode konfigurieren:

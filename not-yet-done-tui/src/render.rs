@@ -125,6 +125,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         );
     }
 
+    // Overlay: generic content form popup (`InputSpec::Form` actions).
+    if let Some(ref state) = app.content_form_popup {
+        state.popup.render(frame, area, &app.shared_theme);
+    }
+
     // Overlay: column config popup.
     if let Some(popup) = &mut app.column_config_popup {
         popup.view(frame, area);

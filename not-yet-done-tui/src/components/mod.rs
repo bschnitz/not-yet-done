@@ -4,6 +4,7 @@ pub mod action_bar;
 pub mod adapter_creds_popup;
 pub mod cmdline;
 pub mod column_config_popup;
+pub mod content_form_popup;
 pub mod data_table;
 pub mod form_pane;
 pub mod notification_bar;

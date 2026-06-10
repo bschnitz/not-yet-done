@@ -446,6 +446,93 @@ pub enum InputSpec {
     /// File picker — the TUI opens its file-picker widget and returns the
     /// chosen path(s). `multi: false` constrains the user to one file.
     FilePicker { multi: bool },
+    /// Structured multi-field form. The TUI renders the [`FormFieldSpec`]
+    /// list generically (text / select / toggle widgets), collects the
+    /// values, and delivers them via [`ActionInput::Form`]. Initial values
+    /// for an edit flow come from [`Node::form_prep`]; static fallbacks
+    /// come from each field's [`FormFieldSpec::default`].
+    Form { fields: Vec<FormFieldSpec> },
+}
+
+/// One field in an [`InputSpec::Form`].
+#[derive(Clone, Debug)]
+pub struct FormFieldSpec {
+    /// Stable key the value is returned under in [`ActionInput::Form`] and
+    /// the key [`Node::form_prep`] uses to prefill an initial value.
+    pub key: String,
+    /// Human-readable label shown next to the widget.
+    pub label: String,
+    /// Which widget renders this field.
+    pub kind: FormFieldKind,
+    /// When true the TUI rejects submission while the value is empty
+    /// (text/select). Toggles are always satisfied.
+    pub required: bool,
+    /// Static initial value used when [`Node::form_prep`] supplies none.
+    /// For a toggle this is `"true"`/`"false"`; for a select it must be
+    /// one of `allowed_values`.
+    pub default: Option<String>,
+}
+
+impl FormFieldSpec {
+    /// A required single-line text field.
+    pub fn text(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: FormFieldKind::Text,
+            required: true,
+            default: None,
+        }
+    }
+
+    /// A select field over a fixed option list.
+    pub fn select(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        allowed_values: Vec<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: FormFieldKind::Select { allowed_values },
+            required: true,
+            default: None,
+        }
+    }
+
+    /// A boolean toggle.
+    pub fn toggle(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: FormFieldKind::Toggle,
+            required: false,
+            default: None,
+        }
+    }
+
+    /// Mark the field optional (empty values are accepted).
+    pub fn optional(mut self) -> Self {
+        self.required = false;
+        self
+    }
+
+    /// Set the static initial value.
+    pub fn with_default(mut self, default: impl Into<String>) -> Self {
+        self.default = Some(default.into());
+        self
+    }
+}
+
+/// Widget kind for a [`FormFieldSpec`].
+#[derive(Clone, Debug)]
+pub enum FormFieldKind {
+    /// Single-line free text.
+    Text,
+    /// One choice out of a fixed list.
+    Select { allowed_values: Vec<String> },
+    /// Boolean on/off.
+    Toggle,
 }
 
 /// The user's input for an action invocation.
@@ -465,6 +552,11 @@ pub enum ActionInput {
     /// `InputSpec::FilePicker` actions: the absolute paths the user chose.
     /// Always non-empty when delivered by the TUI.
     Files(Vec<std::path::PathBuf>),
+    /// `InputSpec::Form` actions: the collected field values keyed by
+    /// [`FormFieldSpec::key`]. Toggles deliver `"true"`/`"false"`; text and
+    /// select fields deliver their string value (possibly empty for an
+    /// optional field).
+    Form(std::collections::HashMap<String, String>),
 }
 
 /// What the adapter wants the TUI to do after executing an action.
@@ -1010,6 +1102,19 @@ pub trait Node: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Prefill values for an `InputSpec::Form` action, keyed by
+    /// [`FormFieldSpec::key`]. Used by edit flows to seed the form with the
+    /// node's current values; keys without an entry fall back to the
+    /// field's [`FormFieldSpec::default`]. The default impl returns no
+    /// prefills (suitable for a create flow).
+    async fn form_prep(
+        &self,
+        action_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let _ = action_id;
+        Ok(std::collections::HashMap::new())
+    }
+
     /// Execute an action with the user's input.
     async fn execute(
         &mut self,
@@ -1179,4 +1284,140 @@ pub trait AdapterFactory: Send + Sync {
     /// into the produced adapter so [`ContentAdapter::instance_id`]
     /// returns it.
     fn create(&self, instance_id: &str, config: &str) -> Result<Box<dyn ContentAdapter>>;
+}
+
+// ---------------------------------------------------------------------------
+// Tests — InputSpec::Form contract round-trip (M6/E5)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod form_contract_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A node that exposes a single `InputSpec::Form` action, prefills it,
+    /// and records the values delivered back through `execute`.
+    struct FormNode {
+        node_type: NodeType,
+        metadata: Metadata,
+        last_form: std::sync::Mutex<Option<HashMap<String, String>>>,
+    }
+
+    impl FormNode {
+        fn new() -> Self {
+            Self {
+                node_type: NodeType {
+                    type_id: "test:item".into(),
+                    mime_type: "text/plain".into(),
+                    syntax: None,
+                    file_extension: ".txt".into(),
+                    display_name: "Item".into(),
+                },
+                metadata: Metadata::default(),
+                last_form: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Node for FormNode {
+        fn id(&self) -> &str {
+            "n1"
+        }
+        fn label(&self) -> &str {
+            "Item"
+        }
+        fn node_type(&self) -> &NodeType {
+            &self.node_type
+        }
+        fn metadata(&self) -> &Metadata {
+            &self.metadata
+        }
+
+        fn actions(&self) -> Vec<NodeAction> {
+            vec![NodeAction::new(
+                "edit",
+                "Edit",
+                InputSpec::Form {
+                    fields: vec![
+                        FormFieldSpec::text("title", "Title"),
+                        FormFieldSpec::select(
+                            "status",
+                            "Status",
+                            vec!["todo".into(), "done".into()],
+                        ),
+                        FormFieldSpec::toggle("urgent", "Urgent"),
+                    ],
+                },
+            )]
+        }
+
+        async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
+            assert_eq!(action_id, "edit");
+            let mut m = HashMap::new();
+            m.insert("title".to_string(), "current".to_string());
+            m.insert("status".to_string(), "done".to_string());
+            Ok(m)
+        }
+
+        async fn execute(
+            &mut self,
+            action_id: &str,
+            input: ActionInput,
+        ) -> Result<ActionOutcome> {
+            assert_eq!(action_id, "edit");
+            match input {
+                ActionInput::Form(values) => {
+                    *self.last_form.lock().unwrap() = Some(values);
+                    Ok(ActionOutcome::Done {
+                        message: Some("saved".into()),
+                    })
+                }
+                _ => panic!("expected ActionInput::Form"),
+            }
+        }
+    }
+
+    #[test]
+    fn action_advertises_form_input_spec() {
+        let node = FormNode::new();
+        let action = node.actions().into_iter().find(|a| a.id == "edit").unwrap();
+        match action.input {
+            InputSpec::Form { fields } => {
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0].key, "title");
+                assert!(matches!(fields[0].kind, FormFieldKind::Text));
+                assert!(matches!(fields[2].kind, FormFieldKind::Toggle));
+            }
+            _ => panic!("expected Form input spec"),
+        }
+    }
+
+    #[tokio::test]
+    async fn form_prep_supplies_edit_prefill() {
+        let node = FormNode::new();
+        let prefill = node.form_prep("edit").await.unwrap();
+        assert_eq!(prefill.get("title").unwrap(), "current");
+        assert_eq!(prefill.get("status").unwrap(), "done");
+    }
+
+    #[tokio::test]
+    async fn execute_receives_form_values() {
+        let mut node = FormNode::new();
+        let mut values = HashMap::new();
+        values.insert("title".to_string(), "new title".to_string());
+        values.insert("status".to_string(), "todo".to_string());
+        values.insert("urgent".to_string(), "true".to_string());
+
+        let outcome = node
+            .execute("edit", ActionInput::Form(values))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ActionOutcome::Done { .. }));
+
+        let recorded = node.last_form.lock().unwrap().clone().unwrap();
+        assert_eq!(recorded.get("title").unwrap(), "new title");
+        assert_eq!(recorded.get("status").unwrap(), "todo");
+        assert_eq!(recorded.get("urgent").unwrap(), "true");
+    }
 }
