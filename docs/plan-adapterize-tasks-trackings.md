@@ -267,6 +267,19 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   Restore-All, scripts, Filter, tracking-toggle. Brückt `TrackingTick` →
   `Repaint`. `views/trackings.yaml`.
 
+  > **Mitzunehmen (Follow-up aus E3, M4):** Hier den **Capability-Gating-
+  > Pfad** sauber etablieren. Heute werden UI-Affordanzen durchgängig über
+  > YAML (`actions:`, `tree_aggregate:`, …) gegated, nicht über
+  > `AdapterCapabilities` — kein View-Layer-Code ruft `.capabilities()` auf.
+  > Beim In-Process-Wiring (M8) liegt der Adapter ohnehin vor (er wird schon
+  > in `action_bar_hints(... adapter)` durchgereicht); deshalb hier **einmal
+  > generisch**: Capabilities (`supports_tree_aggregation`, `supports_create`,
+  > `supports_delete`, `supports_search`, …) entweder in den Claim-Builder
+  > reichen (analog zu den Hints) **oder** beim Pane-/View-Binding einmal in
+  > ein Pane-Feld snapshotten. Dann `toggle_tree_aggregate` (und künftige
+  > Affordanzen) zusätzlich auf die jeweilige Capability gaten statt nur auf
+  > Config-Präsenz. Narrow-Einzelfix bewusst vermieden — siehe M4-Box.
+
 ### Cutover (harter Schnitt)
 
 - **C1 — Routing + Aufräumen (ein Schritt).** Erst die Paritäts-Checkliste
