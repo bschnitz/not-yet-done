@@ -3262,6 +3262,25 @@ und ein offener Geschwister-Task anlegen.
 - [ ] Saved-Query-Shortcut (Ctrl+f im `q`-Menü) auf eine Query → Taste
       filtert den Baum direkt; übersteht YAML-Reload (`query_shortcut`-Tabelle).
 
+### A1c (scripts) — `:script` / `x` auf dem adapterisierten Tasks-Tab
+
+Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
+
+- [ ] `x` auf einem selektierten Task → Script-Menü öffnet, Verzeichnis
+      `<data>/not_yet_done/scripts/tasks/task_item/` (auto-angelegt). Auch
+      `:script` über die Cmdline öffnet dasselbe Menü.
+- [ ] Auf jeder Drill-Tiefe (Subtask, Sub-Subtask) liefert `x` **dasselbe**
+      Verzeichnis (View-Pfad stabil, ein gemeinsamer Scripts-Ordner).
+- [ ] `+name<Enter>` legt ein neues Script aus dem Template an; Editor öffnet.
+- [ ] Script ausführen → bekommt den Task als JSON
+      `{"node": {"id": <uuid>, "node_type": "task:item", "tab": "tasks",
+    "fields": {description/status/priority/tags/tracking/created…}}}`
+      (uniforme Node-Form, NICHT die native `{"task": …}`-Form).
+- [ ] Selektion wechseln (anderer Task, anderer Typ-Mix) → Menü bleibt am
+      selben Ordner (kein Shuffle).
+- [ ] Kein Task selektiert / leerer Baum → Notification „No row selected",
+      kein Crash.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor
