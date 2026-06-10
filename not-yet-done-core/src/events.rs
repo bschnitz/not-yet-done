@@ -42,6 +42,11 @@ pub enum DomainEvent {
     /// A running tracking was stopped. Structural: the tracking row gained
     /// an end time and the task is no longer "running".
     TrackingStopped { task_id: Uuid, tracking_id: Uuid },
+    /// A tracking row changed without a start/stop transition — soft-deleted
+    /// or restored. Structural: the tracking list (and a task's active marker,
+    /// if the affected row was running) may change, so consumers refetch.
+    /// Distinct from `TrackingStarted`/`Stopped`, which mark live transitions.
+    TrackingChanged { tracking_id: Uuid },
     /// Heartbeat while at least one tracking runs (~1 Hz). Carries no id;
     /// consumers map it to a **repaint only**, never a refetch — it exists
     /// so live "elapsed" cells tick.

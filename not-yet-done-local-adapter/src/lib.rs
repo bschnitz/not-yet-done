@@ -98,9 +98,9 @@ impl CoreHandle {
 pub fn domain_event_to_invalidation(ev: &DomainEvent) -> Option<Invalidation> {
     Some(match ev {
         DomainEvent::TaskChanged { id } => Invalidation::Node { id: id.to_string() },
-        DomainEvent::TrackingStarted { .. } | DomainEvent::TrackingStopped { .. } => {
-            Invalidation::All
-        }
+        DomainEvent::TrackingStarted { .. }
+        | DomainEvent::TrackingStopped { .. }
+        | DomainEvent::TrackingChanged { .. } => Invalidation::All,
         DomainEvent::TrackingTick => Invalidation::Repaint,
     })
 }

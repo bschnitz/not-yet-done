@@ -460,7 +460,7 @@ fn reopen_service_error(text: &str, e: AppError) -> ActionOutcome {
 /// policy: with parallel tracking disabled, starting first stops every
 /// other active tracking. Each transition emits a `Tracking*` event so the
 /// other tabs repaint.
-async fn apply_tracking(handle: &CoreHandle, task_id: Uuid, wants_tracked: bool) {
+pub(crate) async fn apply_tracking(handle: &CoreHandle, task_id: Uuid, wants_tracked: bool) {
     let now = chrono::Utc::now();
     if wants_tracked {
         if !handle.allow_parallel_tracking {
@@ -1043,7 +1043,9 @@ fn spawn_task_bridge(
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::Node { id: id.to_string() });
                 }
-                Ok(DomainEvent::TrackingStarted { .. }) | Ok(DomainEvent::TrackingStopped { .. }) => {
+                Ok(DomainEvent::TrackingStarted { .. })
+                | Ok(DomainEvent::TrackingStopped { .. })
+                | Ok(DomainEvent::TrackingChanged { .. }) => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }

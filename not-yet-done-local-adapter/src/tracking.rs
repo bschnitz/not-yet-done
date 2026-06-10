@@ -35,8 +35,18 @@
 //! filtering (via [`TrackingRepository::find_filtered`]), and live
 //! durations. Grouping (Day/Week/Month/Year) + per-group totals are pure
 //! engine features driven from `views/trackings.yaml` (`group_by` /
-//! `aggregates`). Mutations (delete / restore / restore-all, toggle,
-//! scripts) and the Condensed/Tree sub-views land in A2b/A2c.
+//! `aggregates`).
+//!
+//! ## Scope (A2b — mutations)
+//!
+//! Per-row `delete` (soft-delete keeping times, via the generic `DeleteSelf`
+//! confirm flow), `restore`/`restore-all` (undelete + purge the successors a
+//! split produced), and `toggle-tracking` (flips tracking on the row's task,
+//! reusing [`crate::task::apply_tracking`] so the host's exclusivity policy
+//! is identical across both tabs). Each mutation emits a
+//! [`DomainEvent::TrackingChanged`] so the bridge rebuilds the snapshot and
+//! refreshes both this list and the task tracking marker. Scripts run via the
+//! generic `:script` menu. The Condensed/Tree sub-views land in A2c.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -44,9 +54,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore,
-    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
-    SavedQueryStore, SortableColumn,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
+    ContentAdapter, ContentError, FsSavedQueryStore, HintPlacement, InputSpec, Invalidation,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
+    SortableColumn,
 };
 use not_yet_done_core::entity::tracking;
 use not_yet_done_core::error::AppError;
@@ -329,6 +340,148 @@ async fn resolve_visible_set(
 }
 
 // ---------------------------------------------------------------------------
+// Actions + mutations (A2b)
+// ---------------------------------------------------------------------------
+
+/// Actions the synthetic list root exposes. `restore-all` is a list-wide
+/// operation (no target row), so it lives on the root rather than an entry.
+fn tracking_root_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new("restore-all", "Restore all deleted", InputSpec::None)]
+}
+
+/// Actions a single tracking row exposes. All are fire-and-forget shortcuts
+/// dispatched through [`Node::invoke_action`] (`delete` routes through the
+/// generic delete-confirm flow). The `fuzzy filter` / `run script` / `reload`
+/// affordances are generic frontend actions declared in `views/trackings.yaml`,
+/// not adapter actions, so they are not listed here.
+fn tracking_entry_actions() -> Vec<NodeAction> {
+    vec![
+        NodeAction::new("delete", "Delete", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('d'),
+        NodeAction::new("restore", "Restore", InputSpec::None).with_default_key('R'),
+        NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('t'),
+    ]
+}
+
+/// Announce a non-transition tracking change (delete/restore) so the bridge
+/// drops the snapshot and every view (this tab + the task tracking marker)
+/// refetches. See [`DomainEvent::TrackingChanged`].
+fn emit_tracking_changed(handle: &CoreHandle, tracking_id: Uuid) {
+    let _ = handle
+        .events
+        .send(DomainEvent::TrackingChanged { tracking_id });
+}
+
+/// `execute("delete")` — soft-delete a tracking, keeping its start/end times
+/// (mirrors the native tab's `soft_delete_keeping_times`). Reached via the
+/// generic `DeleteSelf` confirm flow. The deleted row drops out of the list
+/// (`find_all` excludes deleted); a [`DomainEvent::TrackingChanged`] then
+/// rebuilds the snapshot and updates the task marker if the row was running.
+async fn execute_delete(handle: &CoreHandle, tracking_id: Uuid) -> Result<ActionOutcome> {
+    handle
+        .tracking_repo
+        .soft_delete_keeping_times(tracking_id)
+        .await
+        .map_err(to_content_err)?;
+    emit_tracking_changed(handle, tracking_id);
+    Ok(ActionOutcome::Done {
+        message: Some("Tracking deleted".to_string()),
+    })
+}
+
+/// Hard-delete every successor of `tracking_id` (the predecessor chain that a
+/// split/edit produced), so a restore doesn't resurrect a row alongside the
+/// successors that replaced it. BFS, deepest-first. Mirrors the native tab.
+async fn purge_successors(handle: &CoreHandle, tracking_id: Uuid) -> std::result::Result<(), AppError> {
+    let mut queue = vec![tracking_id];
+    let mut to_delete = Vec::new();
+    while let Some(id) = queue.pop() {
+        for s in handle.tracking_repo.find_by_predecessor(id).await? {
+            queue.push(s.id);
+            to_delete.push(s.id);
+        }
+    }
+    for id in to_delete.into_iter().rev() {
+        handle.tracking_repo.hard_delete(id).await?;
+    }
+    Ok(())
+}
+
+/// `invoke_action("restore")` — undelete a previously soft-deleted tracking
+/// (and purge the successors that replaced it). Errors if the target is not
+/// deleted. Note: because the list shows only non-deleted rows, a *visible*
+/// row is never deletable here — restore is reachable from a future
+/// show-deleted sub-view; today it mirrors the native tab's behaviour.
+async fn invoke_restore(handle: &CoreHandle, tracking_id: Uuid) -> ActionDispatch {
+    let restore = async {
+        let tracking = handle
+            .tracking_repo
+            .find_by_id(tracking_id)
+            .await?
+            .ok_or(AppError::TrackingNotFound(tracking_id))?;
+        if !tracking.deleted {
+            return Err(AppError::TrackingNotDeleted(tracking_id));
+        }
+        purge_successors(handle, tracking_id).await?;
+        handle.tracking_repo.undelete(tracking_id).await?;
+        Ok::<_, AppError>(())
+    };
+    match restore.await {
+        Ok(()) => {
+            emit_tracking_changed(handle, tracking_id);
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Restore failed: {e}")),
+    }
+}
+
+/// `invoke_action("restore-all")` on the root — best-effort restore of every
+/// deleted tracking among the candidate ids (non-deleted ones are skipped).
+/// Mirrors the native tab, which restores over the currently-loaded rows.
+async fn invoke_restore_all(handle: &CoreHandle, candidates: &[Uuid]) -> ActionDispatch {
+    let run = async {
+        let mut restored = 0u32;
+        for &id in candidates {
+            let Some(tracking) = handle.tracking_repo.find_by_id(id).await? else {
+                continue;
+            };
+            if !tracking.deleted {
+                continue;
+            }
+            purge_successors(handle, id).await?;
+            handle.tracking_repo.undelete(id).await?;
+            restored += 1;
+        }
+        Ok::<_, AppError>(restored)
+    };
+    match run.await {
+        Ok(0) => ActionDispatch::Error("No deleted trackings to restore".to_string()),
+        Ok(_) => {
+            emit_tracking_changed(handle, Uuid::nil());
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Restore-all failed: {e}")),
+    }
+}
+
+/// `invoke_action("toggle-tracking")` — flip time tracking for the row's
+/// task. Reuses the task adapter's [`apply_tracking`](crate::task::apply_tracking)
+/// so the host's exclusivity policy and `Tracking*` events stay identical
+/// across both tabs. State is read live, never from the (possibly stale)
+/// snapshot marker.
+async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
+    let is_tracked = matches!(
+        handle.tracking_repo.find_active_for_task(task_id).await,
+        Ok(Some(_))
+    );
+    crate::task::apply_tracking(handle, task_id, !is_tracked).await;
+    ActionDispatch::Reload
+}
+
+// ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
@@ -361,7 +514,7 @@ impl Node for TrackingRootNode {
         tracking_sortable_columns()
     }
     fn actions(&self) -> Vec<NodeAction> {
-        Vec::new()
+        tracking_root_actions()
     }
     async fn list(
         &self,
@@ -374,20 +527,34 @@ impl Node for TrackingRootNode {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TrackingEntryNode::fetch(&self.snapshot, &self.handle, id)
     }
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            "restore-all" => {
+                let candidates: Vec<Uuid> = self.snapshot.order.clone();
+                invoke_restore_all(&self.handle, &candidates).await
+            }
+            _ => ActionDispatch::Noop,
+        })
+    }
 }
 
-/// A single tracking row. A leaf: it has no children.
+/// A single tracking row. A leaf: it has no children. Carries the live
+/// [`CoreHandle`] and the row's `task_id` so its actions (delete / restore /
+/// toggle-tracking) can mutate through the services.
 struct TrackingEntryNode {
     id_str: String,
     label: String,
     node_type: NodeType,
     metadata: Metadata,
+    handle: CoreHandle,
+    /// The tracked task — `toggle-tracking` flips tracking on it.
+    task_id: Uuid,
 }
 
 impl TrackingEntryNode {
     fn fetch(
         snapshot: &Arc<TrackingSnapshot>,
-        _handle: &CoreHandle,
+        handle: &CoreHandle,
         id: &str,
     ) -> Result<Box<dyn Node>> {
         let uuid = Uuid::parse_str(id).map_err(|_| ContentError::NotFound(id.to_string()))?;
@@ -401,7 +568,14 @@ impl TrackingEntryNode {
             label: row.task_description.clone(),
             node_type: tracking_entry_type(),
             metadata: entry_metadata(row, now),
+            handle: handle.clone(),
+            task_id: row.tracking.task_id,
         }))
+    }
+
+    /// The row's own tracking id, parsed from [`Node::id`].
+    fn tracking_id(&self) -> Result<Uuid> {
+        Uuid::parse_str(&self.id_str).map_err(|_| ContentError::NotFound(self.id_str.clone()))
     }
 }
 
@@ -421,6 +595,32 @@ impl Node for TrackingEntryNode {
     }
     fn children_types(&self) -> Vec<NodeType> {
         Vec::new()
+    }
+    fn actions(&self) -> Vec<NodeAction> {
+        tracking_entry_actions()
+    }
+    async fn execute(&mut self, action_id: &str, _input: ActionInput) -> Result<ActionOutcome> {
+        match action_id {
+            // Reached via the generic `DeleteSelf` confirm flow, which calls
+            // `execute("delete")` after the user confirms.
+            "delete" => execute_delete(&self.handle, self.tracking_id()?).await,
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on a tracking"
+            ))),
+        }
+    }
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // Routed to the generic delete-confirm flow; the actual delete
+            // happens in `execute("delete")` after confirmation.
+            "delete" => ActionDispatch::DeleteSelf,
+            "restore" => match self.tracking_id() {
+                Ok(id) => invoke_restore(&self.handle, id).await,
+                Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
+            },
+            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            _ => ActionDispatch::Noop,
+        })
     }
 }
 
@@ -464,7 +664,8 @@ fn spawn_tracking_bridge(
                 Ok(DomainEvent::TrackingTick) => {}
                 Ok(DomainEvent::TaskChanged { .. })
                 | Ok(DomainEvent::TrackingStarted { .. })
-                | Ok(DomainEvent::TrackingStopped { .. }) => {
+                | Ok(DomainEvent::TrackingStopped { .. })
+                | Ok(DomainEvent::TrackingChanged { .. }) => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }
@@ -587,8 +788,19 @@ impl ContentAdapter for TrackingAdapter {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
-            // A2a is read-only; create/delete/reparent arrive in A2b.
+            // A2b: delete (soft) + restore. No create (trackings are born
+            // from the task toggle, not authored here) and no reparent.
+            supports_delete: true,
+            supports_search: true,
             ..AdapterCapabilities::default()
+        }
+    }
+
+    fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        match node_type.type_id.as_str() {
+            "tracking:root" => tracking_root_actions(),
+            "tracking:entry" => tracking_entry_actions(),
+            _ => Vec::new(),
         }
     }
 
@@ -790,6 +1002,33 @@ mod tests {
             (b, row(tracking(b, Uuid::from_u128(9), 30, true), "B", vec![])),  // done
         ]);
         assert_eq!(snap.active_count(), 1);
+    }
+
+    fn has(actions: &[NodeAction], id: &str) -> bool {
+        actions.iter().any(|a| a.id == id)
+    }
+
+    #[test]
+    fn entry_actions_expose_delete_restore_toggle() {
+        let a = tracking_entry_actions();
+        assert!(has(&a, "delete"));
+        assert!(has(&a, "restore"));
+        assert!(has(&a, "toggle-tracking"));
+        // `delete` and `toggle-tracking` show in the action bar; `restore`
+        // is a recovery shortcut only.
+        let key = |id: &str| a.iter().find(|x| x.id == id).and_then(|x| x.default_key);
+        assert_eq!(key("delete"), Some('d'));
+        assert_eq!(key("toggle-tracking"), Some('t'));
+        assert_eq!(key("restore"), Some('R'));
+    }
+
+    #[test]
+    fn root_actions_expose_restore_all_only() {
+        let a = tracking_root_actions();
+        assert!(has(&a, "restore-all"));
+        // No per-row affordances on the list root.
+        assert!(!has(&a, "delete"));
+        assert!(!has(&a, "toggle-tracking"));
     }
 
     #[test]

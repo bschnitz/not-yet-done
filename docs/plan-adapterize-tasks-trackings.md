@@ -510,8 +510,23 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   >   51 adapter + 536 TUI Tests grün, installiert. **Offen A2a:**
   >   `patch_row`-/Timer-Unit-Test (bisher nur Build + Adapter-Logik-Tests),
   >   Smoke.
-  > - **A2b — Mutationen.** delete / restore (undelete) / restore-all,
-  >   tracking-toggle, scripts-Action.
+  > - **A2b — Mutationen (FERTIG, ungepusht).** Neuer Domain-Event
+  >   `TrackingChanged { tracking_id }` (Delete/Restore, **kein**
+  >   Start/Stop) → beide Bridges + `domain_event_to_invalidation`
+  >   mappen ihn auf `Invalidation::All`, sodass die Liste **und** der
+  >   Task-Marker neu laden. `tracking:entry`-Actions: `delete` (soft,
+  >   Zeiten erhalten, über generischen `DeleteSelf`-Confirm →
+  >   `execute("delete")`), `restore` (find_by_id → deleted-Check → BFS
+  >   `find_by_predecessor`/`hard_delete` der Nachfolger →`undelete`),
+  >   `toggle-tracking` (Reuse `crate::task::apply_tracking`, jetzt
+  >   `pub(crate)`). `tracking:root`-Action `restore-all` (best-effort
+  >   über die sichtbaren ids). YAML `shortcuts:` `d`/`R`/`t` +
+  >   `A: parent:restore-all`. `capabilities.supports_delete = true`,
+  >   `actions_for_type` für root/entry. Scripts schon in A2a via
+  >   `type: script`. **Bekannte Grenze (Parität mit Native):** die Liste
+  >   zeigt nur nicht-gelöschte Zeilen, also haben `R`/`A` heute kein
+  >   sichtbares Ziel — eine „show deleted"-Subview ist Future-Work. 53
+  >   adapter + 536 TUI Tests grün, installiert.
   > - **A2c — Condensed + Tree (own/cumulated, M4) + Capability-Gating.**
   >
   > **Mitzunehmen (Follow-up aus E3, M4):** Hier den **Capability-Gating-
