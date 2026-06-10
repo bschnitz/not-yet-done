@@ -1709,6 +1709,55 @@ views:
     }
 
     #[test]
+    fn example_trackings_yaml_parses_and_validates() {
+        // The shipped `docs/examples/views/trackings.yaml` (plan phase A2)
+        // must stay loadable and pass the validator: the flat list, the
+        // Condensed nested-grouping view, and the A2c Tree view all coexist
+        // in one tab, so their subtab keys must not collide with any per-node
+        // shortcut — notably the Tree's `T` switch key vs. its `t`
+        // toggle-tracking shortcut.
+        let yaml = include_str!("../../../docs/examples/views/trackings.yaml");
+        let cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("trackings.yaml should deserialize");
+        assert_eq!(cfg.adapter.adapter_type, "trackings");
+
+        // Three views: flat (key a), condensed (key v), tree (key T).
+        let flat = cfg.views.iter().find(|v| v.name == "trackings").unwrap();
+        assert_eq!(flat.key.as_deref(), Some("a"));
+        let condensed = cfg.views.iter().find(|v| v.name == "condensed").unwrap();
+        assert_eq!(condensed.key.as_deref(), Some("v"));
+
+        // A2c Tree: a `tracking:tree-item` tree, switched to with `T`, with a
+        // `duration` column that declares the tree-fold (own ↔ cumulated).
+        let tree = cfg.views.iter().find(|v| v.name == "tree").unwrap();
+        assert_eq!(tree.key.as_deref(), Some("T"));
+        assert_eq!(tree.node_type, "tracking:tree-item");
+        assert_eq!(tree.tree_label.as_deref(), Some("task"));
+        let dur = tree.columns.iter().find(|c| c.key == "duration").unwrap();
+        let ta = dur
+            .tree_aggregate
+            .as_ref()
+            .expect("tree duration column should declare tree_aggregate");
+        assert_eq!(ta.cumulated_field, "duration_cumulated");
+        assert_eq!(ta.default, TreeAggregateDefault::Cumulated);
+        // `t` toggles tracking on the task — distinct from the `T` subtab key.
+        assert_eq!(tree.shortcuts.get(&'t'), Some(&"toggle-tracking".to_string()));
+        // The recursive subtask branch repeats the tree-fold column.
+        let sub = &tree.children[0];
+        assert!(sub.recursive);
+        assert!(sub
+            .columns
+            .iter()
+            .any(|c| c.key == "duration" && c.tree_aggregate.is_some()));
+
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("trackings.yaml should pass the validator");
+    }
+
+    #[test]
     fn validate_rejects_unknown_editor_profile() {
         let yaml = r#"
 tab: { name: T }

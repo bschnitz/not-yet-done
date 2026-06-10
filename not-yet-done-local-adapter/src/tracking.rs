@@ -46,7 +46,22 @@
 //! is identical across both tabs). Each mutation emits a
 //! [`DomainEvent::TrackingChanged`] so the bridge rebuilds the snapshot and
 //! refreshes both this list and the task tracking marker. Scripts run via the
-//! generic `:script` menu. The Condensed/Tree sub-views land in A2c.
+//! generic `:script` menu.
+//!
+//! ## Scope (A2c — Condensed + Tree sub-views)
+//!
+//! Two further views over the same data, declared in `views/trackings.yaml`:
+//!
+//! - **Condensed** — pure engine feature (nested grouping `then_by`, M3): the
+//!   flat `tracking:entry` rows grouped day→task with per-cell duration sums.
+//!   The adapter only adds a hidden `task_id` field for the inner group key.
+//! - **Tree** — a second projection of the same loads: the **task forest**
+//!   (`tracking:tree-item`) where each node carries its own tracked seconds
+//!   plus the subtree-cumulated total ([`TreeProjection`], folded bottom-up).
+//!   The view declares a `tree_aggregate` column that toggles own↔cumulated
+//!   (M4); the adapter advertises [`AdapterCapabilities::supports_tree_aggregation`].
+//!   The tree is pruned to tasks with tracked time and bakes durations at
+//!   load (no live tick — like Condensed).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -101,6 +116,27 @@ fn tracking_root_type() -> NodeType {
     }
 }
 
+/// The node type for a task node in the **duration tree** (A2c Tree view):
+/// the task forest projected so each node carries its own + subtree-cumulated
+/// tracked time. Distinct from `tracking:entry` (a single interval) — a
+/// `views/trackings.yaml` binds the tree view's columns to this type and
+/// declares the `tree_aggregate` column on it.
+fn tracking_tree_item_type() -> NodeType {
+    NodeType {
+        type_id: "tracking:tree-item".to_string(),
+        mime_type: "text/plain".to_string(),
+        syntax: None,
+        file_extension: ".txt".to_string(),
+        display_name: "Task".to_string(),
+    }
+}
+
+/// Prefix on a `tracking:tree-item` node id. Tree nodes are addressed by the
+/// *task* UUID, which is indistinguishable from a tracking UUID, so the id is
+/// `tree:<task-uuid>` — [`TrackingAdapter::get_by_id`] routes on the prefix to
+/// the right node kind.
+const TREE_ID_PREFIX: &str = "tree:";
+
 // ---------------------------------------------------------------------------
 // Snapshot
 // ---------------------------------------------------------------------------
@@ -119,6 +155,72 @@ struct TrackingRow {
     active: bool,
 }
 
+/// One task in the **duration tree** projection (A2c Tree view): its label,
+/// effective parent, and the tracked time rolled up two ways — its own and
+/// its whole subtree's.
+struct TreeTaskRow {
+    /// The task's description (the tree row's label / `task` column).
+    description: String,
+    /// Sum of this task's own non-deleted trackings' durations, in seconds
+    /// (a running interval counts `now − started` at snapshot-build time —
+    /// the tree does not tick live, see the M9 note).
+    own_secs: i64,
+    /// `own_secs` plus every descendant's `own_secs`, folded bottom-up. This
+    /// is the value the `tree_aggregate` column shows in its cumulated state.
+    cumulated_secs: i64,
+    /// `true` while this task has a running tracking — seeds the `⏱` marker.
+    active: bool,
+}
+
+/// The task forest projected with per-task tracked durations (A2c Tree).
+/// Built once alongside the flat list (both read the same task + tracking
+/// loads), and pruned to the tasks that carry tracked time anywhere in their
+/// subtree (`cumulated_secs > 0`) so the tree shows only worked-on work.
+#[derive(Default)]
+struct TreeProjection {
+    by_id: HashMap<Uuid, TreeTaskRow>,
+    /// parent id → ordered child ids (`None` key = forest roots).
+    children: HashMap<Option<Uuid>, Vec<Uuid>>,
+}
+
+impl TreeProjection {
+    /// A task belongs in the tree iff it (or some descendant) has tracked
+    /// time. Pruning keeps the path down to every tracked leaf while hiding
+    /// untouched branches.
+    fn is_visible(&self, id: Uuid) -> bool {
+        self.by_id.get(&id).is_some_and(|r| r.cumulated_secs > 0)
+    }
+
+    /// Visible child summaries of `parent` (`None` = forest roots), ordered
+    /// as the children map records them.
+    fn child_summaries(&self, parent: Option<Uuid>) -> Vec<NodeSummary> {
+        self.children
+            .get(&parent)
+            .map(|ids| {
+                ids.iter()
+                    .filter(|id| self.is_visible(**id))
+                    .filter_map(|id| self.by_id.get(id).map(|row| self.summary(*id, row)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn summary(&self, id: Uuid, row: &TreeTaskRow) -> NodeSummary {
+        let has_children = self
+            .children
+            .get(&Some(id))
+            .map(|kids| kids.iter().any(|c| self.is_visible(*c)))
+            .unwrap_or(false);
+        NodeSummary {
+            id: format!("{TREE_ID_PREFIX}{id}"),
+            label: row.description.clone(),
+            node_type: tracking_tree_item_type(),
+            metadata: tree_metadata(id, row),
+            has_children: Some(has_children),
+        }
+    }
+}
+
 /// Immutable, eagerly-loaded view of the whole non-deleted tracking list.
 /// Shared by `Arc` across every node the adapter hands out.
 struct TrackingSnapshot {
@@ -126,6 +228,9 @@ struct TrackingSnapshot {
     /// Display order — newest first, as [`TrackingRepository::find_all`]
     /// returns them.
     order: Vec<Uuid>,
+    /// The task forest projected with per-task durations — the A2c Tree view
+    /// (`tracking:tree-item`). Built from the same task + tracking loads.
+    tree: TreeProjection,
 }
 
 impl TrackingSnapshot {
@@ -150,8 +255,16 @@ impl TrackingSnapshot {
             .await
             .map_err(to_content_err)?;
 
+        // Durations bake at load time (the running interval counts up to
+        // `now`); the flat list re-derives them live per `entries(now)`, but
+        // the tree projection is a static snapshot (no live tick — M9).
+        let now = chrono::Utc::now();
         let mut by_id = HashMap::with_capacity(trackings.len());
         let mut order = Vec::with_capacity(trackings.len());
+        // Per-task own seconds + the set of tasks with a running tracking,
+        // accumulated in the same pass that builds the flat rows.
+        let mut own_secs: HashMap<Uuid, i64> = HashMap::new();
+        let mut active_tasks: HashSet<Uuid> = HashSet::new();
         for t in trackings {
             let task_description = task_map
                 .get(&t.task_id)
@@ -159,6 +272,10 @@ impl TrackingSnapshot {
                 .unwrap_or_else(|| "(unknown task)".to_string());
             let task_path = path_for(&task_map, t.task_id);
             let active = t.ended_at.is_none();
+            *own_secs.entry(t.task_id).or_default() += model_duration_seconds(&t, now);
+            if active {
+                active_tasks.insert(t.task_id);
+            }
             order.push(t.id);
             by_id.insert(
                 t.id,
@@ -170,7 +287,8 @@ impl TrackingSnapshot {
                 },
             );
         }
-        Ok(Arc::new(TrackingSnapshot { by_id, order }))
+        let tree = build_tree_projection(&task_map, &own_secs, &active_tasks);
+        Ok(Arc::new(TrackingSnapshot { by_id, order, tree }))
     }
 
     /// Number of running trackings — drives the live-refresh cadence.
@@ -247,12 +365,113 @@ fn canonical_path(segments: &[String]) -> String {
     }
 }
 
-/// A tracking's duration in **seconds** (the canonical `kind: duration`
-/// input). Completed: `ended − started`; running: `now − started`. Clamped
-/// to zero so a clock skew never renders a negative duration.
+/// A tracking model's duration in **seconds**. Completed: `ended − started`;
+/// running: `now − started`. Clamped to zero so a clock skew never renders a
+/// negative duration. The canonical `kind: duration` input.
+fn model_duration_seconds(t: &tracking::Model, now: chrono::DateTime<chrono::Utc>) -> i64 {
+    let end = t.ended_at.unwrap_or(now);
+    (end - t.started_at).num_seconds().max(0)
+}
+
+/// A tracking row's duration in seconds (see [`model_duration_seconds`]).
 fn duration_seconds(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> i64 {
-    let end = row.tracking.ended_at.unwrap_or(now);
-    (end - row.tracking.started_at).num_seconds().max(0)
+    model_duration_seconds(&row.tracking, now)
+}
+
+/// Build the duration-tree projection (A2c Tree view) from the loaded task
+/// map and the per-task own seconds. Re-roots orphans (a task whose parent
+/// was deleted) to the forest top, then folds each subtree's cumulated total
+/// bottom-up. Sibling order follows the task map's iteration; the engine
+/// sorts the rendered rows.
+fn build_tree_projection(
+    task_map: &HashMap<Uuid, (String, Option<Uuid>)>,
+    own_secs: &HashMap<Uuid, i64>,
+    active_tasks: &HashSet<Uuid>,
+) -> TreeProjection {
+    let mut children: HashMap<Option<Uuid>, Vec<Uuid>> = HashMap::new();
+    for (&id, (_, parent)) in task_map {
+        // Re-root a task whose parent is absent (deleted) so it still shows.
+        let effective = parent.filter(|p| task_map.contains_key(p));
+        children.entry(effective).or_default().push(id);
+    }
+    // Stable sibling order: by id (the engine re-sorts on display anyway, but
+    // a deterministic order keeps tests and snapshots reproducible).
+    for kids in children.values_mut() {
+        kids.sort();
+    }
+    // Fold cumulated totals bottom-up, cycle-guarded.
+    let mut memo: HashMap<Uuid, i64> = HashMap::new();
+    for &id in task_map.keys() {
+        let mut stack = HashSet::new();
+        cumulated_for(id, &children, own_secs, &mut memo, &mut stack);
+    }
+    let by_id = task_map
+        .iter()
+        .map(|(&id, (desc, _))| {
+            (
+                id,
+                TreeTaskRow {
+                    description: desc.clone(),
+                    own_secs: own_secs.get(&id).copied().unwrap_or(0),
+                    cumulated_secs: memo.get(&id).copied().unwrap_or(0),
+                    active: active_tasks.contains(&id),
+                },
+            )
+        })
+        .collect();
+    TreeProjection { by_id, children }
+}
+
+/// Recursive subtree total: `own[id]` plus every child's cumulated total.
+/// Memoized; the `stack` set guards a corrupt parent cycle (a node already on
+/// the path contributes only its own seconds and recursion stops).
+fn cumulated_for(
+    id: Uuid,
+    children: &HashMap<Option<Uuid>, Vec<Uuid>>,
+    own: &HashMap<Uuid, i64>,
+    memo: &mut HashMap<Uuid, i64>,
+    stack: &mut HashSet<Uuid>,
+) -> i64 {
+    if let Some(&v) = memo.get(&id) {
+        return v;
+    }
+    if !stack.insert(id) {
+        return own.get(&id).copied().unwrap_or(0); // cycle guard
+    }
+    let mut total = own.get(&id).copied().unwrap_or(0);
+    if let Some(kids) = children.get(&Some(id)) {
+        for &c in kids {
+            total += cumulated_for(c, children, own, memo, stack);
+        }
+    }
+    stack.remove(&id);
+    memo.insert(id, total);
+    total
+}
+
+/// Column-backing metadata for a duration-tree task node. `task` is the
+/// label; `duration` is the task's **own** tracked seconds and
+/// `duration_cumulated` the subtree total — the `tree_aggregate` column in
+/// `views/trackings.yaml` reads `duration` by default and toggles
+/// (`zt`) to `duration_cumulated`. Both are canonical integer seconds.
+fn tree_metadata(id: Uuid, row: &TreeTaskRow) -> Metadata {
+    Metadata {
+        fields: vec![
+            field(
+                "marker",
+                if row.active { "⏱".to_string() } else { String::new() },
+                "Active",
+            ),
+            field("task", row.description.clone(), "Task"),
+            field("duration", row.own_secs.to_string(), "Duration"),
+            field(
+                "duration_cumulated",
+                row.cumulated_secs.to_string(),
+                "Total",
+            ),
+            field("id", id.to_string(), "ID"),
+        ],
+    }
 }
 
 /// Build the column-backing metadata for a tracking. Values are the
@@ -365,6 +584,19 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
         NodeAction::new("restore", "Restore", InputSpec::None).with_default_key('R'),
+        NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('t'),
+    ]
+}
+
+/// Actions a duration-tree task node (`tracking:tree-item`) exposes. The tree
+/// is a read-only aggregate, so the only mutation is `toggle-tracking` —
+/// start/stop time tracking on the task under the cursor, reusing the same
+/// [`crate::task::apply_tracking`] policy as the other views. (Reload /
+/// fuzzy-filter are generic frontend actions in `views/trackings.yaml`.)
+fn tracking_tree_actions() -> Vec<NodeAction> {
+    vec![
         NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('t'),
@@ -513,7 +745,10 @@ impl Node for TrackingRootNode {
         &self.metadata
     }
     fn children_types(&self) -> Vec<NodeType> {
-        vec![tracking_entry_type()]
+        // Both the flat/condensed entry rows and the A2c duration-tree task
+        // nodes hang off this one root; the loader picks the type matching
+        // the active view's `node_type`, and `list` dispatches on it.
+        vec![tracking_entry_type(), tracking_tree_item_type()]
     }
     fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
         tracking_sortable_columns()
@@ -525,11 +760,19 @@ impl Node for TrackingRootNode {
         &self,
         params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
+        // The Tree view asks for top-level task projections; every other view
+        // (flat list / condensed) asks for the flat tracking entries.
+        if params.node_type.type_id == tracking_tree_item_type().type_id {
+            return Ok(list_result(self.snapshot.tree.child_summaries(None)));
+        }
         let filter = resolve_visible_set(&self.handle, &params.query).await?;
         let now = chrono::Utc::now();
         Ok(list_result(self.snapshot.entries(filter.as_ref(), now)))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        if id.starts_with(TREE_ID_PREFIX) {
+            return TrackingTreeNode::fetch(&self.snapshot, &self.handle, id);
+        }
         TrackingEntryNode::fetch(&self.snapshot, &self.handle, id)
     }
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
@@ -623,6 +866,91 @@ impl Node for TrackingEntryNode {
                 Ok(id) => invoke_restore(&self.handle, id).await,
                 Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
             },
+            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            _ => ActionDispatch::Noop,
+        })
+    }
+}
+
+/// A task node in the duration tree (A2c Tree view). Drilling lists its child
+/// tasks (also `tracking:tree-item`); each carries its own + subtree-cumulated
+/// tracked time. Holds the shared snapshot for in-memory drilling and the
+/// `task_id` so `toggle-tracking` can flip tracking on the task.
+struct TrackingTreeNode {
+    snapshot: Arc<TrackingSnapshot>,
+    handle: CoreHandle,
+    task_id: Uuid,
+    id_str: String,
+    label: String,
+    node_type: NodeType,
+    metadata: Metadata,
+}
+
+impl TrackingTreeNode {
+    /// Look up the `tree:<uuid>` node `id` in the projection, or `NotFound`.
+    fn fetch(
+        snapshot: &Arc<TrackingSnapshot>,
+        handle: &CoreHandle,
+        id: &str,
+    ) -> Result<Box<dyn Node>> {
+        let task_id = parse_tree_id(id)?;
+        let row = snapshot
+            .tree
+            .by_id
+            .get(&task_id)
+            .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+        Ok(Box::new(TrackingTreeNode {
+            snapshot: snapshot.clone(),
+            handle: handle.clone(),
+            task_id,
+            id_str: id.to_string(),
+            label: row.description.clone(),
+            node_type: tracking_tree_item_type(),
+            metadata: tree_metadata(task_id, row),
+        }))
+    }
+}
+
+/// Parse the task UUID out of a `tree:<uuid>` node id.
+fn parse_tree_id(id: &str) -> Result<Uuid> {
+    id.strip_prefix(TREE_ID_PREFIX)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+        .ok_or_else(|| ContentError::NotFound(id.to_string()))
+}
+
+#[async_trait]
+impl Node for TrackingTreeNode {
+    fn id(&self) -> &str {
+        &self.id_str
+    }
+    fn label(&self) -> &str {
+        &self.label
+    }
+    fn node_type(&self) -> &NodeType {
+        &self.node_type
+    }
+    fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+    fn children_types(&self) -> Vec<NodeType> {
+        vec![tracking_tree_item_type()]
+    }
+    fn actions(&self) -> Vec<NodeAction> {
+        tracking_tree_actions()
+    }
+    async fn list(
+        &self,
+        _params: not_yet_done_content::ListParams,
+    ) -> Result<not_yet_done_content::ListResult> {
+        Ok(list_result(
+            self.snapshot.tree.child_summaries(Some(self.task_id)),
+        ))
+    }
+    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
+    }
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
             _ => ActionDispatch::Noop,
         })
@@ -797,6 +1125,10 @@ impl ContentAdapter for TrackingAdapter {
             // from the task toggle, not authored here) and no reparent.
             supports_delete: true,
             supports_search: true,
+            // A2c Tree: the adapter supplies each task node's own +
+            // subtree-cumulated duration, so the engine can render a
+            // `tree_aggregate` column that toggles between the two (M4).
+            supports_tree_aggregation: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -805,6 +1137,7 @@ impl ContentAdapter for TrackingAdapter {
         match node_type.type_id.as_str() {
             "tracking:root" => tracking_root_actions(),
             "tracking:entry" => tracking_entry_actions(),
+            "tracking:tree-item" => tracking_tree_actions(),
             _ => Vec::new(),
         }
     }
@@ -828,6 +1161,10 @@ impl ContentAdapter for TrackingAdapter {
                 node_type: tracking_root_type(),
                 metadata: Metadata::default(),
             }));
+        }
+        // `tree:<uuid>` addresses a duration-tree task node (A2c Tree view).
+        if id.starts_with(TREE_ID_PREFIX) {
+            return TrackingTreeNode::fetch(&snapshot, &self.handle, id);
         }
         TrackingEntryNode::fetch(&snapshot, &self.handle, id)
     }
@@ -890,7 +1227,11 @@ mod tests {
             order.push(id);
             by_id.insert(id, r);
         }
-        Arc::new(TrackingSnapshot { by_id, order })
+        Arc::new(TrackingSnapshot {
+            by_id,
+            order,
+            tree: TreeProjection::default(),
+        })
     }
 
     #[test]
@@ -1047,5 +1388,124 @@ mod tests {
         )]);
         let now = chrono::Utc::now();
         assert_eq!(snap.entries(None, now)[0].has_children, Some(false));
+    }
+
+    // ── A2c Tree projection ──────────────────────────────────────────────
+
+    /// Build a `task_map` (id → (description, parent)) from `(id, desc,
+    /// parent)` triples for the tree-projection tests.
+    fn task_map(rows: &[(Uuid, &str, Option<Uuid>)]) -> HashMap<Uuid, (String, Option<Uuid>)> {
+        rows.iter()
+            .map(|(id, desc, parent)| (*id, (desc.to_string(), *parent)))
+            .collect()
+    }
+
+    #[test]
+    fn tree_projection_folds_cumulated_durations_bottom_up() {
+        let root = Uuid::from_u128(1);
+        let child = Uuid::from_u128(2);
+        let grandchild = Uuid::from_u128(3);
+        let tm = task_map(&[
+            (root, "Root", None),
+            (child, "Child", Some(root)),
+            (grandchild, "Grandchild", Some(child)),
+        ]);
+        // Own seconds: root 10, child 20, grandchild 30.
+        let own: HashMap<Uuid, i64> = [(root, 10), (child, 20), (grandchild, 30)]
+            .into_iter()
+            .collect();
+        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+
+        // Own values are preserved verbatim…
+        assert_eq!(proj.by_id[&grandchild].own_secs, 30);
+        // …and cumulated rolls each subtree up: grandchild = 30, child =
+        // 20+30 = 50, root = 10+50 = 60.
+        assert_eq!(proj.by_id[&grandchild].cumulated_secs, 30);
+        assert_eq!(proj.by_id[&child].cumulated_secs, 50);
+        assert_eq!(proj.by_id[&root].cumulated_secs, 60);
+    }
+
+    #[test]
+    fn tree_projection_prunes_untracked_subtrees_keeps_path_to_tracked() {
+        let root = Uuid::from_u128(1);
+        let tracked_child = Uuid::from_u128(2);
+        let empty_branch = Uuid::from_u128(3);
+        let tm = task_map(&[
+            (root, "Root", None),
+            (tracked_child, "Tracked", Some(root)),
+            (empty_branch, "Empty", None),
+        ]);
+        // Only the tracked child has any time; its ancestor (root) inherits a
+        // non-zero cumulated and stays, the empty top-level branch is pruned.
+        let own: HashMap<Uuid, i64> = [(tracked_child, 42)].into_iter().collect();
+        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+
+        let roots = proj.child_summaries(None);
+        assert_eq!(roots.len(), 1, "the empty branch is pruned");
+        assert_eq!(roots[0].label, "Root");
+        assert_eq!(roots[0].id, format!("{TREE_ID_PREFIX}{root}"));
+        assert_eq!(roots[0].has_children, Some(true));
+        // Root's only visible child is the tracked one.
+        let kids = proj.child_summaries(Some(root));
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].label, "Tracked");
+        assert_eq!(kids[0].has_children, Some(false));
+        // The empty branch itself is invisible.
+        assert!(!proj.is_visible(empty_branch));
+    }
+
+    #[test]
+    fn tree_projection_reroots_orphans() {
+        let orphan = Uuid::from_u128(2);
+        let missing = Uuid::from_u128(999);
+        let tm = task_map(&[(orphan, "Orphan", Some(missing))]);
+        let own: HashMap<Uuid, i64> = [(orphan, 5)].into_iter().collect();
+        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+        // The orphan (parent gone) re-roots to the forest top, so it shows
+        // up as a top-level row rather than vanishing under the missing id.
+        let roots = proj.child_summaries(None);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].label, "Orphan");
+        assert!(proj.children.get(&Some(missing)).is_none());
+    }
+
+    #[test]
+    fn tree_metadata_carries_own_and_cumulated_seconds() {
+        let id = Uuid::from_u128(7);
+        let r = TreeTaskRow {
+            description: "Write report".to_string(),
+            own_secs: 600,
+            cumulated_secs: 1800,
+            active: true,
+        };
+        let md = tree_metadata(id, &r);
+        let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        assert_eq!(get("task").as_deref(), Some("Write report"));
+        assert_eq!(get("duration").as_deref(), Some("600"));
+        assert_eq!(get("duration_cumulated").as_deref(), Some("1800"));
+        assert_eq!(get("marker").as_deref(), Some("⏱"));
+        assert_eq!(get("id").as_deref(), Some(id.to_string().as_str()));
+    }
+
+    #[test]
+    fn parse_tree_id_round_trips_and_rejects_bare_uuid() {
+        let id = Uuid::from_u128(7);
+        assert_eq!(
+            parse_tree_id(&format!("{TREE_ID_PREFIX}{id}")).unwrap(),
+            id
+        );
+        // A bare (unprefixed) uuid is a tracking-entry id, not a tree id.
+        assert!(parse_tree_id(&id.to_string()).is_err());
+    }
+
+    #[test]
+    fn tree_actions_expose_toggle_only() {
+        let a = tracking_tree_actions();
+        assert!(has(&a, "toggle-tracking"));
+        assert_eq!(a.len(), 1);
+        assert_eq!(
+            a.iter().find(|x| x.id == "toggle-tracking").and_then(|x| x.default_key),
+            Some('t')
+        );
     }
 }
