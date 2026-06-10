@@ -8132,6 +8132,21 @@ impl App {
     /// Covers: a live `Busy` banner (1 Hz second counter), an active
     /// tracking (duration cells), a detached editor (`:w` live-reload /
     /// `.done` close) and a detached script (completion marker).
+    /// After a draw, re-fit the active content tab's tables to the pane
+    /// width they just rendered into. Returns `true` if any table was
+    /// rebuilt — the render loop then requests one more frame so the
+    /// re-fitted layout is shown. Handles first paint, terminal resize, and
+    /// preview open/close uniformly. Native (non-adapter) tabs lay their
+    /// columns out at render time already, so they need no re-fit here.
+    pub fn refit_visible_tables(&mut self) -> bool {
+        if let Tab::Content(idx) = self.active_tab {
+            if let Some(cv) = self.content_view_mut(idx) {
+                return cv.refit_tables_if_needed();
+            }
+        }
+        false
+    }
+
     pub fn needs_periodic_tick(&self) -> bool {
         self.has_live_banner()
             || self.trackings_view.state.rows.iter().any(|r| r.active)

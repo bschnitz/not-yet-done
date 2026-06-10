@@ -60,8 +60,9 @@ use crate::ui::theme::Theme;
 use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
 use crate::views::content_tree::{
     child_def_for_type_chain, tree_child_def_at_depth, tree_level_at_depth,
-    effective_child_children, tree_level_children, tree_level_children_for_chain,
-    tree_level_for_chain, tree_row_glyph,
+    effective_child_children, leaf_glyph_opt_for_chain, tree_level_children,
+    tree_level_children_for_chain,
+    tree_level_for_chain,
     tree_self_at_depth, TreeLevel, TreeState,
 };
 use crate::views::{
@@ -373,6 +374,12 @@ pub struct ContentPane {
     /// Column widths from the most recent layout. Used to position the
     /// sort-mode direction-picker overlay correctly across the header.
     last_col_widths: Vec<usize>,
+    /// Pane width (terminal columns) the most recent table layout was
+    /// fitted to. Compared against the table's actual render width after a
+    /// draw (`ContentView::refit_tables_if_needed`): a mismatch — first
+    /// paint, terminal resize, preview open/close — triggers a one-frame
+    /// re-fit so columns always span exactly the current pane.
+    built_table_width: u16,
     /// Column keys in display order from the most recent rebuild_table.
     last_column_keys: Vec<String>,
 
@@ -1016,6 +1023,7 @@ impl ContentPane {
             last_sortable_columns: Vec::new(),
             active_custom_query: None,
             last_col_widths: Vec::new(),
+            built_table_width: 0,
             last_column_keys: Vec::new(),
             loaded: false,
             linked_child: None,
@@ -2244,10 +2252,12 @@ impl ContentPane {
     ///   level that supplies the columns, so it is always present in the
     ///   set. It no longer requires `tree_label` keys to align across
     ///   levels (the old, fragile convention).
-    /// - other cells hold the entry's `column_value` only when the entry
-    ///   sits on the cursor's exact level (same `node_type_chain`) — rows
-    ///   on other levels show only their label cell, everything else
-    ///   blank, since the column set isn't theirs.
+    /// - other cells hold the entry's `column_value` when the entry's
+    ///   **own** level (resolved from its `node_type_chain`) declares a
+    ///   column with that key. In a uniform recursive tree every depth
+    ///   declares the same columns, so every row shows its data; in a
+    ///   multi-branch tree each row fills only the columns its own branch
+    ///   declares, leaving columns unique to another branch blank.
     fn build_tree_data_rows(
         &self,
         columns: &[ColumnDef],
@@ -2263,27 +2273,111 @@ impl ContentPane {
         let label_col_key = self
             .cursor_tree_level(view_defs)
             .map(|l| l.tree_label.to_string());
-        let cursor_chain = self.cursor_node_type_chain();
+
+        // Tree-label prefix per visible row: the `├──`/`└──`/`│` box
+        // connectors + expand glyph, built with the SAME helpers as the
+        // native forest renderer (`forest_connector`/`forest_child_prefix`)
+        // so the generic tree looks identical. `is_last` is "last among the
+        // *visible* siblings sharing a parent_path"; the running
+        // `child_prefix_at[depth]` stack carries each ancestor's `│`/blank
+        // continuation down to its descendants (valid because the visible
+        // entries are in DFS order, so a node's descendants immediately
+        // follow it before any sibling).
+        let connectors: Vec<String> = {
+            let visible: Vec<&crate::views::content_tree::TreeEntry> = self
+                .tree_visible_indices
+                .iter()
+                .filter_map(|&e| tree.entries.get(e))
+                .collect();
+            let mut is_last = vec![false; visible.len()];
+            let mut seen: std::collections::HashSet<&[String]> = std::collections::HashSet::new();
+            for i in (0..visible.len()).rev() {
+                if seen.insert(visible[i].parent_path.as_slice()) {
+                    is_last[i] = true;
+                }
+            }
+            let mut out = Vec::with_capacity(visible.len());
+            // child_prefix_at[d] = the prefix a depth-`d` row renders with.
+            let mut child_prefix_at: Vec<String> = vec![String::new()];
+            for (i, e) in visible.iter().enumerate() {
+                let d = e.depth;
+                if child_prefix_at.len() <= d {
+                    child_prefix_at.resize(d + 1, String::new());
+                }
+                let prefix = child_prefix_at[d].clone();
+                let expanded = if e.is_more_placeholder || !e.has_children {
+                    None
+                } else {
+                    let mut own = e.parent_path.clone();
+                    own.push(e.node.id.clone());
+                    Some(tree.expanded.contains(&own))
+                };
+                let connector = not_yet_done_forest::forest_connector(
+                    not_yet_done_forest::ConnectorSpec {
+                        depth: d,
+                        is_last: is_last[i],
+                        prefix: &prefix,
+                        has_description: true,
+                        has_children: e.has_children,
+                        expanded,
+                    },
+                );
+                let cp = not_yet_done_forest::forest_child_prefix(d, is_last[i], true, &prefix);
+                if child_prefix_at.len() <= d + 1 {
+                    child_prefix_at.resize(d + 2, String::new());
+                }
+                child_prefix_at[d + 1] = cp;
+                out.push(connector);
+            }
+            out
+        };
+
         self.tree_visible_indices
             .iter()
             .enumerate()
             .filter_map(|(row_idx, &eidx)| {
                 let entry = tree.entries.get(eidx)?;
+                // Each entry's data cells are filled per its OWN level's
+                // column set (resolved from its node_type_chain), not the
+                // cursor's. In a uniform recursive tree every depth declares
+                // the same columns, so every row shows its data; in a
+                // multi-branch tree each row fills only the columns its own
+                // branch declares (columns unique to another branch stay
+                // blank).
+                let entry_cols: Option<&[ColumnDef]> = self
+                    .view_def(view_defs)
+                    .and_then(|vd| tree_level_for_chain(vd, &entry.node_type_chain))
+                    .map(|l| l.columns);
+                let entry_declares = |key: &str| {
+                    entry_cols.is_some_and(|cols| cols.iter().any(|c| c.key == key))
+                };
                 let mut row = TRow::new(row_idx as u32);
                 for col in columns {
                     let is_label_cell = label_col_key.as_deref() == Some(col.key.as_str());
                     // The label cell carries the tree glyph + indent and is
-                    // never typed; only the cursor-chain data cells get M2
-                    // formatting. Off-chain rows render blank.
+                    // never typed; data cells get M2 formatting when the
+                    // entry's own level declares the column (see above).
                     let cell: CellContent = if is_label_cell {
-                        let glyph = self
-                            .view_def(view_defs)
-                            .map(|vd| tree_row_glyph(entry, tree, vd))
-                            .unwrap_or("·");
-                        let indent = "  ".repeat(entry.depth);
-                        CellContent::text(format!("{indent}{glyph} {}", entry.node.label))
-                    } else if entry.node_type_chain == cursor_chain
-                        && !entry.is_more_placeholder
+                        // The connector already carries the indent + box
+                        // glyphs + expand arrow. For a leaf the connector has
+                        // no glyph, so append the level's *configured* leaf
+                        // glyph if any (e.g. Confluence `📄`); native-style
+                        // leaves with none configured render as just the
+                        // connector + label.
+                        let connector = connectors.get(row_idx).map(String::as_str).unwrap_or("");
+                        let leaf = if !entry.is_more_placeholder && !entry.has_children {
+                            self.view_def(view_defs)
+                                .and_then(|vd| {
+                                    leaf_glyph_opt_for_chain(vd, &entry.node_type_chain)
+                                })
+                                .map(|g| format!("{g} "))
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        CellContent::text(format!("{connector}{leaf}{}", entry.node.label))
+                    } else if !entry.is_more_placeholder
+                        && entry_declares(col.key.as_str())
                     {
                         if col.source.as_deref() == Some("has_links") {
                             let icon = if self.item_has_link(&entry.node.id) { "🔗" } else { " " };
@@ -3172,6 +3266,23 @@ impl ContentPane {
         if columns.is_empty() {
             return;
         }
+
+        // Lay columns out into the pane's *actual* render width, recorded by
+        // the table widget on its last paint. This makes a `flex` column fill
+        // exactly to the pane edge (and no further), so trailing columns stay
+        // on-screen — matching the native render-time layout. Before the first
+        // paint the width is unknown (0); fall back to `PRE_PAINT_TABLE_WIDTH`,
+        // then `refit_tables_if_needed` re-fits once the real width is known.
+        // `Auto` columns ignore this budget entirely (they self-sufficiently
+        // overflow into horizontal scroll), so wide dynamic-schema tables
+        // (e.g. postgres rows) are unaffected by the value used here.
+        let render_width = self.table.last_render_width();
+        let max_width = if render_width == 0 {
+            PRE_PAINT_TABLE_WIDTH
+        } else {
+            render_width as usize
+        };
+        self.built_table_width = render_width;
         // Single `now` for the whole rebuild so every live (`kind: elapsed`)
         // cell in this frame measures against the same instant. A repaint
         // tick calls rebuild again with a fresh `now` → the timer advances.
@@ -3198,7 +3309,7 @@ impl ContentPane {
         }
 
         let config = TableConfig {
-            max_width: 300,
+            max_width,
             separator: "  ".to_string(),
             sizer: Box::new(MixedColSizer { strategies }),
         };
@@ -6010,6 +6121,32 @@ impl ContentView {
         }
     }
 
+    /// Re-fit the active subtab's tables whose column layout was built for a
+    /// different width than they just rendered into. Called once after each
+    /// draw (`App::refit_visible_tables`): the table widget records its real
+    /// render width during `view()`, but the column widths were computed at
+    /// the previous `rebuild_table` — so first paint, a terminal resize, or a
+    /// preview open/close leaves the cells fitted to a stale width until this
+    /// pass rebuilds them. Returns `true` if any pane was rebuilt, so the
+    /// caller can request one more frame; the next pass is then a no-op
+    /// (widths match) and the loop parks. Only the active subtab's panes have
+    /// a fresh render width, so other subtabs re-fit when they next render.
+    pub fn refit_tables_if_needed(&mut self) -> bool {
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        let mut refit = false;
+        self.pane_trees[self.active_subtab]
+            .root
+            .for_each_leaf_mut(&mut |leaf| {
+                let rw = leaf.pane.table.last_render_width();
+                if rw != 0 && rw != leaf.pane.built_table_width {
+                    leaf.pane.rebuild_table_with(view_defs, &overlay);
+                    refit = true;
+                }
+            });
+        refit
+    }
+
     /// Patch a single row's complete state in place (M9 —
     /// [`Invalidation::Row`](not_yet_done_content::Invalidation::Row)). The
     /// adapter pushes the refreshed [`NodeSummary`]; every pane in this tab
@@ -6647,6 +6784,13 @@ fn cell_content_for(item: &NodeSummary, col: &ColumnDef, now: chrono::DateTime<c
     typed_cell_content(column_value(item, col), col)
 }
 
+/// Fallback column-layout width used only before the table's first paint,
+/// when its real render width is not yet known. The very next draw records
+/// the actual pane width and `refit_tables_if_needed` re-fits, so this value
+/// is transient; it is kept generously wide so `Max` columns aren't starved
+/// in the one-frame interim. (`Auto` columns ignore it entirely.)
+const PRE_PAINT_TABLE_WIDTH: usize = 300;
+
 /// StyleMap slot for the taskpath separator in the flat single-line table
 /// (slot 0 is the sort-mode dim overlay). Referenced when building
 /// `kind: path` cells; kept in sync with the `StyleMap::new(...)` in
@@ -7236,6 +7380,12 @@ fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
         "text_high" => t.text_high(),
         "text_med" => t.text_med(),
         "text_dim" => t.text_dim(),
+        // `secondary`/`tertiary` mirror the native task table's column color
+        // keys (see `tabs/columns.rs`), so an adapter view can reproduce the
+        // bespoke tab's per-column coloring exactly. Both route through the
+        // theme — no hardcoded colors.
+        "secondary" => t.secondary(),
+        "tertiary" => t.tertiary(),
         "success" => t.success(),
         "warning" => t.warning(),
         "error" => t.error(),
@@ -8521,6 +8671,179 @@ mod tests {
                 "row {i} label cell empty/wrong: {cell:?} (expected to contain {label:?})",
             );
         }
+    }
+
+    /// Data column (read from the metadata field by `key`, not the node
+    /// label) — `hcol` sources `label`, this one doesn't.
+    fn dcol(key: &str) -> ColumnDef {
+        let mut c = hcol(key);
+        c.source = None;
+        c
+    }
+
+    /// A `mock:task` node carrying a single `val` metadata field.
+    fn tnode_val(id: &str, label: &str, val: &str) -> NodeSummary {
+        use not_yet_done_content::{Metadata, MetadataField};
+        let mut n = tnode(id, label, "mock:task");
+        n.metadata = Metadata {
+            fields: vec![MetadataField {
+                key: "val".into(),
+                value: val.into(),
+                display_label: "Val".into(),
+                editable: false,
+                allowed_values: None,
+            }],
+        };
+        n
+    }
+
+    /// Uniform recursive tree: every depth is `mock:task` with the same
+    /// columns (`name` label + `val` data).
+    fn uniform_recursive_config() -> ViewFileConfig {
+        let mut child = hchild(
+            "subtasks",
+            "mock:task",
+            Some("name"),
+            vec![hcol("name"), dcol("val")],
+            vec![],
+        );
+        child.recursive = true;
+        ViewFileConfig {
+            tab: TabConfig { name: "Tasks".into(), order: 0, icon: None },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "tasks".into(),
+                node_type: "mock:task".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![hcol("name"), dcol("val")],
+                preview: None,
+                actions: vec![],
+                children: vec![child],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: Some("name".into()),
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+                group_by: None,
+                then_by: Vec::new(),
+                aggregates: Vec::new(),
+                summary_only: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn uniform_recursive_tree_fills_data_cells_at_every_depth() {
+        // Regression: in a uniform recursive tree (same node_type + columns
+        // at every depth), the renderer used to fill data cells only on rows
+        // whose chain exactly equalled the cursor's, blanking every other
+        // depth. With the cursor on the root, the child row's `val` cell was
+        // empty. Now each entry fills the columns its OWN level declares, so
+        // every depth shows its data.
+        let config = uniform_recursive_config();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("root", "Root", "ROOTVAL")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["root".into()],
+                vec![tnode_val("child", "Child", "CHILDVAL")],
+                None,
+            );
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        // Cursor on the root (depth 0).
+        view.active_pane_mut().table.set_selected(0);
+
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        assert_eq!(rows.len(), 2, "root + expanded child");
+        let val_key = TColumnId::new("val");
+        let cell = |i: usize| {
+            rows[i]
+                .cells
+                .get(&val_key)
+                .map(|c| c.text.trim().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(cell(0), "ROOTVAL", "cursor-depth row shows its data");
+        assert_eq!(
+            cell(1),
+            "CHILDVAL",
+            "off-cursor-depth child row now shows its own data too",
+        );
+    }
+
+    #[test]
+    fn uniform_recursive_tree_renders_box_connectors() {
+        // The generic tree draws ├──/└── box connectors (via the shared
+        // forest helpers), identical to the native task tree — not a plain
+        // indent + `·`.
+        let config = uniform_recursive_config();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("root", "Root", "RV")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["root".into()],
+                vec![tnode_val("child", "Child", "CV")],
+                None,
+            );
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let name_key = TColumnId::new("name");
+        let label =
+            |i: usize| rows[i].cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default();
+        // Root (depth 0, expanded): expand glyph, no box prefix.
+        assert!(label(0).starts_with("▼ "), "root label: {:?}", label(0));
+        assert!(label(0).contains("Root"));
+        // Child (depth 1, last/only sibling): `└── ` box connector.
+        assert!(
+            label(1).contains("└── "),
+            "child should carry a box connector: {:?}",
+            label(1),
+        );
+        assert!(label(1).contains("Child"));
     }
 
     // ── Tree-fold aggregation (M4) ───────────────────────────────────
