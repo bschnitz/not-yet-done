@@ -49,7 +49,7 @@ use crate::config::keybindings::{
 };
 use crate::config::view_config::{
     ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, GroupBy, LineLayout,
-    PaginationMode, PreviewConfig, SplitDirection, ViewDef, ViewFileConfig,
+    PaginationMode, PreviewConfig, SplitDirection, TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
@@ -443,6 +443,18 @@ pub struct ContentPane {
     /// level starts from its own configured default.
     group_by_override: Option<Option<GroupBy>>,
 
+    /// Runtime override of `tree_aggregate` columns' shown value (M4). The
+    /// `toggle_tree_aggregate` action flips this without touching the YAML
+    /// defaults:
+    ///
+    /// - `None` → each `tree_aggregate` column follows its own `default`
+    ///   (`own` / `cumulated`).
+    /// - `Some(false)` → all `tree_aggregate` columns show their own value.
+    /// - `Some(true)` → all show the adapter's cumulated value.
+    ///
+    /// Tree-mode only; ignored by flat views. The TUI never folds the tree
+    /// itself — the cumulated value is the adapter-supplied `cumulated_field`.
+    tree_aggregate_override: Option<bool>,
 }
 
 // ── Pane tree ────────────────────────────────────────────────────────
@@ -1000,6 +1012,7 @@ impl ContentPane {
             tree_filter_depth: None,
             tree_find: None,
             group_by_override: None,
+            tree_aggregate_override: None,
         }
     }
 
@@ -1553,6 +1566,7 @@ impl ContentPane {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                tree_aggregate: None,
             })
             .collect()
     }
@@ -1686,6 +1700,82 @@ impl ContentPane {
     /// active level declares no `group_by` (nothing to cycle).
     pub(crate) fn try_cycle_grouping(&mut self, view_defs: &[ViewDef]) -> SubViewMessage {
         if self.cycle_grouping(view_defs) {
+            self.rebuild_table(view_defs);
+            SubViewMessage::SelectionChanged(None)
+        } else {
+            SubViewMessage::Unhandled
+        }
+    }
+
+    // ── Tree-fold aggregation (M4) ───────────────────────────────────
+
+    /// Whether the active (cursor-depth) tree level declares any
+    /// `tree_aggregate` column. Gates the `toggle_tree_aggregate` action and
+    /// its hint, analogous to [`level_has_group_by`](Self::level_has_group_by)
+    /// for `cycle_grouping`. `false` outside tree mode.
+    ///
+    /// Note: this keys off the *view config* (a column declaring
+    /// `tree_aggregate`), not the adapter's `supports_tree_aggregation`
+    /// capability — TUI panes don't carry adapter capabilities today (no
+    /// pane consults them). A view author only declares `tree_aggregate` for
+    /// an adapter that supplies the cumulated field, so config-presence is the
+    /// effective gate until capabilities are plumbed to panes (at A1/A2).
+    fn level_has_tree_aggregate(&self, view_defs: &[ViewDef]) -> bool {
+        self.tree.is_some()
+            && self
+                .current_columns(view_defs)
+                .iter()
+                .any(|c| c.tree_aggregate.is_some())
+    }
+
+    /// The effective global cumulated-state used by `toggle_tree_aggregate`
+    /// to decide which way to flip. The runtime override wins; otherwise it
+    /// derives from whether any `tree_aggregate` column defaults to
+    /// `cumulated`. (Per-column rendering still respects each column's own
+    /// `default` while the override is `None` — see
+    /// [`column_shows_cumulated`](Self::column_shows_cumulated).)
+    fn tree_aggregate_cumulated_now(&self, view_defs: &[ViewDef]) -> bool {
+        if let Some(v) = self.tree_aggregate_override {
+            return v;
+        }
+        self.current_columns(view_defs).iter().any(|c| {
+            c.tree_aggregate
+                .as_ref()
+                .map(|ta| ta.default == TreeAggregateDefault::Cumulated)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Whether a single `tree_aggregate` column should render its cumulated
+    /// value right now: the pane-wide override if set, else the column's own
+    /// `default`. Read per row build in [`build_tree_data_rows`].
+    fn column_shows_cumulated(&self, col: &ColumnDef) -> bool {
+        match (&self.tree_aggregate_override, &col.tree_aggregate) {
+            (Some(v), _) => *v,
+            (None, Some(ta)) => ta.default == TreeAggregateDefault::Cumulated,
+            (None, None) => false,
+        }
+    }
+
+    /// Flip every `tree_aggregate` column between its own and the adapter's
+    /// cumulated value (M4, `content.toggle_tree_aggregate`). A no-op when the
+    /// active level declares no `tree_aggregate` column. Returns `true` when
+    /// the state changed (the caller rebuilds the table).
+    fn toggle_tree_aggregate(&mut self, view_defs: &[ViewDef]) -> bool {
+        if !self.level_has_tree_aggregate(view_defs) {
+            return false;
+        }
+        let next = !self.tree_aggregate_cumulated_now(view_defs);
+        self.tree_aggregate_override = Some(next);
+        true
+    }
+
+    /// Dispatch wrapper for `content.toggle_tree_aggregate`: flip the shown
+    /// value and, when it changed, rebuild the table. Returns
+    /// `SelectionChanged(None)` so the bars refresh, or `Unhandled` when the
+    /// active level declares no `tree_aggregate` column.
+    pub(crate) fn try_toggle_tree_aggregate(&mut self, view_defs: &[ViewDef]) -> SubViewMessage {
+        if self.toggle_tree_aggregate(view_defs) {
             self.rebuild_table(view_defs);
             SubViewMessage::SelectionChanged(None)
         } else {
@@ -2140,6 +2230,17 @@ impl ContentPane {
                         if col.source.as_deref() == Some("has_links") {
                             let icon = if self.item_has_link(&entry.node.id) { "🔗" } else { " " };
                             CellContent::text(icon)
+                        } else if let Some(ta) = col
+                            .tree_aggregate
+                            .as_ref()
+                            .filter(|_| self.column_shows_cumulated(col))
+                        {
+                            // M4: show the adapter's subtree-cumulated value
+                            // (read from `cumulated_field`) instead of the
+                            // node's own value, formatted with the column's
+                            // own `kind` so it lines up identically.
+                            let raw = metadata_field_value(&entry.node, &ta.cumulated_field);
+                            typed_cell_content(raw, col)
                         } else {
                             cell_content_for(&entry.node, col, now)
                         }
@@ -3638,6 +3739,22 @@ impl ContentPane {
             }
         }
 
+        // Tree-fold aggregation toggle (M4) — only where the active tree
+        // level declares a `tree_aggregate` column.
+        if self.level_has_tree_aggregate(view_defs) {
+            if let Some(b) = content_kb
+                .get(&ContentAction::ToggleTreeAggregate)
+                .cloned()
+                .and_then(strip_reserved)
+            {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ContentAction::ToggleTreeAggregate),
+                ));
+            }
+        }
+
         // Drill-down — only when the current level has children.
         if !self.current_children(view_defs).is_empty() {
             if let Some(b) = self
@@ -3862,6 +3979,9 @@ impl ContentPane {
             }
             KeySource::Content(ContentAction::CycleGrouping) => {
                 Some(self.try_cycle_grouping(view_defs))
+            }
+            KeySource::Content(ContentAction::ToggleTreeAggregate) => {
+                Some(self.try_toggle_tree_aggregate(view_defs))
             }
             KeySource::Common(CommonAction::ListNext) => {
                 self.nav_and_refresh(Cmd::Move(Direction::Down), view_defs);
@@ -4724,6 +4844,9 @@ impl ContentView {
                 .unwrap_or(SubViewMessage::Unhandled),
             ContentAction::CycleGrouping => {
                 self.active_pane_mut().try_cycle_grouping(&view_defs)
+            }
+            ContentAction::ToggleTreeAggregate => {
+                self.active_pane_mut().try_toggle_tree_aggregate(&view_defs)
             }
         };
         if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
@@ -7217,9 +7340,9 @@ mod tests {
     fn multiline_widget_rows_chat_layout() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -7267,8 +7390,8 @@ mod tests {
     fn multiline_widget_rows_markdown_expands_body() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -7450,8 +7573,8 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                 ],
                 preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
                 actions: vec![
@@ -7464,7 +7587,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -7610,7 +7733,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -7733,7 +7856,7 @@ mod tests {
             smooth_scroll: true,
             name: "messages".into(),
             node_type: "mock:msg".into(),
-            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None }],
+            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None }],
             preview: None,
             actions: Vec::new(),
             children: Vec::new(),
@@ -7943,7 +8066,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -7954,7 +8077,7 @@ mod tests {
                         name: "Schemas".into(),
                         node_type: "mock:schema".into(),
                         columns: vec![
-                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -8054,6 +8177,7 @@ mod tests {
             format: None,
             separator: None,
             elapsed_from: None,
+            tree_aggregate: None,
         }
     }
 
@@ -8219,6 +8343,159 @@ mod tests {
                 cell.contains(label),
                 "row {i} label cell empty/wrong: {cell:?} (expected to contain {label:?})",
             );
+        }
+    }
+
+    // ── Tree-fold aggregation (M4) ───────────────────────────────────
+
+    /// Single-level tree config whose root carries a label column (`name`)
+    /// and a `tree_aggregate` column (`dur`, cumulated field `dur_cum`).
+    /// `kind: Number` so the cell renders the value verbatim (the toggle
+    /// path is what's under test, not duration formatting).
+    fn tree_aggregate_config(default: TreeAggregateDefault) -> ViewFileConfig {
+        let dur = ColumnDef {
+            key: "dur".into(),
+            label: Some("Dur".into()),
+            source: None,
+            style: None,
+            sizing: "max".into(),
+            markdown: false,
+            kind: ColumnKind::Number,
+            format: None,
+            separator: None,
+            elapsed_from: None,
+            tree_aggregate: Some(crate::config::view_config::TreeAggregate {
+                cumulated_field: "dur_cum".into(),
+                default,
+            }),
+        };
+        ViewFileConfig {
+            tab: TabConfig { name: "Worklog".into(), order: 0, icon: None },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
+            views: vec![ViewDef {
+                row_layout: None,
+                smooth_scroll: false,
+                name: "tasks".into(),
+                node_type: "mock:task".into(),
+                default: true,
+                key: None,
+                query: None,
+                columns: vec![hcol("name"), dur],
+                preview: None,
+                actions: vec![],
+                children: vec![],
+                pagination: None,
+                action_chains: Default::default(),
+                column_cursor: false,
+                tree_label: Some("name".into()),
+                retries: 0,
+                script_template: None,
+                shortcuts: HashMap::new(),
+                leaf_glyph: None,
+                group_by: None,
+                aggregates: Vec::new(),
+                summary_only: false,
+            }],
+        }
+    }
+
+    /// A tree node carrying both the own (`dur`) and cumulated (`dur_cum`)
+    /// metadata fields the `tree_aggregate` column toggles between.
+    fn tnode_dur(id: &str, label: &str, own: &str, cumulated: &str) -> NodeSummary {
+        use not_yet_done_content::{Metadata, MetadataField};
+        let field = |k: &str, v: &str| MetadataField {
+            key: k.into(),
+            value: v.into(),
+            display_label: k.into(),
+            editable: false,
+            allowed_values: None,
+        };
+        let mut n = tnode(id, label, "mock:task");
+        n.metadata = Metadata { fields: vec![field("dur", own), field("dur_cum", cumulated)] };
+        n
+    }
+
+    /// Render the single visible row's `dur` cell text for a pane built from
+    /// `tree_aggregate_config(default)`, optionally after firing the toggle.
+    fn tree_aggregate_dur_cell(default: TreeAggregateDefault, toggle: bool) -> String {
+        let config = tree_aggregate_config(default);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_dur("t1", "Task 1", "30", "100")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view.active_pane_mut().table.set_selected(0);
+        if toggle {
+            assert!(
+                view.active_pane_mut().toggle_tree_aggregate(&view_defs),
+                "toggle must apply on a level with a tree_aggregate column",
+            );
+        }
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        assert_eq!(rows.len(), 1, "exactly one visible row");
+        rows[0]
+            .cells
+            .get(&TColumnId::new("dur"))
+            .map(|c| c.text.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tree_aggregate_default_own_shows_node_value() {
+        // No toggle, default `own` → the column's own `dur` field (30).
+        assert_eq!(tree_aggregate_dur_cell(TreeAggregateDefault::Own, false), "30");
+    }
+
+    #[test]
+    fn tree_aggregate_default_cumulated_shows_cumulated_field() {
+        // No toggle, default `cumulated` → the `dur_cum` field (100).
+        assert_eq!(
+            tree_aggregate_dur_cell(TreeAggregateDefault::Cumulated, false),
+            "100",
+        );
+    }
+
+    #[test]
+    fn tree_aggregate_toggle_flips_own_to_cumulated() {
+        // Default `own` (30) → one toggle flips to the cumulated field (100).
+        assert_eq!(tree_aggregate_dur_cell(TreeAggregateDefault::Own, true), "100");
+    }
+
+    #[test]
+    fn tree_aggregate_toggle_flips_cumulated_to_own() {
+        // Default `cumulated` (100) → one toggle flips back to own (30).
+        assert_eq!(
+            tree_aggregate_dur_cell(TreeAggregateDefault::Cumulated, true),
+            "30",
+        );
+    }
+
+    #[test]
+    fn tree_aggregate_toggle_noop_without_column() {
+        // A plain tree level (no tree_aggregate column) → toggle is a no-op
+        // and the action stays unclaimable.
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        assert!(!view.active_pane().level_has_tree_aggregate(&view_defs));
+        assert!(!view.active_pane_mut().toggle_tree_aggregate(&view_defs));
+        match view.active_pane_mut().try_toggle_tree_aggregate(&view_defs) {
+            SubViewMessage::Unhandled => {}
+            other => panic!("expected Unhandled without a tree_aggregate column, got {other:?}"),
         }
     }
 
@@ -8741,6 +9018,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                tree_aggregate: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -8837,6 +9115,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                tree_aggregate: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -9187,7 +9466,7 @@ mod tests {
                     menu_key: Some("q".into()),
                 }),
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9942,7 +10221,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -9953,7 +10232,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -10313,7 +10592,7 @@ mod tests {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
             ],
             preview: None,
             actions: vec![],
@@ -10323,7 +10602,7 @@ mod tests {
                 name: "pages".into(),
                 node_type: "mock:page".into(),
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -10520,8 +10799,8 @@ mod tests {
 
     fn group_columns() -> Vec<ColumnDef> {
         vec![
-            ColumnDef { key: "category".into(), label: None, source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-            ColumnDef { key: "dur".into(), label: None, source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None },
+            ColumnDef { key: "category".into(), label: None, source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "dur".into(), label: None, source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
         ]
     }
 
@@ -10674,11 +10953,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
-                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None },
+                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
             ],
             preview: Some(PreviewConfig {
                 enabled: true,

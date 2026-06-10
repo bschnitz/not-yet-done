@@ -117,6 +117,7 @@ impl ContentAdapter for TaigaAdapter {
             supports_search: true,
             supports_batch_download: false,
             supports_total_count: false,
+            supports_tree_aggregation: false,
         }
     }
 

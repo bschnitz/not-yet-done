@@ -422,6 +422,50 @@ laufende Sitzung.
 Die Farbe der Gruppen-Kopf- und Footer-Zeilen ist über das Theme konfigurierbar
 (`group_header`, siehe `tui-theme.yaml` / Theme-Referenz).
 
+#### `tree_aggregate:` — Eigen- vs. Summenwert im Tree (M4)
+
+Das Gegenstück zu `group_by:` für den **Tree-Mode**: Eine Spalte kann pro Knoten
+entweder ihren **Eigenwert** (das Feld `key:` der Spalte) oder den vom Adapter
+berechneten **Teilbaum-Summenwert** (`cumulated_field:`) anzeigen — zur Laufzeit
+umschaltbar.
+
+```yaml
+columns:
+  - { key: name, source: label }
+  - key: duration # Eigenwert des Knotens (kanonisch: Sekunden)
+    kind: duration
+    tree_aggregate:
+      cumulated_field: duration_cumulated # Adapter liefert die Teilbaum-Summe
+      default: own # own (Standard) | cumulated
+```
+
+- **`cumulated_field:`** (Pflicht) — der Metadaten-Feldschlüssel, unter dem der
+  Adapter den **bereits aufsummierten** Teilbaumwert liefert (kanonisch für die
+  `kind:` der Spalte, z. B. Sekunden bei `kind: duration`). Der Eigenwert kommt
+  weiterhin aus dem `key:` der Spalte.
+- **`default:`** — welcher Wert vor dem ersten Umschalten gezeigt wird: `own`
+  (Standard) oder `cumulated`.
+
+**Warum adapter-getrieben?** Der Tree wird **lazy** geladen — eingeklappte Äste
+liegen gar nicht im Speicher. Die TUI kann also nicht selbst falten; **nur der
+Adapter** weiß, ob er den vollen Baum hat und einen Teilbaum aufsummieren kann.
+Er liefert beide Werte als Metadatenfelder und deklariert dazu die Fähigkeit
+`supports_tree_aggregation` (siehe `AdapterCapabilities`). Kann er nicht
+kumulieren, lässt er das Feld weg.
+
+**Laufzeit-Umschaltung (`toggle_tree_aggregate`, Default `zt`):** Die Aktion
+schaltet **alle** `tree_aggregate`-Spalten der aktiven Ebene zwischen Eigen- und
+Summenwert um. Sie ist nur aktiv, wenn die Ebene (im Tree-Mode) überhaupt eine
+`tree_aggregate`-Spalte hat. Der Status ist View-State (nicht persistiert).
+
+> **Eigen- _und_ Summenwert nebeneinander** braucht keinen neuen Mechanismus —
+> dafür zwei normale Spalten auf die beiden Felder legen (z. B. `key: duration`
+> und `key: duration_cumulated`, beide `kind: duration`).
+
+> **Einschränkungen.** `tree_aggregate:` greift nur im **Tree-Mode**; in
+> Flat-Listen wird es ignoriert. Spiegelbildlich zu `group_by:`, das nur in
+> Flat-Listen greift.
+
 ### Zweites Beispiel: `confluence.yaml`
 
 ```yaml
