@@ -415,8 +415,22 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   > (add/delete/reparent) leert den Snapshot → der Filter ist verloren, bis
   > die Pane die Query erneut sendet. Bewusst nicht weiter abgefangen.
   >
-  > **Offen (A1c):** scripts (`:script` auf dem Tasks-Tab), optional
-  > „Add-Child unter Selektion im Tree-Mode" / Reparent-to-Root-Un-Nest.
+  > **A1c-scripts umgesetzt (null Adapter-Code).** Der `:script`-Pfad ist
+  > schon generisch über `ContentView`/`ContentPane` verdrahtet
+  > (`open_script_menu_from_current_tab` routet `Tab::Content` →
+  > `open_script_menu_for_content` → `ScriptContext::ContentNode`). Es genügte
+  > eine `type: script`-Action (Key `x`) in `tasks.yaml` auf beiden Ebenen
+  > (`script` ist nicht root-only wie search/fuzzy_filter/tree_find). Der Task
+  > geht als **uniformes** `{"node": …}`-JSON raus (Felder aus `task_metadata`:
+  > description/status/priority/tags/tracking/created), Verzeichnis
+  > `scripts/tasks/task_item/` — _nicht_ die native `{"task": …}`-Form +
+  > `scripts/tasks/` des bespoke Tabs (der parallel weiterläuft, eigene
+  > Skripte migrieren erst bei C1). `view_config`-Test prüft die Action beide
+  > Ebenen, Smoke-Sektion A1c-scripts.
+  >
+  > **Offen (A1c, optional):** „Add-Child unter Selektion im Tree-Mode" /
+  > Reparent-to-Root-Un-Nest. Damit ist A1 (TaskAdapter) bis auf diese
+  > Komfort-Extras vollständig.
 
 - **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
   Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed

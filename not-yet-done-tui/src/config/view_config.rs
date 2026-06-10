@@ -1621,6 +1621,12 @@ views:
         let parsed = not_yet_done_core::filter::query_filter::parse(body)
             .expect("default tasks query body should parse as a FilterExpr document");
         assert_eq!(parsed.name, "open tasks");
+        // A1c (scripts): a `type: script` action on both levels reaches the
+        // generic script menu (key `x`). The validator does not restrict
+        // `script` to the tree root (unlike search/fuzzy_filter/tree_find).
+        let root_script = root.actions.iter().find(|a| a.action_type == "script").unwrap();
+        assert_eq!(root_script.key, "x");
+        assert!(child.actions.iter().any(|a| a.action_type == "script"));
 
         cfg.validate(
             &KeyBindingConfig::default(),

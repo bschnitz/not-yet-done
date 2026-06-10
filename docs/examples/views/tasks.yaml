@@ -41,9 +41,13 @@
 # adapter's per-instance data dir (scope `tasks/<id>/<view>`); manage them
 # with `:query new|edit|delete <name>` and the `q` menu.
 #
-# Still A1c: scripts (`:script` on the tasks tab). Until the C1 cutover this
-# file is illustrative: the bespoke native Tasks tab still ships; copying
-# this file in stands up the adapter path *alongside* it for comparison.
+# Scripts (`x` / `:script`) run against the selected task through the generic
+# script menu — the task is handed over as the uniform `{"node": …}` JSON
+# (see the `run script` action below).
+#
+# Until the C1 cutover this file is illustrative: the bespoke native Tasks
+# tab still ships; copying this file in stands up the adapter path
+# *alongside* it for comparison.
 
 tab:
   name: Tasks
@@ -128,6 +132,17 @@ views:
         key: a
         type: create
         id: add
+      # Run a script against the selected task. Opens the generic `:script`
+      # fuzzy menu (also reachable via the `:script` cmdline). Scripts live
+      # under `<data>/not_yet_done/scripts/tasks/task_item/` — one dir per
+      # view path, shared across depths. The selected task is handed to the
+      # script as JSON (`{"node": {"id", "node_type", "tab", "fields": {…}}}`,
+      # where `fields` carries description/status/priority/tags/tracking);
+      # the adapter path uses the uniform node shape, not the bespoke
+      # `{"task": …}` payload of the legacy native tab.
+      - name: run script
+        key: x
+        type: script
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f
@@ -206,6 +221,11 @@ views:
             key: a
             type: create
             id: add
+          # Same script menu at any depth (the scripts dir is the view
+          # path, stable across the recursive branch → one shared dir).
+          - name: run script
+            key: x
+            type: script
           - name: refresh
             key: r
             type: reload
