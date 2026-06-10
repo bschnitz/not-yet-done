@@ -3181,7 +3181,7 @@ Sets können `icon` + `shortcut` definieren (Voll-Form mit `tabs:`).
 - [ ] Shortcut mit mehr als einem Zeichen → Parse-Fehler (sichtbar als
       Config-Validierungsfehler).
 
-## TaskAdapter (adapterisierter Tasks-Tab) — A1b
+## TaskAdapter (adapterisierter Tasks-Tab) — A1b + A1c-1
 
 Voraussetzung: `docs/examples/views/tasks.yaml` nach
 `~/.config/not_yet_done/views/tasks.yaml` kopieren. Der Adapter-Tab läuft
@@ -3216,6 +3216,22 @@ Voraussetzung: `docs/examples/views/tasks.yaml` nach
       Fehler (Zyklus abgelehnt), keine Änderung.
 - [ ] Mutation in diesem Tab → nativer Tasks-Tab (falls offen) repaint/
       reload via DomainEvent.
+
+### A1c-1 — Tracking-Marker-Spalte + Start/Stop-Taste
+
+- [ ] `⏱`-Spalte zwischen Task und Status sichtbar. Tasks mit laufendem
+      Tracking zeigen `⏱`, alle anderen leer.
+- [ ] `t` (toggle-tracking) auf untracktem Task → `⏱` erscheint sofort
+      (Reload); im nativen Trackings-Tab taucht das Tracking auf.
+- [ ] `t` erneut auf demselben Task → `⏱` verschwindet, Tracking gestoppt.
+- [ ] Bei `tracking.allow_parallel=false`: `t` auf Task B während A läuft →
+      A's `⏱` verschwindet, B's erscheint (exklusiv, native Policy).
+- [ ] Bei `tracking.allow_parallel=true`: `t` auf B lässt A's `⏱` stehen
+      (beide laufen).
+- [ ] Tracking via `e`-Buffer (`tracking: true`) gestartet → `⏱` erscheint
+      ohne extra `t`; `t` togglet danach konsistent.
+- [ ] `t` und der `tracking:`-Buffer-Toggle bleiben synchron (kein
+      Stale-Marker): nach jedem Toggle spiegelt die Spalte den Live-Stand.
 
 ## Refinements / Deferred Tasks
 

@@ -28,9 +28,11 @@
 //!   `---` frontmatter and `## Description:` / `## Notes:` body (see
 //!   [`editor_templates`]). `add` is exposed on every *container* node
 //!   (the root → top-level task, a task → child task); `edit` on the task
-//!   itself. The `tracking:` toggle in the buffer is honored here too —
-//!   the dedicated tracking *marker column* and a one-key start/stop
-//!   shortcut are the only tracking bits still deferred to A1c.
+//!   itself. The `tracking:` toggle in the buffer is honored here too.
+//! - **toggle-tracking** (A1c) — a one-key start/stop of the task's time
+//!   tracking, paired with the `tracking` marker column (a `⏱` glyph on
+//!   running rows). The toggle reads the live state and reuses
+//!   [`apply_tracking`], so it respects the host's exclusivity policy.
 //! - **delete** (`DeleteSelf`) — recursive delete of the task subtree.
 //! - **undelete** — restores the most recently deleted task(s) via
 //!   [`TaskService::undelete_last`](not_yet_done_core::service::TaskService::undelete_last);
@@ -43,8 +45,8 @@
 //! snapshot-clearing bridge ([`spawn_task_bridge`]) drops the cache and
 //! the other tabs repaint.
 //!
-//! Still A1c: tracking marker column + dedicated start/stop shortcut,
-//! saved queries (`task` scope), `FilterExpr` filtering, and scripts.
+//! Still A1c: saved queries (`task` scope), `FilterExpr` filtering, and
+//! scripts.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -117,6 +119,10 @@ struct ForestSnapshot {
     by_id: HashMap<Uuid, TaskRow>,
     /// parent id → ordered child ids. The `None` key holds the forest roots.
     children: HashMap<Option<Uuid>, Vec<Uuid>>,
+    /// Ids of tasks with an open (running) tracking, resolved once at
+    /// build time. Backs the `tracking` marker column and seeds the
+    /// start/stop toggle's "is it already running?" check.
+    tracked: HashSet<Uuid>,
 }
 
 impl ForestSnapshot {
@@ -156,7 +162,19 @@ impl ForestSnapshot {
                 ca.cmp(&cb)
             });
         }
-        Ok(Arc::new(ForestSnapshot { by_id, children }))
+        // Resolve the running-tracking set once for the whole forest rather
+        // than per-row: one query feeds every marker cell.
+        let tracked: HashSet<Uuid> = handle
+            .tracking_repo
+            .find_all_active()
+            .await
+            .map(|active| active.into_iter().map(|t| t.task_id).collect())
+            .unwrap_or_default();
+        Ok(Arc::new(ForestSnapshot {
+            by_id,
+            children,
+            tracked,
+        }))
     }
 
     /// Ordered child summaries of `parent` (`None` = forest roots).
@@ -181,7 +199,7 @@ impl ForestSnapshot {
             id: id.to_string(),
             label: row.task.description.clone(),
             node_type: task_item_type(),
-            metadata: task_metadata(row),
+            metadata: task_metadata(row, self.tracked.contains(&id)),
             has_children: Some(has_children),
         }
     }
@@ -239,10 +257,18 @@ fn field(key: &str, value: String, label: &str) -> MetadataField {
 /// strings** the engine's typed columns (M2) parse: integers for `number`,
 /// RFC 3339 for `datetime`. `views/tasks.yaml` declares the `kind:` per
 /// column; the adapter only supplies the canonical form.
-fn task_metadata(row: &TaskRow) -> Metadata {
+fn task_metadata(row: &TaskRow, is_tracked: bool) -> Metadata {
     let t = &row.task;
     Metadata {
         fields: vec![
+            // Marker column: a running stopwatch glyph when this task has an
+            // open tracking, blank otherwise. `views/tasks.yaml` renders it
+            // as a narrow `kind: text` column. Mirrors the native tab's `⏱`.
+            field(
+                "tracking",
+                if is_tracked { "⏱".to_string() } else { String::new() },
+                "Tracking",
+            ),
             field("status", status_label(&t.status).to_string(), "Status"),
             field("priority", t.priority.to_string(), "Priority"),
             field("tags", row.tags.join(" "), "Tags"),
@@ -299,9 +325,9 @@ fn task_root_actions() -> Vec<NodeAction> {
 
 /// Actions a single task exposes. `add` makes a task a valid `type: create`
 /// container (new child); `edit` opens the markdown buffer on the task
-/// itself; `delete`/`undelete` and the `mark-move`/`paste-move` reparent
-/// pair are fire-and-forget shortcuts dispatched through
-/// [`Node::invoke_action`].
+/// itself; `delete`/`undelete`, `toggle-tracking`, and the
+/// `mark-move`/`paste-move` reparent pair are fire-and-forget shortcuts
+/// dispatched through [`Node::invoke_action`].
 fn task_item_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("edit", "Edit", InputSpec::Editor)
@@ -314,6 +340,9 @@ fn task_item_actions() -> Vec<NodeAction> {
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
         NodeAction::new("undelete", "Undelete", InputSpec::None).with_default_key('u'),
+        NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('t'),
         NodeAction::new("mark-move", "Mark for move", InputSpec::None),
         NodeAction::new("paste-move", "Move here", InputSpec::None),
     ]
@@ -635,6 +664,20 @@ async fn invoke_undelete(handle: &CoreHandle) -> ActionDispatch {
     }
 }
 
+/// `invoke_action("toggle-tracking")` — flip time tracking for `task_id`.
+/// The current state is read live (an active tracking exists?) rather than
+/// from the snapshot, so a stale marker can't desync the toggle.
+/// [`apply_tracking`] enforces the host's exclusivity policy and emits the
+/// `Tracking*` events; the bridge then invalidates and the view reloads.
+async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
+    let is_tracked = matches!(
+        handle.tracking_repo.find_active_for_task(task_id).await,
+        Ok(Some(_))
+    );
+    apply_tracking(handle, task_id, !is_tracked).await;
+    ActionDispatch::Reload
+}
+
 /// `invoke_action("paste-move")` — reparent the previously-marked task
 /// (`ctx.marked`) under `target`. Validates the marked node is a task and
 /// the move forms no cycle, then persists + relocates its notes.
@@ -782,7 +825,7 @@ impl TaskItemNode {
             id_str: id.to_string(),
             label: row.task.description.clone(),
             node_type: task_item_type(),
-            metadata: task_metadata(row),
+            metadata: task_metadata(row, snapshot.tracked.contains(&uuid)),
         }))
     }
 }
@@ -851,6 +894,7 @@ impl Node for TaskItemNode {
             // happens in `execute("delete")` after confirmation.
             "delete" => ActionDispatch::DeleteSelf,
             "undelete" => invoke_undelete(&self.handle).await,
+            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.id).await,
             // The frontend records the mark; the adapter does nothing here.
             "mark-move" => ActionDispatch::Noop,
             "paste-move" => match &ctx.marked {
@@ -1123,7 +1167,11 @@ mod tests {
             children.entry(row.parent).or_default().push(id);
             by_id.insert(id, row);
         }
-        Arc::new(ForestSnapshot { by_id, children })
+        Arc::new(ForestSnapshot {
+            by_id,
+            children,
+            tracked: HashSet::new(),
+        })
     }
 
     #[test]
@@ -1169,7 +1217,7 @@ mod tests {
         r.task.priority = 5;
         r.task.status = task::TaskStatus::InProgress;
         r.tags = vec!["urgent".into(), "home".into()];
-        let md = task_metadata(&r);
+        let md = task_metadata(&r, true);
         let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
         assert_eq!(get("priority").as_deref(), Some("5"));
         assert_eq!(get("status").as_deref(), Some("In Progress"));
@@ -1178,6 +1226,13 @@ mod tests {
         let created = get("created").unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&created).is_ok());
         assert_eq!(get("last_tracked").as_deref(), Some(""));
+        // The marker reflects the passed-in tracked flag.
+        assert_eq!(get("tracking").as_deref(), Some("⏱"));
+        let md_off = task_metadata(&r, false);
+        assert_eq!(
+            md_off.fields.iter().find(|f| f.key == "tracking").map(|f| f.value.as_str()),
+            Some("")
+        );
     }
 
     #[test]
@@ -1241,7 +1296,15 @@ mod tests {
         assert!(has(&root, "add"));
         assert_eq!(root.len(), 1);
         let item = task_item_actions();
-        for id in ["edit", "add", "delete", "undelete", "mark-move", "paste-move"] {
+        for id in [
+            "edit",
+            "add",
+            "delete",
+            "undelete",
+            "toggle-tracking",
+            "mark-move",
+            "paste-move",
+        ] {
             assert!(has(&item, id), "task:item missing action `{id}`");
         }
     }

@@ -24,14 +24,16 @@
 #     flag starts/stops time tracking.
 #   * `d` delete (recursive, with confirm) / `u` undelete (restores the
 #     last deletion) — generic `shortcuts:` dispatched via `invoke_action`.
+#   * `t` toggle-tracking — start/stop time tracking for the selected task
+#     in one key. The `tracking` column shows a `⏱` glyph on running rows.
+#     Respects the host's exclusivity policy (`tracking.allow_parallel`).
 #   * `m` mark-move / `p` paste-move — reparent: mark a task, move onto the
 #     target task (which becomes its new parent). Cycles are rejected.
 #
-# Still A1c: the tracking *marker column* and a dedicated start/stop key,
-# saved queries (`task` scope), `FilterExpr` filtering, and scripts. Until
-# the C1 cutover this file is illustrative: the bespoke native Tasks tab
-# still ships; copying this file in stands up the adapter path *alongside*
-# it for comparison.
+# Still A1c: saved queries (`task` scope), `FilterExpr` filtering, and
+# scripts. Until the C1 cutover this file is illustrative: the bespoke
+# native Tasks tab still ships; copying this file in stands up the adapter
+# path *alongside* it for comparison.
 
 tab:
   name: Tasks
@@ -63,6 +65,12 @@ views:
         source: label
         style: text_high
         sizing: "flex(1)"
+      # Tracking marker: a `⏱` glyph on rows with a running tracking, blank
+      # otherwise. The adapter supplies the canonical glyph; `t` toggles it.
+      - key: tracking
+        label: "⏱"
+        style: accent
+        sizing: max
       - key: status
         label: Status
         sizing: max
@@ -118,6 +126,7 @@ views:
     shortcuts:
       d: delete
       u: undelete
+      t: toggle-tracking
       m: mark-move
       p: paste-move
 
@@ -136,6 +145,10 @@ views:
             source: label
             style: text_high
             sizing: "flex(1)"
+          - key: tracking
+            label: "⏱"
+            style: accent
+            sizing: max
           - key: status
             label: Status
             sizing: max
@@ -171,5 +184,6 @@ views:
         shortcuts:
           d: delete
           u: undelete
+          t: toggle-tracking
           m: mark-move
           p: paste-move
