@@ -12,9 +12,25 @@
 #
 # The whole non-deleted forest loads once into an eager snapshot and drills
 # lazily through a single recursive `task:item` branch. Columns are typed
-# (M2): `priority` is a right-aligned number, `created` a localized
-# datetime. Tree-aware search (`/`) walks the entire forest adapter-side
-# and steps through hits with n/N.
+# (M2): `priority` is a right-aligned number, the date columns render
+# date-only (`format: "%Y-%m-%d"`). Tree-aware search (`/`) walks the entire
+# forest adapter-side and steps through hits with n/N.
+#
+# ## Column parity with the native tab
+#
+# The columns below reproduce the native Tasks tab's default visible set and
+# order 1:1 — St / Pri / Tr / T / Task / Created / Updated / Tracked / N.
+# Each column's `style` maps onto the same theme color key the native table
+# uses (`tabs/columns.rs`): `tertiary`/`accent`/`secondary`/`text_med`.
+# `status` is emitted as the nerd-font glyph (not a text label); the tag
+# split is `tag_symbols` (icons) + `tag_names` (text — hidden by default in
+# native, so omitted here too); `notes` is the `📝` marker.
+#
+# The native `🔗` links column is intentionally absent: links live in the
+# host's app-level link store, which the in-process CoreHandle does not yet
+# expose to the adapter. (A generic `source: has_links` engine mechanism is
+# the intended way to surface it; until then the column would render
+# always-blank, so it is left out.)
 #
 # Mutations go through the generic action vocabulary:
 #   * `e` edit / `a` add — open a markdown buffer (`---` frontmatter +
@@ -61,6 +77,11 @@ tab:
 
 adapter:
   type: tasks
+  # In-process adapter: TaskAdapterFactory ignores this string. The generic
+  # loader still requires *some* config to be present (config_inline or a
+  # readable config: path) before it calls the factory, so a trivial inline
+  # blob keeps this file copy-paste loadable.
+  config_inline: "{}"
 
 views:
   # The root view lists the forest's top-level tasks (`parent_id == None`).
@@ -74,55 +95,71 @@ views:
     default: true
     tree_label: description
 
-    # Saved-query filter. The `default` body re-serializes to the YAML
-    # document the adapter parses (`query_filter::parse`): a `name`, a
-    # `query` FilterExpr (leaves are `[lhs, op, rhs]`), and optional
-    # `options`. This default hides finished work — only non-`done`,
-    # non-deleted tasks load; the tree keeps each match's ancestors so
-    # nested hits stay visible. Drop `default` to show the whole forest.
+    # Saved-query filter. No `default` body is set, so — like the native tab
+    # — the whole (non-deleted) forest is shown, including done tasks. Add a
+    # `default:` block (a `name` + a `query` FilterExpr whose leaves are
+    # `[lhs, op, rhs]`, plus optional `options`) to filter to a subset; the
+    # tree then keeps each match's ancestors so nested hits stay visible.
     # `editable` lets `:query edit` rewrite a body; `menu_key: q` opens the
     # menu listing every saved query for this view (bodies under scope
     # `tasks/<id>/<view>`, shortcuts in the `query_shortcut` table).
     query:
-      default:
-        name: open tasks
-        query:
-          and:
-            - [deleted, "=", false]
-            - [status, "!=", done]
       editable: true
       menu_key: q
 
-    # Tree-label column first (carries the indent + glyph), typed columns
-    # trail behind. `priority` (number) right-aligns; `created` (datetime)
-    # renders localized — the adapter emits canonical strings (integer,
-    # RFC 3339) and the engine formats per `kind`.
+    # Native column parity (see header). `status` is the status glyph,
+    # `priority` a right-aligned number, the date columns render date-only,
+    # `tag_symbols`/`notes` are markers, `description` carries the indent +
+    # tree glyph. The adapter emits canonical strings (integer, RFC 3339);
+    # the engine formats per `kind` + `format`.
     columns:
-      - key: description
-        label: Task
-        source: label
-        style: text_high
-        sizing: "flex(1)"
+      - key: status
+        label: St
+        style: tertiary
+        sizing: max
+      - key: priority
+        label: Pri
+        kind: number
+        style: tertiary
+        sizing: max
       # Tracking marker: a `⏱` glyph on rows with a running tracking, blank
       # otherwise. The adapter supplies the canonical glyph; `t` toggles it.
       - key: tracking
-        label: "⏱"
+        label: Tr
         style: accent
         sizing: max
-      - key: status
-        label: Status
-        sizing: max
-      - key: priority
-        label: Prio
-        kind: number
-        sizing: max
-      - key: tags
-        label: Tags
+      # Tag symbols (icons only); `tag_names` ships hidden in native, omitted.
+      - key: tag_symbols
+        label: T
         style: accent
         sizing: max
+      - key: description
+        label: Task
+        source: label
+        style: text_med
+        sizing: "flex(1)"
       - key: created
         label: Created
         kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
+      - key: updated
+        label: Updated
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
+      - key: last_tracked
+        label: Tracked
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: accent
+        sizing: max
+      # Notes marker: `📝` when a notes file exists for the task, blank else.
+      - key: notes
+        label: N
+        style: tertiary
         sizing: max
 
     actions:
@@ -142,8 +179,9 @@ views:
       # under `<data>/not_yet_done/scripts/tasks/task_item/` — one dir per
       # view path, shared across depths. The selected task is handed to the
       # script as JSON (`{"node": {"id", "node_type", "tab", "fields": {…}}}`,
-      # where `fields` carries description/status/priority/tags/tracking);
-      # the adapter path uses the uniform node shape, not the bespoke
+      # where `fields` carries status/priority/tracking/tag_symbols/tag_names/
+      # notes/created/updated/last_tracked/id); the adapter path uses the
+      # uniform node shape, not the bespoke
       # `{"task": …}` payload of the legacy native tab.
       - name: run script
         key: x
@@ -163,7 +201,7 @@ views:
         key: f
         type: fuzzy_filter
         fuzzy_filter:
-          fields: [description, tags]
+          fields: [description, tag_names]
       # Tree-aware search: `/` opens a free-text input, the adapter matches
       # task descriptions across the whole forest, the tree expands to the
       # first hit, and n/N cycle the rest in tree-render order. Declared
@@ -203,29 +241,49 @@ views:
         recursive: true
 
         columns:
+          - key: status
+            label: St
+            style: tertiary
+            sizing: max
+          - key: priority
+            label: Pri
+            kind: number
+            style: tertiary
+            sizing: max
+          - key: tracking
+            label: Tr
+            style: accent
+            sizing: max
+          - key: tag_symbols
+            label: T
+            style: accent
+            sizing: max
           - key: description
             label: Task
             source: label
-            style: text_high
+            style: text_med
             sizing: "flex(1)"
-          - key: tracking
-            label: "⏱"
-            style: accent
-            sizing: max
-          - key: status
-            label: Status
-            sizing: max
-          - key: priority
-            label: Prio
-            kind: number
-            sizing: max
-          - key: tags
-            label: Tags
-            style: accent
-            sizing: max
           - key: created
             label: Created
             kind: datetime
+            format: "%Y-%m-%d"
+            style: secondary
+            sizing: max
+          - key: updated
+            label: Updated
+            kind: datetime
+            format: "%Y-%m-%d"
+            style: secondary
+            sizing: max
+          - key: last_tracked
+            label: Tracked
+            kind: datetime
+            format: "%Y-%m-%d"
+            style: accent
+            sizing: max
+          - key: notes
+            label: N
+            style: tertiary
             sizing: max
 
         # Edit/add/delete/reparent work at every depth, so the recursive

@@ -254,6 +254,35 @@ Regeln:
   `preview.markdown: true` (siehe `preview:`-Block) — z. B. um den vollen
   Nachrichtenbody mit `p` schön gerendert zu zeigen.
 
+#### `sizing:` — Spaltenbreite
+
+Pro Spalte, default `max`. Bestimmt, wie die Tabellen-Engine die Spaltenbreite
+gegen das Breiten-Budget (= **tatsächliche Pane-Breite zum Render-Zeitpunkt**)
+verteilt:
+
+| `sizing:`       | Verhalten                                                           |
+| --------------- | ------------------------------------------------------------------- |
+| `max`           | so breit wie der breiteste Inhalt (gedeckelt auf den freien Rest)   |
+| `fixed(N)`      | exakt `N` Spalten breit                                             |
+| `flex(N)`       | teilt sich den **Rest** nach Gewicht `N` mit anderen `flex`-Spalten |
+| `auto(min,max)` | inhaltsbreit zwischen `min`/`max`; **ignoriert das Budget** (s. u.) |
+
+`flex`-Spalten füllen den nach `max`/`fixed` verbleibenden Platz **bis zur
+Pane-Breite** — sie blähen die Tabelle nicht über die Fläche hinaus. Eine
+`flex`-Spalte darf damit auch **mitten** in der Spaltenliste stehen (z. B. die
+Task-/Description-Spalte): die Spalten dahinter bleiben sichtbar. (Historisch
+legte die Engine gegen ein fixes Budget von 300 aus statt gegen die Pane-Breite;
+eine nicht-letzte `flex`-Spalte schob dann die nachfolgenden Spalten off-screen.
+Behoben — die Engine fittet jetzt auf die reale Pane-Breite und re-fittet bei
+Resize / Preview-Toggle.)
+
+`auto(min,max)` ist der Sonderfall für Tabellen mit **unbekannter Spaltenzahl**
+(z. B. dynamische Postgres-Rows): solche Spalten ignorieren das Pane-Budget
+bewusst und dürfen die Tabelle breiter als die Fläche machen — dann greift der
+**Horizontal-Scroll** (Spalten-Cursor, nur aktiv mit `column_cursor: true`).
+Für Views mit fester, in die Pane passender Spaltenliste gibt es keinen
+Horizontal-Scroll, weil alle Spalten on-screen liegen.
+
 #### `kind:` — typisierte Spaltenwerte
 
 Eine Spalte deklariert mit `kind:` den **semantischen Typ** ihres Werts. Der

@@ -62,6 +62,12 @@ pub struct Table {
     /// True when there are hidden columns to the right of the viewport.
     /// Set in `view()`; consumed by the header `›` indicator.
     pub(crate) has_more_right: bool,
+    /// Width (in terminal columns) of the area this table last rendered
+    /// into. Set in `view()`. The content view fits its columns to this
+    /// width on rebuild (instead of a fixed budget), so a flex column
+    /// fills exactly to the pane edge and trailing columns stay on-screen
+    /// — matching the native render-time layout. 0 until the first paint.
+    pub(crate) last_render_width: u16,
 
     // --- data ---
     /// Fixed rows always shown at the top (e.g. column headers).
@@ -115,6 +121,7 @@ impl Default for Table {
             last_visible_data_rows: 20,
             scroll_col_offset: 0,
             has_more_right: false,
+            last_render_width: 0,
             fixed_header_rows: Vec::new(),
             rows: Vec::new(),
             fixed_footer_rows: Vec::new(),
@@ -439,6 +446,13 @@ impl Table {
 
     /// Move the column cursor one cell to the left. No-op when the
     /// cursor is disabled or already at column 0.
+    /// Width (terminal columns) of the area this table last rendered into,
+    /// or 0 before the first paint. The content view fits its columns to
+    /// this width on rebuild — see the field docs.
+    pub fn last_render_width(&self) -> u16 {
+        self.last_render_width
+    }
+
     pub fn move_column_left(&mut self) {
         if let Some(c) = self.selected_column {
             if c > 0 {
@@ -808,6 +822,9 @@ impl Component for Table {
 
         let visible_data = self.visible_row_count_from(self.scroll_offset, line_budget);
         self.last_visible_data_rows = visible_data;
+        // Remember the render width so the next column-layout rebuild fits to
+        // the real pane width (see `last_render_width` docs).
+        self.last_render_width = area.width;
 
         // Re-snap horizontal scroll to keep the column cursor in view.
         // No-op when the column-cursor feature is off.

@@ -200,6 +200,44 @@ mod tests {
         assert_eq!(result, vec![5, 13]);
     }
 
+    #[test]
+    fn flex_in_middle_keeps_trailing_columns_on_screen() {
+        // Regression for the content-table layout: a `flex` column that is
+        // *not* last (the Tasks "Task" column sits in the middle, with date
+        // columns after it). When the budget equals the real pane width, flex
+        // must absorb only the *leftover* — the trailing Max columns keep
+        // their natural widths and the whole row fits the budget. (The bug
+        // was passing a fixed budget of 300 instead of the pane width, so
+        // flex ballooned and the render clipped everything after it.)
+        let mut strategies = HashMap::new();
+        strategies.insert(ColumnId::new("a"), ColStrategy::Max);
+        strategies.insert(ColumnId::new("task"), ColStrategy::Flex(1));
+        strategies.insert(ColumnId::new("c"), ColStrategy::Max);
+        strategies.insert(ColumnId::new("d"), ColStrategy::Max);
+        let sizer = MixedColSizer { strategies };
+        let cols = vec![
+            ColumnId::new("a"),
+            ColumnId::new("task"),
+            ColumnId::new("c"),
+            ColumnId::new("d"),
+        ];
+        let mut row = HashMap::new();
+        row.insert(ColumnId::new("a"), "AA".to_string()); // 2
+        row.insert(ColumnId::new("task"), "ignored-for-flex".to_string());
+        row.insert(ColumnId::new("c"), "CCCC".to_string()); // 4
+        row.insert(ColumnId::new("d"), "DD".to_string()); // 2
+        let cells = vec![&row];
+        // max_width=20, sep="  " (2) × 3 gaps = 6 → usable 14.
+        // Max: a=2, c=4, d=2 (used 8) → flex "task" = 14-8 = 6.
+        let result = sizer.col_widths(&cols, &cells, None, 20, "  ");
+        assert_eq!(result, vec![2, 6, 4, 2]);
+        // Trailing Max columns are non-zero (on-screen)…
+        assert!(result[2] > 0 && result[3] > 0);
+        // …and the layout exactly fills the pane budget (no overflow/scroll).
+        let sep_total = 2 * (cols.len() - 1);
+        assert_eq!(result.iter().sum::<usize>() + sep_total, 20);
+    }
+
     fn auto_sizer(min: usize, max: usize) -> MixedColSizer {
         let mut strategies = HashMap::new();
         strategies.insert(ColumnId::new("c"), ColStrategy::Auto { min, max });

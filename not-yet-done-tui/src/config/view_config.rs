@@ -1674,15 +1674,42 @@ views:
         assert_eq!(child.shortcuts.get(&'t'), Some(&"toggle-tracking".to_string()));
         assert!(child.columns.iter().any(|c| c.key == "tracking"));
         // A1c-2: the root view declares a saved-query block — editable, with
-        // a `q` menu key and a default whose body re-serializes to the YAML
-        // document the tasks adapter parses (a `name` + a `query` FilterExpr).
+        // a `q` menu key. No `default` body ships: like the native tab, the
+        // whole (non-deleted) forest is shown including done tasks (parity).
         let query = root.query.as_ref().expect("root view should declare a query block");
         assert!(query.editable, "tasks query should be editable");
         assert_eq!(query.menu_key.as_deref(), Some("q"));
-        let body = query.default.as_ref().expect("tasks query should ship a default body");
-        let parsed = not_yet_done_core::filter::query_filter::parse(body)
-            .expect("default tasks query body should parse as a FilterExpr document");
-        assert_eq!(parsed.name, "open tasks");
+        assert!(
+            query.default.is_none(),
+            "tasks view ships no default query — full forest, native parity"
+        );
+        // Column parity with the native tab: the default visible set + order
+        // (St / Pri / Tr / T / Task / Created / Updated / Tracked / N). The
+        // `🔗` links column is intentionally absent (app-level link store not
+        // wired to the in-process adapter yet). `tag_names` ships hidden in
+        // native, so it is omitted here too.
+        let col_keys: Vec<&str> = root.columns.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(
+            col_keys,
+            vec![
+                "status",
+                "priority",
+                "tracking",
+                "tag_symbols",
+                "description",
+                "created",
+                "updated",
+                "last_tracked",
+                "notes",
+            ],
+            "tasks columns must mirror the native default order"
+        );
+        // The date columns render date-only (`%Y-%m-%d`) like the native tab.
+        for key in ["created", "updated", "last_tracked"] {
+            let col = root.columns.iter().find(|c| c.key == key).unwrap();
+            assert!(matches!(col.kind, ColumnKind::Datetime));
+            assert_eq!(col.format.as_deref(), Some("%Y-%m-%d"));
+        }
         // A1c (scripts): a `type: script` action on both levels reaches the
         // generic script menu (key `x`). The validator does not restrict
         // `script` to the tree root (unlike search/fuzzy_filter/tree_find).

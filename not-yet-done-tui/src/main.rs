@@ -243,6 +243,17 @@ async fn run_loop(
             app.sync_components();
             terminal.draw(|frame| render::render(frame, app))?;
             dirty = false;
+
+            // Tables fit their columns to the pane width recorded during the
+            // draw above. On first paint, a terminal resize, or a preview
+            // toggle that width just changed, so re-fit the affected tables
+            // and draw once more. Converges immediately — the next re-fit
+            // pass is a no-op once widths match — so the loop still parks on
+            // the select! below.
+            if app.refit_visible_tables() {
+                dirty = true;
+                continue;
+            }
         }
 
         // Editor requests deferred from an async `LoadMsg` drain — e.g. a

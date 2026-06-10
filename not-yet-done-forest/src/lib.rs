@@ -319,15 +319,18 @@ impl<Id> Default for TreeRenderOptions<Id> {
 
 /// Bundle of inputs for [`forest_connector`]. Grouped so adding a new
 /// dimension (e.g. expand state, glyph) doesn't grow the parameter list.
-struct ConnectorSpec<'a> {
-    depth: usize,
-    is_last: bool,
-    prefix: &'a str,
-    has_description: bool,
-    has_children: bool,
+///
+/// Public so other tree renderers (e.g. the generic ContentView tree)
+/// can draw connectors identical to the forest's own.
+pub struct ConnectorSpec<'a> {
+    pub depth: usize,
+    pub is_last: bool,
+    pub prefix: &'a str,
+    pub has_description: bool,
+    pub has_children: bool,
     /// `None` = leaf (no glyph). `Some(true)` = expanded (▼).
     /// `Some(false)` = collapsed (▶).
-    expanded: Option<bool>,
+    pub expanded: Option<bool>,
 }
 
 // =============================================================================
@@ -596,7 +599,10 @@ where
 // Internal tree-rendering helpers
 // =============================================================================
 
-fn forest_connector(spec: ConnectorSpec<'_>) -> String {
+/// Build one tree row's connector prefix (`├── `/`└── `) plus expand
+/// glyph (`▼ `/`▶ `, or nothing for a leaf). Shared by the forest's own
+/// renderer and external tree renderers that want identical output.
+pub fn forest_connector(spec: ConnectorSpec<'_>) -> String {
     let ConnectorSpec {
         depth,
         is_last,
@@ -626,7 +632,10 @@ fn forest_connector(spec: ConnectorSpec<'_>) -> String {
     format!("{}{}", base, glyph)
 }
 
-fn forest_child_prefix(
+/// Build the prefix to hand down to a node's children: append `│   `
+/// when the node has following siblings, `    ` when it's the last.
+/// Shared with external tree renderers (see [`forest_connector`]).
+pub fn forest_child_prefix(
     depth: usize,
     is_last: bool,
     has_description: bool,

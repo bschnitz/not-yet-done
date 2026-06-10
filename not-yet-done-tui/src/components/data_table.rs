@@ -51,6 +51,13 @@ impl DataTable {
         self.table.set_nav_chars(chars);
     }
 
+    /// Width (terminal columns) of the area this table last rendered into,
+    /// or 0 before the first paint. The content view fits its column layout
+    /// to this width on rebuild.
+    pub fn last_render_width(&self) -> u16 {
+        self.table.last_render_width()
+    }
+
     /// Activate jump mode (phase 1 — waiting for search char).
     pub fn jump_mode_open(&mut self) {
         self.table.jump_mode_open();

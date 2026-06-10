@@ -362,6 +362,11 @@ pub fn tree_level_for_chain<'a>(
     node_type_chain: &[String],
 ) -> Option<TreeLevel<'a>> {
     let root_label = view_def.tree_label.as_deref()?;
+    // Strip only to decide root-vs-deeper. The lookup gets the *original*
+    // chain because `child_def_for_type_chain` strips the root type itself
+    // — pre-stripping here would double-strip and, in a uniform recursive
+    // tree (root type == child type), eat the child segment, wrongly
+    // resolving every deeper level to `None`.
     let chain = strip_view_root_type(node_type_chain, view_def);
     if chain.is_empty() {
         return Some(TreeLevel {
@@ -370,7 +375,7 @@ pub fn tree_level_for_chain<'a>(
             tree_label: root_label,
         });
     }
-    let child = child_def_for_type_chain(view_def, chain)?;
+    let child = child_def_for_type_chain(view_def, node_type_chain)?;
     let label = child.tree_label.as_deref()?;
     Some(TreeLevel {
         columns: &child.columns,
@@ -619,13 +624,27 @@ pub fn tree_row_glyph<'a>(
 /// otherwise falls back to the ViewDef's `leaf_glyph`, otherwise to
 /// the universal default `·`.
 fn leaf_glyph_for_chain<'a>(view_def: &'a ViewDef, node_type_chain: &[String]) -> &'a str {
-    let stripped = strip_view_root_type(node_type_chain, view_def);
-    if let Some(child) = child_def_for_type_chain(view_def, stripped) {
+    leaf_glyph_opt_for_chain(view_def, node_type_chain).unwrap_or("·")
+}
+
+/// Like [`leaf_glyph_for_chain`] but without the universal `·` default:
+/// returns the configured leaf glyph or `None`. The connector-style
+/// renderer wants no default so native-looking leaves render as just
+/// the connector (`└── Label`), while adapters that *do* configure a
+/// glyph (e.g. Confluence pages `📄`) still get it.
+pub fn leaf_glyph_opt_for_chain<'a>(
+    view_def: &'a ViewDef,
+    node_type_chain: &[String],
+) -> Option<&'a str> {
+    // Pass the ORIGINAL chain: `child_def_for_type_chain` strips the root
+    // type itself, so pre-stripping here would double-strip and miss the
+    // child in a uniform recursive tree (root type == child type).
+    if let Some(child) = child_def_for_type_chain(view_def, node_type_chain) {
         if let Some(g) = child.leaf_glyph.as_deref() {
-            return g;
+            return Some(g);
         }
     }
-    view_def.leaf_glyph.as_deref().unwrap_or("·")
+    view_def.leaf_glyph.as_deref()
 }
 
 #[cfg(test)]

@@ -104,8 +104,17 @@ fn task_root_type() -> NodeType {
 /// One task plus the display data derived once at snapshot-build time.
 struct TaskRow {
     task: task::Model,
-    /// Resolved tag names (global + project), already flattened.
-    tags: Vec<String>,
+    /// Comma-separated tag names (alphabetical, case-insensitive) — backs the
+    /// `tag_names` column. Mirrors the native tab's `fmt_tag_names`.
+    tag_names: String,
+    /// Concatenated tag symbols (alphabetical by tag name; symbol-less tags
+    /// skipped) — backs the `tag_symbols` column. Mirrors the native tab's
+    /// `fmt_tag_symbols`.
+    tag_symbols: String,
+    /// Whether a notes file exists on disk for this task. Precomputed once at
+    /// snapshot-build time (a single `find_notes_file` stat) so the `notes`
+    /// marker column reads it for free — mirrors the native `📝` marker.
+    has_notes: bool,
     /// Effective parent inside the *visible* forest. A task whose stored
     /// `parent_id` points at a deleted (hence absent) task is re-rooted to
     /// `None` so it still shows up rather than vanishing into an orphan
@@ -148,12 +157,37 @@ impl ForestSnapshot {
         for t in tasks {
             // Re-root tasks whose parent was filtered out (e.g. deleted).
             let parent = t.parent_id.filter(|p| id_set.contains(p));
-            let tags = tag_map
-                .get(&t.id)
-                .map(|v| v.iter().map(tag_name).collect())
-                .unwrap_or_default();
+            let resolved = tag_map.get(&t.id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let tag_names = fmt_tag_names(resolved);
+            let tag_symbols = fmt_tag_symbols(resolved);
             children.entry(parent).or_default().push(t.id);
-            by_id.insert(t.id, TaskRow { task: t, tags, parent });
+            by_id.insert(
+                t.id,
+                TaskRow {
+                    task: t,
+                    tag_names,
+                    tag_symbols,
+                    // Filled in the notes pass below, once the full task set
+                    // is available for parent-path resolution.
+                    has_notes: false,
+                    parent,
+                },
+            );
+        }
+        // Notes marker: `find_notes_file` walks each task's parent chain to
+        // build its on-disk notes directory, so it needs the whole task set.
+        // Resolve it once here (one `read_dir` per task) and cache the bool —
+        // the native tab does the same lookup, just lazily per visible row.
+        let all_tasks: Vec<task::Model> = by_id.values().map(|r| r.task.clone()).collect();
+        let with_notes: HashSet<Uuid> = all_tasks
+            .iter()
+            .filter(|t| crate::notes::find_notes_file(t, &all_tasks).is_some())
+            .map(|t| t.id)
+            .collect();
+        for id in &with_notes {
+            if let Some(row) = by_id.get_mut(id) {
+                row.has_notes = true;
+            }
         }
         for siblings in children.values_mut() {
             siblings.sort_by(|a, b| {
@@ -235,14 +269,17 @@ impl ForestSnapshot {
 // Column / metadata helpers
 // ---------------------------------------------------------------------------
 
-/// Human label for a [`task::TaskStatus`]. The canonical column value
-/// (`views/tasks.yaml` declares this column `kind: text`).
-fn status_label(status: &task::TaskStatus) -> &'static str {
+/// Nerd-font glyph for a [`task::TaskStatus`] — the canonical `status`
+/// column value. Mirrors the native tab (`ui/tasks/forest.rs`) pixel-for-pixel
+/// so the adapter's "St" column renders the same icon. The four glyphs are in
+/// ascending codepoint order Todo < InProgress < Done < Cancelled, so a sort
+/// on this column still falls out in the natural status order.
+fn status_icon(status: &task::TaskStatus) -> &'static str {
     match status {
-        task::TaskStatus::Todo => "Todo",
-        task::TaskStatus::InProgress => "In Progress",
-        task::TaskStatus::Done => "Done",
-        task::TaskStatus::Cancelled => "Cancelled",
+        task::TaskStatus::Todo => "󰄰",
+        task::TaskStatus::InProgress => "󰄳",
+        task::TaskStatus::Done => "󰄵",
+        task::TaskStatus::Cancelled => "󰜺",
     }
 }
 
@@ -252,6 +289,36 @@ fn tag_name(tag: &not_yet_done_core::repository::ResolvedTag) -> String {
         ResolvedTag::Global(t) => t.name.clone(),
         ResolvedTag::Project(t) => t.name.clone(),
     }
+}
+
+/// A tag's display symbol, if it has one.
+fn tag_symbol(tag: &not_yet_done_core::repository::ResolvedTag) -> Option<String> {
+    use not_yet_done_core::repository::ResolvedTag;
+    match tag {
+        ResolvedTag::Global(t) => t.symbol.clone(),
+        ResolvedTag::Project(t) => t.symbol.clone(),
+    }
+}
+
+/// Comma-separated tag names, alphabetical (case-insensitive) — the
+/// `tag_names` column. Mirrors the native `fmt_tag_symbols`/`fmt_tag_names`
+/// pair (in the TUI crate, which depends on this one, so the logic is
+/// duplicated here rather than shared).
+fn fmt_tag_names(tags: &[not_yet_done_core::repository::ResolvedTag]) -> String {
+    let mut names: Vec<String> = tags.iter().map(tag_name).collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.join(", ")
+}
+
+/// Concatenated tag symbols, ordered alphabetically by tag name; tags without
+/// a symbol are skipped — the `tag_symbols` column.
+fn fmt_tag_symbols(tags: &[not_yet_done_core::repository::ResolvedTag]) -> String {
+    let mut pairs: Vec<(String, String)> = tags
+        .iter()
+        .filter_map(|t| tag_symbol(t).map(|s| (tag_name(t), s)))
+        .collect();
+    pairs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    pairs.into_iter().map(|(_, s)| s).collect()
 }
 
 /// A read-only metadata field. Tasks are edited through actions (A1b), not
@@ -282,9 +349,24 @@ fn task_metadata(row: &TaskRow, is_tracked: bool) -> Metadata {
                 if is_tracked { "⏱".to_string() } else { String::new() },
                 "Tracking",
             ),
-            field("status", status_label(&t.status).to_string(), "Status"),
+            field("status", status_icon(&t.status).to_string(), "Status"),
             field("priority", t.priority.to_string(), "Priority"),
-            field("tags", row.tags.join(" "), "Tags"),
+            // Tag columns mirror the native split: `tag_symbols` (icons only)
+            // and `tag_names` (comma-separated). Both precomputed at snapshot
+            // build so the cells read straight off the row.
+            field("tag_symbols", row.tag_symbols.clone(), "Tag symbols"),
+            field("tag_names", row.tag_names.clone(), "Tags"),
+            // Notes marker: the native `📝` when a notes file exists, blank
+            // otherwise.
+            field(
+                "notes",
+                if row.has_notes {
+                    "📝".to_string()
+                } else {
+                    String::new()
+                },
+                "Notes",
+            ),
             field("created", t.created_at.to_rfc3339(), "Created"),
             field("updated", t.updated_at.to_rfc3339(), "Updated"),
             field(
@@ -1267,7 +1349,9 @@ mod tests {
                     last_tracked_at: None,
                     path: None,
                 },
-                tags: Vec::new(),
+                tag_names: String::new(),
+                tag_symbols: String::new(),
+                has_notes: false,
                 parent,
             },
         )
@@ -1366,12 +1450,17 @@ mod tests {
         let (_, mut r) = row(id, "Do the thing", None);
         r.task.priority = 5;
         r.task.status = task::TaskStatus::InProgress;
-        r.tags = vec!["urgent".into(), "home".into()];
+        r.tag_names = "home, urgent".into();
+        r.tag_symbols = "🔥".into();
+        r.has_notes = true;
         let md = task_metadata(&r, true);
         let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
         assert_eq!(get("priority").as_deref(), Some("5"));
-        assert_eq!(get("status").as_deref(), Some("In Progress"));
-        assert_eq!(get("tags").as_deref(), Some("urgent home"));
+        // status is rendered as the native nerd-font glyph, not a text label.
+        assert_eq!(get("status").as_deref(), Some("󰄳"));
+        assert_eq!(get("tag_names").as_deref(), Some("home, urgent"));
+        assert_eq!(get("tag_symbols").as_deref(), Some("🔥"));
+        assert_eq!(get("notes").as_deref(), Some("📝"));
         // created/updated are RFC 3339 (parseable back to a datetime).
         let created = get("created").unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&created).is_ok());
@@ -1401,6 +1490,31 @@ mod tests {
             TaskItemNode::resolve_id(&snap, &Uuid::from_u128(1).to_string()).unwrap(),
             Uuid::from_u128(1)
         );
+    }
+
+    #[test]
+    fn tag_formatting_matches_native_sort_and_join() {
+        use not_yet_done_core::entity::global_tag;
+        use not_yet_done_core::repository::ResolvedTag;
+        let mk = |name: &str, symbol: Option<&str>| {
+            ResolvedTag::Global(global_tag::Model {
+                id: Uuid::new_v4(),
+                name: name.to_string(),
+                fg_color: None,
+                bg_color: None,
+                symbol: symbol.map(str::to_string),
+            })
+        };
+        // Out-of-order, mixed case, one symbol-less tag.
+        let tags = vec![
+            mk("Urgent", Some("🔥")),
+            mk("home", Some("🏠")),
+            mk("misc", None),
+        ];
+        // Names: alphabetical (case-insensitive), comma-joined, ALL names.
+        assert_eq!(fmt_tag_names(&tags), "home, misc, Urgent");
+        // Symbols: alphabetical by name (home < Urgent), symbol-less skipped.
+        assert_eq!(fmt_tag_symbols(&tags), "🏠🔥");
     }
 
     #[test]
