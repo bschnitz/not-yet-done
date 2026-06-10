@@ -1591,13 +1591,26 @@ views:
         assert_eq!(edit.id.as_deref(), Some("edit"));
         let add = root.actions.iter().find(|a| a.action_type == "create").unwrap();
         assert_eq!(add.id.as_deref(), Some("add"));
-        for (k, name) in [('d', "delete"), ('u', "undelete"), ('m', "mark-move"), ('p', "paste-move")] {
+        for (k, name) in [
+            ('d', "delete"),
+            ('u', "undelete"),
+            ('t', "toggle-tracking"),
+            ('m', "mark-move"),
+            ('p', "paste-move"),
+        ] {
             assert_eq!(root.shortcuts.get(&k), Some(&name.to_string()));
         }
+        // A1c-1: the tracking marker column is declared on both levels.
+        assert!(
+            root.columns.iter().any(|c| c.key == "tracking"),
+            "root view should declare the tracking marker column"
+        );
         let child = &root.children[0];
         assert!(child.actions.iter().any(|a| a.action_type == "edit"));
         assert!(child.actions.iter().any(|a| a.action_type == "create"));
         assert_eq!(child.shortcuts.get(&'d'), Some(&"delete".to_string()));
+        assert_eq!(child.shortcuts.get(&'t'), Some(&"toggle-tracking".to_string()));
+        assert!(child.columns.iter().any(|c| c.key == "tracking"));
 
         cfg.validate(
             &KeyBindingConfig::default(),

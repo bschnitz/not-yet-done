@@ -368,9 +368,19 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   > geteilten Template wäre sonst ein totes Feld; `CoreHandle` trägt jetzt
   > `allow_parallel_tracking` (aus `tracking.allow_parallel`).
   > `capabilities`: `supports_create`/`supports_delete` → `true`.
-  > **Offen (A1c):** Tracking-**Marker-Spalte** + dedizierte Start/Stop-
-  > Taste, Saved Queries (Scope `task`), Filter via `FilterExpr`, scripts,
-  > optional „Add-Child unter Selektion im Tree-Mode".
+  >
+  > **A1c-1 umgesetzt (Tracking-Marker + Start/Stop-Taste).** `ForestSnapshot`
+  > trägt jetzt ein `tracked: HashSet<Uuid>` (einmal `find_all_active()` in
+  > `load`); `task_metadata` emittiert ein `tracking`-Feld (`⏱` auf laufenden
+  > Rows, sonst leer), die `tracking`-Spalte in `tasks.yaml` rendert es auf
+  > beiden Ebenen. Neue Per-Node-Action `toggle-tracking` (Key `t`,
+  > `shortcuts:`-Pfad → `invoke_action`): liest den Live-Stand
+  > (`find_active_for_task`, kein Stale-Snapshot) und ruft das vorhandene
+  > `apply_tracking(!is_tracked)` → respektiert die Exklusiv-Policy, emittiert
+  > `Tracking*`, Bridge invalidiert → Reload. `actions_for_type` + der
+  > A1b-Action-Test mitgezogen.
+  > **Offen (A1c):** Saved Queries (Scope `task`), Filter via `FilterExpr`,
+  > scripts, optional „Add-Child unter Selektion im Tree-Mode".
 
 - **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
   Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed
