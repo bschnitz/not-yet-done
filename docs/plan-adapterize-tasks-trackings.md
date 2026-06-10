@@ -527,7 +527,28 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   >   zeigt nur nicht-gelöschte Zeilen, also haben `R`/`A` heute kein
   >   sichtbares Ziel — eine „show deleted"-Subview ist Future-Work. 53
   >   adapter + 536 TUI Tests grün, installiert.
-  > - **A2c — Condensed + Tree (own/cumulated, M4) + Capability-Gating.**
+  > - **A2c — Condensed (FERTIG, ungepusht) + Tree (own/cumulated, M4) +
+  >   Capability-Gating (beide offen).**
+  >   - **Condensed (FERTIG).** Statt eines Modus-Toggles als zweite `views:`
+  >     (`key: v`, zurück mit `a`) auf der **generischen verschachtelten
+  >     Gruppierung (M3 `then_by`)**: `group_by` nach Tag + `then_by` nach
+  >     Task + `summary_only`. Dazu generisch ausgebaut: `group.rs`
+  >     `group_nested` (N Ebenen, Header tragen `level` + `representative`),
+  >     `ViewDef`/`ChildDef` `then_by: Vec<GroupBy>`, `current_levels`/
+  >     `current_then_by`, `build_grouped_table` rendert die **innerste**
+  >     `summary_only`-Ebene als selektierbare **repräsentative Daten-Zeile**
+  >     (Pfad+Task aus Member, Aggregat-Spalten = Gruppen-Total), äußere
+  >     Ebenen als eingerückte `── label ──`-Header. `zg` rotiert nur die
+  >     äußere Ebene. Adapter: nur ein verstecktes `task_id`-Feld am
+  >     `tracking:entry` (innerer Gruppen-Key, nie als Spalte). 44 table
+  >     (+3 nested) + 538 TUI (+nested-render+`then_by`-Deser) + 53 adapter
+  >     (+`task_id`) Tests grün, installiert. **Grenze:** Live-Tick im
+  >     Condensed nicht (Total statt Einzel-Dauer); zweistufig sonst
+  >     paritätstreu zum Native.
+  >   - **Tree (offen).** Eager Task-Forest-Projektion (`tracking:tree-*`)
+  >     mit own+cumulated Dauer je Task-Knoten + `supports_tree_aggregation`;
+  >     setzt auf die schon vorhandene M4-Engine auf. Subtab-Key kollidiert
+  >     mit `t`=toggle-tracking → beim Wiring lösen.
   >
   > **Mitzunehmen (Follow-up aus E3, M4):** Hier den **Capability-Gating-
   > Pfad** sauber etablieren. Heute werden UI-Affordanzen durchgängig über

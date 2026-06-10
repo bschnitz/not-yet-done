@@ -588,15 +588,26 @@ pub struct ViewDef {
     /// flat list. Ignored in tree mode (tree-fold is a separate feature).
     #[serde(default)]
     pub group_by: Option<GroupBy>,
+    /// Inner grouping levels (M3 — nested grouping). When set, the list is
+    /// partitioned first by `group_by`, then by each level here in turn
+    /// (e.g. `group_by: day` + `then_by: [task]` = the Trackings "Condensed"
+    /// layout: a day header, then one summary row per task within the day).
+    /// The full level list is `[group_by] ++ then_by`; `then_by` is ignored
+    /// without a `group_by`. The runtime `cycle_grouping` toggles only the
+    /// **outer** (`group_by`) level — the inner `then_by` levels persist.
+    #[serde(default)]
+    pub then_by: Vec<GroupBy>,
     /// Per-column aggregations applied when grouping is active (M3). Each
     /// names a column to total per group; the grand total appears in a
     /// footer row. Empty → groups are pure label headers with no totals.
     #[serde(default)]
     pub aggregates: Vec<AggregateDef>,
     /// Collapse each group to a single summary row (M3 — Trackings
-    /// "Condensed"). The per-group header (carrying its totals) is then the
-    /// only row shown; individual items are hidden. Only meaningful with
-    /// `group_by` set.
+    /// "Condensed"). The innermost-level header (carrying its totals) is then
+    /// the only row shown; individual items are hidden. With nested grouping
+    /// the inner summary row is rendered from a representative member item so
+    /// its non-aggregate columns (e.g. the task path) still appear. Only
+    /// meaningful with `group_by` set.
     #[serde(default)]
     pub summary_only: bool,
 }
@@ -1224,6 +1235,10 @@ pub struct ChildDef {
     /// child's items. Runtime-switchable. Ignored in tree mode.
     #[serde(default)]
     pub group_by: Option<GroupBy>,
+    /// Inner grouping levels for this drill level (M3 — nested grouping).
+    /// Same semantics as [`ViewDef::then_by`].
+    #[serde(default)]
+    pub then_by: Vec<GroupBy>,
     /// Per-column aggregations for this drill level (M3). Same semantics as
     /// [`ViewDef::aggregates`].
     #[serde(default)]
@@ -1428,6 +1443,41 @@ views:
         assert_eq!(preview.split, "horizontal");
         assert_eq!(preview.ratio, 50);
         assert!(preview.keybinding.is_none());
+    }
+
+    #[test]
+    fn parse_nested_grouping_then_by() {
+        // Trackings "Condensed" config: outer day group + inner per-task
+        // group + summary_only. `then_by` defaults to empty when omitted.
+        let yaml = r#"
+tab:
+  name: T
+adapter:
+  type: x
+views:
+  - name: condensed
+    node_type: tracking:entry
+    group_by:
+      column: started
+      bucket: day
+    then_by:
+      - column: task_id
+    summary_only: true
+    aggregates:
+      - column: duration
+  - name: flat
+    node_type: tracking:entry
+"#;
+        let config: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let condensed = &config.views[0];
+        assert_eq!(condensed.group_by.as_ref().unwrap().column, "started");
+        assert_eq!(condensed.group_by.as_ref().unwrap().bucket, Some(DateBucket::Day));
+        assert_eq!(condensed.then_by.len(), 1);
+        assert_eq!(condensed.then_by[0].column, "task_id");
+        assert!(condensed.then_by[0].bucket.is_none());
+        assert!(condensed.summary_only);
+        // Omitted `then_by` → empty (back-compat with single-level configs).
+        assert!(config.views[1].then_by.is_empty());
     }
 
     #[test]

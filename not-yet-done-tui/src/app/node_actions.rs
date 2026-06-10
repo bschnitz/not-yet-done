@@ -490,6 +490,7 @@ mod tests {
             shortcuts: sc,
             leaf_glyph: None,
             group_by: None,
+            then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
         }
@@ -521,6 +522,7 @@ mod tests {
             editor_in_place: false,
             leaf_glyph: None,
             group_by: None,
+            then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
         }

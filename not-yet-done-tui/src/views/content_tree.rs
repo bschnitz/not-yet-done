@@ -693,6 +693,7 @@ mod tests {
             editor_in_place: false,
             leaf_glyph: None,
             group_by: None,
+            then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
         }
@@ -720,6 +721,7 @@ mod tests {
             shortcuts: HashMap::new(),
             leaf_glyph: None,
             group_by: None,
+            then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
         }

@@ -280,6 +280,11 @@ fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Meta
             ),
             field("duration", duration_seconds(row, now).to_string(), "Duration"),
             field("id", row.tracking.id.to_string(), "ID"),
+            // Stable per-task key for the Condensed view's inner grouping
+            // level (`then_by: [{ column: task_id }]`). Never shown as a
+            // column — distinct tasks with the same description must not
+            // coalesce, so the inner group keys on the id, not the label.
+            field("task_id", row.tracking.task_id.to_string(), "Task ID"),
         ],
     }
 }
@@ -960,6 +965,8 @@ mod tests {
         assert_eq!(get("taskpath").as_deref(), Some("/Work/Q2"));
         assert_eq!(get("task").as_deref(), Some("Write report"));
         assert_eq!(get("duration").as_deref(), Some("1800"));
+        // Hidden per-task key for the Condensed view's inner grouping level.
+        assert_eq!(get("task_id").as_deref(), Some(Uuid::from_u128(9).to_string().as_str()));
         let started = get("started").unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&started).is_ok());
         assert!(chrono::DateTime::parse_from_rfc3339(&get("ended").unwrap()).is_ok());
