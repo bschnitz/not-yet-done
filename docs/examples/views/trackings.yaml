@@ -1,0 +1,119 @@
+# Example: Trackings view configuration (adapterized Trackings tab — plan phase A2)
+#
+# Place in: ~/.config/not_yet_done/views/trackings.yaml
+#
+# Like `tasks`, the `trackings` adapter is *in-process*: it wraps the host's
+# own TrackingRepository + TaskService (no network, no adapter-config file).
+# `adapter.type: trackings` resolves to the in-process TrackingAdapterFactory
+# the App registers at startup with a live handle to the core services.
+#
+# ## A2a scope (read path)
+#
+# The whole non-deleted tracking list loads once into an eager snapshot —
+# one flat row per started/stopped interval, newest first. Columns are typed
+# (M2): `taskpath` is a `kind: path` (the task's parent chain, styled with a
+# separator), `started`/`ended` are localized datetimes, `duration` is a
+# right-aligned `H:MM:SS`.
+#
+# **Live durations (M9).** A running tracking's duration ticks every second.
+# Instead of a render-time `kind: elapsed` column (which can't also show a
+# completed tracking's static `ended − started` in the *same* column), the
+# adapter drives the generic live-row mechanism: while ≥1 tracking runs it
+# asks the frontend to pull `live_rows()` at 1 Hz and patches the running
+# rows in place; when the last one stops the pull stops. So the single
+# `duration` column reads live for active rows and static for completed ones.
+#
+# **Grouping + totals (E2).** `group_by` + `aggregates` below bucket the
+# list by day and sum the durations per group + overall (footer). `zg`
+# cycles the grouping at runtime (Day/Week/Month/Year/None); the status is
+# view-state, not persisted. Drop the `group_by` block for a flat list.
+#
+# Saved-query filtering (`q` menu / `:query`) runs a `FilterExpr` through the
+# repository (`find_filtered`, which understands tracking columns and the
+# joined task description) and thins the list to the matches.
+#
+# Mutations (delete / restore / restore-all, tracking-toggle), the
+# Condensed/Tree sub-views, and scripts land in A2b/A2c. Until the C1 cutover
+# this file is illustrative: the bespoke native Trackings tab still ships;
+# copying this file in stands up the adapter path alongside it for comparison.
+
+tab:
+  name: Trackings
+  order: 2
+  icon: "󱎫"
+
+adapter:
+  type: trackings
+
+views:
+  # Flat list of trackings. No `tree_label` / no children — every row is a
+  # leaf (`tracking:entry`).
+  - name: trackings
+    node_type: "tracking:entry"
+    default: true
+
+    # Saved-query filter. No `default` body → the whole list shows; define
+    # queries with `:query new` and pick them from the `q` menu. Bodies are
+    # the usual `name`/`query`(FilterExpr)/`options` YAML, stored under scope
+    # `trackings/<id>/<view>`. `editable` lets `:query edit` rewrite a body.
+    query:
+      editable: true
+      menu_key: q
+
+    # Group by calendar day, summing durations per day and overall. `zg`
+    # re-buckets at runtime (Day → Week → Month → Year → None).
+    group_by:
+      column: started
+      bucket: day
+    aggregates:
+      - column: duration
+        op: sum
+
+    # Tree-label-less flat columns. `taskpath` (the parent chain) renders as
+    # a styled `kind: path`; `started`/`ended` as localized datetimes;
+    # `duration` as right-aligned `H:MM:SS` (live for running rows, see M9).
+    columns:
+      # Running-tracking marker: a `⏱` glyph on open rows, blank otherwise.
+      - key: marker
+        label: "⏱"
+        style: accent
+        sizing: max
+      - key: taskpath
+        label: Path
+        kind: path
+        separator: " › "
+        style: text_dim
+        sizing: max
+      - key: task
+        label: Task
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+      - key: started
+        label: Started
+        kind: datetime
+        sizing: max
+      - key: ended
+        label: Ended
+        kind: datetime
+        sizing: max
+      - key: duration
+        label: Duration
+        kind: duration
+        sizing: max
+
+    actions:
+      # Local filter-while-typing over the loaded rows.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [task, taskpath]
+      # Run a script against the selected tracking (generic `:script` menu;
+      # scripts live under `<data>/not_yet_done/scripts/trackings/tracking_entry/`).
+      - name: run script
+        key: x
+        type: script
+      - name: refresh
+        key: r
+        type: reload

@@ -175,6 +175,12 @@ pub(crate) fn build_adapter_factories(
             core.clone(),
         )),
     );
+    factories.insert(
+        "trackings".to_string(),
+        Box::new(not_yet_done_local_adapter::TrackingAdapterFactory::new(
+            core.clone(),
+        )),
+    );
     factories
 }
 

@@ -29,7 +29,9 @@ use tokio::sync::broadcast;
 pub mod editor_templates;
 pub mod notes;
 pub mod task;
+pub mod tracking;
 pub use task::{TaskAdapter, TaskAdapterFactory};
+pub use tracking::{TrackingAdapter, TrackingAdapterFactory};
 
 /// Live, in-process handles into the host application's core services.
 ///
