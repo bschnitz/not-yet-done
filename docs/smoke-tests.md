@@ -3299,7 +3299,7 @@ Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
 - [ ] `U` und `A` funktionieren im Tree-Mode (Root-View) und nach Drill in
       einen Task (rekursiver Branch).
 
-## TrackingAdapter (adapterisierter Trackings-Tab) — A2a + A2b
+## TrackingAdapter (adapterisierter Trackings-Tab) — A2a + A2b + A2c
 
 Voraussetzung: `views/trackings.yaml` (aus `docs/examples/views/`) nach
 `~/.config/not_yet_done/views/` kopiert. Der Adapter-Tab läuft neben dem
@@ -3337,6 +3337,24 @@ bespoke nativen Trackings-Tab (bis C1).
       „No deleted trackings to restore".
 - [ ] `x` öffnet das `:script`-Menü; ein Script gegen die selektierte Zeile
       bekommt deren JSON (`{json_file}`) übergeben.
+
+### A2c — Condensed (verschachtelte Gruppierung M3 `then_by`)
+
+- [ ] `v` schaltet auf den **Condensed**-Subtab; `a` schaltet zurück zur
+      flachen Liste.
+- [ ] Condensed zeigt pro **Tag** einen `── 2026-… ──`-Header mit Tages-Summe,
+      darunter **je Task eine Zeile** mit Pfad, Task-Name und der summierten
+      Dauer dieses Tasks **an diesem Tag**. Ein Task, der an zwei Tagen
+      getrackt wurde, erscheint zweimal (einmal pro Tag).
+- [ ] Zwei **verschiedene** Tasks mit gleichem Namen verschmelzen **nicht**
+      (innere Gruppierung keyt auf `task_id`, nicht aufs Label).
+- [ ] `zg` rotiert nur die **äußere** (Tag-)Ebene (Day→Week→Month→Year→None);
+      die Pro-Task-Aufschlüsselung bleibt. Auf `None` → eine Zeile pro Task
+      über den ganzen gefilterten Zeitraum.
+- [ ] Eine Condensed-Zeile ist **selektierbar**; `d`/`t` wirken auf das
+      repräsentative Tracking der Zeile (bekannte Grenze: Aktion trifft ein
+      einzelnes Intervall, nicht die ganze Task-Tagessumme).
+- [ ] Der Saved-Query-Filter (`q`) wirkt auch im Condensed-Subtab.
 
 ## Refinements / Deferred Tasks
 
