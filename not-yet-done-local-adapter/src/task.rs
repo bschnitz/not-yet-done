@@ -54,9 +54,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
-    ContentAdapter, ContentError, EditorPrep, HintPlacement, InputSpec, Invalidation, Metadata,
-    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SortableColumn, TreeFindHit,
-    TreeSearchResults,
+    ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement, InputSpec,
+    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
+    SavedQueryStore, SortableColumn, TreeFindHit, TreeSearchResults,
 };
 use not_yet_done_core::entity::task;
 use not_yet_done_core::error::AppError;
@@ -178,22 +178,35 @@ impl ForestSnapshot {
     }
 
     /// Ordered child summaries of `parent` (`None` = forest roots).
-    fn child_summaries(&self, parent: Option<Uuid>) -> Vec<NodeSummary> {
+    /// When `filter` is `Some`, only children in the visible set are
+    /// returned (a saved-query filter is active — the set is matches plus
+    /// their ancestors, see [`resolve_visible_set`]); `None` lists the
+    /// full forest.
+    fn child_summaries(
+        &self,
+        parent: Option<Uuid>,
+        filter: Option<&HashSet<Uuid>>,
+    ) -> Vec<NodeSummary> {
         self.children
             .get(&parent)
             .map(|ids| {
                 ids.iter()
-                    .filter_map(|id| self.by_id.get(id).map(|row| self.summary(*id, row)))
+                    .filter(|id| filter.map_or(true, |f| f.contains(id)))
+                    .filter_map(|id| self.by_id.get(id).map(|row| self.summary(*id, row, filter)))
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    fn summary(&self, id: Uuid, row: &TaskRow) -> NodeSummary {
+    fn summary(&self, id: Uuid, row: &TaskRow, filter: Option<&HashSet<Uuid>>) -> NodeSummary {
+        // `has_children` must reflect *visible* children under an active
+        // filter, or the tree would draw an expand glyph that yields no
+        // rows. An ancestor in the visible set always has ≥1 visible child
+        // (the match below it); a leaf match has none.
         let has_children = self
             .children
             .get(&Some(id))
-            .map(|v| !v.is_empty())
+            .map(|v| v.iter().any(|c| filter.map_or(true, |f| f.contains(c))))
             .unwrap_or(false);
         NodeSummary {
             id: id.to_string(),
@@ -307,6 +320,44 @@ fn task_sortable_columns() -> Vec<SortableColumn> {
 
 fn to_content_err(e: AppError) -> ContentError {
     ContentError::Other(Box::new(e))
+}
+
+/// Resolve the pane's active query into the set of *visible* task ids:
+/// every task matching the query's `FilterExpr`, plus all of their
+/// ancestors so the tree keeps a path down to each hit (filtered tree,
+/// not a flat list). Ancestors are walked in-memory from the snapshot,
+/// so the result is a structurally valid tree regardless of the query's
+/// `options.include_ancestors` flag (which the flat native tab honors but
+/// a tree inherently requires). Returns `None` when there is no query —
+/// the whole forest is visible. A query body that fails to parse surfaces
+/// as an error on the load rather than silently showing everything.
+async fn resolve_visible_set(
+    snapshot: &ForestSnapshot,
+    handle: &CoreHandle,
+    query: &Option<String>,
+) -> Result<Option<HashSet<Uuid>>> {
+    let raw = match query.as_deref().map(str::trim) {
+        Some(q) if !q.is_empty() => q,
+        _ => return Ok(None),
+    };
+    let parsed = not_yet_done_core::filter::query_filter::parse(raw)
+        .map_err(|e| ContentError::Other(Box::new(e)))?;
+    let matches = handle
+        .task_service
+        .list_filtered(&parsed.expr)
+        .await
+        .map_err(to_content_err)?;
+    let mut visible = HashSet::new();
+    for m in &matches {
+        let mut cur = Some(m.id);
+        while let Some(c) = cur {
+            if !visible.insert(c) {
+                break; // this ancestor chain is already recorded
+            }
+            cur = snapshot.by_id.get(&c).and_then(|r| r.parent);
+        }
+    }
+    Ok(Some(visible))
 }
 
 // ---------------------------------------------------------------------------
@@ -757,9 +808,12 @@ impl Node for TaskRootNode {
     }
     async fn list(
         &self,
-        _params: not_yet_done_content::ListParams,
+        params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
-        Ok(list_result(self.snapshot.child_summaries(None)))
+        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
+        Ok(list_result(
+            self.snapshot.child_summaries(None, filter.as_ref()),
+        ))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.handle, id)
@@ -855,9 +909,12 @@ impl Node for TaskItemNode {
     }
     async fn list(
         &self,
-        _params: not_yet_done_content::ListParams,
+        params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
-        Ok(list_result(self.snapshot.child_summaries(Some(self.id))))
+        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
+        Ok(list_result(
+            self.snapshot.child_summaries(Some(self.id), filter.as_ref()),
+        ))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.handle, id)
@@ -997,11 +1054,18 @@ impl AdapterFactory for TaskAdapterFactory {
             inv_tx.clone(),
             snapshot.clone(),
         );
+        let queries_root = dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("not_yet_done")
+            .join("tasks")
+            .join(instance_id)
+            .join("queries");
         Ok(Box::new(TaskAdapter {
             instance_id: instance_id.to_string(),
             handle: self.handle.clone(),
             inv_tx,
             snapshot,
+            saved_queries: FsSavedQueryStore::new(queries_root),
         }))
     }
 }
@@ -1014,6 +1078,12 @@ pub struct TaskAdapter {
     /// Eager forest snapshot, shared with every node. `None` until first
     /// load; cleared by [`spawn_task_bridge`] on structural change.
     snapshot: Arc<RwLock<Option<Arc<ForestSnapshot>>>>,
+    /// Filesystem-backed saved queries (`<data>/not_yet_done/tasks/<id>/
+    /// queries/*.yaml`). Bodies are the same `name`/`query`/`options`
+    /// YAML the native tab persists; applying one filters the forest via
+    /// [`resolve_visible_set`]. Shortcuts live in the `query_shortcut`
+    /// table under the generic `tasks/<id>/<view>` scope.
+    saved_queries: FsSavedQueryStore,
 }
 
 impl TaskAdapter {
@@ -1061,6 +1131,11 @@ impl ContentAdapter for TaskAdapter {
             supports_create: true,
             supports_delete: true,
             supports_search: true,
+            // A1c-2: the task forest is homogeneous (`task:item` →
+            // `task:item`), so a saved-query `FilterExpr` is valid at every
+            // depth — the engine threads the active query into subtree
+            // expansion so a filtered tree stays filtered below the root.
+            propagates_query_to_subtree: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -1099,6 +1174,10 @@ impl ContentAdapter for TaskAdapter {
 
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
         self.inv_tx.subscribe()
+    }
+
+    fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
+        Some(&self.saved_queries)
     }
 
     async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
@@ -1183,15 +1262,51 @@ mod tests {
             row(child, "Child task", Some(root)),
         ]);
 
-        let roots = snap.child_summaries(None);
+        let roots = snap.child_summaries(None, None);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].label, "Root task");
         assert_eq!(roots[0].has_children, Some(true));
 
-        let kids = snap.child_summaries(Some(root));
+        let kids = snap.child_summaries(Some(root), None);
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].label, "Child task");
         assert_eq!(kids[0].has_children, Some(false));
+    }
+
+    #[test]
+    fn child_summaries_filter_keeps_only_visible_ids() {
+        // Forest: root → child → grandchild, plus a sibling under root.
+        let root = Uuid::from_u128(1);
+        let child = Uuid::from_u128(2);
+        let grandchild = Uuid::from_u128(3);
+        let sibling = Uuid::from_u128(4);
+        let snap = snapshot_from(vec![
+            row(root, "Root", None),
+            row(child, "Child", Some(root)),
+            row(grandchild, "Grandchild", Some(child)),
+            row(sibling, "Sibling", Some(root)),
+        ]);
+
+        // Visible set = the grandchild match plus its ancestor chain
+        // (child, root). The sibling is filtered out.
+        let visible: HashSet<Uuid> = [root, child, grandchild].into_iter().collect();
+
+        let roots = snap.child_summaries(None, Some(&visible));
+        assert_eq!(roots.len(), 1, "only the root on the path stays");
+        assert_eq!(roots[0].label, "Root");
+        // Root still has a visible child (the ancestor chain continues).
+        assert_eq!(roots[0].has_children, Some(true));
+
+        let root_kids = snap.child_summaries(Some(root), Some(&visible));
+        assert_eq!(root_kids.len(), 1, "sibling is filtered out");
+        assert_eq!(root_kids[0].label, "Child");
+
+        // The grandchild is a leaf match: no visible children, so the tree
+        // must not draw an expand glyph for it.
+        let grandchild_kids = snap.child_summaries(Some(child), Some(&visible));
+        assert_eq!(grandchild_kids.len(), 1);
+        assert_eq!(grandchild_kids[0].label, "Grandchild");
+        assert_eq!(grandchild_kids[0].has_children, Some(false));
     }
 
     #[test]

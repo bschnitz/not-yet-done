@@ -102,6 +102,19 @@ impl TreeState {
         Self::default()
     }
 
+    /// Drop all expansion and cached children. Called when the active
+    /// query changes (a new saved query / search applied): every cached
+    /// subtree was loaded under the *old* query and no longer reflects
+    /// the new filter, so the tree must re-derive from a fresh root load.
+    /// The root cache entry is repopulated immediately afterwards by
+    /// [`ContentPane::set_items`]; deeper levels re-fetch (filtered) on
+    /// the next expand.
+    pub fn clear_for_new_query(&mut self) {
+        self.expanded.clear();
+        self.cache.clear();
+        self.entries.clear();
+    }
+
     /// Replace the cached children for a parent path. Used by the
     /// adapter-load path to feed depth-0 entries (parent path is
     /// `vec![]`) and, in later phases, the children of an expanded

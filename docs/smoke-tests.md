@@ -3181,7 +3181,7 @@ Sets können `icon` + `shortcut` definieren (Voll-Form mit `tabs:`).
 - [ ] Shortcut mit mehr als einem Zeichen → Parse-Fehler (sichtbar als
       Config-Validierungsfehler).
 
-## TaskAdapter (adapterisierter Tasks-Tab) — A1b + A1c-1
+## TaskAdapter (adapterisierter Tasks-Tab) — A1b + A1c-1 + A1c-2
 
 Voraussetzung: `docs/examples/views/tasks.yaml` nach
 `~/.config/not_yet_done/views/tasks.yaml` kopieren. Der Adapter-Tab läuft
@@ -3232,6 +3232,35 @@ Voraussetzung: `docs/examples/views/tasks.yaml` nach
       ohne extra `t`; `t` togglet danach konsistent.
 - [ ] `t` und der `tracking:`-Buffer-Toggle bleiben synchron (kein
       Stale-Marker): nach jedem Toggle spiegelt die Spalte den Live-Stand.
+
+### A1c-2 — Saved Queries + FilterExpr-Filter (gefilterter Baum)
+
+Voraussetzung: `tasks.yaml` mit dem `query:`-Block (Default `open tasks`:
+nur nicht-`done`, nicht gelöscht). Mindestens ein `done`-Task tief im Baum
+und ein offener Geschwister-Task anlegen.
+
+- [ ] Tab lädt mit aktivem Default-Query: `done`-Tasks fehlen im Tree,
+      offene Tasks da. Ein offener Task **unter** einem `done`-Parent bleibt
+      sichtbar — der `done`-Parent erscheint als Vorfahr mit (nur dem
+      passenden offenen Kind).
+- [ ] Drill in einen gefilterten Knoten zeigt **nur** matchende Kinder
+      (Filter greift auf jeder Tiefe, nicht nur an der Wurzel).
+- [ ] `q` öffnet das Query-Menü: Default-Query `open tasks` gelistet.
+- [ ] `:query new <name>` mit eigenem `FilterExpr`-Body (z. B.
+      `[priority, ">=", 5]`) → speichern → erscheint im `q`-Menü; Apply
+      filtert den Baum live.
+- [ ] `:query edit <name>` → Body ändern, `:wq` → Baum re-filtert sofort
+      (alter Subtree-Cache verworfen, keine Stale-Kinder).
+- [ ] `:query delete <name>` → verschwindet aus dem Menü; Body-Datei unter
+      `…/tasks/<id>/<view>/queries/<name>.yaml` weg.
+- [ ] Query mit 0 Treffern → leerer Baum, Reload-Action (`r`) bleibt
+      erreichbar (kein Dead-End).
+- [ ] Query leeren / `default` droppen → ganzer Forest wieder sichtbar.
+- [ ] Strukturelle Mutation (add/delete/reparent) → Baum re-snapshottet;
+      Filter geht bis zum nächsten erneuten Query-Send verloren (akzeptierte
+      Lifecycle-Kante, s. Plan-Box A1c-2).
+- [ ] Saved-Query-Shortcut (Ctrl+f im `q`-Menü) auf eine Query → Taste
+      filtert den Baum direkt; übersteht YAML-Reload (`query_shortcut`-Tabelle).
 
 ## Refinements / Deferred Tasks
 

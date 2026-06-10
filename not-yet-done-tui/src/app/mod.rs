@@ -2475,6 +2475,25 @@ impl App {
     }
 
     /// Spawn async drill-down load for a content view child level.
+    /// Resolve the active (rendered) query a child/subtree `list()` should
+    /// carry. Returns `None` unless the adapter opts into
+    /// `propagates_query_to_subtree` — flat adapters keep child loads
+    /// query-free (their child node types don't share the parent's query
+    /// semantics). For filtered-tree adapters (the task forest) it mirrors
+    /// [`ContentPane::root_load_request`]'s query resolution so the subtree
+    /// filters by the same query as the root.
+    fn subtree_query_for_pane(
+        cv: &crate::views::content_view::ContentView,
+        pane: &crate::views::content_view::ContentPane,
+        adapter: &Arc<dyn not_yet_done_content::ContentAdapter>,
+    ) -> Option<String> {
+        if !adapter.capabilities().propagates_query_to_subtree {
+            return None;
+        }
+        pane.root_load_request(&cv.view_defs)
+            .and_then(|req| req.query.map(|raw| adapter.render_query(&raw, &req.vars)))
+    }
+
     pub fn spawn_content_drill_down(
         &self,
         view_index: usize,
@@ -2500,6 +2519,11 @@ impl App {
         let page = pane
             .drill_load_page()
             .unwrap_or(not_yet_done_content::PageRequest { offset: 0, limit: 50 });
+        // Filtered-tree adapters (capability `propagates_query_to_subtree`)
+        // want the pane's active query honored at every depth, so the
+        // drilled child list stays filtered. Flat adapters leave the
+        // capability `false` and the child load keeps `query: None`.
+        let subtree_query = Self::subtree_query_for_pane(cv, pane, &adapter);
         let retries = cv
             .view_defs
             .get(pane.view_def_index())
@@ -2511,6 +2535,7 @@ impl App {
                 let adapter = Arc::clone(&adapter);
                 let node_id = node_id.clone();
                 let child_node_type = child_node_type.clone();
+                let subtree_query = subtree_query.clone();
                 async move {
                     let parent = adapter.get_by_id(&node_id).await.map_err(|e| e.to_string())?;
                     let node_type = parent.children_types()
@@ -2522,7 +2547,7 @@ impl App {
                     let sortable_columns = parent.sortable_columns(&node_type);
                     let params = not_yet_done_content::ListParams {
                         node_type,
-                        query: None,
+                        query: subtree_query,
                         sort: Vec::new(),
                         page: Some(page),
                         download: false,
@@ -2587,12 +2612,18 @@ impl App {
             .and_then(|p| cv.view_defs.get(p.view_def_index()))
             .map(|v| v.retries)
             .unwrap_or(0);
+        // Carry the pane's active query into the expansion for filtered-tree
+        // adapters (see `subtree_query_for_pane`); flat adapters get `None`.
+        let subtree_query = cv
+            .find_pane(pane_id)
+            .and_then(|p| Self::subtree_query_for_pane(cv, p, &adapter));
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             let payload = run_with_retries(retries, &tx, view_index, pane_id, || {
                 let adapter = Arc::clone(&adapter);
                 let parent_node_id = parent_node_id.clone();
                 let child_node_type = child_node_type.clone();
+                let subtree_query = subtree_query.clone();
                 async move {
                     let parent = adapter.get_by_id(&parent_node_id).await.map_err(|e| e.to_string())?;
                     let node_type = parent.children_types()
@@ -2607,7 +2638,7 @@ impl App {
                     });
                     let params = not_yet_done_content::ListParams {
                         node_type,
-                        query: None,
+                        query: subtree_query,
                         sort: Vec::new(),
                         page: Some(page_request),
                         download: false,

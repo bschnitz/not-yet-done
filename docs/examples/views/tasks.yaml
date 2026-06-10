@@ -30,10 +30,20 @@
 #   * `m` mark-move / `p` paste-move — reparent: mark a task, move onto the
 #     target task (which becomes its new parent). Cycles are rejected.
 #
-# Still A1c: saved queries (`task` scope), `FilterExpr` filtering, and
-# scripts. Until the C1 cutover this file is illustrative: the bespoke
-# native Tasks tab still ships; copying this file in stands up the adapter
-# path *alongside* it for comparison.
+# ## A1c scope (saved queries + filtering)
+#
+# The `query:` block below turns the forest into a *filtered tree*: a saved
+# query is a small YAML document (`name` + a `FilterExpr` `query` + optional
+# `options`) that the adapter runs against the task service, then thins the
+# forest to the matches **plus their ancestors** so deep hits stay reachable.
+# The filter applies at every depth (capability `propagates_query_to_subtree`),
+# so expanding a node only reveals children that match. Bodies live in the
+# adapter's per-instance data dir (scope `tasks/<id>/<view>`); manage them
+# with `:query new|edit|delete <name>` and the `q` menu.
+#
+# Still A1c: scripts (`:script` on the tasks tab). Until the C1 cutover this
+# file is illustrative: the bespoke native Tasks tab still ships; copying
+# this file in stands up the adapter path *alongside* it for comparison.
 
 tab:
   name: Tasks
@@ -54,6 +64,25 @@ views:
     node_type: "task:item"
     default: true
     tree_label: description
+
+    # Saved-query filter. The `default` body re-serializes to the YAML
+    # document the adapter parses (`query_filter::parse`): a `name`, a
+    # `query` FilterExpr (leaves are `[lhs, op, rhs]`), and optional
+    # `options`. This default hides finished work — only non-`done`,
+    # non-deleted tasks load; the tree keeps each match's ancestors so
+    # nested hits stay visible. Drop `default` to show the whole forest.
+    # `editable` lets `:query edit` rewrite a body; `menu_key: q` opens the
+    # menu listing every saved query for this view (bodies under scope
+    # `tasks/<id>/<view>`, shortcuts in the `query_shortcut` table).
+    query:
+      default:
+        name: open tasks
+        query:
+          and:
+            - [deleted, "=", false]
+            - [status, "!=", done]
+      editable: true
+      menu_key: q
 
     # Tree-label column first (carries the indent + glyph), typed columns
     # trail behind. `priority` (number) right-aligns; `created` (datetime)
