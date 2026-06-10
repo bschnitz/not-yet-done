@@ -3181,6 +3181,42 @@ Sets können `icon` + `shortcut` definieren (Voll-Form mit `tabs:`).
 - [ ] Shortcut mit mehr als einem Zeichen → Parse-Fehler (sichtbar als
       Config-Validierungsfehler).
 
+## TaskAdapter (adapterisierter Tasks-Tab) — A1b
+
+Voraussetzung: `docs/examples/views/tasks.yaml` nach
+`~/.config/not_yet_done/views/tasks.yaml` kopieren. Der Adapter-Tab läuft
+**parallel** zum nativen Tasks-Tab (Vergleich), kein C1-Cutover.
+
+- [ ] Tab lädt: Forest als Tree, Top-Level-Tasks sichtbar, Drill in
+      Subtasks beliebig tief; `priority` rechtsbündig, `created` lokalisiert.
+- [ ] `a` (add) am Root → Markdown-Buffer mit `## Description:` /
+      `## Notes:`; Beschreibung eintragen, `:wq` → neuer Top-Level-Task
+      erscheint, Cursor darauf.
+- [ ] `a` mit `parent:`-Feld auf eine bestehende Task-UUID → Task landet
+      als Subtask unter dem Parent.
+- [ ] In einen Task gedrillt, `a` → neuer Task hängt als Subtask darunter
+      (Buffer hat `parent:` vorbefüllt).
+- [ ] `e` (edit) auf Task → Buffer zeigt aktuelle Felder + Notes;
+      Beschreibung ändern, `:wq` → Zeile aktualisiert. Notes-Datei
+      mitgeschrieben.
+- [ ] `e` → Beschreibung leeren → `:wq` → Reopen mit Error-Banner
+      (Description darf nicht leer sein).
+- [ ] `e` → `status`/`priority` ändern → übernommen. Ungültiger `status`
+      → Reopen mit Inline-Fehler.
+- [ ] `e` → `tracking: true` → Tracking startet (im nativen Trackings-Tab
+      sichtbar); bei `allow_parallel=false` werden andere aktive Trackings
+      gestoppt. `tracking: false` → stoppt wieder.
+- [ ] `d` (delete) auf Task mit Subtasks → Confirm → ganzer Teilbaum weg;
+      Meldung „Deleted subtree (N tasks)". Notes soft-deleted.
+- [ ] `u` (undelete) → zuletzt gelöschte(r) Task(s) zurück; ohne
+      vorherige Löschung → „Nothing to undelete".
+- [ ] `m` (mark-move) auf Task A, dann `p` (paste-move) auf Task B → A
+      wird Subtask von B. „marked …"-Indikator währenddessen sichtbar.
+- [ ] `m` auf A, `p` auf A selbst oder auf einen Nachfahren von A →
+      Fehler (Zyklus abgelehnt), keine Änderung.
+- [ ] Mutation in diesem Tab → nativer Tasks-Tab (falls offen) repaint/
+      reload via DomainEvent.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

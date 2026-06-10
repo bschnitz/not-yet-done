@@ -19,21 +19,41 @@
 //! [`search_in_tree`](ContentAdapter::search_in_tree) walk the entire
 //! forest without a query per node.
 //!
-//! ## Scope (A1a — read path)
+//! ## Scope (A1b — read + mutations)
 //!
-//! This first cut serves the tree and typed columns read-only. Mutations
-//! (create/edit via the generic form, delete/undelete, reparent via
-//! mark/paste-move) and the tracking toggle arrive in A1b/A1c; the
-//! snapshot-clearing bridge is already wired so those land without
-//! revisiting the caching story.
+//! On top of the A1a read path this adds the structural mutations through
+//! the generic action vocabulary:
+//!
+//! - **add / edit** (`InputSpec::Editor`) — a markdown buffer with a
+//!   `---` frontmatter and `## Description:` / `## Notes:` body (see
+//!   [`editor_templates`]). `add` is exposed on every *container* node
+//!   (the root → top-level task, a task → child task); `edit` on the task
+//!   itself. The `tracking:` toggle in the buffer is honored here too —
+//!   the dedicated tracking *marker column* and a one-key start/stop
+//!   shortcut are the only tracking bits still deferred to A1c.
+//! - **delete** (`DeleteSelf`) — recursive delete of the task subtree.
+//! - **undelete** — restores the most recently deleted task(s) via
+//!   [`TaskService::undelete_last`](not_yet_done_core::service::TaskService::undelete_last);
+//!   exposed on the task node (the selected row) since it needs no target.
+//! - **reparent** (mark-move / paste-move, M7) — the adapter performs the
+//!   move inside [`Node::invoke_action`] from [`ActionContext::marked`],
+//!   guarding against cycles.
+//!
+//! Every mutation emits a [`DomainEvent`] on the shared bus so the
+//! snapshot-clearing bridge ([`spawn_task_bridge`]) drops the cache and
+//! the other tabs repaint.
+//!
+//! Still A1c: tracking marker column + dedicated start/stop shortcut,
+//! saved queries (`task` scope), `FilterExpr` filtering, and scripts.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, Invalidation, Metadata,
-    MetadataField, Node, NodeSummary, NodeType, Result, SortableColumn, TreeFindHit,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
+    ContentAdapter, ContentError, EditorPrep, HintPlacement, InputSpec, Invalidation, Metadata,
+    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SortableColumn, TreeFindHit,
     TreeSearchResults,
 };
 use not_yet_done_core::entity::task;
@@ -42,7 +62,8 @@ use not_yet_done_core::events::{DomainEvent, DomainEventReceiver};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
-use crate::CoreHandle;
+use crate::editor_templates::{self, FieldError, ParseResult};
+use crate::{notes, CoreHandle};
 
 /// Stable id of the synthetic forest-root node.
 const ROOT_ID: &str = "task:root";
@@ -263,12 +284,407 @@ fn to_content_err(e: AppError) -> ContentError {
 }
 
 // ---------------------------------------------------------------------------
+// Actions (A1b)
+// ---------------------------------------------------------------------------
+
+/// Actions the synthetic forest root exposes: only `add`, which routes
+/// through the view config's `type: create` to create a *top-level* task
+/// (the new node's parent comes from the buffer's `parent:` field, blank
+/// by default).
+fn task_root_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new("add", "Add task", InputSpec::Editor)
+        .with_placement(HintPlacement::ActionBar)
+        .with_default_key('a')]
+}
+
+/// Actions a single task exposes. `add` makes a task a valid `type: create`
+/// container (new child); `edit` opens the markdown buffer on the task
+/// itself; `delete`/`undelete` and the `mark-move`/`paste-move` reparent
+/// pair are fire-and-forget shortcuts dispatched through
+/// [`Node::invoke_action`].
+fn task_item_actions() -> Vec<NodeAction> {
+    vec![
+        NodeAction::new("edit", "Edit", InputSpec::Editor)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('e'),
+        NodeAction::new("add", "Add subtask", InputSpec::Editor)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('a'),
+        NodeAction::new("delete", "Delete", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('d'),
+        NodeAction::new("undelete", "Undelete", InputSpec::None).with_default_key('u'),
+        NodeAction::new("mark-move", "Mark for move", InputSpec::None),
+        NodeAction::new("paste-move", "Move here", InputSpec::None),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Mutations (A1b) — shared logic for the root/item nodes
+// ---------------------------------------------------------------------------
+
+/// Owned snapshot of every task model — the `all_tasks` slice the notes
+/// path-builder needs to resolve a task's hierarchical notes file.
+fn all_tasks(snapshot: &ForestSnapshot) -> Vec<task::Model> {
+    snapshot.by_id.values().map(|r| r.task.clone()).collect()
+}
+
+/// `root` plus all its descendants present in the snapshot — the subtree a
+/// recursive delete soft-deletes, so their notes are marked deleted too.
+fn subtree_ids(snapshot: &ForestSnapshot, root: Uuid) -> Vec<Uuid> {
+    let mut out = vec![root];
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i];
+        if let Some(children) = snapshot.children.get(&Some(parent)) {
+            out.extend(children.iter().copied());
+        }
+        i += 1;
+    }
+    out
+}
+
+/// True when reparenting `moving` under `new_parent` would form a cycle —
+/// i.e. `new_parent` is `moving` itself or one of its descendants. Walks
+/// `new_parent`'s ancestor chain looking for `moving`.
+fn would_create_cycle(snapshot: &ForestSnapshot, moving: Uuid, new_parent: Uuid) -> bool {
+    let mut cur = Some(new_parent);
+    while let Some(c) = cur {
+        if c == moving {
+            return true;
+        }
+        cur = snapshot.by_id.get(&c).and_then(|r| r.parent);
+    }
+    false
+}
+
+fn emit_task_changed(handle: &CoreHandle, id: Uuid) {
+    let _ = handle.events.send(DomainEvent::TaskChanged { id });
+}
+
+/// Wrap a service error as a buffer-reopen carrying the message, so the
+/// user keeps their edits and sees what failed.
+fn reopen_service_error(text: &str, e: AppError) -> ActionOutcome {
+    let errors = vec![FieldError {
+        field: "description",
+        message: format!("Service error: {e}"),
+    }];
+    ActionOutcome::Reopen {
+        content: editor_templates::render_with_errors(text, &errors),
+        new_version: None,
+    }
+}
+
+/// Start or stop tracking for `task_id`, mirroring the host's native
+/// policy: with parallel tracking disabled, starting first stops every
+/// other active tracking. Each transition emits a `Tracking*` event so the
+/// other tabs repaint.
+async fn apply_tracking(handle: &CoreHandle, task_id: Uuid, wants_tracked: bool) {
+    let now = chrono::Utc::now();
+    if wants_tracked {
+        if !handle.allow_parallel_tracking {
+            if let Ok(active) = handle.tracking_repo.find_all_active().await {
+                for t in active {
+                    if handle.tracking_repo.stop(t.id, now).await.is_ok() {
+                        let _ = handle.events.send(DomainEvent::TrackingStopped {
+                            task_id: t.task_id,
+                            tracking_id: t.id,
+                        });
+                    }
+                }
+            }
+        }
+        if let Ok(started) = handle.tracking_repo.insert(task_id, now, None).await {
+            let _ = handle.events.send(DomainEvent::TrackingStarted {
+                task_id,
+                tracking_id: started.id,
+            });
+        }
+    } else if let Ok(Some(t)) = handle.tracking_repo.find_active_for_task(task_id).await {
+        if handle.tracking_repo.stop(t.id, now).await.is_ok() {
+            let _ = handle.events.send(DomainEvent::TrackingStopped {
+                task_id,
+                tracking_id: t.id,
+            });
+        }
+    }
+}
+
+/// `prepare` for the `add` action: render the new-task buffer for a task
+/// under `parent_id` (`None` = top-level). No version token — a create has
+/// nothing to conflict with.
+fn prepare_add(parent_id: Option<Uuid>) -> EditorPrep {
+    EditorPrep {
+        template: editor_templates::new_task(parent_id),
+        version: String::new(),
+        suffix: ".md".into(),
+    }
+}
+
+/// `prepare` for the `edit` action: render the task's current frontmatter +
+/// description + notes, with the `tracking:` flag reflecting live state.
+async fn prepare_edit(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    id: Uuid,
+) -> Result<EditorPrep> {
+    let task = snapshot
+        .by_id
+        .get(&id)
+        .map(|r| r.task.clone())
+        .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+    let is_tracked = handle
+        .tracking_repo
+        .find_active_for_task(id)
+        .await
+        .map_err(to_content_err)?
+        .is_some();
+    let notes_str = notes::read_notes(&task, &all_tasks(snapshot));
+    let template = editor_templates::edit_task_with_notes(&task, is_tracked, &notes_str);
+    Ok(EditorPrep {
+        template,
+        version: task.updated_at.to_rfc3339(),
+        suffix: ".md".into(),
+    })
+}
+
+/// `execute` for the `add` action. `parent_default` seeds the parent for a
+/// create initiated on a container node; the buffer's `parent:` field (if
+/// the user sets one) wins via the parser.
+async fn execute_add(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    text: &str,
+    original: &str,
+) -> Result<ActionOutcome> {
+    match editor_templates::parse_new_task(text, original) {
+        ParseResult::Aborted => Ok(ActionOutcome::NoChanges),
+        ParseResult::Errors {
+            errors,
+            original_content,
+        } => Ok(ActionOutcome::Reopen {
+            content: editor_templates::render_with_errors(&original_content, &errors),
+            new_version: None,
+        }),
+        ParseResult::Ok(parsed) => {
+            let wants_tracking = parsed.tracking;
+            let notes_text = editor_templates::parse_notes(text);
+            let created = match handle
+                .task_service
+                .add_task(
+                    parsed.description,
+                    None,
+                    parsed.parent_id,
+                    None,
+                    parsed.status,
+                    parsed.priority,
+                )
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => return Ok(reopen_service_error(text, e)),
+            };
+            notes::write_notes(&created, &all_tasks(snapshot), &notes_text);
+            if wants_tracking {
+                apply_tracking(handle, created.id, true).await;
+            }
+            emit_task_changed(handle, created.id);
+            Ok(ActionOutcome::Navigate {
+                node_id: created.id.to_string(),
+                node_type: task_item_type(),
+            })
+        }
+    }
+}
+
+/// `execute` for the `edit` action. Diffs the buffer against the snapshot's
+/// task, persists only changed fields, moves/renames notes on a parent or
+/// description change, applies a tracking toggle, and guards reparents.
+async fn execute_edit(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    id: Uuid,
+    text: &str,
+    original: &str,
+) -> Result<ActionOutcome> {
+    let task = snapshot
+        .by_id
+        .get(&id)
+        .map(|r| r.task.clone())
+        .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+    let was_tracked = handle
+        .tracking_repo
+        .find_active_for_task(id)
+        .await
+        .map_err(to_content_err)?
+        .is_some();
+
+    match editor_templates::parse_edit_task(text, original, &task) {
+        ParseResult::Aborted => Ok(ActionOutcome::NoChanges),
+        ParseResult::Errors {
+            errors,
+            original_content,
+        } => Ok(ActionOutcome::Reopen {
+            content: editor_templates::render_with_errors(&original_content, &errors),
+            new_version: None,
+        }),
+        ParseResult::Ok(parsed) => {
+            // Cycle guard: refuse to move a task under itself or a descendant.
+            if let Some(Some(new_parent)) = parsed.parent_id {
+                if would_create_cycle(snapshot, id, new_parent) {
+                    let errors = vec![FieldError {
+                        field: "parent",
+                        message: "Cannot move a task under itself or one of its descendants"
+                            .to_string(),
+                    }];
+                    return Ok(ActionOutcome::Reopen {
+                        content: editor_templates::render_with_errors(text, &errors),
+                        new_version: None,
+                    });
+                }
+            }
+
+            let notes_text = editor_templates::parse_notes(text);
+            let all = all_tasks(snapshot);
+            if let Some(new_desc) = &parsed.description {
+                notes::rename_notes(&task, &task.description, new_desc, &all);
+            }
+            let parent_changed =
+                parsed.parent_id.is_some() && parsed.parent_id != Some(task.parent_id);
+
+            let updated = match handle
+                .task_service
+                .update_task(
+                    id,
+                    parsed.description.clone(),
+                    parsed.status,
+                    parsed.priority,
+                    parsed.parent_id,
+                    None,
+                )
+                .await
+            {
+                Ok(u) => u,
+                Err(e) => return Ok(reopen_service_error(text, e)),
+            };
+
+            if parent_changed {
+                let new_rows: Vec<task::Model> = all
+                    .iter()
+                    .map(|t| if t.id == updated.id { updated.clone() } else { t.clone() })
+                    .collect();
+                notes::move_notes(&updated, &all, &new_rows);
+                notes::write_notes(&updated, &new_rows, &notes_text);
+            } else {
+                notes::write_notes(&updated, &all, &notes_text);
+            }
+
+            if let Some(want) = parsed.tracking {
+                if want != was_tracked {
+                    apply_tracking(handle, updated.id, want).await;
+                }
+            }
+            emit_task_changed(handle, updated.id);
+            Ok(ActionOutcome::Done {
+                message: Some("Task updated".to_string()),
+            })
+        }
+    }
+}
+
+/// `execute("delete")` — recursive subtree delete + soft-delete the notes
+/// of every task in the subtree (so an `undelete` can bring them back).
+async fn execute_delete(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    id: Uuid,
+) -> Result<ActionOutcome> {
+    let ids = subtree_ids(snapshot, id);
+    let all = all_tasks(snapshot);
+    for tid in &ids {
+        if let Some(row) = snapshot.by_id.get(tid) {
+            notes::mark_notes_deleted(&row.task, &all);
+        }
+    }
+    let count = handle
+        .task_service
+        .delete_task_recursive(id)
+        .await
+        .map_err(to_content_err)?;
+    emit_task_changed(handle, id);
+    let message = if count > 1 {
+        format!("Deleted subtree ({count} tasks)")
+    } else {
+        "Task deleted".to_string()
+    };
+    Ok(ActionOutcome::Done {
+        message: Some(message),
+    })
+}
+
+/// `invoke_action("undelete")` — restore the most recently deleted task(s).
+/// Needs no target node, so it ignores the invoking node's identity.
+async fn invoke_undelete(handle: &CoreHandle) -> ActionDispatch {
+    match handle.task_service.undelete_last().await {
+        Ok(0) => ActionDispatch::Error("Nothing to undelete".to_string()),
+        Ok(_) => {
+            emit_task_changed(handle, Uuid::nil());
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Undelete failed: {e}")),
+    }
+}
+
+/// `invoke_action("paste-move")` — reparent the previously-marked task
+/// (`ctx.marked`) under `target`. Validates the marked node is a task and
+/// the move forms no cycle, then persists + relocates its notes.
+async fn invoke_paste_move(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    target: Uuid,
+    marked: &not_yet_done_content::MarkedNode,
+) -> ActionDispatch {
+    if marked.node_type.type_id != task_item_type().type_id {
+        return ActionDispatch::Error("Can only move a task under a task".to_string());
+    }
+    let Ok(moving) = Uuid::parse_str(&marked.node_id) else {
+        return ActionDispatch::Error(format!("Invalid marked id: {}", marked.node_id));
+    };
+    if moving == target {
+        return ActionDispatch::Error("A task cannot be its own parent".to_string());
+    }
+    if would_create_cycle(snapshot, moving, target) {
+        return ActionDispatch::Error(
+            "Cannot move a task under one of its own descendants".to_string(),
+        );
+    }
+    let all = all_tasks(snapshot);
+    match handle
+        .task_service
+        .update_task(moving, None, None, None, Some(Some(target)), None)
+        .await
+    {
+        Ok(updated) => {
+            let new_rows: Vec<task::Model> = all
+                .iter()
+                .map(|t| if t.id == updated.id { updated.clone() } else { t.clone() })
+                .collect();
+            notes::move_notes(&updated, &all, &new_rows);
+            emit_task_changed(handle, updated.id);
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Move failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
 /// Synthetic forest root. Lists the top-level tasks (`parent_id == None`).
 struct TaskRootNode {
     snapshot: Arc<ForestSnapshot>,
+    handle: CoreHandle,
     node_type: NodeType,
     metadata: Metadata,
 }
@@ -293,6 +709,9 @@ impl Node for TaskRootNode {
     fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
         task_sortable_columns()
     }
+    fn actions(&self) -> Vec<NodeAction> {
+        task_root_actions()
+    }
     async fn list(
         &self,
         _params: not_yet_done_content::ListParams,
@@ -300,7 +719,26 @@ impl Node for TaskRootNode {
         Ok(list_result(self.snapshot.child_summaries(None)))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        TaskItemNode::fetch(&self.snapshot, id)
+        TaskItemNode::fetch(&self.snapshot, &self.handle, id)
+    }
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        match action_id {
+            // Create a top-level task; the buffer's `parent:` may override.
+            "add" => Ok(prepare_add(None)),
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on the task root"
+            ))),
+        }
+    }
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("add", ActionInput::Edited { text, original, .. }) => {
+                execute_add(&self.handle, &self.snapshot, &text, &original).await
+            }
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on the task root"
+            ))),
+        }
     }
 }
 
@@ -308,6 +746,7 @@ impl Node for TaskRootNode {
 /// borrows) and a shared handle to the forest snapshot for drilling.
 struct TaskItemNode {
     snapshot: Arc<ForestSnapshot>,
+    handle: CoreHandle,
     id: Uuid,
     id_str: String,
     label: String,
@@ -316,15 +755,29 @@ struct TaskItemNode {
 }
 
 impl TaskItemNode {
-    /// Look `id` up in `snapshot` and build the node, or `NotFound`.
-    fn fetch(snapshot: &Arc<ForestSnapshot>, id: &str) -> Result<Box<dyn Node>> {
+    /// Parse `id` and confirm the task exists in `snapshot`, or `NotFound`.
+    /// Split out from [`Self::fetch`] so the lookup is testable without a
+    /// live [`CoreHandle`].
+    fn resolve_id(snapshot: &ForestSnapshot, id: &str) -> Result<Uuid> {
         let uuid = Uuid::parse_str(id).map_err(|_| ContentError::NotFound(id.to_string()))?;
-        let row = snapshot
-            .by_id
-            .get(&uuid)
-            .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+        if snapshot.by_id.contains_key(&uuid) {
+            Ok(uuid)
+        } else {
+            Err(ContentError::NotFound(id.to_string()))
+        }
+    }
+
+    /// Look `id` up in `snapshot` and build the node, or `NotFound`.
+    fn fetch(
+        snapshot: &Arc<ForestSnapshot>,
+        handle: &CoreHandle,
+        id: &str,
+    ) -> Result<Box<dyn Node>> {
+        let uuid = Self::resolve_id(snapshot, id)?;
+        let row = &snapshot.by_id[&uuid];
         Ok(Box::new(TaskItemNode {
             snapshot: snapshot.clone(),
+            handle: handle.clone(),
             id: uuid,
             id_str: id.to_string(),
             label: row.task.description.clone(),
@@ -354,6 +807,9 @@ impl Node for TaskItemNode {
     fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
         task_sortable_columns()
     }
+    fn actions(&self) -> Vec<NodeAction> {
+        task_item_actions()
+    }
     async fn list(
         &self,
         _params: not_yet_done_content::ListParams,
@@ -361,7 +817,50 @@ impl Node for TaskItemNode {
         Ok(list_result(self.snapshot.child_summaries(Some(self.id))))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        TaskItemNode::fetch(&self.snapshot, id)
+        TaskItemNode::fetch(&self.snapshot, &self.handle, id)
+    }
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        match action_id {
+            // Create a child task under this one (buffer's `parent:` wins).
+            "add" => Ok(prepare_add(Some(self.id))),
+            "edit" => prepare_edit(&self.handle, &self.snapshot, self.id).await,
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` has no editor buffer"
+            ))),
+        }
+    }
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("add", ActionInput::Edited { text, original, .. }) => {
+                execute_add(&self.handle, &self.snapshot, &text, &original).await
+            }
+            ("edit", ActionInput::Edited { text, original, .. }) => {
+                execute_edit(&self.handle, &self.snapshot, self.id, &text, &original).await
+            }
+            // Reached via the generic `DeleteSelf` confirm flow, which calls
+            // `execute("delete", None)` after the user confirms.
+            ("delete", _) => execute_delete(&self.handle, &self.snapshot, self.id).await,
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on a task"
+            ))),
+        }
+    }
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // Routed to the generic delete-confirm flow; the actual delete
+            // happens in `execute("delete")` after confirmation.
+            "delete" => ActionDispatch::DeleteSelf,
+            "undelete" => invoke_undelete(&self.handle).await,
+            // The frontend records the mark; the adapter does nothing here.
+            "mark-move" => ActionDispatch::Noop,
+            "paste-move" => match &ctx.marked {
+                Some(marked) => {
+                    invoke_paste_move(&self.handle, &self.snapshot, self.id, marked).await
+                }
+                None => ActionDispatch::Error("Nothing marked to move".to_string()),
+            },
+            _ => ActionDispatch::Noop,
+        })
     }
 }
 
@@ -514,11 +1013,19 @@ impl ContentAdapter for TaskAdapter {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
-            // Mutations land in A1b/A1c; read path only for now.
-            supports_create: false,
-            supports_delete: false,
+            // A1b: add/edit (create) and delete/undelete/reparent.
+            supports_create: true,
+            supports_delete: true,
             supports_search: true,
             ..AdapterCapabilities::default()
+        }
+    }
+
+    fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        match node_type.type_id.as_str() {
+            "task:root" => task_root_actions(),
+            "task:item" => task_item_actions(),
+            _ => Vec::new(),
         }
     }
 
@@ -527,6 +1034,7 @@ impl ContentAdapter for TaskAdapter {
         let snapshot = self.reload_snapshot().await?;
         Ok(Box::new(TaskRootNode {
             snapshot,
+            handle: self.handle.clone(),
             node_type: task_root_type(),
             metadata: Metadata::default(),
         }))
@@ -537,11 +1045,12 @@ impl ContentAdapter for TaskAdapter {
         if id == ROOT_ID {
             return Ok(Box::new(TaskRootNode {
                 snapshot,
+                handle: self.handle.clone(),
                 node_type: task_root_type(),
                 metadata: Metadata::default(),
             }));
         }
-        TaskItemNode::fetch(&snapshot, id)
+        TaskItemNode::fetch(&snapshot, &self.handle, id)
     }
 
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
@@ -672,16 +1181,69 @@ mod tests {
     }
 
     #[test]
-    fn fetch_unknown_id_is_not_found() {
+    fn resolve_id_unknown_is_not_found() {
         let snap = snapshot_from(vec![row(Uuid::from_u128(1), "A", None)]);
         assert!(matches!(
-            TaskItemNode::fetch(&snap, "not-a-uuid"),
+            TaskItemNode::resolve_id(&snap, "not-a-uuid"),
             Err(ContentError::NotFound(_))
         ));
         assert!(matches!(
-            TaskItemNode::fetch(&snap, &Uuid::from_u128(99).to_string()),
+            TaskItemNode::resolve_id(&snap, &Uuid::from_u128(99).to_string()),
             Err(ContentError::NotFound(_))
         ));
+        // An existing id resolves.
+        assert_eq!(
+            TaskItemNode::resolve_id(&snap, &Uuid::from_u128(1).to_string()).unwrap(),
+            Uuid::from_u128(1)
+        );
+    }
+
+    #[test]
+    fn cycle_guard_detects_self_and_descendants() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            row(a, "A", None),
+            row(b, "B", Some(a)),
+            row(c, "C", Some(b)),
+        ]);
+        // Moving A under itself, under B, or under C (its descendants) cycles.
+        assert!(would_create_cycle(&snap, a, a));
+        assert!(would_create_cycle(&snap, a, b));
+        assert!(would_create_cycle(&snap, a, c));
+        // Moving C under A (an ancestor) is fine.
+        assert!(!would_create_cycle(&snap, c, a));
+    }
+
+    #[test]
+    fn subtree_ids_collects_descendants() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let d = Uuid::from_u128(4);
+        let snap = snapshot_from(vec![
+            row(a, "A", None),
+            row(b, "B", Some(a)),
+            row(c, "C", Some(b)),
+            row(d, "D", None),
+        ]);
+        let mut ids = subtree_ids(&snap, a);
+        ids.sort();
+        assert_eq!(ids, vec![a, b, c]);
+        assert_eq!(subtree_ids(&snap, d), vec![d]);
+    }
+
+    #[test]
+    fn root_and_item_expose_expected_actions() {
+        let has = |actions: &[NodeAction], id: &str| actions.iter().any(|a| a.id == id);
+        let root = task_root_actions();
+        assert!(has(&root, "add"));
+        assert_eq!(root.len(), 1);
+        let item = task_item_actions();
+        for id in ["edit", "add", "delete", "undelete", "mark-move", "paste-move"] {
+            assert!(has(&item, id), "task:item missing action `{id}`");
+        }
     }
 
     #[test]

@@ -1,3 +1,22 @@
+//! The `TaskAdapter`'s editor-buffer format: a markdown document with a
+//! `---` frontmatter (status / priority / tracking / parent) and a
+//! `## Description:` / `## Notes:` body. Rendering (`new_task`/`edit_task`)
+//! and parsing (`parse_new_task`/`parse_edit_task`) are the two halves of
+//! the [`InputSpec::Editor`](not_yet_done_content::InputSpec::Editor)
+//! round-trip the adapter drives from `Node::prepare`/`Node::execute`.
+//!
+//! Like every other adapter's edit buffer (Jira's `.jira`, Confluence's
+//! storage format), this format is **adapter-owned** — there is no shared
+//! YAML schema for it, because each backend's editable shape differs. It
+//! lives in this crate so the `TaskAdapter` and the (transitional) native
+//! `TaskEditSession` in the TUI share one source of truth until the C1
+//! cutover removes the latter.
+//!
+//! The structural primitives here (`split_frontmatter`, `parse_kv`,
+//! `render_with_errors`) are not task-specific and are a candidate for
+//! hoisting into `not-yet-done-content` as a shared frontmatter helper —
+//! see the A2 follow-up note in `docs/plan-adapterize-tasks-trackings.md`.
+
 use not_yet_done_core::entity::task::{Model as Task, TaskStatus};
 use uuid::Uuid;
 

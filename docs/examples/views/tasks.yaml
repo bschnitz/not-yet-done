@@ -10,18 +10,28 @@
 #
 # ## A1a scope (read path)
 #
-# This first cut renders the task forest read-only: the whole non-deleted
-# forest loads once into an eager snapshot and drills lazily through a
-# single recursive `task:item` branch. Columns are typed (M2): `priority`
-# is a right-aligned number, `created` a localized datetime. Tree-aware
-# search (`/`) walks the entire forest server-side (adapter-side, really —
-# it's all local) and steps through hits with n/N.
+# The whole non-deleted forest loads once into an eager snapshot and drills
+# lazily through a single recursive `task:item` branch. Columns are typed
+# (M2): `priority` is a right-aligned number, `created` a localized
+# datetime. Tree-aware search (`/`) walks the entire forest adapter-side
+# and steps through hits with n/N.
 #
-# Mutations (add/edit via the generic form, delete/undelete, reparent via
-# mark/paste-move) and the tracking toggle arrive in A1b/A1c and will add
-# their actions here. Until the C1 cutover this file is illustrative: the
-# bespoke native Tasks tab still ships; copying this file in stands up the
-# adapter path *alongside* it for comparison.
+# Mutations go through the generic action vocabulary:
+#   * `e` edit / `a` add — open a markdown buffer (`---` frontmatter +
+#     `## Description:` / `## Notes:`). `add` is a `type: create` on the
+#     current container (root → top-level task; drilled-into task → child);
+#     `edit` a `type: edit` on the selected task. The buffer's `tracking:`
+#     flag starts/stops time tracking.
+#   * `d` delete (recursive, with confirm) / `u` undelete (restores the
+#     last deletion) — generic `shortcuts:` dispatched via `invoke_action`.
+#   * `m` mark-move / `p` paste-move — reparent: mark a task, move onto the
+#     target task (which becomes its new parent). Cycles are rejected.
+#
+# Still A1c: the tracking *marker column* and a dedicated start/stop key,
+# saved queries (`task` scope), `FilterExpr` filtering, and scripts. Until
+# the C1 cutover this file is illustrative: the bespoke native Tasks tab
+# still ships; copying this file in stands up the adapter path *alongside*
+# it for comparison.
 
 tab:
   name: Tasks
@@ -70,6 +80,17 @@ views:
         sizing: max
 
     actions:
+      # Edit the selected task in a markdown buffer (adapter action `edit`).
+      - name: edit
+        key: e
+        type: edit
+        id: edit
+      # Create a task under the current container — at the root that's a
+      # top-level task; the buffer's `parent:` field can override.
+      - name: add task
+        key: a
+        type: create
+        id: add
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f
@@ -89,6 +110,16 @@ views:
       - name: refresh
         key: r
         type: reload
+
+    # Fire-and-forget actions dispatched through the adapter's
+    # `invoke_action`. `delete` routes through the confirm-then-delete flow;
+    # `undelete` restores the last deletion; `mark-move`/`paste-move`
+    # reparent a task. Keys must not collide with any `actions:` key above.
+    shortcuts:
+      d: delete
+      u: undelete
+      m: mark-move
+      p: paste-move
 
     children:
       # Recursive subtask branch — the same ChildDef serves every depth.
@@ -121,7 +152,24 @@ views:
             kind: datetime
             sizing: max
 
+        # Edit/add/delete/reparent work at every depth, so the recursive
+        # branch repeats them. fuzzy_filter / tree_find are NOT repeated —
+        # they're declared once at the tree root (validator rule).
         actions:
+          - name: edit
+            key: e
+            type: edit
+            id: edit
+          - name: add subtask
+            key: a
+            type: create
+            id: add
           - name: refresh
             key: r
             type: reload
+
+        shortcuts:
+          d: delete
+          u: undelete
+          m: mark-move
+          p: paste-move
