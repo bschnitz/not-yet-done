@@ -396,6 +396,7 @@ fn task_item_actions() -> Vec<NodeAction> {
             .with_default_key('t'),
         NodeAction::new("mark-move", "Mark for move", InputSpec::None),
         NodeAction::new("paste-move", "Move here", InputSpec::None),
+        NodeAction::new("unnest", "Move to top level", InputSpec::None),
     ]
 }
 
@@ -771,6 +772,37 @@ async fn invoke_paste_move(
     }
 }
 
+/// `invoke_action("unnest")` — move `task` to the top level (`parent_id =
+/// None`). The comfort inverse of paste-move: it re-roots a nested task
+/// without needing a mark + a target. A no-op (friendly error) when the
+/// task is already top-level. No cycle check is needed — the root is never
+/// a descendant of anything.
+async fn invoke_unnest(handle: &CoreHandle, snapshot: &ForestSnapshot, task_id: Uuid) -> ActionDispatch {
+    let Some(row) = snapshot.by_id.get(&task_id) else {
+        return ActionDispatch::Error(format!("Task not found: {task_id}"));
+    };
+    if row.task.parent_id.is_none() {
+        return ActionDispatch::Error("Task is already at the top level".to_string());
+    }
+    let all = all_tasks(snapshot);
+    match handle
+        .task_service
+        .update_task(task_id, None, None, None, Some(None), None)
+        .await
+    {
+        Ok(updated) => {
+            let new_rows: Vec<task::Model> = all
+                .iter()
+                .map(|t| if t.id == updated.id { updated.clone() } else { t.clone() })
+                .collect();
+            notes::move_notes(&updated, &all, &new_rows);
+            emit_task_changed(handle, updated.id);
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Un-nest failed: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
@@ -960,6 +992,7 @@ impl Node for TaskItemNode {
                 }
                 None => ActionDispatch::Error("Nothing marked to move".to_string()),
             },
+            "unnest" => invoke_unnest(&self.handle, &self.snapshot, self.id).await,
             _ => ActionDispatch::Noop,
         })
     }

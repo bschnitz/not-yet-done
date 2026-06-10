@@ -3274,12 +3274,30 @@ Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
 - [ ] `+name<Enter>` legt ein neues Script aus dem Template an; Editor öffnet.
 - [ ] Script ausführen → bekommt den Task als JSON
       `{"node": {"id": <uuid>, "node_type": "task:item", "tab": "tasks",
-    "fields": {description/status/priority/tags/tracking/created…}}}`
+  "fields": {description/status/priority/tags/tracking/created…}}}`
       (uniforme Node-Form, NICHT die native `{"task": …}`-Form).
 - [ ] Selektion wechseln (anderer Task, anderer Typ-Mix) → Menü bleibt am
       selben Ordner (kein Shuffle).
 - [ ] Kein Task selektiert / leerer Baum → Notification „No row selected",
       kein Crash.
+
+### A1c (Komfort) — Add-Child-unter-Selektion (`A`) + Un-nest (`U`)
+
+- [ ] Im Tree-Mode einen Task selektieren, `A` → Editor-Buffer mit
+      `parent:` auf den selektierten Task vorbefüllt; `:wq` → neuer Subtask
+      hängt **unter** dem selektierten Task (nicht als Top-Level).
+- [ ] `a` (klein) am selben Task → weiterhin Top-Level-Task am Container
+      (Verhalten unverändert).
+- [ ] `A` auf einem tief verschachtelten Task → Subtask landet auf der
+      nächsten Tiefe darunter, Baum klappt zum neuen Knoten auf.
+- [ ] `A`, dann im Buffer das `parent:`-Feld leeren → `:wq` → Task wird
+      doch Top-Level (Buffer-Override gewinnt).
+- [ ] `U` (Shift+U) auf einem verschachtelten Task → Task wandert auf die
+      oberste Ebene (parent_id = None), erscheint als Top-Level-Knoten.
+- [ ] `U` auf einem bereits Top-Level-Task → Notification „already at the
+      top level", keine Änderung.
+- [ ] `U` und `A` funktionieren im Tree-Mode (Root-View) und nach Drill in
+      einen Task (rekursiver Branch).
 
 ## Refinements / Deferred Tasks
 
