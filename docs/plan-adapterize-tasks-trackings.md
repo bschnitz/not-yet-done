@@ -205,6 +205,26 @@ Feature (auch Jira-Create etc. könnten es nutzen).
 > (YAML-Buffer im `$EDITOR`, parse-back) wie Jira. Weniger UX, aber
 > uniform. Primär: Form-InputSpec.
 
+> **Umgesetzt (Form-InputSpec, kein Fallback nötig).** content-crate:
+> `InputSpec::Form { fields: Vec<FormFieldSpec> }`, `FormFieldSpec`
+> (`Text` / `Select{allowed_values}` / `Toggle`, je `key`/`label`/
+> `required`/`default` + Builder), `ActionInput::Form(HashMap)` und der
+> `Node::form_prep(action_id) -> HashMap` Hook für Edit-Prefill. TUI:
+> generische, headless-testbare `ContentFormPopup`-Komponente (Stack aus
+> `ratatui_form_widgets`, Feld-Fokus, Pflichtfeld-Validierung) +
+> `ContentFormPopupState`, verdrahtet am `InputSpec`-Match in `app/mod.rs`
+> (`form_prep` → Popup → `ActionInput::Form` → `execute`), Overlay-Render
+> und Popup-Guards. **Scope-Entscheidung:** nur Text/Select/Toggle; der im
+> Plan genannte **NodePicker (Reparent) ist auf E6 (mark/paste, M7)
+> verschoben** — der Reparent-Pfad nutzt dort ohnehin das Clipboard-Move,
+> und ein NodePicker-Widget existiert noch nicht. Das **native
+> Task-Add/Edit (Markdown-`$EDITOR`) bleibt vorerst unangetastet** — E5
+> baut nur den generischen Mechanismus + Tests; die Umstellung des
+> TaskAdapters auf das Form passiert in **A1**. Tests: 7 Popup-Unit-Tests
+> (Eingabe/Prefill/Select/Toggle/Validierung/Submit/Cancel) + 3
+> content-Contract-Tests (Mock-Node: Form-Deklaration, `form_prep`,
+> `execute` empfängt `ActionInput::Form`).
+
 ### M7 — Generisches mark/paste-move (E6)
 
 `ActionContext` trägt einen **markierten Knoten** (Clipboard). Standard-
