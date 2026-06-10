@@ -1,0 +1,127 @@
+# Example: Tasks view configuration (adapterized Tasks tab — plan phase A1)
+#
+# Place in: ~/.config/not_yet_done/views/tasks.yaml
+#
+# Unlike every other adapter, the `tasks` adapter is *in-process*: it wraps
+# the host application's own TaskService (no network, no adapter-config
+# file). The `adapter.type: tasks` key resolves to the in-process
+# TaskAdapterFactory the App registers at startup with a live handle to the
+# core services.
+#
+# ## A1a scope (read path)
+#
+# This first cut renders the task forest read-only: the whole non-deleted
+# forest loads once into an eager snapshot and drills lazily through a
+# single recursive `task:item` branch. Columns are typed (M2): `priority`
+# is a right-aligned number, `created` a localized datetime. Tree-aware
+# search (`/`) walks the entire forest server-side (adapter-side, really —
+# it's all local) and steps through hits with n/N.
+#
+# Mutations (add/edit via the generic form, delete/undelete, reparent via
+# mark/paste-move) and the tracking toggle arrive in A1b/A1c and will add
+# their actions here. Until the C1 cutover this file is illustrative: the
+# bespoke native Tasks tab still ships; copying this file in stands up the
+# adapter path *alongside* it for comparison.
+
+tab:
+  name: Tasks
+  order: 1
+  icon: "󰄬"
+
+adapter:
+  type: tasks
+
+views:
+  # The root view lists the forest's top-level tasks (`parent_id == None`).
+  # `tree_label: description` turns it into a tree; the recursive `subtasks`
+  # branch below expands each task's children inline at any depth. Every
+  # level in the chain reuses the same tree_label key (`description`) — the
+  # renderer pulls the active depth's column set for the indent+glyph+label
+  # cell, so a mismatched key would blank rows at non-active depths.
+  - name: tasks
+    node_type: "task:item"
+    default: true
+    tree_label: description
+
+    # Tree-label column first (carries the indent + glyph), typed columns
+    # trail behind. `priority` (number) right-aligns; `created` (datetime)
+    # renders localized — the adapter emits canonical strings (integer,
+    # RFC 3339) and the engine formats per `kind`.
+    columns:
+      - key: description
+        label: Task
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+      - key: status
+        label: Status
+        sizing: max
+      - key: priority
+        label: Prio
+        kind: number
+        sizing: max
+      - key: tags
+        label: Tags
+        style: accent
+        sizing: max
+      - key: created
+        label: Created
+        kind: datetime
+        sizing: max
+
+    actions:
+      # Local filter-while-typing over the loaded rows.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [description, tags]
+      # Tree-aware search: `/` opens a free-text input, the adapter matches
+      # task descriptions across the whole forest, the tree expands to the
+      # first hit, and n/N cycle the rest in tree-render order. Declared
+      # once here at the tree root (the validator rejects re-declaring
+      # search/fuzzy_filter on the recursive branch below).
+      - name: tree find
+        key: /
+        type: tree_find
+        tree_find:
+          prompt: Search tasks
+      - name: refresh
+        key: r
+        type: reload
+
+    children:
+      # Recursive subtask branch — the same ChildDef serves every depth.
+      # `recursive: true` makes it an implicit member of its own children,
+      # so drilling a task expands its subtasks, theirs, and so on.
+      - name: subtasks
+        node_type: "task:item"
+        tree_label: description
+        recursive: true
+
+        columns:
+          - key: description
+            label: Task
+            source: label
+            style: text_high
+            sizing: "flex(1)"
+          - key: status
+            label: Status
+            sizing: max
+          - key: priority
+            label: Prio
+            kind: number
+            sizing: max
+          - key: tags
+            label: Tags
+            style: accent
+            sizing: max
+          - key: created
+            label: Created
+            kind: datetime
+            sizing: max
+
+        actions:
+          - name: refresh
+            key: r
+            type: reload

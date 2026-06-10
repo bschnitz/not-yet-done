@@ -322,6 +322,32 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   undelete/restore (View-Level-Actions am Root-Node), notes, scripts,
   tracking-toggle (emittiert `TrackingStarted/Stopped` auf den Bus).
   `views/tasks.yaml`.
+
+  > **A1a umgesetzt (Read-Pfad).** Der `LocalAdapter`-No-op aus E7 ist
+  > zum `TaskAdapter` (Factory-Key `local` → `tasks`) ausgebaut, im Crate
+  > `not-yet-done-local-adapter` (`task.rs`). Read-Pfad: synthetischer
+  > Forest-Root (`task:root`) listet die Top-Level-Tasks, eine rekursive
+  > `task:item`-Branch drillt beliebig tief. Die ganze nicht-gelöschte
+  > Forest lädt **einmal** in einen unveränderlichen `ForestSnapshot`
+  > (`Arc`-geteilt über alle Nodes, kein DB-Roundtrip beim Drillen);
+  > `root()` lädt frisch (Reload-Semantik), `get_by_id`/`list` aus dem
+  > Cache. Orphans (Parent gelöscht) werden auf Root re-gewurzelt.
+  > Typisierte Spalten (M2): `priority` als `number`, `created` als
+  > `datetime` — Adapter liefert kanonische Strings. `search_in_tree`
+  > matcht Multi-Token über alle Beschreibungen, liefert
+  > `path`-adressierte Hits in Tree-Render-Reihenfolge.
+  > `capabilities`: `supports_search = true`, create/delete noch
+  > `false`. **Event-Bridge schon final:** eigener `spawn_task_bridge`
+  > ignoriert `TrackingTick`, mappt `TaskChanged` → `Node`,
+  > `Tracking*` → `All`, und **leert den Snapshot** vor jedem Refetch —
+  > damit A1b-Mutationen ohne Cache-Nacharbeit korrekt refetchen.
+  > Beispiel + Regressionstest: `docs/examples/views/tasks.yaml`
+  > (parst + validiert im Test). Capability-only — die native
+  > `TasksView` läuft bis zum C1-Cutover unangetastet weiter. **Offen
+  > (A1b/A1c):** Mutationen (Form-add/edit, delete/undelete, reparent/E6),
+  > tracking-toggle + Marker-Spalte, Saved Queries (Scope `task`),
+  > Filter via `FilterExpr`, scripts.
+
 - **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
   Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed
   (E2), Tree-Fold own/cumulated (E3), Live-Dauern (E4b), Delete/Restore/
