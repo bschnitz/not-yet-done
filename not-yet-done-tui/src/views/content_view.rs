@@ -7261,6 +7261,9 @@ fn parse_sizing(s: &str) -> ColStrategy {
     if trimmed == "max" {
         return ColStrategy::Max;
     }
+    if trimmed == "fit" {
+        return ColStrategy::Fit;
+    }
     if trimmed == "auto" {
         return ColStrategy::Auto {
             min: DEFAULT_AUTO_MIN,

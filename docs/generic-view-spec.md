@@ -265,12 +265,25 @@ verteilt:
 | `max`           | so breit wie der breiteste Inhalt (gedeckelt auf den freien Rest)   |
 | `fixed(N)`      | exakt `N` Spalten breit                                             |
 | `flex(N)`       | teilt sich den **Rest** nach Gewicht `N` mit anderen `flex`-Spalten |
+| `fit`           | `min(Inhaltsbreite, freier Rest)` — content-breit, stretcht nicht   |
 | `auto(min,max)` | inhaltsbreit zwischen `min`/`max`; **ignoriert das Budget** (s. u.) |
 
 `flex`-Spalten füllen den nach `max`/`fixed` verbleibenden Platz **bis zur
 Pane-Breite** — sie blähen die Tabelle nicht über die Fläche hinaus. Eine
 `flex`-Spalte darf damit auch **mitten** in der Spaltenliste stehen (z. B. die
-Task-/Description-Spalte): die Spalten dahinter bleiben sichtbar. (Historisch
+Task-/Description-Spalte): die Spalten dahinter bleiben sichtbar.
+
+`fit` ist die **Kombination aus `max` und `flex`** (entspricht CSS
+`fit-content`): die Spalte wird so breit wie ihr Inhalt, aber nie breiter als
+der nach allen `fixed`/`max`/`auto`-Spalten verbleibende Platz —
+`min(Inhaltsbreite, freier Rest)`. Anders als `flex` stretcht sie also **nicht**
+auf die volle Pane-Breite (ist der Inhalt kurz, bleibt die Tabelle schmaler als
+die Fläche), und anders als `max` wird sie **deferred** ausgelegt (erst nach
+allen Fixbreiten-Spalten) — eine `fit`-Spalte in der Mitte verdrängt die
+nachfolgenden Spalten daher nie off-screen. Gedacht z. B. für die Task-Spalte
+der Tasks-Ansicht, die nur so breit sein soll wie der längste sichtbare
+Task-Titel. Stehen mehrere `fit`-Spalten nebeneinander, bedient sich die
+linkeste zuerst; `flex` füllt einen danach noch übrigen Rest. (Historisch
 legte die Engine gegen ein fixes Budget von 300 aus statt gegen die Pane-Breite;
 eine nicht-letzte `flex`-Spalte schob dann die nachfolgenden Spalten off-screen.
 Behoben — die Engine fittet jetzt auf die reale Pane-Breite und re-fittet bei
