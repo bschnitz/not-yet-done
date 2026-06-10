@@ -111,6 +111,12 @@ pub enum LoadMsg {
         node_id: String,
         action_name: String,
         result: Result<not_yet_done_content::ActionDispatch, String>,
+        /// Label + type of the resolved node, captured while it was
+        /// fetched in the spawn task (M7/E6). `None` when the fetch
+        /// itself failed. Used to build the [`MarkedNode`] for a
+        /// `mark-move` without a second `get_by_id` roundtrip.
+        node_label: Option<String>,
+        node_type: Option<not_yet_done_content::NodeType>,
     },
     /// Live connection-status update from a content adapter (e.g.
     /// `Connecting`, `Ready`, `Failed`). Pushed by a background task
@@ -729,6 +735,16 @@ pub struct App {
     /// Surfaced via status-bar indicator (mirrors [`Self::marked_link`]).
     pub marked_db_script_for_move: Option<String>,
 
+    /// M7/E6: generic move clipboard for content nodes. Set when a
+    /// `mark-move` action fires on any non-db-script content node, read
+    /// back into [`not_yet_done_content::ActionContext::marked`] on the
+    /// next `paste-move` invocation so the adapter performs the move.
+    /// Cleared on successful paste, on Esc, or by another `mark-move`.
+    /// DB-script keeps its own [`Self::marked_db_script_for_move`] slot
+    /// until the consolidation follow-up (see plan A2). Surfaced via the
+    /// status-bar indicator.
+    pub content_marked_node: Option<not_yet_done_content::MarkedNode>,
+
     /// Task marked for moving via `:cut-node` (`mc`). The task is only
     /// actually reparented on `:paste-node` (`mp`); until then the tree
     /// is untouched. Cleared on successful paste, on Esc, or by another
@@ -912,6 +928,7 @@ impl App {
             sort_hint_phase: SortHintPhase::Off,
             marked_link: None,
             marked_db_script_for_move: None,
+            content_marked_node: None,
             cut_node_id: None,
             link_popup: None,
             jump_history: crate::app::link::JumpHistory::new(),
@@ -2842,8 +2859,8 @@ impl App {
                     }
                     self.reload_content_pane_current_level(view_index, pane_id);
                 }
-                LoadMsg::NodeActionDispatched { view_index, pane_id, node_id, action_name, result } => {
-                    self.handle_node_action_dispatched(view_index, pane_id, node_id, action_name, result);
+                LoadMsg::NodeActionDispatched { view_index, pane_id, node_id, action_name, result, node_label, node_type } => {
+                    self.handle_node_action_dispatched(view_index, pane_id, node_id, action_name, result, node_label, node_type);
                 }
                 LoadMsg::ContentAdapterStatus { view_index, status } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
@@ -3842,6 +3859,10 @@ impl App {
         }
         if self.marked_db_script_for_move.take().is_some() {
             self.notify("DB-script move cancelled".to_string());
+            return;
+        }
+        if self.content_marked_node.take().is_some() {
+            self.notify("Move cancelled".to_string());
             return;
         }
         // Fuzzy cancel is handled via FuzzyFilterCancel action.
@@ -5273,13 +5294,19 @@ impl App {
             self.status_bar.set_mode(status_mode, &self.keybindings);
         }
 
-        // Marker pill: link-mark always wins (existing UX), otherwise
-        // the DSF-4 DB-script-move source is shown with a "move: …"
-        // prefix so the user can tell the two states apart.
-        let marker = match (&self.marked_link, &self.marked_db_script_for_move) {
-            (Some(r), _) => Some(r.as_str().to_string()),
-            (None, Some(n)) => Some(format!("move: {n}")),
-            (None, None) => None,
+        // Marker pill: link-mark always wins (existing UX), then the
+        // DSF-4 DB-script-move source, then the M7/E6 generic move
+        // clipboard — each with a distinct prefix so the user can tell
+        // the states apart.
+        let marker = match (
+            &self.marked_link,
+            &self.marked_db_script_for_move,
+            &self.content_marked_node,
+        ) {
+            (Some(r), _, _) => Some(r.as_str().to_string()),
+            (None, Some(n), _) => Some(format!("move: {n}")),
+            (None, None, Some(m)) => Some(format!("move: {}", m.label)),
+            (None, None, None) => None,
         };
         self.status_bar.set_link_marker(marker);
     }
@@ -5773,20 +5800,42 @@ impl App {
         let tx = self.load_tx.clone();
         let action_name_for_task = action_name.clone();
         let node_id_for_task = node_id.clone();
+        // M7/E6: hand the current move clipboard to the adapter so a
+        // `paste-move` invocation can read the marked node out of the
+        // context and relocate it. Every other action ignores it.
+        let marked = self.content_marked_node.clone();
         tokio::spawn(async move {
-            let ctx = not_yet_done_content::ActionContext::default();
-            let outcome = async {
+            let ctx = not_yet_done_content::ActionContext { marked };
+            // Capture the node's label + type alongside the dispatch so a
+            // `mark-move` can populate the clipboard without re-fetching.
+            let outcome: not_yet_done_content::Result<(
+                not_yet_done_content::ActionDispatch,
+                String,
+                not_yet_done_content::NodeType,
+            )> = async {
                 let node = adapter.get_by_id(&node_id_for_task).await?;
-                node.invoke_action(&action_name_for_task, &ctx).await
+                let label = node.label().to_string();
+                let node_type = node.node_type().clone();
+                let dispatch = node.invoke_action(&action_name_for_task, &ctx).await?;
+                Ok((dispatch, label, node_type))
             }
             .await;
-            let result = outcome.map_err(|e| format!("Action '{action_name_for_task}': {e}"));
+            let (result, node_label, node_type) = match outcome {
+                Ok((dispatch, label, node_type)) => (Ok(dispatch), Some(label), Some(node_type)),
+                Err(e) => (
+                    Err(format!("Action '{action_name_for_task}': {e}")),
+                    None,
+                    None,
+                ),
+            };
             let _ = tx.send(LoadMsg::NodeActionDispatched {
                 view_index,
                 pane_id,
                 node_id: node_id_for_task,
                 action_name: action_name_for_task,
                 result,
+                node_label,
+                node_type,
             });
         });
     }
@@ -5802,6 +5851,8 @@ impl App {
         node_id: String,
         action_name: String,
         result: Result<not_yet_done_content::ActionDispatch, String>,
+        node_label: Option<String>,
+        node_type: Option<not_yet_done_content::NodeType>,
     ) {
         let dispatch = match result {
             Ok(d) => d,
@@ -5810,6 +5861,36 @@ impl App {
                 return;
             }
         };
+        // M7/E6: generic mark/paste-move clipboard. db-script nodes keep
+        // their bespoke path (handled inside `dispatch_to_view_request`),
+        // so `generic_mark_move_effect` returns `Ignore` for them — the
+        // two clipboards stay disjoint until the consolidation follow-up.
+        match crate::app::node_actions::generic_mark_move_effect(&action_name, &node_id) {
+            crate::app::node_actions::MarkMoveEffect::Mark => {
+                if let (Some(label), Some(nt)) = (node_label, node_type) {
+                    self.content_marked_node = Some(not_yet_done_content::MarkedNode {
+                        node_id,
+                        node_type: nt,
+                        label: label.clone(),
+                    });
+                    self.notify(format!(
+                        "Marked '{label}' for move — paste with `paste-move` on the target"
+                    ));
+                } else {
+                    self.notify_error("Could not mark node for move".to_string());
+                }
+                return;
+            }
+            crate::app::node_actions::MarkMoveEffect::ClearOnPasteSuccess => {
+                // The adapter performed the move; a `Reload` dispatch
+                // confirms success, so the source is no longer "cut".
+                if matches!(dispatch, not_yet_done_content::ActionDispatch::Reload) {
+                    self.content_marked_node = None;
+                }
+                // Fall through so the `Reload` reloads the target pane.
+            }
+            crate::app::node_actions::MarkMoveEffect::Ignore => {}
+        }
         // Resolve the `editor_in_place` flag for the row's node-type
         // by looking it up in the view-config tree. DB scripts can
         // sit under multiple branches (DSF-6 recursive structure),

@@ -841,6 +841,54 @@ strukturiertes Popup schneller und fehlerärmer als ein YAML-Buffer im
 `InputSpec::Editor` die richtige Wahl. Beide Wege sind uniform über alle
 Adapter nutzbar.
 
+### Markieren & Verschieben (`mark-move` / `paste-move`, M7/E6)
+
+Strukturelle Verschiebungen (einen Task umhängen, eine Seite in einen
+anderen Knoten ziehen) laufen über ein generisches **Move-Clipboard**.
+Zwei Standard-Action-Namen bilden das Vokabular:
+
+- **`mark-move`** — merkt sich den aktuellen Knoten als Verschiebe-Quelle.
+  Reine Frontend-Session-State; der Adapter gibt `ActionDispatch::Noop`
+  zurück (er muss die Action nur in `Node::actions()` listen, damit das
+  Keybinding/Hint-Greift). Die TUI zeigt die markierte Quelle als
+  Indikator in der Status-Bar (`move: <label>`), bis Paste oder `esc`.
+- **`paste-move`** — die TUI ruft `Node::invoke_action("paste-move", ctx)`
+  auf dem **Ziel**-Knoten auf, wobei `ctx.marked` die markierte Quelle
+  trägt (`ActionContext.marked: Option<MarkedNode>`). **Der Adapter führt
+  den Move aus** (Reparent/Relocate) und gibt `ActionDispatch::Reload`
+  zurück; die TUI lädt das Ziel-Pane neu und leert das Clipboard.
+
+```rust
+// im Adapter, in Node::invoke_action():
+async fn invoke_action(&self, name: &str, ctx: &ActionContext)
+    -> Result<ActionDispatch> {
+    match name {
+        "mark-move" => Ok(ActionDispatch::Noop), // Clipboard ist Frontend-State
+        "paste-move" => match &ctx.marked {
+            Some(src) => {
+                // src.node_id / src.node_type prüfen, dann verschieben …
+                self.reparent(&src.node_id, self.id()).await?;
+                Ok(ActionDispatch::Reload)
+            }
+            None => Ok(ActionDispatch::Error("nichts markiert".into())),
+        },
+        _ => Ok(ActionDispatch::Noop),
+    }
+}
+```
+
+`MarkedNode` trägt `node_id` (Adapter-lokale id, wie von `get_by_id`
+akzeptiert), `node_type` (damit das Ziel inkompatible Typen ablehnen kann)
+und `label` (für den Indikator). Die Move-Semantik liegt vollständig im
+Adapter — er allein kennt seine Hierarchie und Restriktionen; die TUI
+hält nur das Clipboard und reicht es beim Paste durch.
+
+Warum ein generischer Mechanismus statt bespoke Cut/Paste pro View: der
+native Tasks-Tree, die Link-Funktion und die DB-Skript-Ordner trugen
+bisher je eigene Mark/Paste-Pfade. Mit `ActionContext.marked` +
+`mark-move`/`paste-move` profitiert jeder Adapter (ab A1 der TaskAdapter)
+vom selben Clipboard, ohne TUI-Code anzufassen.
+
 ## Pagination-Modi (`pagination:`)
 
 Jede ChildDef kann ihren Pagination-Mode konfigurieren:

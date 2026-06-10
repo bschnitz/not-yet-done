@@ -232,6 +232,47 @@ Action-Vokabular `mark-move` / `paste-move`; `invoke_action("paste-move",
 ctx)` führt den Move im Adapter aus. Verallgemeinert das bespoke
 mark/paste aus dem DB-Script-Folders-Plan (der darauf umgestellt wird).
 
+> **Umgesetzt (generischer Mechanismus, db-script-Konsolidierung als
+> Follow-up).** User-Scope-OK vorab: (1) `ActionContext.marked` trägt
+> `MarkedNode { node_id, node_type, label }` (leichtes Struct, kein
+> `NodeRef`); (2) generischen Mechanismus + Tests jetzt, db-script-
+> Migration als expliziter Follow-up (s.u.).
+>
+> - **Contract (`content/src/lib.rs`):** neues `MarkedNode`-Struct;
+>   `ActionContext.marked: Option<MarkedNode>` (statt leerem Struct).
+>   `paste-move` liest die Quelle aus `ctx.marked`; **der Adapter** führt
+>   den Move aus und gibt `ActionDispatch::Reload` zurück. `mark-move` ist
+>   Frontend-State → Adapter gibt `Noop`.
+> - **TUI:** App-Feld `content_marked_node: Option<MarkedNode>`;
+>   `spawn_invoke_node_action` füllt `ctx.marked` und fängt Label+Typ des
+>   Knotens (für `mark-move` ohne zweiten `get_by_id`) in
+>   `LoadMsg::NodeActionDispatched` ein. Pure Entscheidung
+>   `node_actions::generic_mark_move_effect(action, node_id)` liefert
+>   `MarkMoveEffect` (`Mark` | `ClearOnPasteSuccess` | `Ignore`);
+>   `handle_node_action_dispatched` setzt/leert das Clipboard danach.
+>   `esc` leert es (Tail-End-Esc-Consumer), Status-Bar-Indikator
+>   `move: <label>` (nach link-mark/db-script).
+> - **db-script bleibt vorerst auf seinem bespoke Pfad**
+>   (`marked_db_script_for_move` + `tui_owned_db_script_action` →
+>   `Mark/PasteDbScriptMove`, TUI macht den fs-Move). `generic_mark_move_effect`
+>   gibt für db-script-Knoten `Ignore` zurück → beide Clipboards disjunkt.
+> - **Tests:** 3 content-Contract (`MoveNode`: default kein Mark,
+>   `paste-move` empfängt `ctx.marked`, ohne Mark → `Error`) + 4 TUI-pure
+>   (`generic_mark_move_effect`: mark/paste/other/db-script). 83 content +
+>   562 TUI grün, installiert, Privacy-clean.
+> - **Docs:** generic-view-spec.md Abschnitt „Markieren & Verschieben".
+> - Capability-only bis A1/A2 (kein Adapter exponiert heute `mark-move`/
+>   `paste-move` außer dem bespoke db-script-Pfad). A1 (TaskAdapter) ist
+>   der erste Live-Konsument (Reparent).
+>
+> **Follow-up — db-script auf den generischen Pfad konsolidieren (bei
+> A2/M8).** Wenn der Adapter ohnehin durchgereicht wird: Postgres-Adapter
+> `paste-move` macht den fs-Move selbst (statt `Noop` + TUI), die
+> `ViewRequest::Mark/PasteDbScriptMove`-Sonderpfade + die db-script-Gate
+> in `generic_mark_move_effect` fallen weg, `marked_db_script_for_move`
+> wird durch `content_marked_node` ersetzt. Eigener Smoke-Test, da ein
+> funktionierendes Feature umgebaut wird.
+
 ### M8 — In-Process-Adapter-Wiring (E7)
 
 `build_adapter_factories()` bekommt ein `CoreHandle` (DB-Connection +

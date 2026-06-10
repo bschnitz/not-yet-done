@@ -171,6 +171,41 @@ fn tui_owned_db_script_action(
     }
 }
 
+/// M7/E6: what the generic mark/paste-move vocabulary should do for an
+/// action firing on a content node. Returned by
+/// [`generic_mark_move_effect`] so the App can mutate its clipboard state
+/// while the pure decision stays unit-testable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkMoveEffect {
+    /// `mark-move`: record the invoking node as the move source.
+    Mark,
+    /// `paste-move`: the adapter performed the move; clear the mark once
+    /// the dispatch confirms success ([`ActionDispatch::Reload`]).
+    ClearOnPasteSuccess,
+    /// Not a generic mark/paste-move action (or a node that owns a
+    /// bespoke move path) — leave the generic clipboard untouched.
+    Ignore,
+}
+
+/// Decide how a content-node action interacts with the generic move
+/// clipboard ([`crate::app::App::content_marked_node`]).
+///
+/// DB-script nodes keep their own bespoke mark/paste path (DSF-4, routed
+/// through [`tui_owned_db_script_action`]); they are deliberately excluded
+/// here so the two clipboards stay disjoint until the consolidation
+/// follow-up migrates db-script onto this generic mechanism. Every other
+/// adapter (TaskAdapter from A1 onward) drives the generic clipboard.
+pub fn generic_mark_move_effect(action_name: &str, node_id: &str) -> MarkMoveEffect {
+    if parse_db_script_node_id(node_id).is_some() {
+        return MarkMoveEffect::Ignore;
+    }
+    match action_name {
+        "mark-move" => MarkMoveEffect::Mark,
+        "paste-move" => MarkMoveEffect::ClearOnPasteSuccess,
+        _ => MarkMoveEffect::Ignore,
+    }
+}
+
 /// Resolve `key` to an adapter action name using the YAML `shortcuts:`
 /// maps along `type_chain`. Most-specific wins:
 ///
@@ -1079,5 +1114,45 @@ mod tests {
             Some(ViewRequest::Notify(msg)) => assert_eq!(msg, "boom"),
             other => panic!("expected Notify, got {other:?}"),
         }
+    }
+
+    // ── M7/E6: generic mark/paste-move clipboard effect ──────────────
+
+    #[test]
+    fn generic_mark_move_marks_on_mark_move() {
+        assert_eq!(
+            generic_mark_move_effect("mark-move", "task-42"),
+            MarkMoveEffect::Mark
+        );
+    }
+
+    #[test]
+    fn generic_mark_move_clears_on_paste_move() {
+        assert_eq!(
+            generic_mark_move_effect("paste-move", "task-42"),
+            MarkMoveEffect::ClearOnPasteSuccess
+        );
+    }
+
+    #[test]
+    fn generic_mark_move_ignores_other_actions() {
+        assert_eq!(
+            generic_mark_move_effect("edit", "task-42"),
+            MarkMoveEffect::Ignore
+        );
+    }
+
+    #[test]
+    fn generic_mark_move_ignores_db_script_nodes() {
+        // DB-script keeps its bespoke path; the generic clipboard must
+        // not claim these even for the shared action names.
+        assert_eq!(
+            generic_mark_move_effect("mark-move", "live/db_scripts/report"),
+            MarkMoveEffect::Ignore
+        );
+        assert_eq!(
+            generic_mark_move_effect("paste-move", "live/db_scripts/folder"),
+            MarkMoveEffect::Ignore
+        );
     }
 }
