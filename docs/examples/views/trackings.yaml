@@ -39,13 +39,20 @@
 # task. See the `shortcuts:` block below. Scripts run via the generic
 # `:script` menu (`x`, `type: script`).
 #
-# ## A2c scope (Condensed)
+# ## A2c scope (Condensed + Tree)
 #
 # The native "Condensed" mode is rebuilt as a second view (`key: v`) on the
 # generic **nested grouping** (M3 `then_by`): the list groups by day
 # (`group_by`) and then by task (`then_by`), with `summary_only` collapsing
-# each (day, task) cell to one summed row. `a` switches back to the flat
-# list. The Tree (own/cumulated) sub-view lands later in A2c.
+# each (day, task) cell to one summed row.
+#
+# The native "Tree" mode is a third view (`key: T`): the *task forest*
+# (`tracking:tree-item`) with tracked time rolled up per task. Its `duration`
+# column declares a `tree_aggregate` fold — `zt` toggles each task between its
+# **own** tracked time and its **subtree-cumulated** total (M4). The adapter
+# supplies both values and advertises `supports_tree_aggregation`.
+#
+# `a` switches back to the flat list from either.
 #
 # Until the C1 cutover this file is illustrative: the bespoke native Trackings
 # tab still ships; copying this file in stands up the adapter path alongside
@@ -225,3 +232,95 @@ views:
       R: restore
       t: toggle-tracking
       A: parent:restore-all
+
+  # ── Tree (A2c) ───────────────────────────────────────────────────────
+  #
+  # The native Trackings "Tree" mode: the *task forest* with tracked time
+  # rolled up per task. Each row is a `tracking:tree-item` (a task, not a
+  # single interval); drilling expands a task's subtasks. Switched to with
+  # `T` (Shift+t — `t` itself is toggle-tracking on the row); `a` switches
+  # back to the flat list.
+  #
+  # The `duration` column declares `tree_aggregate`: by default it shows each
+  # task's **subtree-cumulated** total (own + all descendants), and `zt`
+  # toggles every such column to the task's **own** tracked time. The adapter
+  # supplies both as canonical seconds (`duration` = own, `duration_cumulated`
+  # = subtree) and advertises `supports_tree_aggregation`; the engine never
+  # folds the tree itself (it's lazy), so the cumulated value is the
+  # adapter's. The tree is pruned to tasks with tracked time somewhere in
+  # their subtree, and durations bake at load (no live tick, like Condensed).
+  - name: tree
+    node_type: "tracking:tree-item"
+    key: T
+    tree_label: task
+
+    columns:
+      - key: task
+        label: Task
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+      - key: marker
+        label: "⏱"
+        style: accent
+        sizing: max
+      # Duration with a tree-fold toggle. `default: cumulated` shows the
+      # subtree total first; `zt` flips all `tree_aggregate` columns to the
+      # node's own value (read from the column's own `key`, `duration`).
+      - key: duration
+        label: Duration
+        kind: duration
+        sizing: max
+        tree_aggregate:
+          cumulated_field: duration_cumulated
+          default: cumulated
+
+    actions:
+      # Local filter-while-typing over the loaded task rows.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [task]
+      - name: refresh
+        key: r
+        type: reload
+
+    # `t` starts/stops tracking on the selected task (adapter `toggle-tracking`,
+    # shared exclusivity policy). Distinct from the `T` subtab key above.
+    shortcuts:
+      t: toggle-tracking
+
+    children:
+      # Recursive subtask branch — the same ChildDef at every depth. Drilling
+      # a task expands its subtasks (those with tracked time), and so on.
+      - name: subtasks
+        node_type: "tracking:tree-item"
+        tree_label: task
+        recursive: true
+
+        columns:
+          - key: task
+            label: Task
+            source: label
+            style: text_high
+            sizing: "flex(1)"
+          - key: marker
+            label: "⏱"
+            style: accent
+            sizing: max
+          - key: duration
+            label: Duration
+            kind: duration
+            sizing: max
+            tree_aggregate:
+              cumulated_field: duration_cumulated
+              default: cumulated
+
+        actions:
+          - name: refresh
+            key: r
+            type: reload
+
+        shortcuts:
+          t: toggle-tracking

@@ -3356,6 +3356,28 @@ bespoke nativen Trackings-Tab (bis C1).
       einzelnes Intervall, nicht die ganze Task-Tagessumme).
 - [ ] Der Saved-Query-Filter (`q`) wirkt auch im Condensed-Subtab.
 
+### A2c — Tree (own/cumulated, M4 `tree_aggregate`)
+
+- [ ] `T` (Shift+t) schaltet auf den **Tree**-Subtab; `a` schaltet zurück zur
+      flachen Liste. `t` (klein) bleibt toggle-tracking auf der Zeile — die
+      beiden kollidieren **nicht**.
+- [ ] Der Tree zeigt den **Task-Forest** (Tasks, nicht einzelne Intervalle);
+      nur Tasks mit getrackter Zeit **irgendwo im Teilbaum** erscheinen
+      (untracked Branches sind ausgeblendet, der Pfad zu getrackten Blättern
+      bleibt sichtbar).
+- [ ] Die `Duration`-Spalte zeigt zunächst die **kumulierte** Teilbaum-Summe
+      (Default `cumulated`). `zt` schaltet alle `tree_aggregate`-Spalten auf
+      die **eigene** Dauer des Tasks um (und zurück).
+- [ ] Ein Eltern-Task ohne eigenes Tracking, aber mit getrackten Kindern, zeigt
+      cumulated > 0 (Eigenwert 0:00:00 nach `zt`).
+- [ ] Drill-in (Enter/→) klappt die Subtasks auf; auf jeder Tiefe gilt die
+      gleiche `tree_aggregate`-Spalte.
+- [ ] `⏱`-Marker erscheint auf Tasks mit laufendem Tracking; `t` startet/stoppt
+      Tracking auf dem selektierten Task (gemeinsame Exklusiv-Policy mit dem
+      Tasks-Tab) und der Tree lädt neu.
+- [ ] **Grenze:** kein Live-Tick im Tree (Dauern backen beim Load wie
+      Condensed); ein `r`-Reload aktualisiert sie.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

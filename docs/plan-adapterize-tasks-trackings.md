@@ -527,8 +527,8 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   >   zeigt nur nicht-gelöschte Zeilen, also haben `R`/`A` heute kein
   >   sichtbares Ziel — eine „show deleted"-Subview ist Future-Work. 53
   >   adapter + 536 TUI Tests grün, installiert.
-  > - **A2c — Condensed (FERTIG, ungepusht) + Tree (own/cumulated, M4) +
-  >   Capability-Gating (beide offen).**
+  > - **A2c — Condensed (FERTIG) + Tree (FERTIG, own/cumulated, M4) +
+  >   Capability-Gating (offen).**
   >   - **Condensed (FERTIG).** Statt eines Modus-Toggles als zweite `views:`
   >     (`key: v`, zurück mit `a`) auf der **generischen verschachtelten
   >     Gruppierung (M3 `then_by`)**: `group_by` nach Tag + `then_by` nach
@@ -545,10 +545,26 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   >     (+`task_id`) Tests grün, installiert. **Grenze:** Live-Tick im
   >     Condensed nicht (Total statt Einzel-Dauer); zweistufig sonst
   >     paritätstreu zum Native.
-  >   - **Tree (offen).** Eager Task-Forest-Projektion (`tracking:tree-*`)
-  >     mit own+cumulated Dauer je Task-Knoten + `supports_tree_aggregation`;
-  >     setzt auf die schon vorhandene M4-Engine auf. Subtab-Key kollidiert
-  >     mit `t`=toggle-tracking → beim Wiring lösen.
+  >   - **Tree (FERTIG).** Zweite Projektion derselben Loads: der **Task-Forest**
+  >     als `tracking:tree-item`-Knoten ([`TreeProjection`] in `tracking.rs`),
+  >     jeder Knoten trägt `duration` (eigene Sekunden) + `duration_cumulated`
+  >     (Teilbaum-Summe, bottom-up gefaltet, zyklus-gesichert). Der Baum wird
+  >     auf Tasks mit getrackter Zeit **geprunt** (`cumulated_secs > 0`, Pfad zu
+  >     getrackten Blättern bleibt), Dauern **backen beim Load** (kein Live-Tick,
+  >     wie Condensed). Verdrahtung: **EIN Root** exponiert beide Child-Typen
+  >     (`tracking:entry` + `tracking:tree-item`), `root.list()` dispatcht auf
+  >     `params.node_type`, `get_by_id`/`get_child` routen über das
+  >     **`tree:<task-uuid>`**-Präfix (Tracking- vs. Task-UUID sonst
+  >     ununterscheidbar). `supports_tree_aggregation: true`. trackings.yaml 3. View `tree` (rekursiver `tracking:tree-item`-Branch) mit
+  >     `tree_aggregate: { cumulated_field: duration_cumulated, default:
+cumulated }` auf der `duration`-Spalte (`zt` toggelt own↔cumulated über
+  >     die vorhandene M4-Engine). **Subtab-Key-Kollision gelöst:** Switch-Key
+  >     `T` (Shift+t), `t` bleibt toggle-tracking auf der Zeile —
+  >     `canonicalize_key` lowercased nicht, also distinkt; Validator grün.
+  >     `tracking:tree-item`-Actions nur `toggle-tracking` (read-only Aggregat).
+  >     6 neue Adapter-Tests (Fold/Prune/Reroot/Metadata/parse-id/actions) =
+  >     59 adapter; neuer `example_trackings_yaml_parses_and_validates` = 539
+  >     TUI; installiert.
   >
   > **Mitzunehmen (Follow-up aus E3, M4):** Hier den **Capability-Gating-
   > Pfad** sauber etablieren. Heute werden UI-Affordanzen durchgängig über
