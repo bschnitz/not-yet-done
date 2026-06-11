@@ -3469,6 +3469,32 @@ Marker.
       (unit-getestet, live offen).
 - [x] Connector-Farbe färbt bei `tree_lines: false` weiterhin den
       Marker-Lauf (im Capture: Marker in `tree_connector`-Farbe).
+
+## Initiale Aufklapptiefe (`expand_depth`) + Listenansicht (`task:flat`)
+
+Tasks-Adapter-Parität mit dem nativen Tab: `expand_depth: 2` auf dem
+Wurzel-`ViewDef` klappt nach dem Laden Tiefe 0 und 1 automatisch auf
+(One-Shot-Kaskade über den normalen Expand-Pfad, spiegelt
+`tasks.tree.default_expand_depth: 2`); die zweite View `list`
+(`node_type: task:flat`, Subtab-Key `v`, zurück `t`) zeigt den ganzen
+Forest als flache Tabelle in DFS-Reihenfolge.
+
+- [x] „Tasks (A)" öffnen: drei Ebenen sind direkt sichtbar (Wurzeln +
+      Kinder + Enkel aufgeklappt), tiefere Ebenen bleiben zu.
+- [x] Einen Knoten manuell zuklappen, dann `r` (Reload): der Knoten
+      bleibt zu — die Kaskade ist one-shot und klappt nach Abschluss
+      nichts mehr gegen den User auf.
+- [x] `v` drücken: flache Liste aller Tasks (alle Tiefen, keine
+      Marker/Einrückung, DFS-Reihenfolge); `t` wechselt zurück zum Tree,
+      Aufklappstand bleibt erhalten.
+- [x] In der Listenansicht: `e` öffnet die Edit-Session der selektierten
+      Zeile wie im Tree (`s` toggle-tracking nutzt denselben
+      invoke-Pfad; bewusst nicht live gedrückt — würde ein echtes
+      Tracking starten/stoppen).
+- [ ] Saved Query in der Listenansicht anwenden (`q`): nur die Treffer
+      selbst erscheinen, keine Vorfahren-Zeilen (unit-getestet, live
+      offen).
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

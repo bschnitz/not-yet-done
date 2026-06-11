@@ -86,6 +86,22 @@ fn task_item_type() -> NodeType {
     }
 }
 
+/// The node type of the flat "list view" projection: every task in the
+/// forest as one flat list (depth-first order), no hierarchy. Mirrors the
+/// native tab's `vl` list view, rebuilt as a second YAML view. The rows it
+/// returns keep `task:item` summaries so actions, mark/move and
+/// `get_by_id` behave exactly like in the tree view — this type exists
+/// only to route the root `list()` to the flat projection.
+fn task_flat_type() -> NodeType {
+    NodeType {
+        type_id: "task:flat".to_string(),
+        mime_type: "text/plain".to_string(),
+        syntax: None,
+        file_extension: ".txt".to_string(),
+        display_name: "Task".to_string(),
+    }
+}
+
 /// The synthetic forest root the adapter exposes from [`ContentAdapter::root`].
 fn task_root_type() -> NodeType {
     NodeType {
@@ -249,6 +265,35 @@ impl ForestSnapshot {
             metadata: task_metadata(row, self.tracked.contains(&id)),
             has_children: Some(has_children),
         }
+    }
+
+    /// Every task in depth-first forest order as one flat list — the
+    /// `task:flat` "list view" projection. `filter` keeps only matching
+    /// tasks; unlike the tree's [`resolve_visible_set`] there is no
+    /// ancestor fill-in (the flat list shows hits, not paths), but the
+    /// walk still descends through non-matching parents so nested
+    /// matches surface. Rows never expand or drill (`has_children:
+    /// Some(false)`).
+    fn flat_summaries(&self, filter: Option<&HashSet<Uuid>>) -> Vec<NodeSummary> {
+        let mut out = Vec::new();
+        let mut stack: Vec<Uuid> = self
+            .children
+            .get(&None)
+            .map(|roots| roots.iter().rev().copied().collect())
+            .unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            if let Some(children) = self.children.get(&Some(id)) {
+                stack.extend(children.iter().rev());
+            }
+            if filter.map_or(true, |f| f.contains(&id)) {
+                if let Some(row) = self.by_id.get(&id) {
+                    let mut summary = self.summary(id, row, None);
+                    summary.has_children = Some(false);
+                    out.push(summary);
+                }
+            }
+        }
+        out
     }
 
     /// Root-to-node chain of task ids (as strings) — the addressing a
@@ -418,6 +463,31 @@ async fn resolve_visible_set(
     handle: &CoreHandle,
     query: &Option<String>,
 ) -> Result<Option<HashSet<Uuid>>> {
+    let Some(matches) = resolve_match_set(handle, query).await? else {
+        return Ok(None);
+    };
+    let mut visible = HashSet::new();
+    for m in matches {
+        let mut cur = Some(m);
+        while let Some(c) = cur {
+            if !visible.insert(c) {
+                break; // this ancestor chain is already recorded
+            }
+            cur = snapshot.by_id.get(&c).and_then(|r| r.parent);
+        }
+    }
+    Ok(Some(visible))
+}
+
+/// Resolve the pane's active query into the bare set of *matching* task
+/// ids — no ancestor fill-in. This is the flat list view's filter
+/// semantics (a query for done tasks shows only done tasks); the tree
+/// view layers the ancestor walk on top via [`resolve_visible_set`].
+/// `None` = no query, everything visible.
+async fn resolve_match_set(
+    handle: &CoreHandle,
+    query: &Option<String>,
+) -> Result<Option<HashSet<Uuid>>> {
     let raw = match query.as_deref().map(str::trim) {
         Some(q) if !q.is_empty() => q,
         _ => return Ok(None),
@@ -429,17 +499,7 @@ async fn resolve_visible_set(
         .list_filtered(&parsed.expr)
         .await
         .map_err(to_content_err)?;
-    let mut visible = HashSet::new();
-    for m in &matches {
-        let mut cur = Some(m.id);
-        while let Some(c) = cur {
-            if !visible.insert(c) {
-                break; // this ancestor chain is already recorded
-            }
-            cur = snapshot.by_id.get(&c).and_then(|r| r.parent);
-        }
-    }
-    Ok(Some(visible))
+    Ok(Some(matches.into_iter().map(|m| m.id).collect()))
 }
 
 // ---------------------------------------------------------------------------
@@ -912,7 +972,7 @@ impl Node for TaskRootNode {
         &self.metadata
     }
     fn children_types(&self) -> Vec<NodeType> {
-        vec![task_item_type()]
+        vec![task_item_type(), task_flat_type()]
     }
     fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
         task_sortable_columns()
@@ -924,6 +984,12 @@ impl Node for TaskRootNode {
         &self,
         params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
+        // `task:flat` routes to the list-view projection: the whole
+        // forest flat, filter = matches only (no ancestor fill-in).
+        if params.node_type.type_id == task_flat_type().type_id {
+            let filter = resolve_match_set(&self.handle, &params.query).await?;
+            return Ok(list_result(self.snapshot.flat_summaries(filter.as_ref())));
+        }
         let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
         Ok(list_result(
             self.snapshot.child_summaries(None, filter.as_ref()),
@@ -1260,7 +1326,8 @@ impl ContentAdapter for TaskAdapter {
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
             "task:root" => task_root_actions(),
-            "task:item" => task_item_actions(),
+            // The flat list view's rows are ordinary tasks — same actions.
+            "task:item" | "task:flat" => task_item_actions(),
             _ => Vec::new(),
         }
     }
@@ -1426,6 +1493,50 @@ mod tests {
         assert_eq!(grandchild_kids.len(), 1);
         assert_eq!(grandchild_kids[0].label, "Grandchild");
         assert_eq!(grandchild_kids[0].has_children, Some(false));
+    }
+
+    #[test]
+    fn flat_summaries_walk_the_forest_depth_first() {
+        // Forest: A → B → C, plus root D. The flat list view shows every
+        // task in DFS order, none of them expandable.
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let d = Uuid::from_u128(4);
+        let snap = snapshot_from(vec![
+            row(a, "A", None),
+            row(b, "B", Some(a)),
+            row(c, "C", Some(b)),
+            row(d, "D", None),
+        ]);
+        let flat = snap.flat_summaries(None);
+        let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["A", "B", "C", "D"]);
+        assert!(
+            flat.iter().all(|s| s.has_children == Some(false)),
+            "flat rows never expand or drill"
+        );
+    }
+
+    #[test]
+    fn flat_summaries_filter_keeps_matches_without_ancestors() {
+        // Unlike the tree's visible-set (matches + ancestors), the flat
+        // list shows only the matches themselves — even when the match is
+        // nested under non-matching parents.
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let d = Uuid::from_u128(4);
+        let snap = snapshot_from(vec![
+            row(a, "A", None),
+            row(b, "B", Some(a)),
+            row(c, "C", Some(b)),
+            row(d, "D", None),
+        ]);
+        let matches: HashSet<Uuid> = [c, d].into_iter().collect();
+        let flat = snap.flat_summaries(Some(&matches));
+        let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["C", "D"], "nested match surfaces, no ancestors");
     }
 
     #[test]

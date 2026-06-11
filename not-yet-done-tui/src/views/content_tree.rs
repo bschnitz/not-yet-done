@@ -95,11 +95,19 @@ pub struct TreeState {
     pub entries: Vec<TreeEntry>,
     pub expanded: HashSet<Vec<String>>,
     pub cache: HashMap<Vec<String>, TreeNodeState>,
+    /// One-shot `expand_depth` cascade armed? Set on a fresh tree (and
+    /// re-armed by [`Self::clear_for_new_query`]); cleared by the cascade
+    /// once a pass finds nothing left to expand, so later loads landing in
+    /// this pane never override the user's manual expand/collapse state.
+    pub auto_expand_pending: bool,
 }
 
 impl TreeState {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            auto_expand_pending: true,
+            ..Self::default()
+        }
     }
 
     /// Drop all expansion and cached children. Called when the active
@@ -113,6 +121,9 @@ impl TreeState {
         self.expanded.clear();
         self.cache.clear();
         self.entries.clear();
+        // The filtered tree starts from scratch — give it the same
+        // `expand_depth` head start as the initial load.
+        self.auto_expand_pending = true;
     }
 
     /// Replace the cached children for a parent path. Used by the
@@ -755,6 +766,7 @@ mod tests {
             tree_connector_style: None,
             tree_lines: None,
             tree_markers: None,
+            expand_depth: None,
         }
     }
 

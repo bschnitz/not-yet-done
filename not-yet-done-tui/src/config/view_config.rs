@@ -642,6 +642,23 @@ pub struct ViewDef {
     /// outside tree mode.
     #[serde(default)]
     pub tree_markers: Option<TreeMarkerDef>,
+    /// Initial expansion depth for tree mode. Rows at depth `d <
+    /// expand_depth` are auto-expanded once after the root list (re)loads
+    /// — `2` shows three levels (roots, children, grandchildren), mirroring
+    /// the native Tasks tab's `tasks.tree.default_expand_depth`. The
+    /// expansion is a one-shot cascade: after it completes the user's
+    /// manual expand/collapse state is never overridden. A new query
+    /// (saved-query apply) re-runs the cascade on the filtered tree.
+    ///
+    /// Why: lazy-loading trees open fully collapsed by default, which is
+    /// right for expensive remote adapters (Postgres, Confluence) but
+    /// wrong for cheap in-memory forests (tasks) where the user expects
+    /// their working set visible immediately. Each level is fetched
+    /// through the normal expand path, so the cost is `expand_depth`
+    /// rounds of adapter calls — keep it small on remote adapters.
+    /// `0`/unset = no auto-expansion (default). Ignored outside tree mode.
+    #[serde(default)]
+    pub expand_depth: Option<u32>,
 }
 
 /// Expand/collapse marker configuration for tree mode (see

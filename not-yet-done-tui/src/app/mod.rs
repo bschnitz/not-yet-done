@@ -2842,6 +2842,24 @@ impl App {
         let _ = self.process_sub_view_message(msg);
     }
 
+    /// Drive the `expand_depth` auto-expansion cascade after tree data
+    /// landed in a pane: collect the pane's pending expand requests and
+    /// dispatch them through the normal request path, exactly as a
+    /// manual Enter on each row would.
+    fn drive_tree_auto_expand(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
+        let reqs = match self.content_view_mut(view_index) {
+            Some(cv) => cv.pending_auto_expand_requests(view_index, pane_id),
+            None => return,
+        };
+        for req in reqs {
+            let _ = self.process_view_request(req);
+        }
+    }
+
     /// Drain all pending async results. Returns `true` if at least one
     /// message was processed (i.e. visible state may have changed and the
     /// frame should be redrawn).
@@ -2895,6 +2913,9 @@ impl App {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         cv.set_items_for_pane(pane_id, items, applied_sort, page, sortable_columns, error);
                     }
+                    // Tree mode: kick off the `expand_depth` cascade now
+                    // that the depth-0 rows are in.
+                    self.drive_tree_auto_expand(view_index, pane_id);
                     // Reload may have shifted the row under the cursor onto a
                     // different item (e.g. mark_as_read sorts the read entry
                     // away). Refresh preview when the row's id no longer
@@ -2924,6 +2945,9 @@ impl App {
                                     payload.child_node_type,
                                 );
                             }
+                            // Continue the `expand_depth` cascade one
+                            // level deeper (no-op once disarmed).
+                            self.drive_tree_auto_expand(view_index, pane_id);
                             // CT-7: if this pane is mid-tree-find,
                             // continue the lazy-expand walk now that
                             // a new level has landed.
