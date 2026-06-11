@@ -701,6 +701,11 @@ pub struct App {
 
     /// When true, the next keypress is captured as a shortcut for a new favorite.
     pub awaiting_favorite_shortcut: Option<(String, String, String)>, // (scope, name, query)
+    /// Saved-query shortcut conflicts already surfaced as notifications
+    /// this session. Saved queries reload on every tab switch and
+    /// q-menu mutation, so without this an unresolved conflict would
+    /// re-notify dozens of times per session instead of once.
+    warned_saved_query_conflicts: std::collections::HashSet<String>,
     /// Pending shortcut capture for a Postgres per-table script. Carries
     /// the addressing tuple so the captured key chord lands in the right
     /// `<table_dir>/.shortcuts.yaml`. Reset on capture or Esc.
@@ -919,6 +924,7 @@ impl App {
             link_refs: HashSet::new(),
             pending_key: None,
             awaiting_favorite_shortcut: None,
+            warned_saved_query_conflicts: std::collections::HashSet::new(),
             awaiting_postgres_script_shortcut: None,
             modal_message: None,
             pending_confirmation: None,
@@ -3157,11 +3163,11 @@ impl App {
             self.modal_message = None;
             if key == "esc" {
                 // Cancelled — no modal needed.
-            } else if self.is_shortcut_taken(key) {
+            } else if let Some(conflict) = self.favorite_shortcut_conflict(&scope, &name, key) {
                 // Show error and re-prompt.
                 self.modal_message = Some(format!(
-                    "Shortcut '{}' is already taken!\n\nPress another key for '{}'\nEsc to cancel",
-                    key, name
+                    "Shortcut '{}' is already taken by {}!\n\nPress another key for '{}'\nEsc to cancel",
+                    key, conflict, name
                 ));
                 self.awaiting_favorite_shortcut = Some((scope, name, query));
             } else {
@@ -7245,8 +7251,46 @@ impl App {
             })
         });
 
+        // Load-time guard: `query_shortcut` rows written externally (or
+        // predating a config change) can collide with keys that are now
+        // bound — the shortcut claim would silently shadow them at the
+        // view layer. The set-time gate can't catch those, so flag them
+        // here. The shortcut stays active (the row is the user's own
+        // data); the notification names the shadowed binding so they
+        // can rebind via the query menu.
+        let warnings: Vec<String> = match self.content_view(view_index) {
+            Some(cv) => {
+                let mut bound: Vec<(String, String)> = Vec::new();
+                let mut warnings = Vec::new();
+                for (name, _, shortcut) in &entries {
+                    let Some(sc) = shortcut else { continue };
+                    if let Some(conflict) = crate::keymap::saved_query_shortcut_conflict(
+                        &cv.tab_name,
+                        &cv.view_defs,
+                        &self.keybindings,
+                        name,
+                        sc,
+                        &bound,
+                    ) {
+                        warnings.push(format!(
+                            "{}: saved-query shortcut [{}] ('{}') shadows {} — rebind it via the query menu",
+                            cv.tab_name, sc, name, conflict
+                        ));
+                    }
+                    bound.push((name.clone(), sc.clone()));
+                }
+                warnings
+            }
+            None => Vec::new(),
+        };
+
         if let Some(cv) = self.content_view_mut(view_index) {
             cv.merge_saved_queries(entries);
+        }
+        for w in warnings {
+            if self.warned_saved_query_conflicts.insert(w.clone()) {
+                self.notify(w);
+            }
         }
     }
 
@@ -7299,6 +7343,25 @@ impl App {
         } else {
             &self.tasks_view.favorites
         }
+    }
+
+    /// Conflict description for binding `shortcut` to the saved query
+    /// `name` in `scope`, or `None` when the key is free. The native
+    /// scopes keep the legacy domain (global + tasks bindings + native
+    /// favorites); content-view scopes route through the keymap-based
+    /// check so a saved-query shortcut can never shadow any key active
+    /// in its tab (the `j`-shadows-list-navigation class of bug).
+    fn favorite_shortcut_conflict(&self, scope: &str, name: &str, shortcut: &str) -> Option<String> {
+        if scope == "tracking" || scope == "task" {
+            return self
+                .is_shortcut_taken(shortcut)
+                .then(|| "an existing key or favorite".to_string());
+        }
+        self.content_views_indexed()
+            .find(|(_, cv)| cv.query_scope == scope)
+            .and_then(|(_, cv)| {
+                cv.saved_query_shortcut_conflict(&self.keybindings, name, shortcut)
+            })
     }
 
     fn is_shortcut_taken(&self, shortcut: &str) -> bool {

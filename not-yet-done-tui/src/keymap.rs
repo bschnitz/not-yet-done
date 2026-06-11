@@ -386,17 +386,23 @@ pub struct ViewLeafMap {
 /// user's `tui.yaml`), so the validator catches collisions against the
 /// user's actual bindings rather than only the built-ins.
 pub fn build_view_leaf_maps(config: &ViewFileConfig, kb: &KeyBindingConfig) -> Vec<ViewLeafMap> {
-    let tab = TabRef::new(&config.tab.name);
+    build_leaf_maps(&TabRef::new(&config.tab.name), &config.views, kb)
+}
+
+/// Internal builder working from the parts a `ContentView` retains at
+/// runtime (`tab_name` + `view_defs`), so the saved-query shortcut
+/// check below can run without the original [`ViewFileConfig`].
+fn build_leaf_maps(tab: &TabRef, views: &[ViewDef], kb: &KeyBindingConfig) -> Vec<ViewLeafMap> {
     let mut leaves = Vec::new();
-    for view in &config.views {
-        leaves.extend(build_for_view(&tab, config, view, kb));
+    for view in views {
+        leaves.extend(build_for_view(tab, views, view, kb));
     }
     leaves
 }
 
 fn build_for_view(
     tab: &TabRef,
-    config: &ViewFileConfig,
+    views: &[ViewDef],
     view: &ViewDef,
     kb: &KeyBindingConfig,
 ) -> Vec<ViewLeafMap> {
@@ -404,7 +410,7 @@ fn build_for_view(
     // Root leaf for this subtab.
     let mut root_map = KeyMap::new();
     push_tab_wide(&mut root_map, tab, kb);
-    push_subtab_keys(&mut root_map, tab, config);
+    push_subtab_keys(&mut root_map, tab, views);
     push_view_query_keys(&mut root_map, tab, view);
     push_leaf_column_cursor(&mut root_map, tab, root_profile(), view.column_cursor);
     push_leaf_content_keys(
@@ -429,7 +435,7 @@ fn build_for_view(
     // keymap. At the same depth, multiple siblings are mutually
     // exclusive at runtime, so they get separate leaves.
     for child in &view.children {
-        push_child_leaves(&mut out, tab, config, view, &Vec::new(), child, kb);
+        push_child_leaves(&mut out, tab, views, view, &Vec::new(), child, kb);
     }
     out
 }
@@ -437,7 +443,7 @@ fn build_for_view(
 fn push_child_leaves(
     out: &mut Vec<ViewLeafMap>,
     tab: &TabRef,
-    config: &ViewFileConfig,
+    views: &[ViewDef],
     view: &ViewDef,
     parent_path: &[String],
     child: &ChildDef,
@@ -453,7 +459,7 @@ fn push_child_leaves(
     // switches the focused subtab. The validator must therefore see
     // them inside every leaf so it can flag collisions with
     // drilldown-level actions.
-    push_subtab_keys(&mut km, tab, config);
+    push_subtab_keys(&mut km, tab, views);
     push_view_query_keys(&mut km, tab, view);
     push_leaf_column_cursor(&mut km, tab, drilled_profile(), child.column_cursor);
     push_leaf_content_keys(
@@ -475,7 +481,7 @@ fn push_child_leaves(
     });
 
     for nested in &child.children {
-        push_child_leaves(out, tab, config, view, &path, nested, kb);
+        push_child_leaves(out, tab, views, view, &path, nested, kb);
     }
 }
 
@@ -632,8 +638,8 @@ fn push_leaf_content_keys(
     }
 }
 
-fn push_subtab_keys(km: &mut KeyMap, tab: &TabRef, config: &ViewFileConfig) {
-    for v in &config.views {
+fn push_subtab_keys(km: &mut KeyMap, tab: &TabRef, views: &[ViewDef]) {
+    for v in views {
         if let Some(k) = &v.key {
             km.push(KeyClaim::handler(
                 KeyBinding::new(k.clone()),
@@ -797,6 +803,123 @@ fn root_profile() -> PaneStateProfile {
 
 fn drilled_profile() -> PaneStateProfile {
     PaneStateProfile::Normal { drilldown: Some(true) }
+}
+
+/// Check whether binding `shortcut` to the saved query `query_name`
+/// would collide with any other key handler in its tab.
+///
+/// Saved-query shortcut claims are tab-wide and active at every
+/// drill-down leaf (see `ContentView::build_view_claims`), so the
+/// shortcut must be free in *every* leaf. This reuses the same leaf
+/// maps as the config-load validator (globals, common navigation,
+/// window chords, subtab keys, query menu keys, YAML actions, preview
+/// keys, action chains) and adds the claim sources that only exist at
+/// runtime or outside the static builder:
+///
+/// - the other saved-query shortcuts already bound in this tab,
+/// - the per-node YAML `shortcuts:` maps (dispatched *before* the
+///   view-claim layer, so a colliding saved-query shortcut would be
+///   dead rather than shadowing — a misconfiguration either way),
+/// - the full `ContentAction` section (the pane dispatches chords like
+///   `zg`/`zm` directly; only a subset is in the static leaf maps).
+///
+/// Chord *prefixes* count as conflicts too: claims dispatch before the
+/// pane's pending-chord handling, so a shortcut `w` would swallow the
+/// window-leader chord `wv` and a shortcut `z` would shadow `zg`.
+///
+/// Returns a human-readable description of the first conflicting
+/// binding, or `None` if the shortcut is free. Callers gate on this
+/// both when the user assigns a shortcut (reject + re-prompt) and when
+/// shortcuts load from the `query_shortcut` table (warn — rows written
+/// externally or predating a config change would otherwise shadow keys
+/// silently).
+pub fn saved_query_shortcut_conflict(
+    tab_name: &str,
+    views: &[ViewDef],
+    kb: &KeyBindingConfig,
+    query_name: &str,
+    shortcut: &str,
+    bound_saved_queries: &[(String, String)],
+) -> Option<String> {
+    // Same claim layer first: another saved query already wearing the
+    // key. Rebinding the same query to its own key is fine.
+    if let Some((name, _)) = bound_saved_queries.iter().find(|(name, sc)| {
+        name != query_name && KeyBinding::new(sc.clone()).matches(shortcut)
+    }) {
+        return Some(format!("saved query '{name}'"));
+    }
+
+    let tab = TabRef::new(tab_name);
+    for leaf in build_leaf_maps(&tab, views, kb) {
+        for claim in &leaf.keymap.claims {
+            if claim.kind != KeyClaimKind::Handler {
+                continue;
+            }
+            if claim.key.matches(shortcut) || claim.key.is_prefix(shortcut) {
+                return Some(claim.source.human());
+            }
+        }
+    }
+
+    if let Some(hit) = node_shortcut_conflict(views, shortcut) {
+        return Some(hit);
+    }
+
+    for (action, binding) in &kb.content.bindings {
+        if binding.matches(shortcut) || binding.is_prefix(shortcut) {
+            return Some(KeySource::Content(action.clone()).human());
+        }
+    }
+    None
+}
+
+/// Find a per-node YAML `shortcuts:` entry (view or any drill-down
+/// child) claiming `shortcut`. These maps are keyed by single chars,
+/// so modifier shortcuts can never collide here.
+fn node_shortcut_conflict(views: &[ViewDef], shortcut: &str) -> Option<String> {
+    let mut chars = shortcut.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    for view in views {
+        let mut path = Vec::new();
+        if let Some(hit) =
+            find_node_shortcut(&view.name, &mut path, &view.shortcuts, &view.children, ch)
+        {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn find_node_shortcut(
+    view_name: &str,
+    child_path: &mut Vec<String>,
+    shortcuts: &std::collections::HashMap<char, String>,
+    children: &[ChildDef],
+    ch: char,
+) -> Option<String> {
+    if let Some(action) = shortcuts.get(&ch) {
+        return Some(if child_path.is_empty() {
+            format!("views.{view_name}.shortcuts[{action}]")
+        } else {
+            format!(
+                "views.{view_name}.children.{}.shortcuts[{action}]",
+                child_path.join(".")
+            )
+        });
+    }
+    for child in children {
+        child_path.push(child.name.clone());
+        if let Some(hit) =
+            find_node_shortcut(view_name, child_path, &child.shortcuts, &child.children, ch)
+        {
+            return Some(hit);
+        }
+        child_path.pop();
+    }
+    None
 }
 
 /// Run the validator on every leaf of `config` and collect a flat list
@@ -1319,5 +1442,119 @@ views:
             .iter()
             .any(|c| matches!(c.source, KeySource::Content(ContentAction::Back)));
         assert!(!has_back, "Back claim should be suppressed by `back: null`");
+    }
+
+    // ── saved_query_shortcut_conflict ────────────────────────────────
+
+    /// Fixture tab for the saved-query shortcut checks: two subtabs
+    /// (keys a / v), a query menu key, YAML actions, per-node
+    /// `shortcuts:` at root and child level.
+    fn sq_views() -> Vec<ViewDef> {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: main
+    node_type: t
+    key: a
+    query:
+      menu_key: q
+    actions:
+      - { name: fuzzy, key: f, type: fuzzy_filter }
+    shortcuts:
+      d: delete
+    children:
+      - name: Rows
+        node_type: r
+        shortcuts:
+          R: restore
+  - name: second
+    node_type: t
+    key: v
+"#;
+        yaml_str(yaml).views
+    }
+
+    fn sq_conflict(shortcut: &str, bound: &[(String, String)]) -> Option<String> {
+        saved_query_shortcut_conflict(
+            "T",
+            &sq_views(),
+            &KeyBindingConfig::default(),
+            "candidate",
+            shortcut,
+            bound,
+        )
+    }
+
+    #[test]
+    fn sq_conflict_flags_subtab_key() {
+        let hit = sq_conflict("v", &[]).expect("subtab key must conflict");
+        assert!(hit.contains("views.second.key"), "got: {hit}");
+    }
+
+    #[test]
+    fn sq_conflict_flags_query_menu_key() {
+        let hit = sq_conflict("q", &[]).expect("menu key must conflict");
+        assert!(hit.contains("query.menu_key"), "got: {hit}");
+    }
+
+    #[test]
+    fn sq_conflict_flags_yaml_action_key() {
+        let hit = sq_conflict("f", &[]).expect("action key must conflict");
+        assert!(hit.contains("actions[fuzzy]"), "got: {hit}");
+    }
+
+    #[test]
+    fn sq_conflict_flags_common_navigation_key() {
+        let hit = sq_conflict("j", &[]).expect("nav key must conflict");
+        assert!(hit.contains("common.list_next"), "got: {hit}");
+    }
+
+    /// Window chords dispatch before the view-claim layer, so a
+    /// saved-query shortcut equal to the chord *leader* would be dead
+    /// (the leader swallows it). `is_prefix` must catch that.
+    #[test]
+    fn sq_conflict_flags_window_leader_prefix() {
+        let hit = sq_conflict("w", &[]).expect("window leader must conflict");
+        assert!(hit.contains("window."), "got: {hit}");
+    }
+
+    /// `zg`/`zm`/`zt` are dispatched by the pane outside the static
+    /// leaf maps — the full content-section scan must still flag the
+    /// chord prefix `z`.
+    #[test]
+    fn sq_conflict_flags_content_chord_prefix() {
+        let hit = sq_conflict("z", &[]).expect("z-chord prefix must conflict");
+        assert!(hit.contains("content."), "got: {hit}");
+    }
+
+    #[test]
+    fn sq_conflict_flags_node_shortcut_at_root_and_child() {
+        let root = sq_conflict("d", &[]).expect("root node shortcut must conflict");
+        assert!(root.contains("views.main.shortcuts[delete]"), "got: {root}");
+        let child = sq_conflict("R", &[]).expect("child node shortcut must conflict");
+        assert!(
+            child.contains("views.main.children.Rows.shortcuts[restore]"),
+            "got: {child}"
+        );
+    }
+
+    #[test]
+    fn sq_conflict_flags_other_saved_query() {
+        let bound = vec![("two months".to_string(), "m".to_string())];
+        let hit = sq_conflict("m", &bound).expect("other saved query must conflict");
+        assert!(hit.contains("saved query 'two months'"), "got: {hit}");
+    }
+
+    #[test]
+    fn sq_conflict_allows_rebinding_same_query() {
+        let bound = vec![("candidate".to_string(), "m".to_string())];
+        assert_eq!(sq_conflict("m", &bound), None);
+    }
+
+    #[test]
+    fn sq_conflict_allows_free_keys() {
+        assert_eq!(sq_conflict("m", &[]), None);
+        assert_eq!(sq_conflict("ctrl+o", &[]), None);
     }
 }

@@ -5857,6 +5857,34 @@ impl ContentView {
         self.query_menu.render(frame, area);
     }
 
+    /// Would binding `shortcut` to the saved query `query_name` collide
+    /// with any other key handler in this tab (built-in, YAML, window
+    /// chord, or another saved query)? Returns a human-readable label
+    /// for the conflicting binding. Used as the set-time gate when the
+    /// user assigns a shortcut via the query menu; the load-time
+    /// counterpart runs in `App::reload_content_saved_queries` against
+    /// the freshly-loaded batch.
+    pub fn saved_query_shortcut_conflict(
+        &self,
+        kb: &KeyBindingConfig,
+        query_name: &str,
+        shortcut: &str,
+    ) -> Option<String> {
+        let bound: Vec<(String, String)> = self
+            .db_saved_queries
+            .iter()
+            .filter_map(|sq| sq.shortcut.clone().map(|s| (sq.name.clone(), s)))
+            .collect();
+        crate::keymap::saved_query_shortcut_conflict(
+            &self.tab_name,
+            &self.view_defs,
+            kb,
+            query_name,
+            shortcut,
+            &bound,
+        )
+    }
+
     /// Apply DB-loaded saved queries (body + optional shortcut). Body
     /// will move to adapter-managed `SavedQueryStore` in SQ-4; for now
     /// this still reads `saved_query` rows via the legacy repository.
