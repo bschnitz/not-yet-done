@@ -473,9 +473,9 @@ fn task_item_actions() -> Vec<NodeAction> {
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
         NodeAction::new("undelete", "Undelete", InputSpec::None).with_default_key('u'),
-        NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
+        NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
-            .with_default_key('t'),
+            .with_default_key('s'),
         NodeAction::new("mark-move", "Mark for move", InputSpec::None),
         NodeAction::new("paste-move", "Move here", InputSpec::None),
         NodeAction::new("unnest", "Move to top level", InputSpec::None),

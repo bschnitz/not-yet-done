@@ -5363,7 +5363,7 @@ impl App {
         self.trackings_view.sync_action_bar(trackings_active_editor, tracking_active);
         if let Tab::Content(idx) = self.active_tab {
             if let Some(cv) = self.content_view_mut(idx) {
-                cv.sync_action_bar(content_active_editor.as_deref());
+                cv.sync_action_bar(content_active_editor.as_deref(), tracking_active);
             }
         }
 

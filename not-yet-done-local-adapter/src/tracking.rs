@@ -587,9 +587,9 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
         NodeAction::new("restore", "Restore", InputSpec::None).with_default_key('R'),
-        NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
+        NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
-            .with_default_key('t'),
+            .with_default_key('s'),
     ]
 }
 
@@ -600,9 +600,9 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
 /// fuzzy-filter are generic frontend actions in `views/trackings.yaml`.)
 fn tracking_tree_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("toggle-tracking", "Start/Stop tracking", InputSpec::None)
+        NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
-            .with_default_key('t'),
+            .with_default_key('s'),
     ]
 }
 
@@ -1371,7 +1371,7 @@ mod tests {
         // is a recovery shortcut only.
         let key = |id: &str| a.iter().find(|x| x.id == id).and_then(|x| x.default_key);
         assert_eq!(key("delete"), Some('d'));
-        assert_eq!(key("toggle-tracking"), Some('t'));
+        assert_eq!(key("toggle-tracking"), Some('s'));
         assert_eq!(key("restore"), Some('R'));
     }
 
@@ -1510,7 +1510,7 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(
             a.iter().find(|x| x.id == "toggle-tracking").and_then(|x| x.default_key),
-            Some('t')
+            Some('s')
         );
     }
 }
