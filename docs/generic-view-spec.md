@@ -57,6 +57,19 @@ views:
       # Verwaltung erfolgt zur Laufzeit: `:query new`, `:query edit`,
       # `:query delete`, sowie Ctrl+f im q-Menü zum Binden eines
       # Shortcuts.
+      #
+      # Shortcut-Validierung: Saved-Query-Shortcuts greifen auf der
+      # View-Claim-Ebene und würden jede danach dispatchte Taste
+      # überschatten (z. B. j/k-Navigation). Beim Binden wird der Key
+      # deshalb gegen *alle* im Tab aktiven Bindings geprüft (Globals,
+      # Common-Navigation, Window-Chords inkl. Leader-Präfix, Subtab-
+      # Keys, menu_key, YAML-`actions:`/`shortcuts:`, Chord-Präfixe wie
+      # `z` vor `zg`, andere Saved-Query-Shortcuts) und bei Kollision
+      # mit Nennung des Konflikts abgelehnt. Beim Laden aus der DB
+      # (extern geschriebene oder durch Config-Änderungen veraltete
+      # Rows) erzeugt eine Kollision eine Warnung in der
+      # Notification-Leiste; der Shortcut bleibt aktiv, bis der User
+      # ihn neu bindet.
 
     # Spalten der Tabelle — welche Metadata-Keys angezeigt werden.
     columns:

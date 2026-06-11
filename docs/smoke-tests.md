@@ -3380,6 +3380,25 @@ bespoke nativen Trackings-Tab (bis C1).
 - [ ] **Grenze:** kein Live-Tick im Tree (Dauern backen beim Load wie
       Condensed); ein `r`-Reload aktualisiert sie.
 
+## Saved-Query-Shortcut-Validierung (Content-Tabs)
+
+Saved-Query-Shortcuts claimen tab-weit auf der View-Claim-Ebene und würden
+jede danach dispatchte Taste überschatten (Navigations-Keys, Chords, …).
+Beide Prüfpfade testen:
+
+- [ ] **Set-Time:** q-Menü öffnen, auf einer Query `ctrl+s` (Shortcut
+      binden), dann `j` drücken → Modal „Shortcut 'j' is already taken by
+      common.list_next!" und Re-Prompt; `v` → Konflikt mit dem Subtab-Key;
+      `w` → Konflikt mit einem Window-Chord (Leader-Präfix); `z` →
+      Konflikt mit `content.cycle_grouping` (Chord-Präfix); `d` →
+      Konflikt mit dem YAML-`shortcuts:`-Eintrag. `esc` bricht ab.
+- [ ] Ein freier Key (z. B. `M`) wird akzeptiert: „Favorite … added".
+- [ ] **Load-Time:** eine kollidierende Row direkt in `query_shortcut`
+      schreiben (oder eine Config-Änderung, die einen bestehenden
+      Shortcut kollidieren lässt) → beim Start erscheint eine
+      Notification „<Tab>: saved-query shortcut [x] ('name') shadows … —
+      rebind it via the query menu"; der Shortcut bleibt aktiv.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor
