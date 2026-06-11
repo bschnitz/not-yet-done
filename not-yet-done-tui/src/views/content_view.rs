@@ -2490,6 +2490,34 @@ impl ContentPane {
         }
     }
 
+    /// Whether the cursor row can be opened (expanded or drilled). In
+    /// tree mode this mirrors `try_tree_open`'s child computation —
+    /// crucially via `effective_child_children`, which counts a
+    /// `recursive: true` ChildDef as an implicit member of its own
+    /// `children:` (DSF-3). `current_children` returns the *raw* declared
+    /// `children:` slice, which is empty for a recursive leaf (e.g. the
+    /// uniform `task:item`/`task:item` tasks tree) even though the row
+    /// still expands one level deeper. Gating the `Open` key claim on
+    /// `current_children` alone left Enter unbound on every recursive
+    /// node below the root: the expand glyph showed (its predicate is
+    /// recursion-aware) but the key did nothing. Outside tree mode this
+    /// falls back to `current_children`.
+    fn cursor_can_open(&self, view_defs: &[ViewDef]) -> bool {
+        if self.tree.is_some() {
+            let Some(vd) = self.view_def(view_defs) else {
+                return false;
+            };
+            let Some(entry) = self.tree_entry_at_row(self.table.selected_row()) else {
+                return false;
+            };
+            return match child_def_for_type_chain(vd, &entry.node_type_chain) {
+                Some(c) => !effective_child_children(c).is_empty(),
+                None => !tree_level_children(vd, entry.depth).unwrap_or(&[]).is_empty(),
+            };
+        }
+        !self.current_children(view_defs).is_empty()
+    }
+
     fn current_children<'a>(&'a self, view_defs: &'a [ViewDef]) -> &'a [ChildDef] {
         if self.tree.is_some() {
             if let Some(vd) = self.view_def(view_defs) {
@@ -3589,7 +3617,7 @@ impl ContentPane {
                 hints.push((kb.clone(), "preview".into()));
             }
         }
-        if !self.current_children(view_defs).is_empty() {
+        if self.cursor_can_open(view_defs) {
             if let Some(label) =
                 self.level_hint_label(&ContentAction::Open, content_kb, key_icons, view_defs)
             {
@@ -3934,8 +3962,10 @@ impl ContentPane {
             }
         }
 
-        // Drill-down — only when the current level has children.
-        if !self.current_children(view_defs).is_empty() {
+        // Drill-down / expand — only when the cursor row can open.
+        // Recursion-aware (`cursor_can_open`): a recursive tree node has
+        // no declared `children:` but still expands into itself.
+        if self.cursor_can_open(view_defs) {
             if let Some(b) = self
                 .level_binding(&ContentAction::Open, content_kb, view_defs)
                 .and_then(strip_reserved)
@@ -11200,6 +11230,133 @@ mod tests {
             file_extension: "".into(),
             display_name: "Page".into(),
         }
+    }
+
+    /// Regression (tasks adapter): Enter on a depth-1 node in a *uniform*
+    /// recursive tree (`mock:task`/`mock:task`, root type == child type) must
+    /// request its children, and they must then render at depth 2. The
+    /// pre-existing `uniform_recursive_*` tests only ever went root→child
+    /// (cursor on the root), so the deeper-than-one expansion path was
+    /// untested — that's where "sub-levels past the 2nd don't unfold" lived.
+    #[test]
+    fn uniform_recursive_tree_expands_below_depth_one() {
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Drive the whole chain through `try_tree_open` (the real Enter
+        // path) at each depth, feeding the adapter response back via
+        // `apply_tree_children`, exactly like the live LoadMsg loop.
+        let expand = |view: &mut ContentView, row: usize, expect_parent: &str, child_id: &str| {
+            view.active_pane_mut().table.set_selected(row);
+            let msg = view
+                .active_pane_mut()
+                .try_tree_open(view_index, pane_id, &view_defs);
+            match msg {
+                Some(SubViewMessage::Request(ViewRequest::ExpandTreeNode {
+                    child_node_type,
+                    parent_node_id,
+                    parent_path,
+                    ..
+                })) => {
+                    assert_eq!(child_node_type, "mock:task");
+                    assert_eq!(parent_node_id, expect_parent, "expanding {expect_parent}");
+                    view.apply_tree_children(
+                        pane_id,
+                        parent_path,
+                        vec![tnode_val(child_id, child_id, "V")],
+                        None,
+                        false,
+                        "mock:task".into(),
+                    );
+                }
+                other => panic!(
+                    "Enter on `{expect_parent}` must yield ExpandTreeNode, got {other:?}"
+                ),
+            }
+        };
+
+        // depth 0 → 1 (Work → h): known to work.
+        expand(&mut view, 0, "work", "h");
+        // depth 1 → 2 (h → g): the regressed level ("nach der 2. Ebene").
+        expand(&mut view, 1, "h", "g");
+        // depth 2 → 3 (g → gg): self-similar tree keeps going.
+        expand(&mut view, 2, "g", "gg");
+
+        // All four levels present in the entry model …
+        let depths: Vec<(String, usize)> = view
+            .active_pane()
+            .tree
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| (e.node.id.clone(), e.depth))
+            .collect();
+        assert!(depths.contains(&("g".to_string(), 2)), "grandchild at depth 2: {depths:?}");
+        assert!(depths.contains(&("gg".to_string(), 3)), "great-grandchild at depth 3: {depths:?}");
+
+        // … and they actually RENDER as rows (not blanked out).
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        assert_eq!(rows.len(), 4, "work + h + g + gg all render");
+    }
+
+    #[test]
+    fn cursor_can_open_recursive_node_below_root() {
+        // Regression: the `Open`/Enter key claim gates on `cursor_can_open`.
+        // `current_children` returns the *raw* declared children of the
+        // cursor's ChildDef — empty for a recursive node (its only child is
+        // itself, added by `effective_child_children`). The earlier gate on
+        // `current_children` left Enter unbound on every node below the root:
+        // the expand glyph showed but pressing Return did nothing.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Root can open.
+        view.active_pane_mut().table.set_selected(0);
+        assert!(view.active_pane().cursor_can_open(&view_defs), "root opens");
+
+        // Expand Work → child h, then put the cursor on h (depth 1).
+        if let Some(SubViewMessage::Request(ViewRequest::ExpandTreeNode { parent_path, .. })) =
+            view.active_pane_mut().try_tree_open(view_index, pane_id, &view_defs)
+        {
+            view.apply_tree_children(
+                pane_id,
+                parent_path,
+                vec![tnode_val("h", "h", "V")],
+                None,
+                false,
+                "mock:task".into(),
+            );
+        } else {
+            panic!("Work must expand");
+        }
+        view.active_pane_mut().table.set_selected(1);
+        assert!(
+            view.active_pane().cursor_can_open(&view_defs),
+            "recursive node below the root must be openable (the regressed gate)"
+        );
     }
 
     fn tree_view_def() -> ViewDef {
