@@ -48,14 +48,15 @@ use crate::config::keybindings::{
     QueryMenuAction, WindowAction,
 };
 use crate::config::view_config::{
-    ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, GroupBy, LineLayout,
-    PaginationMode, PreviewConfig, SplitDirection, TreeAggregateDefault, ViewDef, ViewFileConfig,
+    ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, GroupBy, GroupOrder,
+    LineLayout, PaginationMode, PreviewConfig, SplitDirection, TreeAggregateDefault, ViewDef,
+    ViewFileConfig,
 };
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
 };
 use crate::views::column_format::{format_elapsed_since, format_typed_value};
-use crate::views::group_aggregate::{agg_value, group_label};
+use crate::views::group_aggregate::{agg_value, bucket_display_label, group_label};
 use crate::ui::theme::Theme;
 use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
 use crate::views::content_tree::{
@@ -1576,7 +1577,20 @@ impl ContentPane {
             &[]
         };
         if !configured.is_empty() {
-            return configured.to_vec();
+            let mut cols = configured.to_vec();
+            // An aggregate's `total_column` only carries per-group totals;
+            // with grouping cycled off the column would be permanently
+            // blank, so it is hidden then (matching the native trackings
+            // view, where Total only appears while grouped).
+            let total_targets: Vec<String> = self
+                .current_aggregates(view_defs)
+                .iter()
+                .filter_map(|a| a.total_column.clone())
+                .collect();
+            if !total_targets.is_empty() && self.current_levels(view_defs).is_empty() {
+                cols.retain(|c| !total_targets.contains(&c.key));
+            }
+            return cols;
         }
         // Auto-fallback: derive one ColumnDef per metadata field of the
         // first item, all evenly sized. Used by the postgres rows view
@@ -1738,20 +1752,21 @@ impl ContentPane {
     /// is then no column to bucket. Returns `true` when the state changed
     /// (the caller rebuilds the table).
     fn cycle_grouping(&mut self, view_defs: &[ViewDef]) -> bool {
-        // The column to bucket comes from the *configured* default (or the
-        // current override); without one there is nothing to cycle.
-        let column = self
+        // The column to bucket (and the configured group order) come from
+        // the *configured* default (or the current override); without one
+        // there is nothing to cycle.
+        let base = self
             .current_group_by(view_defs)
-            .map(|gb| gb.column.clone())
+            .map(|gb| (gb.column.clone(), gb.order))
             .or_else(|| {
                 if let Some(ref child) = self.active_child {
-                    child.group_by.as_ref().map(|gb| gb.column.clone())
+                    child.group_by.as_ref().map(|gb| (gb.column.clone(), gb.order))
                 } else {
                     self.view_def(view_defs)
-                        .and_then(|vd| vd.group_by.as_ref().map(|gb| gb.column.clone()))
+                        .and_then(|vd| vd.group_by.as_ref().map(|gb| (gb.column.clone(), gb.order)))
                 }
             });
-        let Some(column) = column else {
+        let Some((column, order)) = base else {
             return false;
         };
         let current_bucket = self.current_group_by(view_defs).and_then(|gb| gb.bucket);
@@ -1760,6 +1775,7 @@ impl ContentPane {
         self.group_by_override = Some(next.map(|bucket| GroupBy {
             column,
             bucket: Some(bucket),
+            order,
         }));
         true
     }
@@ -7068,29 +7084,44 @@ fn format_total(total: i64, col: &ColumnDef) -> String {
 }
 
 /// One group-header / summary / grand-total row: a spanning label across the
-/// columns left of the first aggregate column, then each aggregate column's
-/// total right-aligned in its own column, with the rest blank. `totals` is
-/// indexed parallel to `agg_cols`. The whole row paints in the group-header
-/// style and is non-selectable.
+/// columns left of the first totalled column, then each total right-aligned
+/// in its own column, with the rest blank. `totals` pairs a column index with
+/// the value rendered there (aggregates routed to a `total_column` are simply
+/// absent here — their totals live on data rows instead). The whole row
+/// paints in the group-header style and is non-selectable.
 fn summary_row(
     label: String,
-    totals: &[i64],
-    agg_cols: &[usize],
+    totals: &[(usize, i64)],
     columns: &[ColumnDef],
     col_widths: &[usize],
 ) -> TableWidgetRow {
+    // The widget renders pre-fitted text and never pads a spanning cell
+    // itself, so the label must be padded to the spanned columns' combined
+    // width here — otherwise the first total renders right after the label
+    // instead of aligned under its column. Matches the grouped path's
+    // two-space column separator.
+    const SEP_WIDTH: usize = 2;
     let ncols = columns.len();
-    let first_agg = agg_cols.iter().min().copied().unwrap_or(ncols);
+    let first_agg = totals.iter().map(|&(ci, _)| ci).min().unwrap_or(ncols);
     let label_span = first_agg.max(1);
     let width_of = |ci: usize| col_widths.get(ci).copied().unwrap_or(0);
+
+    let spanned: usize = (0..label_span.min(ncols)).map(width_of).sum::<usize>()
+        + SEP_WIDTH * label_span.min(ncols).saturating_sub(1);
+    let label = if label.chars().count() < spanned {
+        let pad = spanned - label.chars().count();
+        format!("{label}{}", " ".repeat(pad))
+    } else {
+        label
+    };
 
     let mut cells = vec![
         TableWidgetCell::grouped(label, label_span).with_style(GROUP_HEADER_STYLE_ID),
     ];
     for ci in label_span..ncols {
-        match agg_cols.iter().position(|&c| c == ci) {
-            Some(slot) => {
-                let text = format_total(totals[slot], &columns[ci]);
+        match totals.iter().find(|&&(c, _)| c == ci) {
+            Some(&(_, total)) => {
+                let text = format_total(total, &columns[ci]);
                 let fitted = fit_aligned(&text, width_of(ci), CellAlignment::Right);
                 cells.push(TableWidgetCell::plain(fitted).with_style(GROUP_HEADER_STYLE_ID));
             }
@@ -7166,8 +7197,10 @@ fn build_grouped_table(
     let deepest = levels.len().saturating_sub(1);
 
     // 1. Nested group-label path per filtered item; order items by the full
-    //    path so groups are contiguous at every level (and chronological for
-    //    ISO date buckets).
+    //    path — honouring each level's configured `order` — so groups are
+    //    contiguous at every level (and chronological for ISO date buckets;
+    //    `desc` puts the newest bucket first). The sort is stable, so rows
+    //    inside a group keep the adapter's order.
     let mut tagged: Vec<(usize, Vec<String>)> = order
         .iter()
         .map(|&i| {
@@ -7178,7 +7211,18 @@ fn build_grouped_table(
             (i, path)
         })
         .collect();
-    tagged.sort_by(|a, b| a.1.cmp(&b.1));
+    tagged.sort_by(|a, b| {
+        for (k, (ka, kb)) in a.1.iter().zip(b.1.iter()).enumerate() {
+            let ord = match levels.get(k).map(|l| l.order).unwrap_or_default() {
+                GroupOrder::Asc => ka.cmp(kb),
+                GroupOrder::Desc => kb.cmp(ka),
+            };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
     let keys: Vec<Vec<String>> = tagged.iter().map(|(_, p)| p.clone()).collect();
     let sorted_idx: Vec<usize> = tagged.iter().map(|(i, _)| *i).collect();
 
@@ -7187,6 +7231,26 @@ fn build_grouped_table(
         .iter()
         .filter_map(|a| columns.iter().position(|c| c.key == a.column))
         .collect();
+    // Split by destination: an aggregate without `total_column` totals on
+    // the `── label ──` header rows; one *with* it writes per-group totals
+    // into that dedicated column on the closing data row of each outermost
+    // group instead. Pairs are (index into `aggregates`/the totals arrays,
+    // column index).
+    let header_aggs: Vec<(usize, usize)> = aggregates
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.total_column.is_none())
+        .filter_map(|(ai, a)| columns.iter().position(|c| c.key == a.column).map(|ci| (ai, ci)))
+        .collect();
+    let column_total_aggs: Vec<(usize, usize)> = aggregates
+        .iter()
+        .enumerate()
+        .filter_map(|(ai, a)| {
+            let key = a.total_column.as_deref()?;
+            columns.iter().position(|c| c.key == key).map(|ci| (ai, ci))
+        })
+        .collect();
+    let total_target_cols: Vec<usize> = column_total_aggs.iter().map(|&(_, ci)| ci).collect();
     let values_owned: Vec<Vec<Option<i64>>> = aggregates
         .iter()
         .map(|a| {
@@ -7200,12 +7264,71 @@ fn build_grouped_table(
 
     let plan = group_nested(&keys, &values_refs, summary_only, !aggregates.is_empty());
 
+    // Which data-row position closes each outermost group, and the totals
+    // written into the total-target columns there. Computed up front so the
+    // engine's width fitting (step 3) already sees the totals in the cells.
+    let mut pos_totals: std::collections::HashMap<usize, Vec<(usize, i64)>> =
+        std::collections::HashMap::new();
+    if !column_total_aggs.is_empty() {
+        let close = |outer: Option<usize>,
+                     last: Option<usize>,
+                     map: &mut std::collections::HashMap<usize, Vec<(usize, i64)>>| {
+            if let (Some(g), Some(p)) = (outer, last) {
+                map.insert(
+                    p,
+                    column_total_aggs
+                        .iter()
+                        .map(|&(ai, ci)| (ci, plan.group_totals[g][ai]))
+                        .collect(),
+                );
+            }
+        };
+        let mut outer_group: Option<usize> = None;
+        let mut last_pos: Option<usize> = None;
+        let mut data_pos = 0usize;
+        for prow in &plan.rows {
+            match prow {
+                PlanRow::Header { level, group, .. } => {
+                    if *level == 0 {
+                        close(outer_group, last_pos, &mut pos_totals);
+                        outer_group = Some(*group);
+                        last_pos = None;
+                    }
+                    if summary_only && *level == deepest {
+                        // Renders as a representative data row (step 3).
+                        last_pos = Some(data_pos);
+                        data_pos += 1;
+                    }
+                }
+                PlanRow::Item { .. } => {
+                    last_pos = Some(data_pos);
+                    data_pos += 1;
+                }
+                PlanRow::GrandTotal => {}
+            }
+        }
+        close(outer_group, last_pos, &mut pos_totals);
+    }
+    // The total a target column shows at data-row `row_idx` — the outermost
+    // group's total on its closing row, blank everywhere else. Routed
+    // through `typed_cell_content` so the cell keeps the column kind's
+    // alignment (a duration total stays right-aligned like the data cells).
+    let total_cell = |row_idx: usize, ci: usize, col: &ColumnDef| -> CellContent {
+        pos_totals
+            .get(&row_idx)
+            .and_then(|t| t.iter().find(|&&(c, _)| c == ci))
+            .map(|&(_, total)| typed_cell_content(&total.to_string(), col))
+            .unwrap_or_else(|| typed_cell_content("", col))
+    };
+
     // A plain data row built from item `pos` (in `sorted_idx` space).
     let item_row = |row_idx: usize, pos: usize| -> TRow<u32> {
         let item = &items[sorted_idx[pos]];
         let mut row = TRow::new(row_idx as u32);
-        for col in columns {
-            if col.source.as_deref() == Some("has_links") {
+        for (ci, col) in columns.iter().enumerate() {
+            if total_target_cols.contains(&ci) {
+                row = row.cell(&col.key, total_cell(row_idx, ci, col));
+            } else if col.source.as_deref() == Some("has_links") {
                 let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
                 row = row.cell(&col.key, icon);
             } else {
@@ -7221,8 +7344,12 @@ fn build_grouped_table(
         let item = &items[sorted_idx[pos]];
         let mut row = TRow::new(row_idx as u32);
         for (ci, col) in columns.iter().enumerate() {
-            if let Some(slot) = agg_cols.iter().position(|&c| c == ci) {
-                row = row.cell(&col.key, format_total(totals[slot], col));
+            if total_target_cols.contains(&ci) {
+                row = row.cell(&col.key, total_cell(row_idx, ci, col));
+            } else if let Some(slot) = agg_cols.iter().position(|&c| c == ci) {
+                // Through `typed_cell_content` so the summed value keeps the
+                // column kind's alignment, exactly like a plain data cell.
+                row = row.cell(&col.key, typed_cell_content(&totals[slot].to_string(), col));
             } else if col.source.as_deref() == Some("has_links") {
                 let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
                 row = row.cell(&col.key, icon);
@@ -7253,6 +7380,24 @@ fn build_grouped_table(
             _ => {}
         }
     }
+    // Phantom sizing row: the Σ footer's grand totals can be wider than any
+    // single data cell (e.g. `260:04:54` vs `7:35:50`) and would otherwise
+    // truncate — let them participate in the width fit through one extra
+    // row that is computed but never rendered (the plan-row interleave below
+    // consumes exactly the real data rows).
+    if !aggregates.is_empty() {
+        let mut sizing = TRow::new(data_rows.len() as u32).not_selectable();
+        for (ci, col) in columns.iter().enumerate() {
+            let text = header_aggs
+                .iter()
+                .chain(column_total_aggs.iter())
+                .find(|&&(_, c)| c == ci)
+                .map(|&(ai, _)| format_total(plan.grand_totals[ai], col))
+                .unwrap_or_default();
+            sizing = sizing.cell(&col.key, text);
+        }
+        data_rows.push(sizing);
+    }
     let computed = compute_table(&data_rows, config, col_ids, Some(header));
     let col_widths = computed.col_widths.clone();
     let header_cells = computed.header.map(|h| h.cells).unwrap_or_default();
@@ -7272,11 +7417,18 @@ fn build_grouped_table(
             }
             PlanRow::Header { label, level, group, .. } => {
                 // A `── label ──` group header, indented by nesting depth.
+                // The ISO group key stays the sort identity; only the
+                // rendered text goes through the human-facing mapping.
+                let display =
+                    bucket_display_label(label, levels.get(*level).and_then(|l| l.bucket));
                 let indent = "  ".repeat(*level);
+                let totals: Vec<(usize, i64)> = header_aggs
+                    .iter()
+                    .map(|&(ai, ci)| (ci, plan.group_totals[*group][ai]))
+                    .collect();
                 widget_rows.push(summary_row(
-                    format!("{indent}── {label} "),
-                    &plan.group_totals[*group],
-                    &agg_cols,
+                    format!("{indent}── {display} "),
+                    &totals,
                     columns,
                     &col_widths,
                 ));
@@ -7293,17 +7445,18 @@ fn build_grouped_table(
         }
     }
 
-    // 5. Grand-total footer (only when something is aggregated).
+    // 5. Grand-total footer (only when something is aggregated). Aggregates
+    //    routed to a total column show their grand total there too.
     let footers = if aggregates.is_empty() {
         Vec::new()
     } else {
-        vec![summary_row(
-            "── Σ ".to_string(),
-            &plan.grand_totals,
-            &agg_cols,
-            columns,
-            &col_widths,
-        )]
+        let mut totals: Vec<(usize, i64)> = header_aggs
+            .iter()
+            .chain(column_total_aggs.iter())
+            .map(|&(ai, ci)| (ci, plan.grand_totals[ai]))
+            .collect();
+        totals.sort_by_key(|&(ci, _)| ci);
+        vec![summary_row("── Σ ".to_string(), &totals, columns, &col_widths)]
     };
 
     GroupedBuild { widget_rows, footers, header_cells, filtered_indices, col_widths }
@@ -7405,6 +7558,15 @@ fn parse_sizing(s: &str) -> ColStrategy {
     if let Some(inner) = trimmed.strip_prefix("flex(").and_then(|s| s.strip_suffix(')')) {
         if let Ok(n) = inner.parse::<usize>() {
             return ColStrategy::Flex(n);
+        }
+    }
+    // `fixed(n)`: a constant column width that COUNTS toward the pane-width
+    // budget (unlike `auto(min,max)`, which deliberately overflows into
+    // horizontal scroll). Use it to cap a column without pushing trailing
+    // columns off-screen.
+    if let Some(inner) = trimmed.strip_prefix("fixed(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(n) = inner.parse::<usize>() {
+            return ColStrategy::Fixed(n);
         }
     }
     if let Some(inner) = trimmed.strip_prefix("auto(").and_then(|s| s.strip_suffix(')')) {
@@ -11869,8 +12031,10 @@ mod tests {
         for c in &columns {
             header = header.cell(&c.key, c.key.clone());
         }
-        let levels = vec![GroupBy { column: "category".into(), bucket: None }];
-        let aggregates = vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum }];
+        let levels =
+            vec![GroupBy { column: "category".into(), bucket: None, order: GroupOrder::Asc }];
+        let aggregates =
+            vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum, total_column: None }];
         let no_links = |_: &str| false;
 
         let build = build_grouped_table(
@@ -11991,10 +12155,11 @@ mod tests {
         // Inner level keys on `dur` (distinct per item here) so each item is
         // its own inner group; outer on `category`.
         let levels = vec![
-            GroupBy { column: "category".into(), bucket: None },
-            GroupBy { column: "dur".into(), bucket: None },
+            GroupBy { column: "category".into(), bucket: None, order: GroupOrder::Asc },
+            GroupBy { column: "dur".into(), bucket: None, order: GroupOrder::Asc },
         ];
-        let aggregates = vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum }];
+        let aggregates =
+            vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum, total_column: None }];
         let no_links = |_: &str| false;
 
         let build = build_grouped_table(
@@ -12029,6 +12194,89 @@ mod tests {
         };
         assert_eq!(last_text(&build.widget_rows[0]), "30"); // outer A = 10+20
         assert_eq!(last_text(&build.widget_rows[3]), "30"); // outer B = 30
+    }
+
+    /// `fixed(n)` maps to the engine's budget-counted constant width;
+    /// malformed input falls back to `Max` like every other sizing string.
+    #[test]
+    fn parse_sizing_fixed() {
+        assert!(matches!(parse_sizing("fixed(30)"), ColStrategy::Fixed(30)));
+        assert!(matches!(parse_sizing("fixed(x)"), ColStrategy::Max));
+    }
+
+    /// `order: desc` reverses the group order; an aggregate's `total_column`
+    /// moves the per-group totals off the header rows onto the closing data
+    /// row of each outermost group (and the grand total into the same column
+    /// on the Σ footer) — the native trackings layout.
+    #[test]
+    fn grouped_table_desc_order_and_total_column() {
+        let mut columns = group_columns();
+        columns.push(ColumnDef { key: "total".into(), label: Some("Total".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None });
+        let items = vec![
+            group_item("0", "B", "30"),
+            group_item("1", "A", "10"),
+            group_item("2", "A", "20"),
+            group_item("3", "B", "40"),
+        ];
+        let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
+        let mut strategies = std::collections::HashMap::new();
+        for c in &columns {
+            strategies.insert(TColumnId::new(&c.key), parse_sizing(&c.sizing));
+        }
+        let config = TableConfig {
+            max_width: 300,
+            separator: "  ".into(),
+            sizer: Box::new(MixedColSizer { strategies }),
+        };
+        let mut header = TRow::new(0u32).not_selectable();
+        for c in &columns {
+            header = header.cell(&c.key, c.key.clone());
+        }
+        let levels =
+            vec![GroupBy { column: "category".into(), bucket: None, order: GroupOrder::Desc }];
+        let aggregates = vec![AggregateDef {
+            column: "dur".into(),
+            op: AggregateOp::Sum,
+            total_column: Some("total".into()),
+        }];
+        let no_links = |_: &str| false;
+
+        let build = build_grouped_table(
+            &items,
+            &[0, 1, 2, 3],
+            &columns,
+            &levels,
+            &aggregates,
+            false,
+            chrono::Local::now(),
+            &no_links,
+            &config,
+            &col_ids,
+            &header,
+        );
+
+        // Desc: group B first (original indices 0, 3), then A (1, 2).
+        assert_eq!(
+            build.filtered_indices,
+            vec![usize::MAX, 0, 3, usize::MAX, 1, 2]
+        );
+
+        let last_text = |r: &TableWidgetRow| {
+            r.primary_line().last().map(|c| c.text.trim().to_string()).unwrap_or_default()
+        };
+        // Header rows carry NO total any more (it moved to the data rows):
+        // with nothing to right-align, the label spans the whole row.
+        assert_eq!(build.widget_rows[0].primary_line().len(), 1);
+        assert_eq!(last_text(&build.widget_rows[0]), "── B");
+        assert_eq!(last_text(&build.widget_rows[3]), "── A");
+        // The total column is blank except on each group's last data row:
+        // B closes with 30+40 = 70, A with 10+20 = 30.
+        assert_eq!(last_text(&build.widget_rows[1]), "");
+        assert_eq!(last_text(&build.widget_rows[2]), "70");
+        assert_eq!(last_text(&build.widget_rows[4]), "");
+        assert_eq!(last_text(&build.widget_rows[5]), "30");
+        // Grand total lands in the total column of the Σ footer.
+        assert_eq!(last_text(&build.footers[0]), "100");
     }
 }
 

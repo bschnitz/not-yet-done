@@ -83,46 +83,70 @@ views:
       editable: true
       menu_key: q
 
-    # Group by calendar day, summing durations per day and overall. `zg`
-    # re-buckets at runtime (Day → Week → Month → Year → None).
+    # Group by calendar day, newest day first (`order: desc` — group keys
+    # are ISO-formatted, so lexical descending = reverse-chronological).
+    # `zg` re-buckets at runtime (Day → Week → Month → Year → None). The
+    # day headers render with ISO week + weekday (`W24 2026-06-08 Mon`).
+    #
+    # `total_column: total` routes each day's summed duration into the
+    # dedicated `total` column on the day's *last* row instead of onto the
+    # `──` header — the classic time-sheet layout where a Total column
+    # closes each day. The `total` column hides while grouping is off.
     group_by:
       column: started
       bucket: day
+      order: desc
     aggregates:
       - column: duration
         op: sum
+        total_column: total
 
     # Tree-label-less flat columns. `taskpath` (the parent chain) renders as
-    # a styled `kind: path`; `started`/`ended` as localized datetimes;
-    # `duration` as right-aligned `H:MM:SS` (live for running rows, see M9).
+    # a styled `kind: path`; `started`/`ended` as localized datetimes (a
+    # running tracking shows `running` in Ended); `duration` as right-aligned
+    # `H:MM:SS` (live for running rows, see M9).
     columns:
       # Running-tracking marker: a `⏱` glyph on open rows, blank otherwise.
       - key: marker
         label: "⏱"
         style: accent
         sizing: max
-      - key: taskpath
-        label: Path
-        kind: path
-        separator: " › "
-        style: text_dim
-        sizing: max
+      # Constant 30-wide task name (long descriptions truncate) so the time
+      # columns never get squeezed; the path column flexes into the rest.
+      # `fixed` counts toward the pane budget — `auto(5,30)` would not and
+      # would push the trailing `total` column off-screen.
       - key: task
         label: Task
         source: label
-        style: text_high
-        sizing: "flex(1)"
+        style: text_med
+        sizing: "fixed(30)"
       - key: started
         label: Started
         kind: datetime
+        style: secondary
         sizing: max
       - key: ended
         label: Ended
         kind: datetime
+        style: secondary
         sizing: max
       - key: duration
         label: Duration
         kind: duration
+        style: tertiary
+        sizing: max
+      - key: taskpath
+        label: Taskpath
+        kind: path
+        separator: "/"
+        style: text_med
+        sizing: "flex(1)"
+      # Per-group total target (see `aggregates` above). Only visible while
+      # grouped; filled on each day's closing row + the Σ footer.
+      - key: total
+        label: Total
+        kind: duration
+        style: tertiary
         sizing: max
 
     actions:
@@ -195,34 +219,43 @@ views:
     group_by:
       column: started
       bucket: day
+      order: desc
     then_by:
       - column: task_id
     summary_only: true
     aggregates:
       - column: duration
         op: sum
+        total_column: total
 
     # No started/ended columns — a condensed row spans many intervals, so a
-    # single start/end is meaningless. Path + task + the summed duration.
+    # single start/end is meaningless. Task + path + the summed duration,
+    # with the day total closing each day in the `total` column.
     columns:
       - key: marker
         label: "⏱"
         style: accent
         sizing: max
-      - key: taskpath
-        label: Path
-        kind: path
-        separator: " › "
-        style: text_dim
-        sizing: max
       - key: task
         label: Task
         source: label
-        style: text_high
-        sizing: "flex(1)"
+        style: text_med
+        sizing: "fixed(30)"
       - key: duration
         label: Duration
         kind: duration
+        style: tertiary
+        sizing: max
+      - key: taskpath
+        label: Taskpath
+        kind: path
+        separator: "/"
+        style: text_med
+        sizing: "flex(1)"
+      - key: total
+        label: Total
+        kind: duration
+        style: tertiary
         sizing: max
 
     # Same per-row shortcuts as the flat list (delete/restore/toggle act on

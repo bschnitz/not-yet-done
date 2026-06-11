@@ -10,7 +10,7 @@
 //! model in the way. The content view does the `NodeSummary → raw value`
 //! lookup and feeds the raw strings in here.
 
-use chrono::{DateTime, Datelike, Local};
+use chrono::{DateTime, Datelike, Local, NaiveDate};
 
 use crate::config::view_config::{AggregateOp, DateBucket};
 
@@ -53,6 +53,35 @@ fn bucket_label(dt: DateTime<Local>, bucket: DateBucket) -> String {
         }
         DateBucket::Month => dt.format("%Y-%m").to_string(),
         DateBucket::Year => dt.format("%Y").to_string(),
+    }
+}
+
+/// Human-facing header text for a bucket's ISO group key. The ISO label from
+/// [`group_label`] stays the group's *identity and sort key* (lexical =
+/// chronological — the invariant the content view orders by); this is a pure
+/// display mapping applied only when rendering the header:
+///
+/// - `Day`  `2026-06-08` → `W24 2026-06-08 Mon` (ISO week + weekday, like the
+///   native trackings view's day headers)
+/// - `Week` `2026-W23`   → `W23 2026`
+/// - `Month` / `Year` / verbatim (unbucketed or unparseable) keys pass through
+///   unchanged.
+pub fn bucket_display_label(key: &str, bucket: Option<DateBucket>) -> String {
+    match bucket {
+        Some(DateBucket::Day) => match NaiveDate::parse_from_str(key, "%Y-%m-%d") {
+            Ok(date) => {
+                let iso = date.iso_week();
+                format!("W{:02} {} {}", iso.week(), key, date.format("%a"))
+            }
+            Err(_) => key.to_string(),
+        },
+        Some(DateBucket::Week) => match key.split_once("-W") {
+            Some((year, week)) if !year.is_empty() && !week.is_empty() => {
+                format!("W{week} {year}")
+            }
+            _ => key.to_string(),
+        },
+        _ => key.to_string(),
     }
 }
 
@@ -138,6 +167,38 @@ mod tests {
             group_label("not-a-date", Some(DateBucket::Week)),
             "not-a-date"
         );
+    }
+
+    #[test]
+    fn day_display_label_adds_iso_week_and_weekday() {
+        // 2026-06-08 is a Monday in ISO week 24.
+        assert_eq!(
+            bucket_display_label("2026-06-08", Some(DateBucket::Day)),
+            "W24 2026-06-08 Mon"
+        );
+    }
+
+    #[test]
+    fn week_display_label_reorders_week_and_year() {
+        assert_eq!(
+            bucket_display_label("2026-W23", Some(DateBucket::Week)),
+            "W23 2026"
+        );
+    }
+
+    #[test]
+    fn other_display_labels_pass_through() {
+        assert_eq!(
+            bucket_display_label("2026-06", Some(DateBucket::Month)),
+            "2026-06"
+        );
+        assert_eq!(bucket_display_label("2026", Some(DateBucket::Year)), "2026");
+        // Verbatim fallback key (unparseable date) stays untouched.
+        assert_eq!(
+            bucket_display_label("not-a-date", Some(DateBucket::Day)),
+            "not-a-date"
+        );
+        assert_eq!(bucket_display_label("Frontend", None), "Frontend");
     }
 
     #[test]
