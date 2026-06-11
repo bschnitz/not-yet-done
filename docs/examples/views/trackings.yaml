@@ -75,13 +75,25 @@ views:
     default: true
     key: a
 
-    # Saved-query filter. No `default` body → the whole list shows; define
-    # queries with `:query new` and pick them from the `q` menu. Bodies are
-    # the usual `name`/`query`(FilterExpr)/`options` YAML, stored under scope
-    # `trackings/<id>/<view>`. `editable` lets `:query edit` rewrite a body.
+    # Saved-query filter. Queries live as one file per name under the
+    # adapter's data dir (`<data>/not_yet_done/trackings/<id>/queries/
+    # <name>.yaml`, raw FilterExpr body) — define them with `:query new`
+    # or drop files in by hand; the `q` menu lists them. Shortcut keys
+    # are stored separately in the `query_shortcut` DB table, scoped
+    # `trackings/<id>/<view>` (set them with ctrl+s inside the menu).
+    # `editable` lets `:query edit` rewrite a body.
+    #
+    # `default:` is a raw query body applied on startup (native parity:
+    # the bespoke tab starts time-boxed to the last month). Drop it to
+    # show the whole list.
     query:
       editable: true
       menu_key: q
+      default: |
+        query:
+          and:
+            - [deleted, =, false]
+            - [started_at, gt, last month]
 
     # Group by calendar day, newest day first (`order: desc` — group keys
     # are ISO-formatted, so lexical descending = reverse-chronological).
@@ -211,10 +223,15 @@ views:
     node_type: "tracking:entry"
     key: v
 
-    # Same saved-query filter as the flat list.
+    # Same saved-query filter + startup default as the flat list.
     query:
       editable: true
       menu_key: q
+      default: |
+        query:
+          and:
+            - [deleted, =, false]
+            - [started_at, gt, last month]
 
     group_by:
       column: started
