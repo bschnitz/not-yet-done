@@ -610,6 +610,12 @@ Vor C2 müssen über den Adapter-Pfad funktionieren:
 - Tasks: Tree expand/collapse, `/`-Suche durch kollabierte Knoten, add/
   edit/reparent, delete + undelete, notes, scripts, Tracking-Toggle,
   Saved Queries + Shortcuts + Spalten-Config.
+  > **Erledigt (2026-06-11):** initiale Aufklapptiefe (`expand_depth` auf
+  > dem Wurzel-ViewDef, generische One-Shot-Kaskade über den normalen
+  > Expand-Pfad — Parität zu `tasks.tree.default_expand_depth`) und die
+  > Listenansicht (zweite View `list` auf neuem Adapter-Typ `task:flat`,
+  > flacher DFS-Walk, Filter = nur Treffer; Subtab-Keys `v`/`t` ersetzen
+  > das native `vl`/`vt` — `l` kollidiert mit `content.open`).
 - Trackings: Normal/Condensed/Tree, Grouping Day/Week/Month/Year mit
   Totals + Footer, Live-Dauern (tickend), Taskpath-Spalte gestylt,
   Delete/Restore/Restore-All, scripts, Filter, Saved Queries.

@@ -496,6 +496,7 @@ mod tests {
             tree_connector_style: None,
             tree_lines: None,
             tree_markers: None,
+            expand_depth: None,
         }
     }
 

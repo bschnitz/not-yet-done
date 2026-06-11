@@ -93,7 +93,20 @@ views:
   - name: tasks
     node_type: "task:item"
     default: true
+    # Subtab key: `t` switches back here from the flat `list` view (`v`,
+    # bottom of this file) — the generic counterpart of the native vt/vl
+    # view toggle.
+    key: t
     tree_label: description
+
+    # Initial expansion depth (native parity:
+    # `tasks.tree.default_expand_depth`). `2` auto-expands depths 0 and 1
+    # once after the root list loads, so three levels are visible right
+    # away. One-shot: after the cascade finishes, manual expand/collapse
+    # is never overridden; a new saved query re-runs it on the filtered
+    # tree. Each level loads through the normal expand path — cheap here
+    # (in-memory forest), so a deeper value costs little on this tab.
+    expand_depth: 2
 
     # Color of this tree's connector glyphs — the `├──`/`└──`/`│` box prefix
     # and the `▶`/`▼` expand arrows — drawn in the `tree_label` column. A theme
@@ -329,3 +342,101 @@ views:
           m: mark-move
           p: paste-move
           U: unnest
+
+  # Flat list view (native `vl` parity): every task in the forest as one
+  # flat table, depth-first order — no hierarchy, no expand glyphs. `v`
+  # switches here, `t` back to the tree. The adapter routes the synthetic
+  # `task:flat` node_type to the flat projection; the rows themselves are
+  # ordinary tasks, so edit/add/delete/track/move behave exactly like in
+  # the tree view. A query filter shows only the matching tasks (no
+  # ancestor fill-in like the tree view) — matching the native flat list's
+  # filter semantics.
+  - name: list
+    node_type: "task:flat"
+    key: v
+
+    query:
+      editable: true
+      menu_key: q
+
+    columns:
+      - key: status
+        label: St
+        style: tertiary
+        sizing: max
+      - key: priority
+        label: Pri
+        kind: number
+        style: tertiary
+        sizing: max
+      - key: tracking
+        label: Tr
+        style: accent
+        sizing: max
+      - key: tag_symbols
+        label: T
+        style: accent
+        sizing: max
+      - key: description
+        label: Task
+        source: label
+        style: text_med
+        sizing: fit
+      - key: created
+        label: Created
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
+      - key: updated
+        label: Updated
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
+      - key: last_tracked
+        label: Tracked
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: accent
+        sizing: max
+      - key: notes
+        label: N
+        style: tertiary
+        sizing: max
+
+    actions:
+      - name: edit
+        key: e
+        type: edit
+        id: edit
+      - name: add task
+        key: a
+        type: create
+        id: add
+      - name: script
+        key: x
+        type: script
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [description, tag_names]
+      # Flat view: plain field search (the tree-aware `tree_find` needs a
+      # tree to expand into).
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [description, tag_names]
+      - name: refresh
+        key: r
+        type: reload
+
+    shortcuts:
+      d: delete
+      u: undelete
+      s: toggle-tracking
+      m: mark-move
+      p: paste-move
+      U: unnest

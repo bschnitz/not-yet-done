@@ -635,6 +635,33 @@ views:
 - Beide greifen nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung. Das
   Blatt-Symbol konfiguriert weiterhin `leaf_glyph` (pro Ebene), die Farbe des
   gesamten Laufs `tree_connector_style`.
+
+#### `expand_depth:` — initiale Aufklapptiefe pro Tree
+
+```yaml
+views:
+  - name: tasks
+    tree_label: description
+    expand_depth: 2 # Tiefe 0 und 1 klappen nach dem Laden automatisch auf
+```
+
+Lazy geladene Trees starten standardmäßig komplett zugeklappt — richtig für
+teure Remote-Adapter (Postgres, Confluence), falsch für billige In-Memory-
+Forests (Tasks), wo der User sein Arbeitsset sofort sehen will. `expand_depth`
+auf dem **Wurzel-`ViewDef`** klappt nach dem (Neu-)Laden der Root-Liste alle
+Zeilen mit Tiefe `< expand_depth` automatisch auf — `2` zeigt also drei Ebenen
+(Wurzeln, Kinder, Enkel) und spiegelt das native
+`tasks.tree.default_expand_depth`.
+
+- **One-Shot-Kaskade:** Jede Ebene lädt über den normalen Expand-Pfad
+  (dieselben Requests wie ein manuelles Enter). Sobald nichts mehr zu laden
+  ist, deaktiviert sich die Kaskade — manuelles Auf-/Zuklappen wird danach
+  nie überschrieben. Eine neue Saved-Query startet die Kaskade auf dem
+  gefilterten Tree erneut.
+- **Kosten:** `expand_depth` Runden Adapter-Calls (eine pro Ebene, Fan-out
+  pro Knoten). Auf Remote-Adaptern klein halten; `0`/weggelassen = aus
+  (Default, bisheriges Verhalten).
+
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 
 Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf

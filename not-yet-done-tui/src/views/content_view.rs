@@ -2289,6 +2289,156 @@ impl ContentPane {
         })
     }
 
+    /// One-shot `expand_depth` auto-expansion cascade (root ViewDef
+    /// field). Called after tree data lands (root list or expanded
+    /// children). While the cascade is armed (fresh tree / new query),
+    /// every visible entry at depth `< expand_depth` with a
+    /// tree-continuing child branch is expanded: cached subtrees unfold
+    /// synchronously, unloaded ones produce the same `ExpandTreeNode` /
+    /// `ExpandTreeNodeMulti` requests a manual Enter would — their
+    /// children land through the normal `LoadMsg::TreeChildren` path,
+    /// which calls back in here until a pass has nothing left to load
+    /// and disarms the cascade. After that the user's manual
+    /// expand/collapse state is never overridden.
+    pub(crate) fn pending_auto_expand_requests(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> Vec<ViewRequest> {
+        if !self.tree.as_ref().map(|t| t.auto_expand_pending).unwrap_or(false) {
+            return Vec::new();
+        }
+        let Some(view_def) = self.view_def(view_defs).cloned() else {
+            return Vec::new();
+        };
+        let target = view_def.expand_depth.unwrap_or(0) as usize;
+        if target == 0 {
+            if let Some(tree) = self.tree.as_mut() {
+                tree.auto_expand_pending = false;
+            }
+            return Vec::new();
+        }
+        struct Candidate {
+            own_path: Vec<String>,
+            node_id: String,
+            tree_child_types: Vec<String>,
+        }
+        let mut requests = Vec::new();
+        let mut expanded_any = false;
+        loop {
+            // Candidates from the *current* flattened entries — re-scanned
+            // per pass because expanding a cached node reveals new entries
+            // one level deeper.
+            let mut candidates: Vec<Candidate> = Vec::new();
+            {
+                let Some(tree) = self.tree.as_ref() else {
+                    return requests;
+                };
+                for e in &tree.entries {
+                    if e.depth >= target
+                        || e.is_more_placeholder
+                        || e.node.has_children == Some(false)
+                    {
+                        continue;
+                    }
+                    let mut own_path = e.parent_path.clone();
+                    own_path.push(e.node.id.clone());
+                    if tree.expanded.contains(&own_path) {
+                        continue;
+                    }
+                    let entry_child = child_def_for_type_chain(&view_def, &e.node_type_chain);
+                    // Rows routing Enter to an adapter action never expand.
+                    if entry_child.and_then(|c| c.enter_action.as_deref()).is_some() {
+                        continue;
+                    }
+                    let kids: Vec<&ChildDef> = match entry_child {
+                        Some(c) => effective_child_children(c),
+                        None => tree_level_children(&view_def, e.depth)
+                            .unwrap_or(&[])
+                            .iter()
+                            .collect(),
+                    };
+                    let types: Vec<String> = kids
+                        .iter()
+                        .filter(|c| c.tree_label.is_some())
+                        .map(|c| c.node_type.clone())
+                        .collect();
+                    if types.is_empty() {
+                        continue;
+                    }
+                    candidates.push(Candidate {
+                        own_path,
+                        node_id: e.node.id.clone(),
+                        tree_child_types: types,
+                    });
+                }
+            }
+            if candidates.is_empty() {
+                break;
+            }
+            let mut any_cached = false;
+            for c in candidates {
+                let Some(tree) = self.tree.as_mut() else {
+                    return requests;
+                };
+                tree.expanded.insert(c.own_path.clone());
+                expanded_any = true;
+                let cached = tree
+                    .cache
+                    .get(&c.own_path)
+                    .map(|s| s.loaded)
+                    .unwrap_or(false);
+                if cached {
+                    any_cached = true;
+                    continue;
+                }
+                if c.tree_child_types.len() == 1 {
+                    let child_node_type = c.tree_child_types.into_iter().next().unwrap();
+                    requests.push(ViewRequest::ExpandTreeNode {
+                        view_index,
+                        pane_id,
+                        parent_path: c.own_path,
+                        parent_node_id: c.node_id,
+                        child_node_type,
+                        page_size: 50,
+                        page: None,
+                        append: false,
+                    });
+                } else {
+                    requests.push(ViewRequest::ExpandTreeNodeMulti {
+                        view_index,
+                        pane_id,
+                        parent_path: c.own_path,
+                        parent_node_id: c.node_id,
+                        child_node_types: c.tree_child_types,
+                        page_size: 50,
+                    });
+                }
+            }
+            if !any_cached {
+                break;
+            }
+            if let Some(tree) = self.tree.as_mut() {
+                tree.rebuild_entries(&view_def);
+            }
+        }
+        if expanded_any {
+            if let Some(tree) = self.tree.as_mut() {
+                tree.rebuild_entries(&view_def);
+            }
+            self.rebuild_table(view_defs);
+        }
+        if requests.is_empty() {
+            // Nothing left in flight — the cascade has reached
+            // `expand_depth` everywhere (or had nothing to do). Disarm.
+            if let Some(tree) = self.tree.as_mut() {
+                tree.auto_expand_pending = false;
+            }
+        }
+        requests
+    }
+
     /// Tree-mode handler for `content.tree_collapse` (default `c`).
     /// Smart-collapse: when the selected row's own node is currently
     /// expanded, collapse it (cursor stays on the same row).
@@ -6267,6 +6417,32 @@ impl ContentView {
         self.sync_action_bar_hints();
     }
 
+    /// Collect a pane's pending `expand_depth` auto-expansion requests
+    /// (see [`ContentPane::pending_auto_expand_requests`]). Borrow dance
+    /// mirrors [`Self::set_items_for_pane`].
+    pub fn pending_auto_expand_requests(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> Vec<ViewRequest> {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return Vec::new();
+        };
+        let view_defs = self.view_defs.clone();
+        let tree = &mut self.pane_trees[tree_idx];
+        match tree.root.find_leaf_mut(pane_id) {
+            Some(leaf) => {
+                leaf.pane
+                    .pending_auto_expand_requests(view_index, pane_id, &view_defs)
+            }
+            None => Vec::new(),
+        }
+    }
+
     /// Apply a preview-fetch result to a specific pane by id.
     pub fn set_preview_description_for_pane(&mut self, pane_id: PaneId, key: &str, description: String) {
         if let Some(pane) = self.find_pane_mut(pane_id) {
@@ -8576,6 +8752,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -8710,6 +8887,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -9115,6 +9293,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -9281,6 +9460,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -9428,6 +9608,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -9756,6 +9937,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -10915,6 +11097,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -11760,6 +11943,7 @@ mod tests {
                 tree_connector_style: None,
                 tree_lines: None,
                 tree_markers: None,
+                expand_depth: None,
             }],
         }
     }
@@ -12337,6 +12521,116 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expand_depth_auto_expands_to_configured_depth_then_disarms() {
+        // `expand_depth: 2` → depth-0 and depth-1 rows auto-expand after
+        // load (three levels visible), then the one-shot cascade disarms
+        // so it never overrides manual collapse afterwards.
+        let mut config = uniform_recursive_config();
+        config.views[0].expand_depth = Some(2);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Pass 1 (root rows landed): depth-0 `work` auto-expands.
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert_eq!(reqs.len(), 1, "one depth-0 expand request: {reqs:?}");
+        let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+            panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+        };
+        assert_eq!(parent_node_id, "work");
+        view.apply_tree_children(
+            pane_id,
+            parent_path.clone(),
+            vec![tnode_val("h", "h", "V")],
+            None,
+            false,
+            "mock:task".into(),
+        );
+
+        // Pass 2 (depth-1 children landed): `h` (depth 1 < 2) expands too.
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert_eq!(reqs.len(), 1, "one depth-1 expand request: {reqs:?}");
+        let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+            panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+        };
+        assert_eq!(parent_node_id, "h");
+        view.apply_tree_children(
+            pane_id,
+            parent_path.clone(),
+            vec![tnode_val("g", "g", "V")],
+            None,
+            false,
+            "mock:task".into(),
+        );
+
+        // Pass 3: `g` sits AT the target depth → nothing further, disarm.
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert!(reqs.is_empty(), "cascade complete: {reqs:?}");
+        assert!(
+            !view.active_pane().tree.as_ref().unwrap().auto_expand_pending,
+            "cascade must disarm once nothing is left to load"
+        );
+        let depths: Vec<(String, usize)> = view
+            .active_pane()
+            .tree
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| (e.node.id.clone(), e.depth))
+            .collect();
+        assert!(depths.contains(&("h".to_string(), 1)), "{depths:?}");
+        assert!(depths.contains(&("g".to_string(), 2)), "{depths:?}");
+
+        // Disarmed: a manual collapse survives later data landings.
+        view.active_pane_mut()
+            .tree
+            .as_mut()
+            .unwrap()
+            .expanded
+            .remove(&vec!["work".to_string()]);
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert!(reqs.is_empty(), "disarmed cascade must not re-expand");
+        assert!(
+            !view
+                .active_pane()
+                .tree
+                .as_ref()
+                .unwrap()
+                .expanded
+                .contains(&vec!["work".to_string()]),
+            "manual collapse stays collapsed"
+        );
+    }
+
+    #[test]
+    fn no_expand_depth_means_no_auto_expansion() {
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert!(reqs.is_empty(), "no expand_depth → no requests");
+        let tree_state = view.active_pane().tree.as_ref().unwrap();
+        assert!(tree_state.expanded.is_empty(), "tree stays collapsed");
+        assert!(!tree_state.auto_expand_pending, "disarmed immediately");
+    }
+
     fn tree_view_def() -> ViewDef {
         // Minimal tree-enabled view: root → recursive page child.
         // Mirrors confluence.yaml's spaces tree (one space root that
@@ -12396,6 +12690,7 @@ mod tests {
             tree_connector_style: None,
             tree_lines: None,
             tree_markers: None,
+            expand_depth: None,
         }
     }
 
@@ -12951,6 +13246,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             tree_connector_style: None,
             tree_lines: None,
             tree_markers: None,
+            expand_depth: None,
         }],
     }
 }
