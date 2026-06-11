@@ -29,8 +29,8 @@ use not_yet_done_ratatui::{
 };
 use not_yet_done_table::{
     CellAlignment, CellContent, ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer,
-    PlanRow, Row as TRow, RowTemplate, TableConfig, compute_multiline_table, compute_table,
-    fit_aligned, group_nested,
+    PlanRow, Row as TRow, RowTemplate, StyledSpan, TableConfig, compute_multiline_table,
+    compute_table, fit_aligned, group_nested,
 };
 
 use not_yet_done_content::{
@@ -1536,6 +1536,16 @@ impl ContentPane {
         view_defs.get(self.view_def_index)
     }
 
+    /// Resolve this tree's connector color: the active view's per-view
+    /// `tree_connector_style` (a theme color name) if set, else the global
+    /// theme `tree_connector`. Used to fill [`TREE_CONNECTOR_STYLE_ID`].
+    fn tree_connector_color(&self, view_defs: &[ViewDef], t: &Theme) -> ratatui::style::Color {
+        self.view_def(view_defs)
+            .and_then(|vd| vd.tree_connector_style.as_deref())
+            .map(|name| resolve_theme_color(t, name))
+            .unwrap_or_else(|| t.tree_connector())
+    }
+
     // ── Current-level config (respects nav depth) ───────────────────
 
     /// Whether the active level has any live (time-derived) column whose
@@ -2375,7 +2385,24 @@ impl ContentPane {
                         } else {
                             String::new()
                         };
-                        CellContent::text(format!("{connector}{leaf}{}", entry.node.label))
+                        // Tag the leading connector run (box glyphs + expand
+                        // arrow) with the tree-connector style id so the render
+                        // path can paint it apart from the label. The span
+                        // rides the cell through `compute_table` (projected /
+                        // clamped on truncation like a highlight range) and is
+                        // resolved back into a styled segment when the widget
+                        // row is built. The leaf glyph + label stay unstyled
+                        // (the cell's default fg).
+                        let connector_chars = connector.chars().count();
+                        let text = format!("{connector}{leaf}{}", entry.node.label);
+                        if connector_chars > 0 {
+                            CellContent::text(text).with_spans(vec![StyledSpan {
+                                range: 0..connector_chars,
+                                style_id: TREE_CONNECTOR_STYLE_ID,
+                            }])
+                        } else {
+                            CellContent::text(text)
+                        }
                     } else if !entry.is_more_placeholder
                         && entry_declares(col.key.as_str())
                     {
@@ -3292,6 +3319,13 @@ impl ContentPane {
         let t = &*self.theme;
         let columns: Vec<ColumnDef> = self.current_columns(view_defs);
         if columns.is_empty() {
+            // Still record the width we were asked to build for: the
+            // post-draw re-fit pass (`refit_tables_if_needed`) compares it
+            // against the widget's render width and rebuilds on mismatch —
+            // without this stamp a column-less pane (e.g. `manual_connect`
+            // before the first load) re-fits forever and the render loop
+            // spins at 100 % CPU.
+            self.built_table_width = self.table.last_render_width();
             return;
         }
 
@@ -3403,7 +3437,9 @@ impl ContentPane {
                         build.footers,
                         ColumnStyles::new(content_col_styles(&columns, t)),
                         build_content_table_style(t),
-                        content_style_map(t),
+                        // Grouped views are never trees, so the connector slot
+                        // is unused here — the default theme color is fine.
+                        content_style_map(t, t.tree_connector()),
                         "  ",
                     );
                     return;
@@ -3470,27 +3506,58 @@ impl ContentPane {
             .iter()
             .map(|c| (c.kind == ColumnKind::Path).then(|| path_separator(c).to_string()))
             .collect();
+        // In tree mode the label column's leading connector run is tagged with
+        // a `StyledSpan` (see `build_tree_data_rows`); that span travels through
+        // `compute_table` as the cell's first highlight range. Resolve the
+        // label column index once so the row loop can split it into a styled
+        // connector segment + plain label. `None` outside tree mode.
+        let tree_label_col: Option<usize> = if self.tree.is_some() {
+            self.cursor_tree_level(view_defs)
+                .map(|l| l.tree_label.to_string())
+                .and_then(|key| columns.iter().position(|c| c.key == key))
+        } else {
+            None
+        };
         let widget_rows: Vec<TableWidgetRow> = computed
             .rows
             .into_iter()
             .map(|cr| {
+                let highlights = cr.highlights;
                 let cells: Vec<TableWidgetCell> = cr
                     .cells
                     .into_iter()
                     .enumerate()
-                    .map(|(i, fitted)| match path_separators.get(i).and_then(|s| s.as_deref()) {
-                        Some(sep) => TableWidgetCell::from_segments(path_cell_segments(
-                            &fitted,
-                            sep,
-                            PATH_SEPARATOR_STYLE_ID,
-                        )),
-                        None => TableWidgetCell::plain(fitted),
+                    .map(|(i, fitted)| {
+                        if tree_label_col == Some(i) {
+                            // Connector char-length = end of the cell's first
+                            // projected highlight range (the connector span).
+                            // Truncation clamps it for free.
+                            let conn = highlights
+                                .get(i)
+                                .and_then(|r| r.first())
+                                .map(|r| r.end)
+                                .unwrap_or(0);
+                            return TableWidgetCell::from_segments(tree_label_cell_segments(
+                                &fitted,
+                                conn,
+                                TREE_CONNECTOR_STYLE_ID,
+                            ));
+                        }
+                        match path_separators.get(i).and_then(|s| s.as_deref()) {
+                            Some(sep) => TableWidgetCell::from_segments(path_cell_segments(
+                                &fitted,
+                                sep,
+                                PATH_SEPARATOR_STYLE_ID,
+                            )),
+                            None => TableWidgetCell::plain(fitted),
+                        }
                     })
                     .collect();
                 TableWidgetRow::new(cells)
             })
             .collect();
 
+        let tree_connector_col = self.tree_connector_color(view_defs, t);
         let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
         self.table.set_data(
             widget_rows,
@@ -3499,7 +3566,7 @@ impl ContentPane {
             vec![],
             ColumnStyles::new(content_col_styles(&columns, t)),
             build_content_table_style(t),
-            content_style_map(t),
+            content_style_map(t, tree_connector_col),
             "  ",
         );
     }
@@ -6832,6 +6899,41 @@ const PATH_SEPARATOR_STYLE_ID: usize = 1;
 /// Kept in sync with the `StyleMap::new(...)` in `rebuild_table_with`.
 const GROUP_HEADER_STYLE_ID: usize = 2;
 
+/// StyleMap slot for the tree-mode connector run (box glyphs + expand arrow)
+/// in the `tree_label` column. Painted in the per-view `tree_connector_style`
+/// color (falling back to the theme `tree_connector`), resolved into the slot
+/// by `content_style_map`. Kept in sync with the `StyleMap::new(...)` there.
+const TREE_CONNECTOR_STYLE_ID: usize = 3;
+
+/// Split an already-fitted tree-label cell into a styled connector segment +
+/// plain label. The first `connector_chars` characters (the `├──`/`└──`/`│`
+/// box prefix and any `▶`/`▼` expand arrow) carry `connector_style_id`; the
+/// remaining leaf glyph + label carry `None` (the cell's default style).
+/// `connector_chars` is a *char* count (matches the `StyledSpan` range and the
+/// engine's char-indexed highlight projection); it is converted to a byte
+/// offset here. Mirrors [`path_cell_segments`] but splits at a fixed prefix
+/// length instead of a separator.
+fn tree_label_cell_segments(
+    fitted: &str,
+    connector_chars: usize,
+    connector_style_id: usize,
+) -> Vec<(String, Option<usize>)> {
+    if connector_chars == 0 {
+        return vec![(fitted.to_string(), None)];
+    }
+    let byte_idx = fitted
+        .char_indices()
+        .nth(connector_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(fitted.len());
+    let (connector, rest) = fitted.split_at(byte_idx);
+    let mut segments = vec![(connector.to_string(), Some(connector_style_id))];
+    if !rest.is_empty() {
+        segments.push((rest.to_string(), None));
+    }
+    segments
+}
+
 /// Split an already-fitted `path`-column string into render segments,
 /// tagging each run of the display `separator` with `sep_style_id` so the
 /// renderer paints it in the theme's taskpath-separator style. Segment text
@@ -7422,6 +7524,9 @@ fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
         "success" => t.success(),
         "warning" => t.warning(),
         "error" => t.error(),
+        // The dedicated tree-connector color, so a view's `tree_connector_style`
+        // can point back at the global default (or any view at it explicitly).
+        "tree_connector" => t.tree_connector(),
         _ => t.text_med(),
     }
 }
@@ -7483,11 +7588,14 @@ fn content_col_styles(columns: &[ColumnDef], t: &Theme) -> Vec<Style> {
 ///
 /// - slot 0 — sort-mode dim overlay,
 /// - slot 1 ([`PATH_SEPARATOR_STYLE_ID`]) — `kind: path` separator,
-/// - slot 2 ([`GROUP_HEADER_STYLE_ID`]) — group headers + grand-total footer.
+/// - slot 2 ([`GROUP_HEADER_STYLE_ID`]) — group headers + grand-total footer,
+/// - slot 3 ([`TREE_CONNECTOR_STYLE_ID`]) — tree connector glyphs + arrows.
 ///
-/// The group-header slot is always present (harmless when nothing is
-/// grouped) so the same map serves both render paths.
-fn content_style_map(t: &Theme) -> StyleMap {
+/// The group-header and tree-connector slots are always present (harmless when
+/// nothing is grouped / the view isn't a tree) so the same map serves every
+/// render path. `tree_connector` is resolved per view (the caller passes the
+/// view's `tree_connector_style` color, or the theme default).
+fn content_style_map(t: &Theme, tree_connector: ratatui::style::Color) -> StyleMap {
     StyleMap::new(vec![
         Style::default().fg(t.text_dim()),
         Style::default()
@@ -7496,6 +7604,7 @@ fn content_style_map(t: &Theme) -> StyleMap {
         Style::default()
             .fg(t.group_header())
             .add_modifier(Modifier::BOLD),
+        Style::default().fg(tree_connector),
     ])
 }
 
@@ -7973,6 +8082,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -8104,6 +8214,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -8187,6 +8298,45 @@ mod tests {
             "`j` must move the focus to the next message even when nothing scrolls"
         );
         assert_ne!(before, after, "the moved highlight must be visible");
+    }
+
+    /// Regression: pressing `r` on a not-yet-loaded `manual_connect` pane
+    /// (postgres / confluence) froze the whole app at 100 % CPU. The pane
+    /// has no columns before its first load (`current_columns` → empty), so
+    /// `rebuild_table_with` bailed out *without* stamping
+    /// `built_table_width`; the post-draw re-fit pass then saw
+    /// `render width != built width` on every frame and requested a redraw
+    /// forever. The re-fit must converge: at most one rebuild, then a no-op.
+    #[test]
+    fn refit_converges_on_column_less_pane() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = smooth_chat_config();
+        config.views[0].columns = Vec::new();
+        config.views[0].row_layout = None;
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // No items either, so the auto-fallback column derivation is empty too.
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                view.active_pane_mut().table.view(f, area);
+            })
+            .unwrap();
+        assert_ne!(
+            view.active_pane_mut().table.last_render_width(),
+            0,
+            "premise: the draw must record a render width"
+        );
+
+        // First pass may rebuild (the width just became known) …
+        view.refit_tables_if_needed();
+        // … but the second must be a no-op, or the render loop spins forever.
+        assert!(
+            !view.refit_tables_if_needed(),
+            "re-fit must converge for a pane without columns (manual_connect pre-load)"
+        );
     }
 
     /// Like above, but through the **split** path the chat actually uses:
@@ -8467,6 +8617,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -8630,6 +8781,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -8774,6 +8926,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -8879,6 +9032,87 @@ mod tests {
         assert!(label(1).contains("Child"));
     }
 
+    #[test]
+    fn tree_label_cell_carries_connector_style_span() {
+        // The connector run (box glyphs + expand arrow) of a tree-label cell
+        // is tagged with `TREE_CONNECTOR_STYLE_ID` via a `StyledSpan`, so the
+        // render path can paint it apart from the label. The span must cover
+        // exactly the connector prefix — not the label text.
+        let config = uniform_recursive_config();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("root", "Root", "RV")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["root".into()],
+                vec![tnode_val("child", "Child", "CV")],
+                None,
+            );
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let name_key = TColumnId::new("name");
+        let cell = |i: usize| rows[i].cells.get(&name_key).expect("label cell");
+
+        // Every label cell carries exactly one connector span, styled with the
+        // dedicated slot, starting at char 0.
+        for i in 0..rows.len() {
+            let spans = &cell(i).spans;
+            assert_eq!(spans.len(), 1, "row {i} should have one connector span");
+            assert_eq!(spans[0].style_id, TREE_CONNECTOR_STYLE_ID, "row {i}");
+            assert_eq!(spans[0].range.start, 0, "row {i} span starts at 0");
+        }
+        // The span must end where the connector ends — i.e. its char-range
+        // delimits exactly the box/arrow prefix, leaving the label untouched.
+        let span_prefix = |i: usize| -> String {
+            let c = cell(i);
+            c.text.chars().take(c.spans[0].range.end).collect()
+        };
+        assert_eq!(span_prefix(0), "▼ ", "root connector = expand arrow");
+        // The child is itself expandable (uniform recursive tree), so its
+        // connector is the box prefix *plus* the collapsed-arrow — both are
+        // part of the styled connector run, the label `Child` is not.
+        assert_eq!(span_prefix(1), "└── ▶ ", "child connector = box glyphs + arrow");
+    }
+
+    #[test]
+    fn tree_label_cell_segments_splits_connector_from_label() {
+        // Helper: first `connector_chars` chars → styled segment, rest plain.
+        let segs = tree_label_cell_segments("└── Child  ", 4, TREE_CONNECTOR_STYLE_ID);
+        assert_eq!(
+            segs,
+            vec![
+                ("└── ".to_string(), Some(TREE_CONNECTOR_STYLE_ID)),
+                ("Child  ".to_string(), None),
+            ],
+        );
+        // Zero-length connector (e.g. a flat leaf) → single plain segment.
+        assert_eq!(
+            tree_label_cell_segments("Root  ", 0, TREE_CONNECTOR_STYLE_ID),
+            vec![("Root  ".to_string(), None)],
+        );
+        // Connector longer than the (truncated) cell → whole cell is connector,
+        // no trailing label segment. Guards the byte-offset clamp.
+        assert_eq!(
+            tree_label_cell_segments("└─", 9, TREE_CONNECTOR_STYLE_ID),
+            vec![("└─".to_string(), Some(TREE_CONNECTOR_STYLE_ID))],
+        );
+    }
+
     // ── Tree-fold aggregation (M4) ───────────────────────────────────
 
     /// Single-level tree config whose root carries a label column (`name`)
@@ -8935,6 +9169,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -10091,6 +10326,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -10912,6 +11148,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                tree_connector_style: None,
             }],
         }
     }
@@ -11415,6 +11652,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            tree_connector_style: None,
         }
     }
 
@@ -11881,6 +12119,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            tree_connector_style: None,
         }],
     }
 }

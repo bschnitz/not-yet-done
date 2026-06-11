@@ -253,6 +253,9 @@ views:
     node_type: "tracking:tree-item"
     key: T
     tree_label: task
+    # Connector-glyph color for this tree (box prefix + expand arrows). Omit
+    # to inherit the theme's `tree_connector`. See tasks.yaml for the rationale.
+    tree_connector_style: text_dim
 
     columns:
       - key: task

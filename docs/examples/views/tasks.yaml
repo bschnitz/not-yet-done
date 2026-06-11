@@ -95,6 +95,15 @@ views:
     default: true
     tree_label: description
 
+    # Color of this tree's connector glyphs — the `├──`/`└──`/`│` box prefix
+    # and the `▶`/`▼` expand arrows — drawn in the `tree_label` column. A theme
+    # color name (`text_dim`, `tree_connector`, `accent`, …, same vocabulary as
+    # a column `style`). Omit it to use the global theme `tree_connector` color.
+    # Set per *tree* (here, on the root view — it covers every depth): the
+    # connectors should read as quiet scaffolding behind the labels, but how
+    # quiet depends on the view's palette, so each tree tunes it independently.
+    tree_connector_style: text_dim
+
     # Saved-query filter. No `default` body is set, so — like the native tab
     # — the whole (non-deleted) forest is shown, including done tasks. Add a
     # `default:` block (a `name` + a `query` FilterExpr whose leaves are

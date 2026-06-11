@@ -530,6 +530,30 @@ ist View-State (nicht persistiert).
 > Flat-Listen wird es ignoriert. Spiegelbildlich zu `group_by:`, das nur in
 > Flat-Listen greift.
 
+#### `tree_connector_style:` — Farbe der Connector-Glyphen pro Tree
+
+Im Tree-Mode malt die `tree_label`-Spalte vor das Label einen **Connector-Lauf**:
+die Box-Zeichen `├──`/`└──`/`│` und die Aufklapp-Pfeile `▶`/`▼`. Dieser Lauf wird
+getrennt vom Label eingefärbt — er soll als leise Struktur _hinter_ den Labels
+lesbar sein, nicht mit ihnen konkurrieren.
+
+```yaml
+views:
+  - name: tasks
+    tree_label: description
+    tree_connector_style: text_dim # optional; sonst Theme-Farbe `tree_connector`
+```
+
+- Ein Theme-Farbname (`text_dim`, `tree_connector`, `accent`, … — dieselbe
+  Vokabular wie bei einer Spalten-`style:`). Ohne Angabe gilt die globale
+  Theme-Farbe `tree_connector` (`tui.yaml`).
+- Steht **auf dem Wurzel-`ViewDef`** und gilt für den **ganzen Tree** (alle
+  Tiefen) — bewusst _pro Tree_, nicht pro Ebene: ein dichter, tiefer Task-Tree
+  will mattere Connectoren als ein flacher; ein Tree auf farbiger Fläche eine
+  andere Tönung als einer auf dem Basis-Hintergrund. So tunt jede Ansicht den
+  Kontrast unabhängig, statt eine globale Connector-Farbe zu erzwingen.
+- Greift nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung.
+
 ### Zweites Beispiel: `confluence.yaml`
 
 ```yaml

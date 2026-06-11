@@ -610,6 +610,21 @@ pub struct ViewDef {
     /// meaningful with `group_by` set.
     #[serde(default)]
     pub summary_only: bool,
+    /// Foreground color for this tree's connector glyphs — the `├──`/`└──`/`│`
+    /// box-drawing prefix and the `▶`/`▼` expand arrows drawn in the
+    /// `tree_label` column. A theme color name (`text_dim`, `tree_connector`,
+    /// `accent`, …; resolved via the same table as `ColumnDef.style`). `None`
+    /// falls back to the global theme `tree_connector` color.
+    ///
+    /// Why per-view: connectors should read as structural scaffolding, quieter
+    /// than the labels — but how much quieter depends on the view's own
+    /// palette and density. A deep, busy task tree wants dimmer connectors than
+    /// a sparse two-level one; a tree drawn on a colored surface needs a
+    /// different hue than one on the base background. Making it per-tree lets
+    /// each view tune that contrast independently instead of forcing one global
+    /// connector color on every tree. Ignored outside tree mode.
+    #[serde(default)]
+    pub tree_connector_style: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
