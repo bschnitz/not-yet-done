@@ -493,6 +493,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            tree_connector_style: None,
         }
     }
 
