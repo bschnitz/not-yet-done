@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
@@ -12,9 +12,27 @@ use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
 use crate::config::{KeyBindingConfig, CommonAction};
-use crate::tabs::columns::{ColumnMeta, resolve_color};
 use crate::ui::popup_utils::{render_popup_frame, render_hints_bar, hints_height};
 use crate::ui::theme::Theme;
+
+/// One configurable column, already resolved to display data. The popup
+/// is source-agnostic: native tabs map their static `ColumnMeta` registry
+/// into this, content tabs build it from the active level's `ColumnDef`s
+/// — so both share one component without the popup knowing about either.
+#[derive(Debug, Clone)]
+pub struct ColumnEntry {
+    pub id: String,
+    /// Abbreviated header shown in the table (highlighted as the
+    /// display-name prefix when it matches).
+    pub header: String,
+    /// Full display name shown in the popup list.
+    pub display_name: String,
+    /// Already-resolved column color (theme lookup happens at the call
+    /// site, which knows its own color vocabulary).
+    pub color: Color,
+    /// Whether this column can be hidden.
+    pub hideable: bool,
+}
 
 pub struct ColumnConfigPopup {
     theme: Arc<Theme>,
@@ -23,7 +41,7 @@ pub struct ColumnConfigPopup {
     cursor: usize,
     open: bool,
     /// All available columns for lookup.
-    all_columns: &'static [ColumnMeta],
+    all_columns: Vec<ColumnEntry>,
     /// Pre-built hint labels from config.
     hints: Vec<(String, &'static str)>,
 }
@@ -32,13 +50,13 @@ impl ColumnConfigPopup {
     pub fn new(
         theme: Arc<Theme>,
         current_config: &[String],
-        all_columns: &'static [ColumnMeta],
+        all_columns: Vec<ColumnEntry>,
         kb: &KeyBindingConfig,
     ) -> Self {
         let mut order: Vec<String> = current_config.to_vec();
-        for meta in all_columns {
-            if !order.iter().any(|id| id == meta.id) {
-                order.push(meta.id.to_string());
+        for entry in &all_columns {
+            if !order.iter().any(|id| *id == entry.id) {
+                order.push(entry.id.clone());
             }
         }
         let selected: Vec<bool> = order.iter()
@@ -56,7 +74,7 @@ impl ColumnConfigPopup {
         Self { theme, order, selected, cursor: 0, open: true, all_columns, hints }
     }
 
-    fn meta(&self, id: &str) -> Option<&'static ColumnMeta> {
+    fn entry(&self, id: &str) -> Option<&ColumnEntry> {
         self.all_columns.iter().find(|c| c.id == id)
     }
 
@@ -81,8 +99,8 @@ impl ColumnConfigPopup {
 
     fn toggle(&mut self) {
         let id = &self.order[self.cursor];
-        if let Some(meta) = self.meta(id) {
-            if !meta.hideable { return; }
+        if let Some(entry) = self.entry(id) {
+            if !entry.hideable { return; }
         }
         self.selected[self.cursor] = !self.selected[self.cursor];
     }
@@ -159,8 +177,8 @@ impl Component for ColumnConfigPopup {
             let row_y = inner.y + i as u16;
             let is_sel = self.selected[i];
             let is_cursor = i == self.cursor;
-            let meta = self.meta(col_id);
-            let is_fixed = meta.map_or(false, |m| !m.hideable);
+            let entry = self.entry(col_id);
+            let is_fixed = entry.map_or(false, |e| !e.hideable);
 
             let bg = if is_cursor { t.surface_2() } else { t.bg() };
 
@@ -171,9 +189,9 @@ impl Component for ColumnConfigPopup {
                 }
             }
 
-            let display_name = meta.map(|m| m.display_name).unwrap_or(col_id.as_str());
-            let header = meta.map(|m| m.header).unwrap_or("");
-            let col_color = meta.map(|m| resolve_color(m.color_key, t)).unwrap_or(t.text_med());
+            let display_name = entry.map(|e| e.display_name.as_str()).unwrap_or(col_id.as_str());
+            let header = entry.map(|e| e.header.as_str()).unwrap_or("");
+            let col_color = entry.map(|e| e.color).unwrap_or(t.text_med());
 
             let num = format!("{:>w$}. ", i + 1, w = digits);
             let marker = if is_fixed || is_sel { "[x] " } else { "[ ] " };

@@ -464,6 +464,16 @@ pub struct ContentPane {
     /// itself — the cumulated value is the adapter-supplied `cumulated_field`.
     tree_aggregate_override: Option<bool>,
 
+    /// User-configured column visibility/order per level (column-config
+    /// popup, `c`). Keyed by [`Self::column_level_key`] — one entry per
+    /// view root / drilled child / tree chain — and holding the visible
+    /// column keys in display order. Levels without an entry show their
+    /// YAML-configured columns unchanged. The owning [`ContentView`]
+    /// holds the source-of-truth map and mirrors it into every pane
+    /// (including freshly split ones), so a per-level override applies
+    /// uniformly across splits.
+    column_overrides: std::collections::HashMap<String, Vec<String>>,
+
     /// Capabilities of the owning view's adapter, snapshotted once at pane
     /// construction (the adapter is fixed for a `ContentView`'s lifetime).
     /// Lets pane-local logic gate UI affordances on what the adapter can
@@ -979,6 +989,13 @@ pub struct ContentView {
     /// handlers symmetric to Jira/Taiga saved-query shortcuts. Cleared
     /// on bind / delete via [`Self::invalidate_postgres_table_shortcuts`].
     pub postgres_table_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
+
+    /// Source of truth for user column-config overrides (popup `c`),
+    /// keyed by [`ContentPane::column_level_key`]. Mirrored into every
+    /// pane (including ones created by later splits/drills) so a level's
+    /// layout is consistent across panes; persisted by the App as one
+    /// JSON settings row per tab.
+    column_overrides: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl ContentPane {
@@ -1037,6 +1054,7 @@ impl ContentPane {
             tree_find: None,
             group_by_override: None,
             tree_aggregate_override: None,
+            column_overrides: std::collections::HashMap::new(),
             capabilities,
         }
     }
@@ -1564,10 +1582,18 @@ impl ContentPane {
             // Chain-based: the cursor row's own branch decides the column
             // set, so a multi-branch tree shows the right columns at a
             // given depth instead of the first branch's.
-            return self
-                .cursor_tree_level(view_defs)
-                .map(|l| l.columns.to_vec())
-                .unwrap_or_default();
+            let level = self.cursor_tree_level(view_defs);
+            let tree_label = level.as_ref().map(|l| l.tree_label.to_string());
+            let mut cols = level.map(|l| l.columns.to_vec()).unwrap_or_default();
+            if let Some(visible) = self
+                .column_level_key(view_defs)
+                .and_then(|k| self.column_overrides.get(&k))
+            {
+                // The tree-label column carries the tree itself and is
+                // never hideable; keep it even against a stale override.
+                cols = apply_column_override(cols, visible, tree_label.as_deref());
+            }
+            return cols;
         }
         let configured: &[ColumnDef] = if let Some(ref child) = self.active_child {
             &child.columns
@@ -1578,6 +1604,12 @@ impl ContentPane {
         };
         if !configured.is_empty() {
             let mut cols = configured.to_vec();
+            if let Some(visible) = self
+                .column_level_key(view_defs)
+                .and_then(|k| self.column_overrides.get(&k))
+            {
+                cols = apply_column_override(cols, visible, None);
+            }
             // An aggregate's `total_column` only carries per-group totals;
             // with grouping cycled off the column would be permanently
             // blank, so it is hidden then (matching the native trackings
@@ -1617,6 +1649,77 @@ impl ContentPane {
                 tree_aggregate: None,
             })
             .collect()
+    }
+
+    /// Stable identity of the level whose columns the pane currently
+    /// shows, used as the key into `column_overrides`. One key per
+    /// configurable coordinate:
+    ///
+    /// - tree mode → `tree:{node_type_chain}` of the cursor row (each
+    ///   branch/depth configures independently, mirroring how
+    ///   `current_columns` resolves the column set),
+    /// - drilled into a child → `child:{view}/{child name}`,
+    /// - view root → `view:{view name}`.
+    ///
+    /// `None` when the level has no YAML-configured columns (the
+    /// auto-fallback derives them from item metadata — e.g. postgres
+    /// rows — so there is nothing stable to configure against).
+    fn column_level_key(&self, view_defs: &[ViewDef]) -> Option<String> {
+        let vd = self.view_def(view_defs)?;
+        if self.tree.is_some() {
+            let chain = self.cursor_node_type_chain();
+            // An empty/unresolvable cursor level has no column set to
+            // configure (empty tree); root level has an empty chain but
+            // resolves fine.
+            self.cursor_tree_level(view_defs)?;
+            return Some(format!("tree:{}/{}", vd.name, chain.join("/")));
+        }
+        if let Some(ref child) = self.active_child {
+            if child.columns.is_empty() {
+                return None;
+            }
+            return Some(format!("child:{}/{}", vd.name, child.name));
+        }
+        if vd.columns.is_empty() {
+            return None;
+        }
+        Some(format!("view:{}", vd.name))
+    }
+
+    /// Mirror the owning view's override map into this pane. Called on
+    /// construction of split panes and whenever the map changes so all
+    /// panes of a tab agree on per-level column layouts.
+    fn set_column_overrides(
+        &mut self,
+        overrides: std::collections::HashMap<String, Vec<String>>,
+    ) {
+        self.column_overrides = overrides;
+    }
+
+    /// The active level's **raw** configured columns — the YAML truth the
+    /// column-config popup edits, before any user override is applied —
+    /// plus the tree-label key in tree mode (that column is not hideable).
+    /// `None` when the level has no configured columns (auto-fallback
+    /// levels derive theirs from item metadata and aren't configurable).
+    fn column_config_source(
+        &self,
+        view_defs: &[ViewDef],
+    ) -> Option<(Vec<ColumnDef>, Option<String>)> {
+        if self.tree.is_some() {
+            let level = self.cursor_tree_level(view_defs)?;
+            return Some((level.columns.to_vec(), Some(level.tree_label.to_string())));
+        }
+        let configured: &[ColumnDef] = if let Some(ref child) = self.active_child {
+            &child.columns
+        } else if let Some(vd) = self.view_def(view_defs) {
+            &vd.columns
+        } else {
+            &[]
+        };
+        if configured.is_empty() {
+            return None;
+        }
+        Some((configured.to_vec(), None))
     }
 
     /// The active level's multi-line `row_layout`, if any. Tree mode never
@@ -4789,6 +4892,7 @@ impl ContentView {
             manual_connect: config.adapter.manual_connect,
             pending_cursor_closes: Vec::new(),
             postgres_table_shortcuts: std::collections::HashMap::new(),
+            column_overrides: std::collections::HashMap::new(),
         };
         cv.sync_action_bar_hints();
         cv
@@ -5251,6 +5355,7 @@ impl ContentView {
             p.active_query_vars = source.active_query_vars.clone();
             p.current_sort = source.current_sort.clone();
             p.current_page = source.current_page;
+            p.set_column_overrides(self.column_overrides.clone());
             p
         };
         let tree = &mut self.pane_trees[self.active_subtab];
@@ -5382,6 +5487,7 @@ impl ContentView {
                     // inside the new pane returns to the parent listing.
                     p.active_child = source.active_child.clone();
                     p.items = source.items.clone();
+                    p.set_column_overrides(self.column_overrides.clone());
                     p
                 };
                 let child_node_type =
@@ -5519,6 +5625,7 @@ impl ContentView {
             p.current_page = source.current_page;
             p.active_child = source.active_child.clone();
             p.items = source.items.clone();
+            p.set_column_overrides(self.column_overrides.clone());
             p
         };
         new_pane.drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
@@ -6338,6 +6445,100 @@ impl ContentView {
                 }
             }
         }
+    }
+
+    // ── Column config (popup `c`) ────────────────────────────────────
+
+    /// The persisted/persistable override map (level key → visible column
+    /// keys in order). The App serializes this as one JSON settings row
+    /// per tab.
+    pub fn column_overrides(&self) -> &std::collections::HashMap<String, Vec<String>> {
+        &self.column_overrides
+    }
+
+    /// Replace the override map (startup load from settings) and mirror it
+    /// into every pane across all subtab split-trees, rebuilding their
+    /// tables so already-loaded panes re-render with the new layout.
+    pub fn set_column_overrides(
+        &mut self,
+        overrides: std::collections::HashMap<String, Vec<String>>,
+    ) {
+        self.column_overrides = overrides;
+        self.distribute_column_overrides();
+    }
+
+    fn distribute_column_overrides(&mut self) {
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        let overrides = self.column_overrides.clone();
+        for tree in self.pane_trees.iter_mut() {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                leaf.pane.set_column_overrides(overrides.clone());
+                if leaf.pane.loaded {
+                    leaf.pane.rebuild_table_with(view_defs, &overlay);
+                }
+            });
+        }
+    }
+
+    /// Data for the column-config popup on the active pane's current
+    /// level: `(currently visible keys in order, all configurable
+    /// columns)`. `None` when the level has no YAML-configured columns
+    /// (auto-fallback levels — e.g. postgres rows — derive their schema
+    /// from the data and aren't configurable).
+    pub fn column_config_entries(
+        &self,
+    ) -> Option<(Vec<String>, Vec<crate::components::column_config_popup::ColumnEntry>)> {
+        use crate::components::column_config_popup::ColumnEntry;
+        let pane = self.active_pane();
+        let (raw, tree_label) = pane.column_config_source(&self.view_defs)?;
+        let entries: Vec<ColumnEntry> = raw
+            .iter()
+            .map(|col| {
+                let name = col.label.clone().unwrap_or_else(|| col.key.clone());
+                ColumnEntry {
+                    id: col.key.clone(),
+                    header: name.clone(),
+                    display_name: name,
+                    color: resolve_theme_color(
+                        &self.theme,
+                        col.style.as_deref().unwrap_or("text_med"),
+                    ),
+                    hideable: tree_label.as_deref() != Some(col.key.as_str()),
+                }
+            })
+            .collect();
+        let raw_keys: Vec<String> = raw.iter().map(|c| c.key.clone()).collect();
+        let current = pane
+            .column_level_key(&self.view_defs)
+            .and_then(|k| self.column_overrides.get(&k).cloned())
+            .unwrap_or(raw_keys);
+        Some((current, entries))
+    }
+
+    /// Apply the popup result to the active pane's current level. A
+    /// selection identical to the raw YAML layout removes the override
+    /// (clean reset — nothing stale persists once the user restores the
+    /// default). Distributes to all panes and rebuilds. Returns `false`
+    /// when the level isn't configurable (no level key).
+    pub fn apply_column_config(&mut self, visible: Vec<String>) -> bool {
+        let Some((raw, _)) = self
+            .active_pane()
+            .column_config_source(&self.view_defs)
+        else {
+            return false;
+        };
+        let Some(key) = self.active_pane().column_level_key(&self.view_defs) else {
+            return false;
+        };
+        let raw_keys: Vec<String> = raw.iter().map(|c| c.key.clone()).collect();
+        if visible == raw_keys {
+            self.column_overrides.remove(&key);
+        } else {
+            self.column_overrides.insert(key, visible);
+        }
+        self.distribute_column_overrides();
+        true
     }
 
     // ── Key handling ─────────────────────────────────────────────────
@@ -7701,6 +7902,32 @@ fn busy_banner(label: &str, started_at_unix_ms: u64, timeout_secs: u64) -> Strin
     } else {
         format!("{label}… ({elapsed_secs}s/{timeout_secs}s)")
     }
+}
+
+/// Project a configured column set through a user override (column-config
+/// popup): keep only the keys in `visible`, in `visible`'s order. Keys the
+/// config no longer knows (stale persisted override after a YAML edit) are
+/// skipped. `keep` names a column that must survive regardless — the tree
+/// mode's label column, which carries the tree itself — re-inserted at its
+/// configured position when an (older/corrupt) override dropped it.
+fn apply_column_override(
+    cols: Vec<ColumnDef>,
+    visible: &[String],
+    keep: Option<&str>,
+) -> Vec<ColumnDef> {
+    let mut result: Vec<ColumnDef> = visible
+        .iter()
+        .filter_map(|key| cols.iter().find(|c| &c.key == key).cloned())
+        .collect();
+    if let Some(keep_key) = keep {
+        if !result.iter().any(|c| c.key == keep_key) {
+            if let Some(pos) = cols.iter().position(|c| c.key == keep_key) {
+                let idx = pos.min(result.len());
+                result.insert(idx, cols[pos].clone());
+            }
+        }
+    }
+    result
 }
 
 fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
@@ -11618,6 +11845,136 @@ mod tests {
         assert!(!state.loading);
         assert!(state.hits.is_empty());
         assert_eq!(state.query, "design", "query stays for status-bar feedback");
+    }
+
+    // ── Column-config overrides (popup `c` on content tabs) ─────────
+
+    #[test]
+    fn apply_column_override_orders_filters_and_keeps_label() {
+        let cols = vec![hcol("a"), hcol("b"), hcol("c")];
+        // Reorder + hide.
+        let out = apply_column_override(cols.clone(), &["c".into(), "a".into()], None);
+        let keys: Vec<&str> = out.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["c", "a"]);
+        // Keys the config no longer knows (stale persisted override) are skipped.
+        let out = apply_column_override(cols.clone(), &["gone".into(), "b".into()], None);
+        let keys: Vec<&str> = out.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["b"]);
+        // The tree-label column survives an override that dropped it,
+        // re-inserted at its configured position.
+        let out = apply_column_override(cols, &["c".into()], Some("a"));
+        let keys: Vec<&str> = out.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["a", "c"]);
+    }
+
+    #[test]
+    fn column_config_entries_and_apply_on_view_root() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let (current, entries) = view.column_config_entries().expect("root level configurable");
+        assert_eq!(current, vec!["key".to_string(), "summary".to_string()]);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.hideable), "flat levels have no fixed column");
+        assert_eq!(entries[0].display_name, "Key", "label wins as display name");
+        assert_eq!(entries[1].display_name, "summary", "no label → key");
+
+        // Hide `key` → override stored under the view-root level key and
+        // applied by current_columns.
+        assert!(view.apply_column_config(vec!["summary".into()]));
+        assert_eq!(
+            view.column_overrides().get("view:issues"),
+            Some(&vec!["summary".to_string()]),
+        );
+        let view_defs = view.view_defs.clone();
+        let cols = view.active_pane().current_columns(&view_defs);
+        let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["summary"]);
+        // Re-opening the popup shows the overridden selection.
+        let (current, _) = view.column_config_entries().unwrap();
+        assert_eq!(current, vec!["summary".to_string()]);
+
+        // Restoring the raw YAML layout removes the override entirely
+        // (clean reset, nothing stale persists).
+        assert!(view.apply_column_config(vec!["key".into(), "summary".into()]));
+        assert!(view.column_overrides().is_empty());
+        let cols = view.active_pane().current_columns(&view_defs);
+        let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["key", "summary"]);
+    }
+
+    #[test]
+    fn column_level_keys_distinguish_root_child_and_tree() {
+        // Flat root vs drilled child get distinct keys, so each level
+        // keeps its own layout.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        assert_eq!(
+            view.active_pane().column_level_key(&view_defs).as_deref(),
+            Some("view:issues"),
+        );
+        let child_def = config.views[0].children[0].clone();
+        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        assert_eq!(
+            view.active_pane().column_level_key(&view_defs).as_deref(),
+            Some("child:issues/Comments"),
+        );
+
+        // Tree mode keys off the cursor row's node_type_chain.
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        assert_eq!(
+            view.active_pane().column_level_key(&view_defs).as_deref(),
+            Some("tree:databases/mock:db"),
+        );
+    }
+
+    #[test]
+    fn tree_override_never_drops_label_column() {
+        // A (stale/corrupt) override without the tree-label column still
+        // renders it — the column carries the tree itself.
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("tree:databases/mock:db".to_string(), Vec::new());
+        view.set_column_overrides(overrides);
+        let view_defs = view.view_defs.clone();
+        let cols = view.active_pane().current_columns(&view_defs);
+        let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["name"], "tree-label column re-inserted despite empty override");
+    }
+
+    #[test]
+    fn column_config_unavailable_on_auto_fallback_level() {
+        // No YAML columns → schema is derived from item metadata
+        // (postgres rows); there is nothing stable to configure.
+        let mut config = test_config_with_children();
+        config.views[0].columns = Vec::new();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        assert!(view.column_config_entries().is_none());
+        assert!(!view.apply_column_config(vec!["key".into()]));
+    }
+
+    #[test]
+    fn split_pane_inherits_column_overrides() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        assert!(view.apply_column_config(vec!["summary".into()]));
+
+        view.split_focused(SplitOrientation::Horizontal);
+        let view_defs = view.view_defs.clone();
+        // The freshly split pane (now focused) sees the same override.
+        let cols = view.active_pane().current_columns(&view_defs);
+        let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["summary"], "new split pane mirrors the override map");
     }
 
     #[test]

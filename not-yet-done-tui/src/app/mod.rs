@@ -6718,42 +6718,95 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn open_column_config_popup(&mut self) {
-        use crate::components::column_config_popup::ColumnConfigPopup;
-        use crate::tabs::columns::{ALL_COLUMNS, ALL_TRACKING_COLUMNS};
+        use crate::components::column_config_popup::{ColumnConfigPopup, ColumnEntry};
+        use crate::tabs::columns::{resolve_color, ColumnMeta, ALL_COLUMNS, ALL_TRACKING_COLUMNS};
 
-        let (config, columns) = if self.active_tab == Tab::Trackings {
-            (&self.trackings_view.column_config, ALL_TRACKING_COLUMNS)
-        } else {
-            (&self.tasks_view.column_config, ALL_COLUMNS)
+        // Native tabs read from the static column registry; content tabs
+        // ask their view for the active level's configured columns.
+        let native_entries = |metas: &'static [ColumnMeta], theme: &Theme| -> Vec<ColumnEntry> {
+            metas
+                .iter()
+                .map(|m| ColumnEntry {
+                    id: m.id.to_string(),
+                    header: m.header.to_string(),
+                    display_name: m.display_name.to_string(),
+                    color: resolve_color(m.color_key, theme),
+                    hideable: m.hideable,
+                })
+                .collect()
+        };
+
+        let (config, entries) = match self.active_tab {
+            Tab::Trackings => (
+                self.trackings_view.column_config.clone(),
+                native_entries(ALL_TRACKING_COLUMNS, &self.shared_theme),
+            ),
+            Tab::Tasks => (
+                self.tasks_view.column_config.clone(),
+                native_entries(ALL_COLUMNS, &self.shared_theme),
+            ),
+            Tab::Content(idx) => {
+                match self.content_view(idx).and_then(|cv| cv.column_config_entries()) {
+                    Some(pair) => pair,
+                    None => {
+                        self.notify("This level has no configurable columns".to_string());
+                        return;
+                    }
+                }
+            }
         };
         self.column_config_popup = Some(ColumnConfigPopup::new(
             Arc::clone(&self.shared_theme),
-            config,
-            columns,
+            &config,
+            entries,
             &self.keybindings,
         ));
     }
 
     fn apply_column_config(&mut self, config: Vec<String>) {
         let settings = Arc::clone(&self.settings_repo);
-        if self.active_tab == Tab::Trackings {
-            self.trackings_view.column_config = config;
-            let value = self.trackings_view.column_config.join(",");
-            let _ = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    settings.set("tracking_columns", &value).await
-                })
-            });
-            self.rebuild_trackings_table();
-        } else {
-            self.tasks_view.column_config = config;
-            let value = self.tasks_view.column_config.join(",");
-            let _ = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    settings.set("tree_columns", &value).await
-                })
-            });
-            self.spawn_load();
+        match self.active_tab {
+            Tab::Trackings => {
+                self.trackings_view.column_config = config;
+                let value = self.trackings_view.column_config.join(",");
+                let _ = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        settings.set("tracking_columns", &value).await
+                    })
+                });
+                self.rebuild_trackings_table();
+            }
+            Tab::Tasks => {
+                self.tasks_view.column_config = config;
+                let value = self.tasks_view.column_config.join(",");
+                let _ = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        settings.set("tree_columns", &value).await
+                    })
+                });
+                self.spawn_load();
+            }
+            Tab::Content(idx) => {
+                let Some(cv) = self.content_view_mut(idx) else { return };
+                if !cv.apply_column_config(config) {
+                    return;
+                }
+                // One JSON settings row per tab holds the whole override
+                // map (level key → visible column keys); an emptied map
+                // deletes the row so a full reset leaves no residue.
+                let key = format!("content_columns:{}", cv.tab_name);
+                let value = serde_json::to_string(cv.column_overrides()).unwrap_or_default();
+                let empty = cv.column_overrides().is_empty();
+                let _ = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        if empty {
+                            settings.delete(&key).await
+                        } else {
+                            settings.set(&key, &value).await
+                        }
+                    })
+                });
+            }
         }
     }
 
@@ -6845,6 +6898,33 @@ impl App {
             let cols: Vec<String> = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             if !cols.is_empty() {
                 self.trackings_view.column_config = cols;
+            }
+        }
+        // Load per-content-tab column overrides (one JSON row per tab,
+        // mapping level key → visible column keys in order). An unparsable
+        // row is ignored — the views then just show their YAML defaults.
+        let targets: Vec<(usize, String)> = self
+            .content_views_indexed()
+            .map(|(i, cv)| (i, cv.tab_name.clone()))
+            .collect();
+        for (idx, tab_name) in targets {
+            let settings = Arc::clone(&self.settings_repo);
+            let key = format!("content_columns:{tab_name}");
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async { settings.get(&key).await })
+            });
+            if let Ok(Some(value)) = result {
+                if let Ok(map) = serde_json::from_str::<
+                    std::collections::HashMap<String, Vec<String>>,
+                >(&value)
+                {
+                    if !map.is_empty() {
+                        if let Some(cv) = self.content_view_mut(idx) {
+                            cv.set_column_overrides(map);
+                        }
+                    }
+                }
             }
         }
     }

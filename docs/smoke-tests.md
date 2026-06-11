@@ -3399,6 +3399,30 @@ Beide Prüfpfade testen:
       Notification „<Tab>: saved-query shortcut [x] ('name') shadows … —
       rebind it via the query menu"; der Shortcut bleibt aktiv.
 
+## Column-Config (`c`) auf Content-Tabs
+
+`c` öffnete früher auf jedem Nicht-Trackings-Tab das **native
+Tasks**-Spalten-Popup (und hätte beim Anwenden dessen Settings
+überschrieben). Jetzt generisch pro Level:
+
+- [x] Adapter-Tab (z. B. „Trackings (A)"): `c` zeigt die Spalten der
+      aktiven View (nicht die Tasks-Spalten); `Space` blendet eine
+      Spalte aus (z. B. Taskpath) → Tabelle baut sofort ohne sie neu.
+- [x] Persistenz: App neu starten → die Spalte bleibt ausgeblendet
+      (Settings-Row `content_columns:<Tab>` als JSON-Map).
+- [x] Reset: Spalte wieder aktivieren und per `Ctrl+D` an die
+      YAML-Position schieben → Override entfernt, Settings-Row gelöscht
+      (`SELECT key FROM settings WHERE key LIKE 'content_columns%'`
+      ist leer).
+- [x] Tree-Mode („Tasks (A)"): `c` zeigt die Spalten der Cursor-Ebene;
+      die `tree_label`-Spalte (Task) ist fix (`Space` ohne Wirkung);
+      andere Spalte (Created) togglen wirkt sofort + Reset wie oben.
+- [x] Native Tabs (Tasks/Trackings): Popup unverändert (Display-Namen,
+      Toggle, Persistenz in `tree_columns`/`tracking_columns`).
+- [ ] Auto-Fallback-Level (Postgres-Rows): `c` → Notification „This
+      level has no configurable columns" (Unit-Test vorhanden, live
+      ungetestet — braucht verbundene Postgres-Instanz).
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

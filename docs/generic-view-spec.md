@@ -588,6 +588,34 @@ views:
   Kontrast unabhängig, statt eine globale Connector-Farbe zu erzwingen.
 - Greift nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung.
 
+#### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
+
+Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf
+Content-Tabs genauso wie auf den nativen Tasks/Trackings-Tabs: Spalten
+ein-/ausblenden (`Space`) und umsortieren (`Ctrl+D`/`Ctrl+F`), angewendet mit
+`Enter`. Es existiert, damit User das Spalten-Layout an ihre Arbeit anpassen
+können, **ohne die View-YAML zu editieren** — die YAML bleibt die geteilte
+Default-Definition, das Popup ist der persönliche Override darüber.
+
+- **Pro Level konfigurierbar:** Jede Ebene hat ihr eigenes Layout — die
+  Wurzel-View, jede gedrillte Child-Ebene und im Tree-Mode jede
+  `node_type_chain` (Cursor-Zeile entscheidet, welche Ebene konfiguriert
+  wird). Splits derselben Ebene teilen sich das Layout.
+- **Persistenz:** Eine Settings-Row pro Tab (`content_columns:<Tab-Name>`,
+  JSON-Map Level-Key → sichtbare Spalten-Keys in Reihenfolge), geladen beim
+  Start.
+- **Reset-Semantik:** Entspricht die Auswahl wieder exakt der
+  YAML-Reihenfolge, wird der Override entfernt (und bei leerer Map die
+  Settings-Row gelöscht) — ein zurückgesetztes Layout hinterlässt keinen
+  Zustand, der spätere YAML-Änderungen verdecken könnte.
+- **`tree_label`-Spalte ist fix:** Sie trägt den Tree selbst (Connectoren,
+  Einrückung) und kann nicht ausgeblendet werden.
+- **Auto-Fallback-Ebenen** (keine `columns:` in der YAML, Schema aus den
+  Item-Metadaten abgeleitet — z. B. Postgres-Rows) sind nicht konfigurierbar;
+  `c` meldet das per Notification. Es gibt dort keine stabile
+  Spalten-Identität, an der ein Override über Reloads hinweg festmachen
+  könnte.
+
 ### Zweites Beispiel: `confluence.yaml`
 
 ```yaml
