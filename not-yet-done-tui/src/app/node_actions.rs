@@ -494,6 +494,8 @@ mod tests {
             aggregates: Vec::new(),
             summary_only: false,
             tree_connector_style: None,
+            tree_lines: None,
+            tree_markers: None,
         }
     }
 

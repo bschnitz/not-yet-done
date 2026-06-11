@@ -3450,6 +3450,25 @@ App-Start automatisch angewendet wird.
       roh (ohne Variablen-Popup) angewendet — Verhalten dokumentiert,
       live ungetestet.
 
+## Tree-Linien + Aufklappmarker konfigurierbar (`tree_lines` / `tree_markers`)
+
+Pro Tree (Wurzel-`ViewDef`) sind die Box-Linien (`├──`/`└──`/`│`) und die
+Aufklappmarker (`▶`/`▼`) getrennt konfigurierbar: `tree_lines: false` ersetzt
+die Linien durch Einrückung (zwei Leerzeichen pro Tiefe), `tree_markers:`
+überschreibt (`collapsed`/`expanded`) oder versteckt (`enabled: false`) die
+Marker.
+
+- [x] Postgres-Tab (`tree_lines: false` in der User-Config): Datenbank
+      vier Ebenen tief aufklappen → Schema/Tabellen-Ebenen sind nur
+      eingerückt, ohne `├──`/`└──`-Linien; die `▶`/`▼`-Marker
+      erscheinen weiterhin.
+- [x] Tab ohne Konfiguration („Tasks (A)"): unverändert Linien +
+      Marker wie bisher (Default-Verhalten).
+- [ ] `tree_markers.enabled: false` (temporär setzen): Linien bleiben,
+      Marker verschwinden; Aufklappen per Enter funktioniert weiter
+      (unit-getestet, live offen).
+- [x] Connector-Farbe färbt bei `tree_lines: false` weiterhin den
+      Marker-Lauf (im Capture: Marker in `tree_connector`-Farbe).
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor
