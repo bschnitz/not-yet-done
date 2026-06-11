@@ -625,6 +625,42 @@ pub struct ViewDef {
     /// connector color on every tree. Ignored outside tree mode.
     #[serde(default)]
     pub tree_connector_style: Option<String>,
+    /// Draw the `├──`/`└──`/`│` box-drawing line connectors in tree mode.
+    /// `false` replaces the lines with plain indentation (two spaces per
+    /// depth level); the expand markers (see `tree_markers`) and the
+    /// optional `leaf_glyph` are unaffected.
+    ///
+    /// Why: the lines carry sibling/continuation structure, which earns
+    /// its visual weight on deep, irregular trees (tasks) but reads as
+    /// noise on shallow, regular drills (database → schema → table).
+    /// Default `true`. Ignored outside tree mode.
+    #[serde(default)]
+    pub tree_lines: Option<bool>,
+    /// Expand/collapse markers drawn in front of expandable tree rows,
+    /// configured independently of the line connectors (`tree_lines`).
+    /// `None` = defaults (`▶` collapsed, `▼` expanded, shown). Ignored
+    /// outside tree mode.
+    #[serde(default)]
+    pub tree_markers: Option<TreeMarkerDef>,
+}
+
+/// Expand/collapse marker configuration for tree mode (see
+/// [`ViewDef::tree_markers`]). Each field is optional so a config can
+/// override just one marker; unset fields keep the defaults.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeMarkerDef {
+    /// Show the markers at all. `false` hides them entirely — rows stay
+    /// expandable via the usual keys, only the visual cue goes. Default
+    /// `true`.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Marker for a collapsed expandable row. Default `▶`.
+    #[serde(default)]
+    pub collapsed: Option<String>,
+    /// Marker for an expanded row. Default `▼`.
+    #[serde(default)]
+    pub expanded: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1569,6 +1569,29 @@ impl ContentPane {
             .unwrap_or_else(|| t.tree_connector())
     }
 
+    /// Resolve this tree's drawing options from the view's `tree_lines` /
+    /// `tree_markers` config: whether the `├──`/`└──`/`│` line connectors
+    /// are drawn (default yes) and which expand/collapse markers prefix
+    /// expandable rows (default `▶`/`▼`; empty when markers are disabled).
+    fn tree_draw_options<'a>(&self, view_defs: &'a [ViewDef]) -> TreeDrawOptions<'a> {
+        let vd = self.view_def(view_defs);
+        let markers = vd.and_then(|v| v.tree_markers.as_ref());
+        let enabled = markers.and_then(|m| m.enabled).unwrap_or(true);
+        let (collapsed_marker, expanded_marker) = if enabled {
+            (
+                markers.and_then(|m| m.collapsed.as_deref()).unwrap_or("▶"),
+                markers.and_then(|m| m.expanded.as_deref()).unwrap_or("▼"),
+            )
+        } else {
+            ("", "")
+        };
+        TreeDrawOptions {
+            lines: vd.and_then(|v| v.tree_lines).unwrap_or(true),
+            collapsed_marker,
+            expanded_marker,
+        }
+    }
+
     // ── Current-level config (respects nav depth) ───────────────────
 
     /// Whether the active level has any live (time-derived) column whose
@@ -2415,8 +2438,11 @@ impl ContentPane {
         // `child_prefix_at[depth]` stack carries each ancestor's `│`/blank
         // continuation down to its descendants (valid because the visible
         // entries are in DFS order, so a node's descendants immediately
-        // follow it before any sibling).
+        // follow it before any sibling). The view's `tree_lines` /
+        // `tree_markers` config can swap the line connectors for plain
+        // indentation and override or hide the expand markers.
         let connectors: Vec<String> = {
+            let opts = self.tree_draw_options(view_defs);
             let visible: Vec<&crate::views::content_tree::TreeEntry> = self
                 .tree_visible_indices
                 .iter()
@@ -2445,16 +2471,34 @@ impl ContentPane {
                     own.push(e.node.id.clone());
                     Some(tree.expanded.contains(&own))
                 };
-                let connector = not_yet_done_forest::forest_connector(
-                    not_yet_done_forest::ConnectorSpec {
-                        depth: d,
-                        is_last: is_last[i],
-                        prefix: &prefix,
-                        has_description: true,
-                        has_children: e.has_children,
-                        expanded,
-                    },
-                );
+                // The marker is appended here (not via `ConnectorSpec.
+                // expanded`) so the per-view `tree_markers` config can
+                // override or hide it; an empty marker leaves no stray
+                // trailing space.
+                let marker = match expanded {
+                    Some(true) => opts.expanded_marker,
+                    Some(false) => opts.collapsed_marker,
+                    None => "",
+                };
+                let base = if opts.lines {
+                    not_yet_done_forest::forest_connector(
+                        not_yet_done_forest::ConnectorSpec {
+                            depth: d,
+                            is_last: is_last[i],
+                            prefix: &prefix,
+                            has_description: true,
+                            has_children: e.has_children,
+                            expanded: None,
+                        },
+                    )
+                } else {
+                    "  ".repeat(d)
+                };
+                let connector = if marker.is_empty() {
+                    base
+                } else {
+                    format!("{base}{marker} ")
+                };
                 let cp = not_yet_done_forest::forest_child_prefix(d, is_last[i], true, &prefix);
                 if child_prefix_at.len() <= d + 1 {
                     child_prefix_at.resize(d + 2, String::new());
@@ -7198,6 +7242,17 @@ fn tree_label_cell_segments(
     segments
 }
 
+/// Resolved per-view tree drawing options (see
+/// [`ContentPane::tree_draw_options`]): whether the box-drawing line
+/// connectors are drawn and which expand/collapse markers (possibly empty
+/// when disabled) prefix expandable rows. Borrows the marker strings from
+/// the view config they were resolved from.
+struct TreeDrawOptions<'a> {
+    lines: bool,
+    collapsed_marker: &'a str,
+    expanded_marker: &'a str,
+}
+
 /// Split an already-fitted `path`-column string into render segments,
 /// tagging each run of the display `separator` with `sep_style_id` so the
 /// renderer paints it in the theme's taskpath-separator style. Segment text
@@ -8519,6 +8574,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -8651,6 +8708,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -9054,6 +9113,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -9218,6 +9279,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -9363,6 +9426,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -9466,6 +9531,89 @@ mod tests {
             label(1),
         );
         assert!(label(1).contains("Child"));
+    }
+
+    /// Build the standard two-row tree (expanded Root → expandable Child)
+    /// from `config` and return the rendered tree-label cell texts.
+    /// Shared by the `tree_lines` / `tree_markers` config tests.
+    fn tree_label_texts(config: ViewFileConfig) -> Vec<String> {
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("root", "Root", "RV")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["root".into()],
+                vec![tnode_val("child", "Child", "CV")],
+                None,
+            );
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let name_key = TColumnId::new("name");
+        rows.iter()
+            .map(|r| r.cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn tree_lines_off_indents_without_box_connectors() {
+        // `tree_lines: false` swaps the `├──`/`└──` box prefix for plain
+        // two-space-per-depth indentation; the expand markers stay.
+        let mut config = uniform_recursive_config();
+        config.views[0].tree_lines = Some(false);
+        let labels = tree_label_texts(config);
+        assert!(labels[0].starts_with("▼ Root"), "root: {:?}", labels[0]);
+        assert!(
+            labels[1].starts_with("  ▶ Child"),
+            "child should be indent + marker, no box glyphs: {:?}",
+            labels[1],
+        );
+    }
+
+    #[test]
+    fn tree_markers_config_overrides_arrows() {
+        use crate::config::view_config::TreeMarkerDef;
+        let mut config = uniform_recursive_config();
+        config.views[0].tree_markers = Some(TreeMarkerDef {
+            enabled: None,
+            collapsed: Some("+".into()),
+            expanded: Some("-".into()),
+        });
+        let labels = tree_label_texts(config);
+        assert!(labels[0].starts_with("- Root"), "root: {:?}", labels[0]);
+        assert!(labels[1].starts_with("└── + Child"), "child: {:?}", labels[1]);
+    }
+
+    #[test]
+    fn tree_markers_disabled_hides_arrows_keeps_lines() {
+        use crate::config::view_config::TreeMarkerDef;
+        let mut config = uniform_recursive_config();
+        config.views[0].tree_markers = Some(TreeMarkerDef {
+            enabled: Some(false),
+            collapsed: None,
+            expanded: None,
+        });
+        let labels = tree_label_texts(config);
+        assert!(labels[0].starts_with("Root"), "root: {:?}", labels[0]);
+        assert!(
+            labels[1].starts_with("└── Child"),
+            "child keeps the box connector, loses the arrow: {:?}",
+            labels[1],
+        );
     }
 
     #[test]
@@ -9606,6 +9754,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -10763,6 +10913,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -11606,6 +11758,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                tree_lines: None,
+                tree_markers: None,
             }],
         }
     }
@@ -12240,6 +12394,8 @@ mod tests {
             aggregates: Vec::new(),
             summary_only: false,
             tree_connector_style: None,
+            tree_lines: None,
+            tree_markers: None,
         }
     }
 
@@ -12793,6 +12949,8 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             aggregates: Vec::new(),
             summary_only: false,
             tree_connector_style: None,
+            tree_lines: None,
+            tree_markers: None,
         }],
     }
 }

@@ -605,6 +605,36 @@ views:
   Kontrast unabhängig, statt eine globale Connector-Farbe zu erzwingen.
 - Greift nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung.
 
+#### `tree_lines:` / `tree_markers:` — Linien und Aufklappmarker pro Tree
+
+Die beiden Bestandteile des Connector-Laufs sind getrennt konfigurierbar: die
+Box-Linien (`├──`/`└──`/`│`) über `tree_lines`, die Aufklappmarker (`▶`/`▼`)
+über `tree_markers`. Beide stehen — wie `tree_connector_style` — auf dem
+**Wurzel-`ViewDef`** und gelten für den ganzen Tree.
+
+```yaml
+views:
+  - name: databases
+    tree_label: name
+    tree_lines: false # Default true; false = nur Einrückung statt Linien
+    tree_markers: # optional; weglassen = ▶/▼ wie gehabt
+      enabled: true # false versteckt die Marker komplett
+      collapsed: "+" # Default ▶
+      expanded: "-" # Default ▼
+```
+
+- **`tree_lines: false`** ersetzt die Linien durch schlichte Einrückung
+  (zwei Leerzeichen pro Tiefe). Warum: die Linien transportieren
+  Geschwister-/Fortsetzungsstruktur — das lohnt sich auf tiefen, unregelmäßigen
+  Bäumen (Tasks), ist aber visuelles Rauschen auf flachen, regelmäßigen Drills
+  (Datenbank → Schema → Tabelle). Marker und `leaf_glyph` bleiben unberührt.
+- **`tree_markers.enabled: false`** versteckt die Aufklappmarker; die Zeilen
+  bleiben über die üblichen Tasten aufklappbar, nur der visuelle Hinweis
+  entfällt. `collapsed`/`expanded` überschreiben einzeln die Glyphen — z. B.
+  `+`/`-` für einen kompakteren Look oder Nerd-Font-Icons.
+- Beide greifen nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung. Das
+  Blatt-Symbol konfiguriert weiterhin `leaf_glyph` (pro Ebene), die Farbe des
+  gesamten Laufs `tree_connector_style`.
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 
 Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf
