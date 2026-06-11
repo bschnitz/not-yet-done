@@ -453,8 +453,11 @@ pub fn has_tree_continuation_for_chain(view_def: &ViewDef, node_type_chain: &[St
             return true;
         }
     }
-    let stripped = strip_view_root_type(node_type_chain, view_def);
-    if let Some(child) = child_def_for_type_chain(view_def, stripped) {
+    // Pass the ORIGINAL chain — `child_def_for_type_chain` strips the root
+    // type itself; pre-stripping double-strips and misses the recursive
+    // child in a uniform tree (root type == child type). See the note in
+    // `tree_level_children_for_chain`.
+    if let Some(child) = child_def_for_type_chain(view_def, node_type_chain) {
         if child.recursive && child.tree_label.is_some() {
             return true;
         }
@@ -586,7 +589,13 @@ pub fn tree_level_children_for_chain<'a>(
     if chain.is_empty() {
         return Some(&view_def.children);
     }
-    Some(&child_def_for_type_chain(view_def, chain)?.children)
+    // Pass the ORIGINAL chain: `child_def_for_type_chain` strips the root
+    // type itself, so handing it the pre-stripped `chain` would double-strip
+    // and, in a uniform recursive tree (root type == child type, e.g. the
+    // tasks adapter's `task:item`/`task:item`), eat the child segment —
+    // resolving every level past depth 0 to `None` and blanking its
+    // expand glyph. Same fix as `tree_level_for_chain` / `leaf_glyph_opt_for_chain`.
+    Some(&child_def_for_type_chain(view_def, node_type_chain)?.children)
 }
 
 /// Pick the expand-state glyph for a tree entry. Placeholders show
@@ -1482,6 +1491,48 @@ mod tests {
         // counts as tree-continuing → true.
         let chain = vec!["mock:dir".to_string()];
         assert!(has_tree_continuation_for_chain(&v, &chain));
+    }
+
+    /// Regression (tasks adapter, "sub-levels past the 2nd don't unfold"):
+    /// in a *uniform* recursive tree the view-root node_type equals the
+    /// recursive child's node_type (here `task:item`/`task:item`). A depth
+    /// ≥1 entry's `node_type_chain` then carries the root type twice. The
+    /// chain-aware helpers must strip the root prefix exactly once —
+    /// `child_def_for_type_chain` already strips it, so a caller that
+    /// pre-strips double-strips and eats the child segment, resolving every
+    /// level below the root to `None`. That blanked the `▶`/`▼` expand glyph
+    /// for every node below the root, so sub-levels couldn't be unfolded.
+    /// Distinct from
+    /// `has_tree_continuation_for_chain_honors_recursive_self`, which uses
+    /// distinct root/child types and a single-element chain → never triggers
+    /// the double-strip.
+    #[test]
+    fn uniform_recursive_tree_keeps_expand_glyph_below_root() {
+        let mut item = child("item", Some("name"), vec![col("name")], Vec::new());
+        item.node_type = "task:item".into();
+        item.recursive = true;
+        let mut v = view(Some("name"), vec![col("name")], vec![item]);
+        v.node_type = "task:item".into();
+
+        // Depth 0 (chain == [root]) always worked; depths ≥1 are the regression.
+        let d0 = vec!["task:item".to_string()];
+        let d1 = vec!["task:item".to_string(), "task:item".to_string()];
+        let d2 = vec!["task:item".to_string(); 3];
+
+        assert!(has_tree_continuation_for_chain(&v, &d0));
+        assert!(
+            has_tree_continuation_for_chain(&v, &d1),
+            "depth-1 node in a uniform recursive tree must stay expandable"
+        );
+        assert!(
+            has_tree_continuation_for_chain(&v, &d2),
+            "self-similar tree stays expandable at arbitrary depth"
+        );
+
+        // The children-resolver (drives the glyph hint and the expand
+        // fan-out) must resolve the recursive child, not `None`.
+        assert!(tree_level_children_for_chain(&v, &d1).is_some());
+        assert!(tree_level_children_for_chain(&v, &d2).is_some());
     }
 
     /// Regression: the first-chain depth walkers (`tree_level_at_depth`,
