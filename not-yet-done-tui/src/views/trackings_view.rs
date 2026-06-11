@@ -50,6 +50,10 @@ pub struct TrackingsView {
     pub active_filter_name: Option<String>,
     pub column_config: Vec<String>,
     pub favorites: Vec<SavedQuery>,
+    /// Name of the saved query marked as default (★ in the query
+    /// menu). Persisted by the App as a settings row; applied on app
+    /// start instead of the last-active filter.
+    pub default_query_name: Option<String>,
 
     /// Tracking grouping popup cursor (None = closed).
     pub group_popup: Option<usize>,
@@ -105,6 +109,7 @@ impl TrackingsView {
             active_filter_name: None,
             column_config: crate::tabs::columns::default_tracking_column_ids(),
             favorites: Vec::new(),
+            default_query_name: None,
             group_popup: None,
             taskpath_separator: "/".to_string(),
             link_refs: std::collections::HashSet::new(),
@@ -178,6 +183,7 @@ impl TrackingsView {
             name: f.name.clone(),
             query: f.query.clone(),
             shortcut: f.shortcut.clone(),
+            is_default: self.default_query_name.as_deref() == Some(f.name.as_str()),
         }).collect();
         self.query_menu.open(&entries, &self.query_menu_kb);
     }
@@ -202,6 +208,9 @@ impl TrackingsView {
             }
             QueryMenuMessage::EditShortcut { name, query } => {
                 ViewRequest::PromptSavedQueryShortcut { scope, name, query }
+            }
+            QueryMenuMessage::SetDefault { name } => {
+                ViewRequest::SetDefaultSavedQuery { scope, name }
             }
             QueryMenuMessage::CreateNew { name } => {
                 ViewRequest::OpenSavedQueryEditor {

@@ -104,6 +104,7 @@ impl App {
             .map(|p| PopupItem {
                 label: config_label(p, &root),
                 value: p.display().to_string(),
+                ..Default::default()
             })
             .collect();
         let mut popup = SearchablePopup::new(

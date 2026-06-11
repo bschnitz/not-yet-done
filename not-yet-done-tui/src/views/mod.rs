@@ -166,6 +166,10 @@ pub enum ViewRequest {
         query: String,
         name: String,
     },
+    /// Toggle a content-view saved query as this tab's default —
+    /// applied automatically on app start instead of the view-YAML
+    /// `query.default`. Selecting the current default clears it.
+    SetDefaultContentQuery { view_index: usize, name: String },
     /// Drill down into a child node (async).
     DrillDown { view_index: usize, pane_id: PaneId, node_id: String, node_label: String, child_node_type: String },
     /// Load the children of a tree node into the pane's tree cache
@@ -486,6 +490,9 @@ pub enum ViewRequest {
     DeleteSavedQuery { scope: String, name: String },
     /// Prompt the user for a shortcut key for a saved query.
     PromptSavedQueryShortcut { scope: String, name: String, query: String },
+    /// Toggle a saved query as the per-scope default (applied on app
+    /// start). Selecting the current default clears it.
+    SetDefaultSavedQuery { scope: String, name: String },
 }
 
 // ---------------------------------------------------------------------------

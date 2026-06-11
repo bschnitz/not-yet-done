@@ -166,6 +166,19 @@ impl App {
     }
 
     pub async fn load_active_filter(&mut self) {
+        // An explicitly marked default query (★ in the query menu)
+        // beats the last-active filter restore.
+        if let Some(saved) = self.load_default_query("task").await {
+            if let Ok(parsed) = query_filter::parse(&saved.1) {
+                self.tasks_view.active_filter = Some(parsed.expr);
+                self.tasks_view.active_filter_options = parsed.options;
+                self.tasks_view.active_filter_json = Some(saved.1);
+                self.tasks_view.active_filter_name = Some(saved.0);
+                self.spawn_load();
+                return;
+            }
+        }
+
         let Some(filter_id_str) = self.settings_repo
             .get("active_saved_filter_task").await.ok().flatten()
         else { return };
@@ -183,6 +196,20 @@ impl App {
             self.tasks_view.active_filter_name = Some(saved.name);
             self.spawn_load();
         }
+    }
+
+    /// Resolve the `default_query:{scope}` setting to `(name, query)`.
+    /// Self-contained (reads the setting itself) so it works regardless
+    /// of whether `load_saved_queries` ran first; a stale name with no
+    /// matching saved query yields `None` (callers fall back to the
+    /// last-active restore).
+    async fn load_default_query(&self, scope: &str) -> Option<(String, String)> {
+        let name = self.settings_repo
+            .get(&format!("default_query:{scope}")).await.ok().flatten()?;
+        let models = self.saved_query_repo.list_by_scope(scope).await.ok()?;
+        models.into_iter()
+            .find(|m| m.name == name)
+            .map(|m| (m.name, m.query))
     }
 
     // -----------------------------------------------------------------------
@@ -244,6 +271,17 @@ impl App {
     }
 
     pub async fn load_active_tracking_filter(&mut self) {
+        // See `load_active_filter`: an explicit default query wins.
+        if let Some(saved) = self.load_default_query("tracking").await {
+            if let Ok(parsed) = query_filter::parse(&saved.1) {
+                self.trackings_view.active_filter = Some(parsed.expr);
+                self.trackings_view.active_filter_json = Some(saved.1);
+                self.trackings_view.active_filter_name = Some(saved.0);
+                self.spawn_load_trackings();
+                return;
+            }
+        }
+
         let Some(filter_id_str) = self.settings_repo
             .get("active_saved_filter_tracking").await.ok().flatten()
         else { return };
