@@ -4874,7 +4874,7 @@ impl ContentView {
     }
 
     /// Push current view state into the bar. Called by App once per frame.
-    pub fn sync_action_bar(&mut self, active_editor: Option<&str>) {
+    pub fn sync_action_bar(&mut self, active_editor: Option<&str>, tracking_active: bool) {
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
         // before the mutable borrow on `action_bar` begins.
@@ -4909,6 +4909,10 @@ impl ContentView {
         self.action_bar.set_hints(hints);
         self.action_bar.set_mode_label(mode_label);
         self.action_bar.set_active_editor(active_editor);
+        // Highlights any hint labelled "track" (adapter `toggle-tracking`
+        // actions) while a tracking runs — same affordance as the native
+        // Tasks/Trackings action bars.
+        self.action_bar.set_tracking_active(tracking_active);
         self.action_bar.set_active_filter_name(active_filter_name);
         self.action_bar.set_favorites(favs);
         self.action_bar.set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);

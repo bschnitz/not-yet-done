@@ -1696,7 +1696,7 @@ views:
         for (k, name) in [
             ('d', "delete"),
             ('u', "undelete"),
-            ('t', "toggle-tracking"),
+            ('s', "toggle-tracking"),
             ('m', "mark-move"),
             ('p', "paste-move"),
         ] {
@@ -1711,7 +1711,7 @@ views:
         assert!(child.actions.iter().any(|a| a.action_type == "edit"));
         assert!(child.actions.iter().any(|a| a.action_type == "create"));
         assert_eq!(child.shortcuts.get(&'d'), Some(&"delete".to_string()));
-        assert_eq!(child.shortcuts.get(&'t'), Some(&"toggle-tracking".to_string()));
+        assert_eq!(child.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
         assert!(child.columns.iter().any(|c| c.key == "tracking"));
         // A1c-2: the root view declares a saved-query block — editable, with
         // a `q` menu key. No `default` body ships: like the native tab, the
@@ -1788,16 +1788,17 @@ views:
             serde_yaml::from_str(yaml).expect("trackings.yaml should deserialize");
         assert_eq!(cfg.adapter.adapter_type, "trackings");
 
-        // Three views: flat (key a), condensed (key v), tree (key T).
+        // Three views: flat (key a), condensed (key v), tree (key t).
         let flat = cfg.views.iter().find(|v| v.name == "trackings").unwrap();
         assert_eq!(flat.key.as_deref(), Some("a"));
         let condensed = cfg.views.iter().find(|v| v.name == "condensed").unwrap();
         assert_eq!(condensed.key.as_deref(), Some("v"));
 
-        // A2c Tree: a `tracking:tree-item` tree, switched to with `T`, with a
-        // `duration` column that declares the tree-fold (own ↔ cumulated).
+        // A2c Tree: a `tracking:tree-item` tree, switched to with `t` (native
+        // parity — track itself sits on `s`), with a `duration` column that
+        // declares the tree-fold (own ↔ cumulated).
         let tree = cfg.views.iter().find(|v| v.name == "tree").unwrap();
-        assert_eq!(tree.key.as_deref(), Some("T"));
+        assert_eq!(tree.key.as_deref(), Some("t"));
         assert_eq!(tree.node_type, "tracking:tree-item");
         assert_eq!(tree.tree_label.as_deref(), Some("task"));
         let dur = tree.columns.iter().find(|c| c.key == "duration").unwrap();
@@ -1807,8 +1808,8 @@ views:
             .expect("tree duration column should declare tree_aggregate");
         assert_eq!(ta.cumulated_field, "duration_cumulated");
         assert_eq!(ta.default, TreeAggregateDefault::Cumulated);
-        // `t` toggles tracking on the task — distinct from the `T` subtab key.
-        assert_eq!(tree.shortcuts.get(&'t'), Some(&"toggle-tracking".to_string()));
+        // `s` toggles tracking on the task (native track key).
+        assert_eq!(tree.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
         // The recursive subtask branch repeats the tree-fold column.
         let sub = &tree.children[0];
         assert!(sub.recursive);

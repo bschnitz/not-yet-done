@@ -35,7 +35,7 @@
 # ## A2b scope (mutations)
 #
 # `d` soft-deletes a tracking (keeping its times) through the confirm flow;
-# `R`/`A` restore deleted trackings; `t` toggles time tracking on the row's
+# `R`/`A` restore deleted trackings; `s` toggles time tracking on the row's
 # task. See the `shortcuts:` block below. Scripts run via the generic
 # `:script` menu (`x`, `type: script`).
 #
@@ -46,7 +46,7 @@
 # (`group_by`) and then by task (`then_by`), with `summary_only` collapsing
 # each (day, task) cell to one summed row.
 #
-# The native "Tree" mode is a third view (`key: T`): the *task forest*
+# The native "Tree" mode is a third view (`key: t`): the *task forest*
 # (`tracking:tree-item`) with tracked time rolled up per task. Its `duration`
 # column declares a `tree_aggregate` fold — `zt` toggles each task between its
 # **own** tracked time and its **subtree-cumulated** total (M4). The adapter
@@ -81,13 +81,15 @@ views:
     # or drop files in by hand; the `q` menu lists them. Shortcut keys
     # are stored separately in the `query_shortcut` DB table, scoped
     # `trackings/<id>/<view>` (set them with ctrl+s inside the menu).
-    # `editable` lets `:query edit` rewrite a body.
+    # `editable: false` drops the top-level `Q` edit-query binding — the
+    # `q` menu's ctrl+e edit covers rewriting bodies, so the extra key
+    # only added noise next to the native tab.
     #
     # `default:` is a raw query body applied on startup (native parity:
     # the bespoke tab starts time-boxed to the last month). Drop it to
     # show the whole list.
     query:
-      editable: true
+      editable: false
       menu_key: q
       default: |
         query:
@@ -158,7 +160,7 @@ views:
       - key: total
         label: Total
         kind: duration
-        style: tertiary
+        style: accent
         sizing: max
 
     actions:
@@ -170,7 +172,7 @@ views:
           fields: [task, taskpath]
       # Run a script against the selected tracking (generic `:script` menu;
       # scripts live under `<data>/not_yet_done/scripts/trackings/tracking_entry/`).
-      - name: run script
+      - name: script
         key: x
         type: script
       - name: refresh
@@ -187,7 +189,7 @@ views:
     #   * `R` restore — undelete a previously deleted tracking (and purge the
     #     successors a split produced). `A` restore-all does the same across
     #     every deleted tracking the list can reach.
-    #   * `t` toggle-tracking — start/stop time tracking on the row's *task*
+    #   * `s` toggle-tracking — start/stop time tracking on the row's *task*
     #     (shares the host's exclusivity policy with the Tasks tab).
     #
     # Note: the list shows only non-deleted rows, so `R`/`A` are recovery
@@ -196,8 +198,8 @@ views:
     shortcuts:
       d: delete
       R: restore
-      t: toggle-tracking
-      A: parent:restore-all
+      s: toggle-tracking
+      A: parens:restore-all
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #
@@ -225,7 +227,7 @@ views:
 
     # Same saved-query filter + startup default as the flat list.
     query:
-      editable: true
+      editable: false
       menu_key: q
       default: |
         query:
@@ -272,7 +274,7 @@ views:
       - key: total
         label: Total
         kind: duration
-        style: tertiary
+        style: accent
         sizing: max
 
     # Same per-row shortcuts as the flat list (delete/restore/toggle act on
@@ -280,15 +282,16 @@ views:
     shortcuts:
       d: delete
       R: restore
-      t: toggle-tracking
-      A: parent:restore-all
+      s: toggle-tracking
+      A: parens:restore-all
 
   # ── Tree (A2c) ───────────────────────────────────────────────────────
   #
   # The native Trackings "Tree" mode: the *task forest* with tracked time
   # rolled up per task. Each row is a `tracking:tree-item` (a task, not a
   # single interval); drilling expands a task's subtasks. Switched to with
-  # `T` (Shift+t — `t` itself is toggle-tracking on the row); `a` switches
+  # `t` (toggle-tracking moved to `s`, the native track key, freeing `t`
+  # for the subtab — full native key parity); `a` switches
   # back to the flat list.
   #
   # The `duration` column declares `tree_aggregate`: by default it shows each
@@ -301,7 +304,7 @@ views:
   # their subtree, and durations bake at load (no live tick, like Condensed).
   - name: tree
     node_type: "tracking:tree-item"
-    key: T
+    key: t
     tree_label: task
     # Connector-glyph color for this tree (box prefix + expand arrows). Omit
     # to inherit the theme's `tree_connector`. See tasks.yaml for the rationale.
@@ -339,10 +342,10 @@ views:
         key: r
         type: reload
 
-    # `t` starts/stops tracking on the selected task (adapter `toggle-tracking`,
-    # shared exclusivity policy). Distinct from the `T` subtab key above.
+    # `s` starts/stops tracking on the selected task (adapter `toggle-tracking`,
+    # shared exclusivity policy).
     shortcuts:
-      t: toggle-tracking
+      s: toggle-tracking
 
     children:
       # Recursive subtask branch — the same ChildDef at every depth. Drilling
@@ -376,4 +379,4 @@ views:
             type: reload
 
         shortcuts:
-          t: toggle-tracking
+          s: toggle-tracking
