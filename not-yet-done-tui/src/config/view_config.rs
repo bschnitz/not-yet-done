@@ -840,6 +840,19 @@ pub enum DateBucket {
     Year,
 }
 
+/// Ordering of the groups themselves (not the rows inside a group, which
+/// keep the adapter's order). Group labels are built ISO-sortable (see
+/// `views::group_aggregate`), so lexical order equals chronological order
+/// for date buckets — `desc` therefore puts the newest bucket first, which
+/// is what a time-tracking log wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupOrder {
+    #[default]
+    Asc,
+    Desc,
+}
+
 /// Grouping declaration (M3). Partitions the flat row list by a column's
 /// value — verbatim, or, when `bucket` is set, by the date bucket the
 /// column's datetime falls into. This is only the *default*: grouping is
@@ -855,6 +868,9 @@ pub struct GroupBy {
     /// A value that fails to parse falls back to verbatim grouping.
     #[serde(default)]
     pub bucket: Option<DateBucket>,
+    /// Order of the groups in the rendered table. Default ascending.
+    #[serde(default)]
+    pub order: GroupOrder,
 }
 
 /// Aggregation operation for an [`AggregateDef`] (M3). Only `sum` exists
@@ -880,6 +896,14 @@ pub struct AggregateDef {
     /// How to combine the values. Default `sum`.
     #[serde(default)]
     pub op: AggregateOp,
+    /// When set, the group total moves out of the group-header row into this
+    /// dedicated column, written on the *last* data row of each outermost
+    /// group (and into the same column on the Σ grand-total footer). The
+    /// target column is hidden while grouping is off, since a per-group
+    /// total has no meaning in a flat list. This mirrors classic
+    /// time-sheet layouts where a running "Total" column closes each day.
+    #[serde(default)]
+    pub total_column: Option<String>,
 }
 
 fn default_sizing() -> String {

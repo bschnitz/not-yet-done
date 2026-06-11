@@ -438,6 +438,18 @@ Ohne `bucket:` wird der Spaltenwert **verbatim** als Gruppenschlüssel benutzt
 **ISO-sortierbar** gewählt, sodass die lexikografische Sortierung der Gruppen
 zugleich die chronologische ist.
 
+In der **Kopfzeile** wird der ISO-Schlüssel zusätzlich menschenlesbar
+aufbereitet (reines Display — Identität und Sortierung bleiben der
+ISO-Schlüssel): `day` rendert als `W24 2026-06-08 Mon` (ISO-Woche + Wochentag),
+`week` als `W23 2026`; `month`/`year` und Verbatim-Schlüssel bleiben
+unverändert.
+
+Optionales `order:` (`asc` Default, `desc`) bestimmt die **Reihenfolge der
+Gruppen** — `desc` zeigt bei Datums-Buckets den neuesten Eimer zuerst (das
+übliche Layout eines Zeit-Logs). Die Zeilen _innerhalb_ einer Gruppe behalten
+unabhängig davon die Adapter-Reihenfolge. `zg` (s. u.) übernimmt das
+konfigurierte `order:` beim Durchschalten.
+
 **`then_by:`** — **verschachtelte** Gruppierung. Eine Liste weiterer Ebenen
 (gleiche Felder wie `group_by:`), nach denen _innerhalb_ jeder äußeren Gruppe
 weiter partitioniert wird. Die volle Ebenenliste ist `[group_by] ++ then_by`.
@@ -454,6 +466,15 @@ also die Sekunden-Zahl); die Summe wird durch denselben typisierten Formatter
 gerendert wie die Datenzellen, eine Dauer-Summe erscheint also wieder als
 `H:MM:SS`. Ohne `aggregates:` entfallen Zwischensummen und Footer — es bleibt
 die reine Gruppierung mit Kopfzeilen.
+
+Optionales `total_column:` (ein Spalten-`key`) verlegt die Gruppen-Summe von
+der `──`-Kopfzeile in diese **eigene Spalte**, geschrieben auf die **letzte
+Datenzeile** jeder äußersten Gruppe (und auf den `Σ`-Footer). Das ist das
+klassische Stundenzettel-Layout, bei dem eine „Total"-Spalte jeden Tag
+abschließt — die Kopfzeile bleibt dann ein reines Label. Die Zielspalte wird
+ganz normal als Spalte deklariert (typisch `kind: duration`); solange die
+Gruppierung ausgeschaltet ist (`zg` auf `None`), wird sie **ausgeblendet**,
+weil eine Gruppensumme ohne Gruppen keinen Inhalt hätte.
 
 **`summary_only:`** — `true` blendet die einzelnen Daten-Rows aus. Die
 **innerste** Gruppen-Ebene kollabiert dann zu **je einer repräsentativen

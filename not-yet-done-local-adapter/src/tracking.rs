@@ -489,12 +489,15 @@ fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Meta
             field("taskpath", canonical_path(&row.task_path), "Task Path"),
             field("task", row.task_description.clone(), "Task"),
             field("started", row.tracking.started_at.to_rfc3339(), "Started"),
+            // An open tracking has no end; the literal "running" matches the
+            // native trackings view. The engine's `datetime` column renders
+            // unparseable values verbatim, so the word passes through.
             field(
                 "ended",
                 row.tracking
                     .ended_at
                     .map(|d| d.to_rfc3339())
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| "running".to_string()),
                 "Ended",
             ),
             field("duration", duration_seconds(row, now).to_string(), "Duration"),
@@ -1314,14 +1317,16 @@ mod tests {
     }
 
     #[test]
-    fn active_entry_shows_marker_and_empty_ended() {
+    fn active_entry_shows_marker_and_running_ended() {
         let now = chrono::Utc::now();
         let m = tracking(Uuid::from_u128(7), Uuid::from_u128(9), 5, false);
         let r = row(m, "Task", vec![]);
         let md = entry_metadata(&r, now);
         let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
         assert_eq!(get("marker").as_deref(), Some("⏱"));
-        assert_eq!(get("ended").as_deref(), Some(""));
+        // Literal "running" (native parity): the engine's datetime column
+        // passes unparseable values through verbatim.
+        assert_eq!(get("ended").as_deref(), Some("running"));
     }
 
     #[test]
