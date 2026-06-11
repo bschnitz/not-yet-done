@@ -120,7 +120,13 @@ async fn main() -> Result<()> {
     app.load_tasks_sort();
     app.load_saved_queries();
     app.load_content_saved_queries();
+    app.apply_default_content_queries();
     app.load_content_sort_states();
+
+    // Initial content loads start only now — after the default saved
+    // queries have been stamped onto the panes, so the first fetch
+    // already uses them.
+    app.start_content_loads();
 
     // Daily backup: create one if none exists for today.
     if let Err(e) = not_yet_done_core::service::BackupServiceImpl.ensure_daily_backup().await {

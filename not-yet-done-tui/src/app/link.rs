@@ -256,6 +256,7 @@ impl App {
             items.push(PopupItem {
                 label: format!("→ {}", row.target_ref),
                 value: row.id.to_string(),
+                ..Default::default()
             });
             other_by_id.insert(row.id, row.target_ref.clone());
         }
@@ -263,6 +264,7 @@ impl App {
             items.push(PopupItem {
                 label: format!("← {}", row.source_ref),
                 value: row.id.to_string(),
+                ..Default::default()
             });
             other_by_id.insert(row.id, row.source_ref.clone());
         }

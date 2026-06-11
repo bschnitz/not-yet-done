@@ -695,6 +695,9 @@ pub enum QueryMenuAction {
     Edit,
     Delete,
     EditShortcut,
+    /// Toggle the selected entry as the default query — applied
+    /// automatically on app start.
+    SetDefault,
     Close,
 }
 
@@ -707,6 +710,7 @@ impl QueryMenuAction {
             Self::Edit => "edit",
             Self::Delete => "delete",
             Self::EditShortcut => "edit_shortcut",
+            Self::SetDefault => "set_default",
             Self::Close => "close",
         }
     }
@@ -728,6 +732,7 @@ impl FromStr for QueryMenuAction {
             "edit" => Ok(Self::Edit),
             "delete" => Ok(Self::Delete),
             "edit_shortcut" => Ok(Self::EditShortcut),
+            "set_default" => Ok(Self::SetDefault),
             "close" => Ok(Self::Close),
             other => Err(format!("unknown query_menu action: {}", other)),
         }
@@ -1153,6 +1158,7 @@ impl Default for KeyBindingSection<QueryMenuAction> {
         m.insert(QueryMenuAction::Edit, KeyBinding::new("ctrl+e"));
         m.insert(QueryMenuAction::Delete, KeyBinding::new("ctrl+d"));
         m.insert(QueryMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
+        m.insert(QueryMenuAction::SetDefault, KeyBinding::new("ctrl+t"));
         m.insert(QueryMenuAction::Close, KeyBinding::new("esc"));
         Self { bindings: m }
     }

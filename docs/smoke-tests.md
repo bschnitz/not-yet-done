@@ -3423,6 +3423,33 @@ Tasks**-Spalten-Popup (und hätte beim Anwenden dessen Settings
       level has no configurable columns" (Unit-Test vorhanden, live
       ungetestet — braucht verbundene Postgres-Instanz).
 
+## Default-Query + Query-Menü-Styling
+
+Das Query-Menü (`q`) teilt sich jetzt das Popup-Chrome mit dem
+Column-Config-Popup (SearchablePopup rendert über `popup_utils`), und
+`ctrl+t` markiert die selektierte Saved Query als Default, die beim
+App-Start automatisch angewendet wird.
+
+- [x] Optik: Query-Menü (Content + nativ), Script- und Tag-Menü zeigen
+      das einheitliche Chrome (abgerundeter Rahmen, gewrappte
+      Hint-Zeile, Cursor-Zeile hinterlegt statt Farbbalken);
+      Saved-Query-Shortcuts erscheinen als `[key]`-Suffix.
+- [x] Content-Tab („Trackings (A)"): `ctrl+t` auf „2 months" →
+      Notification „Default query: 2 months", Settings-Row
+      `default_query:<scope>` angelegt; App-Neustart → Query ist aktiv
+      (Action-Bar zeigt sie), Menü zeigt `★ 2 months`.
+- [x] Toggle-Off: `ctrl+t` auf der markierten Query → „Default query
+      cleared", Settings-Row gelöscht.
+- [x] Nativer Tasks-Tab: `ctrl+t` auf „Alle" → Neustart wendet „Alle"
+      an, obwohl zuletzt „2 months" aktiv war (Default schlägt
+      Last-Active-Restore); Toggle-Off stellt das alte Verhalten
+      wieder her.
+- [x] Postgres-Script-Menü: kein `default`-Hint, `ctrl+t` ohne Wirkung
+      (Scripts sind keine Queries; via `open_without_default`).
+- [ ] Default-Query mit Pflicht-Variablen (`{var}`): wird beim Start
+      roh (ohne Variablen-Popup) angewendet — Verhalten dokumentiert,
+      live ungetestet.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

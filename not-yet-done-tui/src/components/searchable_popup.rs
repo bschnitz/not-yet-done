@@ -3,9 +3,9 @@
 //! Used for saved filter selection, script picker, etc.
 
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Widget};
+use ratatui::widgets::Widget;
 use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
@@ -14,14 +14,23 @@ use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
 use std::sync::Arc;
+use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
 use crate::ui::theme::Theme;
 use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction};
 
 /// A single item in the searchable list.
+#[derive(Default)]
 pub struct PopupItem {
     pub label: String,
     /// Opaque payload returned when the item is selected.
     pub value: String,
+    /// Renders a `★` marker in front of the label (e.g. the default
+    /// saved query). Purely visual — not part of the filter text and
+    /// not returned on selection.
+    pub marked: bool,
+    /// Dim text rendered after the label (e.g. a shortcut key). Like
+    /// `marked`, display-only.
+    pub suffix: Option<String>,
 }
 
 /// Result of [`SearchablePopup::handle_key`]. The popup consumes navigation
@@ -241,35 +250,28 @@ impl SearchablePopup {
 
 impl Component for SearchablePopup {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        let t = &self.theme;
+        let t: &Theme = &self.theme;
 
         // Intrinsic hints render in front of embedder-supplied ones.
         let intrinsic = self.intrinsic_hints();
-        let all_hints: Vec<&(String, String)> = intrinsic
+        let all_hints: Vec<(&str, &str)> = intrinsic
             .iter()
             .chain(self.hints.iter())
+            .map(|(k, d)| (k.as_str(), d.as_str()))
             .collect();
 
         let popup_w = (area.width * 50 / 100).max(30).min(area.width.saturating_sub(4));
-        let hints_h = if all_hints.is_empty() { 0u16 } else { 1 };
+        let hints_h = if all_hints.is_empty() {
+            0u16
+        } else {
+            hints_height(&all_hints, popup_w.saturating_sub(2))
+        };
         let max_items = self.filtered.len() as u16;
         let popup_h = (max_items + 3 + hints_h).min(area.height * 60 / 100).max(5);
-        let x = (area.width.saturating_sub(popup_w)) / 2;
-        let y = (area.height.saturating_sub(popup_h)) / 2;
-        let popup_area = Rect::new(x, y, popup_w, popup_h);
 
-        frame.render_widget(Clear, popup_area);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.primary()))
-            .title(format!(" {} ", self.title))
-            .title_style(Style::default().fg(t.accent()).add_modifier(Modifier::BOLD))
-            .style(Style::default().bg(t.bg()));
-
-        let inner = block.inner(popup_area);
-        frame.render_widget(block, popup_area);
-
+        // Shared popup chrome — same frame + hint bar as the column
+        // config popup, so all pickers look alike.
+        let inner = render_popup_frame(frame, area, t, &self.title, popup_w, popup_h);
         if inner.height == 0 || inner.width == 0 { return; }
 
         let input_y = inner.y;
@@ -322,72 +324,62 @@ impl Component for SearchablePopup {
                 None
             };
 
-            // Items list.
+            // Items list. The cursor row gets a `surface_2` background
+            // (matching the column config popup) instead of a colored
+            // selection bar.
             let list_y = inner.y + 1;
             let list_h = inner.height.saturating_sub(1 + hints_h);
+            let any_marked = self.items.iter().any(|i| i.marked);
 
             for (i, &item_idx) in self.filtered.iter().enumerate() {
                 if i as u16 >= list_h { break; }
                 let item = &self.items[item_idx];
                 let is_selected = i == self.selected;
-                let style = if is_selected {
-                    Style::default().fg(t.bg()).bg(t.primary())
-                } else {
-                    Style::default().fg(t.text_high()).bg(t.bg())
-                };
+                let bg = if is_selected { t.surface_2() } else { t.bg() };
+                let row_y = list_y + i as u16;
+
+                for cx in inner.left()..inner.right() {
+                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().bg(bg));
+                    }
+                }
+
+                let mut spans: Vec<Span> = vec![Span::styled(
+                    " ",
+                    Style::default().bg(bg),
+                )];
+                if any_marked {
+                    let (glyph, style) = if item.marked {
+                        ("★ ", Style::default().fg(t.accent()).bg(bg))
+                    } else {
+                        ("  ", Style::default().bg(bg))
+                    };
+                    spans.push(Span::styled(glyph, style));
+                }
+                spans.push(Span::styled(
+                    item.label.clone(),
+                    Style::default().fg(t.text_high()).bg(bg),
+                ));
+                if let Some(suffix) = &item.suffix {
+                    spans.push(Span::styled(
+                        format!(" {suffix}"),
+                        Style::default().fg(t.text_dim()).bg(bg),
+                    ));
+                }
                 let row_area = Rect {
                     x: inner.x,
-                    y: list_y + i as u16,
+                    y: row_y,
                     width: inner.width,
                     height: 1,
                 };
-                let display = format!(" {}", item.label);
-                let padded = format!("{:width$}", display, width = inner.width as usize);
-                Line::from(Span::styled(padded, style)).render(row_area, buf);
+                Line::from(spans).render(row_area, buf);
             }
+        }
 
-            // Hints bar.
-            if !all_hints.is_empty() && hints_h > 0 {
-                let hints_y = inner.y + inner.height - hints_h;
-                // Background.
-                for cx in inner.left()..inner.right() {
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, hints_y)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(t.surface()));
-                    }
-                }
-                let mut hx = inner.left() + 1;
-                for (key_label, desc) in all_hints.iter().map(|p| (&p.0, &p.1)) {
-                    if hx >= inner.right() { break; }
-                    let key_style = Style::default().fg(t.text_dim()).bg(t.surface());
-                    let desc_style = Style::default().fg(t.text_med()).bg(t.surface());
-                    for ch in key_label.chars() {
-                        if hx >= inner.right() { break; }
-                        if let Some(cell) = buf.cell_mut(Position::new(hx, hints_y)) {
-                            cell.set_char(ch);
-                            cell.set_style(key_style);
-                        }
-                        hx += 1;
-                    }
-                    if hx < inner.right() {
-                        if let Some(cell) = buf.cell_mut(Position::new(hx, hints_y)) {
-                            cell.set_char(' ');
-                            cell.set_style(desc_style);
-                        }
-                        hx += 1;
-                    }
-                    for ch in desc.chars() {
-                        if hx >= inner.right() { break; }
-                        if let Some(cell) = buf.cell_mut(Position::new(hx, hints_y)) {
-                            cell.set_char(ch);
-                            cell.set_style(desc_style);
-                        }
-                        hx += 1;
-                    }
-                    // Gap.
-                    hx += 2;
-                }
-            }
+        // Hints bar with auto-wrap — shared with the column config popup.
+        if hints_h > 0 {
+            render_hints_bar(frame, inner, t, &all_hints, hints_h);
         }
 
         if let Some(pos) = cursor_pos {
@@ -407,9 +399,9 @@ mod tests {
 
     fn items() -> Vec<PopupItem> {
         vec![
-            PopupItem { label: "all tasks".into(), value: "{}".into() },
-            PopupItem { label: "high priority".into(), value: "{}".into() },
-            PopupItem { label: "done tasks".into(), value: "{}".into() },
+            PopupItem { label: "all tasks".into(), value: "{}".into(), ..Default::default() },
+            PopupItem { label: "high priority".into(), value: "{}".into(), ..Default::default() },
+            PopupItem { label: "done tasks".into(), value: "{}".into(), ..Default::default() },
         ]
     }
 
@@ -489,5 +481,36 @@ mod tests {
         popup.insert_char('z');
         popup.insert_char('z');
         assert!(popup.filtered_is_empty());
+    }
+
+    #[test]
+    fn renders_marker_and_suffix() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let items = vec![
+            PopupItem {
+                label: "plain".into(),
+                value: "v".into(),
+                ..Default::default()
+            },
+            PopupItem {
+                label: "starred".into(),
+                value: "v".into(),
+                marked: true,
+                suffix: Some("[1]".into()),
+            },
+        ];
+        let mut popup = SearchablePopup::new(theme(), "Test", items);
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal
+            .draw(|f| popup.view(f, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("★ starred"), "marker missing: {text}");
+        assert!(text.contains("[1]"), "suffix missing: {text}");
+        // Unmarked rows are indented to align with marked ones, no star.
+        assert!(text.contains("  plain"), "indent missing: {text}");
+        assert!(!text.contains("★ plain"));
     }
 }

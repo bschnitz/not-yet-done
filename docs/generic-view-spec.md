@@ -70,6 +70,23 @@ views:
       # Rows) erzeugt eine Kollision eine Warnung in der
       # Notification-Leiste; der Shortcut bleibt aktiv, bis der User
       # ihn neu bindet.
+      #
+      # Default-Query: Im q-Menü markiert `ctrl+t` (Keybinding
+      # `query_menu.set_default`, konfigurierbar in tui.yaml) die
+      # selektierte Saved Query als Default (★ vor dem Namen;
+      # Shortcuts erscheinen als dimmer `[key]`-Suffix). Die Default-
+      # Query wird beim App-Start automatisch angewendet — sie schlägt
+      # das YAML-`query.default` dieses Views (Content-Tabs) bzw. den
+      # Restore des zuletzt aktiven Filters (native Tasks/Trackings).
+      # Warum: das YAML-`default` ist die geteilte, eingecheckte
+      # Vorgabe; die Default-Query ist die persönliche, zur Laufzeit
+      # umsteckbare Wahl ohne Config-Edit. `ctrl+t` auf der aktuellen
+      # Default-Query löscht die Markierung wieder. Persistenz: eine
+      # Settings-Row `default_query:{scope}` pro Scope (Content:
+      # `query_scope` des Tabs; nativ: `task`/`tracking`); verschwindet
+      # die Query aus dem Store, wird der Default beim Start still
+      # übersprungen. Grenze: Queries mit Pflicht-Variablen (`{var}`)
+      # werden beim Start ohne Variablen-Popup roh angewendet.
 
     # Spalten der Tabelle — welche Metadata-Keys angezeigt werden.
     columns:

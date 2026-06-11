@@ -88,6 +88,7 @@ impl TagMenuComponent {
         let items: Vec<PopupItem> = entries.iter().map(|e| PopupItem {
             label: e.label.clone(),
             value: e.id.clone(),
+            ..Default::default()
         }).collect();
         let mut popup = SearchablePopup::new(
             Arc::clone(&self.theme),

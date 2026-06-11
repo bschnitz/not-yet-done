@@ -952,6 +952,10 @@ pub struct ContentView {
     key_icons: KeyIconMap,
     /// DB-persisted saved queries (merged with YAML defaults).
     pub db_saved_queries: Vec<MergedSavedQuery>,
+    /// Name of the saved query marked as default (★ in the query menu).
+    /// Persisted by the App as a settings row; applied automatically on
+    /// app start instead of the view-YAML `query.default`.
+    pub default_saved_query: Option<String>,
     /// `NodeRef`-style scope string for DB-side saved-query shortcuts
     /// (e.g. `"jira/jira/tickets"`). Today set once to the view-root
     /// NodeRef; future work may track the drill-down level.
@@ -4886,6 +4890,7 @@ impl ContentView {
             pane_tag_alphabet,
             key_icons,
             db_saved_queries: Vec::new(),
+            default_saved_query: None,
             query_scope,
             header_overlay: crate::components::sort_header::HeaderOverlay::default(),
             source_path: None,
@@ -5846,6 +5851,7 @@ impl ContentView {
             name: sq.name.clone(),
             query: sq.query.clone(),
             shortcut: sq.shortcut.clone(),
+            is_default: self.default_saved_query.as_deref() == Some(sq.name.as_str()),
         }).collect();
         self.query_menu_mode = QueryMenuMode::SavedQueries;
         self.query_menu.open(&entries, &self.query_menu_kb);
@@ -5868,7 +5874,8 @@ impl ContentView {
             schema,
             table,
         };
-        self.query_menu.open(&entries, &self.query_menu_kb);
+        // Scripts are files, not queries — no default-query semantics.
+        self.query_menu.open_without_default(&entries, &self.query_menu_kb);
     }
 
     /// Handle key events when the query popup is open.
@@ -5927,6 +5934,14 @@ impl ContentView {
                     is_new: true,
                 }))
             }
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::SetDefault { name }) => {
+                Some(SubViewMessage::Request(ViewRequest::SetDefaultContentQuery {
+                    view_index, name,
+                }))
+            }
+            // Unreachable — the scripts popup opens via
+            // `open_without_default`, which never emits SetDefault.
+            (QueryMenuMode::PostgresScripts { .. }, QueryMenuMessage::SetDefault { .. }) => noop,
 
             // ── Postgres table scripts (new) ──────────────────────────
             (
@@ -11179,6 +11194,27 @@ mod tests {
             }
             other => panic!("Expected ApplyContentSavedQuery, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn query_menu_set_default_dispatches_request() {
+        // ctrl+t on a query-menu entry surfaces SetDefaultContentQuery
+        // so the App can toggle + persist the per-scope default.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.merge_saved_queries(vec![
+            ("My Bugs".into(), "type = Bug".into(), None),
+        ]);
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.open_query_popup();
+        let msg = view.handle_query_popup_key("ctrl+t");
+        match msg {
+            Some(SubViewMessage::Request(ViewRequest::SetDefaultContentQuery {
+                name, ..
+            })) => assert_eq!(name, "My Bugs"),
+            other => panic!("Expected SetDefaultContentQuery, got {other:?}"),
+        }
+        assert!(!view.has_query_popup());
     }
 
     #[test]

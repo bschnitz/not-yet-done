@@ -377,6 +377,7 @@ impl App {
                 // non-empty so the popup widget treats the row as
                 // selectable.
                 query: "<file>".to_string(),
+                is_default: false,
             })
             .collect();
         if let Some(cv) = self.content_view_mut(view_index) {

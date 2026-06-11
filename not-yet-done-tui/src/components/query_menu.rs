@@ -20,11 +20,14 @@ use crate::ui::theme::Theme;
 
 /// One entry in the menu. The embedder is responsible for any merging
 /// (e.g. ContentView merges YAML defaults + DB entries).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct QueryMenuEntry {
     pub name: String,
     pub query: String,
     pub shortcut: Option<String>,
+    /// Marks this entry as the default query (★ in the list). The
+    /// default query is applied automatically on app start.
+    pub is_default: bool,
 }
 
 /// Output of `handle_key` — describes what the embedder should do.
@@ -44,6 +47,9 @@ pub enum QueryMenuMessage {
     Delete { name: String },
     /// Prompt for a new shortcut for the selected entry.
     EditShortcut { name: String, query: String },
+    /// Toggle the selected entry as the default query (embedder decides
+    /// set-vs-clear and persists it).
+    SetDefault { name: String },
     /// User typed a name, no match — create a brand-new entry under that name.
     CreateNew { name: String },
 }
@@ -57,6 +63,10 @@ pub struct QueryMenuComponent {
     /// and the hint bar auto-shows it.
     popup_kb: Option<KeyBindingSection<PopupAction>>,
     key_icons: Option<KeyIconMap>,
+    /// Whether the current popup session supports marking a default
+    /// query. Set per `open*` call — saved-query menus do, repurposed
+    /// menus (e.g. the Postgres script picker) don't.
+    set_default_enabled: bool,
 }
 
 impl QueryMenuComponent {
@@ -67,6 +77,7 @@ impl QueryMenuComponent {
             popup: None,
             popup_kb: None,
             key_icons: None,
+            set_default_enabled: false,
         }
     }
 
@@ -87,14 +98,38 @@ impl QueryMenuComponent {
 
     pub fn close(&mut self) { self.popup = None; }
 
+    /// Open the menu for saved queries — supports marking a default
+    /// query (★) via [`QueryMenuAction::SetDefault`].
     pub fn open(
         &mut self,
         entries: &[QueryMenuEntry],
         kb: &KeyBindingSection<QueryMenuAction>,
     ) {
+        self.open_inner(entries, kb, true);
+    }
+
+    /// Open the menu for non-query entries (e.g. the Postgres script
+    /// picker reusing this component) — no default-query semantics.
+    pub fn open_without_default(
+        &mut self,
+        entries: &[QueryMenuEntry],
+        kb: &KeyBindingSection<QueryMenuAction>,
+    ) {
+        self.open_inner(entries, kb, false);
+    }
+
+    fn open_inner(
+        &mut self,
+        entries: &[QueryMenuEntry],
+        kb: &KeyBindingSection<QueryMenuAction>,
+        set_default_enabled: bool,
+    ) {
+        self.set_default_enabled = set_default_enabled;
         let items: Vec<PopupItem> = entries.iter().map(|e| PopupItem {
             label: e.name.clone(),
             value: e.query.clone(),
+            marked: set_default_enabled && e.is_default,
+            suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
         }).collect();
         let mut popup = SearchablePopup::new(
             Arc::clone(&self.theme),
@@ -106,13 +141,17 @@ impl QueryMenuComponent {
         }
         // Embedder-specific hints; Next/Prev are rendered automatically
         // by the popup when popup_kb is attached.
-        popup = popup.with_hints(vec![
+        let mut hints = vec![
             (kb.label(&QueryMenuAction::Select), "apply".into()),
             (kb.label(&QueryMenuAction::Edit), "edit".into()),
             (kb.label(&QueryMenuAction::EditShortcut), "shortcut".into()),
             (kb.label(&QueryMenuAction::Delete), "delete".into()),
-            (kb.label(&QueryMenuAction::Close), "close".into()),
-        ]);
+        ];
+        if set_default_enabled {
+            hints.push((kb.label(&QueryMenuAction::SetDefault), "default".into()));
+        }
+        hints.push((kb.label(&QueryMenuAction::Close), "close".into()));
+        popup = popup.with_hints(hints);
         self.popup = Some(popup);
     }
 
@@ -183,6 +222,17 @@ impl QueryMenuComponent {
             }
             return QueryMenuMessage::Handled;
         }
+        if self.set_default_enabled
+            && kb.get(&QueryMenuAction::SetDefault).is_some_and(|b| b.matches(key))
+        {
+            let popup = self.popup.as_ref().unwrap();
+            if let Some(item) = popup.selected_item() {
+                let msg = QueryMenuMessage::SetDefault { name: item.label.clone() };
+                self.popup = None;
+                return msg;
+            }
+            return QueryMenuMessage::Handled;
+        }
 
         // Navigation + text input — delegated to the popup's intrinsic
         // PopupAction bindings.
@@ -211,14 +261,15 @@ mod tests {
         m.insert(QueryMenuAction::Edit, KeyBinding::new("ctrl+e"));
         m.insert(QueryMenuAction::Delete, KeyBinding::new("ctrl+d"));
         m.insert(QueryMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
+        m.insert(QueryMenuAction::SetDefault, KeyBinding::new("ctrl+t"));
         m.insert(QueryMenuAction::Close, KeyBinding::new("esc"));
         KeyBindingSection { bindings: m }
     }
 
     fn entries() -> Vec<QueryMenuEntry> {
         vec![
-            QueryMenuEntry { name: "alpha".into(), query: "Q1".into(), shortcut: None },
-            QueryMenuEntry { name: "beta".into(),  query: "Q2".into(), shortcut: Some("1".into()) },
+            QueryMenuEntry { name: "alpha".into(), query: "Q1".into(), shortcut: None, is_default: false },
+            QueryMenuEntry { name: "beta".into(),  query: "Q2".into(), shortcut: Some("1".into()), is_default: true },
         ]
     }
 
@@ -283,6 +334,28 @@ mod tests {
         menu.open(&entries(), &kb);
         let msg = menu.handle_key("ctrl+s", &kb);
         assert!(matches!(msg, QueryMenuMessage::EditShortcut { ref name, .. } if name == "alpha"));
+    }
+
+    #[test]
+    fn set_default_emits_for_selected_entry() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        let msg = menu.handle_key("ctrl+t", &kb);
+        assert_eq!(msg, QueryMenuMessage::SetDefault { name: "alpha".into() });
+        assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn set_default_disabled_without_default_support() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open_without_default(&entries(), &kb);
+        // The key falls through to the popup (typed/ignored), never
+        // emitting SetDefault.
+        let msg = menu.handle_key("ctrl+t", &kb);
+        assert_eq!(msg, QueryMenuMessage::Handled);
+        assert!(menu.is_open());
     }
 
     #[test]

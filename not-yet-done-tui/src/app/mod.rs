@@ -963,25 +963,52 @@ impl App {
         app.reload_link_refs();
         app.spawn_load();
 
-        // Auto-load content views that already have an adapter from YAML config.
-        // The watcher is always spawned (it only subscribes to a watch
-        // channel, no I/O); the load itself is skipped for tabs flagged
-        // `adapter.manual_connect: true` so they wait for an explicit
-        // user-triggered `reload` action.
-        let to_watch: Vec<(usize, crate::views::content_view::PaneId, bool)> = app
+        app
+    }
+
+    /// Auto-load content views that already have an adapter from YAML config.
+    /// The watcher is always spawned (it only subscribes to a watch
+    /// channel, no I/O); the load itself is skipped for tabs flagged
+    /// `adapter.manual_connect: true` so they wait for an explicit
+    /// user-triggered `reload` action.
+    ///
+    /// Lives outside [`App::new`] so main can apply DB-persisted state
+    /// (default saved queries) before the first fetch — otherwise every
+    /// tab with a default query would load twice on startup.
+    pub fn start_content_loads(&mut self) {
+        let to_watch: Vec<(usize, crate::views::content_view::PaneId, bool)> = self
             .content_views_indexed()
             .filter(|(_, cv)| cv.adapter.is_some())
             .map(|(i, cv)| (i, cv.active_pane_id(), cv.manual_connect))
             .collect();
         for (i, pane_id, manual) in to_watch {
-            app.spawn_content_status_watcher(i);
-            app.spawn_content_invalidation_watcher(i);
+            self.spawn_content_status_watcher(i);
+            self.spawn_content_invalidation_watcher(i);
             if !manual {
-                app.spawn_content_load(i, pane_id);
+                self.spawn_content_load(i, pane_id);
             }
         }
+    }
 
-        app
+    /// Stamp each content view's default saved query (if any) onto its
+    /// active pane so the initial load already uses it. Runs once at
+    /// startup after [`Self::load_content_saved_queries`]; a default
+    /// whose name no longer exists in the store is skipped silently
+    /// (the view falls back to its YAML `query.default`).
+    pub fn apply_default_content_queries(&mut self) {
+        for idx in 0..self.content_views.len() {
+            let Some(cv) = self.content_view_mut(idx) else { continue };
+            let Some(name) = cv.default_saved_query.clone() else { continue };
+            let Some(body) = cv
+                .db_saved_queries
+                .iter()
+                .find(|q| q.name == name)
+                .map(|q| q.query.clone())
+            else {
+                continue;
+            };
+            cv.set_query(body, Some(name));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -5774,6 +5801,10 @@ impl App {
                 self.notify(format!("Deleted query '{name}'"));
                 EditorRequest::None
             }
+            ViewRequest::SetDefaultContentQuery { view_index, name } => {
+                self.set_default_content_query(view_index, &name);
+                EditorRequest::None
+            }
             ViewRequest::PromptContentQueryShortcut { view_index, scope, name, query } => {
                 self.save_content_query_body(view_index, &name, &query);
                 self.reload_content_saved_queries(view_index);
@@ -5798,6 +5829,10 @@ impl App {
             }
             ViewRequest::PromptSavedQueryShortcut { scope, name, query } => {
                 self.prompt_saved_query_shortcut(scope, name, query);
+                EditorRequest::None
+            }
+            ViewRequest::SetDefaultSavedQuery { scope, name } => {
+                self.set_default_saved_query(&scope, &name);
                 EditorRequest::None
             }
             ViewRequest::OpenScriptMenuForNode { view_index, pane_id } => {
@@ -5876,6 +5911,10 @@ impl App {
             }
             ViewRequest::PromptSavedQueryShortcut { scope, name, query } => {
                 self.prompt_saved_query_shortcut(scope, name, query);
+                EditorRequest::None
+            }
+            ViewRequest::SetDefaultSavedQuery { scope, name } => {
+                self.set_default_saved_query(&scope, &name);
                 EditorRequest::None
             }
             _ => EditorRequest::None,
@@ -6146,6 +6185,7 @@ impl App {
                             .map(|o| PopupItem {
                                 label: o.label.clone(),
                                 value: o.value.clone(),
+                                ..Default::default()
                             })
                             .collect();
                         let popup = SearchablePopup::new(
@@ -7233,6 +7273,70 @@ impl App {
         if let Ok(models) = result {
             self.trackings_view.favorites = models.into_iter().map(SavedQuery::from_db).collect();
         }
+        let settings = Arc::clone(&self.settings_repo);
+        let (task_default, tracking_default) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                (
+                    settings.get("default_query:task").await.ok().flatten(),
+                    settings.get("default_query:tracking").await.ok().flatten(),
+                )
+            })
+        });
+        self.tasks_view.default_query_name = task_default;
+        self.trackings_view.default_query_name = tracking_default;
+    }
+
+    /// Write or delete the `default_query:{scope}` settings row. `None`
+    /// clears the default.
+    fn persist_default_query(&self, scope: &str, name: Option<&str>) {
+        let repo = Arc::clone(&self.settings_repo);
+        let key = format!("default_query:{scope}");
+        let _ = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match name {
+                    Some(n) => repo.set(&key, n).await,
+                    None => repo.delete(&key).await,
+                }
+            })
+        });
+    }
+
+    /// Toggle the default saved query for the native `task`/`tracking`
+    /// scopes. Selecting the current default clears it; the default is
+    /// applied automatically on app start (it beats the last-active
+    /// filter restore).
+    fn set_default_saved_query(&mut self, scope: &str, name: &str) {
+        let current = match scope {
+            "tracking" => self.trackings_view.default_query_name.as_deref(),
+            _ => self.tasks_view.default_query_name.as_deref(),
+        };
+        let new = if current == Some(name) { None } else { Some(name.to_string()) };
+        self.persist_default_query(scope, new.as_deref());
+        match scope {
+            "tracking" => self.trackings_view.default_query_name = new.clone(),
+            _ => self.tasks_view.default_query_name = new.clone(),
+        }
+        match new {
+            Some(n) => self.notify(format!("Default query: {n}")),
+            None => self.notify("Default query cleared".to_string()),
+        }
+    }
+
+    /// Content-tab counterpart of [`Self::set_default_saved_query`] —
+    /// keyed on the view's `query_scope`.
+    fn set_default_content_query(&mut self, view_index: usize, name: &str) {
+        let Some(cv) = self.content_view(view_index) else { return };
+        let scope = cv.query_scope.clone();
+        let current = cv.default_saved_query.clone();
+        let new = if current.as_deref() == Some(name) { None } else { Some(name.to_string()) };
+        self.persist_default_query(&scope, new.as_deref());
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.default_saved_query = new.clone();
+        }
+        match new {
+            Some(n) => self.notify(format!("Default query: {n}")),
+            None => self.notify("Default query cleared".to_string()),
+        }
     }
 
     /// Apply a saved query (YAML content) to tasks_view or trackings_view
@@ -7302,34 +7406,41 @@ impl App {
         let scope = cv.query_scope.clone();
         let adapter = cv.adapter.clone();
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let settings_repo = Arc::clone(&self.settings_repo);
 
-        let entries: Vec<(String, String, Option<String>)> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let Some(adapter) = adapter.as_ref() else { return Vec::new() };
-                let Some(store) = adapter.saved_query_store() else { return Vec::new() };
-                let names = match store.list().await {
-                    Ok(n) => n,
-                    Err(_) => return Vec::new(),
-                };
-                let shortcut_map: std::collections::HashMap<String, String> = shortcut_repo
-                    .list_by_scope(&scope)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|m| (m.name, m.shortcut))
-                    .collect();
-                let mut out = Vec::with_capacity(names.len());
-                for name in names {
-                    let body = match store.load(&name).await {
-                        Ok(b) => b,
-                        Err(_) => continue,
+        let (entries, default_query): (Vec<(String, String, Option<String>)>, Option<String>) =
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let default_query = settings_repo
+                        .get(&format!("default_query:{scope}"))
+                        .await
+                        .ok()
+                        .flatten();
+                    let Some(adapter) = adapter.as_ref() else { return (Vec::new(), default_query) };
+                    let Some(store) = adapter.saved_query_store() else { return (Vec::new(), default_query) };
+                    let names = match store.list().await {
+                        Ok(n) => n,
+                        Err(_) => return (Vec::new(), default_query),
                     };
-                    let shortcut = shortcut_map.get(&name).cloned();
-                    out.push((name, body, shortcut));
-                }
-                out
-            })
-        });
+                    let shortcut_map: std::collections::HashMap<String, String> = shortcut_repo
+                        .list_by_scope(&scope)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|m| (m.name, m.shortcut))
+                        .collect();
+                    let mut out = Vec::with_capacity(names.len());
+                    for name in names {
+                        let body = match store.load(&name).await {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+                        let shortcut = shortcut_map.get(&name).cloned();
+                        out.push((name, body, shortcut));
+                    }
+                    (out, default_query)
+                })
+            });
 
         // Load-time guard: `query_shortcut` rows written externally (or
         // predating a config change) can collide with keys that are now
@@ -7366,6 +7477,7 @@ impl App {
 
         if let Some(cv) = self.content_view_mut(view_index) {
             cv.merge_saved_queries(entries);
+            cv.default_saved_query = default_query;
         }
         for w in warnings {
             if self.warned_saved_query_conflicts.insert(w.clone()) {
