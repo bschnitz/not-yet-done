@@ -1360,6 +1360,27 @@ impl ContentAdapter for TaskAdapter {
         self.inv_tx.subscribe()
     }
 
+    async fn revalidate(&self) {
+        // Out-of-process changes (CLI, waybar, another instance) write to
+        // the same DB but emit no in-process DomainEvent, so the snapshot's
+        // `tracked` set (the `⏱` marker column) can go stale without the
+        // bridge noticing. Diff it against the live DB on tab switch; on
+        // drift drop the snapshot and reload.
+        let snap_tracked = match self.snapshot.read().await.as_ref() {
+            Some(snap) => snap.tracked.clone(),
+            // No snapshot — the next load is fresh anyway.
+            None => return,
+        };
+        let Ok(active) = self.handle.tracking_repo.find_all_active().await else {
+            return;
+        };
+        let db_tracked: HashSet<Uuid> = active.iter().map(|t| t.task_id).collect();
+        if db_tracked != snap_tracked {
+            *self.snapshot.write().await = None;
+            let _ = self.inv_tx.send(Invalidation::All);
+        }
+    }
+
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         Some(&self.saved_queries)
     }

@@ -979,6 +979,17 @@ pub trait ContentAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Cheap staleness probe, called by the frontend when the user switches
+    /// to a tab backed by this adapter. An adapter whose backing store can
+    /// change *outside* the process (e.g. the local task/tracking DB written
+    /// by the CLI or a waybar module — no in-process domain event fires)
+    /// should compare a low-cost fingerprint against its cache and, on
+    /// drift, drop the cache and emit [`Invalidation::All`] through its
+    /// invalidation stream so the visible panes reload. Must be cheap
+    /// enough to run on every tab switch. Default: no-op — pull-only remote
+    /// adapters revalidate via their normal reload/HTTP paths instead.
+    async fn revalidate(&self) {}
+
     /// Submit credentials gathered from a [`AdapterStatus::NeedsCreds`]
     /// form. The adapter performs the login and updates its status
     /// channel — `Ok(())` means the login round-trip succeeded; the

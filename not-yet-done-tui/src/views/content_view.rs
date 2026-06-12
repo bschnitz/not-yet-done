@@ -2561,6 +2561,86 @@ impl ContentPane {
         requests
     }
 
+    /// Re-fetch the children of every *expanded* tree node — the staleness
+    /// counterpart to the auto-expand cascade. A root reload (the `r`
+    /// reload action, an adapter `Invalidation::All`, an action's
+    /// post-mutation reload) replaces only the depth-0 rows; everything
+    /// expanded below them still renders from children cached *before* the
+    /// change — e.g. a freshly started tracking's `⏱` marker wouldn't show
+    /// on a nested task. Called after a root list lands: emits one
+    /// `ExpandTreeNode`/`…Multi` request per expanded path, exactly what a
+    /// manual collapse+re-expand would issue. The stale rows stay visible
+    /// until the fresh children land (`apply_tree_children` replaces them
+    /// in place). Paths whose cache isn't `loaded` are skipped — a fetch
+    /// (cascade or manual expand) is already in flight for them. Expanded
+    /// paths hidden under a *collapsed* ancestor aren't walked (they're
+    /// not in `entries`); they keep stale children until re-expanded.
+    pub(crate) fn pending_expanded_refresh_requests(
+        &self,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> Vec<ViewRequest> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Vec::new();
+        };
+        let Some(view_def) = self.view_def(view_defs) else {
+            return Vec::new();
+        };
+        let mut requests = Vec::new();
+        for e in &tree.entries {
+            if e.is_more_placeholder {
+                continue;
+            }
+            let mut own_path = e.parent_path.clone();
+            own_path.push(e.node.id.clone());
+            if !tree.expanded.contains(&own_path) {
+                continue;
+            }
+            if !tree.cache.get(&own_path).map(|s| s.loaded).unwrap_or(false) {
+                continue;
+            }
+            let entry_child = child_def_for_type_chain(view_def, &e.node_type_chain);
+            let kids: Vec<&ChildDef> = match entry_child {
+                Some(c) => effective_child_children(c),
+                None => tree_level_children(view_def, e.depth)
+                    .unwrap_or(&[])
+                    .iter()
+                    .collect(),
+            };
+            let types: Vec<String> = kids
+                .iter()
+                .filter(|c| c.tree_label.is_some())
+                .map(|c| c.node_type.clone())
+                .collect();
+            if types.is_empty() {
+                continue;
+            }
+            if types.len() == 1 {
+                requests.push(ViewRequest::ExpandTreeNode {
+                    view_index,
+                    pane_id,
+                    parent_path: own_path,
+                    parent_node_id: e.node.id.clone(),
+                    child_node_type: types.into_iter().next().unwrap(),
+                    page_size: 50,
+                    page: None,
+                    append: false,
+                });
+            } else {
+                requests.push(ViewRequest::ExpandTreeNodeMulti {
+                    view_index,
+                    pane_id,
+                    parent_path: own_path,
+                    parent_node_id: e.node.id.clone(),
+                    child_node_types: types,
+                    page_size: 50,
+                });
+            }
+        }
+        requests
+    }
+
     /// Tree-mode handler for `content.tree_collapse` (default `c`).
     /// Smart-collapse: when the selected row's own node is currently
     /// expanded, collapse it (cursor stays on the same row).
@@ -6787,6 +6867,21 @@ impl ContentView {
             Some(leaf) => {
                 leaf.pane
                     .pending_auto_expand_requests(view_index, pane_id, &view_defs)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Collect a pane's expanded-subtree refresh requests after a root
+    /// reload (see [`ContentPane::pending_expanded_refresh_requests`]).
+    pub fn pending_expanded_refresh_requests(
+        &self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> Vec<ViewRequest> {
+        match self.find_pane(pane_id) {
+            Some(pane) => {
+                pane.pending_expanded_refresh_requests(view_index, pane_id, &self.view_defs)
             }
             None => Vec::new(),
         }
@@ -12999,6 +13094,80 @@ mod tests {
             view.active_pane().cursor_can_open(&view_defs),
             "recursive node below the root must be openable (the regressed gate)"
         );
+    }
+
+    #[test]
+    fn expanded_refresh_requests_refetch_expanded_loaded_paths_only() {
+        // After a root reload only the depth-0 rows are fresh; the
+        // refresh pass re-fetches every *expanded* node's children (so
+        // e.g. a tracking-marker change shows on nested rows too) while
+        // leaving collapsed siblings and in-flight loads alone.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W"), tnode_val("priv", "Priv", "P")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Expand work → h → (children loaded for both); `priv` stays
+        // collapsed.
+        {
+            let tree = view.active_pane_mut().tree.as_mut().unwrap();
+            tree.expanded.insert(vec!["work".to_string()]);
+            tree.expanded.insert(vec!["work".to_string(), "h".to_string()]);
+        }
+        view.apply_tree_children(
+            pane_id,
+            vec!["work".to_string()],
+            vec![tnode_val("h", "h", "V")],
+            None,
+            false,
+            "mock:task".into(),
+        );
+        view.apply_tree_children(
+            pane_id,
+            vec!["work".to_string(), "h".to_string()],
+            vec![tnode_val("g", "g", "V")],
+            None,
+            false,
+            "mock:task".into(),
+        );
+
+        // A reload lands: depth-0 replaced, deeper caches untouched.
+        view.set_items(
+            vec![tnode_val("work", "Work", "W2"), tnode_val("priv", "Priv", "P")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let reqs = view.pending_expanded_refresh_requests(view_index, pane_id);
+        let parents: Vec<&str> = reqs
+            .iter()
+            .map(|r| match r {
+                ViewRequest::ExpandTreeNode { parent_node_id, .. } => parent_node_id.as_str(),
+                other => panic!("expected ExpandTreeNode, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(parents, vec!["work", "h"], "every expanded path refreshes: {reqs:?}");
+
+        // An expanded path whose children are still in flight (cache not
+        // `loaded`) is skipped — its landing already brings fresh data.
+        view.active_pane_mut()
+            .tree
+            .as_mut()
+            .unwrap()
+            .cache
+            .get_mut(&vec!["work".to_string(), "h".to_string()])
+            .unwrap()
+            .loaded = false;
+        let reqs = view.pending_expanded_refresh_requests(view_index, pane_id);
+        assert_eq!(reqs.len(), 1, "in-flight path skipped: {reqs:?}");
     }
 
     #[test]
