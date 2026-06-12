@@ -228,9 +228,15 @@ views:
     key: v
 
     # Same saved-query filter + startup default as the flat list.
+    # `inherit_default: true` additionally stamps the *user-set* default
+    # saved query (★ in the `q` menu) onto this subtab at startup — the
+    # plain apply only targets the tab's default view, which is right for
+    # sibling views showing different data, but Condensed is just another
+    # projection of the same trackings, so the default filter follows.
     query:
       editable: false
       menu_key: q
+      inherit_default: true
       default: |
         query:
           and:
