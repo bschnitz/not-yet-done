@@ -49,9 +49,9 @@ use crate::config::keybindings::{
     QueryMenuAction, WindowAction,
 };
 use crate::config::view_config::{
-    ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, GroupBy, GroupOrder,
-    LineLayout, PaginationMode, PreviewConfig, SplitDirection, TreeAggregateDefault, ViewDef,
-    ViewFileConfig,
+    ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, ExpandDepth, GroupBy,
+    GroupOrder, LineLayout, PaginationMode, PreviewConfig, SplitDirection, TreeAggregateDefault,
+    ViewDef, ViewFileConfig,
 };
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
@@ -1613,8 +1613,16 @@ impl ContentPane {
         if self.tree.is_some() {
             // Chain-based: the cursor row's own branch decides the column
             // set, so a multi-branch tree shows the right columns at a
-            // given depth instead of the first branch's.
-            let level = self.cursor_tree_level(view_defs);
+            // given depth instead of the first branch's. When the cursor
+            // can't be resolved (the tree shrank under it — e.g. a new
+            // query replaced the entries — or the filtered tree is empty),
+            // fall back to the root level: an empty column set would abort
+            // `rebuild_table` before `set_data`, leaving the widget
+            // painting the previous (stale) rows.
+            let level = self.cursor_tree_level(view_defs).or_else(|| {
+                self.view_def(view_defs)
+                    .and_then(|vd| tree_level_at_depth(vd, 0))
+            });
             let tree_label = level.as_ref().map(|l| l.tree_label.to_string());
             let mut cols = level.map(|l| l.columns.to_vec()).unwrap_or_default();
             if let Some(visible) = self
@@ -2336,7 +2344,11 @@ impl ContentPane {
         let Some(view_def) = self.view_def(view_defs).cloned() else {
             return Vec::new();
         };
-        let target = view_def.expand_depth.unwrap_or(0) as usize;
+        let target = match view_def.expand_depth {
+            Some(ExpandDepth::All) => usize::MAX,
+            Some(ExpandDepth::Levels(n)) => n as usize,
+            None => 0,
+        };
         if target == 0 {
             if let Some(tree) = self.tree.as_mut() {
                 tree.auto_expand_pending = false;
@@ -3656,6 +3668,14 @@ impl ContentPane {
         // primed too.
         if self.tree.is_some() {
             self.refresh_tree_visible_indices(view_defs);
+            // The entries may have shrunk under the cursor (a new query
+            // rebuilt the tree from scratch): clamp the selection so the
+            // cursor-based column/level lookups below resolve against a
+            // row that actually exists.
+            let visible = self.tree_visible_indices.len();
+            if visible > 0 && self.table.selected_row() >= visible {
+                self.table.set_selected(visible - 1);
+            }
         }
         let t = &*self.theme;
         let columns: Vec<ColumnDef> = self.current_columns(view_defs);
@@ -10499,6 +10519,48 @@ mod tests {
         assert_eq!(pane.table.selected_row(), 0, "cursor moved to db1");
     }
 
+    /// Regression: applying a saved query while the cursor sits on a row
+    /// deeper than the (much smaller) filtered tree used to abort the
+    /// table rebuild — `current_columns` resolved the column set via the
+    /// now out-of-range cursor row, got nothing, and `rebuild_table`
+    /// early-returned before `set_data`, leaving the widget painting the
+    /// stale pre-query rows.
+    #[test]
+    fn tree_query_apply_shrink_clamps_cursor_and_keeps_columns() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        // Entries: [db1, public, private, db2]; cursor on the last row.
+        view.active_pane_mut().table.set_selected(3);
+
+        // The query-apply path: set_query clears the tree, set_items
+        // feeds the (single) filtered root back in.
+        view.active_pane_mut().set_query("filtered".into(), Some("sq".into()));
+        let filtered_root = vec![mock_dbs().remove(0)];
+        view.set_items(filtered_root, Vec::new(), None, Vec::new(), None);
+
+        let pane = view.active_pane();
+        assert_eq!(pane.tree_visible_indices.len(), 1, "one filtered root entry");
+        assert_eq!(
+            pane.table.selected_row(),
+            0,
+            "stale cursor clamped onto the shrunk tree"
+        );
+        assert!(
+            !pane.current_columns(&view.view_defs).is_empty(),
+            "columns resolve (root-level fallback) so rebuild_table reaches set_data"
+        );
+    }
+
     /// Tree config like `test_config_with_tree`, plus a `fuzzy_filter`
     /// action mounted at the requested depth (`0` = ViewDef root, `1` =
     /// the schemas ChildDef). Used by Phase 6 filter tests so each can
@@ -12730,7 +12792,7 @@ mod tests {
         // load (three levels visible), then the one-shot cascade disarms
         // so it never overrides manual collapse afterwards.
         let mut config = uniform_recursive_config();
-        config.views[0].expand_depth = Some(2);
+        config.views[0].expand_depth = Some(ExpandDepth::Levels(2));
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
             vec![tnode_val("work", "Work", "W")],
@@ -12812,6 +12874,76 @@ mod tests {
                 .contains(&vec!["work".to_string()]),
             "manual collapse stays collapsed"
         );
+    }
+
+    #[test]
+    fn expand_depth_all_expands_until_nothing_is_left() {
+        // `expand_depth: all` → no depth ceiling; the cascade keeps
+        // requesting children level by level and only disarms once a
+        // pass finds nothing expandable (here: a leaf level lands).
+        let mut config = uniform_recursive_config();
+        config.views[0].expand_depth = Some(ExpandDepth::All);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // Walk three levels deep — each landing triggers the next request.
+        for (parent, child) in [("work", "h"), ("h", "g"), ("g", "leaf")] {
+            let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+            assert_eq!(reqs.len(), 1, "expand request for `{parent}`: {reqs:?}");
+            let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+                panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+            };
+            assert_eq!(parent_node_id, parent);
+            view.apply_tree_children(
+                pane_id,
+                parent_path.clone(),
+                vec![tnode_val(child, child, "V")],
+                None,
+                false,
+                "mock:task".into(),
+            );
+        }
+
+        // `leaf` expands too (depth 3 — beyond any fixed default), comes
+        // back empty → the next pass has nothing left and disarms.
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert_eq!(reqs.len(), 1, "leaf still probed under `all`: {reqs:?}");
+        let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+            panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+        };
+        assert_eq!(parent_node_id, "leaf");
+        view.apply_tree_children(
+            pane_id,
+            parent_path.clone(),
+            Vec::new(),
+            None,
+            false,
+            "mock:task".into(),
+        );
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert!(reqs.is_empty(), "cascade complete: {reqs:?}");
+        assert!(
+            !view.active_pane().tree.as_ref().unwrap().auto_expand_pending,
+            "cascade must disarm once a pass finds nothing expandable"
+        );
+        let depths: Vec<(String, usize)> = view
+            .active_pane()
+            .tree
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| (e.node.id.clone(), e.depth))
+            .collect();
+        assert!(depths.contains(&("leaf".to_string(), 3)), "{depths:?}");
     }
 
     #[test]

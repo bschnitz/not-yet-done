@@ -5048,6 +5048,12 @@ impl App {
                         None,
                     );
                 }
+                // `set_query_*` re-armed the pane's `expand_depth`
+                // cascade; the async load path pumps it from
+                // `LoadMsg::ContentItems`, but this synchronous apply
+                // bypasses that — drive it here so the filtered tree
+                // unfolds just like a fresh load.
+                self.drive_tree_auto_expand(tab_idx, pane_id);
             }
             Err(e) => {
                 not_yet_done_content::http_log::log_error("query_apply", &e);

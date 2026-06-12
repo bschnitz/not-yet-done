@@ -317,6 +317,30 @@ views:
     # Connector-glyph color for this tree (box prefix + expand arrows). Omit
     # to inherit the theme's `tree_connector`. See tasks.yaml for the rationale.
     tree_connector_style: text_dim
+    # Native parity: the legacy Trackings tree is always fully open and has
+    # no expand/collapse markers — it's a small, pruned, in-memory forest,
+    # so eager expansion is cheap and the markers are pure noise.
+    # `expand_depth: all` keeps cascading until nothing expandable is left
+    # (use a number on remote adapters instead — each level costs a round
+    # of adapter calls).
+    expand_depth: all
+    tree_markers:
+      enabled: false
+
+    # The tree folds the same trackings the other subtabs list, so the
+    # saved-query filter applies here too (root *and* expanded branches —
+    # the adapter re-folds the durations from the visible trackings only;
+    # tasks whose subtree carries no visible tracked time prune away).
+    # `inherit_default: true`: see the Condensed view above.
+    query:
+      editable: false
+      menu_key: q
+      inherit_default: true
+      default: |
+        query:
+          and:
+            - [deleted, =, false]
+            - [started_at, gt, last month]
 
     columns:
       - key: task

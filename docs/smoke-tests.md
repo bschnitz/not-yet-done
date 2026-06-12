@@ -3539,6 +3539,26 @@ persistiert, wie `zg` — nativ persistierte via `SaveTrackingGrouping`).
 - [x] Auf einer Ebene ohne `group_by` (z. B. Tasks (A)): kein
       `u group`-Hint, `u` bleibt frei für YAML-`shortcuts:`.
 
+## Trackings-Tree: immer ausgeklappt + ohne Marker (`expand_depth: all`)
+
+Native Parität für den Tree-Subtab von Trackings (A): der Legacy-Tree war
+immer komplett offen und hatte keine Aufklappmarker. `expand_depth: all`
+(neuer Wert, Kaskade läuft bis nichts Aufklappbares übrig ist) +
+`tree_markers.enabled: false` in trackings.yaml.
+
+- [x] Trackings (A) → `t` (Tree): der gesamte Baum ist sofort komplett
+      ausgeklappt — alle Ebenen sichtbar, ohne manuelles Enter.
+- [x] Keine `▶`/`▼`-Marker vor den Zeilen; die Box-Connectors
+      (`├──`/`└──`) bleiben.
+- [x] Manuell einen Ast zuklappen (Enter), dann Subtab wechseln und
+      zurück: Zustand bleibt — die Kaskade ist one-shot und klappt nichts
+      gegen den User wieder auf.
+- [x] Saved Query anwenden (`q`): der gefilterte Baum ist ebenfalls
+      sofort voll ausgeklappt (neue Query re-armiert die Kaskade).
+      Auch mit Cursor tief im Baum + vorherigem manuellen Auf-/Zuklappen
+      (Regression: Out-of-Range-Cursor brach den Tabellen-Rebuild ab →
+      stale Anzeige).
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

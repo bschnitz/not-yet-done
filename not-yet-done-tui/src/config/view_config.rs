@@ -645,20 +645,73 @@ pub struct ViewDef {
     /// Initial expansion depth for tree mode. Rows at depth `d <
     /// expand_depth` are auto-expanded once after the root list (re)loads
     /// — `2` shows three levels (roots, children, grandchildren), mirroring
-    /// the native Tasks tab's `tasks.tree.default_expand_depth`. The
-    /// expansion is a one-shot cascade: after it completes the user's
-    /// manual expand/collapse state is never overridden. A new query
+    /// the native Tasks tab's `tasks.tree.default_expand_depth`; `all`
+    /// keeps expanding until no expandable row is left (the whole tree is
+    /// always fully open, like the native Trackings tree). The expansion
+    /// is a one-shot cascade: after it completes the user's manual
+    /// expand/collapse state is never overridden. A new query
     /// (saved-query apply) re-runs the cascade on the filtered tree.
     ///
     /// Why: lazy-loading trees open fully collapsed by default, which is
     /// right for expensive remote adapters (Postgres, Confluence) but
     /// wrong for cheap in-memory forests (tasks) where the user expects
     /// their working set visible immediately. Each level is fetched
-    /// through the normal expand path, so the cost is `expand_depth`
-    /// rounds of adapter calls — keep it small on remote adapters.
-    /// `0`/unset = no auto-expansion (default). Ignored outside tree mode.
+    /// through the normal expand path, so the cost is one round of
+    /// adapter calls per level — keep the value small (and avoid `all`)
+    /// on remote adapters. `0`/unset = no auto-expansion (default).
+    /// Ignored outside tree mode.
     #[serde(default)]
-    pub expand_depth: Option<u32>,
+    pub expand_depth: Option<ExpandDepth>,
+}
+
+/// Value of [`ViewDef::expand_depth`]: a fixed number of levels, or the
+/// string `all` to expand every level until nothing expandable remains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpandDepth {
+    /// Auto-expand rows at depth `d < n` (`expand_depth: 2`).
+    Levels(u32),
+    /// Auto-expand everything (`expand_depth: all`). The cascade
+    /// terminates on its own once no row has unexpanded children.
+    All,
+}
+
+impl<'de> Deserialize<'de> for ExpandDepth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ExpandDepthVisitor;
+        impl serde::de::Visitor<'_> for ExpandDepthVisitor {
+            type Value = ExpandDepth;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a non-negative integer or the string \"all\"")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<ExpandDepth, E> {
+                u32::try_from(v)
+                    .map(ExpandDepth::Levels)
+                    .map_err(|_| E::custom(format!("expand_depth {v} out of range")))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<ExpandDepth, E> {
+                u32::try_from(v)
+                    .map(ExpandDepth::Levels)
+                    .map_err(|_| E::custom(format!("expand_depth must be >= 0, got {v}")))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<ExpandDepth, E> {
+                if v.eq_ignore_ascii_case("all") {
+                    Ok(ExpandDepth::All)
+                } else {
+                    Err(E::custom(format!(
+                        "unknown expand_depth `{v}` (expected a number or `all`)"
+                    )))
+                }
+            }
+        }
+        deserializer.deserialize_any(ExpandDepthVisitor)
+    }
 }
 
 /// Expand/collapse marker configuration for tree mode (see
@@ -1548,6 +1601,30 @@ views:
     }
 
     #[test]
+    fn parse_expand_depth_number_and_all() {
+        let yaml = r#"
+tab:
+  name: T
+adapter:
+  type: x
+views:
+  - name: levels
+    node_type: t
+    expand_depth: 2
+  - name: full
+    node_type: t
+    expand_depth: all
+"#;
+        let config: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.views[0].expand_depth, Some(ExpandDepth::Levels(2)));
+        assert_eq!(config.views[1].expand_depth, Some(ExpandDepth::All));
+
+        let bad = yaml.replace("expand_depth: all", "expand_depth: everything");
+        let err = serde_yaml::from_str::<ViewFileConfig>(&bad).unwrap_err();
+        assert!(err.to_string().contains("expand_depth"), "{err}");
+    }
+
+    #[test]
     fn parse_nested_grouping_then_by() {
         // Trackings "Condensed" config: outer day group + inner per-task
         // group + summary_only. `then_by` defaults to empty when omitted.
@@ -1866,6 +1943,7 @@ views:
         assert_eq!(tree.key.as_deref(), Some("t"));
         assert_eq!(tree.node_type, "tracking:tree-item");
         assert_eq!(tree.tree_label.as_deref(), Some("task"));
+        assert!(tree.query.as_ref().unwrap().inherit_default);
         let dur = tree.columns.iter().find(|c| c.key == "duration").unwrap();
         let ta = dur
             .tree_aggregate
