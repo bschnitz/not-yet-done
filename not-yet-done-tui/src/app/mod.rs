@@ -2869,6 +2869,24 @@ impl App {
         }
     }
 
+    /// After a root reload landed in a tree pane, re-fetch the children of
+    /// every expanded node so the whole visible tree reflects the reload —
+    /// not just depth 0 (see
+    /// [`ContentPane::pending_expanded_refresh_requests`](crate::views::content_view::ContentPane)).
+    fn drive_tree_expanded_refresh(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
+        let reqs = match self.content_view(view_index) {
+            Some(cv) => cv.pending_expanded_refresh_requests(view_index, pane_id),
+            None => return,
+        };
+        for req in reqs {
+            let _ = self.process_view_request(req);
+        }
+    }
+
     /// Drain all pending async results. Returns `true` if at least one
     /// message was processed (i.e. visible state may have changed and the
     /// frame should be redrawn).
@@ -2925,6 +2943,11 @@ impl App {
                     // Tree mode: kick off the `expand_depth` cascade now
                     // that the depth-0 rows are in.
                     self.drive_tree_auto_expand(view_index, pane_id);
+                    // …and refresh what's already expanded, so a reload
+                    // (r / Invalidation::All) renews the whole visible
+                    // tree, not just the depth-0 rows. Disjoint from the
+                    // cascade: it only touches loaded expanded paths.
+                    self.drive_tree_expanded_refresh(view_index, pane_id);
                     // Reload may have shifted the row under the cursor onto a
                     // different item (e.g. mark_as_read sorts the read entry
                     // away). Refresh preview when the row's id no longer
@@ -5250,6 +5273,16 @@ impl App {
         }
         if let Tab::Content(idx) = tab {
             if let Some(cv) = self.content_view(idx) {
+                // Cheap staleness probe: adapters over stores that change
+                // outside the process (local task/tracking DB written by
+                // the CLI or waybar) diff their cache against the backend
+                // and emit `Invalidation::All` on drift, so the tab shows
+                // e.g. an externally started tracking on switch. No-op
+                // for everyone else.
+                if let Some(adapter) = cv.adapter.as_ref() {
+                    let adapter = Arc::clone(adapter);
+                    tokio::spawn(async move { adapter.revalidate().await });
+                }
                 let status = cv.auth_status.clone();
                 self.react_to_adapter_status(idx, &status);
             }

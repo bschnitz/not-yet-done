@@ -326,6 +326,24 @@ HashMap<view_index, JoinHandle>`; `set_live_refresh_timer` (re)spawnt je
 > Bootstrap race-frei: der Invalidation-Watcher subscribt **vor** dem ersten
 > Load, also erreicht ein `RefreshInterval`, das der Adapter am Ende seines
 > Snapshot-Loads pusht, garantiert einen Empfänger.
+>
+> **Adaptives Intervall (Nachtrag, native Parität):** der TrackingAdapter
+> taktet nicht fix 1 Hz, sondern wie `App::tick_active_trackings` nach der
+> **jüngsten** laufenden Tracking-Dauer (<60 s → 5 s, <10 min → 10 s,
+> <1 h → 30 s, sonst 60 s; `live_interval_for`). Jeder `live_rows`-Pull
+> vergleicht die Ziel-Stufe mit der zuletzt announceten und re-taktet den
+> Framework-Timer nur bei Stufenwechsel (`RefreshInterval` erneut senden).
+>
+> **`revalidate()` (Nachtrag, externe Änderungen):** neuer Trait-Hook
+> `ContentAdapter::revalidate()` (Default no-op), von der App bei jedem
+> Wechsel auf einen Content-Tab gespawnt. Task- und Tracking-Adapter diffen
+> die laufenden Trackings der DB (`find_all_active`) gegen ihren Snapshot
+> (`tracked`-Set bzw. aktive IDs) und droppen bei Drift den Snapshot +
+> senden `Invalidation::All` — so werden Starts/Stops aus CLI/waybar (kein
+> in-process DomainEvent) beim Tab-Wechsel sichtbar; `r` (Reload-Action)
+> bleibt der manuelle Weg. Reloads erneuern seitdem auch aufgeklappte
+> Tree-Ebenen (Engine, siehe generic-view-spec „Reload erneuert
+> aufgeklappte Ebenen").
 
 ## Phasen
 

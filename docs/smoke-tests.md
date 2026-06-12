@@ -3311,10 +3311,11 @@ bespoke nativen Trackings-Tab (bis C1).
       Marker (`⏱` nur bei laufenden), Path (gestylt `/a › b`), Task, Started,
       Ended (leer bei laufend), Duration (`H:MM:SS`, rechtsbündig).
 - [ ] Auf der Tasks-Seite ein Tracking starten → die laufende Zeile zeigt
-      `⏱`, leeres Ended, und die Duration **tickt jede Sekunde** (nur diese
-      Zeile wird gepatcht, kein Voll-Reload-Flackern).
+      `⏱`, leeres Ended, und die Duration **tickt adaptiv** (frisch: alle
+      5 s; ab 1 min: 10 s; ab 10 min: 30 s; ab 1 h: 60 s — wie der native
+      Tab; nur diese Zeile wird gepatcht, kein Voll-Reload-Flackern).
 - [ ] Tracking stoppen → `⏱` weg, Ended gefüllt, Duration statisch; das
-      Sekunden-Ticken stoppt (kein Dauer-CPU mehr).
+      Ticken stoppt (kein Dauer-CPU mehr).
 - [ ] `zg` zykliert die Gruppierung (Day → Week → Month → Year → None) mit
       Pro-Gruppe-Summe + Footer-Gesamtsumme.
 - [ ] `q` öffnet das Query-Menü; eine gespeicherte FilterExpr-Query
@@ -3589,6 +3590,33 @@ mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
 - [ ] `s` (toggle-tracking) auf einer Task-Zeile im Bucket funktioniert;
       auf einer Bucket-Zeile ist `s` nicht belegt (read-only Aggregat).
       ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen.
+
+## Live-Frische Tasks/Trackings (A): Marker sofort, externe Starts, adaptives Ticken
+
+Drei Frische-Fixes für die Adapter-Tabs: (1) ein Root-Reload erneuert jetzt
+auch alle **aufgeklappten** Tree-Ebenen (vorher blieben deren gecachte
+Children stehen → `⏱` erschien auf verschachtelten Tasks nicht sofort);
+(2) neuer Trait-Hook `revalidate()` — beim Tab-Wechsel diffen Task-/
+Tracking-Adapter die laufenden Trackings gegen die DB und laden bei Drift
+neu (externe Starts/Stops via CLI/waybar); (3) die Live-Dauer tickt
+adaptiv statt sekündlich (5 s → 10 s → 30 s → 60 s, native Parität).
+
+- [ ] Tasks (A), Baum aufgeklappt: `s` auf einem **verschachtelten** Task
+      → `⏱` erscheint sofort auf der Zeile (kein Zuklappen/Neuladen
+      nötig); nochmal `s` → Marker sofort weg.
+      ⚠ nur auf einem Wegwerf-Task togglen.
+- [ ] Trackings (A) Flat-List: laufende Zeile tickt erst alle 5 s, nach
+      einer Minute spürbar seltener (10 s-Sprünge); CPU bleibt ruhig.
+      Nach Stop hört das Ticken auf.
+- [ ] Extern ein Tracking starten (z. B. CLI `task track …` / waybar),
+      während ein anderer Tab aktiv ist → auf Tasks (A) wechseln: `⏱`
+      ist da; auf Trackings (A) wechseln: neue laufende Zeile da und
+      tickt. Extern stoppen → Tab-Wechsel zeigt den Stop.
+- [ ] `r` auf Tasks (A) bzw. Trackings (A) holt dieselbe externe Änderung
+      manuell — auch im **Tree** mit aufgeklappten Ebenen (vorher blieb
+      dort alter Stand stehen).
+- [ ] Trackings (A) Tree/Condensed nach Toggle/Reload: Durations
+      konsistent frisch (auch unter Gruppen-Headern).
 
 ## Refinements / Deferred Tasks
 

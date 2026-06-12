@@ -785,6 +785,16 @@ Zeilen mit Tiefe `< expand_depth` automatisch auf — `2` zeigt also drei Ebenen
 - **Kosten:** eine Runde Adapter-Calls pro Ebene (Fan-out pro Knoten). Auf
   Remote-Adaptern klein halten; `0`/weggelassen = aus (Default, bisheriges
   Verhalten).
+- **Reload erneuert aufgeklappte Ebenen:** Landet ein Root-Reload (die
+  `r`-Reload-Action, ein `Invalidation::All` des Adapters oder der
+  Nach-Mutation-Reload einer Action) in einem Tree-Pane, werden zusätzlich
+  die Children **jedes aufgeklappten** Knotens re-fetcht — dieselben
+  Requests wie ein manuelles Zu-/Aufklappen, die alten Zeilen bleiben bis
+  zum Eintreffen sichtbar (kein Flackern). Ohne das blieben tiefere Ebenen
+  auf dem Stand vor dem Reload (z. B. ein gerade gestartetes Tracking ohne
+  `⏱`-Marker auf einem verschachtelten Task). Aufgeklappte Pfade, die
+  unter einem **zugeklappten** Vorfahren verborgen sind, werden nicht
+  erneuert — sie holen sich frische Daten beim nächsten Aufklappen.
 
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 

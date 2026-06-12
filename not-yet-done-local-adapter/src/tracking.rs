@@ -18,15 +18,18 @@
 //!
 //! ## Live durations (M9)
 //!
-//! A running tracking's duration ticks every second. Rather than a
+//! A running tracking's duration ticks while it runs. Rather than a
 //! render-time `kind: elapsed` column (which can't also show the *static*
 //! `ended − started` of a completed tracking in the same column), the
 //! adapter drives the generic **live-row** mechanism: while ≥1 tracking is
 //! active it asks the frontend to pull [`live_rows`](ContentAdapter::live_rows)
-//! at 1 Hz (via [`Invalidation::RefreshInterval`]); each pull recomputes
+//! (via [`Invalidation::RefreshInterval`]); each pull recomputes
 //! `now − started` for the active rows and the frontend patches them in
-//! place ([`Invalidation::Row`]). When the last tracking stops the adapter
-//! sends `RefreshInterval(None)` and the pull stops.
+//! place ([`Invalidation::Row`]). The cadence is **adaptive** like the
+//! native tab's ([`live_interval_for`]: 5 s under a minute, then 10 s/30 s/
+//! 60 s as the youngest tracking ages) and re-paces itself from each pull.
+//! When the last tracking stops the adapter sends `RefreshInterval(None)`
+//! and the pull stops.
 //!
 //! ## Scope (A2a — read path)
 //!
@@ -85,9 +88,24 @@ use crate::CoreHandle;
 /// Stable id of the synthetic list-root node.
 const ROOT_ID: &str = "tracking:root";
 
-/// The 1 Hz cadence the adapter requests while a tracking is running, so a
-/// running duration ticks once a second (see the module-level M9 note).
-const LIVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Adaptive live-refresh cadence (M9), matching the native Trackings tab
+/// (`App::tick_active_trackings`): a young tracking ticks fast (the user is
+/// watching the seconds), an old one slowly (the displayed value barely
+/// changes and every tick costs a recompute + repaint). Keyed off the
+/// *shortest* active duration so the most recently started tracking sets
+/// the pace.
+fn live_interval_for(shortest_active_secs: i64) -> Duration {
+    let secs = if shortest_active_secs < 60 {
+        5
+    } else if shortest_active_secs < 600 {
+        10
+    } else if shortest_active_secs < 3600 {
+        30
+    } else {
+        60
+    };
+    Duration::from_secs(secs)
+}
 
 // ---------------------------------------------------------------------------
 // Node types
@@ -524,9 +542,25 @@ impl TrackingSnapshot {
         Ok(folded)
     }
 
-    /// Number of running trackings — drives the live-refresh cadence.
-    fn active_count(&self) -> usize {
-        self.by_id.values().filter(|r| r.active).count()
+    /// Elapsed seconds of the *youngest* running tracking (`None` when none
+    /// runs) — the input to [`live_interval_for`]'s adaptive cadence.
+    fn shortest_active_secs(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+        self.by_id
+            .values()
+            .filter(|r| r.active)
+            .map(|r| (now - r.tracking.started_at).num_seconds().max(0))
+            .min()
+    }
+
+    /// The ids of the currently running trackings — what
+    /// [`TrackingAdapter::revalidate`] diffs against the live DB to detect
+    /// out-of-process starts/stops.
+    fn active_ids(&self) -> HashSet<Uuid> {
+        self.by_id
+            .iter()
+            .filter(|(_, r)| r.active)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// One summary per bucket the active grouping (`spec`) partitions the
@@ -1532,6 +1566,7 @@ impl AdapterFactory for TrackingAdapterFactory {
             inv_tx,
             snapshot,
             saved_queries: FsSavedQueryStore::new(queries_root),
+            last_live_secs: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 }
@@ -1548,6 +1583,11 @@ pub struct TrackingAdapter {
     /// queries/*.yaml`). Bodies are `name`/`query`(`FilterExpr`)/`options`;
     /// applying one filters the list via [`resolve_visible_set`].
     saved_queries: FsSavedQueryStore,
+    /// The cadence last announced via [`Invalidation::RefreshInterval`],
+    /// in seconds (`0` = stopped). [`ContentAdapter::live_rows`] compares
+    /// the adaptive target against this on every tick and re-paces the
+    /// frontend timer only when the bracket actually changes.
+    last_live_secs: std::sync::atomic::AtomicU64,
 }
 
 impl TrackingAdapter {
@@ -1575,12 +1615,20 @@ impl TrackingAdapter {
         Ok(snap)
     }
 
-    /// Tell the frontend whether to run the 1 Hz live-row pull: `Some` while
-    /// a tracking is running, `None` when none is (M9). Emitted on every
-    /// (re)load so a tracking that started/stopped in another tab re-paces
-    /// the timer after the reload its event triggered.
+    /// Tell the frontend whether (and how fast) to run the live-row pull:
+    /// the adaptive [`live_interval_for`] cadence while a tracking is
+    /// running, `None` when none is (M9). Emitted on every (re)load so a
+    /// tracking that started/stopped in another tab re-paces the timer
+    /// after the reload its event triggered; `live_rows` keeps re-pacing
+    /// as the tracking ages and the bracket slows down.
     fn announce_interval(&self, snapshot: &TrackingSnapshot) {
-        let interval = (snapshot.active_count() > 0).then_some(LIVE_INTERVAL);
+        let interval = snapshot
+            .shortest_active_secs(chrono::Utc::now())
+            .map(live_interval_for);
+        self.last_live_secs.store(
+            interval.map(|d| d.as_secs()).unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let _ = self.inv_tx.send(Invalidation::RefreshInterval(interval));
     }
 }
@@ -1678,6 +1726,19 @@ impl ContentAdapter for TrackingAdapter {
             return Vec::new();
         };
         let now = chrono::Utc::now();
+        // Adaptive cadence: as the youngest tracking ages into a slower
+        // bracket (5 s → 10 s → 30 s → 60 s, see `live_interval_for`),
+        // re-pace the frontend timer. Compared against the last announced
+        // value so a steady state sends nothing.
+        let target = snapshot.shortest_active_secs(now).map(live_interval_for);
+        let target_secs = target.map(|d| d.as_secs()).unwrap_or(0);
+        if self
+            .last_live_secs
+            .swap(target_secs, std::sync::atomic::Ordering::Relaxed)
+            != target_secs
+        {
+            let _ = self.inv_tx.send(Invalidation::RefreshInterval(target));
+        }
         snapshot
             .order
             .iter()
@@ -1686,6 +1747,29 @@ impl ContentAdapter for TrackingAdapter {
                 row.active.then(|| entry_summary(*id, row, now))
             })
             .collect()
+    }
+
+    async fn revalidate(&self) {
+        // Out-of-process changes (CLI, waybar, another instance) write to
+        // the same DB but emit no in-process DomainEvent, so the eager
+        // snapshot can go stale without the bridge noticing. Diff the
+        // running-tracking set against the live DB; on drift drop the
+        // snapshot and reload everything (the reload also re-announces the
+        // live cadence, so an externally started tracking starts ticking
+        // and an externally stopped one stops).
+        let snap_active = match self.snapshot.read().await.as_ref() {
+            Some(snap) => snap.active_ids(),
+            // No snapshot — the next load is fresh anyway.
+            None => return,
+        };
+        let Ok(active) = self.handle.tracking_repo.find_all_active().await else {
+            return;
+        };
+        let db_active: HashSet<Uuid> = active.iter().map(|t| t.id).collect();
+        if db_active != snap_active {
+            *self.snapshot.write().await = None;
+            let _ = self.inv_tx.send(Invalidation::All);
+        }
     }
 }
 
@@ -1892,14 +1976,46 @@ mod tests {
     }
 
     #[test]
-    fn active_count_counts_running() {
+    fn shortest_active_and_active_ids_track_running_rows() {
         let a = Uuid::from_u128(1);
         let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
         let snap = snapshot_from(vec![
-            (a, row(tracking(a, Uuid::from_u128(9), 60, false), "A", vec![])), // active
+            (a, row(tracking(a, Uuid::from_u128(9), 60, false), "A", vec![])), // active, older
             (b, row(tracking(b, Uuid::from_u128(9), 30, true), "B", vec![])),  // done
+            (c, row(tracking(c, Uuid::from_u128(9), 5, false), "C", vec![])),  // active, youngest
         ]);
-        assert_eq!(snap.active_count(), 1);
+        let now = chrono::Utc::now();
+        // The youngest active tracking (5 min ago) sets the pace; the
+        // completed one is ignored.
+        let shortest = snap.shortest_active_secs(now).expect("two active rows");
+        assert!((290..=310).contains(&shortest), "got {shortest}");
+        assert_eq!(snap.active_ids(), HashSet::from([a, c]));
+    }
+
+    #[test]
+    fn shortest_active_none_without_running_rows() {
+        let a = Uuid::from_u128(1);
+        let snap = snapshot_from(vec![(
+            a,
+            row(tracking(a, Uuid::from_u128(9), 30, true), "A", vec![]),
+        )]);
+        assert_eq!(snap.shortest_active_secs(chrono::Utc::now()), None);
+        assert!(snap.active_ids().is_empty());
+    }
+
+    #[test]
+    fn live_interval_slows_down_as_the_tracking_ages() {
+        // Native parity (`App::tick_active_trackings`): <60s → 5s,
+        // <10min → 10s, <1h → 30s, else 60s.
+        assert_eq!(live_interval_for(0), Duration::from_secs(5));
+        assert_eq!(live_interval_for(59), Duration::from_secs(5));
+        assert_eq!(live_interval_for(60), Duration::from_secs(10));
+        assert_eq!(live_interval_for(599), Duration::from_secs(10));
+        assert_eq!(live_interval_for(600), Duration::from_secs(30));
+        assert_eq!(live_interval_for(3599), Duration::from_secs(30));
+        assert_eq!(live_interval_for(3600), Duration::from_secs(60));
+        assert_eq!(live_interval_for(86_400), Duration::from_secs(60));
     }
 
     fn has(actions: &[NodeAction], id: &str) -> bool {
