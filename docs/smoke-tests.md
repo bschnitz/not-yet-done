@@ -3495,6 +3495,29 @@ Forest als flache Tabelle in DFS-Reihenfolge.
       selbst erscheinen, keine Vorfahren-Zeilen (unit-getestet, live
       offen).
 
+## Default-Query auf allen Trackings-Subtabs (`query.inherit_default`)
+
+Der User-Default (★ im q-Menü) wird beim Start nur auf die Default-View
+des Tabs gestempelt. `query.inherit_default: true` (condensed + tree in
+trackings.yaml) stempelt ihn zusätzlich auf den jeweiligen Subtab; der
+Tree filtert dabei adapter-seitig (Projektion wird aus den sichtbaren
+Trackings neu gefaltet, `propagates_query_to_subtree`).
+
+- [x] App mit ★-Default starten: Normal-, Condensed- UND Tree-Subtab
+      zeigen den Default-Query-Namen als aktive Query in der Action-Bar
+      (Grenze unverändert: ein Default mit `{var}`-Variable wird roh,
+      d. h. effektiv ungefiltert, angewendet — wie auf der Default-View).
+- [ ] Subtab ohne `inherit_default` (z. B. Tasks (A) Listenansicht):
+      Default-Query greift dort weiterhin NICHT (Opt-in-Verhalten;
+      unit-getestet, live offen).
+- [x] Im Tree-Subtab `q` → Saved Query anwenden: Wurzel zeigt die
+      gefilterte Summe; Expand der Äste bleibt gefiltert (nur Äste mit
+      sichtbarer Zeit, identische Summen die Kette hoch bei
+      Einzel-Ast-Treffern).
+- [x] Nach Anwendung zurück zur flachen Liste (`a`): deren eigene Query
+      unverändert (Pane-State bleibt getrennt; geteilt ist nur der
+      Start-Default).
+
 ## Group-by-Menü (`u`) auf Content-Tabs (`content.group_menu`)
 
 Direktsprung-Parität zum nativen Trackings-`u`: ein Hotkey-Popup über die

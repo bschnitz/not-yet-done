@@ -991,10 +991,11 @@ impl App {
     }
 
     /// Stamp each content view's default saved query (if any) onto its
-    /// active pane so the initial load already uses it. Runs once at
-    /// startup after [`Self::load_content_saved_queries`]; a default
-    /// whose name no longer exists in the store is skipped silently
-    /// (the view falls back to its YAML `query.default`).
+    /// active pane — plus every subtab pane opting in via
+    /// `query.inherit_default` — so the initial loads already use it.
+    /// Runs once at startup after [`Self::load_content_saved_queries`];
+    /// a default whose name no longer exists in the store is skipped
+    /// silently (the view falls back to its YAML `query.default`).
     pub fn apply_default_content_queries(&mut self) {
         for idx in 0..self.content_views.len() {
             let Some(cv) = self.content_view_mut(idx) else { continue };
@@ -1007,7 +1008,7 @@ impl App {
             else {
                 continue;
             };
-            cv.set_query(body, Some(name));
+            cv.apply_default_query(body, Some(name));
         }
     }
 

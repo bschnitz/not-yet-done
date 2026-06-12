@@ -724,6 +724,15 @@ pub struct QueryConfig {
     /// Key to open the query menu popup (e.g. "q").
     #[serde(default)]
     pub menu_key: Option<String>,
+    /// Apply the tab's user-set default saved query (★ in the query menu)
+    /// to this view too. By default the startup apply only stamps the
+    /// tab's default view — usually right, because sibling views show
+    /// *different* data where the query means something else. Set this on
+    /// views that are mere projections of the same rows (e.g. the
+    /// Trackings condensed/tree subtabs) so the default filter follows
+    /// the user across subtabs.
+    #[serde(default)]
+    pub inherit_default: bool,
 }
 
 /// Accept either a string (for adapters that take a verbatim query, e.g.
@@ -1846,6 +1855,9 @@ views:
         assert_eq!(flat.key.as_deref(), Some("a"));
         let condensed = cfg.views.iter().find(|v| v.name == "condensed").unwrap();
         assert_eq!(condensed.key.as_deref(), Some("v"));
+        // Condensed + Tree are projections of the same trackings, so the
+        // user-set default saved query follows across them.
+        assert!(condensed.query.as_ref().unwrap().inherit_default);
 
         // A2c Tree: a `tracking:tree-item` tree, switched to with `t` (native
         // parity — track itself sits on `s`), with a `duration` column that

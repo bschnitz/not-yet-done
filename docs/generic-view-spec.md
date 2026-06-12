@@ -87,6 +87,16 @@ views:
       # die Query aus dem Store, wird der Default beim Start still
       # übersprungen. Grenze: Queries mit Pflicht-Variablen (`{var}`)
       # werden beim Start ohne Variablen-Popup roh angewendet.
+      #
+      # `inherit_default: true` (Default false) stempelt die User-
+      # Default-Query (★) beim Start zusätzlich auf *diesen* Subtab —
+      # der einfache Start-Apply trifft nur die Default-View des Tabs.
+      # Warum opt-in: Geschwister-Views zeigen meist *andere* Daten,
+      # wo dieselbe Query nichts bedeutet (Postgres tables vs.
+      # scripts); Views, die nur eine andere Projektion derselben
+      # Zeilen sind (Trackings normal/condensed/tree), wollen den
+      # Default-Filter dagegen überall (analog zum nativen Tab, der
+      # EINEN Filterzustand über alle Subviews hatte).
 
     # Spalten der Tabelle — welche Metadata-Keys angezeigt werden.
     columns:

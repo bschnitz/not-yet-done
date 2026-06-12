@@ -6034,6 +6034,33 @@ impl ContentView {
         self.active_pane_mut().set_query(query, name);
     }
 
+    /// Stamp the tab's user-set default saved query onto the active pane
+    /// (the default view, as the plain startup apply always did) *and*
+    /// onto every pane whose view opts in via `query.inherit_default` —
+    /// subtabs that are projections of the same rows, where the default
+    /// filter should follow the user. Runs once at startup, before any
+    /// pane has loaded.
+    pub fn apply_default_query(&mut self, query: String, name: Option<String>) {
+        self.set_query(query.clone(), name.clone());
+        let view_defs = self.view_defs.clone();
+        let active = self.active_pane_id();
+        for tree in &mut self.pane_trees {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                if leaf.id == active {
+                    return; // already stamped above
+                }
+                let inherits = view_defs
+                    .get(leaf.pane.view_def_index())
+                    .and_then(|vd| vd.query.as_ref())
+                    .map(|q| q.inherit_default)
+                    .unwrap_or(false);
+                if inherits {
+                    leaf.pane.set_query(query.clone(), name.clone());
+                }
+            });
+        }
+    }
+
     pub fn set_query_with_vars(
         &mut self,
         query: String,
@@ -11204,6 +11231,7 @@ mod tests {
                     default: Some("assignee = me".into()),
                     editable: true,
                     menu_key: Some("q".into()),
+                    inherit_default: false,
                 }),
                 columns: vec![
                     ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
@@ -11612,6 +11640,52 @@ mod tests {
         let req = view.root_load_request().unwrap();
         assert_eq!(req.query.as_deref(), Some("type = Bug"));
         assert_eq!(view.active_pane().active_query_name.as_deref(), Some("My Bugs"));
+    }
+
+    #[test]
+    fn apply_default_query_stamps_inheriting_subtab_panes() {
+        // The startup default-query apply stamps the active (default
+        // view) pane plus every subtab opting in via
+        // `query.inherit_default`; plain sibling views keep their own
+        // query semantics untouched.
+        let mut config = test_config_with_query();
+        let mut inheriting = config.views[0].clone();
+        inheriting.name = "condensed".into();
+        inheriting.default = false;
+        inheriting.query.as_mut().unwrap().inherit_default = true;
+        let mut plain = config.views[0].clone();
+        plain.name = "other".into();
+        plain.default = false;
+        config.views.push(inheriting);
+        config.views.push(plain);
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.apply_default_query("type = Bug".into(), Some("My Bugs".into()));
+
+        assert_eq!(
+            view.active_pane().active_query.as_deref(),
+            Some("type = Bug"),
+            "default view pane is stamped as before"
+        );
+        let PaneNode::Leaf(inheriting_leaf) = &view.pane_trees[1].root else {
+            panic!("expected single-leaf pane tree");
+        };
+        assert_eq!(
+            inheriting_leaf.pane.active_query.as_deref(),
+            Some("type = Bug"),
+            "inherit_default subtab pane is stamped too"
+        );
+        assert_eq!(
+            inheriting_leaf.pane.active_query_name.as_deref(),
+            Some("My Bugs")
+        );
+        let PaneNode::Leaf(plain_leaf) = &view.pane_trees[2].root else {
+            panic!("expected single-leaf pane tree");
+        };
+        assert!(
+            plain_leaf.pane.active_query.is_none(),
+            "non-inheriting sibling view stays untouched"
+        );
     }
 
     #[test]
