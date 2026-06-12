@@ -592,7 +592,35 @@ cumulated }` auf der `duration`-Spalte (`zt` toggelt own↔cumulated über
   >     das ist der generische Pfad, kein Narrow-Einzelfix. 2 neue Gate-Tests
   >     (Spalte ohne Capability → unclaimable/No-op; Spalte + Capability →
   >     claimable) = 541 TUI; installiert. (M3 `cycle_grouping` bleibt
-  >     config-only — keine `supports_grouping`-Capability existiert.)
+  >     in Flat-Listen config-only — keine `supports_grouping`-Capability;
+  >     im **Tree** gated es auf `group_by_via_adapter`, siehe nächster
+  >     Punkt.)
+  >   - **Tree-Gruppierung (FERTIG, generischer Mechanismus
+  >     `group_by_via_adapter`).** Native Parität Punkt (3): der Legacy-Tree
+  >     gruppierte nach Tag. Ein Tree kann nicht engine-seitig gruppieren
+  >     (der Adapter besitzt den per-Bucket-Fold), also dreht sich die
+  >     Zuständigkeit: Engine reicht das aktive `group_by` der Pane als
+  >     `ListParams.group_by` (`GroupSpec` aus dem neuen Content-Modul
+  >     `grouping`, das auch die Flat-Gruppierung der TUI speist — Keys +
+  >     Labels identisch) in den Root-`list()`; der Adapter antwortet mit
+  >     `tracking:tree-group`-Bucket-Knoten (`treegrp:<col>:<gran>:<key>`),
+  >     deren Teilbäume aus den Trackings **dieses** Buckets gefaltet sind;
+  >     Item-IDs darunter tragen den Bucket-Scope
+  >     (`tree:<col>:<gran>:<key>:<uuid>`), damit `get_by_id` ohne
+  >     Query-Kontext bucket-korrekt rechnet (Query kommt zusätzlich pro
+  >     `list()` via `propagates_query_to_subtree`). Engine-Seite:
+  >     `level_has_group_by`/`current_group_by`/`configured_grouping_base`
+  >     capability-gated im Tree, `zg`/`u` = **Reload** statt Rebuild,
+  >     `current_levels` im Tree immer leer (gruppierter Render-Pfad bleibt
+  >     flat-only); `spawn_content_load` + synchroner Query-Apply threaden
+  >     `adapter_group_spec`. **EIN View-Config für beide Formen:** Root
+  >     `node_type: tracking:tree-group` + rekursive
+  >     `tracking:tree-item`-ChildDef — „No grouping" liefert Items statt
+  >     Buckets, die typbasierte Chain-Auflösung matcht die ChildDef dann ab
+  >     Tiefe 0 (Root-`shortcuts:` entfernt: Buckets sind read-only;
+  >     `s: toggle-tracking` lebt auf der Item-Ebene). 592 TUI (+5 Gating/
+  >     Reload) + 68 adapter (+5 Bucket/Scope/Refold) Tests grün,
+  >     installiert.
 
 ### Cutover (harter Schnitt)
 

@@ -69,10 +69,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
-    ContentAdapter, ContentError, FsSavedQueryStore, HintPlacement, InputSpec, Invalidation,
-    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
-    SortableColumn,
+    grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
+    AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore, GroupBucket, GroupSpec,
+    HintPlacement, InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortableColumn,
 };
 use not_yet_done_core::entity::tracking;
 use not_yet_done_core::error::AppError;
@@ -131,11 +131,99 @@ fn tracking_tree_item_type() -> NodeType {
     }
 }
 
+/// The node type for a **group bucket** in the grouped tree (generic
+/// `group_by_via_adapter` mechanism): one node per day/week/month/year (or
+/// verbatim value) the active grouping partitions the trackings into. Each
+/// bucket's children are `tracking:tree-item` nodes whose durations are
+/// re-folded from that bucket's trackings only — the per-bucket fold the
+/// engine cannot do itself. The tree view in `views/trackings.yaml` uses this
+/// as its root `node_type`; when grouping is cycled off the adapter answers
+/// the same root request with plain `tracking:tree-item` rows instead (the
+/// frontend's type-based chain resolution handles both shapes).
+fn tracking_tree_group_type() -> NodeType {
+    NodeType {
+        type_id: "tracking:tree-group".to_string(),
+        mime_type: "text/plain".to_string(),
+        syntax: None,
+        file_extension: ".txt".to_string(),
+        display_name: "Group".to_string(),
+    }
+}
+
 /// Prefix on a `tracking:tree-item` node id. Tree nodes are addressed by the
 /// *task* UUID, which is indistinguishable from a tracking UUID, so the id is
 /// `tree:<task-uuid>` — [`TrackingAdapter::get_by_id`] routes on the prefix to
-/// the right node kind.
+/// the right node kind. Inside a group bucket the id additionally embeds the
+/// bucket scope: `tree:<column>:<gran>:<key>:<task-uuid>` (see [`BucketScope`]).
 const TREE_ID_PREFIX: &str = "tree:";
+
+/// Prefix on a `tracking:tree-group` node id: `treegrp:<column>:<gran>:<key>`.
+const GROUP_ID_PREFIX: &str = "treegrp:";
+
+// ---------------------------------------------------------------------------
+// Bucket scope (grouped tree)
+// ---------------------------------------------------------------------------
+
+/// The bucket a grouped-tree level is scoped to. Encoded into every node id
+/// under a group (`treegrp:…` and the scoped `tree:…` items) because that is
+/// the only context [`ContentAdapter::get_by_id`] has: the same task appears
+/// in several buckets, so the id alone must say *which* bucket's re-folded
+/// durations the node carries. The pane's saved query, by contrast, arrives
+/// per `list()` call (capability `propagates_query_to_subtree`) and is
+/// intersected on top.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BucketScope {
+    /// The grouped column (`GroupSpec::column`), so bucket membership can be
+    /// recomputed from an id without the original spec.
+    column: String,
+    /// The date granularity; `None` groups the column's value verbatim.
+    bucket: Option<GroupBucket>,
+    /// The bucket key ([`grouping::group_key`]), e.g. `2026-06-09`.
+    key: String,
+}
+
+impl BucketScope {
+    /// `<column>:<gran>:<key>` — the id-embedded form. The key goes last so
+    /// a verbatim key containing `:` survives (parsers split off the fixed
+    /// prefix fields and keep the remainder).
+    fn encode(&self) -> String {
+        format!("{}:{}:{}", self.column, gran_token(self.bucket), self.key)
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        let (column, rest) = s.split_once(':')?;
+        let (gran, key) = rest.split_once(':')?;
+        Some(BucketScope {
+            column: column.to_string(),
+            bucket: parse_gran(gran)?,
+            key: key.to_string(),
+        })
+    }
+}
+
+/// Id token for a bucket granularity (`day`/`week`/`month`/`year`; `none`
+/// = verbatim grouping).
+fn gran_token(bucket: Option<GroupBucket>) -> &'static str {
+    match bucket {
+        None => "none",
+        Some(GroupBucket::Day) => "day",
+        Some(GroupBucket::Week) => "week",
+        Some(GroupBucket::Month) => "month",
+        Some(GroupBucket::Year) => "year",
+    }
+}
+
+/// Inverse of [`gran_token`]. Outer `None` = unknown token (bad id).
+fn parse_gran(s: &str) -> Option<Option<GroupBucket>> {
+    Some(match s {
+        "none" => None,
+        "day" => Some(GroupBucket::Day),
+        "week" => Some(GroupBucket::Week),
+        "month" => Some(GroupBucket::Month),
+        "year" => Some(GroupBucket::Year),
+        _ => return None,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Snapshot
@@ -193,32 +281,43 @@ impl TreeProjection {
     }
 
     /// Visible child summaries of `parent` (`None` = forest roots), ordered
-    /// as the children map records them.
-    fn child_summaries(&self, parent: Option<Uuid>) -> Vec<NodeSummary> {
+    /// as the children map records them. Inside a group bucket the `scope`
+    /// is embedded in every id (see [`BucketScope`]); `None` keeps the plain
+    /// `tree:<uuid>` ids of the ungrouped tree.
+    fn child_summaries(&self, parent: Option<Uuid>, scope: Option<&BucketScope>) -> Vec<NodeSummary> {
         self.children
             .get(&parent)
             .map(|ids| {
                 ids.iter()
                     .filter(|id| self.is_visible(**id))
-                    .filter_map(|id| self.by_id.get(id).map(|row| self.summary(*id, row)))
+                    .filter_map(|id| self.by_id.get(id).map(|row| self.summary(*id, row, scope)))
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    fn summary(&self, id: Uuid, row: &TreeTaskRow) -> NodeSummary {
+    fn summary(&self, id: Uuid, row: &TreeTaskRow, scope: Option<&BucketScope>) -> NodeSummary {
         let has_children = self
             .children
             .get(&Some(id))
             .map(|kids| kids.iter().any(|c| self.is_visible(*c)))
             .unwrap_or(false);
         NodeSummary {
-            id: format!("{TREE_ID_PREFIX}{id}"),
+            id: tree_item_id(scope, id),
             label: row.description.clone(),
             node_type: tracking_tree_item_type(),
             metadata: tree_metadata(id, row),
             has_children: Some(has_children),
         }
+    }
+}
+
+/// A tree item's node id: `tree:<uuid>` ungrouped, `tree:<scope>:<uuid>`
+/// inside a group bucket.
+fn tree_item_id(scope: Option<&BucketScope>, id: Uuid) -> String {
+    match scope {
+        Some(s) => format!("{TREE_ID_PREFIX}{}:{id}", s.encode()),
+        None => format!("{TREE_ID_PREFIX}{id}"),
     }
 }
 
@@ -340,6 +439,56 @@ impl TrackingSnapshot {
         self.by_id.values().filter(|r| r.active).count()
     }
 
+    /// One summary per bucket the active grouping (`spec`) partitions the
+    /// visible trackings into — the root level of the grouped tree. Each
+    /// bucket carries the sum of its trackings' durations (baked at
+    /// `built_at`, like the tree fold) and a `⏱` marker when one of them is
+    /// still running. Buckets are ordered by their ISO key (lexical =
+    /// chronological) per `spec.order`.
+    fn group_summaries(&self, filter: Option<&HashSet<Uuid>>, spec: &GroupSpec) -> Vec<NodeSummary> {
+        let now = self.built_at;
+        let mut buckets: HashMap<String, (i64, bool)> = HashMap::new();
+        for id in &self.order {
+            if !filter.map_or(true, |f| f.contains(id)) {
+                continue;
+            }
+            let Some(row) = self.by_id.get(id) else { continue };
+            let key = grouping::group_key(&bucket_raw_value(row, &spec.column), spec.bucket);
+            let entry = buckets.entry(key).or_insert((0, false));
+            entry.0 += duration_seconds(row, now);
+            entry.1 |= row.active;
+        }
+        let mut keys: Vec<String> = buckets.keys().cloned().collect();
+        keys.sort();
+        if spec.order == SortDirection::Desc {
+            keys.reverse();
+        }
+        keys.into_iter()
+            .map(|key| {
+                let (total_secs, active) = buckets[&key];
+                let scope = BucketScope {
+                    column: spec.column.clone(),
+                    bucket: spec.bucket,
+                    key,
+                };
+                group_summary(&scope, total_secs, active)
+            })
+            .collect()
+    }
+
+    /// The tracking ids that fall into `scope`'s bucket, optionally
+    /// intersected with a saved-query `filter`. This is what a group node's
+    /// subtree re-folds from.
+    fn bucket_members(&self, filter: Option<&HashSet<Uuid>>, scope: &BucketScope) -> HashSet<Uuid> {
+        self.by_id
+            .iter()
+            .filter(|(id, row)| {
+                filter.map_or(true, |f| f.contains(id)) && scope_member(row, scope)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Ordered entry summaries (newest first). When `filter` is `Some`,
     /// only trackings in the visible set are returned (a saved-query filter
     /// is active); `None` lists all.
@@ -420,6 +569,60 @@ fn model_duration_seconds(t: &tracking::Model, now: chrono::DateTime<chrono::Utc
 /// A tracking row's duration in seconds (see [`model_duration_seconds`]).
 fn duration_seconds(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> i64 {
     model_duration_seconds(&row.tracking, now)
+}
+
+/// The raw value the grouped tree buckets a row by — the same canonical
+/// string [`entry_metadata`] exposes for the column, so a day bucket here
+/// matches the flat view's engine-side grouping exactly. Unknown columns
+/// fall back to `started` (the shipped grouping).
+fn bucket_raw_value(row: &TrackingRow, column: &str) -> String {
+    match column {
+        "task" => row.task_description.clone(),
+        "taskpath" => canonical_path(&row.task_path),
+        "ended" => row
+            .tracking
+            .ended_at
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| "running".to_string()),
+        _ => row.tracking.started_at.to_rfc3339(),
+    }
+}
+
+/// Whether `row` falls into `scope`'s bucket.
+fn scope_member(row: &TrackingRow, scope: &BucketScope) -> bool {
+    grouping::group_key(&bucket_raw_value(row, &scope.column), scope.bucket) == scope.key
+}
+
+/// Column-backing metadata for a group-bucket node. `task` carries the
+/// human label (the tree view's `tree_label` column); both duration columns
+/// carry the bucket total so the `tree_aggregate` toggle (`zt`) never blanks
+/// the group row.
+fn group_metadata(label: &str, total_secs: i64, active: bool) -> Metadata {
+    Metadata {
+        fields: vec![
+            field(
+                "marker",
+                if active { "⏱".to_string() } else { String::new() },
+                "Active",
+            ),
+            field("task", label.to_string(), "Task"),
+            field("duration", total_secs.to_string(), "Duration"),
+            field("duration_cumulated", total_secs.to_string(), "Total"),
+        ],
+    }
+}
+
+/// Build a group bucket's [`NodeSummary`]. Always expandable — a bucket
+/// exists only because at least one tracking fell into it.
+fn group_summary(scope: &BucketScope, total_secs: i64, active: bool) -> NodeSummary {
+    let label = grouping::bucket_display_label(&scope.key, scope.bucket);
+    NodeSummary {
+        id: format!("{GROUP_ID_PREFIX}{}", scope.encode()),
+        label: label.clone(),
+        node_type: tracking_tree_group_type(),
+        metadata: group_metadata(&label, total_secs, active),
+        has_children: Some(true),
+    }
 }
 
 /// Build the duration-tree projection (A2c Tree view) from the loaded task
@@ -792,10 +995,15 @@ impl Node for TrackingRootNode {
         &self.metadata
     }
     fn children_types(&self) -> Vec<NodeType> {
-        // Both the flat/condensed entry rows and the A2c duration-tree task
-        // nodes hang off this one root; the loader picks the type matching
-        // the active view's `node_type`, and `list` dispatches on it.
-        vec![tracking_entry_type(), tracking_tree_item_type()]
+        // The flat/condensed entry rows, the A2c duration-tree task nodes
+        // and the grouped tree's bucket nodes all hang off this one root;
+        // the loader picks the type matching the active view's `node_type`,
+        // and `list` dispatches on it.
+        vec![
+            tracking_entry_type(),
+            tracking_tree_item_type(),
+            tracking_tree_group_type(),
+        ]
     }
     fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
         tracking_sortable_columns()
@@ -807,14 +1015,34 @@ impl Node for TrackingRootNode {
         &self,
         params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
-        // The Tree view asks for top-level task projections; every other view
-        // (flat list / condensed) asks for the flat tracking entries. Both
-        // honor the pane's saved query — the tree re-folds its durations
-        // from the visible trackings only.
+        // The Tree view asks for top-level task projections (grouped into
+        // bucket nodes while a `group_by` rides along — the generic
+        // `group_by_via_adapter` mechanism); every other view (flat list /
+        // condensed) asks for the flat tracking entries. All honor the
+        // pane's saved query — the tree re-folds its durations from the
+        // visible trackings only.
+        if params.node_type.type_id == tracking_tree_group_type().type_id {
+            let filter = resolve_visible_set(&self.handle, &params.query).await?;
+            if let Some(spec) = &params.group_by {
+                return Ok(list_result(
+                    self.snapshot.group_summaries(filter.as_ref(), spec),
+                ));
+            }
+            // Grouping cycled off at runtime: the same root request serves
+            // the plain task tree — the frontend's type-based chain
+            // resolution matches the recursive tree-item level from depth 0.
+            return Ok(list_result(
+                self.snapshot
+                    .tree_for(filter.as_ref())
+                    .child_summaries(None, None),
+            ));
+        }
         if params.node_type.type_id == tracking_tree_item_type().type_id {
             let filter = resolve_visible_set(&self.handle, &params.query).await?;
             return Ok(list_result(
-                self.snapshot.tree_for(filter.as_ref()).child_summaries(None),
+                self.snapshot
+                    .tree_for(filter.as_ref())
+                    .child_summaries(None, None),
             ));
         }
         let filter = resolve_visible_set(&self.handle, &params.query).await?;
@@ -822,6 +1050,9 @@ impl Node for TrackingRootNode {
         Ok(list_result(self.snapshot.entries(filter.as_ref(), now)))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        if id.starts_with(GROUP_ID_PREFIX) {
+            return TrackingGroupNode::fetch(&self.snapshot, &self.handle, id);
+        }
         if id.starts_with(TREE_ID_PREFIX) {
             return TrackingTreeNode::fetch(&self.snapshot, &self.handle, id);
         }
@@ -924,14 +1155,103 @@ impl Node for TrackingEntryNode {
     }
 }
 
+/// A group bucket in the grouped tree (generic `group_by_via_adapter`): one
+/// day/week/month/year (or verbatim value) of trackings. Listing it re-folds
+/// the task tree from this bucket's trackings only (intersected with the
+/// pane's saved query, which the engine propagates into subtree loads).
+/// Read-only — a bucket is an aggregate, not a thing to act on.
+struct TrackingGroupNode {
+    snapshot: Arc<TrackingSnapshot>,
+    handle: CoreHandle,
+    scope: BucketScope,
+    id_str: String,
+    label: String,
+    node_type: NodeType,
+    metadata: Metadata,
+}
+
+impl TrackingGroupNode {
+    /// Rebuild a group node from its `treegrp:…` id. No query context here —
+    /// a direct fetch sees the unfiltered bucket; the pane's query arrives
+    /// on [`Node::list`] and is intersected there.
+    fn fetch(
+        snapshot: &Arc<TrackingSnapshot>,
+        handle: &CoreHandle,
+        id: &str,
+    ) -> Result<Box<dyn Node>> {
+        let scope = id
+            .strip_prefix(GROUP_ID_PREFIX)
+            .and_then(BucketScope::parse)
+            .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+        let now = snapshot.built_at;
+        let mut total_secs = 0;
+        let mut active = false;
+        for row in snapshot.by_id.values() {
+            if scope_member(row, &scope) {
+                total_secs += duration_seconds(row, now);
+                active |= row.active;
+            }
+        }
+        let label = grouping::bucket_display_label(&scope.key, scope.bucket);
+        Ok(Box::new(TrackingGroupNode {
+            snapshot: snapshot.clone(),
+            handle: handle.clone(),
+            metadata: group_metadata(&label, total_secs, active),
+            scope,
+            id_str: id.to_string(),
+            label,
+            node_type: tracking_tree_group_type(),
+        }))
+    }
+}
+
+#[async_trait]
+impl Node for TrackingGroupNode {
+    fn id(&self) -> &str {
+        &self.id_str
+    }
+    fn label(&self) -> &str {
+        &self.label
+    }
+    fn node_type(&self) -> &NodeType {
+        &self.node_type
+    }
+    fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+    fn children_types(&self) -> Vec<NodeType> {
+        vec![tracking_tree_item_type()]
+    }
+    async fn list(
+        &self,
+        params: not_yet_done_content::ListParams,
+    ) -> Result<not_yet_done_content::ListResult> {
+        let query = resolve_visible_set(&self.handle, &params.query).await?;
+        let members = self.snapshot.bucket_members(query.as_ref(), &self.scope);
+        Ok(list_result(
+            self.snapshot
+                .tree_for(Some(&members))
+                .child_summaries(None, Some(&self.scope)),
+        ))
+    }
+    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
+    }
+}
+
 /// A task node in the duration tree (A2c Tree view). Drilling lists its child
 /// tasks (also `tracking:tree-item`); each carries its own + subtree-cumulated
 /// tracked time. Holds the shared snapshot for in-memory drilling and the
-/// `task_id` so `toggle-tracking` can flip tracking on the task.
+/// `task_id` so `toggle-tracking` can flip tracking on the task. Inside a
+/// group bucket the node additionally carries its [`BucketScope`] (parsed
+/// back out of the id), and every duration re-folds from that bucket's
+/// trackings only.
 struct TrackingTreeNode {
     snapshot: Arc<TrackingSnapshot>,
     handle: CoreHandle,
     task_id: Uuid,
+    /// `Some` when this node lives under a group bucket.
+    scope: Option<BucketScope>,
     id_str: String,
     label: String,
     node_type: NodeType,
@@ -939,17 +1259,22 @@ struct TrackingTreeNode {
 }
 
 impl TrackingTreeNode {
-    /// Look up the `tree:<uuid>` node `id` in the projection, or `NotFound`.
+    /// Look up the `tree:[<scope>:]<uuid>` node `id` in the (bucket-scoped)
+    /// projection, or `NotFound`.
     fn fetch(
         snapshot: &Arc<TrackingSnapshot>,
         handle: &CoreHandle,
         id: &str,
     ) -> Result<Box<dyn Node>> {
-        let task_id = parse_tree_id(id)?;
-        let row = snapshot
-            .tree
+        let (scope, task_id) = parse_tree_id(id)?;
+        let projection = match &scope {
+            Some(s) => snapshot.tree_for(Some(&snapshot.bucket_members(None, s))),
+            None => std::borrow::Cow::Borrowed(&snapshot.tree),
+        };
+        let row = projection
             .by_id
             .get(&task_id)
+            .filter(|_| projection.is_visible(task_id))
             .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
         Ok(Box::new(TrackingTreeNode {
             snapshot: snapshot.clone(),
@@ -959,15 +1284,24 @@ impl TrackingTreeNode {
             label: row.description.clone(),
             node_type: tracking_tree_item_type(),
             metadata: tree_metadata(task_id, row),
+            scope,
         }))
     }
 }
 
-/// Parse the task UUID out of a `tree:<uuid>` node id.
-fn parse_tree_id(id: &str) -> Result<Uuid> {
-    id.strip_prefix(TREE_ID_PREFIX)
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .ok_or_else(|| ContentError::NotFound(id.to_string()))
+/// Parse a `tree:` node id back into its optional [`BucketScope`] and the
+/// task UUID: `tree:<uuid>` (ungrouped) or `tree:<column>:<gran>:<key>:<uuid>`
+/// (inside a group bucket).
+fn parse_tree_id(id: &str) -> Result<(Option<BucketScope>, Uuid)> {
+    let not_found = || ContentError::NotFound(id.to_string());
+    let raw = id.strip_prefix(TREE_ID_PREFIX).ok_or_else(not_found)?;
+    if let Ok(uuid) = Uuid::parse_str(raw) {
+        return Ok((None, uuid));
+    }
+    let (scope_str, uuid_str) = raw.rsplit_once(':').ok_or_else(not_found)?;
+    let uuid = Uuid::parse_str(uuid_str).map_err(|_| not_found())?;
+    let scope = BucketScope::parse(scope_str).ok_or_else(not_found)?;
+    Ok((Some(scope), uuid))
 }
 
 #[async_trait]
@@ -997,11 +1331,16 @@ impl Node for TrackingTreeNode {
         // The engine propagates the pane's query into subtree loads
         // (capability `propagates_query_to_subtree`), so an expanded
         // branch shows the same filtered durations as the root level.
-        let filter = resolve_visible_set(&self.handle, &params.query).await?;
+        // Under a group bucket the query intersects the bucket's set.
+        let query = resolve_visible_set(&self.handle, &params.query).await?;
+        let filter = match &self.scope {
+            Some(scope) => Some(self.snapshot.bucket_members(query.as_ref(), scope)),
+            None => query,
+        };
         Ok(list_result(
             self.snapshot
                 .tree_for(filter.as_ref())
-                .child_summaries(Some(self.task_id)),
+                .child_summaries(Some(self.task_id), self.scope.as_ref()),
         ))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -1191,6 +1530,11 @@ impl ContentAdapter for TrackingAdapter {
             // depth (root + expanded branches re-fold from the visible
             // trackings), so subtree loads must carry the query along.
             propagates_query_to_subtree: true,
+            // Grouped tree: the engine hands the pane's active `group_by`
+            // to the root `list()` and this adapter returns one bucket node
+            // per group, each with a per-bucket re-folded subtree (the fold
+            // the engine can't do itself). `zg`/`u` regroup via reload.
+            group_by_via_adapter: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -1200,6 +1544,8 @@ impl ContentAdapter for TrackingAdapter {
             "tracking:root" => tracking_root_actions(),
             "tracking:entry" => tracking_entry_actions(),
             "tracking:tree-item" => tracking_tree_actions(),
+            // A group bucket is a read-only aggregate — nothing to act on.
+            "tracking:tree-group" => Vec::new(),
             _ => Vec::new(),
         }
     }
@@ -1224,7 +1570,12 @@ impl ContentAdapter for TrackingAdapter {
                 metadata: Metadata::default(),
             }));
         }
-        // `tree:<uuid>` addresses a duration-tree task node (A2c Tree view).
+        // `treegrp:…` addresses a grouped-tree bucket node.
+        if id.starts_with(GROUP_ID_PREFIX) {
+            return TrackingGroupNode::fetch(&snapshot, &self.handle, id);
+        }
+        // `tree:…` addresses a duration-tree task node (A2c Tree view),
+        // optionally bucket-scoped.
         if id.starts_with(TREE_ID_PREFIX) {
             return TrackingTreeNode::fetch(&snapshot, &self.handle, id);
         }
@@ -1367,13 +1718,13 @@ mod tests {
 
         let visible: HashSet<Uuid> = [t2].into_iter().collect();
         let tree = snapshot.tree_for(Some(&visible));
-        let roots = tree.child_summaries(None);
+        let roots = tree.child_summaries(None, None);
         assert_eq!(roots.len(), 1, "{roots:?}");
         assert_eq!(roots[0].label, "A");
         let a_row = tree.by_id.get(&task_a).unwrap();
         assert_eq!(a_row.own_secs, 0, "A's own tracking is filtered out");
         assert_eq!(a_row.cumulated_secs, 1800, "subtree total = B's 30 min");
-        let kids = tree.child_summaries(Some(task_a));
+        let kids = tree.child_summaries(Some(task_a), None);
         assert_eq!(kids.len(), 1, "{kids:?}");
         assert_eq!(kids[0].label, "B");
     }
@@ -1552,13 +1903,13 @@ mod tests {
         let own: HashMap<Uuid, i64> = [(tracked_child, 42)].into_iter().collect();
         let proj = build_tree_projection(&tm, &own, &HashSet::new());
 
-        let roots = proj.child_summaries(None);
+        let roots = proj.child_summaries(None, None);
         assert_eq!(roots.len(), 1, "the empty branch is pruned");
         assert_eq!(roots[0].label, "Root");
         assert_eq!(roots[0].id, format!("{TREE_ID_PREFIX}{root}"));
         assert_eq!(roots[0].has_children, Some(true));
         // Root's only visible child is the tracked one.
-        let kids = proj.child_summaries(Some(root));
+        let kids = proj.child_summaries(Some(root), None);
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].label, "Tracked");
         assert_eq!(kids[0].has_children, Some(false));
@@ -1575,7 +1926,7 @@ mod tests {
         let proj = build_tree_projection(&tm, &own, &HashSet::new());
         // The orphan (parent gone) re-roots to the forest top, so it shows
         // up as a top-level row rather than vanishing under the missing id.
-        let roots = proj.child_summaries(None);
+        let roots = proj.child_summaries(None, None);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].label, "Orphan");
         assert!(proj.children.get(&Some(missing)).is_none());
@@ -1604,10 +1955,198 @@ mod tests {
         let id = Uuid::from_u128(7);
         assert_eq!(
             parse_tree_id(&format!("{TREE_ID_PREFIX}{id}")).unwrap(),
-            id
+            (None, id)
         );
         // A bare (unprefixed) uuid is a tracking-entry id, not a tree id.
         assert!(parse_tree_id(&id.to_string()).is_err());
+    }
+
+    // ── Grouped tree (group_by_via_adapter) ──────────────────────────────
+
+    fn day_scope(key: &str) -> BucketScope {
+        BucketScope {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn bucket_scope_and_scoped_tree_id_round_trip() {
+        let scope = day_scope("2026-06-09");
+        assert_eq!(scope.encode(), "started:day:2026-06-09");
+        assert_eq!(BucketScope::parse("started:day:2026-06-09"), Some(scope.clone()));
+        // Unknown granularity token → bad id.
+        assert_eq!(BucketScope::parse("started:fortnight:x"), None);
+
+        // Scoped tree-item ids embed the scope and parse back out.
+        let task = Uuid::from_u128(7);
+        let id = tree_item_id(Some(&scope), task);
+        assert_eq!(id, format!("tree:started:day:2026-06-09:{task}"));
+        assert_eq!(parse_tree_id(&id).unwrap(), (Some(scope.clone()), task));
+        // A verbatim bucket key may itself contain `:` — the key is the
+        // remainder between the granularity and the trailing uuid.
+        let verbatim = BucketScope {
+            column: "task".to_string(),
+            bucket: None,
+            key: "a:b".to_string(),
+        };
+        assert_eq!(
+            parse_tree_id(&tree_item_id(Some(&verbatim), task)).unwrap(),
+            (Some(verbatim), task)
+        );
+    }
+
+    /// A tracking started at **local** noon of `date` (UTC-converted), so
+    /// day-bucket boundaries are timezone-stable in tests.
+    fn tracking_on(
+        id: Uuid,
+        task_id: Uuid,
+        date: &str,
+        minutes: i64,
+        ended: bool,
+    ) -> tracking::Model {
+        use chrono::TimeZone;
+        let naive = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let started = chrono::Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        tracking::Model {
+            id,
+            task_id,
+            predecessor_id: None,
+            started_at: started,
+            ended_at: ended.then(|| started + chrono::Duration::minutes(minutes)),
+            deleted: false,
+            created_at: started,
+        }
+    }
+
+    #[test]
+    fn group_summaries_bucket_totals_marker_and_order() {
+        let task = Uuid::from_u128(9);
+        let t1 = Uuid::from_u128(1);
+        let t2 = Uuid::from_u128(2);
+        let t3 = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            // Two trackings on the 9th (one still running), one on the 8th.
+            (t1, row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![])),
+            (t2, row(tracking_on(t2, task, "2026-06-09", 0, false), "A", vec![])),
+            (t3, row(tracking_on(t3, task, "2026-06-08", 45, true), "B", vec![])),
+        ]);
+        let spec = GroupSpec {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            order: SortDirection::Desc,
+        };
+        let groups = snap.group_summaries(None, &spec);
+        assert_eq!(groups.len(), 2);
+        // Desc → newest bucket first; ids embed the scope.
+        assert_eq!(groups[0].id, "treegrp:started:day:2026-06-09");
+        assert_eq!(groups[1].id, "treegrp:started:day:2026-06-08");
+        assert_eq!(groups[0].node_type.type_id, "tracking:tree-group");
+        assert_eq!(groups[0].has_children, Some(true));
+        // Labels go through the shared bucket display mapping.
+        assert_eq!(
+            groups[0].label,
+            grouping::bucket_display_label("2026-06-09", Some(GroupBucket::Day))
+        );
+        let get = |g: &NodeSummary, k: &str| {
+            g.metadata.fields.iter().find(|f| f.key == k).map(|f| f.value.clone())
+        };
+        // The 9th: 30 min completed + the open tracking's seconds up to the
+        // snapshot's `built_at`; marker set. Both duration columns carry the
+        // total (so `zt` never blanks the row).
+        let total: i64 = get(&groups[0], "duration").unwrap().parse().unwrap();
+        assert!(total >= 30 * 60, "got {total}");
+        assert_eq!(get(&groups[0], "duration"), get(&groups[0], "duration_cumulated"));
+        assert_eq!(get(&groups[0], "marker").as_deref(), Some("⏱"));
+        // The 8th: 45 min, nothing running.
+        assert_eq!(get(&groups[1], "duration").as_deref(), Some("2700"));
+        assert_eq!(get(&groups[1], "marker").as_deref(), Some(""));
+
+        // Asc flips the order.
+        let asc = GroupSpec { order: SortDirection::Asc, ..spec };
+        assert_eq!(snap.group_summaries(None, &asc)[0].id, "treegrp:started:day:2026-06-08");
+    }
+
+    #[test]
+    fn bucket_members_intersect_scope_and_query_filter() {
+        let task = Uuid::from_u128(9);
+        let t1 = Uuid::from_u128(1);
+        let t2 = Uuid::from_u128(2);
+        let t3 = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            (t1, row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![])),
+            (t2, row(tracking_on(t2, task, "2026-06-09", 15, true), "A", vec![])),
+            (t3, row(tracking_on(t3, task, "2026-06-08", 45, true), "B", vec![])),
+        ]);
+        let scope = day_scope("2026-06-09");
+        // Scope alone: both trackings of the 9th.
+        let members = snap.bucket_members(None, &scope);
+        assert_eq!(members, [t1, t2].into_iter().collect());
+        // Intersected with a saved-query filter: only the visible one.
+        let visible: HashSet<Uuid> = [t2, t3].into_iter().collect();
+        let members = snap.bucket_members(Some(&visible), &scope);
+        assert_eq!(members, [t2].into_iter().collect());
+    }
+
+    #[test]
+    fn grouped_subtree_refolds_durations_per_bucket_with_scoped_ids() {
+        // Task forest A → B; B tracked 30 min on the 8th and 45 min on the
+        // 9th. The 9th's bucket subtree must fold only the 9th's 45 min and
+        // every id must carry the bucket scope.
+        let task_a = Uuid::from_u128(10);
+        let task_b = Uuid::from_u128(20);
+        let t1 = Uuid::from_u128(1);
+        let t2 = Uuid::from_u128(2);
+        let tm = task_map(&[(task_a, "A", None), (task_b, "B", Some(task_a))]);
+        let mut by_id = HashMap::new();
+        by_id.insert(t1, row(tracking_on(t1, task_b, "2026-06-08", 30, true), "B", vec!["A"]));
+        by_id.insert(t2, row(tracking_on(t2, task_b, "2026-06-09", 45, true), "B", vec!["A"]));
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![t2, t1],
+            tree: TreeProjection::default(),
+            task_map: tm,
+            built_at: chrono::Utc::now(),
+        };
+
+        let scope = day_scope("2026-06-09");
+        let members = snapshot.bucket_members(None, &scope);
+        let tree = snapshot.tree_for(Some(&members));
+        let roots = tree.child_summaries(None, Some(&scope));
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].label, "A");
+        assert_eq!(roots[0].id, format!("tree:started:day:2026-06-09:{task_a}"));
+        assert_eq!(tree.by_id[&task_a].cumulated_secs, 45 * 60);
+        let kids = tree.child_summaries(Some(task_a), Some(&scope));
+        assert_eq!(kids[0].id, format!("tree:started:day:2026-06-09:{task_b}"));
+        assert_eq!(tree.by_id[&task_b].own_secs, 45 * 60);
+    }
+
+    #[test]
+    fn bucket_raw_value_matches_entry_metadata_columns() {
+        let m = tracking_on(Uuid::from_u128(1), Uuid::from_u128(9), "2026-06-09", 30, true);
+        let r = row(m, "Write report", vec!["Work"]);
+        assert_eq!(bucket_raw_value(&r, "task"), "Write report");
+        assert_eq!(bucket_raw_value(&r, "taskpath"), "/Work");
+        assert_eq!(bucket_raw_value(&r, "started"), r.tracking.started_at.to_rfc3339());
+        // Unknown column falls back to `started`.
+        assert_eq!(bucket_raw_value(&r, "bogus"), bucket_raw_value(&r, "started"));
+        // An open tracking's `ended` is the literal "running" (groups
+        // verbatim — same as the flat view's engine-side grouping).
+        let open = row(
+            tracking_on(Uuid::from_u128(2), Uuid::from_u128(9), "2026-06-09", 0, false),
+            "X",
+            vec![],
+        );
+        assert_eq!(bucket_raw_value(&open, "ended"), "running");
     }
 
     #[test]

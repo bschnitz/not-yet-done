@@ -34,8 +34,8 @@ use not_yet_done_table::{
 };
 
 use not_yet_done_content::{
-    AdapterStatus, ContentAdapter, CursorIntent, NodeSummary, PageInfo, PageRequest, SortKey,
-    TreeFindHit,
+    AdapterStatus, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo, PageRequest,
+    SortDirection, SortKey, TreeFindHit,
 };
 
 use crate::components::action_bar::ActionBarComponent;
@@ -57,7 +57,7 @@ use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
 };
 use crate::views::column_format::{format_elapsed_since, format_typed_value};
-use crate::views::group_aggregate::{agg_value, bucket_display_label, group_label};
+use crate::views::group_aggregate::{agg_value, bucket_display_label, group_label, to_group_bucket};
 use crate::ui::theme::Theme;
 use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
 use crate::views::content_tree::{
@@ -1791,11 +1791,23 @@ impl ContentPane {
     /// level as [`current_columns`](Self::current_columns). A runtime
     /// `cycle_grouping` override (`group_by_override`) takes precedence so
     /// the user can regroup or turn grouping off without an adapter
-    /// round-trip. Tree mode never groups (tree-fold is a separate
-    /// feature), so it returns `None` there.
+    /// round-trip.
+    ///
+    /// Tree mode: the engine never groups a tree itself (the adapter owns
+    /// the fold), so this is `None` there — *unless* the adapter advertises
+    /// `group_by_via_adapter`, in which case the root `ViewDef`'s
+    /// `group_by` (or the override) names the grouping the adapter is asked
+    /// to apply (see [`adapter_group_spec`](Self::adapter_group_spec));
+    /// regrouping then means a reload, not a rebuild.
     fn current_group_by(&self, view_defs: &[ViewDef]) -> Option<GroupBy> {
         if self.tree.is_some() {
-            return None;
+            if !self.capabilities.group_by_via_adapter {
+                return None;
+            }
+            if let Some(ovr) = &self.group_by_override {
+                return ovr.clone();
+            }
+            return self.view_def(view_defs).and_then(|vd| vd.group_by.clone());
         }
         if let Some(ovr) = &self.group_by_override {
             return ovr.clone();
@@ -1858,8 +1870,15 @@ impl ContentPane {
     /// (flat list). When the user has cycled the outer level off but inner
     /// levels exist, those inner levels remain (e.g. Trackings "Condensed"
     /// with grouping turned off collapses to one row per task). This is what
-    /// the grouped render path consumes.
+    /// the grouped render path consumes — and that path is **flat-only**: in
+    /// tree mode this is always empty, even when the adapter groups the tree
+    /// itself (`group_by_via_adapter` makes [`current_group_by`] non-`None`
+    /// there, but those groups arrive as tree *nodes*, not as engine-built
+    /// group headers).
     fn current_levels(&self, view_defs: &[ViewDef]) -> Vec<GroupBy> {
+        if self.tree.is_some() {
+            return Vec::new();
+        }
         if !self.level_has_group_by(view_defs) {
             return Vec::new();
         }
@@ -1874,10 +1893,19 @@ impl ContentPane {
     /// Whether the active level *configures* a `group_by` (M3). Unlike
     /// [`current_group_by`](Self::current_group_by) this ignores the runtime
     /// override, so the `cycle_grouping` key stays claimable even after the
-    /// user has cycled the view to "ungrouped". `false` in tree mode.
+    /// user has cycled the view to "ungrouped".
+    ///
+    /// In tree mode this gates on the adapter capability instead of the
+    /// active child: only an adapter that groups the tree itself
+    /// (`group_by_via_adapter`) plus a root `group_by` in the config makes
+    /// `zg`/`u` meaningful there (both then reload through the adapter).
     fn level_has_group_by(&self, view_defs: &[ViewDef]) -> bool {
         if self.tree.is_some() {
-            return false;
+            return self.capabilities.group_by_via_adapter
+                && self
+                    .view_def(view_defs)
+                    .map(|vd| vd.group_by.is_some())
+                    .unwrap_or(false);
         }
         if let Some(ref child) = self.active_child {
             child.group_by.is_some()
@@ -1910,6 +1938,12 @@ impl ContentPane {
         &self,
         view_defs: &[ViewDef],
     ) -> Option<(String, GroupOrder)> {
+        // A tree only regroups through the adapter; without that capability
+        // there is nothing a runtime override could apply to (this guards
+        // the action-chain path, which bypasses the key-claim gate).
+        if self.tree.is_some() && !self.capabilities.group_by_via_adapter {
+            return None;
+        }
         self.current_group_by(view_defs)
             .map(|gb| (gb.column.clone(), gb.order))
             .or_else(|| {
@@ -1942,12 +1976,51 @@ impl ContentPane {
         true
     }
 
+    /// Whether this pane's grouping is applied **adapter-side**: tree mode
+    /// plus an adapter that advertises `group_by_via_adapter`. Regrouping is
+    /// then a reload (the adapter re-folds per bucket), not an engine
+    /// rebuild.
+    fn tree_groups_via_adapter(&self) -> bool {
+        self.tree.is_some() && self.capabilities.group_by_via_adapter
+    }
+
+    /// The grouping to hand the adapter in `ListParams::group_by` for this
+    /// pane's **root** load — the content-crate [`GroupSpec`] twin of the
+    /// effective [`current_group_by`](Self::current_group_by). `None`
+    /// outside the adapter-grouped-tree case (flat lists group engine-side;
+    /// the adapter must never see a grouping it isn't asked to apply) and
+    /// when the user has cycled grouping off (the adapter then returns the
+    /// plain tree).
+    pub(crate) fn adapter_group_spec(&self, view_defs: &[ViewDef]) -> Option<GroupSpec> {
+        if !self.tree_groups_via_adapter() {
+            return None;
+        }
+        self.current_group_by(view_defs).map(|gb| GroupSpec {
+            column: gb.column,
+            bucket: gb.bucket.map(to_group_bucket),
+            order: match gb.order {
+                GroupOrder::Asc => SortDirection::Asc,
+                GroupOrder::Desc => SortDirection::Desc,
+            },
+        })
+    }
+
     /// Dispatch wrapper for `content.cycle_grouping`: rotate the grouping
-    /// granularity and, when it changed, rebuild the table. Returns
+    /// granularity and, when it changed, rebuild the table — or, when the
+    /// adapter owns the grouping (adapter-grouped tree), request a reload of
+    /// the current level so the adapter re-buckets. Returns
     /// `SelectionChanged(None)` so the bars refresh, or `Unhandled` when the
     /// active level declares no `group_by` (nothing to cycle).
-    pub(crate) fn try_cycle_grouping(&mut self, view_defs: &[ViewDef]) -> SubViewMessage {
+    pub(crate) fn try_cycle_grouping(
+        &mut self,
+        view_defs: &[ViewDef],
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> SubViewMessage {
         if self.cycle_grouping(view_defs) {
+            if self.tree_groups_via_adapter() {
+                return self.reload_current_level(view_index, pane_id);
+            }
             self.rebuild_table(view_defs);
             SubViewMessage::SelectionChanged(None)
         } else {
@@ -4615,7 +4688,7 @@ impl ContentPane {
                 self.try_tree_collapse_all(view_defs)
             }
             KeySource::Content(ContentAction::CycleGrouping) => {
-                Some(self.try_cycle_grouping(view_defs))
+                Some(self.try_cycle_grouping(view_defs, view_index, pane_id))
             }
             KeySource::Content(ContentAction::ToggleTreeAggregate) => {
                 Some(self.try_toggle_tree_aggregate(view_defs))
@@ -5513,7 +5586,7 @@ impl ContentView {
                 .try_tree_collapse_all(&view_defs)
                 .unwrap_or(SubViewMessage::Unhandled),
             ContentAction::CycleGrouping => {
-                self.active_pane_mut().try_cycle_grouping(&view_defs)
+                self.active_pane_mut().try_cycle_grouping(&view_defs, view_index, pane_id)
             }
             ContentAction::GroupMenu => {
                 if self.active_pane().level_has_group_by(&self.view_defs) {
@@ -6292,7 +6365,9 @@ impl ContentView {
 
     /// Key handler while the group-by menu is open (it intercepts every
     /// key). A selection jumps the active pane's runtime grouping to the
-    /// chosen state and rebuilds the table.
+    /// chosen state and rebuilds the table — or reloads the level when the
+    /// adapter owns the grouping (adapter-grouped tree), mirroring
+    /// [`ContentPane::try_cycle_grouping`].
     fn handle_group_menu_key(&mut self, key: &str) -> SubViewMessage {
         match self.group_menu.handle_key(key) {
             TabSetPopupMessage::Switch(name) => {
@@ -6303,9 +6378,14 @@ impl ContentView {
                     "y" => Some(DateBucket::Year),
                     _ => None,
                 };
+                let view_index = self.view_index;
+                let pane_id = self.active_pane_id();
                 let view_defs = self.view_defs.clone();
                 let pane = self.active_pane_mut();
                 if pane.set_grouping_bucket(bucket, &view_defs) {
+                    if pane.tree_groups_via_adapter() {
+                        return pane.reload_current_level(view_index, pane_id);
+                    }
                     pane.rebuild_table(&view_defs);
                 }
                 SubViewMessage::SelectionChanged(None)
@@ -13541,6 +13621,138 @@ mod tests {
             .active_pane()
             .current_group_by(&view.view_defs)
             .is_none());
+    }
+
+    // ── Adapter-grouped tree (group_by_via_adapter) ──────────────────
+
+    /// A pane in tree mode, optionally with the `group_by_via_adapter`
+    /// capability — the shape a tracking-style adapter's tree view has.
+    fn tree_pane(group_by_via_adapter: bool) -> ContentPane {
+        let mut caps = not_yet_done_content::AdapterCapabilities::default();
+        caps.group_by_via_adapter = group_by_via_adapter;
+        ContentPane::new(test_theme(), 0, true, caps)
+    }
+
+    #[test]
+    fn tree_grouping_gates_on_adapter_capability() {
+        let view_defs = test_config_with_group_by().views;
+
+        // Capability missing → a tree never groups, even with a root
+        // `group_by` in the config: keys stay unclaimable, the effective
+        // grouping is `None`, nothing is handed to the adapter, and the
+        // action-chain path (which bypasses the key-claim gate) no-ops.
+        let mut pane = tree_pane(false);
+        assert!(!pane.level_has_group_by(&view_defs));
+        assert!(pane.current_group_by(&view_defs).is_none());
+        assert!(pane.adapter_group_spec(&view_defs).is_none());
+        assert!(matches!(
+            pane.try_cycle_grouping(&view_defs, 0, 0),
+            SubViewMessage::Unhandled
+        ));
+
+        // Capability present → the root `group_by` arms the tree.
+        let pane = tree_pane(true);
+        assert!(pane.level_has_group_by(&view_defs));
+        assert_eq!(
+            pane.current_group_by(&view_defs).and_then(|gb| gb.bucket),
+            Some(DateBucket::Day)
+        );
+    }
+
+    #[test]
+    fn adapter_group_spec_maps_config_grouping() {
+        let mut config = test_config_with_group_by();
+        config.views[0].group_by.as_mut().unwrap().order = GroupOrder::Desc;
+        let view_defs = config.views;
+
+        let spec = tree_pane(true)
+            .adapter_group_spec(&view_defs)
+            .expect("tree + capability + root group_by yields a spec");
+        assert_eq!(spec.column, "key");
+        assert_eq!(spec.bucket, Some(not_yet_done_content::GroupBucket::Day));
+        assert_eq!(spec.order, SortDirection::Desc);
+
+        // Flat mode never hands the adapter a grouping — flat lists group
+        // engine-side.
+        let flat = ContentPane::new(
+            test_theme(),
+            0,
+            false,
+            tree_pane(true).capabilities.clone(),
+        );
+        assert!(flat.adapter_group_spec(&view_defs).is_none());
+    }
+
+    #[test]
+    fn tree_cycle_grouping_requests_reload() {
+        let view_defs = test_config_with_group_by().views;
+        let mut pane = tree_pane(true);
+
+        // Cycling changes the override (Day → Week) and, because the
+        // adapter owns the fold, asks for a root reload instead of an
+        // engine rebuild.
+        let msg = pane.try_cycle_grouping(&view_defs, 3, 7);
+        assert!(matches!(
+            msg,
+            SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index: 3, pane_id: 7 })
+        ));
+        assert_eq!(
+            pane.current_group_by(&view_defs).and_then(|gb| gb.bucket),
+            Some(DateBucket::Week)
+        );
+        assert_eq!(
+            pane.adapter_group_spec(&view_defs)
+                .expect("spec follows the override")
+                .bucket,
+            Some(not_yet_done_content::GroupBucket::Week)
+        );
+
+        // Cycled off → the adapter gets no grouping (plain tree)...
+        for _ in 0..3 {
+            pane.try_cycle_grouping(&view_defs, 3, 7);
+        }
+        assert!(pane.current_group_by(&view_defs).is_none());
+        assert!(pane.adapter_group_spec(&view_defs).is_none());
+        // ...but the key stays claimable (configured default still set).
+        assert!(pane.level_has_group_by(&view_defs));
+    }
+
+    #[test]
+    fn current_levels_stays_empty_in_adapter_grouped_tree() {
+        // The engine's grouped render path is flat-only: even an armed
+        // adapter-grouped tree must not produce engine grouping levels
+        // (its groups arrive as tree nodes from the adapter).
+        let view_defs = test_config_with_group_by().views;
+        let pane = tree_pane(true);
+        assert!(pane.current_group_by(&view_defs).is_some());
+        assert!(pane.current_levels(&view_defs).is_empty());
+    }
+
+    #[test]
+    fn group_menu_in_adapter_tree_requests_reload() {
+        let config = test_config_with_group_by();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        {
+            let pane = view.active_pane_mut();
+            pane.tree = Some(TreeState::new());
+            pane.capabilities.group_by_via_adapter = true;
+        }
+
+        view.dispatch_content_action(ContentAction::GroupMenu);
+        assert!(view.group_menu.is_open());
+        let msg = view.handle_key("m");
+        assert!(matches!(
+            msg,
+            SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index: 0, .. })
+        ));
+        assert_eq!(
+            view.active_pane()
+                .adapter_group_spec(&view.view_defs)
+                .expect("menu selection lands in the override")
+                .bucket,
+            Some(not_yet_done_content::GroupBucket::Month)
+        );
     }
 }
 

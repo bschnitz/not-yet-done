@@ -148,6 +148,7 @@ impl ContentAdapter for JiraAdapter {
             supports_total_count: true,
             supports_tree_aggregation: false,
             propagates_query_to_subtree: false,
+            group_by_via_adapter: false,
         }
     }
 

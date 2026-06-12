@@ -1936,14 +1936,20 @@ views:
         // user-set default saved query follows across them.
         assert!(condensed.query.as_ref().unwrap().inherit_default);
 
-        // A2c Tree: a `tracking:tree-item` tree, switched to with `t` (native
-        // parity — track itself sits on `s`), with a `duration` column that
-        // declares the tree-fold (own ↔ cumulated).
+        // A2c Tree: an adapter-grouped tree (`group_by_via_adapter`) —
+        // root level = `tracking:tree-group` day buckets, switched to with
+        // `t` (native parity — track itself sits on `s`), with a `duration`
+        // column that declares the tree-fold (own ↔ cumulated).
         let tree = cfg.views.iter().find(|v| v.name == "tree").unwrap();
         assert_eq!(tree.key.as_deref(), Some("t"));
-        assert_eq!(tree.node_type, "tracking:tree-item");
+        assert_eq!(tree.node_type, "tracking:tree-group");
         assert_eq!(tree.tree_label.as_deref(), Some("task"));
         assert!(tree.query.as_ref().unwrap().inherit_default);
+        // The grouping the adapter applies (day buckets, newest first).
+        let gb = tree.group_by.as_ref().expect("tree view declares group_by");
+        assert_eq!(gb.column, "started");
+        assert_eq!(gb.bucket, Some(DateBucket::Day));
+        assert_eq!(gb.order, GroupOrder::Desc);
         let dur = tree.columns.iter().find(|c| c.key == "duration").unwrap();
         let ta = dur
             .tree_aggregate
@@ -1951,15 +1957,20 @@ views:
             .expect("tree duration column should declare tree_aggregate");
         assert_eq!(ta.cumulated_field, "duration_cumulated");
         assert_eq!(ta.default, TreeAggregateDefault::Cumulated);
-        // `s` toggles tracking on the task (native track key).
-        assert_eq!(tree.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
-        // The recursive subtask branch repeats the tree-fold column.
+        // Group buckets are read-only aggregates — no shortcuts on the root
+        // level; `s: toggle-tracking` lives on the task (item) level, which
+        // also serves the root rows when grouping is cycled off.
+        assert!(tree.shortcuts.is_empty());
+        // The recursive subtask branch carries the tree-fold column and the
+        // track toggle.
         let sub = &tree.children[0];
         assert!(sub.recursive);
+        assert_eq!(sub.node_type, "tracking:tree-item");
         assert!(sub
             .columns
             .iter()
             .any(|c| c.key == "duration" && c.tree_aggregate.is_some()));
+        assert_eq!(sub.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
 
         cfg.validate(
             &KeyBindingConfig::default(),

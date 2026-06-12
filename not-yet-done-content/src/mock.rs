@@ -409,6 +409,7 @@ mod tests {
                 sort: vec![],
                 page: Some(PageRequest { offset: 0, limit: 50 }),
                 download: false,
+                group_by: None,
             })
             .await
             .unwrap();
@@ -475,6 +476,7 @@ mod tests {
                 sort: vec![],
                 page: Some(PageRequest { offset: 0, limit: 50 }),
                 download: false,
+                group_by: None,
             })
             .await
             .unwrap();
@@ -502,6 +504,7 @@ mod tests {
                 sort: vec![],
                 page: Some(PageRequest { offset: 3, limit: 2 }),
                 download: false,
+                group_by: None,
             })
             .await
             .unwrap();

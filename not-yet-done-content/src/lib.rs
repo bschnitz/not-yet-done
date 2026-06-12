@@ -8,11 +8,14 @@
 pub mod mock;
 
 pub mod auth;
+pub mod grouping;
 pub mod http_log;
 pub mod link_route;
 pub mod node_ref;
 pub mod slug;
 pub mod sort_serde;
+
+pub use grouping::{GroupBucket, GroupSpec};
 
 pub use auth::{
     AuthError, AuthMechanism, AuthOrchestrator, AuthSpec, CredentialBinding, CredentialProvider,
@@ -118,6 +121,14 @@ pub struct ListParams {
     /// If true, download full content for each item (batch).
     /// If false, return NodeSummary only (lazy).
     pub download: bool,
+    /// The pane's active grouping, for adapters that group **adapter-side**
+    /// (capability [`AdapterCapabilities::group_by_via_adapter`]). Tree views
+    /// can't group engine-side — the adapter owns the per-bucket fold — so
+    /// the engine passes the active `group_by` along on the root `list()`
+    /// and the adapter returns one bucket node per group as the root level.
+    /// `None` = ungrouped (or an engine-side-grouping flat view); adapters
+    /// without the capability never see `Some` and may ignore the field.
+    pub group_by: Option<GroupSpec>,
 }
 
 /// One sort key in a (potentially multi-column) sort spec.
@@ -244,6 +255,16 @@ pub struct AdapterCapabilities {
     /// homogeneous trees (the task forest: `task:item` → `task:item`,
     /// one `FilterExpr` valid at every depth) opt in.
     pub propagates_query_to_subtree: bool,
+    /// Whether the adapter can group its **tree** root level itself when the
+    /// engine passes the active grouping in [`ListParams::group_by`]: it then
+    /// returns one bucket node per group (each holding that bucket's folded
+    /// subtree) instead of the plain root rows. Engine-side grouping (M3)
+    /// only partitions flat lists; a tree's per-bucket aggregates must be
+    /// folded by whoever owns the data, so tree views group only through
+    /// this capability. With it set, the `cycle_grouping` / group-menu keys
+    /// become claimable in tree mode and trigger a *reload* (the adapter
+    /// must re-list) instead of an in-memory rebuild.
+    pub group_by_via_adapter: bool,
 }
 
 // ---------------------------------------------------------------------------

@@ -48,11 +48,14 @@
 # (`group_by`) and then by task (`then_by`), with `summary_only` collapsing
 # each (day, task) cell to one summed row.
 #
-# The native "Tree" mode is a third view (`key: t`): the *task forest*
-# (`tracking:tree-item`) with tracked time rolled up per task. Its `duration`
-# column declares a `tree_aggregate` fold — `zt` toggles each task between its
-# **own** tracked time and its **subtree-cumulated** total (M4). The adapter
-# supplies both values and advertises `supports_tree_aggregation`.
+# The native "Tree" mode is a third view (`key: t`): day buckets
+# (`tracking:tree-group`, adapter-side grouping — `group_by_via_adapter`),
+# each expanding into the *task forest* (`tracking:tree-item`) with that
+# day's tracked time rolled up per task. `zg`/`u` regroup (each switch is a
+# reload — the adapter re-buckets). Its `duration` column declares a
+# `tree_aggregate` fold — `zt` toggles each task between its **own** tracked
+# time and its **subtree-cumulated** total (M4). The adapter supplies both
+# values and advertises `supports_tree_aggregation`.
 #
 # `a` switches back to the flat list from either.
 #
@@ -296,11 +299,23 @@ views:
   # ── Tree (A2c) ───────────────────────────────────────────────────────
   #
   # The native Trackings "Tree" mode: the *task forest* with tracked time
-  # rolled up per task. Each row is a `tracking:tree-item` (a task, not a
-  # single interval); drilling expands a task's subtasks. Switched to with
+  # rolled up per task, **grouped into date buckets**. Switched to with
   # `t` (toggle-tracking moved to `s`, the native track key, freeing `t`
   # for the subtab — full native key parity); `a` switches
   # back to the flat list.
+  #
+  # **Adapter-side grouping (`group_by_via_adapter`).** A tree can't group
+  # engine-side like the flat list (each bucket's subtree durations must be
+  # re-folded from that bucket's trackings only — the adapter owns the
+  # fold), so the engine hands the active `group_by` to the adapter's root
+  # `list()` and the adapter answers with one `tracking:tree-group` bucket
+  # node per day (the root `node_type` below); expanding a bucket shows the
+  # task forest folded from *that bucket's* trackings. `zg` / `u` regroup
+  # at runtime exactly like on the flat list — here each switch is a reload
+  # (the adapter re-buckets). Cycling to "No grouping" makes the adapter
+  # return the plain task forest instead; the recursive `tracking:tree-item`
+  # child level below then matches from the root row on (chain resolution
+  # is type-based), so this ONE view config serves both shapes.
   #
   # The `duration` column declares `tree_aggregate`: by default it shows each
   # task's **subtree-cumulated** total (own + all descendants), and `zt`
@@ -308,12 +323,21 @@ views:
   # supplies both as canonical seconds (`duration` = own, `duration_cumulated`
   # = subtree) and advertises `supports_tree_aggregation`; the engine never
   # folds the tree itself (it's lazy), so the cumulated value is the
-  # adapter's. The tree is pruned to tasks with tracked time somewhere in
-  # their subtree, and durations bake at load (no live tick, like Condensed).
+  # adapter's. (A bucket row carries its total in both fields, so `zt`
+  # never blanks it.) The tree is pruned to tasks with tracked time
+  # somewhere in their subtree, and durations bake at load (no live tick,
+  # like Condensed).
   - name: tree
-    node_type: "tracking:tree-item"
+    node_type: "tracking:tree-group"
     key: t
     tree_label: task
+    # The grouping the adapter applies (same block as the flat view's
+    # engine-side grouping — the keys/labels match across both). `desc`
+    # puts the newest bucket first, like the native tree.
+    group_by:
+      column: started
+      bucket: day
+      order: desc
     # Connector-glyph color for this tree (box prefix + expand arrows). Omit
     # to inherit the theme's `tree_connector`. See tasks.yaml for the rationale.
     tree_connector_style: text_dim
@@ -364,7 +388,7 @@ views:
           default: cumulated
 
     actions:
-      # Local filter-while-typing over the loaded task rows.
+      # Local filter-while-typing over the loaded bucket rows.
       - name: fuzzy filter
         key: f
         type: fuzzy_filter
@@ -374,14 +398,17 @@ views:
         key: r
         type: reload
 
-    # `s` starts/stops tracking on the selected task (adapter `toggle-tracking`,
-    # shared exclusivity policy).
-    shortcuts:
-      s: toggle-tracking
+    # No `shortcuts:` here: this level describes the **group buckets**, and
+    # a bucket is a read-only aggregate (nothing to toggle). The task rows'
+    # `s: toggle-tracking` lives on the `subtasks` child level below — which
+    # also serves the root rows when grouping is cycled off.
 
     children:
       # Recursive subtask branch — the same ChildDef at every depth. Drilling
       # a task expands its subtasks (those with tracked time), and so on.
+      # With grouping cycled off (`zg`/`u` → "No grouping") this level also
+      # matches the root rows (the adapter then returns plain
+      # `tracking:tree-item`s and chain resolution is type-based).
       - name: subtasks
         node_type: "tracking:tree-item"
         tree_label: task
@@ -406,6 +433,8 @@ views:
               default: cumulated
 
         actions:
+          # (The `f` fuzzy filter is defined once at the tree root — it is
+          # tree-wide, so it covers this level too.)
           - name: refresh
             key: r
             type: reload
