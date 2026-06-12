@@ -158,6 +158,7 @@ struct TrackingRow {
 /// One task in the **duration tree** projection (A2c Tree view): its label,
 /// effective parent, and the tracked time rolled up two ways — its own and
 /// its whole subtree's.
+#[derive(Clone)]
 struct TreeTaskRow {
     /// The task's description (the tree row's label / `task` column).
     description: String,
@@ -176,7 +177,7 @@ struct TreeTaskRow {
 /// Built once alongside the flat list (both read the same task + tracking
 /// loads), and pruned to the tasks that carry tracked time anywhere in their
 /// subtree (`cumulated_secs > 0`) so the tree shows only worked-on work.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TreeProjection {
     by_id: HashMap<Uuid, TreeTaskRow>,
     /// parent id → ordered child ids (`None` key = forest roots).
@@ -230,7 +231,17 @@ struct TrackingSnapshot {
     order: Vec<Uuid>,
     /// The task forest projected with per-task durations — the A2c Tree view
     /// (`tracking:tree-item`). Built from the same task + tracking loads.
+    /// This is the *unfiltered* projection; a saved-query filter re-folds
+    /// on demand via [`Self::tree_for`].
     tree: TreeProjection,
+    /// task id → (description, parent) — kept so [`Self::tree_for`] can
+    /// re-fold the projection for a filtered tracking set.
+    task_map: HashMap<Uuid, (String, Option<Uuid>)>,
+    /// The instant the snapshot baked its durations. Filtered re-folds
+    /// reuse it so a running tracking contributes the *same* seconds at
+    /// every tree level (root and branches load moments apart) and the
+    /// filtered tree matches the unfiltered one's bake-at-load semantics.
+    built_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl TrackingSnapshot {
@@ -288,7 +299,40 @@ impl TrackingSnapshot {
             );
         }
         let tree = build_tree_projection(&task_map, &own_secs, &active_tasks);
-        Ok(Arc::new(TrackingSnapshot { by_id, order, tree }))
+        Ok(Arc::new(TrackingSnapshot {
+            by_id,
+            order,
+            tree,
+            task_map,
+            built_at: now,
+        }))
+    }
+
+    /// The duration-tree projection for an optional saved-query filter.
+    /// `None` reuses the eagerly built full projection; `Some(visible)`
+    /// re-folds the tree from the visible trackings only — own seconds and
+    /// running markers come from the filtered set, and tasks whose subtree
+    /// carries no visible tracked time prune away, exactly like untracked
+    /// tasks do in the unfiltered tree.
+    fn tree_for(&self, filter: Option<&HashSet<Uuid>>) -> std::borrow::Cow<'_, TreeProjection> {
+        let Some(visible) = filter else {
+            return std::borrow::Cow::Borrowed(&self.tree);
+        };
+        let now = self.built_at;
+        let mut own_secs: HashMap<Uuid, i64> = HashMap::new();
+        let mut active_tasks: HashSet<Uuid> = HashSet::new();
+        for id in visible {
+            let Some(row) = self.by_id.get(id) else { continue };
+            *own_secs.entry(row.tracking.task_id).or_default() += duration_seconds(row, now);
+            if row.active {
+                active_tasks.insert(row.tracking.task_id);
+            }
+        }
+        std::borrow::Cow::Owned(build_tree_projection(
+            &self.task_map,
+            &own_secs,
+            &active_tasks,
+        ))
     }
 
     /// Number of running trackings — drives the live-refresh cadence.
@@ -764,9 +808,14 @@ impl Node for TrackingRootNode {
         params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
         // The Tree view asks for top-level task projections; every other view
-        // (flat list / condensed) asks for the flat tracking entries.
+        // (flat list / condensed) asks for the flat tracking entries. Both
+        // honor the pane's saved query — the tree re-folds its durations
+        // from the visible trackings only.
         if params.node_type.type_id == tracking_tree_item_type().type_id {
-            return Ok(list_result(self.snapshot.tree.child_summaries(None)));
+            let filter = resolve_visible_set(&self.handle, &params.query).await?;
+            return Ok(list_result(
+                self.snapshot.tree_for(filter.as_ref()).child_summaries(None),
+            ));
         }
         let filter = resolve_visible_set(&self.handle, &params.query).await?;
         let now = chrono::Utc::now();
@@ -943,10 +992,16 @@ impl Node for TrackingTreeNode {
     }
     async fn list(
         &self,
-        _params: not_yet_done_content::ListParams,
+        params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
+        // The engine propagates the pane's query into subtree loads
+        // (capability `propagates_query_to_subtree`), so an expanded
+        // branch shows the same filtered durations as the root level.
+        let filter = resolve_visible_set(&self.handle, &params.query).await?;
         Ok(list_result(
-            self.snapshot.tree.child_summaries(Some(self.task_id)),
+            self.snapshot
+                .tree_for(filter.as_ref())
+                .child_summaries(Some(self.task_id)),
         ))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -1132,6 +1187,10 @@ impl ContentAdapter for TrackingAdapter {
             // subtree-cumulated duration, so the engine can render a
             // `tree_aggregate` column that toggles between the two (M4).
             supports_tree_aggregation: true,
+            // The duration tree filters by the pane's saved query at every
+            // depth (root + expanded branches re-fold from the visible
+            // trackings), so subtree loads must carry the query along.
+            propagates_query_to_subtree: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -1234,6 +1293,8 @@ mod tests {
             by_id,
             order,
             tree: TreeProjection::default(),
+            task_map: HashMap::new(),
+            built_at: chrono::Utc::now(),
         })
     }
 
@@ -1269,6 +1330,52 @@ mod tests {
         // Terminates rather than looping forever.
         let p = path_for(&map, a);
         assert!(p.len() <= 2);
+    }
+
+    #[test]
+    fn tree_for_refolds_projection_from_visible_trackings_only() {
+        // Task forest A → B; one 30-min tracking on each. Filtering to
+        // B's tracking must re-fold the tree: A stays visible as B's
+        // ancestor but carries no own time, and the cumulated total is
+        // B's alone.
+        let task_a = Uuid::from_u128(10);
+        let task_b = Uuid::from_u128(20);
+        let t1 = Uuid::from_u128(1);
+        let t2 = Uuid::from_u128(2);
+        let task_map: HashMap<Uuid, (String, Option<Uuid>)> = [
+            (task_a, ("A".to_string(), None)),
+            (task_b, ("B".to_string(), Some(task_a))),
+        ]
+        .into_iter()
+        .collect();
+        let mut by_id = HashMap::new();
+        by_id.insert(t1, row(tracking(t1, task_a, 120, true), "A", vec![]));
+        by_id.insert(t2, row(tracking(t2, task_b, 90, true), "B", vec!["A"]));
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![t2, t1],
+            tree: TreeProjection::default(),
+            task_map,
+            built_at: chrono::Utc::now(),
+        };
+
+        // No filter → the prebuilt projection is reused untouched.
+        assert!(matches!(
+            snapshot.tree_for(None),
+            std::borrow::Cow::Borrowed(_)
+        ));
+
+        let visible: HashSet<Uuid> = [t2].into_iter().collect();
+        let tree = snapshot.tree_for(Some(&visible));
+        let roots = tree.child_summaries(None);
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(roots[0].label, "A");
+        let a_row = tree.by_id.get(&task_a).unwrap();
+        assert_eq!(a_row.own_secs, 0, "A's own tracking is filtered out");
+        assert_eq!(a_row.cumulated_secs, 1800, "subtree total = B's 30 min");
+        let kids = tree.child_summaries(Some(task_a));
+        assert_eq!(kids.len(), 1, "{kids:?}");
+        assert_eq!(kids[0].label, "B");
     }
 
     #[test]

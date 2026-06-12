@@ -665,6 +665,9 @@ views:
   - name: tasks
     tree_label: description
     expand_depth: 2 # Tiefe 0 und 1 klappen nach dem Laden automatisch auf
+  - name: tree
+    tree_label: task
+    expand_depth: all # immer komplett ausgeklappt (z. B. Trackings-Tree)
 ```
 
 Lazy geladene Trees starten standardmäßig komplett zugeklappt — richtig für
@@ -680,9 +683,13 @@ Zeilen mit Tiefe `< expand_depth` automatisch auf — `2` zeigt also drei Ebenen
   ist, deaktiviert sich die Kaskade — manuelles Auf-/Zuklappen wird danach
   nie überschrieben. Eine neue Saved-Query startet die Kaskade auf dem
   gefilterten Tree erneut.
-- **Kosten:** `expand_depth` Runden Adapter-Calls (eine pro Ebene, Fan-out
-  pro Knoten). Auf Remote-Adaptern klein halten; `0`/weggelassen = aus
-  (Default, bisheriges Verhalten).
+- **`expand_depth: all`:** keine Tiefen-Obergrenze — die Kaskade läuft, bis
+  eine Runde nichts Aufklappbares mehr findet. Für kleine In-Memory-Trees
+  gedacht, die immer komplett offen sein sollen (z. B. der Trackings-Tree,
+  native Parität); auf Remote-Adaptern stattdessen eine Zahl verwenden.
+- **Kosten:** eine Runde Adapter-Calls pro Ebene (Fan-out pro Knoten). Auf
+  Remote-Adaptern klein halten; `0`/weggelassen = aus (Default, bisheriges
+  Verhalten).
 
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 
