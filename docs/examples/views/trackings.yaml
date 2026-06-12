@@ -346,6 +346,20 @@ views:
     expand_depth: all
     tree_markers:
       enabled: false
+    # Native parity: the day buckets render as `── label` group-header rows
+    # (header style, not selectable) instead of tree nodes, and the task
+    # forest starts at indent 0 under each header — exactly the flat-list
+    # grouping look. The `total` column is appended while grouped and shows
+    # each day's total on the day's *last* row (the classic time-sheet
+    # layout); `source` names the bucket metadata field carrying the total.
+    group_headers:
+      total:
+        key: total
+        label: Total
+        kind: duration
+        style: accent
+        sizing: max
+        source: duration
 
     # The tree folds the same trackings the other subtabs list, so the
     # saved-query filter applies here too (root *and* expanded branches —

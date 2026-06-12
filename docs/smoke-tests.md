@@ -3567,20 +3567,22 @@ Tages). Generischer Mechanismus: Engine reicht das aktive `group_by` im
 Root-`list()` durch, Adapter liefert `tracking:tree-group`-Bucket-Knoten
 mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
 
-- [ ] Trackings (A) → `t` (Tree): Root-Ebene sind Tages-Buckets, neuester
-      Tag zuerst, Label wie in der gruppierten Flat-List
-      (`W24 2026-06-08 Mon`), Own/Cumulated-Spalten = Tages-Total. Buckets
-      sind voll aufgeklappt (expand_depth-Kaskade greift durch die
-      Gruppen), und der Aufbau ist flott (kein sekundenlanger Aufbau —
-      Folds + Query-Auflösung sind pro Snapshot memoisiert).
-- [ ] Teilbaum unter einem Bucket: Durations sind die des jeweiligen
+- [ ] Trackings (A) → `t` (Tree): Tages-Gruppen als `── label`-Header-Zeilen
+      (nicht selektierbar, Header-Style, Label wie in der gruppierten
+      Flat-List: `W24 2026-06-08 Mon`), neuester Tag zuerst. Die Task-Zeilen
+      darunter starten bei Einrückung 0 (keine Extra-Ebene unter dem
+      Header). Voll aufgeklappt (expand_depth-Kaskade), Aufbau flott (kein
+      sekundenlanger Aufbau — Folds + Query-Auflösung pro Snapshot
+      memoisiert).
+- [ ] Teilbaum unter einem Header: Durations sind die des jeweiligen
       Tages (derselbe Task unter zwei Tagen zeigt unterschiedliche
-      Werte). Spalten wie nativ: `⏱`, Task, Own, Cumulated (zwei
-      Duration-Spalten nebeneinander statt `zt`-Toggle).
+      Werte). Spalten wie nativ: `⏱`, Task, Own, Cumulated; zusätzlich
+      schließt eine **Total**-Spalte jeden Tag auf seiner letzten Zeile
+      (Stundenzettel-Layout). Cursor überspringt die Header-Zeilen.
 - [ ] `zg` rotiert Day → Week → Month → Year → No grouping → Day; jeder
       Schritt lädt neu. „No grouping" zeigt den ungebucketeten Task-Baum
-      (wie vor diesem Feature). `u`-Menü springt direkt, `●` markiert den
-      aktiven Zustand.
+      ohne Header und ohne Total-Spalte (wie vor diesem Feature). `u`-Menü
+      springt direkt, `●` markiert den aktiven Zustand.
 - [ ] Saved Query (`q`) auf gruppiertem Tree: Buckets + Teilbäume
       re-falten aus den sichtbaren Trackings; leere Buckets verschwinden.
       Gruppierungszustand überlebt das Query-Apply.

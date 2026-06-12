@@ -53,6 +53,22 @@ impl ViewFileConfig {
                 check_child(view.name.as_str(), child, editors, &mut errors);
             }
             check_tree(view, &mut errors);
+            // `group_headers` renders adapter group buckets as header rows —
+            // only meaningful on a tree view that actually groups.
+            if view.group_headers.is_some() {
+                if view.tree_label.is_none() {
+                    errors.push(format!(
+                        "views.{}: group_headers requires tree mode (set tree_label)",
+                        view.name
+                    ));
+                }
+                if view.group_by.is_none() {
+                    errors.push(format!(
+                        "views.{}: group_headers requires a group_by (the adapter-grouped tree root)",
+                        view.name
+                    ));
+                }
+            }
             check_row_layout(
                 view.name.as_str(),
                 None,
@@ -662,6 +678,38 @@ pub struct ViewDef {
     /// Ignored outside tree mode.
     #[serde(default)]
     pub expand_depth: Option<ExpandDepth>,
+    /// Render the bucket rows of an adapter-grouped tree
+    /// (`group_by_via_adapter`) as flat-style `── label` group-header rows
+    /// instead of selectable tree nodes: header style, non-selectable, and
+    /// the rows beneath lose the extra indentation level the bucket would
+    /// otherwise add — the forest starts at indent 0 under each header,
+    /// exactly like the engine's flat-list grouping looks.
+    ///
+    /// Why: a group bucket is an aggregate, not a thing to navigate to —
+    /// rendering it as a tree node makes it selectable and pushes the real
+    /// rows a level deeper, which reads as a different (and noisier) layout
+    /// than the same grouping on a flat view. Only meaningful on a tree
+    /// view whose root level is the adapter's group-bucket type; ignored
+    /// while grouping is cycled off (the adapter then returns plain rows at
+    /// the root). Combine with `expand_depth` — a collapsed bucket cannot
+    /// be expanded by cursor (headers are not selectable).
+    #[serde(default)]
+    pub group_headers: Option<GroupHeadersDef>,
+}
+
+/// Value of [`ViewDef::group_headers`]. Presence alone enables the header
+/// rendering (`group_headers: {}`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GroupHeadersDef {
+    /// Optional extra column appended (as the last column) while grouping
+    /// is active: each group's total, shown on the group's **closing** row
+    /// — the classic time-sheet layout where a Total column closes each
+    /// day (same semantics as the flat grouping's `total_column`). A full
+    /// `ColumnDef`: `label`/`kind`/`style`/`sizing` render it; `source`
+    /// names the **bucket node's** metadata field carrying the total
+    /// (falling back to `key`). The column disappears with grouping off.
+    #[serde(default)]
+    pub total: Option<ColumnDef>,
 }
 
 /// Value of [`ViewDef::expand_depth`]: a fixed number of levels, or the
@@ -1953,6 +2001,12 @@ views:
         assert_eq!(gb.order, GroupOrder::Desc);
         assert!(tree.columns.iter().any(|c| c.key == "duration"));
         assert!(tree.columns.iter().any(|c| c.key == "duration_cumulated"));
+        // Buckets render as `── label` header rows; the appended Total
+        // column reads the bucket's `duration` metadata field.
+        let gh = tree.group_headers.as_ref().expect("tree view declares group_headers");
+        let total = gh.total.as_ref().expect("group_headers carries a total column");
+        assert_eq!(total.key, "total");
+        assert_eq!(total.source.as_deref(), Some("duration"));
         // Group buckets are read-only aggregates — no shortcuts on the root
         // level; `s: toggle-tracking` lives on the task (item) level, which
         // also serves the root rows when grouping is cycled off.
@@ -1994,6 +2048,35 @@ views:
             .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("nope") && errs[0].contains("editors"), "got: {}", errs[0]);
+    }
+
+    #[test]
+    fn validate_group_headers_requires_tree_and_group_by() {
+        // `group_headers` renders adapter group buckets as `── label` header
+        // rows — meaningless without tree mode and a root `group_by`.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    group_headers: {}
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("group_headers") && e.contains("tree_label")),
+            "got: {errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("group_headers") && e.contains("group_by")),
+            "got: {errs:?}"
+        );
     }
 
     #[test]

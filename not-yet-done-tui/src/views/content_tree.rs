@@ -767,6 +767,7 @@ mod tests {
             tree_lines: None,
             tree_markers: None,
             expand_depth: None,
+            group_headers: None,
         }
     }
 

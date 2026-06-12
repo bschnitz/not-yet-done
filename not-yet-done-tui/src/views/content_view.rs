@@ -50,8 +50,8 @@ use crate::config::keybindings::{
 };
 use crate::config::view_config::{
     ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, ExpandDepth, GroupBy,
-    GroupOrder, LineLayout, PaginationMode, PreviewConfig, SplitDirection, TreeAggregateDefault,
-    ViewDef, ViewFileConfig,
+    GroupHeadersDef, GroupOrder, LineLayout, PaginationMode, PreviewConfig, SplitDirection,
+    TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{
     KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
@@ -1984,6 +1984,19 @@ impl ContentPane {
         self.tree.is_some() && self.capabilities.group_by_via_adapter
     }
 
+    /// The active `group_headers:` rendering config — `Some` only while the
+    /// adapter-grouped tree is actually grouped (capability + view config +
+    /// grouping not cycled off). The depth-0 rows are then the adapter's
+    /// group buckets and render as `── label` header rows; with grouping
+    /// off the adapter returns plain rows at depth 0 and the tree renders
+    /// normally.
+    fn tree_group_headers_def<'a>(&self, view_defs: &'a [ViewDef]) -> Option<&'a GroupHeadersDef> {
+        if !self.tree_groups_via_adapter() || self.current_group_by(view_defs).is_none() {
+            return None;
+        }
+        self.view_def(view_defs)?.group_headers.as_ref()
+    }
+
     /// The grouping to hand the adapter in `ListParams::group_by` for this
     /// pane's **root** load — the content-crate [`GroupSpec`] twin of the
     /// effective [`current_group_by`](Self::current_group_by). `None`
@@ -2678,6 +2691,8 @@ impl ContentPane {
         columns: &[ColumnDef],
         view_defs: &[ViewDef],
         now: chrono::DateTime<chrono::Local>,
+        headers_active: bool,
+        total_col_idx: Option<usize>,
     ) -> Vec<TRow<u32>> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -2718,7 +2733,21 @@ impl ContentPane {
             // child_prefix_at[d] = the prefix a depth-`d` row renders with.
             let mut child_prefix_at: Vec<String> = vec![String::new()];
             for (i, e) in visible.iter().enumerate() {
-                let d = e.depth;
+                // With `group_headers:` active the depth-0 rows are the
+                // adapter's group buckets, rendered as `── label` header
+                // rows (no connector), and every deeper row sheds the
+                // indentation level the bucket would otherwise add — the
+                // forest starts at indent 0 under each header, like the
+                // flat-list grouping.
+                if headers_active && e.depth == 0 {
+                    out.push(String::new());
+                    continue;
+                }
+                let d = if headers_active {
+                    e.depth.saturating_sub(1)
+                } else {
+                    e.depth
+                };
                 if child_prefix_at.len() <= d {
                     child_prefix_at.resize(d + 1, String::new());
                 }
@@ -2768,11 +2797,57 @@ impl ContentPane {
             out
         };
 
+        // `group_headers.total`: the bucket's total closes its group — map
+        // each group's LAST visible row to the bucket node's total value
+        // (read from the total column's `source` metadata field, falling
+        // back to its `key`). The classic time-sheet layout, matching the
+        // flat grouping's `total_column` semantics.
+        let closing_totals: std::collections::HashMap<usize, String> = match total_col_idx
+            .and_then(|ci| columns.get(ci))
+        {
+            Some(tc) if headers_active => {
+                let field = tc.source.as_deref().unwrap_or(&tc.key);
+                let mut map = std::collections::HashMap::new();
+                let mut bucket_total: Option<String> = None;
+                let mut last_item_row: Option<usize> = None;
+                let close =
+                    |total: &Option<String>, row: Option<usize>, map: &mut std::collections::HashMap<usize, String>| {
+                        if let (Some(t), Some(r)) = (total.as_ref(), row) {
+                            map.insert(r, t.clone());
+                        }
+                    };
+                for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
+                    let Some(e) = tree.entries.get(eidx) else { continue };
+                    if e.depth == 0 {
+                        close(&bucket_total, last_item_row, &mut map);
+                        bucket_total = Some(metadata_field_value(&e.node, field).to_string());
+                        last_item_row = None;
+                    } else {
+                        last_item_row = Some(row_idx);
+                    }
+                }
+                close(&bucket_total, last_item_row, &mut map);
+                map
+            }
+            _ => std::collections::HashMap::new(),
+        };
+
         self.tree_visible_indices
             .iter()
             .enumerate()
             .filter_map(|(row_idx, &eidx)| {
                 let entry = tree.entries.get(eidx)?;
+                // A group-bucket row renders as a `── label` summary row at
+                // the widget stage; emit an empty, non-selectable row here so
+                // the engine's width fit ignores it while the 1:1 row ↔
+                // visible-entry mapping (cursor → tree entry) stays intact.
+                if headers_active && entry.depth == 0 {
+                    let mut row = TRow::new(row_idx as u32).not_selectable();
+                    for col in columns {
+                        row = row.cell(&col.key, CellContent::text(String::new()));
+                    }
+                    return Some(row);
+                }
                 // Each entry's data cells are filled per its OWN level's
                 // column set (resolved from its node_type_chain), not the
                 // cursor's. In a uniform recursive tree every depth declares
@@ -2788,7 +2863,16 @@ impl ContentPane {
                     entry_cols.is_some_and(|cols| cols.iter().any(|c| c.key == key))
                 };
                 let mut row = TRow::new(row_idx as u32);
-                for col in columns {
+                for (ci, col) in columns.iter().enumerate() {
+                    // The synthetic group-total column: the bucket's total on
+                    // the group's closing row, blank everywhere else. Typed
+                    // through the column's own `kind` so a duration total
+                    // stays right-aligned like the data cells.
+                    if total_col_idx == Some(ci) {
+                        let raw = closing_totals.get(&row_idx).map(String::as_str).unwrap_or("");
+                        row = row.cell(&col.key, typed_cell_content(raw, col));
+                        continue;
+                    }
                     let is_label_cell = label_col_key.as_deref() == Some(col.key.as_str());
                     // The label cell carries the tree glyph + indent and is
                     // never typed; data cells get M2 formatting when the
@@ -3751,7 +3835,7 @@ impl ContentPane {
             }
         }
         let t = &*self.theme;
-        let columns: Vec<ColumnDef> = self.current_columns(view_defs);
+        let mut columns: Vec<ColumnDef> = self.current_columns(view_defs);
         if columns.is_empty() {
             // Still record the width we were asked to build for: the
             // post-draw re-fit pass (`refit_tables_if_needed`) compares it
@@ -3762,6 +3846,20 @@ impl ContentPane {
             self.built_table_width = self.table.last_render_width();
             return;
         }
+
+        // Adapter-grouped tree with `group_headers:`: the depth-0 bucket
+        // rows render as `── label` header rows (built at the widget stage
+        // below) and the optional `total` column is appended for the
+        // duration of the grouping — it closes each group, and disappears
+        // with grouping cycled off, like the native Trackings tree's Total.
+        let tree_headers_active = self.tree_group_headers_def(view_defs).is_some();
+        let tree_total_col_idx = self
+            .tree_group_headers_def(view_defs)
+            .and_then(|g| g.total.as_ref())
+            .map(|tc| {
+                columns.push(tc.clone());
+                columns.len() - 1
+            });
 
         // Lay columns out into the pane's *actual* render width, recorded by
         // the table widget on its last paint. This makes a `flex` column fill
@@ -3825,7 +3923,13 @@ impl ContentPane {
             // `tree_visible_indices` (refreshed above). Fuzzy filter
             // only narrows entries at `tree_filter_depth`; `/`-search
             // steps over the same visible rows.
-            self.build_tree_data_rows(&columns, view_defs, now)
+            self.build_tree_data_rows(
+                &columns,
+                view_defs,
+                now,
+                tree_headers_active,
+                tree_total_col_idx,
+            )
         } else {
             // Flat list. Fuzzy filter first (SkimMatcherV2; whitespace-split
             // AND of fuzzy tokens — see `fuzzy_filtered_order`), then either
@@ -3952,10 +4056,33 @@ impl ContentPane {
         } else {
             None
         };
+        // `group_headers:` rows: map each depth-0 (bucket) row to its label
+        // so the loop below can swap in a `── label` summary row — same
+        // chrome (`summary_row`, group-header style, non-selectable) as the
+        // flat grouping's headers. The bucket label is already the human
+        // display label (the adapter formats it via `bucket_display_label`).
+        let tree_header_labels: std::collections::HashMap<usize, String> = match self.tree.as_ref()
+        {
+            Some(tree) if tree_headers_active => self
+                .tree_visible_indices
+                .iter()
+                .enumerate()
+                .filter_map(|(row_idx, &eidx)| {
+                    let e = tree.entries.get(eidx)?;
+                    (e.depth == 0).then(|| (row_idx, e.node.label.clone()))
+                })
+                .collect(),
+            _ => Default::default(),
+        };
+        let col_widths = self.last_col_widths.clone();
         let widget_rows: Vec<TableWidgetRow> = computed
             .rows
             .into_iter()
-            .map(|cr| {
+            .enumerate()
+            .map(|(ri, cr)| {
+                if let Some(label) = tree_header_labels.get(&ri) {
+                    return summary_row(format!("── {label} "), &[], &columns, &col_widths);
+                }
                 let highlights = cr.highlights;
                 let cells: Vec<TableWidgetCell> = cr
                     .cells
@@ -9009,6 +9136,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -9144,6 +9272,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -9550,6 +9679,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -9717,6 +9847,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -9775,7 +9906,7 @@ mod tests {
         let columns = pane.current_columns(&view_defs);
         // Cursor level is the root → its label column key is "name".
         let label_key = TColumnId::new("name");
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 4, "every visible entry produces a row");
 
         // Every row — including the deep, divergent-key channel — must
@@ -9865,6 +9996,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -9905,7 +10037,7 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 2, "root + expanded child");
         let val_key = TColumnId::new("val");
         let cell = |i: usize| {
@@ -9954,7 +10086,7 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
         let label =
             |i: usize| rows[i].cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default();
@@ -9999,7 +10131,7 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
         rows.iter()
             .map(|r| r.cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default())
@@ -10085,7 +10217,7 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
         let cell = |i: usize| rows[i].cells.get(&name_key).expect("label cell");
 
@@ -10194,6 +10326,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -10256,7 +10389,7 @@ mod tests {
         }
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 1, "exactly one visible row");
         rows[0]
             .cells
@@ -11397,6 +11530,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -12289,6 +12423,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
+            group_headers: None,
             }],
         }
     }
@@ -12815,7 +12950,7 @@ mod tests {
         // … and they actually RENDER as rows (not blanked out).
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now());
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 4, "work + h + g + gg all render");
     }
 
@@ -13106,6 +13241,7 @@ mod tests {
             tree_lines: None,
             tree_markers: None,
             expand_depth: None,
+            group_headers: None,
         }
     }
 
@@ -13729,6 +13865,148 @@ mod tests {
     }
 
     #[test]
+    fn tree_group_headers_def_gates_on_capability_and_active_grouping() {
+        let mut config = test_config_with_group_by();
+        config.views[0].group_headers = Some(GroupHeadersDef::default());
+        let view_defs = config.views;
+
+        // Armed: tree + capability + config + grouping active.
+        let mut pane = tree_pane(true);
+        assert!(pane.tree_group_headers_def(&view_defs).is_some());
+
+        // Capability missing → buckets never arrive, headers stay off.
+        assert!(tree_pane(false).tree_group_headers_def(&view_defs).is_none());
+
+        // Grouping cycled off → the adapter returns plain rows at depth 0,
+        // so the header rendering must switch off with it.
+        for _ in 0..4 {
+            pane.try_cycle_grouping(&view_defs, 0, 0);
+        }
+        assert!(pane.current_group_by(&view_defs).is_none());
+        assert!(pane.tree_group_headers_def(&view_defs).is_none());
+    }
+
+    fn group_headers_tree_config() -> ViewFileConfig {
+        // Trackings-(A)-tree shape: bucket root level + recursive item level.
+        let mut config = uniform_recursive_config();
+        config.views[0].node_type = "mock:bucket".into();
+        config.views[0].group_by = Some(GroupBy {
+            column: "key".into(),
+            bucket: Some(DateBucket::Day),
+            order: GroupOrder::Desc,
+        });
+        let mut total = dcol("total");
+        total.source = Some("dur".into());
+        config.views[0].group_headers = Some(GroupHeadersDef { total: Some(total) });
+        config
+    }
+
+    fn bucket_node(id: &str, label: &str, total: &str) -> NodeSummary {
+        use not_yet_done_content::{Metadata, MetadataField};
+        let mut n = tnode(id, label, "mock:bucket");
+        n.metadata = Metadata {
+            fields: vec![MetadataField {
+                key: "dur".into(),
+                value: total.into(),
+                display_label: "dur".into(),
+                editable: false,
+                allowed_values: None,
+            }],
+        };
+        n
+    }
+
+    #[test]
+    fn tree_group_headers_blank_bucket_rows_shift_indent_and_close_totals() {
+        // Two day buckets; the first holds a task with a subtask, the
+        // second a single task. With `group_headers:` active the bucket
+        // rows turn into non-selectable placeholders (the widget stage
+        // swaps in the `── label` summary row), the items shed the
+        // bucket's indentation level, and the appended total column
+        // carries each bucket's total on the bucket's LAST row only.
+        let config = group_headers_tree_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.active_pane_mut().capabilities.group_by_via_adapter = true;
+        view.set_items(
+            vec![bucket_node("b1", "Mon", "1:00"), bucket_node("b2", "Tue", "0:30")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["b1".into()],
+                vec![tnode("t1", "T1", "mock:task")],
+                None,
+            );
+            tree.expanded.insert(vec!["b1".into()]);
+            tree.set_cached_children(
+                vec!["b1".into(), "t1".into()],
+                vec![tnode("t1a", "T1a", "mock:task")],
+                None,
+            );
+            tree.expanded.insert(vec!["b1".into(), "t1".into()]);
+            tree.set_cached_children(
+                vec!["b2".into()],
+                vec![tnode("t2", "T2", "mock:task")],
+                None,
+            );
+            tree.expanded.insert(vec!["b2".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        assert!(pane.tree_group_headers_def(&view_defs).is_some());
+        // DFS order: b1, t1, t1a, b2, t2.
+        let mut columns = pane.current_columns(&view_defs);
+        let gh = view_defs[0].group_headers.as_ref().unwrap();
+        columns.push(gh.total.clone().unwrap());
+        let total_idx = columns.len() - 1;
+        let rows = pane.build_tree_data_rows(
+            &columns,
+            &view_defs,
+            chrono::Local::now(),
+            true,
+            Some(total_idx),
+        );
+        assert_eq!(rows.len(), 5);
+
+        // Bucket rows: non-selectable placeholders with an empty label.
+        let label_key = TColumnId::new("name");
+        let cell = |r: usize, key: &TColumnId| {
+            rows[r].cells.get(key).map(|c| c.text.clone()).unwrap_or_default()
+        };
+        for b in [0usize, 3] {
+            assert!(!rows[b].selectable, "bucket row {b} must not be selectable");
+            assert_eq!(cell(b, &label_key), "", "bucket row {b} renders at the widget stage");
+        }
+        // Items shed the bucket's indent level: the first-level task has no
+        // box connector (it is a forest root now), its subtask has one.
+        let t1 = cell(1, &label_key);
+        assert!(
+            !t1.contains('├') && !t1.contains('└'),
+            "depth-1 item must render at indent 0: {t1:?}"
+        );
+        let t1a = cell(2, &label_key);
+        assert!(
+            t1a.contains('└') || t1a.contains('├'),
+            "depth-2 item keeps its (shifted) connector: {t1a:?}"
+        );
+        // The total column closes each bucket on its last row.
+        let total_key = TColumnId::new("total");
+        assert_eq!(cell(0, &total_key), "");
+        assert_eq!(cell(1, &total_key), "");
+        assert_eq!(cell(2, &total_key), "1:00", "b1's total sits on its last row");
+        assert_eq!(cell(3, &total_key), "");
+        assert_eq!(cell(4, &total_key), "0:30", "b2's total sits on its last row");
+    }
+
+    #[test]
     fn group_menu_in_adapter_tree_requests_reload() {
         let config = test_config_with_group_by();
         let mut view =
@@ -13847,6 +14125,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             tree_lines: None,
             tree_markers: None,
             expand_depth: None,
+            group_headers: None,
         }],
     }
 }

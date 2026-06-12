@@ -607,6 +607,48 @@ Teilbaum, dessen Werte nur aus den Einträgen _dieses_ Buckets gefaltet sind.
   engine-seitige Flat-Gruppierung benutzt — ein Tag heißt im gruppierten
   Tree exakt so wie in der gruppierten Flat-List.
 
+##### `group_headers:` — Buckets als `── label`-Header-Zeilen
+
+Ohne weitere Config sind die Bucket-Knoten **normale Tree-Zeilen**:
+selektierbar, mit den Items eine Einrückungsebene tiefer. Das liest sich
+anders als dieselbe Gruppierung auf einer Flat-List (dort sind Gruppenköpfe
+nicht-selektierbare `── label`-Zeilen ohne Extra-Einrückung). `group_headers:`
+auf der Tree-Root-Ebene stellt die Bucket-Zeilen auf genau dieses
+Header-Rendering um:
+
+```yaml
+- name: tree
+  node_type: "tracking:tree-group"
+  tree_label: task
+  group_by: { column: started, bucket: day, order: desc }
+  expand_depth: all # Pflicht in der Praxis, s. u.
+  group_headers:
+    total: # optional: Gruppen-Total in eigener Spalte
+      key: total
+      label: Total
+      kind: duration
+      style: accent
+      sizing: max
+      source: duration # Metadata-Feld des BUCKET-Knotens mit dem Total
+```
+
+- **Rendering.** Bucket-Zeilen werden `── label`-Zeilen im
+  Gruppen-Header-Style (gleiche Chrome wie die Flat-Gruppierung), **nicht
+  selektierbar**; die Zeilen darunter verlieren die Einrückungsebene des
+  Buckets — der Wald beginnt unter jedem Header bei Einrückung 0.
+- **`total:` (optional).** Eine vollwertige `ColumnDef`, die nur bei aktiver
+  Gruppierung als letzte Spalte erscheint und das Gruppen-Total auf der
+  **letzten** Zeile jeder Gruppe zeigt (das klassische
+  Stundenzettel-Layout — dieselbe Semantik wie `total_column` der
+  Flat-Gruppierung). `source:` benennt das Metadata-Feld des
+  Bucket-Knotens, das das Total trägt (Fallback: `key`). Mit ausgeschalteter
+  Gruppierung verschwindet die Spalte.
+- **`expand_depth` ist praktisch Pflicht:** Header sind nicht selektierbar,
+  ein eingeklappter Bucket ließe sich also per Cursor nie öffnen. Der
+  Validator verlangt `tree_label` + `group_by` auf derselben View.
+- Gilt nur, solange tatsächlich gruppiert wird (Capability + aktives
+  `group_by`); mit „No grouping" rendert der Tree normal.
+
 #### `tree_aggregate:` — Eigen- vs. Summenwert im Tree (M4)
 
 Das Gegenstück zu `group_by:` für den **Tree-Mode**: Eine Spalte kann pro Knoten
