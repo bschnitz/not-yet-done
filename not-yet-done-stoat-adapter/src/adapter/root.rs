@@ -188,6 +188,7 @@ mod tests {
                 sort: Vec::new(),
                 page: None,
                 download: false,
+                group_by: None,
             })
             .await
             .unwrap();
@@ -206,6 +207,7 @@ mod tests {
                 sort: Vec::new(),
                 page: None,
                 download: false,
+                group_by: None,
             })
             .await
             .unwrap();

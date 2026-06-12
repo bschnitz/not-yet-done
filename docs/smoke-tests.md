@@ -3559,6 +3559,33 @@ immer komplett offen und hatte keine Aufklappmarker. `expand_depth: all`
       (Regression: Out-of-Range-Cursor brach den Tabellen-Rebuild ab →
       stale Anzeige).
 
+## Trackings-Tree: Gruppierung via Adapter (`group_by_via_adapter`)
+
+Native Parität, Punkt (3): der Legacy-Tree gruppierte nach Tag (ein
+Gruppenkopf pro Tag, darunter der Task-Baum mit den Durations nur dieses
+Tages). Generischer Mechanismus: Engine reicht das aktive `group_by` im
+Root-`list()` durch, Adapter liefert `tracking:tree-group`-Bucket-Knoten
+mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
+
+- [ ] Trackings (A) → `t` (Tree): Root-Ebene sind Tages-Buckets, neuester
+      Tag zuerst, Label wie in der gruppierten Flat-List
+      (`W24 2026-06-08 Mon`), Duration-Spalte = Tages-Total. Buckets sind
+      voll aufgeklappt (expand_depth-Kaskade greift durch die Gruppen).
+- [ ] Teilbaum unter einem Bucket: Durations sind die des jeweiligen
+      Tages (derselbe Task unter zwei Tagen zeigt unterschiedliche
+      Werte). `zt` (own↔cumulated) funktioniert; auf der Bucket-Zeile
+      bleibt der Total stehen (blankt nicht).
+- [ ] `zg` rotiert Day → Week → Month → Year → No grouping → Day; jeder
+      Schritt lädt neu. „No grouping" zeigt den ungebucketeten Task-Baum
+      (wie vor diesem Feature). `u`-Menü springt direkt, `●` markiert den
+      aktiven Zustand.
+- [ ] Saved Query (`q`) auf gruppiertem Tree: Buckets + Teilbäume
+      re-falten aus den sichtbaren Trackings; leere Buckets verschwinden.
+      Gruppierungszustand überlebt das Query-Apply.
+- [ ] `s` (toggle-tracking) auf einer Task-Zeile im Bucket funktioniert;
+      auf einer Bucket-Zeile ist `s` nicht belegt (read-only Aggregat).
+      ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

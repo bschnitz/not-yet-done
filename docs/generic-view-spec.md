@@ -549,11 +549,63 @@ YAML-`shortcuts:`.
 
 > **Einschränkungen.** Der gruppierte Pfad gilt nur für **einzeilige**
 > Tabellen — `group_by:` zusammen mit `row_layout:` (mehrzeilig/Chat) wird
-> ignoriert. Gruppierung ist außerdem ein Flat-List-Feature; im Tree-Mode
-> greift sie nicht.
+> ignoriert. Engine-seitige Gruppierung ist außerdem ein Flat-List-Feature;
+> im Tree-Mode gruppiert stattdessen der **Adapter** (siehe nächster
+> Abschnitt) — ohne entsprechende Adapter-Fähigkeit greift `group_by:` im
+> Tree nicht.
 
 Die Farbe der Gruppen-Kopf- und Footer-Zeilen ist über das Theme konfigurierbar
 (`group_header`, siehe `tui-theme.yaml` / Theme-Referenz).
+
+#### Adapter-seitige Tree-Gruppierung (`group_by_via_adapter`)
+
+Ein **Tree** kann nicht engine-seitig gruppiert werden: Die Engine lädt lazy
+und kann die Teilbaum-Summen eines einzelnen Buckets nicht selbst falten —
+der Adapter besitzt den Fold (siehe `tree_aggregate:` unten). Deshalb dreht
+sich die Zuständigkeit im Tree um: Die Engine reicht das aktive `group_by:`
+der Pane im Root-`list()`-Aufruf an den Adapter durch
+(`ListParams.group_by`), und der Adapter antwortet mit **einem
+Bucket-Knoten pro Gruppe** als Root-Ebene; jeder Bucket expandiert in einen
+Teilbaum, dessen Werte nur aus den Einträgen _dieses_ Buckets gefaltet sind.
+
+```yaml
+- name: tree
+  node_type: "tracking:tree-group" # Root-Ebene = Bucket-Knoten des Adapters
+  tree_label: task
+  group_by: { column: started, bucket: day, order: desc }
+  children:
+    - name: subtasks
+      node_type: "tracking:tree-item" # rekursive Item-Ebene
+      recursive: true
+```
+
+- **Capability-Gate.** Der Adapter deklariert `group_by_via_adapter` (siehe
+  `AdapterCapabilities`). Nur dann sind `zg`/`u` im Tree aktiv; ohne die
+  Fähigkeit bleibt ein `group_by:` auf einer Tree-Root-Ebene wirkungslos
+  (gleiche Doppel-Gate-Logik wie `tree_aggregate`).
+- **Umschalten = Reload.** `zg` und das `u`-Menü funktionieren im Tree wie
+  in der Flat-List, aber jeder Wechsel ist ein **Adapter-Reload** (der
+  Adapter muss neu bucketen), kein lokaler Rebuild. Der Status bleibt
+  View-State (nicht persistiert).
+- **„No grouping" = ein Config, zwei Formen.** Schaltet man die Gruppierung
+  aus, liefert der Adapter auf denselben Root-Request den ungebucketeten
+  Baum (Items statt Buckets). Die Chain-Auflösung der Engine matcht
+  **typbasiert**: Mit Buckets greift die Root-`ViewDef`-Ebene
+  (`tracking:tree-group`), ohne Buckets matcht die rekursive
+  Item-`ChildDef` ab Tiefe 0. Es braucht also keine zweite View — aber
+  Spalten/`shortcuts:` der Root-Ebene gelten nur für Bucket-Zeilen
+  (Buckets sind read-only Aggregate; Row-Aktionen gehören auf die
+  Item-Ebene).
+- **Bucket-Identität steckt in der Node-ID.** Derselbe Task kann in
+  mehreren Buckets erscheinen; Knoten unter einem Bucket tragen den
+  Bucket-Scope in ihrer ID, damit `get_by_id` ohne Query-Kontext die
+  richtigen (bucket-gefalteten) Werte rechnen kann. Der Saved-Query-Filter
+  der Pane kommt zusätzlich pro `list()` an
+  (`propagates_query_to_subtree`) und schneidet den Bucket weiter zu.
+- **Konsistente Labels.** Bucket-Keys und -Anzeigelabels kommen aus
+  demselben Modul (`not_yet_done_content::grouping`), das auch die
+  engine-seitige Flat-Gruppierung benutzt — ein Tag heißt im gruppierten
+  Tree exakt so wie in der gruppierten Flat-List.
 
 #### `tree_aggregate:` — Eigen- vs. Summenwert im Tree (M4)
 
@@ -600,8 +652,9 @@ ist View-State (nicht persistiert).
 > und `key: duration_cumulated`, beide `kind: duration`).
 
 > **Einschränkungen.** `tree_aggregate:` greift nur im **Tree-Mode**; in
-> Flat-Listen wird es ignoriert. Spiegelbildlich zu `group_by:`, das nur in
-> Flat-Listen greift.
+> Flat-Listen wird es ignoriert. Spiegelbildlich zu `group_by:`, das
+> engine-seitig nur in Flat-Listen greift (im Tree gruppiert der Adapter,
+> siehe `group_by_via_adapter` oben).
 
 #### `tree_connector_style:` — Farbe der Connector-Glyphen pro Tree
 

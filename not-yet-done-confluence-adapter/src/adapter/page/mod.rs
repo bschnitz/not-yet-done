@@ -759,6 +759,7 @@ mod tests {
             sort: Vec::new(),
             query: None,
             download: false,
+            group_by: None,
         };
         match node.list(params).await {
             Err(e) => assert!(

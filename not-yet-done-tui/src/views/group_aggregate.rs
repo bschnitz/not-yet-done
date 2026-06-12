@@ -10,9 +10,22 @@
 //! model in the way. The content view does the `NodeSummary → raw value`
 //! lookup and feeds the raw strings in here.
 
-use chrono::{DateTime, Datelike, Local, NaiveDate};
+use not_yet_done_content::grouping::{self, GroupBucket};
 
 use crate::config::view_config::{AggregateOp, DateBucket};
+
+/// The content-crate twin of the view config's [`DateBucket`]. The bucket
+/// key/label logic lives in [`not_yet_done_content::grouping`] (single
+/// source of truth shared with adapter-side tree grouping); this maps the
+/// config enum onto it.
+pub fn to_group_bucket(bucket: DateBucket) -> GroupBucket {
+    match bucket {
+        DateBucket::Day => GroupBucket::Day,
+        DateBucket::Week => GroupBucket::Week,
+        DateBucket::Month => GroupBucket::Month,
+        DateBucket::Year => GroupBucket::Year,
+    }
+}
 
 /// Group label for a column's canonical `raw` value under an optional date
 /// `bucket`.
@@ -20,40 +33,14 @@ use crate::config::view_config::{AggregateOp, DateBucket};
 /// - No bucket → the value groups verbatim (so `kind: text` columns like a
 ///   category group by their string).
 /// - A bucket → `raw` is parsed as an RFC 3339 instant and reduced to an
-///   ISO-sortable bucket label (see [`bucket_label`]); lexical order over
+///   ISO-sortable bucket label (see [`grouping::bucket_key`]); lexical order over
 ///   the labels is therefore chronological.
 ///
 /// A value that fails to parse falls back to grouping **verbatim** (under its
 /// raw string) rather than collapsing all bad rows into one bogus bucket —
 /// the same "malformed data stays visible" stance as `column_format`.
 pub fn group_label(raw: &str, bucket: Option<DateBucket>) -> String {
-    match bucket {
-        None => raw.to_string(),
-        Some(b) => match DateTime::parse_from_rfc3339(raw.trim()) {
-            Ok(dt) => bucket_label(dt.with_timezone(&Local), b),
-            Err(_) => raw.to_string(),
-        },
-    }
-}
-
-/// Reduce a local instant to its bucket label. Labels are ISO-formatted so
-/// lexical ordering equals chronological ordering — the content view groups
-/// in label order, so this is what makes the buckets come out in time order:
-///
-/// - `Day`   → `2026-06-09`
-/// - `Week`  → `2026-W23` (ISO week-year + ISO week number)
-/// - `Month` → `2026-06`
-/// - `Year`  → `2026`
-fn bucket_label(dt: DateTime<Local>, bucket: DateBucket) -> String {
-    match bucket {
-        DateBucket::Day => dt.format("%Y-%m-%d").to_string(),
-        DateBucket::Week => {
-            let iso = dt.iso_week();
-            format!("{}-W{:02}", iso.year(), iso.week())
-        }
-        DateBucket::Month => dt.format("%Y-%m").to_string(),
-        DateBucket::Year => dt.format("%Y").to_string(),
-    }
+    grouping::group_key(raw, bucket.map(to_group_bucket))
 }
 
 /// Human-facing header text for a bucket's ISO group key. The ISO label from
@@ -67,22 +54,7 @@ fn bucket_label(dt: DateTime<Local>, bucket: DateBucket) -> String {
 /// - `Month` / `Year` / verbatim (unbucketed or unparseable) keys pass through
 ///   unchanged.
 pub fn bucket_display_label(key: &str, bucket: Option<DateBucket>) -> String {
-    match bucket {
-        Some(DateBucket::Day) => match NaiveDate::parse_from_str(key, "%Y-%m-%d") {
-            Ok(date) => {
-                let iso = date.iso_week();
-                format!("W{:02} {} {}", iso.week(), key, date.format("%a"))
-            }
-            Err(_) => key.to_string(),
-        },
-        Some(DateBucket::Week) => match key.split_once("-W") {
-            Some((year, week)) if !year.is_empty() && !week.is_empty() => {
-                format!("W{week} {year}")
-            }
-            _ => key.to_string(),
-        },
-        _ => key.to_string(),
-    }
+    grouping::bucket_display_label(key, bucket.map(to_group_bucket))
 }
 
 /// The integer an aggregate consumes from a column's canonical `raw` value.
@@ -101,7 +73,7 @@ pub fn agg_value(raw: &str, op: AggregateOp) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Local};
 
     #[test]
     fn no_bucket_groups_verbatim() {

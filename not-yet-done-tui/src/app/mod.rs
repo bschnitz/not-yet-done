@@ -1386,6 +1386,10 @@ impl App {
             vars,
         } = req;
         let query = query.map(|raw| adapter.render_query(&raw, &vars));
+        // Adapter-grouped tree (capability `group_by_via_adapter`): the
+        // pane's effective grouping rides along so the adapter buckets the
+        // root level itself. `None` everywhere else.
+        let group_by = pane.adapter_group_spec(&cv.view_defs);
         let retries = cv
             .view_defs
             .get(pane.view_def_index())
@@ -1398,6 +1402,7 @@ impl App {
                 let node_type_id = node_type_id.clone();
                 let query = query.clone();
                 let sort = sort.clone();
+                let group_by = group_by.clone();
                 async move {
                     let root = adapter.root().await.map_err(|e| e.to_string())?;
                     let node_type = root.children_types()
@@ -1411,6 +1416,7 @@ impl App {
                         sort,
                         page,
                         download: false,
+                        group_by,
                     };
                     let list = root.list(params).await.map_err(|e| e.to_string())?;
                     Ok((list, sortable_columns))
@@ -2660,6 +2666,7 @@ impl App {
                         sort: Vec::new(),
                         page: Some(page),
                         download: false,
+                        group_by: None,
                     };
                     let list = parent.list(params).await.map_err(|e| e.to_string())?;
                     Ok((list, sortable_columns))
@@ -2751,6 +2758,7 @@ impl App {
                         sort: Vec::new(),
                         page: Some(page_request),
                         download: false,
+                        group_by: None,
                     };
                     let list = parent.list(params).await.map_err(|e| e.to_string())?;
                     Ok(TreeChildrenPayload {
@@ -4971,7 +4979,7 @@ impl App {
         let tab_idx = target.tab_idx;
         let pane_id = target.pane_id;
 
-        let (adapter, load_req) = {
+        let (adapter, load_req, group_by) = {
             let cv = match &mut self.content_views[tab_idx] {
                 ContentSlot::Working(cv) => cv,
                 ContentSlot::Broken { name, errors, .. } => {
@@ -4996,15 +5004,19 @@ impl App {
                     return;
                 }
             };
-            let Some(req) = cv
-                .find_pane(pane_id)
-                .and_then(|p| p.root_load_request(&cv.view_defs))
-            else {
+            let Some(pane) = cv.find_pane(pane_id) else {
                 self.modal_message =
                     Some(":query apply — could not build a load request".to_string());
                 return;
             };
-            (adapter, req)
+            let Some(req) = pane.root_load_request(&cv.view_defs) else {
+                self.modal_message =
+                    Some(":query apply — could not build a load request".to_string());
+                return;
+            };
+            // Adapter-grouped tree: keep the pane's grouping across a
+            // query apply, same as `spawn_content_load`.
+            (adapter, req, pane.adapter_group_spec(&cv.view_defs))
         };
 
         let crate::views::content_view::LoadRequest {
@@ -5030,6 +5042,7 @@ impl App {
                     sort,
                     page,
                     download: false,
+                    group_by,
                 };
                 let list = root.list(params).await.map_err(|e| e.to_string())?;
                 Ok((list, sortable_columns))

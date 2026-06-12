@@ -483,6 +483,7 @@ impl ContentAdapter for PostgresAdapter {
             supports_total_count: false,
             supports_tree_aggregation: false,
             propagates_query_to_subtree: false,
+            group_by_via_adapter: false,
         }
     }
 
@@ -2063,6 +2064,7 @@ mod db_script_tree_tests {
             sort: Vec::new(),
             page: None,
             download: false,
+            group_by: None,
         }
     }
 
