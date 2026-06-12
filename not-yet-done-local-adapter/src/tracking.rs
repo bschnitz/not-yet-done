@@ -332,7 +332,7 @@ struct TrackingSnapshot {
     /// (`tracking:tree-item`). Built from the same task + tracking loads.
     /// This is the *unfiltered* projection; a saved-query filter re-folds
     /// on demand via [`Self::tree_for`].
-    tree: TreeProjection,
+    tree: Arc<TreeProjection>,
     /// task id → (description, parent) — kept so [`Self::tree_for`] can
     /// re-fold the projection for a filtered tracking set.
     task_map: HashMap<Uuid, (String, Option<Uuid>)>,
@@ -341,6 +341,17 @@ struct TrackingSnapshot {
     /// every tree level (root and branches load moments apart) and the
     /// filtered tree matches the unfiltered one's bake-at-load semantics.
     built_at: chrono::DateTime<chrono::Utc>,
+    /// Saved-query → resolved visible-tracking set, memoized per snapshot.
+    /// An `expand_depth: all` cascade calls `list()` once per expanded node
+    /// and each call used to re-run the filter against the DB; the result
+    /// only changes when the data does, and any mutation replaces the whole
+    /// snapshot, so entries can never go stale.
+    visible_cache: std::sync::RwLock<HashMap<String, Arc<HashSet<Uuid>>>>,
+    /// `(bucket scope, saved query)` → folded projection, memoized per
+    /// snapshot for the same reason: without it every scoped `fetch`/`list`
+    /// re-folded the whole task forest (O(tasks + trackings)), which made
+    /// grouped trees visibly slow to expand.
+    fold_cache: std::sync::RwLock<HashMap<(String, String), Arc<TreeProjection>>>,
 }
 
 impl TrackingSnapshot {
@@ -397,13 +408,15 @@ impl TrackingSnapshot {
                 },
             );
         }
-        let tree = build_tree_projection(&task_map, &own_secs, &active_tasks);
+        let tree = Arc::new(build_tree_projection(&task_map, &own_secs, &active_tasks));
         Ok(Arc::new(TrackingSnapshot {
             by_id,
             order,
             tree,
             task_map,
             built_at: now,
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
         }))
     }
 
@@ -415,7 +428,7 @@ impl TrackingSnapshot {
     /// tasks do in the unfiltered tree.
     fn tree_for(&self, filter: Option<&HashSet<Uuid>>) -> std::borrow::Cow<'_, TreeProjection> {
         let Some(visible) = filter else {
-            return std::borrow::Cow::Borrowed(&self.tree);
+            return std::borrow::Cow::Borrowed(self.tree.as_ref());
         };
         let now = self.built_at;
         let mut own_secs: HashMap<Uuid, i64> = HashMap::new();
@@ -432,6 +445,83 @@ impl TrackingSnapshot {
             &own_secs,
             &active_tasks,
         ))
+    }
+
+    /// The visible-tracking set for a pane's saved query, memoized in
+    /// [`Self::visible_cache`]. `None` = no query → everything visible.
+    async fn visible_set(
+        &self,
+        handle: &CoreHandle,
+        query: &Option<String>,
+    ) -> Result<Option<Arc<HashSet<Uuid>>>> {
+        let raw = match query.as_deref().map(str::trim) {
+            Some(q) if !q.is_empty() => q.to_string(),
+            _ => return Ok(None),
+        };
+        if let Some(hit) = self.visible_cache.read().unwrap().get(&raw) {
+            return Ok(Some(Arc::clone(hit)));
+        }
+        let set = resolve_visible_set(handle, query).await?.unwrap_or_default();
+        let set = Arc::new(set);
+        self.visible_cache
+            .write()
+            .unwrap()
+            .insert(raw, Arc::clone(&set));
+        Ok(Some(set))
+    }
+
+    /// The folded projection for a bucket scope without any query filter,
+    /// memoized in [`Self::fold_cache`]. Synchronous — `fetch` paths have no
+    /// query context and must not touch the DB.
+    fn unfiltered_projection(&self, scope: Option<&BucketScope>) -> Arc<TreeProjection> {
+        let Some(scope) = scope else {
+            return Arc::clone(&self.tree);
+        };
+        let key = (scope.encode(), String::new());
+        if let Some(hit) = self.fold_cache.read().unwrap().get(&key) {
+            return Arc::clone(hit);
+        }
+        let members = self.bucket_members(None, scope);
+        let folded = Arc::new(self.tree_for(Some(&members)).into_owned());
+        self.fold_cache
+            .write()
+            .unwrap()
+            .insert(key, Arc::clone(&folded));
+        folded
+    }
+
+    /// The folded projection for a `(bucket scope, saved query)` pair,
+    /// memoized in [`Self::fold_cache`]. This is the hot path of an
+    /// `expand_depth: all` cascade — every expanded node lands here, so the
+    /// first call per pair folds and the rest are map lookups.
+    async fn scoped_projection(
+        &self,
+        handle: &CoreHandle,
+        scope: Option<&BucketScope>,
+        query: &Option<String>,
+    ) -> Result<Arc<TreeProjection>> {
+        let Some(visible) = self.visible_set(handle, query).await? else {
+            return Ok(self.unfiltered_projection(scope));
+        };
+        let key = (
+            scope.map(BucketScope::encode).unwrap_or_default(),
+            query.as_deref().map(str::trim).unwrap_or("").to_string(),
+        );
+        if let Some(hit) = self.fold_cache.read().unwrap().get(&key) {
+            return Ok(Arc::clone(hit));
+        }
+        let folded = match scope {
+            Some(s) => {
+                let members = self.bucket_members(Some(visible.as_ref()), s);
+                Arc::new(self.tree_for(Some(&members)).into_owned())
+            }
+            None => Arc::new(self.tree_for(Some(visible.as_ref())).into_owned()),
+        };
+        self.fold_cache
+            .write()
+            .unwrap()
+            .insert(key, Arc::clone(&folded));
+        Ok(folded)
     }
 
     /// Number of running trackings — drives the live-refresh cadence.
@@ -1022,10 +1112,10 @@ impl Node for TrackingRootNode {
         // pane's saved query — the tree re-folds its durations from the
         // visible trackings only.
         if params.node_type.type_id == tracking_tree_group_type().type_id {
-            let filter = resolve_visible_set(&self.handle, &params.query).await?;
             if let Some(spec) = &params.group_by {
+                let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
                 return Ok(list_result(
-                    self.snapshot.group_summaries(filter.as_ref(), spec),
+                    self.snapshot.group_summaries(filter.as_deref(), spec),
                 ));
             }
             // Grouping cycled off at runtime: the same root request serves
@@ -1033,21 +1123,22 @@ impl Node for TrackingRootNode {
             // resolution matches the recursive tree-item level from depth 0.
             return Ok(list_result(
                 self.snapshot
-                    .tree_for(filter.as_ref())
+                    .scoped_projection(&self.handle, None, &params.query)
+                    .await?
                     .child_summaries(None, None),
             ));
         }
         if params.node_type.type_id == tracking_tree_item_type().type_id {
-            let filter = resolve_visible_set(&self.handle, &params.query).await?;
             return Ok(list_result(
                 self.snapshot
-                    .tree_for(filter.as_ref())
+                    .scoped_projection(&self.handle, None, &params.query)
+                    .await?
                     .child_summaries(None, None),
             ));
         }
-        let filter = resolve_visible_set(&self.handle, &params.query).await?;
+        let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
         let now = chrono::Utc::now();
-        Ok(list_result(self.snapshot.entries(filter.as_ref(), now)))
+        Ok(list_result(self.snapshot.entries(filter.as_deref(), now)))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         if id.starts_with(GROUP_ID_PREFIX) {
@@ -1226,11 +1317,10 @@ impl Node for TrackingGroupNode {
         &self,
         params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
-        let query = resolve_visible_set(&self.handle, &params.query).await?;
-        let members = self.snapshot.bucket_members(query.as_ref(), &self.scope);
         Ok(list_result(
             self.snapshot
-                .tree_for(Some(&members))
+                .scoped_projection(&self.handle, Some(&self.scope), &params.query)
+                .await?
                 .child_summaries(None, Some(&self.scope)),
         ))
     }
@@ -1267,10 +1357,7 @@ impl TrackingTreeNode {
         id: &str,
     ) -> Result<Box<dyn Node>> {
         let (scope, task_id) = parse_tree_id(id)?;
-        let projection = match &scope {
-            Some(s) => snapshot.tree_for(Some(&snapshot.bucket_members(None, s))),
-            None => std::borrow::Cow::Borrowed(&snapshot.tree),
-        };
+        let projection = snapshot.unfiltered_projection(scope.as_ref());
         let row = projection
             .by_id
             .get(&task_id)
@@ -1332,14 +1419,10 @@ impl Node for TrackingTreeNode {
         // (capability `propagates_query_to_subtree`), so an expanded
         // branch shows the same filtered durations as the root level.
         // Under a group bucket the query intersects the bucket's set.
-        let query = resolve_visible_set(&self.handle, &params.query).await?;
-        let filter = match &self.scope {
-            Some(scope) => Some(self.snapshot.bucket_members(query.as_ref(), scope)),
-            None => query,
-        };
         Ok(list_result(
             self.snapshot
-                .tree_for(filter.as_ref())
+                .scoped_projection(&self.handle, self.scope.as_ref(), &params.query)
+                .await?
                 .child_summaries(Some(self.task_id), self.scope.as_ref()),
         ))
     }
@@ -1643,9 +1726,11 @@ mod tests {
         Arc::new(TrackingSnapshot {
             by_id,
             order,
-            tree: TreeProjection::default(),
+            tree: Arc::new(TreeProjection::default()),
             task_map: HashMap::new(),
             built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
         })
     }
 
@@ -1705,9 +1790,11 @@ mod tests {
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![t2, t1],
-            tree: TreeProjection::default(),
+            tree: Arc::new(TreeProjection::default()),
             task_map,
             built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
         };
 
         // No filter → the prebuilt projection is reused untouched.
@@ -2112,9 +2199,11 @@ mod tests {
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![t2, t1],
-            tree: TreeProjection::default(),
+            tree: Arc::new(TreeProjection::default()),
             task_map: tm,
             built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
         };
 
         let scope = day_scope("2026-06-09");
@@ -2128,6 +2217,34 @@ mod tests {
         let kids = tree.child_summaries(Some(task_a), Some(&scope));
         assert_eq!(kids[0].id, format!("tree:started:day:2026-06-09:{task_b}"));
         assert_eq!(tree.by_id[&task_b].own_secs, 45 * 60);
+    }
+
+    #[test]
+    fn unfiltered_projection_memoizes_per_scope() {
+        let task_a = Uuid::from_u128(0xA);
+        let t1 = Uuid::from_u128(1);
+        let tm = task_map(&[(task_a, "A", None)]);
+        let mut by_id = HashMap::new();
+        by_id.insert(t1, row(tracking_on(t1, task_a, "2026-06-09", 30, true), "A", vec![]));
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![t1],
+            tree: Arc::new(TreeProjection::default()),
+            task_map: tm,
+            built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
+        };
+
+        // Scope-less = the eagerly built projection, no fold at all.
+        assert!(Arc::ptr_eq(&snapshot.unfiltered_projection(None), &snapshot.tree));
+        // Scoped folds once; the second request is the same Arc (an
+        // expand-all cascade lands here once per node — this is the fix
+        // for the seconds-long grouped-tree build).
+        let scope = day_scope("2026-06-09");
+        let first = snapshot.unfiltered_projection(Some(&scope));
+        assert_eq!(first.by_id[&task_a].own_secs, 30 * 60);
+        assert!(Arc::ptr_eq(&first, &snapshot.unfiltered_projection(Some(&scope))));
     }
 
     #[test]
