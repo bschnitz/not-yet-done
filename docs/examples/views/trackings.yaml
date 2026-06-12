@@ -25,8 +25,10 @@
 #
 # **Grouping + totals (E2).** `group_by` + `aggregates` below bucket the
 # list by day and sum the durations per group + overall (footer). `zg`
-# cycles the grouping at runtime (Day/Week/Month/Year/None); the status is
-# view-state, not persisted. Drop the `group_by` block for a flat list.
+# cycles the grouping at runtime (Day/Week/Month/Year/None) and `u` opens
+# a direct-jump menu over the same five states (native-`u` parity); the
+# status is view-state, not persisted. Drop the `group_by` block for a
+# flat list.
 #
 # Saved-query filtering (`q` menu / `:query`) runs a `FilterExpr` through the
 # repository (`find_filtered`, which understands tracking columns and the
@@ -199,7 +201,7 @@ views:
       d: delete
       R: restore
       s: toggle-tracking
-      A: parens:restore-all
+      A: parent:restore-all
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #
@@ -283,7 +285,7 @@ views:
       d: delete
       R: restore
       s: toggle-tracking
-      A: parens:restore-all
+      A: parent:restore-all
 
   # ── Tree (A2c) ───────────────────────────────────────────────────────
   #

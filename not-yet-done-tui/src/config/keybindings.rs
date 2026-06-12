@@ -574,6 +574,14 @@ pub enum ContentAction {
     /// declares no `group_by` (and in tree mode). Lets a user regroup a
     /// worklog by day/week/month without editing the view YAML.
     CycleGrouping,
+    /// Open the group-by menu (M3) on a grouped flat view: a small popup
+    /// listing the same states `cycle_grouping` walks (No grouping / Day /
+    /// Week / Month / Year) for a direct jump instead of cycling. First-
+    /// letter hotkeys select immediately — native Trackings `u` parity.
+    /// Registered under the same gate as `cycle_grouping` (the level must
+    /// declare a `group_by`), so the default `u` stays free elsewhere
+    /// (e.g. for a YAML `u: undelete` shortcut on the Tasks tab).
+    GroupMenu,
     /// Toggle `tree_aggregate` columns (M4) between a node's own value and
     /// the adapter's subtree-cumulated value, in tree mode. A no-op on a
     /// level whose columns declare no `tree_aggregate` (and in flat mode).
@@ -594,6 +602,7 @@ impl ContentAction {
             Self::TreeCollapse => "tree_collapse",
             Self::TreeCollapseAll => "tree_collapse_all",
             Self::CycleGrouping => "cycle_grouping",
+            Self::GroupMenu => "group_menu",
             Self::ToggleTreeAggregate => "toggle_tree_aggregate",
         }
     }
@@ -618,6 +627,7 @@ impl FromStr for ContentAction {
             "tree_collapse" => Ok(Self::TreeCollapse),
             "tree_collapse_all" => Ok(Self::TreeCollapseAll),
             "cycle_grouping" => Ok(Self::CycleGrouping),
+            "group_menu" => Ok(Self::GroupMenu),
             "toggle_tree_aggregate" => Ok(Self::ToggleTreeAggregate),
             other => Err(format!("unknown content action: {}", other)),
         }
@@ -1129,6 +1139,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::TreeCollapse, KeyBinding::new("c"));
         m.insert(ContentAction::TreeCollapseAll, KeyBinding::new("zm"));
         m.insert(ContentAction::CycleGrouping, KeyBinding::new("zg"));
+        m.insert(ContentAction::GroupMenu, KeyBinding::new("u"));
         m.insert(ContentAction::ToggleTreeAggregate, KeyBinding::new("zt"));
         Self { bindings: m }
     }

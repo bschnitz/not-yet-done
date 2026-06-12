@@ -143,7 +143,9 @@ nur Tasks/Trackings den Typ überhaupt brauchen.
 > (ISO-Datums-Buckets, Duration-Parsing) als reines TUI-Modul
 > `views/group_aggregate.rs` (Spiegel von `column_format.rs`). Der gruppierte
 > Render-Pfad sitzt in `content_view::build_grouped_table`; Laufzeit-Umschaltung
-> via Aktion `cycle_grouping` (Default `zg`). Farbe der Header/Footer-Zeilen über
+> via Aktion `cycle_grouping` (Default `zg`) oder Direktsprung-Menü
+> `group_menu` (Default `u`, native-`u`-Parität; nicht persistiert — nativ
+> persistierte via `SaveTrackingGrouping`). Farbe der Header/Footer-Zeilen über
 > Theme `group_header`. Gilt nur für einzeilige Flat-Tabellen (kein
 > `row_layout`, kein Tree). Capability-only — noch an keine Live-View gebunden
 > (wie E1/E4b bis zum Cutover A1/A2).
