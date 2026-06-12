@@ -52,10 +52,9 @@
 # (`tracking:tree-group`, adapter-side grouping — `group_by_via_adapter`),
 # each expanding into the *task forest* (`tracking:tree-item`) with that
 # day's tracked time rolled up per task. `zg`/`u` regroup (each switch is a
-# reload — the adapter re-buckets). Its `duration` column declares a
-# `tree_aggregate` fold — `zt` toggles each task between its **own** tracked
-# time and its **subtree-cumulated** total (M4). The adapter supplies both
-# values and advertises `supports_tree_aggregation`.
+# reload — the adapter re-buckets). Each task row shows its **own** tracked
+# time and its **subtree-cumulated** total side by side (native column
+# parity; the adapter supplies both values).
 #
 # `a` switches back to the flat list from either.
 #
@@ -317,16 +316,13 @@ views:
   # child level below then matches from the root row on (chain resolution
   # is type-based), so this ONE view config serves both shapes.
   #
-  # The `duration` column declares `tree_aggregate`: by default it shows each
-  # task's **subtree-cumulated** total (own + all descendants), and `zt`
-  # toggles every such column to the task's **own** tracked time. The adapter
-  # supplies both as canonical seconds (`duration` = own, `duration_cumulated`
-  # = subtree) and advertises `supports_tree_aggregation`; the engine never
-  # folds the tree itself (it's lazy), so the cumulated value is the
-  # adapter's. (A bucket row carries its total in both fields, so `zt`
-  # never blanks it.) The tree is pruned to tasks with tracked time
-  # somewhere in their subtree, and durations bake at load (no live tick,
-  # like Condensed).
+  # Native parity: each task shows its **own** tracked time and the
+  # **subtree-cumulated** total as two side-by-side columns (`duration` =
+  # own, `duration_cumulated` = subtree — both canonical seconds from the
+  # adapter; the engine never folds the tree itself, it's lazy). A bucket
+  # row carries its bucket total in both fields. The tree is pruned to
+  # tasks with tracked time somewhere in their subtree, and durations bake
+  # at load (no live tick, like Condensed).
   - name: tree
     node_type: "tracking:tree-group"
     key: t
@@ -367,25 +363,25 @@ views:
             - [started_at, gt, last month]
 
     columns:
-      - key: task
-        label: Task
-        source: label
-        style: text_high
-        sizing: "flex(1)"
       - key: marker
         label: "⏱"
         style: accent
         sizing: max
-      # Duration with a tree-fold toggle. `default: cumulated` shows the
-      # subtree total first; `zt` flips all `tree_aggregate` columns to the
-      # node's own value (read from the column's own `key`, `duration`).
+      - key: task
+        label: Task
+        source: label
+        style: text_med
+        sizing: "flex(1)"
       - key: duration
-        label: Duration
+        label: Own
         kind: duration
+        style: tertiary
         sizing: max
-        tree_aggregate:
-          cumulated_field: duration_cumulated
-          default: cumulated
+      - key: duration_cumulated
+        label: Cumulated
+        kind: duration
+        style: accent
+        sizing: max
 
     actions:
       # Local filter-while-typing over the loaded bucket rows.
@@ -415,22 +411,25 @@ views:
         recursive: true
 
         columns:
-          - key: task
-            label: Task
-            source: label
-            style: text_high
-            sizing: "flex(1)"
           - key: marker
             label: "⏱"
             style: accent
             sizing: max
+          - key: task
+            label: Task
+            source: label
+            style: text_med
+            sizing: "flex(1)"
           - key: duration
-            label: Duration
+            label: Own
             kind: duration
+            style: tertiary
             sizing: max
-            tree_aggregate:
-              cumulated_field: duration_cumulated
-              default: cumulated
+          - key: duration_cumulated
+            label: Cumulated
+            kind: duration
+            style: accent
+            sizing: max
 
         actions:
           # (The `f` fuzzy filter is defined once at the tree root — it is

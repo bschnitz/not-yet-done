@@ -3569,12 +3569,14 @@ mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
 
 - [ ] Trackings (A) → `t` (Tree): Root-Ebene sind Tages-Buckets, neuester
       Tag zuerst, Label wie in der gruppierten Flat-List
-      (`W24 2026-06-08 Mon`), Duration-Spalte = Tages-Total. Buckets sind
-      voll aufgeklappt (expand_depth-Kaskade greift durch die Gruppen).
+      (`W24 2026-06-08 Mon`), Own/Cumulated-Spalten = Tages-Total. Buckets
+      sind voll aufgeklappt (expand_depth-Kaskade greift durch die
+      Gruppen), und der Aufbau ist flott (kein sekundenlanger Aufbau —
+      Folds + Query-Auflösung sind pro Snapshot memoisiert).
 - [ ] Teilbaum unter einem Bucket: Durations sind die des jeweiligen
       Tages (derselbe Task unter zwei Tagen zeigt unterschiedliche
-      Werte). `zt` (own↔cumulated) funktioniert; auf der Bucket-Zeile
-      bleibt der Total stehen (blankt nicht).
+      Werte). Spalten wie nativ: `⏱`, Task, Own, Cumulated (zwei
+      Duration-Spalten nebeneinander statt `zt`-Toggle).
 - [ ] `zg` rotiert Day → Week → Month → Year → No grouping → Day; jeder
       Schritt lädt neu. „No grouping" zeigt den ungebucketeten Task-Baum
       (wie vor diesem Feature). `u`-Menü springt direkt, `●` markiert den
