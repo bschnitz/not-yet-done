@@ -3495,6 +3495,27 @@ Forest als flache Tabelle in DFS-Reihenfolge.
       selbst erscheinen, keine Vorfahren-Zeilen (unit-getestet, live
       offen).
 
+## Group-by-Menü (`u`) auf Content-Tabs (`content.group_menu`)
+
+Direktsprung-Parität zum nativen Trackings-`u`: ein Hotkey-Popup über die
+fünf `zg`-Zustände (No grouping/Day/Week/Month/Year). Nur aktiv, wenn die
+Ebene ein `group_by:` konfiguriert; Wahl ist View-State (nicht
+persistiert, wie `zg` — nativ persistierte via `SaveTrackingGrouping`).
+
+- [x] Trackings (A), Normal-Subtab: Action-Bar zeigt `u group`; `u`
+      öffnet das Popup „Group by" in der nativen Optik (Standard-Chrome,
+      `●` markiert den aktuellen Zustand (Day), Hotkey-Buchstabe im Label
+      unterstrichen, Keybinding-Legende unten).
+- [x] `w` springt direkt auf Wochen-Gruppierung (Header `── W24 2026`),
+      Summen pro Woche; `u` → `n` entfernt die Gruppierung (flache
+      Liste; Aggregat-Spalte + Σ-Footer verschwinden, wie bei `zg` auf
+      „ungruppiert").
+- [x] Pfeile + Enter/Space wählen ebenfalls; Esc schließt ohne Änderung.
+- [x] Condensed-Subtab: `u` → `m` rotiert nur die äußere Ebene auf
+      Monat (`── 2026-06`), die innere `then_by`-Task-Ebene bleibt.
+- [x] Auf einer Ebene ohne `group_by` (z. B. Tasks (A)): kein
+      `u group`-Hint, `u` bleibt frei für YAML-`shortcuts:`.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

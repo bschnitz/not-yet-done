@@ -525,6 +525,18 @@ Zeitraum). Sie ist nur aktiv, wenn die Ebene überhaupt ein `group_by:`
 konfiguriert hat. Der Umschalt-Status ist View-State (nicht persistiert) und
 überschreibt das konfigurierte `group_by:` nur für die laufende Sitzung.
 
+**Direktsprung-Menü (`group_menu`, Default `u`):** Statt durchzuschalten
+öffnet `group_menu` ein kleines Hotkey-Popup über dieselben fünf Zustände —
+`n` No grouping, `d` Day, `w` Week, `m` Month, `y` Year (Pfeile +
+Enter/Space gehen auch, Esc bricht ab). Optik wie das native Grouping-Menü:
+Standard-Popup-Chrome mit Keybinding-Legende unten, `●` markiert den
+aktuellen Zustand, der Hotkey-Buchstabe ist im Label unterstrichen.
+Gleiche Bedingung
+und gleiche Semantik wie `zg` (rotiert nur die äußere Ebene, View-State,
+nicht persistiert) — es ist die Parität zum `u`-Menü des nativen
+Trackings-Tabs. Auf Ebenen ohne `group_by:` bleibt `u` frei für
+YAML-`shortcuts:`.
+
 > **Einschränkungen.** Der gruppierte Pfad gilt nur für **einzeilige**
 > Tabellen — `group_by:` zusammen mit `row_layout:` (mehrzeilig/Chat) wird
 > ignoriert. Gruppierung ist außerdem ein Flat-List-Feature; im Tree-Mode

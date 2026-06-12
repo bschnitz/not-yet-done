@@ -43,6 +43,7 @@ use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
 use crate::components::search::SearchComponent;
+use crate::components::tab_set_popup::{TabSetEntry, TabSetPopup, TabSetPopupMessage};
 use crate::config::keybindings::{
     CommonAction, ContentAction, KeyBinding, KeyBindingConfig, KeyBindingSection, KeyIconMap,
     QueryMenuAction, WindowAction,
@@ -922,6 +923,10 @@ pub struct ContentView {
     /// decides how `handle_query_popup_key` routes the emitted
     /// [`QueryMenuMessage`].
     query_menu: QueryMenuComponent,
+    /// Group-by menu (M3, `content.group_menu`): a fixed hotkey popup over
+    /// the same states `cycle_grouping` walks. Reuses the tab-set popup
+    /// chrome; acts on the active pane's `group_by_override`.
+    group_menu: TabSetPopup,
     /// Current routing for `query_menu`. `SavedQueries` is the default
     /// (DB-backed list); `PostgresScripts` means the popup is showing
     /// per-table on-disk `.sql` scripts.
@@ -1882,11 +1887,22 @@ impl ContentPane {
     /// is then no column to bucket. Returns `true` when the state changed
     /// (the caller rebuilds the table).
     fn cycle_grouping(&mut self, view_defs: &[ViewDef]) -> bool {
-        // The column to bucket (and the configured group order) come from
-        // the *configured* default (or the current override); without one
-        // there is nothing to cycle.
-        let base = self
-            .current_group_by(view_defs)
+        let current_bucket = self.current_group_by(view_defs).and_then(|gb| gb.bucket);
+        let grouped_now = self.current_group_by(view_defs).is_some();
+        let next = next_bucket_state(grouped_now, current_bucket);
+        self.set_grouping_bucket(next, view_defs)
+    }
+
+    /// The column to bucket (and the configured group order) — from the
+    /// *configured* default (or the current override). `None` when the
+    /// active level declares no `group_by` at all: there is then nothing
+    /// to (re)group. Shared base of [`cycle_grouping`](Self::cycle_grouping)
+    /// and [`set_grouping_bucket`](Self::set_grouping_bucket).
+    fn configured_grouping_base(
+        &self,
+        view_defs: &[ViewDef],
+    ) -> Option<(String, GroupOrder)> {
+        self.current_group_by(view_defs)
             .map(|gb| (gb.column.clone(), gb.order))
             .or_else(|| {
                 if let Some(ref child) = self.active_child {
@@ -1895,14 +1911,22 @@ impl ContentPane {
                     self.view_def(view_defs)
                         .and_then(|vd| vd.group_by.as_ref().map(|gb| (gb.column.clone(), gb.order)))
                 }
-            });
-        let Some((column, order)) = base else {
+            })
+    }
+
+    /// Jump the runtime grouping of the active level directly to a date
+    /// bucket (`None` = ungrouped) — the group-by menu's counterpart of
+    /// the stepwise [`cycle_grouping`](Self::cycle_grouping). Returns
+    /// `true` when applied (the caller rebuilds the table).
+    pub(crate) fn set_grouping_bucket(
+        &mut self,
+        bucket: Option<DateBucket>,
+        view_defs: &[ViewDef],
+    ) -> bool {
+        let Some((column, order)) = self.configured_grouping_base(view_defs) else {
             return false;
         };
-        let current_bucket = self.current_group_by(view_defs).and_then(|gb| gb.bucket);
-        let grouped_now = self.current_group_by(view_defs).is_some();
-        let next = next_bucket_state(grouped_now, current_bucket);
-        self.group_by_override = Some(next.map(|bucket| GroupBy {
+        self.group_by_override = Some(bucket.map(|bucket| GroupBy {
             column,
             bucket: Some(bucket),
             order,
@@ -5059,6 +5083,7 @@ impl ContentView {
 
         let query_menu = QueryMenuComponent::new(Arc::clone(&theme), "Queries")
             .with_popup_kb(keybindings.popup.clone(), keybindings.key_icons.clone());
+        let group_menu = TabSetPopup::new(Arc::clone(&theme)).with_title("Group by");
         let mut cv = Self {
             action_bar,
             theme,
@@ -5075,6 +5100,7 @@ impl ContentView {
             auth_status: AdapterStatus::Ready,
             adapter_init_error: None,
             query_menu,
+            group_menu,
             query_menu_mode: QueryMenuMode::SavedQueries,
             query_menu_kb,
             common_kb,
@@ -5468,6 +5494,14 @@ impl ContentView {
                 .unwrap_or(SubViewMessage::Unhandled),
             ContentAction::CycleGrouping => {
                 self.active_pane_mut().try_cycle_grouping(&view_defs)
+            }
+            ContentAction::GroupMenu => {
+                if self.active_pane().level_has_group_by(&self.view_defs) {
+                    self.open_group_menu();
+                    SubViewMessage::SelectionChanged(None)
+                } else {
+                    SubViewMessage::Unhandled
+                }
             }
             ContentAction::ToggleTreeAggregate => {
                 self.active_pane_mut().try_toggle_tree_aggregate(&view_defs)
@@ -6173,6 +6207,67 @@ impl ContentView {
         self.query_menu.render(frame, area);
     }
 
+    /// Open the group-by menu (M3, `content.group_menu`) over the active
+    /// pane's current grouping state: the same five states the stepwise
+    /// `cycle_grouping` walks, as a direct-jump hotkey popup (native
+    /// Trackings `u` parity). The current state is marked; first-letter
+    /// hotkeys (n/d/w/m/y) select immediately.
+    fn open_group_menu(&mut self) {
+        // `None` = ungrouped; `Some(b)` = grouped by bucket `b`. A plain
+        // (bucket-less) column grouping reads as `Some(None)` and marks no
+        // entry — selecting one re-buckets it, exactly like `cycle_grouping`.
+        let current = self
+            .active_pane()
+            .current_group_by(&self.view_defs)
+            .map(|gb| gb.bucket);
+        let options: [(Option<DateBucket>, &str, &str); 5] = [
+            (None, "No grouping", "n"),
+            (Some(DateBucket::Day), "Day", "d"),
+            (Some(DateBucket::Week), "Week", "w"),
+            (Some(DateBucket::Month), "Month", "m"),
+            (Some(DateBucket::Year), "Year", "y"),
+        ];
+        let entries: Vec<TabSetEntry> = options
+            .into_iter()
+            .map(|(bucket, label, key)| TabSetEntry {
+                name: key.to_string(),
+                label: label.to_string(),
+                icon: None,
+                shortcut: Some(key.to_string()),
+                active: match bucket {
+                    None => current.is_none(),
+                    some_bucket => current == Some(some_bucket),
+                },
+            })
+            .collect();
+        self.group_menu.open(entries);
+    }
+
+    /// Key handler while the group-by menu is open (it intercepts every
+    /// key). A selection jumps the active pane's runtime grouping to the
+    /// chosen state and rebuilds the table.
+    fn handle_group_menu_key(&mut self, key: &str) -> SubViewMessage {
+        match self.group_menu.handle_key(key) {
+            TabSetPopupMessage::Switch(name) => {
+                let bucket = match name.as_str() {
+                    "d" => Some(DateBucket::Day),
+                    "w" => Some(DateBucket::Week),
+                    "m" => Some(DateBucket::Month),
+                    "y" => Some(DateBucket::Year),
+                    _ => None,
+                };
+                let view_defs = self.view_defs.clone();
+                let pane = self.active_pane_mut();
+                if pane.set_grouping_bucket(bucket, &view_defs) {
+                    pane.rebuild_table(&view_defs);
+                }
+                SubViewMessage::SelectionChanged(None)
+            }
+            TabSetPopupMessage::Unhandled => SubViewMessage::Unhandled,
+            _ => SubViewMessage::SelectionChanged(None),
+        }
+    }
+
     /// Would binding `shortcut` to the saved query `query_name` collide
     /// with any other key handler in this tab (built-in, YAML, window
     /// chord, or another saved query)? Returns a human-readable label
@@ -6788,6 +6883,11 @@ impl ContentView {
             return self.handle_query_popup_key(key).unwrap_or(SubViewMessage::Unhandled);
         }
 
+        // Group-by menu — same popup-mode interception.
+        if self.group_menu.is_open() {
+            return self.handle_group_menu_key(key);
+        }
+
         // Window-leader chord runs before any other key handler so that
         // once the leader is consumed, the resolution key is interpreted
         // strictly as a window action (split / close / pane-tag switch)
@@ -6916,6 +7016,20 @@ impl ContentView {
         // (drilled into a table; rows being displayed). The SQL editor
         // (`Q sql`) lives in the new per-node-action shortcut path via
         // YAML `shortcuts:` on the postgres view config.
+        // Group-by menu (M3) — direct-jump counterpart of the pane-level
+        // `cycle_grouping` claim, under the same gate (the active level
+        // must declare a `group_by`), so the default `u` stays free for
+        // YAML shortcuts on ungroupable levels.
+        if self.active_pane().level_has_group_by(&self.view_defs) {
+            if let Some(b) = self.content_kb.get(&ContentAction::GroupMenu) {
+                km.push(KeyClaim::handler(
+                    b.clone(),
+                    scope.clone(),
+                    KeySource::Content(ContentAction::GroupMenu),
+                ));
+            }
+        }
+
         if let Some(table_node_id) = self.target_postgres_table_node_id() {
             if let Some(b) = self.content_kb.get(&ContentAction::OpenScriptsMenu) {
                 km.push(KeyClaim::handler(
@@ -6985,6 +7099,10 @@ impl ContentView {
                     name: sq.name,
                 }))
             }
+            KeySource::Content(ContentAction::GroupMenu) => {
+                self.open_group_menu();
+                Some(SubViewMessage::SelectionChanged(None))
+            }
             KeySource::Content(ContentAction::OpenScriptsMenu) => {
                 let view_index = self.view_index;
                 let pane_id = self.active_pane_id();
@@ -7032,6 +7150,16 @@ impl ContentView {
                 .hint_label(&ContentAction::OpenScriptsMenu, &self.key_icons);
             if !hints.iter().any(|(k, _)| k == &q_key) {
                 hints.push((q_key, "queries".to_string()));
+            }
+        }
+        // Group-by menu hint — same gate as the claim in `build_view_claims`
+        // (native trackings shows `u group` too).
+        if self.active_pane().level_has_group_by(&self.view_defs) {
+            let u_key = self
+                .content_kb
+                .hint_label(&ContentAction::GroupMenu, &self.key_icons);
+            if !hints.iter().any(|(k, _)| k == &u_key) {
+                hints.push((u_key, "group".to_string()));
             }
         }
         hints
@@ -7282,8 +7410,9 @@ impl Component for ContentView {
             self.active_pane().render_page_footer(frame, area);
         }
 
-        // Overlay: query popup (tab-level).
+        // Overlay: query popup + group-by menu (tab-level).
         self.render_query_popup(frame, area);
+        self.group_menu.render(frame, area);
     }
 
     fn query(&self, attr: tuirealm::props::Attribute) -> Option<tuirealm::props::QueryResult<'_>> {
@@ -13153,6 +13282,59 @@ mod tests {
         assert_eq!(last_text(&build.widget_rows[5]), "30");
         // Grand total lands in the total column of the Σ footer.
         assert_eq!(last_text(&build.footers[0]), "100");
+    }
+
+    /// `test_config_with_children` with a `group_by` on the root view —
+    /// the minimal shape that arms the group-by menu (`u`).
+    fn test_config_with_group_by() -> ViewFileConfig {
+        let mut config = test_config_with_children();
+        config.views[0].group_by = Some(GroupBy {
+            column: "key".into(),
+            bucket: Some(DateBucket::Day),
+            order: GroupOrder::Asc,
+        });
+        config
+    }
+
+    #[test]
+    fn group_menu_requires_group_by_level() {
+        // No `group_by` on the level → the menu must not open (same gate
+        // as the keybinding claim; this covers the action-chain path).
+        let config = test_config_with_children();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let msg = view.dispatch_content_action(ContentAction::GroupMenu);
+        assert!(matches!(msg, SubViewMessage::Unhandled));
+        assert!(!view.group_menu.is_open());
+    }
+
+    #[test]
+    fn group_menu_jumps_grouping_state() {
+        let config = test_config_with_group_by();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        // Open the menu and jump straight to Week via its hotkey.
+        let msg = view.dispatch_content_action(ContentAction::GroupMenu);
+        assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
+        assert!(view.group_menu.is_open());
+        view.handle_key("w");
+        assert!(!view.group_menu.is_open());
+        let gb = view
+            .active_pane()
+            .current_group_by(&view.view_defs)
+            .expect("override grouping");
+        assert_eq!(gb.bucket, Some(DateBucket::Week));
+        assert_eq!(gb.column, "key");
+
+        // Reopen and pick "No grouping" — runtime state goes ungrouped.
+        view.dispatch_content_action(ContentAction::GroupMenu);
+        view.handle_key("n");
+        assert!(!view.group_menu.is_open());
+        assert!(view
+            .active_pane()
+            .current_group_by(&view.view_defs)
+            .is_none());
     }
 }
 
