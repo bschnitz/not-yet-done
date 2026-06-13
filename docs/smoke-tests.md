@@ -3574,6 +3574,24 @@ immer komplett offen und hatte keine Aufklappmarker. `expand_depth: all`
       (Regression: Out-of-Range-Cursor brach den Tabellen-Rebuild ab →
       stale Anzeige).
 
+### Tiefe Bäume klappen vollständig auf (Kaskade bleibt scharf)
+
+Bugfix: die `expand_depth: all`-Kaskade wird pro asynchron eintreffender
+Kind-Ebene einmal gepumpt. Bei mehreren Geschwister-Ästen, die parallel
+laden, konnte ein Ast „auslaufen" (ein Blatt landet) **während** ein anderer
+noch in der Luft war — der Pump für das Blatt fand nichts mehr und
+ent-schärfte die Kaskade voreilig. Folge: nur die obersten ein/zwei Ebenen
+klappten auf, tiefere Äste blieben zu. Fix: die Kaskade ent­schärft erst,
+wenn keine bereits-expandierte Ebene mehr auf ihre Kinder wartet.
+
+- [ ] Trackings (A) → `t` (Tree) mit einem **mehrstufigen** Task-Baum
+      (≥3 Ebenen, mehrere Geschwister mit unterschiedlich tiefen Ästen):
+      der Baum ist nach dem Laden **komplett** offen bis zum letzten
+      getrackten Blatt — nicht nur die obersten beiden Ebenen. Gleichviel
+      sichtbar wie im nativen Trackings-Tab.
+- [ ] Auch der gruppierte Tree (Tages-Buckets) klappt jeden Bucket-Teilbaum
+      vollständig auf, nicht nur die erste Task-Ebene.
+
 ## Trackings-Tree: Gruppierung via Adapter (`group_by_via_adapter`)
 
 Native Parität, Punkt (3): der Legacy-Tree gruppierte nach Tag (ein
