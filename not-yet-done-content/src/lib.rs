@@ -101,6 +101,58 @@ pub struct MetadataField {
     pub allowed_values: Option<Vec<String>>,
 }
 
+impl Metadata {
+    /// Overwrite the `value` of an existing field by `key`, in place.
+    ///
+    /// A no-op if no field with that key exists (the caller asked to patch
+    /// a column the row doesn't carry — silently ignored rather than
+    /// inventing a field with an empty label). Used to build a patched
+    /// row summary for [`ActionDispatch::PatchRow`] from an existing one
+    /// (e.g. flipping a tracking marker) without rebuilding the metadata.
+    pub fn set_field(&mut self, key: &str, value: impl Into<String>) {
+        if let Some(field) = self.fields.iter_mut().find(|f| f.key == key) {
+            field.value = value.into();
+        }
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    fn field(key: &str, value: &str) -> MetadataField {
+        MetadataField {
+            key: key.into(),
+            value: value.into(),
+            display_label: key.into(),
+            editable: false,
+            allowed_values: None,
+        }
+    }
+
+    #[test]
+    fn set_field_overwrites_existing_value_in_place() {
+        let mut md = Metadata {
+            fields: vec![field("marker", ""), field("label", "keep")],
+        };
+        md.set_field("marker", "⏱");
+        assert_eq!(md.fields[0].value, "⏱");
+        // Other fields untouched; no field added.
+        assert_eq!(md.fields[1].value, "keep");
+        assert_eq!(md.fields.len(), 2);
+    }
+
+    #[test]
+    fn set_field_is_noop_for_absent_key() {
+        let mut md = Metadata {
+            fields: vec![field("marker", "")],
+        };
+        md.set_field("missing", "x");
+        assert_eq!(md.fields.len(), 1);
+        assert_eq!(md.fields[0].value, "");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ListParams / ListResult / NodeSummary
 // ---------------------------------------------------------------------------
@@ -683,6 +735,20 @@ pub enum ActionDispatch {
     DeleteSelf,
     /// Reload the current pane.
     Reload,
+    /// Patch a single visible row in place (M9) without refetching or
+    /// rebuilding the pane. The frontend swaps the row's state by `id`
+    /// across every pane that currently shows it (no selection/scroll
+    /// change); a row whose `id` is not visible is silently ignored.
+    ///
+    /// Used by actions that mutate only the invoking row's own display
+    /// and can recompute it cheaply — e.g. a tree row toggling its own
+    /// tracking marker. Unlike the domain-event bridge's row patches
+    /// (which key on the backend's plain id), the node builds the summary
+    /// with its own view-correct id (e.g. a scope-encoded `tree:<…>` id),
+    /// so a row the bridge cannot address still updates. The user presses
+    /// `r` for a full structural refresh (ancestor aggregates, added/
+    /// removed rows).
+    PatchRow(NodeSummary),
     /// No-op — useful as a default for adapters that haven't migrated.
     Noop,
     /// Adapter rejected the action with a user-displayable error.
