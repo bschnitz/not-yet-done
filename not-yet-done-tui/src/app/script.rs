@@ -1,7 +1,7 @@
 //! `:script` orchestration — the App-level menu lifecycle and the
 //! script-run pipeline for both Trackings (legacy JSON shape) and
-//! content-view nodes (`{ "node": { ref, node_type, tab, instance,
-//! fields } }`).
+//! content-view nodes (`{ "node": { ref, id, label, node_type, tab,
+//! instance, fields } }`).
 //!
 //! Anatomy:
 //!   - [`ScriptContext`] carries everything needed to decide *where*
@@ -52,8 +52,8 @@ pub enum ScriptContext {
         new_script_template: String,
     },
     /// Content-view node. JSON shape (new generic schema):
-    /// `{"node": {"ref": .., "node_type": .., "tab": .., "instance":
-    /// .., "fields": {<key>: <value>, …}}}`.
+    /// `{"node": {"ref": .., "id": .., "label": .., "node_type": ..,
+    /// "tab": .., "instance": .., "fields": {<key>: <value>, …}}}`.
     ContentNode {
         view_index: usize,
         pane_id: PaneId,
@@ -70,6 +70,11 @@ pub enum ScriptContext {
         node_type: String,
         node_id: String,
         node_ref: String,
+        /// The selected item's display label (e.g. a task's description,
+        /// a ticket's summary) — the one row value that is *not* a
+        /// metadata field (columns pull it via `source: label`), so the
+        /// payload carries it explicitly.
+        label: String,
         fields: Vec<(String, String)>,
         /// Scaffold for create-new, pre-resolved at menu-open time
         /// (per-view override, else global fallback).
@@ -167,7 +172,7 @@ impl ScriptContext {
                 )
             }
             ScriptContext::ContentNode {
-                tab, instance, node_type, node_id, node_ref, fields, ..
+                tab, instance, node_type, node_id, node_ref, label, fields, ..
             } => {
                 let fields_inner = fields
                     .iter()
@@ -175,9 +180,10 @@ impl ScriptContext {
                     .collect::<Vec<_>>()
                     .join(",\n");
                 format!(
-                    "{{\n  \"node\": {{\n    \"ref\": {nref},\n    \"id\": {nid},\n    \"node_type\": {nt},\n    \"tab\": {tabq},\n    \"instance\": {iq},\n    \"fields\": {{\n{fields}\n    }}\n  }}\n}}",
+                    "{{\n  \"node\": {{\n    \"ref\": {nref},\n    \"id\": {nid},\n    \"label\": {lbl},\n    \"node_type\": {nt},\n    \"tab\": {tabq},\n    \"instance\": {iq},\n    \"fields\": {{\n{fields}\n    }}\n  }}\n}}",
                     nref = json_string(node_ref),
                     nid = json_string(node_id),
+                    lbl = json_string(label),
                     nt = json_string(node_type),
                     tabq = json_string(tab),
                     iq = json_string(instance),
@@ -321,15 +327,16 @@ impl App {
             self.notify("Pane not found".to_string());
             return;
         };
-        let Some(node_id) = pane.selected_item_id().map(str::to_string) else {
+        // Tree-aware: in tree mode the selected summary lives on the
+        // tree entry, not in `pane.items` (depth-0 only) — an id lookup
+        // there would miss every nested node.
+        let Some(item) = pane.selected_item() else {
             self.notify("No row selected".to_string());
             return;
         };
-        let Some(item) = pane.items.iter().find(|n| n.id == node_id) else {
-            self.notify("No row selected".to_string());
-            return;
-        };
+        let node_id = item.id.clone();
         let node_type = item.node_type.type_id.clone();
+        let label = item.label.clone();
         let fields: Vec<(String, String)> = item
             .metadata
             .fields
@@ -355,6 +362,7 @@ impl App {
             node_type,
             node_id,
             node_ref,
+            label,
             fields,
             new_script_template,
         };

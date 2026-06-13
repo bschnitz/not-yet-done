@@ -493,6 +493,19 @@ Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
   > Skripte migrieren erst bei C1). `view_config`-Test prüft die Action beide
   > Ebenen, Smoke-Sektion A1c-scripts.
   >
+  > **Nachtrag Script-Parität (Port von `task_to_taiga.py`):** Zwei Lücken
+  > gegenüber dem nativen `{"task": …}`-Payload geschlossen. (1) Generisch:
+  > das `{"node": …}`-JSON trägt jetzt auch `label` (das Anzeige-Label der
+  > Zeile — bei Tasks die Beschreibung, die als `source: label`-Spalte kein
+  > Metadata-Feld ist). Gilt für alle Adapter. (2) Adapter-seitig: neues
+  > Metadata-Feld `ancestors` = JSON-Array-String `[{"id", "description"},
+…]` Root→Parent exklusive des Tasks selbst
+  > (`ForestSnapshot::ancestors_json`, O(Tiefe) pro Zeile am in-memory
+  > Forest). Damit liest ein portiertes Script Beschreibung aus
+  > `node.label` und die Pfad-Konvention aus
+  > `json.loads(node.fields.ancestors)` — funktional identisch zum nativen
+  > `task.description`/`task.ancestors`.
+  >
   > **A1c-Komfort umgesetzt (Add-Child-unter-Selektion + Un-nest).**
   >
   > - **Add-Child im Tree (`A`)** — generisch, ein opt-in: neues Bool-Feld

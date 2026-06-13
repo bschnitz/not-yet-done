@@ -3610,6 +3610,7 @@ dependencies = [
  "dirs",
  "not-yet-done-content",
  "not-yet-done-core",
+ "serde_json",
  "slug",
  "tokio",
  "uuid",
