@@ -105,6 +105,29 @@ pub fn domain_event_to_invalidation(ev: &DomainEvent) -> Option<Invalidation> {
     })
 }
 
+/// Publish a set of refreshed rows as in-place [`Invalidation::Row`]
+/// patches (M9) instead of a coarse [`Invalidation::All`] reload.
+///
+/// The frontend's `patch_row` swaps each row's state by `id` across every
+/// pane that currently shows it — no refetch, no tree rebuild, no
+/// selection/scroll change. A row whose `id` is not visible is silently
+/// ignored, so over-reporting is harmless.
+///
+/// Any local adapter that can cheaply recompute the rows touched by a
+/// structural change should prefer this over `All` so a deep,
+/// fully-expanded tree stays responsive: a start/stop toggle patches the
+/// affected marker/duration in place rather than re-folding and
+/// re-expanding the whole forest. The user presses `r` for a full
+/// structural refresh (rows added/removed, ancestor aggregates).
+pub fn publish_row_patches(
+    inv_tx: &broadcast::Sender<Invalidation>,
+    rows: impl IntoIterator<Item = not_yet_done_content::NodeSummary>,
+) {
+    for row in rows {
+        let _ = inv_tx.send(Invalidation::Row(row));
+    }
+}
+
 /// Spawn a background task that bridges the core domain-event bus into an
 /// adapter's own invalidation broadcast: each [`DomainEvent`] is mapped
 /// via [`domain_event_to_invalidation`] and republished on `inv_tx`.
@@ -189,5 +212,44 @@ mod tests {
         tokio::task::yield_now().await;
         bus.send(DomainEvent::TrackingTick).unwrap();
         assert_eq!(inv_rx.recv().await.unwrap(), Invalidation::Repaint);
+    }
+
+    fn summary(id: &str) -> not_yet_done_content::NodeSummary {
+        not_yet_done_content::NodeSummary {
+            id: id.to_string(),
+            label: id.to_string(),
+            node_type: not_yet_done_content::NodeType {
+                type_id: "t".into(),
+                mime_type: "text/plain".into(),
+                syntax: None,
+                file_extension: ".txt".into(),
+                display_name: "T".into(),
+            },
+            metadata: not_yet_done_content::Metadata::default(),
+            has_children: Some(false),
+        }
+    }
+
+    #[test]
+    fn publish_row_patches_emits_one_row_invalidation_per_row_in_order() {
+        let (inv_tx, mut inv_rx) = broadcast::channel(8);
+        publish_row_patches(&inv_tx, [summary("a"), summary("b")]);
+        assert_eq!(
+            inv_rx.try_recv().unwrap(),
+            Invalidation::Row(summary("a"))
+        );
+        assert_eq!(
+            inv_rx.try_recv().unwrap(),
+            Invalidation::Row(summary("b"))
+        );
+        // Exactly two — no stray coarse `All`.
+        assert!(inv_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn publish_row_patches_empty_emits_nothing() {
+        let (inv_tx, mut inv_rx) = broadcast::channel(8);
+        publish_row_patches(&inv_tx, std::iter::empty());
+        assert!(inv_rx.try_recv().is_err());
     }
 }

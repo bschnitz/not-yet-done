@@ -83,7 +83,7 @@ use not_yet_done_core::events::{DomainEvent, DomainEventReceiver};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
-use crate::CoreHandle;
+use crate::{publish_row_patches, CoreHandle};
 
 /// Stable id of the synthetic list-root node.
 const ROOT_ID: &str = "tracking:root";
@@ -1089,7 +1089,10 @@ async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDis
         Ok(Some(_))
     );
     crate::task::apply_tracking(handle, task_id, !is_tracked).await;
-    ActionDispatch::Reload
+    // No `Reload`: the start/stop emits a `Tracking*` event that the bridge
+    // turns into an in-place row patch (M9), so a deep tree never rebuilds
+    // on `s`. A full structural refresh is the explicit `r`.
+    ActionDispatch::Noop
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,15 +1490,40 @@ fn list_result(items: Vec<NodeSummary>) -> not_yet_done_content::ListResult {
 // Event bridge
 // ---------------------------------------------------------------------------
 
-/// Bridge the core domain-event bus into this adapter's invalidation stream
-/// **and** drop the eager snapshot on a change so the next fetch rebuilds.
+/// Tell the frontend whether (and how fast) to run the live-row pull, and
+/// record the announced cadence in `last_live_secs`. Free function so both
+/// [`TrackingAdapter::announce_interval`] and [`spawn_tracking_bridge`]
+/// re-pace the timer through the *same* shared atomic — a start/stop
+/// handled in the bridge updates the bracket the next `live_rows` tick
+/// compares against, so it never emits a redundant re-announce.
+fn announce_live_interval(
+    inv_tx: &broadcast::Sender<Invalidation>,
+    last_live_secs: &std::sync::atomic::AtomicU64,
+    snapshot: &TrackingSnapshot,
+) {
+    let interval = snapshot
+        .shortest_active_secs(chrono::Utc::now())
+        .map(live_interval_for);
+    last_live_secs.store(
+        interval.map(|d| d.as_secs()).unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let _ = inv_tx.send(Invalidation::RefreshInterval(interval));
+}
+
+/// Bridge the core domain-event bus into this adapter's invalidation stream.
 ///
-/// - `TrackingStarted`/`Stopped` → a tracking appeared/closed: the list and
-///   the active set change, so clear + [`Invalidation::All`]. The reload it
-///   triggers rebuilds the snapshot and re-announces the live cadence (see
-///   [`TrackingAdapter::announce_interval`]).
-/// - `TaskChanged` → a task's description/path may have changed → clear +
-///   `All`.
+/// - `TrackingStarted`/`Stopped` → a tracking's running marker flips and (on
+///   a stop) its duration freezes, but the task forest's *shape* is
+///   unchanged. Reload the in-memory snapshot (so `live_rows` and a later
+///   `r` are fresh), re-pace the live timer, and **patch only the affected
+///   entry row in place** (M9, [`publish_row_patches`]) instead of a coarse
+///   [`Invalidation::All`] — a deep, fully-expanded tree must not rebuild on
+///   every `s`. A newly-created entry (from a *start*) is not yet a visible
+///   row, so it surfaces on the next `r`; the auto-stopped previous entry
+///   emits its own `TrackingStopped` and is patched off here.
+/// - `TaskChanged`/`TrackingChanged` → genuinely structural (task edited, or
+///   a tracking deleted/restored) → clear + [`Invalidation::All`].
 /// - `TrackingTick` is ignored: the per-second duration tick is driven by
 ///   the M9 live-row pull, not this global heartbeat (the heartbeat still
 ///   serves the native tab until the C1 cutover).
@@ -1503,15 +1531,35 @@ fn spawn_tracking_bridge(
     mut events: DomainEventReceiver,
     inv_tx: broadcast::Sender<Invalidation>,
     snapshot: Arc<RwLock<Option<Arc<TrackingSnapshot>>>>,
+    handle: CoreHandle,
+    last_live_secs: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tokio::spawn(async move {
         use broadcast::error::RecvError;
         loop {
             match events.recv().await {
                 Ok(DomainEvent::TrackingTick) => {}
+                Ok(DomainEvent::TrackingStarted { tracking_id, .. })
+                | Ok(DomainEvent::TrackingStopped { tracking_id, .. }) => {
+                    match TrackingSnapshot::load(&handle).await {
+                        Ok(snap) => {
+                            *snapshot.write().await = Some(snap.clone());
+                            announce_live_interval(&inv_tx, &last_live_secs, &snap);
+                            if let Some(row) = snap.by_id.get(&tracking_id) {
+                                publish_row_patches(
+                                    &inv_tx,
+                                    [entry_summary(tracking_id, row, chrono::Utc::now())],
+                                );
+                            }
+                        }
+                        // Couldn't refresh in place — fall back to a full reload.
+                        Err(_) => {
+                            *snapshot.write().await = None;
+                            let _ = inv_tx.send(Invalidation::All);
+                        }
+                    }
+                }
                 Ok(DomainEvent::TaskChanged { .. })
-                | Ok(DomainEvent::TrackingStarted { .. })
-                | Ok(DomainEvent::TrackingStopped { .. })
                 | Ok(DomainEvent::TrackingChanged { .. }) => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
@@ -1549,10 +1597,13 @@ impl AdapterFactory for TrackingAdapterFactory {
     fn create(&self, instance_id: &str, _config: &str) -> Result<Box<dyn ContentAdapter>> {
         let (inv_tx, _) = broadcast::channel(64);
         let snapshot: Arc<RwLock<Option<Arc<TrackingSnapshot>>>> = Arc::new(RwLock::new(None));
+        let last_live_secs = Arc::new(std::sync::atomic::AtomicU64::new(0));
         spawn_tracking_bridge(
             self.handle.events.subscribe(),
             inv_tx.clone(),
             snapshot.clone(),
+            self.handle.clone(),
+            last_live_secs.clone(),
         );
         let queries_root = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
@@ -1566,7 +1617,7 @@ impl AdapterFactory for TrackingAdapterFactory {
             inv_tx,
             snapshot,
             saved_queries: FsSavedQueryStore::new(queries_root),
-            last_live_secs: std::sync::atomic::AtomicU64::new(0),
+            last_live_secs,
         }))
     }
 }
@@ -1586,8 +1637,10 @@ pub struct TrackingAdapter {
     /// The cadence last announced via [`Invalidation::RefreshInterval`],
     /// in seconds (`0` = stopped). [`ContentAdapter::live_rows`] compares
     /// the adaptive target against this on every tick and re-paces the
-    /// frontend timer only when the bracket actually changes.
-    last_live_secs: std::sync::atomic::AtomicU64,
+    /// frontend timer only when the bracket actually changes. Shared
+    /// (`Arc`) with [`spawn_tracking_bridge`] so a start/stop re-paces the
+    /// timer through the same atomic without an extra redundant announce.
+    last_live_secs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TrackingAdapter {
@@ -1622,14 +1675,7 @@ impl TrackingAdapter {
     /// after the reload its event triggered; `live_rows` keeps re-pacing
     /// as the tracking ages and the bracket slows down.
     fn announce_interval(&self, snapshot: &TrackingSnapshot) {
-        let interval = snapshot
-            .shortest_active_secs(chrono::Utc::now())
-            .map(live_interval_for);
-        self.last_live_secs.store(
-            interval.map(|d| d.as_secs()).unwrap_or(0),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let _ = self.inv_tx.send(Invalidation::RefreshInterval(interval));
+        announce_live_interval(&self.inv_tx, &self.last_live_secs, snapshot);
     }
 }
 

@@ -244,7 +244,7 @@ fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
 - [ ] `:tree-find` direkt (ohne Skript): `:tree-find "Tasks (A)" <text>`
       (Beschreibungs-Substring) springt auf Tasks (A) und parkt auf
       dem ersten Treffer; `n`/`N` zykeln weitere. `:tree-find "Tasks (A)"
-    id:<uuid>` parkt exakt auf diesem Knoten. Modal-Fehler bei
+id:<uuid>` parkt exakt auf diesem Knoten. Modal-Fehler bei
       unbekanntem Tab/View oder wenn die aktive View kein Baum ist
       (Hinweis auf `:focus-node`).
 
@@ -3591,6 +3591,31 @@ wenn keine bereits-expandierte Ebene mehr auf ihre Kinder wartet.
       sichtbar wie im nativen Trackings-Tab.
 - [ ] Auch der gruppierte Tree (Tages-Buckets) klappt jeden Bucket-Teilbaum
       vollständig auf, nicht nur die erste Task-Ebene.
+
+### `s` (toggle-tracking) baut den Baum nicht neu auf
+
+Bugfix: `s`/`t` (toggle-tracking) gab früher `Reload` zurück **und** das
+`Tracking*`-DomainEvent löste `Invalidation::All` aus → der ganze (tiefe,
+voll aufgeklappte) Baum wurde zweimal neu gefaltet und neu expandiert, was
+spürbar dauerte und währenddessen die Eingabe blockierte. Fix (Option 1):
+der Toggle gibt `Noop` zurück und der Adapter-Bridge patcht nur die
+betroffene Zeile in place (M9), statt einen vollen Reload anzustoßen. Ein
+echter struktureller Refresh ist explizit `r`.
+
+> Beim Smoke-Test **kein** echtes Tracking auf echten Zeilen togglen —
+> eine Wegwerf-Aufgabe anlegen und auf der tracken.
+
+- [ ] Trackings (A) → Tree, tiefer/voll aufgeklappter Baum: `s` auf einer
+      Zeile startet/stoppt das Tracking **ohne** sichtbaren Neuaufbau des
+      Baums — kein Zusammenklappen, kurzes Eingabe-Freeze entfällt, die
+      Selektion bleibt stehen.
+- [ ] Nach `r` (echter Reload) sind die strukturellen Effekte sichtbar
+      (neuer Tracking-Eintrag in der flachen Liste, kumulierte Sekunden der
+      Vorfahren im Tree aktualisiert).
+- [ ] Tasks (A) → Tree: `t` (toggle-tracking) flippt den `⏱`-Marker der
+      Zeile in place, ebenfalls ohne Baum-Neuaufbau.
+- [ ] Flache Trackings-Liste: `s` auf einer **laufenden** Zeile stoppt sie
+      → `⏱` verschwindet und die Dauer friert in place ein (kein Reload).
 
 ## Trackings-Tree: Gruppierung via Adapter (`group_by_via_adapter`)
 
