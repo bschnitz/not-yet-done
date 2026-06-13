@@ -65,7 +65,7 @@ use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use crate::editor_templates::{self, FieldError, ParseResult};
-use crate::{notes, CoreHandle};
+use crate::{notes, publish_row_patches, CoreHandle};
 
 /// Stable id of the synthetic forest-root node.
 const ROOT_ID: &str = "task:root";
@@ -947,14 +947,17 @@ async fn invoke_undelete(handle: &CoreHandle) -> ActionDispatch {
 /// The current state is read live (an active tracking exists?) rather than
 /// from the snapshot, so a stale marker can't desync the toggle.
 /// [`apply_tracking`] enforces the host's exclusivity policy and emits the
-/// `Tracking*` events; the bridge then invalidates and the view reloads.
+/// `Tracking*` events; the bridge then patches the affected task row's
+/// `⏱` marker in place (M9) rather than reloading the tree.
 async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
     let is_tracked = matches!(
         handle.tracking_repo.find_active_for_task(task_id).await,
         Ok(Some(_))
     );
     apply_tracking(handle, task_id, !is_tracked).await;
-    ActionDispatch::Reload
+    // No `Reload`: only the row's tracking marker changed, so the bridge
+    // patches it in place instead of rebuilding the (deep) task tree.
+    ActionDispatch::Noop
 }
 
 /// `invoke_action("paste-move")` — reparent the previously-marked task
@@ -1259,17 +1262,22 @@ fn list_result(items: Vec<NodeSummary>) -> not_yet_done_content::ListResult {
 /// The TaskAdapter narrows the generic mapping deliberately:
 /// - `TrackingTick` is ignored — a task row's shape doesn't change on the
 ///   1 Hz heartbeat (that repaint belongs to the TrackingAdapter, A2).
-/// - `TaskChanged { id }` → [`Invalidation::Node`] (refetch that subtree).
-/// - `TrackingStarted`/`Stopped` → [`Invalidation::All`] (the per-task
-///   tracking marker, A1c, may change anywhere).
-///
-/// On every non-tick event the cached snapshot is cleared first, so a
-/// refetch triggered by the invalidation reads fresh data rather than the
-/// stale `Arc`.
+/// - `TaskChanged { id }` → clear + [`Invalidation::Node`] (refetch that
+///   subtree).
+/// - `TrackingStarted`/`Stopped` → only the task's `⏱` tracking marker
+///   flips; the forest shape is unchanged. Reload the snapshot (so the
+///   `tracked` set is fresh) and **patch that one task row in place** (M9,
+///   [`publish_row_patches`]) instead of [`Invalidation::All`], so a deep,
+///   fully-expanded task tree never rebuilds on a `t` toggle. (Under an
+///   active saved-query filter the patched `has_children` is recomputed
+///   unfiltered — a harmless edge until the next `r`.)
+/// - `TrackingChanged` → a tracking was deleted/restored; keep the coarse
+///   clear + `All`.
 fn spawn_task_bridge(
     mut events: DomainEventReceiver,
     inv_tx: broadcast::Sender<Invalidation>,
     snapshot: Arc<RwLock<Option<Arc<ForestSnapshot>>>>,
+    handle: CoreHandle,
 ) {
     tokio::spawn(async move {
         use broadcast::error::RecvError;
@@ -1280,9 +1288,23 @@ fn spawn_task_bridge(
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::Node { id: id.to_string() });
                 }
-                Ok(DomainEvent::TrackingStarted { .. })
-                | Ok(DomainEvent::TrackingStopped { .. })
-                | Ok(DomainEvent::TrackingChanged { .. }) => {
+                Ok(DomainEvent::TrackingStarted { task_id, .. })
+                | Ok(DomainEvent::TrackingStopped { task_id, .. }) => {
+                    match ForestSnapshot::load(&handle).await {
+                        Ok(snap) => {
+                            *snapshot.write().await = Some(snap.clone());
+                            if let Some(row) = snap.by_id.get(&task_id) {
+                                publish_row_patches(&inv_tx, [snap.summary(task_id, row, None)]);
+                            }
+                        }
+                        // Couldn't refresh in place — fall back to a full reload.
+                        Err(_) => {
+                            *snapshot.write().await = None;
+                            let _ = inv_tx.send(Invalidation::All);
+                        }
+                    }
+                }
+                Ok(DomainEvent::TrackingChanged { .. }) => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }
@@ -1325,6 +1347,7 @@ impl AdapterFactory for TaskAdapterFactory {
             self.handle.events.subscribe(),
             inv_tx.clone(),
             snapshot.clone(),
+            self.handle.clone(),
         );
         let queries_root = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)

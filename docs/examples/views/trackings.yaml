@@ -194,7 +194,12 @@ views:
     #     successors a split produced). `A` restore-all does the same across
     #     every deleted tracking the list can reach.
     #   * `s` toggle-tracking — start/stop time tracking on the row's *task*
-    #     (shares the host's exclusivity policy with the Tasks tab).
+    #     (shares the host's exclusivity policy with the Tasks tab). The
+    #     toggle does NOT rebuild the view: the adapter patches the affected
+    #     row's running marker / frozen duration in place (M9) so a deep,
+    #     fully-expanded tree stays responsive. Structural effects (a newly
+    #     created entry, the cumulated seconds of a tree's ancestors) appear
+    #     on the next explicit reload — press `r`.
     #
     # Note: the list shows only non-deleted rows, so `R`/`A` are recovery
     # hooks with no visible target today — a "show deleted" sub-view is future
