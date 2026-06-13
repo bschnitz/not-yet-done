@@ -262,7 +262,7 @@ impl ForestSnapshot {
             id: id.to_string(),
             label: row.task.description.clone(),
             node_type: task_item_type(),
-            metadata: task_metadata(row, self.tracked.contains(&id)),
+            metadata: task_metadata(row, self.tracked.contains(&id), self.ancestors_json(id)),
             has_children: Some(has_children),
         }
     }
@@ -296,6 +296,28 @@ impl ForestSnapshot {
         out
     }
 
+    /// Root→parent ancestor chain (exclusive of the task itself) as a
+    /// JSON array string of `{"id", "description"}` objects — the
+    /// `ancestors` metadata field. Scripts parse it to reconstruct the
+    /// task's position in the forest (the legacy native Tasks tab handed
+    /// the same shape as a structured `task.ancestors` array; here it
+    /// rides inside the uniform `node.fields` map, so it is one
+    /// JSON-encoded string value).
+    fn ancestors_json(&self, id: Uuid) -> String {
+        let mut chain: Vec<serde_json::Value> = Vec::new();
+        let mut cur = self.by_id.get(&id).and_then(|r| r.parent);
+        while let Some(pid) = cur {
+            let Some(row) = self.by_id.get(&pid) else { break };
+            chain.push(serde_json::json!({
+                "id": pid.to_string(),
+                "description": row.task.description,
+            }));
+            cur = row.parent;
+        }
+        chain.reverse();
+        serde_json::Value::Array(chain).to_string()
+    }
+
     /// Root-to-node chain of task ids (as strings) — the addressing a
     /// [`TreeFindHit`] hands back to the TUI to expand to a hit.
     fn path_to(&self, id: Uuid) -> Vec<String> {
@@ -307,6 +329,65 @@ impl ForestSnapshot {
         }
         chain.reverse();
         chain
+    }
+
+    /// Pure tree-search backing [`ContentAdapter::search_in_tree`]. Two
+    /// modes, switched on the query shape:
+    ///
+    /// - **`id:<uuid>`** — exact node match, independent of the
+    ///   (possibly drifted) description. Scripted jumps that already
+    ///   resolved the task id via the CLI (e.g. the Taiga `goto_task`
+    ///   script) use this so the jump stays exact even when the Taiga
+    ///   subject and the local description diverge. Yields 0 or 1 hit.
+    /// - **anything else** — case-insensitive, whitespace-tokenised
+    ///   AND-substring match against task descriptions, sorted into
+    ///   tree-render order (parents before children) and capped at
+    ///   `limit`.
+    fn tree_search(&self, query: &str, limit: u32) -> TreeSearchResults {
+        if let Some(rest) = query.trim().strip_prefix("id:") {
+            let hits = match Uuid::parse_str(rest.trim()) {
+                Ok(uuid) => self
+                    .by_id
+                    .get(&uuid)
+                    .map(|row| TreeFindHit {
+                        path: self.path_to(uuid),
+                        label: row.task.description.clone(),
+                        space_key: String::new(),
+                    })
+                    .into_iter()
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            return TreeSearchResults {
+                hits,
+                truncated: false,
+            };
+        }
+        let tokens: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+        if tokens.is_empty() {
+            return TreeSearchResults {
+                hits: Vec::new(),
+                truncated: false,
+            };
+        }
+        let mut hits: Vec<TreeFindHit> = self
+            .by_id
+            .iter()
+            .filter(|(_, row)| {
+                let hay = row.task.description.to_lowercase();
+                tokens.iter().all(|t| hay.contains(t))
+            })
+            .map(|(id, row)| TreeFindHit {
+                path: self.path_to(*id),
+                label: row.task.description.clone(),
+                space_key: String::new(),
+            })
+            .collect();
+        // Tree-render order: parents before children, siblings together.
+        hits.sort_by(|a, b| a.path.cmp(&b.path));
+        let truncated = hits.len() > limit as usize;
+        hits.truncate(limit as usize);
+        TreeSearchResults { hits, truncated }
     }
 }
 
@@ -382,7 +463,7 @@ fn field(key: &str, value: String, label: &str) -> MetadataField {
 /// strings** the engine's typed columns (M2) parse: integers for `number`,
 /// RFC 3339 for `datetime`. `views/tasks.yaml` declares the `kind:` per
 /// column; the adapter only supplies the canonical form.
-fn task_metadata(row: &TaskRow, is_tracked: bool) -> Metadata {
+fn task_metadata(row: &TaskRow, is_tracked: bool, ancestors_json: String) -> Metadata {
     let t = &row.task;
     Metadata {
         fields: vec![
@@ -422,6 +503,10 @@ fn task_metadata(row: &TaskRow, is_tracked: bool) -> Metadata {
                 "Last Tracked",
             ),
             field("id", t.id.to_string(), "ID"),
+            // Root→parent chain as a JSON array string (see
+            // [`ForestSnapshot::ancestors_json`]). Consumed by `:script`
+            // payloads, not meant as a visible column.
+            field("ancestors", ancestors_json, "Ancestors"),
         ],
     }
 }
@@ -1059,7 +1144,11 @@ impl TaskItemNode {
             id_str: id.to_string(),
             label: row.task.description.clone(),
             node_type: task_item_type(),
-            metadata: task_metadata(row, snapshot.tracked.contains(&uuid)),
+            metadata: task_metadata(
+                row,
+                snapshot.tracked.contains(&uuid),
+                snapshot.ancestors_json(uuid),
+            ),
         }))
     }
 }
@@ -1387,31 +1476,7 @@ impl ContentAdapter for TaskAdapter {
 
     async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
         let snapshot = self.snapshot().await?;
-        let tokens: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
-        if tokens.is_empty() {
-            return Ok(Some(TreeSearchResults {
-                hits: Vec::new(),
-                truncated: false,
-            }));
-        }
-        let mut hits: Vec<TreeFindHit> = snapshot
-            .by_id
-            .iter()
-            .filter(|(_, row)| {
-                let hay = row.task.description.to_lowercase();
-                tokens.iter().all(|t| hay.contains(t))
-            })
-            .map(|(id, row)| TreeFindHit {
-                path: snapshot.path_to(*id),
-                label: row.task.description.clone(),
-                space_key: String::new(),
-            })
-            .collect();
-        // Tree-render order: parents before children, siblings together.
-        hits.sort_by(|a, b| a.path.cmp(&b.path));
-        let truncated = hits.len() > limit as usize;
-        hits.truncate(limit as usize);
-        Ok(Some(TreeSearchResults { hits, truncated }))
+        Ok(Some(snapshot.tree_search(query, limit)))
     }
 }
 
@@ -1540,6 +1605,45 @@ mod tests {
     }
 
     #[test]
+    fn tree_search_id_escape_matches_exactly_one_node() {
+        let root = Uuid::from_u128(1);
+        let child = Uuid::from_u128(2);
+        let snap = snapshot_from(vec![
+            row(root, "Work", None),
+            row(child, "#42 - Fix the frobnicator", Some(root)),
+        ]);
+
+        // `id:<uuid>` resolves the one node and its full root→leaf path,
+        // ignoring the description entirely.
+        let res = snap.tree_search(&format!("id:{child}"), 50);
+        assert_eq!(res.hits.len(), 1);
+        assert_eq!(res.hits[0].path, vec![root.to_string(), child.to_string()]);
+        assert_eq!(res.hits[0].label, "#42 - Fix the frobnicator");
+        assert!(!res.truncated);
+
+        // Unknown / unparseable id → no hits (no panic, no fallback to
+        // description search).
+        assert!(snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50).hits.is_empty());
+        assert!(snap.tree_search("id:not-a-uuid", 50).hits.is_empty());
+    }
+
+    #[test]
+    fn tree_search_description_fallback_is_substring_and_path_sorted() {
+        let root = Uuid::from_u128(1);
+        let child = Uuid::from_u128(2);
+        let snap = snapshot_from(vec![
+            row(root, "Frobnicator project", None),
+            row(child, "Fix the Frobnicator", Some(root)),
+        ]);
+
+        // Case-insensitive AND-substring across descriptions; both rows
+        // contain "frobnicator", returned parent-before-child.
+        let res = snap.tree_search("frobnicator", 50);
+        let labels: Vec<&str> = res.hits.iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, vec!["Frobnicator project", "Fix the Frobnicator"]);
+    }
+
+    #[test]
     fn flat_summaries_filter_keeps_matches_without_ancestors() {
         // Unlike the tree's visible-set (matches + ancestors), the flat
         // list shows only the matches themselves — even when the match is
@@ -1577,6 +1681,28 @@ mod tests {
     }
 
     #[test]
+    fn ancestors_json_is_root_first_exclusive_of_self() {
+        let a = Uuid::from_u128(10);
+        let b = Uuid::from_u128(20);
+        let c = Uuid::from_u128(30);
+        let snap = snapshot_from(vec![
+            row(a, "Root \"quoted\"", None),
+            row(b, "Mid", Some(a)),
+            row(c, "Leaf", Some(b)),
+        ]);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snap.ancestors_json(c)).expect("valid JSON");
+        let chain = parsed.as_array().expect("array");
+        assert_eq!(chain.len(), 2, "exclusive of the task itself");
+        assert_eq!(chain[0]["id"], a.to_string());
+        assert_eq!(chain[0]["description"], "Root \"quoted\"");
+        assert_eq!(chain[1]["id"], b.to_string());
+        assert_eq!(chain[1]["description"], "Mid");
+        // A root task has no ancestors → empty array, still valid JSON.
+        assert_eq!(snap.ancestors_json(a), "[]");
+    }
+
+    #[test]
     fn metadata_carries_canonical_typed_values() {
         let id = Uuid::from_u128(7);
         let (_, mut r) = row(id, "Do the thing", None);
@@ -1585,7 +1711,7 @@ mod tests {
         r.tag_names = "home, urgent".into();
         r.tag_symbols = "🔥".into();
         r.has_notes = true;
-        let md = task_metadata(&r, true);
+        let md = task_metadata(&r, true, "[]".to_string());
         let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
         assert_eq!(get("priority").as_deref(), Some("5"));
         // status is rendered as the native nerd-font glyph, not a text label.
@@ -1599,7 +1725,7 @@ mod tests {
         assert_eq!(get("last_tracked").as_deref(), Some(""));
         // The marker reflects the passed-in tracked flag.
         assert_eq!(get("tracking").as_deref(), Some("⏱"));
-        let md_off = task_metadata(&r, false);
+        let md_off = task_metadata(&r, false, "[]".to_string());
         assert_eq!(
             md_off.fields.iter().find(|f| f.key == "tracking").map(|f| f.value.as_str()),
             Some("")

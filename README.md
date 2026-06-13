@@ -284,6 +284,21 @@ In-process commands (executed by the TUI itself, not via subprocess):
   and currently return a modal error. Modal errors also on unknown
   tab/view, unknown column, no match, or ambiguous match.
   Example: `:focus-node Taiga:items /ref|acme#42`.
+- `:tree-find <Tab>[:<view>] <query>` — the **tree-mode** sibling of
+  `:focus-node`. Switches to the named content tab/sub-view, forces a
+  fresh reload (so out-of-process CLI mutations are in the adapter
+  snapshot before the search runs), then runs a server-side tree
+  search and **lazily expands to the first hit**, parking the cursor
+  on it. Use this — not `:focus-node` — to jump into a tree whose
+  target sits several levels deep (e.g. the adapterized Tasks tab,
+  where ticket nodes live under `work → client → tickets`). The tab
+  name may be double-quoted to allow spaces:
+  `:tree-find "Tasks (A)" <query>`. The `<query>` is adapter-defined;
+  the local task adapter additionally accepts an exact-id escape
+  `id:<uuid>` (used by scripted jumps that already resolved the node
+  id via the CLI). Modal errors on unknown tab/view or when the
+  active view isn't a tree.
+  Example: `:tree-find "Tasks (A)" id:550e8400-…`.
 - `:query <subcommand>` — namespace for saved-query operations:
   `apply` activates a saved query (read), `edit` / `new` / `delete`
   manage the saved-query bodies stored by the active content tab's
@@ -788,29 +803,35 @@ desc = f"#{number} - {subject}".rstrip(" -")
 ticket = f"/work/clients/{project}/tickets/re:\\b{re.escape(number)}\\b"
 parent = f"/work/clients/{project}/tickets"
 
+TAB = "Tasks (A)"   # display name of the adapter Tasks tab
+
 def show(p):
     return subprocess.run([CLI, "task", "show", "--path", p, "-i"],
                           capture_output=True, text=True)
 
-if show(ticket).returncode != 0:
+def task_id_at(p):
+    r = show(p)
+    return json.loads(r.stdout)["id"] if r.returncode == 0 else None
+
+task_id = task_id_at(ticket)
+if task_id is None:
     p = show(parent)
     if p.returncode != 0:
         sys.exit(f"Parent path not found: {parent}\n{p.stderr}")
     parent_id = json.loads(p.stdout)["id"]
     subprocess.check_call([CLI, "task", "add", desc, "--parent", parent_id])
+    task_id = task_id_at(ticket)          # re-resolve the new leaf's id
 
 with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
-    json.dump({"commands": [
-        "jump Tasks:tree",
-        "reload-tasks",
-        f"focus-task -i {ticket}",
-    ]}, f)
+    json.dump({"commands": [f'tree-find "{TAB}" id:{task_id}']}, f)
 ```
 
-The `reload-tasks` step is what makes the auto-create round-trip
-visible to the subsequent `focus-task` — without it the TUI still
-holds the pre-add snapshot of `task_rows` and the new leaf is
-invisible to the walker.
+`:tree-find` switches to the adapter Tasks tab, reloads it (so the
+just-created task is in the adapter snapshot — the parity replacement
+for the legacy `:reload-tasks` + `:focus-task` pair), and lazily
+expands to the node. Passing the resolved task **id** via the
+`id:<uuid>` escape keeps the jump exact even when the Taiga subject
+and the local description have drifted apart.
 
 The mirror-image flow — selected local task → matching Taiga item —
 uses `:focus-node`. The script lives under

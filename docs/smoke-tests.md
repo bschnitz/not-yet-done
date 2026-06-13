@@ -204,8 +204,8 @@ beim App-Start auf jeder als View-Config erkannten YAML-Datei (hat
       `goto_task.py`-Flows).
 - [ ] `:script` in einem Content-Tab mit selektiertem Node → Menü
       mit Scripts unter `<data>/not_yet_done/scripts/<tab>/<view-path>/`,
-      Run liefert JSON `{node: {ref, id, node_type, tab, instance,
-fields}}`
+      Run liefert JSON `{node: {ref, id, label, node_type, tab, instance,
+fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
 - [ ] Taiga `items`-View mit gemischten Knotentypen (issue +
       userstory + task + epic): das Skript-Menü zeigt **immer
       dieselbe** Liste unabhängig vom selektierten Knoten — Pfad
@@ -224,23 +224,29 @@ fields}}`
       Content) bedient (alter `{tracking_json_file}` ist
       umbenannt → tui.yaml einmal anpassen)
 - [ ] Taiga `items`-View, Cursor auf einem Ticket mit `ref` wie
-      `acme#42`, `:script` → `goto_task.py` ausführen → TUI
-      springt nach Tasks:tree und parkt auf dem Task im Pfad
-      `/work/clients/acme/tickets/<…42…>`. Wenn der Pfad
-      nicht existiert: Modal-Fehler aus `:focus-task` (nicht
-      gefunden / ambiguous / kein Tasks-Tab).
+      `acme#42`, `:script` → `goto_task.py` ausführen → TUI springt
+      auf den **Adapter**-Tab „Tasks (A)" (NICHT den Legacy-Tasks-Tab)
+      und expandiert/parkt auf dem Task im Pfad
+      `/work/.../<slug>/tickets/<…42…>`. Das Skript emittiert genau
+      ein `tree-find "Tasks (A)" id:<uuid>`.
 - [ ] Taiga `items`-View, Auto-Create-Pfad: Cursor auf einem
       Ticket, dessen lokaler Task NOCH NICHT existiert (z.B. neue
       Ticket-Nummer). `:script` → `goto_task.py`:
   - Skript ruft via CLI `task add` auf, legt `#<n> - <subject>`
-    unter dem `tickets`-Parent an.
-  - Anschließend feuert es `jump Tasks:tree` + `reload-tasks` +
-    `focus-task -i …` → der neu angelegte Task ist sofort
-    sichtbar im Tree und der Cursor parkt darauf.
+    unter dem `tickets`-Parent an und löst danach dessen `id` neu auf.
+  - `tree-find` erzwingt einen frischen Reload des Adapter-Tabs, **bevor**
+    gesucht wird → der eben angelegte Task ist sofort sichtbar
+    (Parität zum alten `reload-tasks`), Cursor parkt darauf.
   - Wiederholtes Ausführen ist idempotent (Task existiert dann
     schon → nur jump+focus). Tree zeigt KEINE Duplikate.
-  - Wenn der Parent-Path (`/work/clients/<slug>/tickets`) gar
+  - Wenn der Parent-Path (`/work/.../<slug>/tickets`) gar
     nicht existiert: Modal-Fehler aus dem Skript (stderr).
+- [ ] `:tree-find` direkt (ohne Skript): `:tree-find "Tasks (A)" <text>`
+      (Beschreibungs-Substring) springt auf Tasks (A) und parkt auf
+      dem ersten Treffer; `n`/`N` zykeln weitere. `:tree-find "Tasks (A)"
+    id:<uuid>` parkt exakt auf diesem Knoten. Modal-Fehler bei
+      unbekanntem Tab/View oder wenn die aktive View kein Baum ist
+      (Hinweis auf `:focus-node`).
 
 ## `:query apply` — saved-query activation via cmdline
 
@@ -3273,13 +3279,21 @@ Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
       Verzeichnis (View-Pfad stabil, ein gemeinsamer Scripts-Ordner).
 - [ ] `+name<Enter>` legt ein neues Script aus dem Template an; Editor öffnet.
 - [ ] Script ausführen → bekommt den Task als JSON
-      `{"node": {"id": <uuid>, "node_type": "task:item", "tab": "tasks",
-"fields": {description/status/priority/tags/tracking/created…}}}`
-      (uniforme Node-Form, NICHT die native `{"task": …}`-Form).
+      `{"node": {"id": <uuid>, "label": <description>, "node_type":
+"task:item", "tab": "tasks", "fields": {status/priority/tags/tracking/
+created/…/ancestors}}}` (uniforme Node-Form, NICHT die native
+      `{"task": …}`-Form). `fields.ancestors` ist ein JSON-Array-String
+      `[{"id", "description"}, …]` Root→Parent (exklusive des Tasks selbst);
+      bei einem Top-Level-Task `"[]"`.
 - [ ] Selektion wechseln (anderer Task, anderer Typ-Mix) → Menü bleibt am
       selben Ordner (kein Shuffle).
 - [ ] Kein Task selektiert / leerer Baum → Notification „No row selected",
       kein Crash.
+- [ ] Portiertes `task_to_taiga.py` (unter `scripts/tasks/task_item/`) auf
+      einem Ticket-Task (`#<n> - …` unter `<slug>/tickets/`) ausführen →
+      Taiga-Tab aktiviert die Per-Project-Query und parkt den Cursor auf
+      dem Item `<slug>#<n>` — identisch zum Verhalten auf dem nativen
+      Tasks-Tab.
 
 ### A1c (Komfort) — Add-Child-unter-Selektion (`A`) + Un-nest (`U`)
 

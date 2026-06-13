@@ -64,7 +64,12 @@
 #
 # Scripts (`x` / `:script`) run against the selected task through the generic
 # script menu — the task is handed over as the uniform `{"node": …}` JSON
-# (see the `run script` action below).
+# (see the `run script` action below). The node's `label` carries the task
+# description; `fields.ancestors` is a JSON-array string of
+# `{"id", "description"}` objects walking root→parent (exclusive of the task
+# itself), so path-convention scripts (e.g. a jump-to-ticket script keyed on
+# a `<project>/tickets/#<num>` layout) can reconstruct the forest position
+# without the legacy `{"task": …}` payload.
 #
 # Until the C1 cutover this file is illustrative: the bespoke native Tasks
 # tab still ships; copying this file in stands up the adapter path
@@ -200,10 +205,13 @@ views:
       # fuzzy menu (also reachable via the `:script` cmdline). Scripts live
       # under `<data>/not_yet_done/scripts/tasks/task_item/` — one dir per
       # view path, shared across depths. The selected task is handed to the
-      # script as JSON (`{"node": {"id", "node_type", "tab", "fields": {…}}}`,
-      # where `fields` carries status/priority/tracking/tag_symbols/tag_names/
-      # notes/created/updated/last_tracked/id); the adapter path uses the
-      # uniform node shape, not the bespoke
+      # script as JSON
+      # (`{"node": {"id", "label", "node_type", "tab", "fields": {…}}}`,
+      # where `label` is the task description and `fields` carries
+      # status/priority/tracking/tag_symbols/tag_names/notes/created/
+      # updated/last_tracked/id/ancestors — `ancestors` being a JSON-array
+      # string of `{"id", "description"}` root→parent); the adapter path
+      # uses the uniform node shape, not the bespoke
       # `{"task": …}` payload of the legacy native tab.
       - name: script
         key: x

@@ -440,6 +440,14 @@ pub struct ContentPane {
     /// of `tree` cache contents so expand/collapse leaves it intact.
     pub tree_find: Option<TreeFindState>,
 
+    /// A tree-find query queued by the `:tree-find` command, to fire
+    /// once the *next* root load lands. The command forces a fresh
+    /// reload first (so out-of-process CLI mutations — e.g. a task the
+    /// Taiga `goto_task` script just created — are in the snapshot
+    /// before the search runs), then this query drives the normal
+    /// expand-to-hit walk. Cleared by [`Self::take_pending_tree_find`].
+    pub pending_tree_find: Option<String>,
+
     /// Runtime override of the level's configured `group_by` (M3). The
     /// `cycle_grouping` action rotates the date-bucket granularity through
     /// this field without touching the YAML default:
@@ -1061,6 +1069,7 @@ impl ContentPane {
             tree_visible_indices: Vec::new(),
             tree_filter_depth: None,
             tree_find: None,
+            pending_tree_find: None,
             group_by_override: None,
             tree_aggregate_override: None,
             column_overrides: std::collections::HashMap::new(),
@@ -1091,6 +1100,19 @@ impl ContentPane {
             truncated: false,
             settled: false,
         });
+    }
+
+    /// Queue a `:tree-find` query to fire after the next root load (see
+    /// [`Self::pending_tree_find`]).
+    pub fn queue_pending_tree_find(&mut self, query: String) {
+        self.pending_tree_find = Some(query);
+    }
+
+    /// Take the queued `:tree-find` query, if any, clearing it so it
+    /// fires exactly once (on the load that follows the command's
+    /// forced reload).
+    pub fn take_pending_tree_find(&mut self) -> Option<String> {
+        self.pending_tree_find.take()
     }
 
     /// Land hits from a successful adapter response. No-op when the
@@ -3262,6 +3284,25 @@ impl ContentPane {
         let row = self.table.selected_row();
         let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
         self.items.get(item_idx).map(|item| item.label.as_str())
+    }
+
+    /// The selected row's full [`NodeSummary`] — the tree-aware way to
+    /// reach its label + metadata. In tree mode the summary lives on
+    /// the tree entry (`self.items` only holds the depth-0 rows, so an
+    /// `items` lookup by id silently misses every nested node); in
+    /// flat mode it indexes `items` through the fuzzy filter.
+    pub fn selected_item(&self) -> Option<&NodeSummary> {
+        if self.tree.is_some() {
+            let row = self.table.selected_row();
+            let entry = self.tree_entry_at_row(row)?;
+            if entry.is_more_placeholder {
+                return None;
+            }
+            return Some(&entry.node);
+        }
+        let row = self.table.selected_row();
+        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        self.items.get(item_idx)
     }
 
     /// Position the table cursor on the row whose node id matches
@@ -5575,6 +5616,14 @@ impl ContentView {
 
     pub fn active_view_index(&self) -> usize {
         self.active_subtab
+    }
+
+    /// True when the active view renders as a tree (has a `tree_label`),
+    /// i.e. the lazy expand-to-hit `:tree-find` walk is meaningful here.
+    pub fn active_view_is_tree(&self) -> bool {
+        self.active_view_def()
+            .map(|vd| vd.tree_label.is_some())
+            .unwrap_or(false)
     }
 
     /// Switch the active subtab by view name (case-insensitive). Returns
@@ -13168,6 +13217,47 @@ mod tests {
             .loaded = false;
         let reqs = view.pending_expanded_refresh_requests(view_index, pane_id);
         assert_eq!(reqs.len(), 1, "in-flight path skipped: {reqs:?}");
+    }
+
+    #[test]
+    fn selected_item_resolves_nested_tree_rows() {
+        // `selected_item` must read the summary off the tree entry —
+        // `items` only holds the depth-0 rows, so an id lookup there
+        // misses every nested node (the `:script` "No row selected" bug).
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        view.active_pane_mut()
+            .tree
+            .as_mut()
+            .unwrap()
+            .expanded
+            .insert(vec!["work".to_string()]);
+        view.apply_tree_children(
+            pane_id,
+            vec!["work".to_string()],
+            vec![tnode_val("h", "Nested", "V")],
+            None,
+            false,
+            "mock:task".into(),
+        );
+
+        assert!(view.active_pane_mut().focus_item_by_id("h"));
+        let pane = view.find_pane(pane_id).unwrap();
+        let item = pane.selected_item().expect("nested row resolves to its summary");
+        assert_eq!(item.id, "h");
+        assert_eq!(item.label, "Nested");
+        assert!(
+            pane.items.iter().all(|n| n.id != "h"),
+            "nested summary is absent from items — an items lookup would miss it"
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 ///   placeholder for both Trackings and content-node invocations; the
 ///   JSON shape differs by context — Trackings: `{tracking_ids,
 ///   filter_min_date, filter_max_date}`, content nodes: `{node: {ref,
-///   node_type, tab, instance, fields}}`).
+///   id, label, node_type, tab, instance, fields}}`).
 /// - `{output_file}` — path to output file; the TUI watches for it to
 ///   detect completion. Scripts can optionally write captured output
 ///   here. `touch` it at the end to signal completion.
@@ -76,6 +76,7 @@ Reads the selected node from a JSON file (first argument):
   {"node": {
       "ref": "<adapter>/<instance>/<id>",
       "id": "<node id>",
+      "label": "<display label of the row>",
       "node_type": "<adapter>:<type>",
       "tab": "<adapter>",
       "instance": "<instance>",

@@ -2948,6 +2948,29 @@ impl App {
                     // tree, not just the depth-0 rows. Disjoint from the
                     // cascade: it only touches loaded expanded paths.
                     self.drive_tree_expanded_refresh(view_index, pane_id);
+                    // `:tree-find` queued a search to run against the
+                    // freshly-reloaded snapshot — fire it now that the
+                    // root rows are in. The lazy expand-to-hit walk then
+                    // proceeds via the normal `TreeFindResult` /
+                    // `TreeChildren` drivers.
+                    let pending = self
+                        .content_view_mut(view_index)
+                        .and_then(|cv| cv.find_pane_mut(pane_id))
+                        .and_then(|pane| pane.take_pending_tree_find());
+                    if let Some(query) = pending {
+                        if let Some(pane) = self
+                            .content_view_mut(view_index)
+                            .and_then(|cv| cv.find_pane_mut(pane_id))
+                        {
+                            pane.tree_find_begin(query.clone());
+                        }
+                        self.spawn_tree_find(
+                            view_index,
+                            pane_id,
+                            query,
+                            Self::TREE_FIND_DEFAULT_LIMIT,
+                        );
+                    }
                     // Reload may have shifted the row under the cursor onto a
                     // different item (e.g. mark_as_read sorts the read entry
                     // away). Refresh preview when the row's id no longer
@@ -4686,6 +4709,99 @@ impl App {
         }
     }
 
+    /// `:tree-find <Tab>[:<view>] <query>` — the tree-mode sibling of
+    /// `:focus-node`. Switches to the named content tab/sub-view, forces
+    /// a fresh reload (so out-of-process CLI mutations are in the
+    /// adapter's snapshot before the search runs), then drives a
+    /// server-side tree search and lazily expands to the first hit,
+    /// parking the cursor on it. Unlike `:focus-node` (synchronous, flat,
+    /// single-segment) this is asynchronous and walks the lazy-loaded
+    /// tree — the natural target for jumping into the adapterized Tasks
+    /// tab, whose ticket nodes sit several levels deep.
+    ///
+    /// The tab name may be double-quoted to allow spaces, e.g.
+    /// `:tree-find "Tasks (A)" id:<uuid>`. The query is adapter-defined;
+    /// the local task adapter additionally accepts an exact-id escape
+    /// `id:<uuid>` (used by scripted jumps that already resolved the
+    /// node id via the CLI).
+    ///
+    /// Modal error when:
+    ///   - the target tab is unknown or not a content tab
+    ///   - the named view is unknown for that tab
+    ///   - the active view isn't a tree (use `:focus-node` for flat views)
+    fn tree_find_command(&mut self, raw_args: &str) {
+        let (target, query) = split_leading_token(raw_args.trim());
+        let query = query.trim().to_string();
+        if target.is_empty() || query.is_empty() {
+            self.modal_message = Some(
+                ":tree-find expects <Tab>[:<view>] <query>, e.g. \
+                 :tree-find \"Tasks (A)\" id:<uuid>"
+                    .to_string(),
+            );
+            return;
+        }
+        let (tab_name, view_name) = match target.split_once(':') {
+            Some((t, v)) => (t.trim().to_string(), Some(v.trim().to_string())),
+            None => (target, None),
+        };
+        if tab_name.is_empty() {
+            self.modal_message = Some(":tree-find — empty tab name".to_string());
+            return;
+        }
+
+        let Some(tab_idx) = self
+            .content_views
+            .iter()
+            .position(|slot| slot.tab_name().eq_ignore_ascii_case(&tab_name))
+        else {
+            self.modal_message = Some(format!(
+                ":tree-find — '{tab_name}' is not a content tab (Taiga/Jira/Tasks/…)"
+            ));
+            return;
+        };
+
+        self.set_active_tab(Tab::Content(tab_idx));
+
+        let pane_id = {
+            let cv = match &mut self.content_views[tab_idx] {
+                ContentSlot::Working(cv) => cv,
+                ContentSlot::Broken { name, errors, .. } => {
+                    self.modal_message = Some(format!(
+                        ":tree-find — tab '{name}' is in an error state: {}",
+                        errors.first().cloned().unwrap_or_default()
+                    ));
+                    return;
+                }
+            };
+            if let Some(v) = view_name {
+                if let Err(available) = cv.switch_to_view_by_name(&v) {
+                    self.modal_message = Some(format!(
+                        ":tree-find — unknown view '{v}' for tab '{tab_name}' (available: {})",
+                        available.join(", ")
+                    ));
+                    return;
+                }
+            }
+            if !cv.active_view_is_tree() {
+                self.modal_message = Some(
+                    ":tree-find — the active view isn't a tree \
+                     (use :focus-node for flat views)"
+                        .to_string(),
+                );
+                return;
+            }
+            let pane_id = cv.active_pane_id();
+            cv.active_pane_mut().queue_pending_tree_find(query);
+            pane_id
+        };
+
+        // Force a fresh reload; the queued query fires when the load
+        // lands (see the `LoadMsg::ContentItems` handler), so the search
+        // runs against an up-to-date snapshot — parity with the legacy
+        // `:reload-tasks` that preceded `:focus-task`.
+        self.spawn_content_load(tab_idx, pane_id);
+    }
+
     /// `:query apply [-t <Tab>[:<view>]] <name>` — activate the saved
     /// query `<name>` on a content tab, synchronously reload so a
     /// subsequent command (e.g. `:focus-node`) in the same command list
@@ -5167,6 +5283,26 @@ fn parse_query_apply_args(
         break;
     }
     Ok((vars, target, rest.to_string()))
+}
+
+/// Split off a leading token from `s`, honouring double quotes so a
+/// token may itself contain spaces — e.g. `"Tasks (A)" id:42` →
+/// (`Tasks (A)`, `id:42`). Unquoted tokens split on the first
+/// whitespace run. Used by `:tree-find` to address a tab whose display
+/// name contains spaces. Returns (token, remainder).
+fn split_leading_token(s: &str) -> (String, &str) {
+    let s = s.trim_start();
+    if let Some(rest) = s.strip_prefix('"') {
+        return match rest.find('"') {
+            Some(end) => (rest[..end].to_string(), rest[end + 1..].trim_start()),
+            // Unterminated quote: take the rest as the whole token.
+            None => (rest.to_string(), ""),
+        };
+    }
+    match s.split_once(char::is_whitespace) {
+        Some((tok, rest)) => (tok.to_string(), rest.trim_start()),
+        None => (s.to_string(), ""),
+    }
 }
 
 fn format_focus_error(e: &crate::views::focus_node::FocusError) -> String {
@@ -7991,6 +8127,21 @@ impl App {
             return;
         }
 
+        if args[0] == "tree-find" {
+            // Everything after the command name is target + query; the
+            // tab name may be quoted and the query may contain `:` etc,
+            // so hand the whole rest off to `tree_find_command` unsplit.
+            let rest = cmd.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+            if rest.trim().is_empty() {
+                self.modal_message = Some(
+                    ":tree-find expects <Tab>[:<view>] <query>".to_string(),
+                );
+                return;
+            }
+            self.tree_find_command(rest.trim());
+            return;
+        }
+
         if args[0] == "reload-tasks" {
             if args.len() > 1 {
                 self.modal_message =
@@ -8957,5 +9108,40 @@ fn load_content_views(
     }
 
     slots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_leading_token;
+
+    #[test]
+    fn split_leading_token_quoted_tab_name_with_spaces() {
+        // The `:tree-find "Tasks (A)" id:42` case: a quoted tab name
+        // keeps its spaces, the rest is the query.
+        let (tok, rest) = split_leading_token(r#""Tasks (A)" id:42"#);
+        assert_eq!(tok, "Tasks (A)");
+        assert_eq!(rest, "id:42");
+    }
+
+    #[test]
+    fn split_leading_token_unquoted_splits_on_first_space() {
+        let (tok, rest) = split_leading_token("Taiga:items /ref|acme#42");
+        assert_eq!(tok, "Taiga:items");
+        assert_eq!(rest, "/ref|acme#42");
+    }
+
+    #[test]
+    fn split_leading_token_single_token_has_empty_remainder() {
+        let (tok, rest) = split_leading_token("Trackings");
+        assert_eq!(tok, "Trackings");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn split_leading_token_unterminated_quote_takes_whole_rest() {
+        let (tok, rest) = split_leading_token(r#""Tasks (A"#);
+        assert_eq!(tok, "Tasks (A");
+        assert_eq!(rest, "");
+    }
 }
 
