@@ -2574,10 +2574,28 @@ impl ContentPane {
             self.rebuild_table(view_defs);
         }
         if requests.is_empty() {
-            // Nothing left in flight — the cascade has reached
-            // `expand_depth` everywhere (or had nothing to do). Disarm.
-            if let Some(tree) = self.tree.as_mut() {
-                tree.auto_expand_pending = false;
+            // This pump emitted no new load — but the cascade may only
+            // disarm once nothing is still *in flight*. An expanded path
+            // whose children haven't landed yet will fire another pump
+            // when they arrive, and that pump can reveal a deeper level to
+            // expand. Disarming now (just because *this* arrival, e.g. a
+            // leaf on one branch, had no follow-up) strands every level
+            // below any sibling branch still loading — the "tree only opens
+            // the top two levels" bug. Stay armed until the last in-flight
+            // expansion has resolved.
+            let in_flight = self
+                .tree
+                .as_ref()
+                .map(|tree| {
+                    tree.expanded
+                        .iter()
+                        .any(|p| !tree.cache.get(p).map(|s| s.loaded).unwrap_or(false))
+                })
+                .unwrap_or(false);
+            if !in_flight {
+                if let Some(tree) = self.tree.as_mut() {
+                    tree.auto_expand_pending = false;
+                }
             }
         }
         requests
@@ -13418,6 +13436,163 @@ mod tests {
             .map(|e| (e.node.id.clone(), e.depth))
             .collect();
         assert!(depths.contains(&("leaf".to_string(), 3)), "{depths:?}");
+    }
+
+    /// Mirror trackings.yaml `tree`: a heterogeneous group-bucket root
+    /// (`tracking:tree-group`) over a recursive task forest
+    /// (`tracking:tree-item`/`tracking:tree-item`), with `group_headers`
+    /// and `expand_depth: all`. Differs from `uniform_recursive_config`
+    /// in that the ROOT type is NOT the recursive child type.
+    fn grouped_recursive_tree_config() -> ViewFileConfig {
+        let mut sub = hchild(
+            "subtasks",
+            "tracking:tree-item",
+            Some("name"),
+            vec![hcol("name"), dcol("val")],
+            vec![],
+        );
+        sub.recursive = true;
+        let mut cfg = uniform_recursive_config();
+        cfg.views[0].node_type = "tracking:tree-group".into();
+        cfg.views[0].children = vec![sub];
+        cfg.views[0].expand_depth = Some(ExpandDepth::All);
+        cfg.views[0].group_headers = Some(GroupHeadersDef::default());
+        cfg
+    }
+
+    /// A tree node with an explicit `has_children` flag (the trackings
+    /// adapter always sets it, unlike the `tnode_val` default of `None`).
+    fn hc_node(id: &str, ty: &str, has_children: bool) -> NodeSummary {
+        let mut n = tnode_val(id, id, "V");
+        n.node_type.type_id = ty.into();
+        n.has_children = Some(has_children);
+        n
+    }
+
+    #[test]
+    fn grouped_recursive_tree_cascade_expands_below_depth_two() {
+        // Repro for "Trackings (A) tree only opens the top two levels":
+        // bucket(0) → t1(1) → t2(2) → t3(3, leaf). The cascade must keep
+        // descending past depth 2 exactly like the uniform tree does.
+        let config = grouped_recursive_tree_config();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![hc_node("treegrp:started:day:2026-06-09", "tracking:tree-group", true)],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        let chain = [
+            ("treegrp:started:day:2026-06-09", "tree:s:t1", true),
+            ("tree:s:t1", "tree:s:t2", true),
+            ("tree:s:t2", "tree:s:t3", false),
+        ];
+        for (parent, child, child_has) in chain {
+            let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+            assert_eq!(reqs.len(), 1, "expand request for `{parent}`: {reqs:?}");
+            let ViewRequest::ExpandTreeNode {
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                ..
+            } = &reqs[0]
+            else {
+                panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+            };
+            assert_eq!(parent_node_id, parent, "cascade expanding {parent}");
+            assert_eq!(child_node_type, "tracking:tree-item");
+            view.apply_tree_children(
+                pane_id,
+                parent_path.clone(),
+                vec![hc_node(child, "tracking:tree-item", child_has)],
+                None,
+                false,
+                "tracking:tree-item".into(),
+            );
+        }
+
+        let depths: Vec<(String, usize)> = view
+            .active_pane()
+            .tree
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| (e.node.id.clone(), e.depth))
+            .collect();
+        assert!(depths.contains(&("tree:s:t2".to_string(), 2)), "depth-2 task: {depths:?}");
+        assert!(depths.contains(&("tree:s:t3".to_string(), 3)), "depth-3 task: {depths:?}");
+
+        // … and they RENDER (group_headers maps the bucket to a header row;
+        // the three task rows must all survive into the table).
+        let view_defs = view.view_defs.clone();
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        assert_eq!(rows.len(), 4, "bucket header + t1 + t2 + t3 all render: {} rows", rows.len());
+    }
+
+    #[test]
+    fn cascade_stays_armed_while_a_sibling_branch_is_still_in_flight() {
+        // Live repro for "Trackings (A) tree only opens the top two levels":
+        // the `expand_depth: all` cascade is pumped once per async
+        // `TreeChildren` arrival (drive_tree_auto_expand). With two sibling
+        // branches expanding concurrently, one branch can bottom out (a leaf
+        // lands) WHILE the other is still in flight. The pump for that leaf
+        // finds no new candidate that round — but it must NOT disarm: the
+        // in-flight sibling will reveal deeper levels once its children land.
+        //
+        //   root → t1 → t1a → L1(leaf)
+        //        → t2 → t2a → t2b → L2(leaf)
+        let mut config = uniform_recursive_config();
+        config.views[0].expand_depth = Some(ExpandDepth::All);
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![hc_node("root", "mock:task", true)],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // The live loop calls pending_auto_expand_requests once per arrival,
+        // then dispatches the children of exactly one expand request.
+        let pump = |view: &mut ContentView, parent_path: Vec<String>, kids: Vec<NodeSummary>| {
+            let _ = view.pending_auto_expand_requests(view_index, pane_id);
+            view.apply_tree_children(pane_id, parent_path, kids, None, false, "mock:task".into());
+        };
+
+        // root → [t1, t2]
+        pump(&mut view, vec!["root".into()], vec![hc_node("t1", "mock:task", true), hc_node("t2", "mock:task", true)]);
+        // t1 → [t1a]
+        pump(&mut view, vec!["root".into(), "t1".into()], vec![hc_node("t1a", "mock:task", true)]);
+        // t2 → [t2a]   (t1a now queued for expansion, t2a about to be)
+        pump(&mut view, vec!["root".into(), "t2".into()], vec![hc_node("t2a", "mock:task", true)]);
+        // t1a → [L1 leaf]   ← this pump finds no NEW candidate (t2a is
+        // expanded-but-in-flight, L1 is a leaf). The cascade must stay armed.
+        pump(&mut view, vec!["root".into(), "t1".into(), "t1a".into()], vec![hc_node("L1", "mock:task", false)]);
+
+        assert!(
+            view.active_pane().tree.as_ref().unwrap().auto_expand_pending,
+            "cascade disarmed while the t2 branch is still in flight — deeper \
+             levels of t2 will never auto-expand",
+        );
+
+        // t2a → [t2b]   if still armed, the next pump expands t2b.
+        pump(&mut view, vec!["root".into(), "t2".into(), "t2a".into()], vec![hc_node("t2b", "mock:task", true)]);
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        assert!(
+            reqs.iter().any(|r| matches!(r, ViewRequest::ExpandTreeNode { parent_node_id, .. } if parent_node_id == "t2b")),
+            "t2b must still auto-expand: {reqs:?}",
+        );
     }
 
     #[test]

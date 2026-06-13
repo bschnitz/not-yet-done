@@ -2336,6 +2336,54 @@ mod tests {
     }
 
     #[test]
+    fn grouped_subtree_reports_has_children_three_levels_deep() {
+        // A → B → C, only C tracked (45 min on the 9th). The bucket's
+        // folded subtree must report `has_children` correctly at every
+        // level so the engine's `expand_depth: all` cascade keeps
+        // descending past the top two — the "Trackings (A) tree only
+        // opens two levels" repro.
+        let task_a = Uuid::from_u128(10);
+        let task_b = Uuid::from_u128(20);
+        let task_c = Uuid::from_u128(30);
+        let t1 = Uuid::from_u128(1);
+        let tm = task_map(&[
+            (task_a, "A", None),
+            (task_b, "B", Some(task_a)),
+            (task_c, "C", Some(task_b)),
+        ]);
+        let mut by_id = HashMap::new();
+        by_id.insert(t1, row(tracking_on(t1, task_c, "2026-06-09", 45, true), "C", vec!["A", "B"]));
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![t1],
+            tree: Arc::new(TreeProjection::default()),
+            task_map: tm,
+            built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
+        };
+
+        let scope = day_scope("2026-06-09");
+        let members = snapshot.bucket_members(None, &scope);
+        let tree = snapshot.tree_for(Some(&members));
+
+        let roots = tree.child_summaries(None, Some(&scope));
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].label, "A");
+        assert_eq!(roots[0].has_children, Some(true), "A has visible child B");
+
+        let kids_a = tree.child_summaries(Some(task_a), Some(&scope));
+        assert_eq!(kids_a.len(), 1);
+        assert_eq!(kids_a[0].label, "B");
+        assert_eq!(kids_a[0].has_children, Some(true), "B has visible child C");
+
+        let kids_b = tree.child_summaries(Some(task_b), Some(&scope));
+        assert_eq!(kids_b.len(), 1);
+        assert_eq!(kids_b[0].label, "C");
+        assert_eq!(kids_b[0].has_children, Some(false), "C is a leaf");
+    }
+
+    #[test]
     fn unfiltered_projection_memoizes_per_scope() {
         let task_a = Uuid::from_u128(0xA);
         let t1 = Uuid::from_u128(1);
