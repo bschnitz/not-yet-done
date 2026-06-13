@@ -1078,17 +1078,24 @@ async fn invoke_restore_all(handle: &CoreHandle, candidates: &[Uuid]) -> ActionD
     }
 }
 
-/// `invoke_action("toggle-tracking")` — flip time tracking for the row's
-/// task. Reuses the task adapter's [`apply_tracking`](crate::task::apply_tracking)
-/// so the host's exclusivity policy and `Tracking*` events stay identical
-/// across both tabs. State is read live, never from the (possibly stale)
-/// snapshot marker.
-async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
+/// Flip time tracking for `task_id` and return the **new** tracked state
+/// (`true` = now tracking). Reads the current state live (never from the
+/// possibly-stale snapshot) and reuses the task adapter's
+/// [`apply_tracking`](crate::task::apply_tracking) so the host's
+/// exclusivity policy and `Tracking*` events stay identical across both
+/// tabs. The emitted event drives the bridge's in-place row patches (M9).
+async fn toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> bool {
     let is_tracked = matches!(
         handle.tracking_repo.find_active_for_task(task_id).await,
         Ok(Some(_))
     );
-    crate::task::apply_tracking(handle, task_id, !is_tracked).await;
+    let now_tracked = !is_tracked;
+    crate::task::apply_tracking(handle, task_id, now_tracked).await;
+    now_tracked
+}
+
+async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
+    toggle_tracking(handle, task_id).await;
     // No `Reload`: the start/stop emits a `Tracking*` event that the bridge
     // turns into an in-place row patch (M9), so a deep tree never rebuilds
     // on `s`. A full structural refresh is the explicit `r`.
@@ -1468,7 +1475,31 @@ impl Node for TrackingTreeNode {
     }
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
-            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            // Unlike the flat list (patched by the bridge via the tracking
+            // UUID) and the Tasks (A) tree (plain task UUID), a tree row's
+            // id is scope-encoded (`tree:[<scope>:]<uuid>`) — no bridge
+            // patch addresses it. So the node patches *itself*: flip the
+            // marker on its own (view-correct) summary and return it as a
+            // `PatchRow`, sparing the deep tree a full rebuild on `s`. The
+            // own/cumulated durations stay at their pre-toggle bake; the
+            // explicit `r` recomputes ancestor aggregates.
+            "toggle-tracking" => {
+                let now_tracked = toggle_tracking(&self.handle, self.task_id).await;
+                let projection = self.snapshot.unfiltered_projection(self.scope.as_ref());
+                match projection.by_id.get(&self.task_id) {
+                    Some(row) => {
+                        let mut summary =
+                            projection.summary(self.task_id, row, self.scope.as_ref());
+                        summary
+                            .metadata
+                            .set_field("marker", if now_tracked { "⏱" } else { "" });
+                        ActionDispatch::PatchRow(summary)
+                    }
+                    // Row vanished from the snapshot (raced a structural
+                    // change) — nothing to patch; the next `r` resyncs.
+                    None => ActionDispatch::Noop,
+                }
+            }
             _ => ActionDispatch::Noop,
         })
     }
@@ -1862,6 +1893,53 @@ mod tests {
             visible_cache: Default::default(),
             fold_cache: Default::default(),
         })
+    }
+
+    #[test]
+    fn toggle_patch_summary_flips_marker_on_scope_encoded_tree_id() {
+        // The tree row's `toggle-tracking` builds a `PatchRow` summary from
+        // its own (view-correct) projection summary with the marker flipped
+        // — the domain-event bridge can't address a `tree:`-id row, so the
+        // node patches itself. This exercises that summary construction
+        // (id shape + marker flip) without the DB-backed toggle.
+        let task = Uuid::from_u128(42);
+        let mut by_id = HashMap::new();
+        by_id.insert(
+            task,
+            TreeTaskRow {
+                description: "Write report".to_string(),
+                own_secs: 600,
+                cumulated_secs: 600,
+                active: false, // pre-toggle: not yet tracking
+            },
+        );
+        let mut children = HashMap::new();
+        children.insert(None, vec![task]);
+        let projection = TreeProjection { by_id, children };
+
+        // Ungrouped: plain `tree:<uuid>` id, marker flipped on.
+        let row = projection.by_id.get(&task).unwrap();
+        let mut summary = projection.summary(task, row, None);
+        summary.metadata.set_field("marker", "⏱");
+        assert_eq!(summary.id, format!("tree:{task}"));
+        let marker = summary
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "marker")
+            .unwrap();
+        assert_eq!(marker.value, "⏱");
+
+        // Flipping off writes the empty marker back.
+        let mut summary = projection.summary(task, row, None);
+        summary.metadata.set_field("marker", "");
+        let marker = summary
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "marker")
+            .unwrap();
+        assert_eq!(marker.value, "");
     }
 
     #[test]

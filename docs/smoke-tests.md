@@ -3602,13 +3602,21 @@ der Toggle gibt `Noop` zurück und der Adapter-Bridge patcht nur die
 betroffene Zeile in place (M9), statt einen vollen Reload anzustoßen. Ein
 echter struktureller Refresh ist explizit `r`.
 
+Nachtrag: Die getoggelte **Tree-Zeile** aktualisiert ihren `⏱`-Marker
+trotzdem sofort. Die Bridge-Patches adressieren Zeilen über die nackte
+Tracking-/Task-UUID; eine Tree-Zeile hat aber eine scope-kodierte
+`tree:<…>`-ID, die kein Bridge-Patch trifft. Deshalb gibt der Tree-Knoten
+selbst einen `PatchRow`-Dispatch mit seiner eigenen, view-korrekten ID und
+geflipptem Marker zurück — die Zeile patcht sich selbst, ohne Neuaufbau.
+
 > Beim Smoke-Test **kein** echtes Tracking auf echten Zeilen togglen —
 > eine Wegwerf-Aufgabe anlegen und auf der tracken.
 
 - [ ] Trackings (A) → Tree, tiefer/voll aufgeklappter Baum: `s` auf einer
       Zeile startet/stoppt das Tracking **ohne** sichtbaren Neuaufbau des
       Baums — kein Zusammenklappen, kurzes Eingabe-Freeze entfällt, die
-      Selektion bleibt stehen.
+      Selektion bleibt stehen. Der `⏱`-Marker der getoggelten Zeile flippt
+      dabei sofort (an beim Start, weg beim Stopp).
 - [ ] Nach `r` (echter Reload) sind die strukturellen Effekte sichtbar
       (neuer Tracking-Eintrag in der flachen Liste, kumulierte Sekunden der
       Vorfahren im Tree aktualisiert).
