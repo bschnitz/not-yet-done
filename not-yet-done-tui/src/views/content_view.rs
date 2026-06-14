@@ -3116,13 +3116,33 @@ impl ContentPane {
                         // (the cell's default fg).
                         let connector_chars = connector.chars().count();
                         let text = format!("{connector}{leaf}{}", entry.node.label);
+                        let mut spans: Vec<StyledSpan> = Vec::new();
                         if connector_chars > 0 {
-                            CellContent::text(text).with_spans(vec![StyledSpan {
+                            spans.push(StyledSpan {
                                 range: 0..connector_chars,
                                 style_id: TREE_CONNECTOR_STYLE_ID,
-                            }])
-                        } else {
+                            });
+                        }
+                        // Fuzzy-match highlight (native Tasks-tree parity): tag
+                        // the matched runs in the *label* so the filtered
+                        // substring stands out. Ranges are computed against the
+                        // bare label and shifted past the connector + leaf glyph
+                        // into the full-cell coordinate; the engine projects /
+                        // clamps them through truncation like any span.
+                        if !self.table.filter_text.is_empty() {
+                            let prefix_chars = connector_chars + leaf.chars().count();
+                            for r in fuzzy_label_ranges(&entry.node.label, &self.table.filter_text)
+                            {
+                                spans.push(StyledSpan {
+                                    range: (r.start + prefix_chars)..(r.end + prefix_chars),
+                                    style_id: FUZZY_MATCH_STYLE_ID,
+                                });
+                            }
+                        }
+                        if spans.is_empty() {
                             CellContent::text(text)
+                        } else {
+                            CellContent::text(text).with_spans(spans)
                         }
                     } else if !entry.is_more_placeholder
                         && entry_declares(col.key.as_str())
@@ -4215,6 +4235,16 @@ impl ContentPane {
             }
 
             self.filtered_indices = order.clone();
+            // Flat-mode fuzzy-match highlight: only the searched columns get a
+            // highlight (an empty `fuzzy_filter_fields` searches everything, so
+            // every column is eligible), so an incidental match in an unrelated
+            // column can't paint a misleading highlight.
+            let filter_text = self.table.filter_text.clone();
+            let highlight_col = |key: &str| -> bool {
+                !filter_text.is_empty()
+                    && (self.fuzzy_filter_fields.is_empty()
+                        || self.fuzzy_filter_fields.iter().any(|f| f == key))
+            };
             order
                 .iter()
                 .enumerate()
@@ -4226,7 +4256,22 @@ impl ContentPane {
                             let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
                             row = row.cell(&col.key, icon);
                         } else {
-                            row = row.cell(&col.key, cell_content_for(item, col, now));
+                            let mut content = cell_content_for(item, col, now);
+                            if highlight_col(&col.key) {
+                                let ranges = fuzzy_label_ranges(&content.text, &filter_text);
+                                if !ranges.is_empty() {
+                                    content = content.with_spans(
+                                        ranges
+                                            .into_iter()
+                                            .map(|r| StyledSpan {
+                                                range: r,
+                                                style_id: FUZZY_MATCH_STYLE_ID,
+                                            })
+                                            .collect(),
+                                    );
+                                }
+                            }
+                            row = row.cell(&col.key, content);
                         }
                     }
                     row
@@ -4320,19 +4365,34 @@ impl ContentPane {
                     .enumerate()
                     .map(|(i, fitted)| {
                         if tree_label_col == Some(i) {
-                            // Connector char-length = end of the cell's first
-                            // projected highlight range (the connector span).
-                            // Truncation clamps it for free.
-                            let conn = highlights
-                                .get(i)
-                                .and_then(|r| r.first())
+                            // The label cell carries the connector span (always
+                            // anchored at char 0) plus any fuzzy-match spans
+                            // (always past the connector, so start > 0). Both
+                            // arrive here as bare projected ranges — the style
+                            // id was dropped by the engine — so split them by
+                            // position: the range starting at 0 is the
+                            // connector, the rest are matches. Truncation clamps
+                            // every range for free.
+                            let cell_ranges = highlights.get(i).cloned().unwrap_or_default();
+                            let conn = cell_ranges
+                                .iter()
+                                .find(|r| r.start == 0)
                                 .map(|r| r.end)
                                 .unwrap_or(0);
-                            return TableWidgetCell::from_segments(tree_label_cell_segments(
-                                &fitted,
-                                conn,
-                                TREE_CONNECTOR_STYLE_ID,
-                            ));
+                            let matches: Vec<std::ops::Range<usize>> = cell_ranges
+                                .iter()
+                                .filter(|r| r.start > 0)
+                                .cloned()
+                                .collect();
+                            return TableWidgetCell::from_segments(
+                                tree_label_segments_with_highlights(
+                                    &fitted,
+                                    conn,
+                                    TREE_CONNECTOR_STYLE_ID,
+                                    &matches,
+                                    FUZZY_MATCH_STYLE_ID,
+                                ),
+                            );
                         }
                         match path_separators.get(i).and_then(|s| s.as_deref()) {
                             Some(sep) => TableWidgetCell::from_segments(path_cell_segments(
@@ -4340,7 +4400,18 @@ impl ContentPane {
                                 sep,
                                 PATH_SEPARATOR_STYLE_ID,
                             )),
-                            None => TableWidgetCell::plain(fitted),
+                            None => {
+                                // Flat-mode fuzzy-match highlight: cells outside
+                                // the tree label carry their match ranges as
+                                // plain projected ranges (no connector), painted
+                                // by the engine's `Highlight` style.
+                                let hl = highlights.get(i).cloned().unwrap_or_default();
+                                if hl.is_empty() {
+                                    TableWidgetCell::plain(fitted)
+                                } else {
+                                    TableWidgetCell::with_highlights(fitted, hl)
+                                }
+                            }
                         }
                     })
                     .collect();
@@ -8179,6 +8250,14 @@ const GROUP_HEADER_STYLE_ID: usize = 2;
 /// by `content_style_map`. Kept in sync with the `StyleMap::new(...)` there.
 const TREE_CONNECTOR_STYLE_ID: usize = 3;
 
+/// StyleMap slot for fuzzy-match runs inside the `tree_label` column (the box
+/// connector uses [`TREE_CONNECTOR_STYLE_ID`], so the matched substring needs
+/// its own slot to render apart from it). Painted in the theme `accent` —
+/// matching the native Tasks tree's match highlight and the engine's
+/// `Highlight` style used for non-tree cells. Kept in sync with the
+/// `StyleMap::new(...)` in `content_style_map`.
+const FUZZY_MATCH_STYLE_ID: usize = 4;
+
 /// Split an already-fitted tree-label cell into a styled connector segment +
 /// plain label. The first `connector_chars` characters (the `├──`/`└──`/`│`
 /// box prefix and any `▶`/`▼` expand arrow) carry `connector_style_id`; the
@@ -8206,6 +8285,104 @@ fn tree_label_cell_segments(
         segments.push((rest.to_string(), None));
     }
     segments
+}
+
+/// Like [`tree_label_cell_segments`], but additionally splits the label part
+/// (everything after the connector prefix) at the fuzzy-match `highlights` so
+/// matched runs carry `highlight_style_id` (painted in the theme's match color,
+/// the native Tasks tree's underline-less accent). `highlights` are **char**
+/// ranges into the *fitted* cell (already projected / clamped by the table
+/// engine), parallel to and disjoint from the connector run. Falls back to the
+/// plain connector split when there is nothing to highlight, so the
+/// non-filtering hot path stays identical.
+fn tree_label_segments_with_highlights(
+    fitted: &str,
+    connector_chars: usize,
+    connector_style_id: usize,
+    highlights: &[std::ops::Range<usize>],
+    highlight_style_id: usize,
+) -> Vec<(String, Option<usize>)> {
+    if highlights.is_empty() {
+        return tree_label_cell_segments(fitted, connector_chars, connector_style_id);
+    }
+    let chars: Vec<char> = fitted.chars().collect();
+    let len = chars.len();
+    let conn = connector_chars.min(len);
+    let take = |range: std::ops::Range<usize>| -> String { chars[range].iter().collect() };
+
+    let mut segments: Vec<(String, Option<usize>)> = Vec::new();
+    if conn > 0 {
+        segments.push((take(0..conn), Some(connector_style_id)));
+    }
+    // Walk the label remainder, emitting plain runs interleaved with the
+    // matched runs. `highlights` arrive sorted and non-overlapping (merged at
+    // build time, order preserved through the engine's projection); clamp each
+    // into the post-connector window so a connector-overlapping range can't
+    // double-style the prefix.
+    let mut cursor = conn;
+    for r in highlights {
+        let start = r.start.max(conn).min(len);
+        let end = r.end.max(conn).min(len);
+        if start >= end {
+            continue;
+        }
+        if start > cursor {
+            segments.push((take(cursor..start), None));
+        }
+        segments.push((take(start..end), Some(highlight_style_id)));
+        cursor = end;
+    }
+    if cursor < len {
+        segments.push((take(cursor..len), None));
+    }
+    if segments.is_empty() {
+        segments.push((fitted.to_string(), None));
+    }
+    segments
+}
+
+/// Char-index ranges within `label` that match the active fuzzy `filter_text`.
+///
+/// Mirrors the native Tasks tree highlight ([`fill_highlight_ranges`] in
+/// `ui::tasks::highlight`): each whitespace-separated token is matched against
+/// the label with `fuzzy_indices`, all matched char indices are unioned, and
+/// consecutive indices collapse into contiguous ranges. Empty when the filter
+/// is empty or the label itself carries no match (the row may have survived
+/// the filter via another field — then nothing in the label is highlighted,
+/// exactly as upstream).
+fn fuzzy_label_ranges(label: &str, filter_text: &str) -> Vec<std::ops::Range<usize>> {
+    use fuzzy_matcher::FuzzyMatcher;
+    let filter = filter_text.trim();
+    if filter.is_empty() {
+        return Vec::new();
+    }
+    let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+    let mut indices: Vec<usize> = Vec::new();
+    for token in filter.split_whitespace() {
+        if let Some((_score, char_indices)) = matcher.fuzzy_indices(label, token) {
+            indices.extend(char_indices);
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    merge_consecutive_char_indices(&indices)
+}
+
+/// Collapse a sorted list of matched char indices into contiguous ranges:
+/// `[0, 1, 2, 5, 6]` → `[0..3, 5..7]`. Local mirror of the helper in
+/// `ui::tasks::highlight` (kept private there).
+fn merge_consecutive_char_indices(indices: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut iter = indices.iter().peekable();
+    while let Some(&start) = iter.next() {
+        let mut end = start + 1;
+        while iter.peek().map(|&&next| next == end).unwrap_or(false) {
+            iter.next();
+            end += 1;
+        }
+        ranges.push(start..end);
+    }
+    ranges
 }
 
 /// Resolved per-view tree drawing options (see
@@ -9069,12 +9246,14 @@ fn content_col_styles(columns: &[ColumnDef], t: &Theme) -> Vec<Style> {
 /// - slot 0 — sort-mode dim overlay,
 /// - slot 1 ([`PATH_SEPARATOR_STYLE_ID`]) — `kind: path` separator,
 /// - slot 2 ([`GROUP_HEADER_STYLE_ID`]) — group headers + grand-total footer,
-/// - slot 3 ([`TREE_CONNECTOR_STYLE_ID`]) — tree connector glyphs + arrows.
+/// - slot 3 ([`TREE_CONNECTOR_STYLE_ID`]) — tree connector glyphs + arrows,
+/// - slot 4 ([`FUZZY_MATCH_STYLE_ID`]) — fuzzy-match runs in the tree label.
 ///
-/// The group-header and tree-connector slots are always present (harmless when
-/// nothing is grouped / the view isn't a tree) so the same map serves every
-/// render path. `tree_connector` is resolved per view (the caller passes the
-/// view's `tree_connector_style` color, or the theme default).
+/// The group-header, tree-connector, and fuzzy-match slots are always present
+/// (harmless when nothing is grouped / the view isn't a tree / no filter is
+/// active) so the same map serves every render path. `tree_connector` is
+/// resolved per view (the caller passes the view's `tree_connector_style`
+/// color, or the theme default).
 fn content_style_map(t: &Theme, tree_connector: ratatui::style::Color) -> StyleMap {
     StyleMap::new(vec![
         Style::default().fg(t.text_dim()),
@@ -9085,6 +9264,7 @@ fn content_style_map(t: &Theme, tree_connector: ratatui::style::Color) -> StyleM
             .fg(t.group_header())
             .add_modifier(Modifier::BOLD),
         Style::default().fg(tree_connector),
+        Style::default().fg(t.accent()).add_modifier(Modifier::BOLD),
     ])
 }
 
@@ -10693,6 +10873,73 @@ mod tests {
         assert_eq!(
             tree_label_cell_segments("└─", 9, TREE_CONNECTOR_STYLE_ID),
             vec![("└─".to_string(), Some(TREE_CONNECTOR_STYLE_ID))],
+        );
+    }
+
+    #[test]
+    fn fuzzy_label_ranges_merges_consecutive_and_unions_tokens() {
+        // Contiguous match collapses into one range.
+        assert_eq!(fuzzy_label_ranges("hello world", "hello"), vec![0..5]);
+        // No filter → no ranges.
+        assert_eq!(
+            fuzzy_label_ranges("hello", "   "),
+            Vec::<std::ops::Range<usize>>::new(),
+        );
+        // Two whitespace-separated tokens union their matched runs.
+        let ranges = fuzzy_label_ranges("alpha beta", "alpha beta");
+        assert_eq!(ranges, vec![0..5, 6..10]);
+        // A label with no match (row survived via another field) → empty.
+        assert_eq!(
+            fuzzy_label_ranges("nothing", "zzz"),
+            Vec::<std::ops::Range<usize>>::new(),
+        );
+    }
+
+    #[test]
+    fn tree_label_segments_split_connector_and_highlight() {
+        // Connector (0..4) + a fuzzy match inside the label ("Child" at chars
+        // 4..9, highlight the "hi" run at 5..7) → three segments: connector,
+        // plain lead, highlighted run, plain tail.
+        let segs = tree_label_segments_with_highlights(
+            "└── Child ",
+            4,
+            TREE_CONNECTOR_STYLE_ID,
+            &[5..7],
+            FUZZY_MATCH_STYLE_ID,
+        );
+        assert_eq!(
+            segs,
+            vec![
+                ("└── ".to_string(), Some(TREE_CONNECTOR_STYLE_ID)),
+                ("C".to_string(), None),
+                ("hi".to_string(), Some(FUZZY_MATCH_STYLE_ID)),
+                ("ld ".to_string(), None),
+            ],
+        );
+        // No highlights → falls back to the plain connector split.
+        assert_eq!(
+            tree_label_segments_with_highlights(
+                "└── Child ",
+                4,
+                TREE_CONNECTOR_STYLE_ID,
+                &[],
+                FUZZY_MATCH_STYLE_ID,
+            ),
+            tree_label_cell_segments("└── Child ", 4, TREE_CONNECTOR_STYLE_ID),
+        );
+        // Zero connector (root leaf) + a match at the very start of the label.
+        assert_eq!(
+            tree_label_segments_with_highlights(
+                "Root ",
+                0,
+                TREE_CONNECTOR_STYLE_ID,
+                &[0..4],
+                FUZZY_MATCH_STYLE_ID,
+            ),
+            vec![
+                ("Root".to_string(), Some(FUZZY_MATCH_STYLE_ID)),
+                (" ".to_string(), None),
+            ],
         );
     }
 
