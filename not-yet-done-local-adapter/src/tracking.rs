@@ -665,6 +665,29 @@ impl TrackingSnapshot {
         Ok(Subtree { items, page: None })
     }
 
+    /// The id of the group bucket the **current instant** falls into for a
+    /// grouped tree under `spec` — the [`ContentAdapter::bucket_for_now`]
+    /// answer (M9 now-bucket refresh). Resolves to the bucket of the
+    /// *youngest* tracking (max `started_at`): a start mints the newest
+    /// interval and a stop freezes it, so the youngest is the one a toggle
+    /// just shifted, and its start day is the bucket the row actually lives in
+    /// (a tracking spanning midnight files under its start, not "today").
+    /// Computed with the **same** [`bucket_raw_value`] + [`grouping::group_key`]
+    /// the bucket level uses, so the returned `treegrp:` id always matches a
+    /// real bucket row when one exists. `None` when there are no trackings.
+    fn bucket_for_now(&self, spec: &GroupSpec) -> Option<String> {
+        let row = self
+            .by_id
+            .values()
+            .max_by_key(|r| r.tracking.started_at)?;
+        let scope = BucketScope {
+            column: spec.column.clone(),
+            bucket: spec.bucket,
+            key: grouping::group_key(&bucket_raw_value(row, &spec.column), spec.bucket),
+        };
+        Some(format!("{GROUP_ID_PREFIX}{}", scope.encode()))
+    }
+
     /// The tracking ids that fall into `scope`'s bucket, optionally
     /// intersected with a saved-query `filter`. This is what a group node's
     /// subtree re-folds from.
@@ -1614,13 +1637,18 @@ impl Node for TrackingTreeNode {
     }
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
-            // Reload like every other view: flipping a marker in place can't
-            // express the re-folded own/cumulated durations and ancestor
-            // aggregates a toggle produces, and (since `supports_eager_subtree`)
-            // the reload renews the whole expanded tree in one `list_subtree`
-            // call rather than the per-node cascade that once made this too
-            // costly to do on `s`.
-            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            // Toggle, then let the snapshot reload + `NowAnchored` the bridge
+            // emits drive the refresh: the frontend reloads only the bucket
+            // `bucket_for_now` resolves (the one this task's interval lands
+            // in), not the whole grouped forest. Returning `Reload` here would
+            // rebuild every bucket — exactly the cost the now-bucket path
+            // avoids. The flat/condensed entry node keeps `Reload`
+            // (`invoke_toggle_tracking`); they have no per-bucket fold to
+            // localise, so a full pane reload is already cheap there.
+            "toggle-tracking" => {
+                toggle_tracking(&self.handle, self.task_id).await;
+                ActionDispatch::Noop
+            }
             _ => ActionDispatch::Noop,
         })
     }
@@ -1668,12 +1696,13 @@ fn announce_live_interval(
 /// - `TrackingStarted`/`Stopped` → a tracking's running marker flips and (on
 ///   a stop) its duration freezes, but the task forest's *shape* is
 ///   unchanged. Reload the in-memory snapshot (so `live_rows` and a later
-///   `r` are fresh), re-pace the live timer, and **patch only the affected
-///   entry row in place** (M9, [`publish_row_patches`]) instead of a coarse
-///   [`Invalidation::All`] — a deep, fully-expanded tree must not rebuild on
-///   every `s`. A newly-created entry (from a *start*) is not yet a visible
-///   row, so it surfaces on the next `r`; the auto-stopped previous entry
-///   emits its own `TrackingStopped` and is patched off here.
+///   `r` are fresh), re-pace the live timer, **patch the affected entry row
+///   in place** (M9, [`publish_row_patches`] — the flat list / cross-tab
+///   marker) instead of a coarse [`Invalidation::All`], and emit
+///   [`Invalidation::NowAnchored`] so a *grouped tree* pane reloads only the
+///   now-bucket (its totals shifted and a start may add a row — neither a row
+///   patch can express, but a whole-forest rebuild is what we're avoiding).
+///   A deep, fully-expanded tree must not rebuild on every `s`.
 /// - `TaskChanged`/`TrackingChanged` → genuinely structural (task edited, or
 ///   a tracking deleted/restored) → clear + [`Invalidation::All`].
 /// - `TrackingTick` is ignored: the per-second duration tick is driven by
@@ -1703,6 +1732,15 @@ fn spawn_tracking_bridge(
                                     [entry_summary(tracking_id, row, chrono::Utc::now())],
                                 );
                             }
+                            // A grouped tree can't be expressed by a single
+                            // row patch — its bucket totals shift and (on a
+                            // start) a row may appear. Signal the now-bucket
+                            // refresh; the frontend reloads only the bucket
+                            // `bucket_for_now` resolves for each grouped pane,
+                            // not the whole forest. Sent *after* the snapshot
+                            // write so `bucket_for_now` reads the post-toggle
+                            // state.
+                            let _ = inv_tx.send(Invalidation::NowAnchored);
                         }
                         // Couldn't refresh in place — fall back to a full reload.
                         Err(_) => {
@@ -1950,6 +1988,12 @@ impl ContentAdapter for TrackingAdapter {
                 row.active.then(|| entry_summary(*id, row, now))
             })
             .collect()
+    }
+
+    async fn bucket_for_now(&self, group_by: &GroupSpec) -> Option<String> {
+        // The bridge has already reloaded the snapshot for the start/stop that
+        // triggered the `NowAnchored`, so this reads the post-toggle state.
+        self.snapshot().await.ok()?.bucket_for_now(group_by)
     }
 
     async fn revalidate(&self) {
@@ -2552,6 +2596,68 @@ mod tests {
         // Asc flips the order.
         let asc = GroupSpec { order: SortDirection::Asc, ..spec };
         assert_eq!(snap.group_summaries(None, &asc)[0].id, "treegrp:started:day:2026-06-08");
+    }
+
+    #[test]
+    fn bucket_for_now_resolves_youngest_tracking_bucket() {
+        let task = Uuid::from_u128(9);
+        let older = Uuid::from_u128(1);
+        let youngest = Uuid::from_u128(2);
+        let snap = snapshot_from(vec![
+            (older, row(tracking_on(older, task, "2026-06-08", 45, false), "A", vec![])),
+            // Latest `started_at` — the bucket a start/stop just shifted.
+            (youngest, row(tracking_on(youngest, task, "2026-06-09", 0, true), "A", vec![])),
+        ]);
+        let day = GroupSpec {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            order: SortDirection::Desc,
+        };
+        // The id matches the bucket `group_summaries` builds for the 9th, so
+        // the frontend's splice always finds a real row to graft onto.
+        assert_eq!(
+            snap.bucket_for_now(&day).as_deref(),
+            Some("treegrp:started:day:2026-06-09")
+        );
+        // Order doesn't affect resolution — it's the youngest item, not the
+        // first bucket.
+        let asc = GroupSpec { order: SortDirection::Asc, ..day };
+        assert_eq!(
+            snap.bucket_for_now(&asc).as_deref(),
+            Some("treegrp:started:day:2026-06-09")
+        );
+    }
+
+    #[test]
+    fn bucket_for_now_buckets_verbatim_column_by_youngest() {
+        let t_old = Uuid::from_u128(1);
+        let t_new = Uuid::from_u128(2);
+        let snap = snapshot_from(vec![
+            (t_old, row(tracking_on(t_old, Uuid::from_u128(8), "2026-06-08", 30, false), "Old task", vec![])),
+            (t_new, row(tracking_on(t_new, Uuid::from_u128(9), "2026-06-09", 0, true), "New task", vec![])),
+        ]);
+        // Grouping verbatim by the task label (no date bucket): the now-bucket
+        // is the youngest tracking's task, keyed verbatim.
+        let by_task = GroupSpec {
+            column: "task".to_string(),
+            bucket: None,
+            order: SortDirection::Asc,
+        };
+        assert_eq!(
+            snap.bucket_for_now(&by_task).as_deref(),
+            Some("treegrp:task:none:New task")
+        );
+    }
+
+    #[test]
+    fn bucket_for_now_empty_snapshot_is_none() {
+        let snap = snapshot_from(vec![]);
+        let day = GroupSpec {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            order: SortDirection::Desc,
+        };
+        assert_eq!(snap.bucket_for_now(&day), None);
     }
 
     #[test]

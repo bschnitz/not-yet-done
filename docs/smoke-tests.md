@@ -3656,6 +3656,35 @@ mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
       auf einer Bucket-Zeile ist `s` nicht belegt (read-only Aggregat).
       ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen.
 
+### `s` im gruppierten Tree aktualisiert nur den Now-Bucket
+
+Im **gruppierten** Tree (z. B. nach Tag) ist jeder Bucket ein eigenständig
+aggregierter Teilbaum. Ein `s` (Start/Stopp) verschiebt nur die Totals des
+Buckets, in den **„jetzt"** fällt — bei Tages-Gruppierung der heutige Tag,
+generell der Bucket der gerade laufenden/zuletzt berührten Buchung. Statt
+den ganzen Forst neu zu falten lädt das Frontend deshalb **nur diesen einen
+Bucket** neu: Der Adapter sendet das payload-freie `Invalidation::NowAnchored`,
+das Frontend fragt `bucket_for_now(spec)` (jüngstes Tracking → dessen Bucket),
+holt Header + Teilbaum dieses Buckets und spleißt sie in-place ein; alle
+anderen Buckets (inkl. deren Auf-/Zugeklappt-Zustand) bleiben unangetastet.
+Ein _Start_, der den ersten Eintrag der Periode anlegt, erzeugt einen
+brandneuen Bucket → das Frontend fällt dann auf einen vollen Pane-Reload
+zurück (damit der neue Bucket in Sortier-Position erscheint).
+
+> ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen, nie auf echten Zeilen.
+
+- [ ] Trackings (A) → `t` (Tree), nach Tag gruppiert, mehrere Tage
+      aufgeklappt: `s` auf einer Task-Zeile im **heutigen** Bucket flippt
+      deren `⏱`-Marker und aktualisiert das Tages-Total dieses Buckets
+      **sofort** — die **anderen** Tages-Buckets flackern nicht, klappen
+      nicht zu und ihre Totals bleiben unverändert. Selektion bleibt stehen.
+- [ ] Ein `s`, das die **erste** Buchung des heutigen Tages anlegt (vorher
+      kein heutiger Bucket sichtbar): der neue Tages-Header erscheint in
+      korrekter Sortier-Position (Fallback voller Reload), restliche Buckets
+      bleiben aufgeklappt.
+- [ ] „No grouping" (ungebucketeter Tree): `s` lädt wie gehabt den ganzen
+      (einen) Baum neu — kein Now-Bucket-Spezialfall, keine Regression.
+
 ## Live-Frische Tasks/Trackings (A): Marker sofort, externe Starts, adaptives Ticken
 
 Drei Frische-Fixes für die Adapter-Tabs: (1) ein Root-Reload erneuert jetzt
@@ -3703,7 +3732,7 @@ Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
 - [ ] `r`-Reload auf dem eager Tree erneuert alle Ebenen (z. B. neu
       gestartetes Tracking zeigt `⏱` auf verschachteltem Task).
 - [ ] Gegenprobe Remote (Postgres/Confluence-Tree, `supports_eager_subtree:
-  false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
+false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
       friert nicht ein — der eager Pfad greift dort bewusst nicht.
 
 ## Refinements / Deferred Tasks

@@ -941,6 +941,22 @@ pub enum Invalidation {
     /// wake-ups against the dirty-gated render loop); the adapter only
     /// declares the interval.
     RefreshInterval(Option<std::time::Duration>),
+    /// Data anchored to the **current instant** changed structurally, so a
+    /// view grouped into buckets (one independently-aggregated subtree per
+    /// group) must re-resolve and reload *only* the bucket that "now" falls
+    /// into — not every bucket. Payload-free on purpose: the adapter knows
+    /// *that* its now-anchored data moved, but not which bucket a given pane
+    /// shows it under, because the active grouping ([`GroupSpec`]) is
+    /// per-pane frontend state. So the frontend, on receiving this, asks the
+    /// adapter [`bucket_for_now`](ContentAdapter::bucket_for_now) for each
+    /// grouped pane's spec and reloads that one bucket's subtree in place.
+    ///
+    /// Emitted by the tracking adapter when a tracking starts/stops (the
+    /// running interval's bucket totals shift) — the targeted counterpart to
+    /// the coarse [`All`] a structural change (e.g. a deleted tracking) sends.
+    /// Generic over any now-anchored grouping (e.g. a CI adapter grouping
+    /// builds by day could re-fold today's bucket on a new build).
+    NowAnchored,
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,6 +1095,26 @@ pub trait ContentAdapter: Send + Sync {
     /// timer (if any) patches nothing.
     async fn live_rows(&self) -> Vec<NodeSummary> {
         Vec::new()
+    }
+
+    /// Resolve the **id of the bucket the current instant falls into** for a
+    /// view grouped by `group_by`. The frontend calls this when it receives
+    /// [`Invalidation::NowAnchored`]: each grouped pane hands in its own
+    /// [`GroupSpec`] (per-pane frontend state the adapter can't know) and gets
+    /// back the single bucket node id whose subtree it should reload in place,
+    /// leaving every other bucket untouched.
+    ///
+    /// Returns the bucket the *most recent* item falls into — e.g. the
+    /// tracking adapter returns the group node of the youngest tracking, which
+    /// is the one a start/stop just shifted (a start mints the newest interval;
+    /// a stop freezes it). Computed with the **same** bucketing the grouped
+    /// list uses, so the returned id always matches a real bucket row when one
+    /// exists. `None` when nothing is grouped this way (no items, or the
+    /// adapter has no now-anchored data) — the frontend then leaves the pane
+    /// as-is. Default returns `None`: adapters without now-anchored grouping
+    /// never need to override.
+    async fn bucket_for_now(&self, _group_by: &GroupSpec) -> Option<String> {
+        None
     }
 
     /// Cheap staleness probe, called by the frontend when the user switches

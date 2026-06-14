@@ -6853,6 +6853,62 @@ impl ContentView {
         self.sync_action_bar_hints();
     }
 
+    /// M9 now-bucket refresh: splice one grouped-tree bucket's refreshed
+    /// `header` (its shifted total / `⏱` marker) and re-folded `subtree` into
+    /// `pane_id`, leaving every other bucket's cache untouched — the targeted
+    /// counterpart of [`Self::apply_subtree`]'s whole-forest replacement. Used
+    /// when a tracking starts/stops: only the bucket "now" falls into changed,
+    /// so only it re-folds.
+    ///
+    /// Returns `false` (changing nothing) when the bucket isn't a visible root
+    /// row — a *start* can mint a brand-new bucket the splice can't graft onto,
+    /// so the caller falls back to a full pane reload. The bucket's own
+    /// expansion is preserved (`expanded` is never touched here), so a
+    /// collapsed bucket stays collapsed.
+    pub fn reload_now_bucket(
+        &mut self,
+        pane_id: PaneId,
+        header: NodeSummary,
+        subtree: Subtree,
+    ) -> bool {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return false;
+        };
+        let view_defs = self.view_defs.clone();
+        let mut spliced = false;
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            if let Some(state) = leaf.pane.tree.as_mut() {
+                // Swap the bucket's header row at the root level in place.
+                // Absent → brand-new bucket: bail so the caller full-reloads.
+                let present = state
+                    .cache
+                    .get_mut(&Vec::<String>::new())
+                    .and_then(|root| root.children.iter_mut().find(|c| c.id == header.id))
+                    .map(|slot| *slot = header.clone())
+                    .is_some();
+                if present {
+                    // Replace the bucket's whole re-folded subtree under its
+                    // own path; sibling buckets' cache slots stay as they are.
+                    ingest_subtree_level(state, vec![header.id.clone()], subtree);
+                    if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
+                        state.rebuild_entries(vd);
+                    }
+                    leaf.pane.rebuild_table(&view_defs);
+                    spliced = true;
+                }
+            }
+        }
+        if spliced {
+            self.sync_action_bar_hints();
+        }
+        spliced
+    }
+
     /// Initialise the tree cache entry for a parent that expects N
     /// per-type loads (heterogeneous fan-out). Called by the
     /// `ExpandTreeNodeMulti` dispatch before firing per-type loads.
@@ -10908,6 +10964,81 @@ mod tests {
             assert_eq!(ec.loaded, cc.loaded, "loaded mismatch at {key:?}");
             assert_eq!(ec.next_page, cc.next_page, "next_page mismatch at {key:?}");
         }
+    }
+
+    /// M9 now-bucket refresh: `reload_now_bucket` swaps one bucket's header
+    /// row + re-folds its subtree, and leaves every sibling bucket's cache
+    /// untouched — the whole point of the targeted path. A header id absent
+    /// from the root level returns `false` (brand-new bucket → caller
+    /// full-reloads).
+    #[test]
+    fn reload_now_bucket_splices_one_bucket_and_leaves_siblings() {
+        let config = test_config_with_tree();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // Root level = two buckets (db1, db2), each with one schema child.
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["db1".into()],
+                vec![tnode("s1_old", "s1_old", "mock:schema")],
+                None,
+            );
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.set_cached_children(
+                vec!["db2".into()],
+                vec![tnode("s2", "s2", "mock:schema")],
+                None,
+            );
+            tree.expanded.insert(vec!["db2".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        let pane_id = view.active_pane_id();
+
+        // Reload db1: a relabelled header + a fresh single-child subtree.
+        let mut new_header = tnode("db1", "db1*", "mock:db");
+        new_header.has_children = Some(true);
+        let new_subtree = Subtree {
+            items: vec![sub_node("s1_new", vec![])],
+            page: None,
+        };
+        assert!(view.reload_now_bucket(pane_id, new_header, new_subtree));
+
+        let tree = view.find_pane(pane_id).unwrap().tree.as_ref().unwrap();
+        // db1's header row picked up the new label; db2 stayed put.
+        let roots: Vec<(&str, &str)> = tree.cache[&Vec::<String>::new()]
+            .children
+            .iter()
+            .map(|c| (c.id.as_str(), c.label.as_str()))
+            .collect();
+        assert_eq!(roots, vec![("db1", "db1*"), ("db2", "db2")]);
+        // db1's subtree was replaced; db2's was not.
+        assert_eq!(
+            tree.cache[&vec!["db1".to_string()]]
+                .children
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s1_new"],
+        );
+        assert_eq!(
+            tree.cache[&vec!["db2".to_string()]]
+                .children
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s2"],
+        );
+
+        // A header id that isn't a visible bucket → no splice, caller falls
+        // back to a full reload.
+        let orphan = tnode("db_new", "db_new", "mock:db");
+        assert!(!view.reload_now_bucket(pane_id, orphan, Subtree::default()));
+        let tree = view.find_pane(pane_id).unwrap().tree.as_ref().unwrap();
+        assert!(!tree.cache.contains_key(&vec!["db_new".to_string()]));
     }
 
     #[test]
