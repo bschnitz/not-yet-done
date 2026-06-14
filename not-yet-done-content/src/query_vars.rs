@@ -1,4 +1,10 @@
-//! Inline variable parsing for Taiga saved queries.
+//! Inline variable parsing/substitution for adapter saved queries.
+//!
+//! Adapter-agnostic string templating shared by adapters whose saved
+//! queries support user-supplied variables (Taiga structured filters,
+//! Jira JQL, …). The frontend stays syntax-agnostic — it only knows that
+//! an adapter reports a list of [`QueryVariable`]s to gather before the
+//! query can be rendered, then asks the adapter to substitute them.
 //!
 //! Syntax: `${name:default}` or `${name}` (no default → required).
 //! - `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
@@ -9,9 +15,9 @@
 
 use std::collections::HashMap;
 
-use not_yet_done_content::QueryVariable;
+use crate::QueryVariable;
 
-/// Extract variables from a raw Taiga saved-query string. Returns one
+/// Extract variables from a raw saved-query string. Returns one
 /// `QueryVariable` per distinct `name` in source order (first occurrence
 /// wins for the default).
 pub fn parse_variables(query: &str) -> Vec<QueryVariable> {
@@ -228,5 +234,17 @@ mod tests {
             render("a=${x:1}&b=${y:2}&c=${z:3}", &vars),
             "a=X&b=Y&c=3"
         );
+    }
+
+    /// JQL-shaped query (Jira): `key = ${key}` renders to a concrete clause.
+    #[test]
+    fn renders_jql_key_clause() {
+        let mut vars = HashMap::new();
+        vars.insert("key".to_string(), "ACME-123".to_string());
+        assert_eq!(render("key = ${key}", &vars), "key = ACME-123");
+        let v = parse_variables("key = ${key}");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "key");
+        assert!(v[0].default.is_none());
     }
 }

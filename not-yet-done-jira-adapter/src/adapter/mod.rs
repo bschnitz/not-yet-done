@@ -176,6 +176,18 @@ impl ContentAdapter for JiraAdapter {
         Ok(())
     }
 
+    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
+        not_yet_done_content::query_vars::parse_variables(query)
+    }
+
+    fn render_query(
+        &self,
+        query: &str,
+        vars: &std::collections::HashMap<String, String>,
+    ) -> String {
+        not_yet_done_content::query_vars::render(query, vars)
+    }
+
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         Some(&self.saved_queries)
     }

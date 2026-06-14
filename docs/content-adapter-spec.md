@@ -61,10 +61,12 @@ pub trait ContentAdapter: Send + Sync {
 placeholders. The TUI calls `query_variables(raw)` at apply time,
 asks the user to fill any missing required values via a popup, and
 passes the bindings back through `render_query(raw, &vars)` right
-before the load. Today only the Taiga adapter implements them, using
-`${name:default}` (no default → required). Adapters that don't
-implement the methods get the identity defaults and the popup is
-never opened.
+before the load. The `${name:default}` syntax (no default → required)
+is implemented as an adapter-agnostic helper in
+`not_yet_done_content::query_vars`; the Taiga and Jira adapters both
+delegate to it (Taiga structured filters, Jira JQL — e.g. a `By Key`
+saved query `key = ${key}`). Adapters that don't implement the methods
+get the identity defaults and the popup is never opened.
 
 ### Node
 
