@@ -2977,6 +2977,30 @@ wird als Chord-Präfix gestasht, das zweite Zeichen löst aus.
 - [ ] **Chord-Abbruch:** `a` tippen, dann `esc`/eine nicht-passende Taste →
       kein Effekt, normale Bedienung läuft weiter.
 
+## Stoat-Adapter — Channel/Kategorie umbenennen (`R`)
+
+Umbenennen aus der TUI. Voraussetzung: ein Server, den du administrierst,
+und die `R`-Action in `stoat.yaml` (beide `channels`-ChildDefs +
+`categories`-ChildDef). `R` ist ein **Einzelzeichen** (kein Chord) und
+öffnet — wie `al`/`ay` — ein Namens-Formular mit einem Feld, vorgefüllt
+ist es nicht.
+
+- [ ] **Channel unter Server:** Cursor auf eine **uncategorized Channel-Zeile**,
+      `R` tippen → Formular → neuer Name → Channel-Zeile aktualisiert sich
+      live (kein `r` nötig; der Gateway echot `ChannelUpdate`).
+- [ ] **Channel unter Kategorie:** Cursor auf eine Channel-Zeile **im
+      Kategorie-Branch**, `R` → Formular → neuer Name → Zeile aktualisiert
+      sich live (gleiche Action, `PATCH /channels/{id}`).
+- [ ] **Kategorie:** Cursor auf eine **Kategorie-Zeile**, `R` → Formular →
+      neuer Name → Kategorie-Header aktualisiert sich live (`ServerUpdate`
+      mit voller Kategorie-Liste; nur der Titel der Zielkategorie ändert
+      sich, Channel-Zuordnungen bleiben).
+- [ ] **Leerer Name:** Formular mit leerem/Whitespace-Namen bestätigen →
+      klare Fehlermeldung, kein Umbenennen findet statt.
+- [ ] **Fremder Server (kein Admin):** `R` auf einem Channel/einer Kategorie
+      ohne Rechte → der Server lehnt mit sauberer Fehlermeldung ab, der Baum
+      bleibt unverändert.
+
 ## Stoat-Adapter — Chat-Layout (`row_layout`)
 
 Die Message-Liste rendert per `row_layout` als Chat: Meta-Zeile + Body +

@@ -14,14 +14,14 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentError, EditorPrep, InputSpec, ListParams, ListResult,
-    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
+    ActionInput, ActionOutcome, ContentError, EditorPrep, FormFieldSpec, InputSpec, ListParams,
+    ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::members::{MemberCache, channel_user_map};
 use super::mentions;
 use super::message::{StoatMessageNode, composite_id};
-use super::other_err;
+use super::{form_field, other_err};
 use super::types::{channel_type, message_type};
 use crate::client::StoatClient;
 use crate::gateway::StoatState;
@@ -29,11 +29,23 @@ use crate::gateway::StoatState;
 /// How many messages to pull for the latest page.
 const DEFAULT_MESSAGE_LIMIT: u32 = 50;
 
-/// Actions a channel exposes. `send_message` is the `create`-style action
-/// the message-list view triggers (parent = channel, child = message): it
-/// opens an empty editor and posts the buffer as a new message.
+/// Actions a channel exposes:
+/// - `send_message` — the `create`-style action the message-list view
+///   triggers (parent = channel, child = message): opens an empty editor
+///   and posts the buffer as a new message.
+/// - `rename` — retitle the channel itself (a single-field name form),
+///   reachable while the cursor sits on the channel row in the tree.
 pub(super) fn channel_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("send_message", "send", InputSpec::Editor)]
+    vec![
+        NodeAction::new("send_message", "send", InputSpec::Editor),
+        NodeAction::new(
+            "rename",
+            "rename",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("name", "Channel name")],
+            },
+        ),
+    ]
 }
 
 pub(super) struct StoatChannelNode {
@@ -162,6 +174,19 @@ impl Node for StoatChannelNode {
                 Ok(ActionOutcome::Navigate {
                     node_id: composite_id(&self.channel_id, &message_id),
                     node_type: message_type().clone(),
+                })
+            }
+            // Rename the channel itself. `PATCH /channels/{id}` is a
+            // single-field delta; the `ChannelUpdate` echo refreshes the
+            // tree without a reload.
+            ("rename", input) => {
+                let name = form_field(&input, "name")?;
+                self.client
+                    .rename_channel(&self.channel_id, &name)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("Renamed channel to #{name}")),
                 })
             }
             (other, _) => Err(ContentError::NotSupported(format!(
