@@ -12,6 +12,7 @@ pub mod grouping;
 pub mod http_log;
 pub mod link_route;
 pub mod node_ref;
+pub mod query_vars;
 pub mod slug;
 pub mod sort_serde;
 

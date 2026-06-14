@@ -15,7 +15,6 @@ mod config;
 mod factory;
 mod item;
 mod notification;
-mod query_vars;
 mod types;
 
 pub use factory::TaigaAdapterFactory;
@@ -160,7 +159,7 @@ impl ContentAdapter for TaigaAdapter {
     }
 
     fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
-        query_vars::parse_variables(query)
+        not_yet_done_content::query_vars::parse_variables(query)
     }
 
     fn render_query(
@@ -168,7 +167,7 @@ impl ContentAdapter for TaigaAdapter {
         query: &str,
         vars: &std::collections::HashMap<String, String>,
     ) -> String {
-        query_vars::render(query, vars)
+        not_yet_done_content::query_vars::render(query, vars)
     }
 
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
