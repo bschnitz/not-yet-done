@@ -173,6 +173,18 @@ pub enum LoadMsg {
         parent_path: Vec<String>,
         result: Result<not_yet_done_content::Subtree, String>,
     },
+    /// Targeted reload of a single grouped-tree **bucket** (M9 now-bucket
+    /// refresh), spawned by [`App::spawn_now_bucket_reload`] in response to
+    /// [`Invalidation::NowAnchored`]. `header` is the bucket node's refreshed
+    /// summary (its shifted total / `⏱` marker) and `subtree` its re-folded
+    /// forest; [`ContentView::reload_now_bucket`] splices both in place,
+    /// leaving every other bucket untouched. A `None` result means the
+    /// now-bucket couldn't be resolved (no trackings / load error) — dropped.
+    NowBucketReload {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        result: Option<NowBucketPayload>,
+    },
     /// In-flight retry progress for a failed content/drill/tree load on
     /// `view_index` / `pane_id`. Updates the pane's `retry_state` so
     /// the auth-status banner reads `"Retrying (n/total): {err}"`
@@ -251,6 +263,15 @@ pub struct TreeChildrenPayload {
     pub items: Vec<not_yet_done_content::NodeSummary>,
     pub page_info: Option<not_yet_done_content::PageInfo>,
     pub child_node_type: String,
+}
+
+/// Successful payload for [`LoadMsg::NowBucketReload`]: the refreshed
+/// grouped-tree bucket header and its re-folded subtree. `parent_path` is
+/// `vec![header.id]` — the path the subtree hangs under in the pane's tree
+/// cache (carried explicitly so the splice doesn't re-derive it).
+pub struct NowBucketPayload {
+    pub header: not_yet_done_content::NodeSummary,
+    pub subtree: not_yet_done_content::Subtree,
 }
 
 /// Successful payload for [`LoadMsg::CustomQueryItems`]. Carries the
@@ -1320,6 +1341,21 @@ impl App {
             self.set_live_refresh_timer(view_index, interval);
             return;
         }
+        // M9 now-bucket refresh — now-anchored data shifted: reload only the
+        // bucket the current instant falls into, per grouped-tree pane, rather
+        // than rebuilding every bucket. `spawn_now_bucket_reload` self-filters
+        // (it no-ops on panes that aren't grouped trees), so we can offer it
+        // every pane in the view.
+        if matches!(inv, Invalidation::NowAnchored) {
+            let panes = self
+                .content_view(view_index)
+                .map(|cv| cv.all_pane_ids())
+                .unwrap_or_default();
+            for pid in panes {
+                self.spawn_now_bucket_reload(view_index, pid);
+            }
+            return;
+        }
         // Collect the affected pane ids first so the immutable borrow of
         // the view ends before `reload_content_pane_current_level`
         // re-borrows `self`.
@@ -1338,11 +1374,12 @@ impl App {
                     // Redraw-only: select no panes (no refetch). The
                     // repaint itself happens because `handle_load_msg`
                     // always returns dirty=true for any message it drains.
-                    // Row / RefreshInterval are handled by the early returns
-                    // above and never reach this filter.
+                    // Row / RefreshInterval / NowAnchored are handled by the
+                    // early returns above and never reach this filter.
                     Invalidation::Repaint
                     | Invalidation::Row(_)
-                    | Invalidation::RefreshInterval(_) => false,
+                    | Invalidation::RefreshInterval(_)
+                    | Invalidation::NowAnchored => false,
                 })
                 .collect()
         };
@@ -1537,6 +1574,76 @@ impl App {
                 pane_id,
                 parent_path: Vec::new(),
                 result,
+            });
+        });
+    }
+
+    /// M9 now-bucket refresh: reload just the bucket the current instant falls
+    /// into for one grouped-tree pane, in response to
+    /// [`Invalidation::NowAnchored`](not_yet_done_content::Invalidation::NowAnchored).
+    /// Returns without spawning unless the pane is a grouped *eager* tree — it
+    /// needs both a `TreeState` (an active `group_by`) and an eager subtree
+    /// depth; a flat/condensed pane has no per-bucket fold to localise and
+    /// keeps the cheap full `Reload` on its toggle. Asks the adapter
+    /// [`bucket_for_now`](not_yet_done_content::ContentAdapter::bucket_for_now)
+    /// for the bucket id, fetches that one bucket node's refreshed header +
+    /// re-folded subtree, and lands them via [`LoadMsg::NowBucketReload`] →
+    /// [`ContentView::reload_now_bucket`]. Folds ONE bucket instead of the
+    /// per-bucket fold a whole-forest reload would run for every group.
+    pub fn spawn_now_bucket_reload(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
+        let Some(pane) = cv.find_pane(pane_id) else {
+            return;
+        };
+        let Some(spec) = pane.adapter_group_spec(&cv.view_defs) else {
+            return;
+        };
+        let Some(depth) = pane.eager_subtree_depth(&cv.view_defs) else {
+            return;
+        };
+        let adapter = Arc::clone(adapter);
+        let subtree_query = Self::subtree_query_for_pane(cv, pane, &adapter);
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            let payload = async {
+                let bucket_id = adapter.bucket_for_now(&spec).await?;
+                let node = adapter.get_by_id(&bucket_id).await.ok()?;
+                // The bucket node's metadata already carries the refreshed
+                // total + `⏱` marker (recomputed in `get_by_id`); lift it
+                // straight into the header the splice swaps the bucket row for.
+                let header = not_yet_done_content::NodeSummary {
+                    id: node.id().to_string(),
+                    label: node.label().to_string(),
+                    node_type: node.node_type().clone(),
+                    metadata: node.metadata().clone(),
+                    has_children: Some(true),
+                };
+                let node_type = node.children_types().into_iter().next()?;
+                let params = not_yet_done_content::ListParams {
+                    node_type,
+                    query: subtree_query,
+                    sort: Vec::new(),
+                    page: None,
+                    download: false,
+                    group_by: None,
+                };
+                let subtree = node.list_subtree(params, depth).await.ok()?;
+                Some(NowBucketPayload { header, subtree })
+            }
+            .await;
+            let _ = tx.send(LoadMsg::NowBucketReload {
+                view_index,
+                pane_id,
+                result: payload,
             });
         });
     }
@@ -3146,6 +3253,24 @@ impl App {
                             // still expands progressively despite the eager
                             // load failing.
                             self.drive_tree_auto_expand(view_index, pane_id);
+                        }
+                    }
+                }
+                LoadMsg::NowBucketReload { view_index, pane_id, result } => {
+                    // `None` = the now-bucket couldn't be resolved (no
+                    // trackings / a load error) — leave the pane as-is.
+                    if let Some(payload) = result {
+                        let spliced = self
+                            .content_view_mut(view_index)
+                            .map(|cv| cv.reload_now_bucket(pane_id, payload.header, payload.subtree))
+                            .unwrap_or(false);
+                        // A *start* can mint a brand-new bucket (the task's
+                        // first booking of the period) that isn't a visible
+                        // row yet — the splice can't graft onto a row that
+                        // doesn't exist, so fall back to a full pane reload to
+                        // surface the new bucket in sorted position.
+                        if !spliced {
+                            self.reload_content_pane_current_level(view_index, pane_id);
                         }
                     }
                 }
