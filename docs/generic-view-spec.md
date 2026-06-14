@@ -1524,10 +1524,19 @@ hat. So tauchen Treffer samt ihrer Vorfahren-Kette auf, während nicht-
 matchende Geschwister-Teilbäume verschwinden. Ein tief verschachtelter
 Treffer wird also gefunden und über seine Eltern sichtbar gemacht — auch
 wenn die `fuzzy_filter`-Action nur auf der Wurzel-View deklariert ist
-(sie dient dort nur als Schalter, der den Filter scharf macht). Die Suche
-ist auf die aktuell geladenen/aufgeklappten Knoten beschränkt: ein Treffer
-in einem eingeklappten oder noch nicht nachgeladenen Ast wird erst sichtbar,
-wenn dieser Ast geladen ist.
+(sie dient dort nur als Schalter, der den Filter scharf macht).
+
+**Eager-Trees laden beim Öffnen des Filters den ganzen Teilbaum:** Auf
+Adaptern mit `supports_eager_subtree` (lokale Tasks/Trackings) zieht das
+Öffnen des Filters einmalig den kompletten Baum (`list_subtree(u32::MAX)`)
+nach und klappt ihn auf. So matchen auch Knoten in eingeklappten oder noch
+nicht paginierten Ästen — das „der Filter sieht den ganzen Wald"-Verhalten
+des nativen Tabs. Der Aufklapp-Zustand vor dem Filter wird gestasht und
+beim Leeren des Filters wiederhergestellt (der Baum klappt exakt in seine
+vorherige Form zurück). Auf Remote-Trees ohne diese Capability bleibt die
+Suche auf die aktuell geladenen/aufgeklappten Knoten beschränkt: ein
+Treffer in einem ungeladenen Ast wird erst sichtbar, wenn dieser Ast
+geladen ist.
 
 ### Custom Actions
 

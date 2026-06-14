@@ -431,6 +431,15 @@ pub struct ContentPane {
     /// tree levels. `None` when no level defines fuzzy_filter (filter
     /// then can't be opened) or outside tree mode.
     tree_filter_depth: Option<usize>,
+    /// Snapshot of `tree.expanded` captured the moment a fuzzy filter is
+    /// opened on an **eager** tree (`supports_eager_subtree`). Opening the
+    /// filter pulls the *whole* subtree (`list_subtree(u32::MAX)`) and marks
+    /// every node expanded, so matches that live in collapsed or not-yet-paged
+    /// branches surface — the native tab's "filter sees the entire forest"
+    /// behaviour. When the filter is cleared we restore this set, re-collapsing
+    /// the tree to exactly its pre-filter shape instead of leaving it blown
+    /// open. `None` when no filter-expand is in effect.
+    tree_filter_expand_stash: Option<std::collections::HashSet<Vec<String>>>,
 
     /// CT-5: pane-local cache for the active `tree_find` (server-side
     /// tree search). `Some` from `tree_find_begin` until the user
@@ -1068,6 +1077,7 @@ impl ContentPane {
             tree: tree_enabled.then(TreeState::new),
             tree_visible_indices: Vec::new(),
             tree_filter_depth: None,
+            tree_filter_expand_stash: None,
             tree_find: None,
             pending_tree_find: None,
             group_by_override: None,
@@ -2217,12 +2227,15 @@ impl ContentPane {
     /// (only `tree_filter_depth`) could not do.
     ///
     /// The filter is armed only when some level declares a `fuzzy_filter`
-    /// action (`tree_filter_depth` is `Some`). Matching is bounded to the
-    /// currently loaded/expanded entries — a match hidden inside a collapsed
-    /// or not-yet-paged branch can't be seen until that branch is loaded.
-    /// Pagination placeholders ride along with their parent: visible iff the
-    /// parent survives (root-level placeholders are always visible, since
-    /// the next page may hold the only matches).
+    /// action (`tree_filter_depth` is `Some`). Matching runs over the entries
+    /// currently in the tree — but on an eager tree (`supports_eager_subtree`)
+    /// opening the filter first pulls and expands the *whole* subtree (see
+    /// [`Self::tree_filter_expand_stash`]), so collapsed and not-yet-paged
+    /// branches are present and their matches surface. On a non-eager (remote)
+    /// tree the bound stands: a match hidden in an unloaded branch stays hidden
+    /// until that branch is loaded. Pagination placeholders ride along with
+    /// their parent: visible iff the parent survives (root-level placeholders
+    /// are always visible, since the next page may hold the only matches).
     fn refresh_tree_visible_indices(&mut self, view_defs: &[ViewDef]) {
         let Some(tree) = self.tree.as_ref() else {
             self.tree_visible_indices.clear();
@@ -2307,6 +2320,25 @@ impl ContentPane {
         self.tree_visible_indices = visible;
     }
 
+    /// Undo the eager filter-expand. Opening a fuzzy filter on an eager tree
+    /// pulls the whole subtree and marks everything expanded (see
+    /// [`Self::tree_filter_expand_stash`]); when the filter is cleared this
+    /// restores the stashed pre-filter `expanded` set and rebuilds, so the tree
+    /// re-collapses to exactly its previous shape (the deeper cache stays —
+    /// harmless, and a later manual expand is now instant). No-op when no
+    /// filter-expand is in effect.
+    fn restore_tree_filter_expand(&mut self, view_defs: &[ViewDef]) {
+        let Some(expanded) = self.tree_filter_expand_stash.take() else {
+            return;
+        };
+        if let Some(tree) = self.tree.as_mut() {
+            tree.expanded = expanded;
+            if let Some(vd) = view_defs.get(self.view_def_index) {
+                tree.rebuild_entries(vd);
+            }
+        }
+        self.rebuild_table(view_defs);
+    }
 
     /// Tree-mode handler for `content.open`. Toggles expand on a row
     /// whose level has a tree-continuing child; on first expand emits
@@ -5124,15 +5156,23 @@ impl ContentPane {
             "enter" => {
                 self.table.fuzzy_close();
                 self.rebuild_table(view_defs);
+                // Closing with an empty query is a cancel: restore the
+                // pre-filter tree shape. A non-empty query keeps the filter
+                // (and the eager expansion) live.
+                if self.table.filter_text.is_empty() {
+                    self.restore_tree_filter_expand(view_defs);
+                }
             }
             "esc" => {
                 if self.table.fuzzy_query.is_empty() {
                     self.table.fuzzy_close();
+                    self.restore_tree_filter_expand(view_defs);
                 } else {
                     self.table.fuzzy_query.clear();
                     self.table.fuzzy_cursor = 0;
                     self.table.filter_text.clear();
                     self.rebuild_table(view_defs);
+                    self.restore_tree_filter_expand(view_defs);
                 }
             }
             "ctrl+u" => {
@@ -5140,10 +5180,16 @@ impl ContentPane {
                 self.table.fuzzy_cursor = 0;
                 self.table.filter_text.clear();
                 self.rebuild_table(view_defs);
+                self.restore_tree_filter_expand(view_defs);
             }
             "backspace" => {
                 self.table.fuzzy_backspace();
                 self.rebuild_table(view_defs);
+                // Backspacing the last character clears the filter — drop the
+                // eager expansion too.
+                if self.table.filter_text.is_empty() {
+                    self.restore_tree_filter_expand(view_defs);
+                }
             }
             "left" => {
                 self.table.fuzzy_cursor_left();
@@ -5380,6 +5426,21 @@ impl ContentPane {
                     self.tree_filter_depth = self.resolve_tree_filter_depth(view_defs);
                 }
                 self.table.fuzzy_open();
+                // Eager tree: pull the WHOLE subtree up front and expand it, so
+                // the filter matches across collapsed / not-yet-paged branches
+                // (native parity). Stash the pre-filter expansion first so the
+                // tree re-collapses to its old shape when the filter clears.
+                if self.eager_subtree_depth(view_defs).is_some()
+                    && self.tree_filter_expand_stash.is_none()
+                {
+                    if let Some(tree) = self.tree.as_ref() {
+                        self.tree_filter_expand_stash = Some(tree.expanded.clone());
+                    }
+                    return SubViewMessage::Request(ViewRequest::EagerExpandSubtree {
+                        view_index,
+                        pane_id,
+                    });
+                }
                 return SubViewMessage::SelectionChanged(None);
             }
             "search" => {
@@ -11484,6 +11545,40 @@ mod tests {
         // db1 kept as ancestor of the match; public matches; private and db2
         // pruned.
         assert_eq!(visible_ids, vec!["db1", "public"]);
+    }
+
+    #[test]
+    fn restore_tree_filter_expand_recollapses_to_stashed_shape() {
+        // Opening a fuzzy filter on an eager tree blows the whole subtree open
+        // and stashes the pre-filter `expanded` set; clearing the filter must
+        // restore exactly that set, re-collapsing the branches the filter
+        // expanded. Here the stash is the collapsed (empty) pre-filter state.
+        let config = test_config_with_tree_filter_at(0);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            // Pre-filter shape: db1 collapsed (nothing expanded).
+            let stash: std::collections::HashSet<Vec<String>> = tree.expanded.clone();
+            // Filter expands db1 to surface its schemas.
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+            pane.tree_filter_expand_stash = Some(stash);
+        }
+        // Expanded while the filter is "open": db1 + its two schemas + db2.
+        assert_eq!(view.active_pane().tree.as_ref().unwrap().entries.len(), 4);
+
+        view.active_pane_mut().restore_tree_filter_expand(&view_defs);
+
+        let pane = view.active_pane();
+        assert!(pane.tree_filter_expand_stash.is_none());
+        let tree = pane.tree.as_ref().unwrap();
+        assert!(tree.expanded.is_empty());
+        // Re-collapsed back to the two root rows.
+        assert_eq!(tree.entries.len(), 2);
     }
 
     #[test]

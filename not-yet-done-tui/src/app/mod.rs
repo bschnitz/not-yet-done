@@ -6209,6 +6209,12 @@ impl App {
                 );
                 EditorRequest::None
             }
+            ViewRequest::EagerExpandSubtree { view_index, pane_id } => {
+                // Fuzzy filter opened on an eager tree: pull the whole subtree
+                // so the filter matches across collapsed / unpaged branches.
+                self.spawn_subtree_load(view_index, pane_id, u32::MAX);
+                EditorRequest::None
+            }
             ViewRequest::ExpandTreeNodeMulti {
                 view_index, pane_id, parent_path, parent_node_id, child_node_types, page_size,
             } => {
