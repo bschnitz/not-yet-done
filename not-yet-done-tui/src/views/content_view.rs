@@ -1022,6 +1022,12 @@ pub struct ContentView {
     /// layout is consistent across panes; persisted by the App as one
     /// JSON settings row per tab.
     column_overrides: std::collections::HashMap<String, Vec<String>>,
+
+    /// Alphabet for vimium-style jump-mode labels (`content.jump_mode`,
+    /// default `J`). Set once by the App from `navigation.jump_chars`.
+    /// Applied to the focused pane's table at jump-open time, so panes
+    /// created later by splits/drills pick it up without extra wiring.
+    nav_chars: Vec<char>,
 }
 
 impl ContentPane {
@@ -4891,6 +4897,23 @@ impl ContentPane {
             }
         }
 
+        // Jump mode (vimium-style hop) — native Tasks-tab parity. Always
+        // claimable: on an empty pane the search just finds nothing and
+        // closes. The App-level interceptor (handle_key) drives phases 1/2
+        // once open, since `active_table_mut` covers content tabs. Default
+        // `J`; configurable via `keybindings.content.jump_mode`.
+        if let Some(b) = content_kb
+            .get(&ContentAction::JumpMode)
+            .cloned()
+            .and_then(strip_reserved)
+        {
+            km.push(KeyClaim::handler(
+                b,
+                scope.clone(),
+                KeySource::Content(ContentAction::JumpMode),
+            ));
+        }
+
         // Drill-down / expand — only when the cursor row can open.
         // Recursion-aware (`cursor_can_open`): a recursive tree node has
         // no declared `children:` but still expands into itself.
@@ -5120,6 +5143,12 @@ impl ContentPane {
             }
             KeySource::Content(ContentAction::ToggleTreeAggregate) => {
                 Some(self.try_toggle_tree_aggregate(view_defs))
+            }
+            KeySource::Content(ContentAction::JumpMode) => {
+                // Phase 1 only — open the hop overlay. The App-level
+                // interceptor feeds subsequent search/label keystrokes.
+                self.table.jump_mode_open();
+                Some(SubViewMessage::SelectionChanged(None))
             }
             KeySource::Common(CommonAction::ListNext) => {
                 self.nav_and_refresh(Cmd::Move(Direction::Down), view_defs);
@@ -5668,6 +5697,7 @@ impl ContentView {
             pending_cursor_closes: Vec::new(),
             postgres_table_shortcuts: std::collections::HashMap::new(),
             column_overrides: std::collections::HashMap::new(),
+            nav_chars: Vec::new(),
         };
         cv.sync_action_bar_hints();
         cv
@@ -6063,6 +6093,13 @@ impl ContentView {
             }
             ContentAction::ToggleTreeAggregate => {
                 self.active_pane_mut().try_toggle_tree_aggregate(&view_defs)
+            }
+            ContentAction::JumpMode => {
+                let nav_chars = self.nav_chars.clone();
+                let pane = self.active_pane_mut();
+                pane.table.set_nav_chars(&nav_chars);
+                pane.table.jump_mode_open();
+                SubViewMessage::SelectionChanged(None)
             }
         };
         if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
@@ -7674,7 +7711,17 @@ impl ContentView {
             }
         }
 
-        // Delegate the rest to the active pane.
+        // Delegate the rest to the active pane. Refresh the focused
+        // table's jump alphabet first so the `jump_mode` action (and label
+        // rendering) work on panes created later by splits/drills, which
+        // never went through the App's one-shot startup wiring.
+        if !self.nav_chars.is_empty() {
+            self.pane_trees[self.active_subtab]
+                .focused_leaf_mut()
+                .pane
+                .table
+                .set_nav_chars(&self.nav_chars);
+        }
         let view_index = self.view_index;
         let pane_id = self.active_pane_id();
         let msg = {
@@ -7860,6 +7907,13 @@ impl ContentView {
             .unwrap_or_default()
     }
 
+    /// Set the jump-mode label alphabet (from `navigation.jump_chars`).
+    /// Stored on the view; applied to the focused pane's table when jump
+    /// mode opens, so dynamically-created panes (splits/drills) inherit it.
+    pub fn set_nav_chars(&mut self, chars: &[char]) {
+        self.nav_chars = chars.to_vec();
+    }
+
     pub fn action_bar_hints(&self) -> Vec<BarHint> {
         if self.window_pending.is_some() {
             return self.window_mode_hints();
@@ -7893,6 +7947,14 @@ impl ContentView {
             if !hints.iter().any(|(k, _)| k == &u_key) {
                 hints.push((u_key, "group".to_string()));
             }
+        }
+        // Jump-mode hint — always claimable (native Tasks tab shows `p jump`;
+        // here it defaults to `J`).
+        let jump_key = self
+            .content_kb
+            .hint_label(&ContentAction::JumpMode, &self.key_icons);
+        if !hints.iter().any(|(k, _)| k == &jump_key) {
+            hints.push((jump_key, "jump".to_string()));
         }
         hints
     }
@@ -14978,6 +15040,33 @@ mod tests {
             order: GroupOrder::Asc,
         });
         config
+    }
+
+    #[test]
+    fn jump_mode_action_opens_hop_on_active_table() {
+        // Native Tasks-tab parity: the jump action arms the table's hop
+        // overlay (phase 1). The App-level interceptor drives the rest.
+        let config = test_config_with_children();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // The App sets this from `navigation.jump_chars`; without an
+        // alphabet the table refuses to open (no labels to hand out).
+        view.set_nav_chars(&['a', 'b', 'c']);
+        assert!(!view.active_pane().table.jump_active());
+        let msg = view.dispatch_content_action(ContentAction::JumpMode);
+        assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
+        assert!(view.active_pane().table.jump_active());
+        assert!(view.active_pane().table.jump_waiting_for_char());
+    }
+
+    #[test]
+    fn jump_mode_default_key_is_shift_j() {
+        // `J` is the shipped default and must not collide with the native
+        // tab's `p` (CommonAction::JumpMode), which stays on `p`.
+        let kb = KeyBindingConfig::default();
+        let binding = kb.content.get(&ContentAction::JumpMode).unwrap();
+        assert!(binding.matches("J"));
+        assert!(!binding.matches("p"));
     }
 
     #[test]

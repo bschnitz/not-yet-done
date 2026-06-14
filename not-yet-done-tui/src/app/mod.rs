@@ -1011,6 +1011,9 @@ impl App {
         let nav_chars: Vec<char> = app.config.navigation.jump_chars.chars().collect();
         app.tasks_view.set_nav_chars(&nav_chars);
         app.trackings_view.table.set_nav_chars(&nav_chars);
+        for cv in app.content_views_iter_mut() {
+            cv.set_nav_chars(&nav_chars);
+        }
 
         app.reload_link_refs();
         app.spawn_load();
