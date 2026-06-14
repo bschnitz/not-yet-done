@@ -161,6 +161,18 @@ pub enum LoadMsg {
         result: Result<TreeChildrenPayload, String>,
         append: bool,
     },
+    /// A whole eagerly-expanded subtree, loaded by `spawn_subtree_load`
+    /// for an adapter that advertises `supports_eager_subtree`. Lands via
+    /// [`ContentView::apply_subtree`], which fills every tree level and marks
+    /// the expanded nodes in one pass — the eager replacement for the
+    /// per-node [`Self::TreeChildren`] cascade. `parent_path` is the path the
+    /// subtree hangs under (`vec![]` for a root load).
+    Subtree {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        parent_path: Vec<String>,
+        result: Result<not_yet_done_content::Subtree, String>,
+    },
     /// In-flight retry progress for a failed content/drill/tree load on
     /// `view_index` / `pane_id`. Updates the pane's `retry_state` so
     /// the auth-status banner reads `"Retrying (n/total): {err}"`
@@ -1447,6 +1459,85 @@ impl App {
                     });
                 }
             }
+        });
+    }
+
+    /// Eager tree load: ask the adapter (capability `supports_eager_subtree`)
+    /// for the whole expanded subtree under the root in ONE `list_subtree`
+    /// call, landing it via [`LoadMsg::Subtree`] → [`ContentView::apply_subtree`].
+    /// The root level itself is still configured by the ordinary
+    /// [`Self::spawn_content_load`] (`ContentItems` sets columns / sort /
+    /// selection); this fires alongside it to expand the descendants in place
+    /// of the per-node cascade. `depth` is the view's `expand_depth` mapped to
+    /// a level count (`all` → `u32::MAX`).
+    pub fn spawn_subtree_load(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        depth: u32,
+    ) {
+        let cv = match self.content_view(view_index) {
+            Some(cv) => cv,
+            None => return,
+        };
+        let adapter = match cv.adapter.as_ref() {
+            Some(a) => Arc::clone(a),
+            None => return,
+        };
+        let pane = match cv.find_pane(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let Some(req) = pane.root_load_request(&cv.view_defs) else {
+            return;
+        };
+        let crate::views::content_view::LoadRequest {
+            node_type_id,
+            query,
+            sort,
+            page,
+            vars,
+        } = req;
+        let query = query.map(|raw| adapter.render_query(&raw, &vars));
+        let group_by = pane.adapter_group_spec(&cv.view_defs);
+        let retries = cv
+            .view_defs
+            .get(pane.view_def_index())
+            .map(|v| v.retries)
+            .unwrap_or(0);
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            let result = run_with_retries(retries, &tx, view_index, pane_id, || {
+                let adapter = Arc::clone(&adapter);
+                let node_type_id = node_type_id.clone();
+                let query = query.clone();
+                let sort = sort.clone();
+                let group_by = group_by.clone();
+                async move {
+                    let root = adapter.root().await.map_err(|e| e.to_string())?;
+                    let node_type = root
+                        .children_types()
+                        .into_iter()
+                        .find(|t| t.type_id == node_type_id)
+                        .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
+                    let params = not_yet_done_content::ListParams {
+                        node_type,
+                        query,
+                        sort,
+                        page,
+                        download: false,
+                        group_by,
+                    };
+                    root.list_subtree(params, depth).await.map_err(|e| e.to_string())
+                }
+            })
+            .await;
+            let _ = tx.send(LoadMsg::Subtree {
+                view_index,
+                pane_id,
+                parent_path: Vec::new(),
+                result,
+            });
         });
     }
 
@@ -2940,14 +3031,27 @@ impl App {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         cv.set_items_for_pane(pane_id, items, applied_sort, page, sortable_columns, error);
                     }
-                    // Tree mode: kick off the `expand_depth` cascade now
-                    // that the depth-0 rows are in.
-                    self.drive_tree_auto_expand(view_index, pane_id);
-                    // …and refresh what's already expanded, so a reload
-                    // (r / Invalidation::All) renews the whole visible
-                    // tree, not just the depth-0 rows. Disjoint from the
-                    // cascade: it only touches loaded expanded paths.
-                    self.drive_tree_expanded_refresh(view_index, pane_id);
+                    // Eager tree (capability `supports_eager_subtree`): the
+                    // root rows are in; pull the WHOLE expanded subtree in one
+                    // `list_subtree` call instead of running the per-node
+                    // cascade. This covers reload (r / Invalidation::All) too —
+                    // the single eager load renews every level.
+                    let eager_depth = self.content_view(view_index).and_then(|cv| {
+                        cv.find_pane(pane_id)
+                            .and_then(|p| p.eager_subtree_depth(&cv.view_defs))
+                    });
+                    if let Some(depth) = eager_depth {
+                        self.spawn_subtree_load(view_index, pane_id, depth);
+                    } else {
+                        // Tree mode: kick off the `expand_depth` cascade now
+                        // that the depth-0 rows are in.
+                        self.drive_tree_auto_expand(view_index, pane_id);
+                        // …and refresh what's already expanded, so a reload
+                        // (r / Invalidation::All) renews the whole visible
+                        // tree, not just the depth-0 rows. Disjoint from the
+                        // cascade: it only touches loaded expanded paths.
+                        self.drive_tree_expanded_refresh(view_index, pane_id);
+                    }
                     // `:tree-find` queued a search to run against the
                     // freshly-reloaded snapshot — fire it now that the
                     // root rows are in. The lazy expand-to-hit walk then
@@ -3015,6 +3119,33 @@ impl App {
                             if let Some(cv) = self.content_view_mut(view_index) {
                                 cv.cancel_tree_expand(pane_id, parent_path);
                             }
+                        }
+                    }
+                }
+                LoadMsg::Subtree { view_index, pane_id, parent_path, result } => {
+                    if let Some(cv) = self.content_view_mut(view_index) {
+                        if let Some(pane) = cv.find_pane_mut(pane_id) {
+                            pane.retry_state = None;
+                        }
+                    }
+                    match result {
+                        Ok(subtree) => {
+                            if let Some(cv) = self.content_view_mut(view_index) {
+                                cv.apply_subtree(pane_id, parent_path, subtree);
+                            }
+                            // The eager load already laid down the whole
+                            // expanded shape; nothing to cascade. A pending
+                            // tree-find walk may still want to advance.
+                            self.drive_tree_find_chain(view_index, pane_id);
+                        }
+                        Err(e) => {
+                            not_yet_done_content::http_log::log_error("subtree_load", &e);
+                            self.last_error = Some(e.clone());
+                            self.notify_error(format!("Tree load error: {e}"));
+                            // Fall back to the per-node cascade so the tree
+                            // still expands progressively despite the eager
+                            // load failing.
+                            self.drive_tree_auto_expand(view_index, pane_id);
                         }
                     }
                 }

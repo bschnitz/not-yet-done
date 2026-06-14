@@ -3683,6 +3683,29 @@ adaptiv statt sekündlich (5 s → 10 s → 30 s → 60 s, native Parität).
 - [ ] Trackings (A) Tree/Condensed nach Toggle/Reload: Durations
       konsistent frisch (auch unter Gruppen-Headern).
 
+## Eager-Subtree (`supports_eager_subtree`, `list_subtree`)
+
+In-Memory-Adapter (Tasks (A), Trackings (A)) liefern bei `expand_depth: all`
+bzw. `expand_depth: N` den ganzen erwarteten Teilbaum in **einem**
+`list_subtree`-Call statt der per-Knoten-Kaskade. Resultat muss optisch
+**identisch** zur Kaskade sein — gleiche Zeilen, gleiche Reihenfolge, gleiche
+Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
+
+- [ ] Tasks (A) Tree-View (`expand_depth: all`): nach dem Laden ist der
+      komplette Forest sofort offen — kein sichtbares Ebene-für-Ebene-
+      Nachklappen. Tiefe ≥ 3 Ebenen testen (Task → Subtask → Sub-Subtask).
+- [ ] Selektion/Collapse: Cursor auf einen tiefen Knoten, `zc`/Collapse
+      und wieder aufklappen → Zustand stimmt (Pfad-Schema == Kaskade).
+- [ ] Trackings (A) Tree-View: dito, voll aufgeklappt in einem Rutsch.
+- [ ] `:tree-find "Tasks (A)" id:<uuid>` (z. B. via `goto_task`) landet
+      weiterhin auf dem richtigen Knoten — der eager geladene Baum ist
+      vollständig durchsuchbar.
+- [ ] `r`-Reload auf dem eager Tree erneuert alle Ebenen (z. B. neu
+      gestartetes Tracking zeigt `⏱` auf verschachteltem Task).
+- [ ] Gegenprobe Remote (Postgres/Confluence-Tree, `supports_eager_subtree:
+    false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
+      friert nicht ein — der eager Pfad greift dort bewusst nicht.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

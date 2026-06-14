@@ -120,6 +120,7 @@ impl ContentAdapter for TaigaAdapter {
             supports_tree_aggregation: false,
             propagates_query_to_subtree: false,
             group_by_via_adapter: false,
+            supports_eager_subtree: false,
         }
     }
 

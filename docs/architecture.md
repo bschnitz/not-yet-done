@@ -165,6 +165,12 @@ Factory + YAML registriert — kein Kern-Code ändert sich.
 ### `Node` / `Content` (Knoten-Ebene)
 
 - `list(params)` — Kindknoten; `content()` — Lese-Body (für Preview/Detail)
+- `list_subtree(params, depth)` — ganzer Teilbaum (`depth + 1` Ebenen) in
+  **einem** Call. Default rekursiert über `list()` (ein Call pro Knoten);
+  In-Memory-Adapter (Tasks, Trackings) überschreiben mit Snapshot-Walk ohne
+  I/O. Engine-getrieben nur bei Capability `supports_eager_subtree` — ersetzt
+  dann die O(N²)-Kaskade beim Initial-/Reload-Aufklappen. Siehe
+  `docs/generic-view-spec.md` → Eager-Subtree.
 - `actions()` — Aktionen dieses konkreten Knotens
 - `invoke_action(name, ctx)` → `ActionDispatch` — Shortcut-getriebener
   Aktions-Dispatch, der eine UI-Flow-Absicht zurückgibt
