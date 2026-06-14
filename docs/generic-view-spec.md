@@ -1518,6 +1518,17 @@ Der Fuzzy Filter filtert die aktuelle Liste live. In der Action Bar erscheint
 ein Eingabefeld. `fields` erlaubt die Einschränkung auf bestimmte Metadata-Keys.
 Der Spezialwert `label` sucht im Node-Label (meist der Titel/Summary).
 
+**Im Tree-Mode filtert er per Pfad-Pruning über _alle_ Ebenen:** ein Knoten
+bleibt sichtbar, wenn er selbst matcht **oder** einen matchenden Nachfahren
+hat. So tauchen Treffer samt ihrer Vorfahren-Kette auf, während nicht-
+matchende Geschwister-Teilbäume verschwinden. Ein tief verschachtelter
+Treffer wird also gefunden und über seine Eltern sichtbar gemacht — auch
+wenn die `fuzzy_filter`-Action nur auf der Wurzel-View deklariert ist
+(sie dient dort nur als Schalter, der den Filter scharf macht). Die Suche
+ist auf die aktuell geladenen/aufgeklappten Knoten beschränkt: ein Treffer
+in einem eingeklappten oder noch nicht nachgeladenen Ast wird erst sichtbar,
+wenn dieser Ast geladen ist.
+
 ### Custom Actions
 
 Adapter registrieren eigene Aktionen:
