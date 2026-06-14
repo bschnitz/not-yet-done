@@ -9,6 +9,7 @@ pub mod auth;
 pub mod discovery;
 pub mod members;
 pub mod messages;
+pub mod structure;
 
 use std::sync::Arc;
 

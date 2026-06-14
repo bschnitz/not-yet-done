@@ -30,7 +30,7 @@ pub struct Server {
 /// under a title. Unlike servers/channels the id field is plain `id`
 /// (not `_id`) on the wire, and is not always a ULID — keep it an opaque
 /// string. Verified against Stoat 0.13.7 (`Server.categories`).
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Category {
     pub id: String,
     #[serde(default)]

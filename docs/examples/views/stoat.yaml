@@ -67,6 +67,17 @@ views:
       - { key: name, label: Name, source: label, sizing: "flex(1)" }
     actions:
       - { name: refresh, key: r, type: reload }
+      # Create directly under the server (cursor on the server row): a
+      # channel lands uncategorized, a category is appended to the
+      # server's category list. The keys `al`/`ay` are multi-char
+      # *chords* — they are NOT in the typed `keybindings.content`
+      # section, so the App's chord interceptor consults this view's
+      # keymap via ContentView::yaml_action_chord_prefix. `type: custom`
+      # targets the SELECTED node (here the server) and opens its
+      # `InputSpec::Form` — a single `name` field. Any multi-char
+      # `actions:` key works as a chord this way, with no extra wiring.
+      - { name: new channel, key: al, type: custom, id: create_channel }
+      - { name: new category, key: ay, type: custom, id: create_category }
       - name: tree find
         key: /
         type: tree_find
@@ -176,6 +187,15 @@ views:
         tree_label: name
         columns:
           - { key: name, label: Category, source: label, sizing: "flex(1)" }
+        # A channel can also be created INSIDE a category (cursor on a
+        # category row). Stoat has no "create in category" endpoint, so
+        # the adapter does it in two steps: create the channel (it lands
+        # uncategorized), then PATCH the server's full category list with
+        # the new channel added to this category. Same `al` chord as the
+        # server level — `type: custom` resolves to whichever row the
+        # cursor sits on, so one key serves both placements.
+        actions:
+          - { name: new channel, key: al, type: custom, id: create_channel }
         children:
           - name: channels
             node_type: "stoat:channel"

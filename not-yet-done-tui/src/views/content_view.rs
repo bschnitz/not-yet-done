@@ -7838,6 +7838,35 @@ impl ContentView {
         km
     }
 
+    /// Does `key` begin a multi-char chord that the focused pane/view
+    /// would resolve right now (e.g. `a` starting `al` → "new channel")?
+    ///
+    /// The App's chord interceptor needs this because YAML `actions:`
+    /// keys live in the per-pane ([`ContentPane::build_claims`]) and
+    /// per-view ([`Self::build_view_claims`]) keymaps — *not* in the
+    /// typed `keybindings.content` section it normally consults. Without
+    /// it, a configured multi-char action key would be split into two
+    /// single-key dispatches and never fire. By probing the very same
+    /// keymaps the dispatcher uses, any chord-length YAML key becomes a
+    /// usable chord automatically, with no per-feature wiring.
+    ///
+    /// Node `shortcuts:` are single-char by construction (see
+    /// [`Self::try_node_action_shortcut`]) and so are never chords —
+    /// they need no consideration here.
+    pub fn yaml_action_chord_prefix(&self, key: &str) -> bool {
+        if self.active_view_def().is_none() {
+            return false;
+        }
+        let pane = &self.pane_trees[self.active_subtab].focused_leaf().pane;
+        let pane_claims = pane.build_claims(&self.view_defs, &self.common_kb, &self.content_kb);
+        let view_claims = self.build_view_claims();
+        pane_claims
+            .claims
+            .iter()
+            .chain(view_claims.claims.iter())
+            .any(|c| c.key.is_prefix(key))
+    }
+
     fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
         match source {
             KeySource::YamlSubtab { view } => {
@@ -9883,6 +9912,40 @@ mod tests {
         let children = view.active_pane().current_children(&view.view_defs);
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].node_type, "mock:comment");
+    }
+
+    #[test]
+    fn yaml_action_chord_prefix_detects_multi_char_action_keys() {
+        // The App's chord interceptor relies on this to stash the first
+        // key of a YAML `actions:` chord (e.g. `al` → new channel) that
+        // does not live in the typed `keybindings.content` section.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // Mirror stoat.yaml: a multi-char chord action on the root view.
+        view.view_defs[0].actions.push(ActionDef {
+            name: "new channel".into(),
+            key: "al".into(),
+            action_type: "custom".into(),
+            id: Some("create_channel".into()),
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
+            editor: None,
+            under_selection: false,
+            commit_on_save: false,
+        });
+        // `a` begins the `al` chord → detected as a prefix …
+        assert!(view.yaml_action_chord_prefix("a"));
+        // … the full chord is the binding itself, not a prefix of it …
+        assert!(!view.yaml_action_chord_prefix("al"));
+        // … an unrelated key is a prefix of nothing here …
+        assert!(!view.yaml_action_chord_prefix("z"));
+        // … and the single-char `edit` key (`e`) is no chord at all.
+        assert!(!view.yaml_action_chord_prefix("e"));
     }
 
     #[test]

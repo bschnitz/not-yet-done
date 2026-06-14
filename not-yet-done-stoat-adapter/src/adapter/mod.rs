@@ -26,8 +26,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 use not_yet_done_content::{
-    AdapterCapabilities, AdapterStatus, ContentAdapter, ContentError, Invalidation, Node, NodeType,
-    Result,
+    ActionInput, AdapterCapabilities, AdapterStatus, ContentAdapter, ContentError, Invalidation,
+    Node, NodeType, Result,
 };
 
 use crate::gateway::{StoatGateway, StoatState};
@@ -45,6 +45,27 @@ pub use factory::StoatAdapterFactory;
 /// the generic `ContentError::Other`.
 pub(in crate::adapter) fn other_err(e: impl std::fmt::Display) -> ContentError {
     ContentError::Other(e.to_string().into())
+}
+
+/// Pull a required, trimmed text field out of a `Form` action's input.
+/// Shared by the server/category create actions, which both take a single
+/// `name` field. An empty (or missing) value is rejected with a clear
+/// message rather than creating a nameless channel/category.
+pub(in crate::adapter) fn form_field(input: &ActionInput, key: &str) -> Result<String> {
+    match input {
+        ActionInput::Form(values) => {
+            let value = values.get(key).map(|s| s.trim()).unwrap_or("");
+            if value.is_empty() {
+                return Err(ContentError::Other(
+                    format!("`{key}` must not be empty").into(),
+                ));
+            }
+            Ok(value.to_string())
+        }
+        _ => Err(ContentError::NotSupported(
+            "expected form input".into(),
+        )),
+    }
 }
 
 pub struct StoatAdapter {
@@ -205,7 +226,9 @@ impl ContentAdapter for StoatAdapter {
                     .map(|c| c.title.clone())
                     .unwrap_or_else(|| category_id.to_string())
             };
+            let client = self.auth.get_client().await.map_err(other_err)?;
             return Ok(Box::new(StoatCategoryNode::new(
+                client,
                 Arc::clone(&self.state),
                 server_id.to_string(),
                 category_id.to_string(),
@@ -254,11 +277,15 @@ impl ContentAdapter for StoatAdapter {
             }
         };
         match kind {
-            Kind::Server(name) => Ok(Box::new(StoatServerNode::new(
-                Arc::clone(&self.state),
-                id.to_string(),
-                name,
-            ))),
+            Kind::Server(name) => {
+                let client = self.auth.get_client().await.map_err(other_err)?;
+                Ok(Box::new(StoatServerNode::new(
+                    client,
+                    Arc::clone(&self.state),
+                    id.to_string(),
+                    name,
+                )))
+            }
             Kind::Channel(name) => {
                 let client = self.auth.get_client().await.map_err(other_err)?;
                 Ok(Box::new(StoatChannelNode::new(
@@ -288,6 +315,8 @@ impl ContentAdapter for StoatAdapter {
     /// node's own `actions()` so the action bar and the editor agree.
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<not_yet_done_content::NodeAction> {
         match node_type.type_id.as_str() {
+            "stoat:server" => server::server_actions(),
+            "stoat:category" => category::category_actions(),
             "stoat:channel" => channel::channel_actions(),
             "stoat:message" => message::message_actions(),
             _ => Vec::new(),
