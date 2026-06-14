@@ -676,16 +676,91 @@ impl TrackingSnapshot {
     /// the bucket level uses, so the returned `treegrp:` id always matches a
     /// real bucket row when one exists. `None` when there are no trackings.
     fn bucket_for_now(&self, spec: &GroupSpec) -> Option<String> {
+        let scope = self.now_scope(spec)?;
+        Some(format!("{GROUP_ID_PREFIX}{}", scope.encode()))
+    }
+
+    /// The bucket scope the current instant falls into — the youngest
+    /// tracking's bucket (see [`Self::bucket_for_now`] for why youngest).
+    /// Shared by `bucket_for_now` (id only) and [`Self::live_group_rows`]
+    /// (which re-folds this bucket against live `now`). `None` with no
+    /// trackings.
+    fn now_scope(&self, spec: &GroupSpec) -> Option<BucketScope> {
         let row = self
             .by_id
             .values()
             .max_by_key(|r| r.tracking.started_at)?;
-        let scope = BucketScope {
+        Some(BucketScope {
             column: spec.column.clone(),
             bucket: spec.bucket,
             key: grouping::group_key(&bucket_raw_value(row, &spec.column), spec.bucket),
+        })
+    }
+
+    /// The now-bucket's ticking rows folded against the *live* `now` — the
+    /// M9 live-tick counterpart of the static `built_at` fold ([`group_subtree`]
+    /// bakes durations at snapshot time; this re-folds them to the current
+    /// instant). Returns the bucket header (total re-summed to `now`) plus the
+    /// tree rows on the **running chain** — every task with a running tracking
+    /// and all its ancestors, whose cumulated grows — keyed exactly as the
+    /// rendered grouped tree (`treegrp:`/`tree:<scope>:<uuid>`), so the
+    /// frontend's `patch_row` swaps each ticking cell in place. Untouched
+    /// sibling tasks keep their frozen value and aren't returned (no churn).
+    /// Empty when nothing is running or the bucket is empty.
+    ///
+    /// [`group_subtree`]: Self::group_subtree
+    fn live_group_rows(
+        &self,
+        spec: &GroupSpec,
+        filter: Option<&HashSet<Uuid>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<NodeSummary> {
+        let Some(scope) = self.now_scope(spec) else {
+            return Vec::new();
         };
-        Some(format!("{GROUP_ID_PREFIX}{}", scope.encode()))
+        let members = self.bucket_members(filter, &scope);
+        if members.is_empty() {
+            return Vec::new();
+        }
+        // Re-fold own durations + the bucket total against live `now`, and
+        // note which tasks are still running.
+        let mut own_secs: HashMap<Uuid, i64> = HashMap::new();
+        let mut active_tasks: HashSet<Uuid> = HashSet::new();
+        let mut total_secs = 0i64;
+        for id in &members {
+            let Some(row) = self.by_id.get(id) else { continue };
+            let secs = duration_seconds(row, now);
+            *own_secs.entry(row.tracking.task_id).or_default() += secs;
+            total_secs += secs;
+            if row.active {
+                active_tasks.insert(row.tracking.task_id);
+            }
+        }
+        if active_tasks.is_empty() {
+            return Vec::new(); // nothing running in this bucket → nothing ticks
+        }
+        let projection = build_tree_projection(&self.task_map, &own_secs, &active_tasks);
+        // The running chain: each active task plus its ancestors (their
+        // cumulated grows). Cycle-guarded by the `insert` short-circuit.
+        let mut chain: HashSet<Uuid> = HashSet::new();
+        for &task in &active_tasks {
+            let mut current = Some(task);
+            while let Some(id) = current {
+                if !chain.insert(id) {
+                    break;
+                }
+                current = self.task_map.get(&id).and_then(|(_, parent)| *parent);
+            }
+        }
+        let mut rows = vec![group_summary(&scope, total_secs, true)];
+        for id in chain {
+            if projection.is_visible(id) {
+                if let Some(row) = projection.by_id.get(&id) {
+                    rows.push(projection.summary(id, row, Some(&scope)));
+                }
+            }
+        }
+        rows
     }
 
     /// The tracking ids that fall into `scope`'s bucket, optionally
@@ -1996,6 +2071,21 @@ impl ContentAdapter for TrackingAdapter {
         self.snapshot().await.ok()?.bucket_for_now(group_by)
     }
 
+    async fn live_group_rows(
+        &self,
+        group_by: &GroupSpec,
+        query: Option<&str>,
+    ) -> Vec<NodeSummary> {
+        let Ok(snapshot) = self.snapshot().await else {
+            return Vec::new();
+        };
+        // Honour the pane's saved query so the ticked rows match the filtered
+        // tree the user sees; `None`/empty → whole bucket.
+        let query = query.map(str::to_string);
+        let filter = snapshot.visible_set(&self.handle, &query).await.ok().flatten();
+        snapshot.live_group_rows(group_by, filter.as_deref(), chrono::Utc::now())
+    }
+
     async fn revalidate(&self) {
         // Out-of-process changes (CLI, waybar, another instance) write to
         // the same DB but emit no in-process DomainEvent, so the eager
@@ -2658,6 +2748,116 @@ mod tests {
             order: SortDirection::Desc,
         };
         assert_eq!(snap.bucket_for_now(&day), None);
+    }
+
+    #[test]
+    fn live_group_rows_ticks_now_bucket_chain_against_live_now() {
+        // Forest A → B, B running since noon the 9th, plus an *idle*
+        // (completed) tracking on a sibling task the same day. The live fold
+        // returns the now-bucket header + the running chain (B and its
+        // ancestor A) keyed to the rendered tree rows, with durations summed
+        // to the passed `now` (not the frozen `built_at`); the idle sibling
+        // never ticks.
+        let task_a = Uuid::from_u128(10);
+        let task_b = Uuid::from_u128(20);
+        let other = Uuid::from_u128(30);
+        let running = Uuid::from_u128(1);
+        let idle = Uuid::from_u128(2);
+        let tm = task_map(&[
+            (task_a, "A", None),
+            (task_b, "B", Some(task_a)),
+            (other, "Other", None),
+        ]);
+        let started = tracking_on(running, task_b, "2026-06-09", 0, false).started_at;
+        let mut by_id = HashMap::new();
+        by_id.insert(running, row(tracking_on(running, task_b, "2026-06-09", 0, false), "B", vec!["A"]));
+        by_id.insert(idle, row(tracking_on(idle, other, "2026-06-09", 30, true), "Other", vec![]));
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![running, idle],
+            tree: Arc::new(TreeProjection::default()),
+            task_map: tm,
+            built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
+        };
+        let spec = GroupSpec {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            order: SortDirection::Desc,
+        };
+        let now1 = started + chrono::Duration::hours(1);
+        let now2 = started + chrono::Duration::hours(2);
+        let rows1 = snapshot.live_group_rows(&spec, None, now1);
+        let rows2 = snapshot.live_group_rows(&spec, None, now2);
+
+        let header = "treegrp:started:day:2026-06-09".to_string();
+        let a_id = format!("tree:started:day:2026-06-09:{task_a}");
+        let b_id = format!("tree:started:day:2026-06-09:{task_b}");
+        let other_id = format!("tree:started:day:2026-06-09:{other}");
+
+        // The chain is exactly header + A + B; the idle sibling never ticks.
+        let ids1: HashSet<&str> = rows1.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(rows1.len(), 3, "header + running chain (A, B)");
+        assert!(ids1.contains(header.as_str()));
+        assert!(ids1.contains(a_id.as_str()));
+        assert!(ids1.contains(b_id.as_str()));
+        assert!(!ids1.contains(other_id.as_str()), "idle sibling isn't returned");
+
+        let dur = |rows: &[NodeSummary], id: &str, key: &str| -> i64 {
+            rows.iter()
+                .find(|r| r.id == id)
+                .and_then(|r| r.metadata.fields.iter().find(|f| f.key == key))
+                .map(|f| f.value.parse().unwrap())
+                .unwrap()
+        };
+        // At now1: B has run one hour (own = cumulated = 3600); A's own is 0
+        // but its cumulated rolls up B; the header total mirrors it.
+        assert_eq!(dur(&rows1, &b_id, "duration"), 3600);
+        assert_eq!(dur(&rows1, &a_id, "duration"), 0, "A has no own tracking");
+        assert_eq!(dur(&rows1, &a_id, "duration_cumulated"), 3600);
+        // The header is the *whole bucket's* total: B's running hour plus the
+        // idle sibling's completed 30 min (1800 s) = 5400.
+        assert_eq!(dur(&rows1, &header, "duration"), 3600 + 1800);
+        // One hour later only the running chain grew by 3600 s — proof the
+        // fold ran against the live `now`, not the frozen snapshot. The idle
+        // sibling's 1800 s stays put.
+        assert_eq!(dur(&rows2, &b_id, "duration"), 7200);
+        assert_eq!(dur(&rows2, &a_id, "duration_cumulated"), 7200);
+        assert_eq!(dur(&rows2, &header, "duration"), 7200 + 1800);
+        // Header marker stays set while something runs.
+        let header_marker = rows1
+            .iter()
+            .find(|r| r.id == header)
+            .and_then(|r| r.metadata.fields.iter().find(|f| f.key == "marker"))
+            .map(|f| f.value.clone());
+        assert_eq!(header_marker.as_deref(), Some("⏱"));
+    }
+
+    #[test]
+    fn live_group_rows_empty_without_running_tracking() {
+        // Only completed trackings → nothing ticks → no live rows (the timer
+        // wouldn't even be paced, but the fold is defensive).
+        let task = Uuid::from_u128(9);
+        let t1 = Uuid::from_u128(1);
+        let tm = task_map(&[(task, "A", None)]);
+        let mut by_id = HashMap::new();
+        by_id.insert(t1, row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![]));
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![t1],
+            tree: Arc::new(TreeProjection::default()),
+            task_map: tm,
+            built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
+        };
+        let spec = GroupSpec {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            order: SortDirection::Desc,
+        };
+        assert!(snapshot.live_group_rows(&spec, None, chrono::Utc::now()).is_empty());
     }
 
     #[test]

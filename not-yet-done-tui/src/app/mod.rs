@@ -185,6 +185,16 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         result: Option<NowBucketPayload>,
     },
+    /// One live-refresh tick for `view_index` (M9 live rows), fired by the
+    /// per-view timer set in [`App::set_live_refresh_timer`]. The timer carries
+    /// no data — it only paces; the actual fold runs in
+    /// [`App::spawn_live_refresh`]. Crucially, a tick for a **background** tab
+    /// must not touch the visible tab: the handler only evaluates it when its
+    /// view is active, otherwise it marks the view due in
+    /// `pending_live_refresh` for a single coalesced refresh on switch-back.
+    LiveTick {
+        view_index: usize,
+    },
     /// In-flight retry progress for a failed content/drill/tree load on
     /// `view_index` / `pane_id`. Updates the pane's `retry_state` so
     /// the auth-status banner reads `"Retrying (n/total): {err}"`
@@ -617,6 +627,14 @@ pub struct App {
     /// respawn aborts the previous handle, `None` stops it).
     live_refresh_timers: std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
 
+    /// Views whose live-refresh tick fired while they were **not** the active
+    /// tab (M9 — adapter-driven live rows). A background tick must not touch
+    /// the visible tab, so it only records the view here; switching *to* the
+    /// view runs one coalesced [`Self::spawn_live_refresh`] against the current
+    /// state (so any number of missed ticks collapse to a single up-to-date
+    /// fold) and clears the flag.
+    pending_live_refresh: std::collections::HashSet<usize>,
+
     /// Channel for results of background commit tasks (see `app::editor`).
     /// The receiver is selected on by the main loop and each message is
     /// applied via `handle_commit_msg`.
@@ -920,6 +938,7 @@ impl App {
             load_rx,
             load_tx,
             live_refresh_timers: std::collections::HashMap::new(),
+            pending_live_refresh: std::collections::HashSet::new(),
             commit_rx,
             commit_tx,
             commit_in_flight: false,
@@ -1253,12 +1272,12 @@ impl App {
 
     /// Start, re-pace, or stop the live-refresh timer for `view_index`
     /// (M9 — adapter-driven live rows). `Some(interval)` (re)spawns a
-    /// `tokio::time::interval` that, on each tick, pulls the view adapter's
-    /// [`live_rows`](not_yet_done_content::ContentAdapter::live_rows) and
-    /// forwards each refreshed row as an
-    /// [`Invalidation::Row`](not_yet_done_content::Invalidation::Row) patch
-    /// through the load channel; `None` stops it. A respawn aborts the
-    /// existing handle first, so the cadence the adapter last declared
+    /// `tokio::time::interval` that, on each tick, sends a data-free
+    /// [`LoadMsg::LiveTick`] through the load channel; `None` stops it. The
+    /// timer only *paces* — the actual fold runs in
+    /// [`Self::spawn_live_refresh`], gated on whether the view is the active
+    /// tab (a background tick must not touch the visible tab). A respawn aborts
+    /// the existing handle first, so the cadence the adapter last declared
     /// always wins and timers never accumulate across re-pacings.
     fn set_live_refresh_timer(
         &mut self,
@@ -1273,9 +1292,6 @@ impl App {
         if interval.is_zero() {
             return; // a zero interval would busy-loop
         }
-        let Some(cv) = self.content_view(view_index) else { return };
-        let Some(adapter) = cv.adapter.as_ref() else { return };
-        let adapter = Arc::clone(adapter);
         let tx = self.load_tx.clone();
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -1285,18 +1301,71 @@ impl App {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                for summary in adapter.live_rows().await {
-                    let msg = LoadMsg::AdapterInvalidation {
-                        view_index,
-                        inv: not_yet_done_content::Invalidation::Row(summary),
-                    };
-                    if tx.send(msg).is_err() {
-                        return; // app gone
-                    }
+                if tx.send(LoadMsg::LiveTick { view_index }).is_err() {
+                    return; // app gone
                 }
             }
         });
         self.live_refresh_timers.insert(view_index, handle);
+    }
+
+    /// Run one live-refresh fold for `view_index` (M9 — adapter-driven live
+    /// rows): pull the adapter's [`live_rows`] (the flat list / cross-tab
+    /// markers — this also re-paces the adaptive interval) and, for each
+    /// grouped-tree pane, the now-bucket's chain folded against live `now`
+    /// ([`live_group_rows`]), forwarding every refreshed row as an
+    /// [`Invalidation::Row`] patch. Per-pane [`GroupSpec`] + saved query are
+    /// resolved up front (frontend state the adapter can't see), then the
+    /// async folds run off the main loop. Called for the active tab on every
+    /// tick, and once per tab on switch-back (see `pending_live_refresh`).
+    ///
+    /// [`live_rows`]: not_yet_done_content::ContentAdapter::live_rows
+    /// [`live_group_rows`]: not_yet_done_content::ContentAdapter::live_group_rows
+    /// [`Invalidation::Row`]: not_yet_done_content::Invalidation::Row
+    /// [`GroupSpec`]: not_yet_done_content::GroupSpec
+    pub fn spawn_live_refresh(&self, view_index: usize) {
+        let Some(cv) = self.content_view(view_index) else { return };
+        let Some(adapter) = cv.adapter.as_ref() else { return };
+        let adapter = Arc::clone(adapter);
+        // Each grouped *eager* tree pane's (spec, saved query). A flat /
+        // condensed / ungrouped pane has no spec and is served by `live_rows`
+        // alone; a pane with a spec but no eager depth isn't a tree we fold.
+        let grouped: Vec<(not_yet_done_content::GroupSpec, Option<String>)> = cv
+            .all_pane_ids()
+            .into_iter()
+            .filter_map(|pid| {
+                let pane = cv.find_pane(pid)?;
+                let spec = pane.adapter_group_spec(&cv.view_defs)?;
+                pane.eager_subtree_depth(&cv.view_defs)?;
+                let query = Self::subtree_query_for_pane(cv, pane, &adapter);
+                Some((spec, query))
+            })
+            .collect();
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            let send = |summary| {
+                tx.send(LoadMsg::AdapterInvalidation {
+                    view_index,
+                    inv: not_yet_done_content::Invalidation::Row(summary),
+                })
+                .is_ok()
+            };
+            // Flat list / cross-tab markers (and adaptive re-pacing).
+            for summary in adapter.live_rows().await {
+                if !send(summary) {
+                    return; // app gone
+                }
+            }
+            // Grouped trees: the now-bucket's ticking chain, keyed to the
+            // rendered tree rows so `patch_row` swaps them in place.
+            for (spec, query) in grouped {
+                for summary in adapter.live_group_rows(&spec, query.as_deref()).await {
+                    if !send(summary) {
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// React to a streaming adapter's [`Invalidation`]. Reloads the
@@ -3273,6 +3342,21 @@ impl App {
                             self.reload_content_pane_current_level(view_index, pane_id);
                         }
                     }
+                }
+                LoadMsg::LiveTick { view_index } => {
+                    // A background tab's tick must not touch the visible tab:
+                    // only the active view folds now; others record themselves
+                    // as due and run one coalesced refresh on switch-back. The
+                    // fold itself spawns async and produces no immediate visible
+                    // change (its row patches arrive as later messages), so this
+                    // arm never marks the frame dirty — returning `false` keeps a
+                    // background tick from redrawing the active tab.
+                    if self.active_tab == Tab::Content(view_index) {
+                        self.spawn_live_refresh(view_index);
+                    } else {
+                        self.pending_live_refresh.insert(view_index);
+                    }
+                    return false;
                 }
                 LoadMsg::CustomQueryItems { view_index, pane_id, result } => {
                     match result {
@@ -5677,6 +5761,13 @@ impl App {
                 }
                 let status = cv.auth_status.clone();
                 self.react_to_adapter_status(idx, &status);
+                // Live-tick coalescing: if this tab accrued background ticks
+                // while hidden, run exactly one refresh now against the current
+                // state so its live cells (e.g. a grouped tree's ticking
+                // durations) are up to date the instant it becomes visible.
+                if self.pending_live_refresh.remove(&idx) {
+                    self.spawn_live_refresh(idx);
+                }
             }
         }
     }
