@@ -6386,20 +6386,6 @@ impl App {
             }
             crate::app::node_actions::MarkMoveEffect::Ignore => {}
         }
-        // M9: a `PatchRow` dispatch swaps the invoking row's state in
-        // place (e.g. a tree row flipping its own tracking marker) without
-        // refetching or rebuilding the pane — the node built the summary
-        // with its own view-correct id, so a row the domain-event bridge
-        // cannot address (scope-encoded `tree:<…>` id) still updates. We
-        // patch directly here rather than minting a `ViewRequest` because
-        // there is no async roundtrip to dispatch — it's a synchronous
-        // edit of already-loaded pane state.
-        if let not_yet_done_content::ActionDispatch::PatchRow(summary) = &dispatch {
-            if let Some(cv) = self.content_view_mut(view_index) {
-                cv.patch_row(summary);
-            }
-            return;
-        }
         // Resolve the `editor_in_place` flag for the row's node-type
         // by looking it up in the view-config tree. DB scripts can
         // sit under multiple branches (DSF-6 recursive structure),
