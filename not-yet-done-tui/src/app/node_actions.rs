@@ -452,10 +452,6 @@ pub fn dispatch_to_view_request(
             }),
         },
         ActionDispatch::Reload => Some(ViewRequest::SpawnContentLoad { view_index, pane_id }),
-        // M9: handled synchronously in `handle_node_action_dispatched`
-        // before this translation runs (it patches the pane in place),
-        // so it never reaches here. Mapped to `None` for exhaustiveness.
-        ActionDispatch::PatchRow(_) => None,
         ActionDispatch::Noop => None,
         ActionDispatch::Error(msg) => Some(ViewRequest::Notify(msg)),
     }

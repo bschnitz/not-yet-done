@@ -3592,38 +3592,38 @@ wenn keine bereits-expandierte Ebene mehr auf ihre Kinder wartet.
 - [ ] Auch der gruppierte Tree (Tages-Buckets) klappt jeden Bucket-Teilbaum
       vollständig auf, nicht nur die erste Task-Ebene.
 
-### `s` (toggle-tracking) baut den Baum nicht neu auf
+### `s` (toggle-tracking) aktualisiert die Ansicht sofort
 
-Bugfix: `s`/`t` (toggle-tracking) gab früher `Reload` zurück **und** das
-`Tracking*`-DomainEvent löste `Invalidation::All` aus → der ganze (tiefe,
-voll aufgeklappte) Baum wurde zweimal neu gefaltet und neu expandiert, was
-spürbar dauerte und währenddessen die Eingabe blockierte. Fix (Option 1):
-der Toggle gibt `Noop` zurück und der Adapter-Bridge patcht nur die
-betroffene Zeile in place (M9), statt einen vollen Reload anzustoßen. Ein
-echter struktureller Refresh ist explizit `r`.
+Bugfix: `s` aktualisierte die TUI in den Trackings-Tabs (flach / condensed /
+Tree) meist **nicht** sofort. Grund: der Toggle gab `Noop` zurück und
+verließ sich auf Bridge-Row-Patches bzw. (im Tree) auf einen
+`PatchRow`-Dispatch. Beide trafen die sichtbare Zeile oft nicht — ein
+_Start_ erzeugt ein neues, noch unsichtbares Intervall (keine Zeile zum
+Patchen), und `patch_row` durchsucht nur die Tiefe-0-Zeilen, sodass tiefere
+Tree-Knoten gar nicht aktualisiert wurden. Die `Noop`/`PatchRow`-Lösung
+existierte nur, weil ein voller `Reload` früher die O(N²)-Expand-Kaskade
+auslöste (langsam, blockierte Eingabe).
 
-Nachtrag: Die getoggelte **Tree-Zeile** aktualisiert ihren `⏱`-Marker
-trotzdem sofort. Die Bridge-Patches adressieren Zeilen über die nackte
-Tracking-/Task-UUID; eine Tree-Zeile hat aber eine scope-kodierte
-`tree:<…>`-ID, die kein Bridge-Patch trifft. Deshalb gibt der Tree-Knoten
-selbst einen `PatchRow`-Dispatch mit seiner eigenen, view-korrekten ID und
-geflipptem Marker zurück — die Zeile patcht sich selbst, ohne Neuaufbau.
+Fix: Mit der Eager-Subtree-Verbesserung (`supports_eager_subtree`) erneuert
+ein `Reload` den ganzen aufgeklappten Baum in **einem** `list_subtree`-Call.
+Der Toggle gibt deshalb in allen drei Views schlicht `Reload` zurück
+(identisch zur Tasks-(A)-Logik) — re-foldet Own/Cumulated, Vorfahren-Aggregate
+und Marker konsistent. Der `PatchRow`-Dispatch entfällt ganz.
 
 > Beim Smoke-Test **kein** echtes Tracking auf echten Zeilen togglen —
 > eine Wegwerf-Aufgabe anlegen und auf der tracken.
 
 - [ ] Trackings (A) → Tree, tiefer/voll aufgeklappter Baum: `s` auf einer
-      Zeile startet/stoppt das Tracking **ohne** sichtbaren Neuaufbau des
-      Baums — kein Zusammenklappen, kurzes Eingabe-Freeze entfällt, die
-      Selektion bleibt stehen. Der `⏱`-Marker der getoggelten Zeile flippt
-      dabei sofort (an beim Start, weg beim Stopp).
-- [ ] Nach `r` (echter Reload) sind die strukturellen Effekte sichtbar
-      (neuer Tracking-Eintrag in der flachen Liste, kumulierte Sekunden der
-      Vorfahren im Tree aktualisiert).
+      **verschachtelten** Zeile flippt deren `⏱`-Marker **sofort** (an beim
+      Start, weg beim Stopp); der Baum bleibt voll aufgeklappt, der Reload
+      ist flott (kein sekundenlanges Zusammenklappen/Eingabe-Freeze), die
+      Selektion bleibt auf der Zeile stehen. Kumulierte Sekunden der
+      Vorfahren stimmen ohne extra `r`.
+- [ ] Trackings (A) → flache Liste (`a`) und condensed (`v`): `s` auf einer
+      laufenden Zeile stoppt sie (`⏱` weg, Dauer eingefroren); `s` auf einer
+      gestoppten Zeile startet ein neues Intervall, das sofort sichtbar wird.
 - [ ] Tasks (A) → Tree: `t` (toggle-tracking) flippt den `⏱`-Marker der
-      Zeile in place, ebenfalls ohne Baum-Neuaufbau.
-- [ ] Flache Trackings-Liste: `s` auf einer **laufenden** Zeile stoppt sie
-      → `⏱` verschwindet und die Dauer friert in place ein (kein Reload).
+      Zeile sofort (unverändert — nutzte schon `Reload`).
 
 ## Trackings-Tree: Gruppierung via Adapter (`group_by_via_adapter`)
 
@@ -3703,7 +3703,7 @@ Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
 - [ ] `r`-Reload auf dem eager Tree erneuert alle Ebenen (z. B. neu
       gestartetes Tracking zeigt `⏱` auf verschachteltem Task).
 - [ ] Gegenprobe Remote (Postgres/Confluence-Tree, `supports_eager_subtree:
-    false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
+  false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
       friert nicht ein — der eager Pfad greift dort bewusst nicht.
 
 ## Refinements / Deferred Tasks

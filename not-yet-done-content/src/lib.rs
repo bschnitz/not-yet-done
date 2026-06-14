@@ -106,9 +106,8 @@ impl Metadata {
     ///
     /// A no-op if no field with that key exists (the caller asked to patch
     /// a column the row doesn't carry — silently ignored rather than
-    /// inventing a field with an empty label). Used to build a patched
-    /// row summary for [`ActionDispatch::PatchRow`] from an existing one
-    /// (e.g. flipping a tracking marker) without rebuilding the metadata.
+    /// inventing a field with an empty label). Lets a caller tweak a single
+    /// column value on an existing summary without rebuilding the metadata.
     pub fn set_field(&mut self, key: &str, value: impl Into<String>) {
         if let Some(field) = self.fields.iter_mut().find(|f| f.key == key) {
             field.value = value.into();
@@ -786,20 +785,6 @@ pub enum ActionDispatch {
     DeleteSelf,
     /// Reload the current pane.
     Reload,
-    /// Patch a single visible row in place (M9) without refetching or
-    /// rebuilding the pane. The frontend swaps the row's state by `id`
-    /// across every pane that currently shows it (no selection/scroll
-    /// change); a row whose `id` is not visible is silently ignored.
-    ///
-    /// Used by actions that mutate only the invoking row's own display
-    /// and can recompute it cheaply — e.g. a tree row toggling its own
-    /// tracking marker. Unlike the domain-event bridge's row patches
-    /// (which key on the backend's plain id), the node builds the summary
-    /// with its own view-correct id (e.g. a scope-encoded `tree:<…>` id),
-    /// so a row the bridge cannot address still updates. The user presses
-    /// `r` for a full structural refresh (ancestor aggregates, added/
-    /// removed rows).
-    PatchRow(NodeSummary),
     /// No-op — useful as a default for adapters that haven't migrated.
     Noop,
     /// Adapter rejected the action with a user-displayable error.
