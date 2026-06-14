@@ -14,10 +14,12 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentError, EditorPrep, FormFieldSpec, InputSpec, ListParams,
-    ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, EditorPrep,
+    FormFieldSpec, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, Result,
 };
 
+use super::category::move_marked_channel;
 use super::members::{MemberCache, channel_user_map};
 use super::mentions;
 use super::message::{StoatMessageNode, composite_id};
@@ -35,6 +37,10 @@ const DEFAULT_MESSAGE_LIMIT: u32 = 50;
 ///   and posts the buffer as a new message.
 /// - `rename` — retitle the channel itself (a single-field name form),
 ///   reachable while the cursor sits on the channel row in the tree.
+/// - `mark-move` / `paste-move` — the cut/paste move pair. `mark-move`
+///   records this channel as the cut; `paste-move` (on a category, the
+///   server, or another channel) relocates it. Both are frontend-driven
+///   shortcuts dispatched through [`Node::invoke_action`].
 pub(super) fn channel_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("send_message", "send", InputSpec::Editor),
@@ -45,6 +51,8 @@ pub(super) fn channel_actions() -> Vec<NodeAction> {
                 fields: vec![FormFieldSpec::text("name", "Channel name")],
             },
         ),
+        NodeAction::new("mark-move", "cut", InputSpec::None),
+        NodeAction::new("paste-move", "paste channel", InputSpec::None),
     ]
 }
 
@@ -193,6 +201,51 @@ impl Node for StoatChannelNode {
                 "execute: unsupported action/input for {other}"
             ))),
         }
+    }
+
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // Paste a cut channel beside this one — into whatever container
+            // (a category, or the uncategorized branch) currently holds
+            // this channel. Resolving the destination needs this channel's
+            // server + owning category from the live snapshot.
+            "paste-move" => {
+                let Some(marked) = &ctx.marked else {
+                    return Ok(ActionDispatch::Error("Nothing cut to paste".into()));
+                };
+                let resolved = {
+                    let st = self.state.read().await;
+                    st.channels
+                        .get(&self.channel_id)
+                        .and_then(|c| c.server.clone())
+                        .map(|server_id| {
+                            let target_cat = st.servers.get(&server_id).and_then(|s| {
+                                s.categories
+                                    .iter()
+                                    .find(|c| c.channels.iter().any(|ch| ch == &self.channel_id))
+                                    .map(|c| c.id.clone())
+                            });
+                            (server_id, target_cat)
+                        })
+                };
+                match resolved {
+                    Some((server_id, target_cat)) => {
+                        move_marked_channel(
+                            &self.client,
+                            &self.state,
+                            &server_id,
+                            target_cat.as_deref(),
+                            marked,
+                        )
+                        .await
+                    }
+                    None => ActionDispatch::Error("This channel has no server".into()),
+                }
+            }
+            // `mark-move` is frontend-owned (it records the cut); just
+            // acknowledge it. Anything else is a no-op.
+            _ => ActionDispatch::Noop,
+        })
     }
 
     async fn list(&self, params: ListParams) -> Result<ListResult> {

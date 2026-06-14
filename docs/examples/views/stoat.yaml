@@ -83,6 +83,15 @@ views:
         type: tree_find
         tree_find:
           prompt: Search channels
+    # Cut/paste move a channel between categories. `C` cuts the channel
+    # under the cursor (it is NOT deleted — only marked); `P` pastes it
+    # onto the target the cursor sits on. `P` on the SERVER row drops the
+    # channel into the uncategorized branch. The cut is local to this tab
+    # (switching tabs aborts it) and pressing `C` again on the same row
+    # cancels it. These are generic `shortcuts:` (the shared mark/paste-move
+    # vocabulary, dispatched via `invoke_action`), not editor actions.
+    shortcuts:
+      P: paste-move
     children:
       # Branch order = render order at the server level: uncategorized
       # channels first, then categories.
@@ -96,6 +105,11 @@ views:
         # the tree without a reload. `R` is a single char (no chord).
         actions:
           - { name: rename, key: R, type: custom, id: rename }
+        # `C` cuts THIS channel (mark for move, no delete); `P` pastes a
+        # previously-cut channel beside this one (into the same container).
+        shortcuts:
+          C: mark-move
+          P: paste-move
         # Enter on a channel has no tree-continuing child (messages carry
         # no tree_label), so it DRILLS into the message list. `split` opens
         # that list in a focused pane to the right (80%) while the channel
@@ -205,6 +219,11 @@ views:
         actions:
           - { name: new channel, key: al, type: custom, id: create_channel }
           - { name: rename, key: R, type: custom, id: rename }
+        # `P` on a category row pastes a cut channel INTO this category.
+        # (Categories themselves aren't cut — only channels are, so there's
+        # no `C` here.)
+        shortcuts:
+          P: paste-move
         children:
           - name: channels
             node_type: "stoat:channel"
@@ -215,6 +234,11 @@ views:
             # uncategorized branch.
             actions:
               - { name: rename, key: R, type: custom, id: rename }
+            # Cut/paste a channel inside a category — same move pair as the
+            # uncategorized branch.
+            shortcuts:
+              C: mark-move
+              P: paste-move
             children:
               - name: messages
                 node_type: "stoat:message"

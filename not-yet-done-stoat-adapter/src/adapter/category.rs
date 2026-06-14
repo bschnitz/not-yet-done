@@ -15,8 +15,9 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentError, FormFieldSpec, InputSpec, ListParams, ListResult,
-    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, FormFieldSpec,
+    InputSpec, ListParams, ListResult, MarkedNode, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, Result,
 };
 
 use super::server::channel_summary;
@@ -28,8 +29,9 @@ use crate::gateway::protocol::Category;
 
 const CAT_MARKER: &str = "/cat/";
 
-/// Actions a category exposes: create a channel directly inside it, or
-/// rename the category. Kept in lockstep with
+/// Actions a category exposes: create a channel directly inside it,
+/// rename the category, or accept a previously-cut channel (`paste-move`,
+/// the move target — see [`move_marked_channel`]). Kept in lockstep with
 /// [`StoatCategoryNode::actions`].
 pub(super) fn category_actions() -> Vec<NodeAction> {
     vec![
@@ -47,6 +49,8 @@ pub(super) fn category_actions() -> Vec<NodeAction> {
                 fields: vec![FormFieldSpec::text("name", "Category name")],
             },
         ),
+        // Paste target only — the cut itself happens on a channel row.
+        NodeAction::new("paste-move", "paste channel", InputSpec::None),
     ]
 }
 
@@ -103,6 +107,73 @@ pub(super) fn categories_with_channel(
             cat
         })
         .collect()
+}
+
+/// Return `existing` with `channel_id` detached from every category and,
+/// when `target` is `Some(cat_id)`, re-attached to that category. `None`
+/// leaves it uncategorized. Stoat's server PATCH replaces the whole list,
+/// so a move is "remove it from wherever it was, then place it" — one
+/// rule covers category→category, category→uncategorized and the reverse.
+/// Removing first makes the re-insert duplicate-free even when the source
+/// and target category coincide (a no-op move).
+pub(super) fn categories_with_channel_moved(
+    existing: &[Category],
+    channel_id: &str,
+    target: Option<&str>,
+) -> Vec<Category> {
+    existing
+        .iter()
+        .cloned()
+        .map(|mut cat| {
+            cat.channels.retain(|c| c != channel_id);
+            if target == Some(cat.id.as_str()) {
+                cat.channels.push(channel_id.to_string());
+            }
+            cat
+        })
+        .collect()
+}
+
+/// Execute a cut/paste channel move: relocate the marked channel to
+/// `target_category` (`None` = the server's uncategorized branch) within
+/// `server_id`. Shared by the server / category / channel `paste-move`
+/// handlers, which differ only in how they resolve the destination.
+///
+/// Validates that the marked node is a channel **belonging to this
+/// server** — categories are server-scoped, so a cross-server paste is
+/// rejected rather than silently dropping the channel. On success the
+/// `ServerUpdate` echo refreshes the tree, so we return
+/// [`ActionDispatch::Reload`] (which also clears the frontend's cut mark).
+pub(super) async fn move_marked_channel(
+    client: &StoatClient,
+    state: &RwLock<StoatState>,
+    server_id: &str,
+    target_category: Option<&str>,
+    marked: &MarkedNode,
+) -> ActionDispatch {
+    if marked.node_type.type_id != channel_type().type_id {
+        return ActionDispatch::Error("Only channels can be cut and pasted".into());
+    }
+    let channel_id = marked.node_id.as_str();
+    let categories = {
+        let st = state.read().await;
+        match st.channels.get(channel_id).and_then(|c| c.server.as_deref()) {
+            Some(srv) if srv == server_id => {}
+            Some(_) => {
+                return ActionDispatch::Error("Cannot move a channel to a different server".into());
+            }
+            None => return ActionDispatch::Error("The cut channel no longer exists".into()),
+        }
+        st.servers
+            .get(server_id)
+            .map(|s| s.categories.clone())
+            .unwrap_or_default()
+    };
+    let updated = categories_with_channel_moved(&categories, channel_id, target_category);
+    match client.update_server_categories(server_id, &updated).await {
+        Ok(()) => ActionDispatch::Reload,
+        Err(e) => ActionDispatch::Error(format!("Move failed: {e}")),
+    }
 }
 
 /// Build the composite id for a category row: `<server>/cat/<catid>`.
@@ -257,6 +328,28 @@ impl Node for StoatCategoryNode {
         }
     }
 
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // Paste a previously-cut channel INTO this category.
+            "paste-move" => match &ctx.marked {
+                Some(marked) => {
+                    move_marked_channel(
+                        &self.client,
+                        &self.state,
+                        &self.server_id,
+                        Some(&self.category_id),
+                        marked,
+                    )
+                    .await
+                }
+                None => ActionDispatch::Error("Nothing cut to paste".into()),
+            },
+            // `mark-move` is frontend-owned (it records the cut); the
+            // adapter only acknowledges it. Anything else is a no-op.
+            _ => ActionDispatch::Noop,
+        })
+    }
+
     async fn list(&self, params: ListParams) -> Result<ListResult> {
         if params.node_type.type_id != "stoat:channel" {
             return Err(ContentError::NotSupported(format!(
@@ -356,6 +449,22 @@ mod tests {
         assert_eq!(out[0].title, "title-c1"); // untouched
         assert_eq!(out[1].title, "Fresh Title");
         assert_eq!(out[1].channels, vec!["B"]); // channels preserved
+    }
+
+    #[test]
+    fn channel_moved_detaches_then_reattaches() {
+        let existing = vec![cat("c1", &["A", "X"]), cat("c2", &["B"])];
+        // Move X from c1 into c2.
+        let into_c2 = categories_with_channel_moved(&existing, "X", Some("c2"));
+        assert_eq!(into_c2[0].channels, vec!["A"]); // detached from c1
+        assert_eq!(into_c2[1].channels, vec!["B", "X"]); // attached to c2
+        // Move X out to uncategorized (no target): gone from every list.
+        let uncategorized = categories_with_channel_moved(&into_c2, "X", None);
+        assert_eq!(uncategorized[0].channels, vec!["A"]);
+        assert_eq!(uncategorized[1].channels, vec!["B"]);
+        // A no-op move (target == current category) keeps it once, no dup.
+        let same = categories_with_channel_moved(&existing, "A", Some("c1"));
+        assert_eq!(same[0].channels, vec!["X", "A"]);
     }
 
     #[test]

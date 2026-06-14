@@ -5770,6 +5770,12 @@ impl App {
         if self.sort_hint_phase.is_active() {
             self.cancel_sort_hint_mode();
         }
+        // A pending cut (the generic mark/paste-move clipboard) is local to
+        // the tab it was made on — you can't paste a marked node into a
+        // different adapter's tree. Leaving that tab aborts the cut.
+        if self.active_tab != tab && self.content_marked_node.take().is_some() {
+            self.notify("Cut cancelled".to_string());
+        }
         self.active_tab = tab;
         if tab == Tab::Trackings {
             self.spawn_load_trackings();
@@ -6614,6 +6620,18 @@ impl App {
         // two clipboards stay disjoint until the consolidation follow-up.
         match crate::app::node_actions::generic_mark_move_effect(&action_name, &node_id) {
             crate::app::node_actions::MarkMoveEffect::Mark => {
+                // Re-marking the already-marked node toggles the cut off
+                // (e.g. two `C` in a row on the same channel). A cut never
+                // deletes — it only ever cancels here or relocates on paste.
+                if self
+                    .content_marked_node
+                    .as_ref()
+                    .is_some_and(|m| m.node_id == node_id)
+                {
+                    self.content_marked_node = None;
+                    self.notify("Cut cancelled".to_string());
+                    return;
+                }
                 if let (Some(label), Some(nt)) = (node_label, node_type) {
                     self.content_marked_node = Some(not_yet_done_content::MarkedNode {
                         node_id,
