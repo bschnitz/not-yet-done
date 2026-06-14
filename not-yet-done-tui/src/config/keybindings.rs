@@ -588,6 +588,12 @@ pub enum ContentAction {
     /// Lets a user flip a worklog tree between per-node and rolled-up
     /// durations without editing the view YAML.
     ToggleTreeAggregate,
+    /// Open vimium-style jump mode on the table (native Tasks-tab parity):
+    /// type a character, every visible row containing it gets a label, type
+    /// the label to hop the cursor there. Distinct from the native tab's
+    /// [`CommonAction::JumpMode`] (`p`) so the adapter tab can keep `p` free
+    /// for a `paste`/`paste-move` shortcut; defaults to `J`.
+    JumpMode,
 }
 
 impl ContentAction {
@@ -604,6 +610,7 @@ impl ContentAction {
             Self::CycleGrouping => "cycle_grouping",
             Self::GroupMenu => "group_menu",
             Self::ToggleTreeAggregate => "toggle_tree_aggregate",
+            Self::JumpMode => "jump_mode",
         }
     }
 }
@@ -629,6 +636,7 @@ impl FromStr for ContentAction {
             "cycle_grouping" => Ok(Self::CycleGrouping),
             "group_menu" => Ok(Self::GroupMenu),
             "toggle_tree_aggregate" => Ok(Self::ToggleTreeAggregate),
+            "jump_mode" => Ok(Self::JumpMode),
             other => Err(format!("unknown content action: {}", other)),
         }
     }
@@ -1141,6 +1149,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::CycleGrouping, KeyBinding::new("zg"));
         m.insert(ContentAction::GroupMenu, KeyBinding::new("u"));
         m.insert(ContentAction::ToggleTreeAggregate, KeyBinding::new("zt"));
+        m.insert(ContentAction::JumpMode, KeyBinding::new("J"));
         Self { bindings: m }
     }
 }

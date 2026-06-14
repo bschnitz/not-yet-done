@@ -1138,6 +1138,28 @@ struct NavFrame {
 - `Esc` / `Backspace` → pop Frame, zurück zur Elternliste
 - Breadcrumb wird in der Tab-Bar oder als eigene Zeile angezeigt
 
+### Jump-Mode (`jump_mode`, Default `J`)
+
+Vimium-artiger Direkt-Sprung über die sichtbaren Zeilen — Parität zum
+nativen Tasks-Tab (dort auf `p`). Die Aktion `jump_mode` ist in
+`keybindings.yaml` unter `content:` bindbar; Default ist `J` (großes J),
+damit der Adapter-Tab `p` für ein `paste`/`paste-move`-Shortcut frei
+behält (der native Tab nutzt weiterhin `p` über `common.jump_mode`).
+
+Ablauf:
+
+1. `J` öffnet den Sprung-Overlay (Phase 1).
+2. Ein beliebiges Zeichen tippen → jede sichtbare Zeile, die das Zeichen
+   enthält, bekommt ein Label (Phase 2). Gibt es nur einen Treffer,
+   springt der Cursor sofort dorthin; bei keinem Treffer schließt der
+   Overlay.
+3. Das Label tippen → der Cursor springt in die zugehörige Zeile.
+   `Esc` bricht jederzeit ab.
+
+Das Label-Alphabet stammt aus `navigation.jump_chars` (geteilt mit dem
+nativen Tab). Der Sprung wirkt nur auf das fokussierte Pane; in Splits
+gilt er für das gerade aktive Pane.
+
 ---
 
 ## Per-Node-Aktionen (`shortcuts:`)

@@ -3790,6 +3790,26 @@ durchsuchten Spalten.
 - [ ] Sehr schmale Spalte / langes Label: Highlight bleibt korrekt geclamped
       (kein Panic, kein Übermalen des Connectors).
 
+## Jump-Mode (`J`) auf Content-Tabs (`content.jump_mode`)
+
+Parität zum nativen Tasks-Tab-Sprung (dort `p`), hier auf `Shift+J`.
+Default-Binding ist `J`; konfigurierbar über `keybindings.content.jump_mode`.
+Das Label-Alphabet kommt aus `navigation.jump_chars`.
+
+- [ ] Tasks (A): `Shift+J` drücken → Sprung-Overlay aktiv (Action-Bar zeigt
+      `J jump`). Ein Zeichen tippen, das in mehreren sichtbaren Zeilen
+      vorkommt → jede Treffer-Zeile bekommt ein Label, Nicht-Treffer sind
+      gedimmt.
+- [ ] Label tippen → Cursor springt in die zugehörige Zeile.
+- [ ] Zeichen, das nur in **einer** sichtbaren Zeile vorkommt → sofortiger
+      Sprung ohne Label-Phase.
+- [ ] Zeichen ohne Treffer → Overlay schließt sich, keine Auswahländerung.
+- [ ] `esc` während des Overlays → Abbruch, Cursor unverändert.
+- [ ] In einem Split: `Shift+J` wirkt nur auf das **fokussierte** Pane; nach
+      Pane-Wechsel funktioniert der Sprung auch dort (neu erzeugtes Pane).
+- [ ] Trackings (A) (Liste/Condensed/Tree): `Shift+J` verhält sich gleich.
+- [ ] Nativer Tasks-Tab unverändert: `p` öffnet dort weiterhin den Sprung.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor
