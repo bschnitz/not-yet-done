@@ -2203,69 +2203,107 @@ impl ContentPane {
         None
     }
 
-    /// Recompute `tree_visible_indices` from `tree.entries`, applying
-    /// the active fuzzy filter (if any) only to entries at
-    /// `tree_filter_depth`. Entries at other depths pass through;
-    /// hiding an entry at the filter depth also hides its expanded
-    /// subtree (DFS-ordered, so we just skip until the depth bounces
-    /// back up to or above the hidden ancestor's depth). Pagination
-    /// placeholders are always visible — they belong to the parent
-    /// they trail, not to the filtered level itself.
+    /// Recompute `tree_visible_indices` from `tree.entries`, applying the
+    /// active fuzzy filter (if any) as a **path-pruning** tree filter: an
+    /// entry survives iff it matches the query tokens itself *or* has a
+    /// surviving descendant. So matches plus the ancestor chain that leads
+    /// to them stay visible, while non-matching sibling subtrees disappear.
+    ///
+    /// This differs from the native Tasks tab, which keeps the *whole* root
+    /// subtree of any match (no inner pruning); here a match shows only its
+    /// own path, not its unrelated children. Matching runs on every depth —
+    /// each entry against the columns of its own tree level — so a deeply
+    /// nested match surfaces its parents, which the old single-depth filter
+    /// (only `tree_filter_depth`) could not do.
+    ///
+    /// The filter is armed only when some level declares a `fuzzy_filter`
+    /// action (`tree_filter_depth` is `Some`). Matching is bounded to the
+    /// currently loaded/expanded entries — a match hidden inside a collapsed
+    /// or not-yet-paged branch can't be seen until that branch is loaded.
+    /// Pagination placeholders ride along with their parent: visible iff the
+    /// parent survives (root-level placeholders are always visible, since
+    /// the next page may hold the only matches).
     fn refresh_tree_visible_indices(&mut self, view_defs: &[ViewDef]) {
         let Some(tree) = self.tree.as_ref() else {
             self.tree_visible_indices.clear();
             return;
         };
         let filter = self.table.filter_text.clone();
-        let fd = self.tree_filter_depth;
-        if filter.is_empty() || fd.is_none() {
+        if filter.is_empty() || self.tree_filter_depth.is_none() {
             self.tree_visible_indices = (0..tree.entries.len()).collect();
             return;
         }
-        let fd = fd.unwrap();
-        let level_columns: Vec<ColumnDef> = self
-            .view_def(view_defs)
-            .and_then(|v| tree_level_at_depth(v, fd))
-            .map(|l| l.columns.to_vec())
-            .unwrap_or_default();
         let filter_fields = self.fuzzy_filter_fields.clone();
         let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
         let tokens: Vec<String> = filter.split_whitespace().map(String::from).collect();
 
-        let mut visible = Vec::with_capacity(tree.entries.len());
-        let mut hidden_under: Option<usize> = None;
+        // Columns per depth, resolved lazily down the first tree chain. The
+        // haystack also falls back to raw metadata, so branches that differ
+        // only in column labels still match on their field values.
+        let max_depth = tree.entries.iter().map(|e| e.depth).max().unwrap_or(0);
+        let vd = self.view_def(view_defs);
+        let columns_by_depth: Vec<Vec<ColumnDef>> = (0..=max_depth)
+            .map(|d| {
+                vd.and_then(|v| tree_level_at_depth(v, d))
+                    .map(|l| l.columns.to_vec())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let n = tree.entries.len();
+        // parent[i] = nearest shallower ancestor in DFS order; keep[i] =
+        // entry itself matches; placeholder[i] = pagination loader row.
+        let mut parent: Vec<Option<usize>> = vec![None; n];
+        let mut keep = vec![false; n];
+        let mut placeholder = vec![false; n];
+        let mut stack: Vec<usize> = Vec::new();
+
+        use fuzzy_matcher::FuzzyMatcher;
         for (idx, entry) in tree.entries.iter().enumerate() {
-            if let Some(hd) = hidden_under {
-                if entry.depth <= hd {
-                    hidden_under = None;
+            while let Some(&top) = stack.last() {
+                if tree.entries[top].depth >= entry.depth {
+                    stack.pop();
+                } else {
+                    break;
                 }
             }
-            if hidden_under.is_some() {
-                continue;
-            }
+            parent[idx] = stack.last().copied();
+            stack.push(idx);
+
             if entry.is_more_placeholder {
-                visible.push(idx);
+                placeholder[idx] = true;
                 continue;
             }
-            if entry.depth == fd {
-                let haystack = build_field_haystack(&entry.node, &level_columns, &filter_fields);
-                use fuzzy_matcher::FuzzyMatcher;
-                let matches = if tokens.is_empty() {
-                    true
-                } else {
-                    tokens
-                        .iter()
-                        .all(|t| matcher.fuzzy_match(&haystack, t).is_some())
-                };
-                if matches {
-                    visible.push(idx);
-                } else {
-                    hidden_under = Some(fd);
+            let cols = columns_by_depth
+                .get(entry.depth)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let haystack = build_field_haystack(&entry.node, cols, &filter_fields);
+            keep[idx] = tokens
+                .iter()
+                .all(|t| matcher.fuzzy_match(&haystack, t).is_some());
+        }
+
+        // Propagate "has a surviving descendant" up the ancestor chain. In
+        // DFS preorder every descendant has a higher index than its ancestor,
+        // so one reverse pass accumulates the OR transitively.
+        for idx in (0..n).rev() {
+            if keep[idx] {
+                if let Some(p) = parent[idx] {
+                    keep[p] = true;
                 }
-            } else {
-                visible.push(idx);
             }
         }
+
+        let visible: Vec<usize> = (0..n)
+            .filter(|&idx| {
+                if placeholder[idx] {
+                    parent[idx].map(|p| keep[p]).unwrap_or(true)
+                } else {
+                    keep[idx]
+                }
+            })
+            .collect();
         self.tree_visible_indices = visible;
     }
 
@@ -11414,10 +11452,46 @@ mod tests {
     }
 
     #[test]
+    fn tree_filter_surfaces_deep_match_above_armed_depth() {
+        // Regression: filter armed at depth 0 (the root level carries the
+        // `fuzzy_filter` action), but the match — "public" — sits at depth 1.
+        // The old single-depth filter only tested depth-0 rows, so a non-
+        // matching parent (db1) hid its whole subtree and the subtask match
+        // was unreachable. Path-pruning must surface db1 because a descendant
+        // matches.
+        let config = test_config_with_tree_filter_at(0);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().unwrap();
+            tree.set_cached_children(vec!["db1".into()], mock_schemas(), None);
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().tree_filter_depth = Some(0);
+        view.active_pane_mut().table.filter_text = "public".into();
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let tree = pane.tree.as_ref().unwrap();
+        let visible_ids: Vec<&str> = pane
+            .tree_visible_indices
+            .iter()
+            .map(|&i| tree.entries[i].node.id.as_str())
+            .collect();
+        // db1 kept as ancestor of the match; public matches; private and db2
+        // pruned.
+        assert_eq!(visible_ids, vec!["db1", "public"]);
+    }
+
+    #[test]
     fn tree_filter_hides_non_matching_at_filter_depth() {
         // Filter at depth 1 (schemas). db1 expanded with [public, private];
-        // db2 collapsed. Filter "pub" should hide "private" but keep both
-        // depth-0 dbs visible.
+        // db2 collapsed. Filter "pub" matches "public" → keep public and its
+        // ancestor db1; "private" is pruned, and db2 (no match, no matching
+        // descendant) is pruned too — path-pruning hides irrelevant siblings.
         let config = test_config_with_tree_filter_at(1);
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -11436,13 +11510,14 @@ mod tests {
         let pane = view.active_pane();
         let tree = pane.tree.as_ref().unwrap();
         // Full entries: [db1, public, private, db2]; visible:
-        // [db1 (depth 0, kept), public (depth 1, matches), db2 (depth 0, kept)].
+        // [db1 (kept as ancestor of a match), public (matches)]. private and
+        // db2 are pruned.
         let visible_ids: Vec<&str> = pane
             .tree_visible_indices
             .iter()
             .map(|&i| tree.entries[i].node.id.as_str())
             .collect();
-        assert_eq!(visible_ids, vec!["db1", "public", "db2"]);
+        assert_eq!(visible_ids, vec!["db1", "public"]);
     }
 
     #[test]
@@ -11502,20 +11577,18 @@ mod tests {
 
         let pane = view.active_pane();
         let tree = pane.tree.as_ref().unwrap();
-        // Full: [db1, public, private, <more>, db2]; with `pub` filter
-        // at depth 1: private gets hidden, the placeholder bounces the
-        // hidden-subtree state back open (same depth as the filter
-        // level, by design), and depth-0 db2 stays visible.
+        // Full: [db1, public, private, <more>, db2]; with `pub` filter:
+        // public matches → db1 kept; private pruned; the placeholder rides
+        // along because its parent db1 survives; db2 (no match) is pruned.
         let visible: Vec<(&str, bool)> = pane
             .tree_visible_indices
             .iter()
             .map(|&i| (tree.entries[i].node.id.as_str(), tree.entries[i].is_more_placeholder))
             .collect();
-        assert_eq!(visible.len(), 4);
+        assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].0, "db1");
         assert_eq!(visible[1].0, "public");
         assert!(visible[2].1, "placeholder kept in the schemas group");
-        assert_eq!(visible[3].0, "db2");
     }
 
     #[test]
@@ -11545,17 +11618,15 @@ mod tests {
 
         let pane = view.active_pane();
         let descs = pane.search_descriptions(&view_defs);
-        // Visible rows are db1 (row 0), public (row 1), <more> (row 2),
-        // db2 (row 3). search_descriptions drops the placeholder, so
-        // /-search sees three rows — and the surviving row indices map
-        // back into the visible-row list, not the raw tree.entries.
-        assert_eq!(descs.len(), 3);
+        // Visible rows are db1 (row 0), public (row 1), <more> (row 2);
+        // db2 is pruned (no match). search_descriptions drops the
+        // placeholder, so /-search sees two rows — and the surviving row
+        // indices map back into the visible-row list, not raw tree.entries.
+        assert_eq!(descs.len(), 2);
         assert_eq!(descs[0].0, 0);
         assert!(descs[0].1.contains("db1"));
         assert_eq!(descs[1].0, 1);
         assert!(descs[1].1.contains("public"));
-        assert_eq!(descs[2].0, 3);
-        assert!(descs[2].1.contains("db2"));
     }
 
     #[test]
@@ -11603,8 +11674,9 @@ mod tests {
             .collect();
         assert_eq!(
             visible_ids,
-            vec!["db1", "public", "db2"],
-            "freshly loaded schemas must be filtered: private is hidden"
+            vec!["db1", "public"],
+            "freshly loaded schemas must be filtered: private is hidden, \
+             and db2 (no match) is pruned with path-pruning semantics"
         );
     }
 
