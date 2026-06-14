@@ -3001,6 +3001,34 @@ ist es nicht.
       ohne Rechte → der Server lehnt mit sauberer Fehlermeldung ab, der Baum
       bleibt unverändert.
 
+## Stoat-Adapter — Channel cut/paste (`C` / `P`)
+
+Channels zwischen Kategorien verschieben. `C` (cut) **markiert** den Channel
+unter dem Cursor — es wird **nichts gelöscht**; erst `P` (paste) hängt ihn um.
+Reuse der generischen `mark-move`/`paste-move`-Shortcuts (wie Tasks `m`/`p`),
+über `invoke_action` + `ActionContext.marked`. Voraussetzung: ein Server, den
+du administrierst. Der Move ist intern ein Voll-Listen-PATCH der Server-
+Kategorien (`update_server_categories`), live via `ServerUpdate`.
+
+- [ ] **Channel in Kategorie:** Cursor auf eine Channel-Zeile, `C` (Status:
+      „Marked … for move") → Cursor auf eine **Kategorie-Zeile**, `P` → Channel
+      wandert live in diese Kategorie, verschwindet aus der alten Stelle.
+- [ ] **Channel → uncategorized:** Channel `C`, dann Cursor auf die
+      **Server-Zeile**, `P` → Channel landet im uncategorized-Branch.
+- [ ] **Paste neben Channel:** Channel A `C`, dann Cursor auf Channel B (in
+      einer anderen Kategorie), `P` → A landet in B's Kategorie (bzw.
+      uncategorized, wenn B uncategorized ist).
+- [ ] **Abbruch per zweimal `C`:** Channel `C`, dann auf derselben Zeile noch
+      einmal `C` → „Cut cancelled", kein Move bei späterem `P`.
+- [ ] **Abbruch per Tab-Wechsel:** Channel `C`, Tab wechseln (z. B. `1`) →
+      „Cut cancelled"; zurück auf Stoat, `P` auf einer Kategorie → nichts
+      passiert (kein hängender Cut).
+- [ ] **`C` löscht nie:** nach `C` ist der Channel unverändert sichtbar; nur
+      `P` verändert den Baum.
+- [ ] **Fremder Server:** Channel von Server A `C`, dann `P` auf eine
+      Kategorie/Server B → saubere Fehlermeldung („different server"), kein
+      Move (Kategorien sind serverlokal).
+
 ## Stoat-Adapter — Chat-Layout (`row_layout`)
 
 Die Message-Liste rendert per `row_layout` als Chat: Meta-Zeile + Body +

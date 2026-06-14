@@ -21,11 +21,12 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentError, FormFieldSpec, InputSpec, ListParams, ListResult,
-    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, FormFieldSpec,
+    InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
+    NodeType, Result,
 };
 
-use super::category::{categories_with_new, category_composite_id};
+use super::category::{categories_with_new, category_composite_id, move_marked_channel};
 use super::types::{category_type, channel_type, server_type};
 use super::{form_field, other_err};
 use crate::client::StoatClient;
@@ -33,8 +34,10 @@ use crate::gateway::StoatState;
 use crate::gateway::protocol::Channel;
 
 /// Actions a server node exposes: create a channel (lands uncategorized)
-/// or a category, both via a single-field name form. Kept in lockstep
-/// with [`StoatServerNode::actions`] so the action bar and the form agree.
+/// or a category, both via a single-field name form; plus `paste-move`,
+/// the cut/paste target that moves a cut channel to the server's
+/// uncategorized branch. Kept in lockstep with [`StoatServerNode::actions`]
+/// so the action bar and the form agree.
 pub(super) fn server_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new(
@@ -51,6 +54,8 @@ pub(super) fn server_actions() -> Vec<NodeAction> {
                 fields: vec![FormFieldSpec::text("name", "Category name")],
             },
         ),
+        // Paste target only — a cut channel pasted here goes uncategorized.
+        NodeAction::new("paste-move", "paste channel", InputSpec::None),
     ]
 }
 
@@ -202,6 +207,21 @@ impl Node for StoatServerNode {
                 "execute: unknown action {other}"
             ))),
         }
+    }
+
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // Paste a cut channel here = move it to this server's
+            // uncategorized branch (detach it from every category).
+            "paste-move" => match &ctx.marked {
+                Some(marked) => {
+                    move_marked_channel(&self.client, &self.state, &self.server_id, None, marked)
+                        .await
+                }
+                None => ActionDispatch::Error("Nothing cut to paste".into()),
+            },
+            _ => ActionDispatch::Noop,
+        })
     }
 
     async fn list(&self, params: ListParams) -> Result<ListResult> {
