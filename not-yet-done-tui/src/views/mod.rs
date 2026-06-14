@@ -214,6 +214,13 @@ pub enum ViewRequest {
         child_node_types: Vec<String>,
         page_size: u32,
     },
+    /// Eagerly load and expand the pane's WHOLE subtree in one
+    /// `list_subtree(u32::MAX)` call. Fired when a fuzzy filter is opened on an
+    /// eager tree (`supports_eager_subtree`) so the filter can match across
+    /// collapsed and not-yet-paged branches — the native "filter sees the
+    /// entire forest" behaviour. Routes into [`App::spawn_subtree_load`]; the
+    /// pre-filter expansion is restored locally when the filter clears.
+    EagerExpandSubtree { view_index: usize, pane_id: PaneId },
     /// Open editor for the content view's query (JQL etc.).
     /// If `save_name` is set, the query will be saved to DB under that name after editing.
     /// `is_new` triggers the shortcut prompt after save (only on creation, not edit).
