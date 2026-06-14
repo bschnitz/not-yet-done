@@ -18,16 +18,41 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use not_yet_done_content::{
-    ContentError, ListParams, ListResult, Metadata, MetadataField, Node, NodeSummary, NodeType,
-    Result,
+    ActionInput, ActionOutcome, ContentError, FormFieldSpec, InputSpec, ListParams, ListResult,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
-use super::category::category_composite_id;
+use super::category::{categories_with_new, category_composite_id};
 use super::types::{category_type, channel_type, server_type};
+use super::{form_field, other_err};
+use crate::client::StoatClient;
 use crate::gateway::StoatState;
 use crate::gateway::protocol::Channel;
+
+/// Actions a server node exposes: create a channel (lands uncategorized)
+/// or a category, both via a single-field name form. Kept in lockstep
+/// with [`StoatServerNode::actions`] so the action bar and the form agree.
+pub(super) fn server_actions() -> Vec<NodeAction> {
+    vec![
+        NodeAction::new(
+            "create_channel",
+            "new channel",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("name", "Channel name")],
+            },
+        ),
+        NodeAction::new(
+            "create_category",
+            "new category",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("name", "Category name")],
+            },
+        ),
+    ]
+}
 
 /// Build the `NodeSummary` for a channel row. Shared by the server's
 /// uncategorized branch and [`StoatCategoryNode`](super::category) so a
@@ -68,6 +93,7 @@ pub(super) fn channel_summary(c: &Channel) -> NodeSummary {
 }
 
 pub(super) struct StoatServerNode {
+    client: Arc<StoatClient>,
     state: Arc<RwLock<StoatState>>,
     server_id: String,
     name: String,
@@ -75,7 +101,12 @@ pub(super) struct StoatServerNode {
 }
 
 impl StoatServerNode {
-    pub(super) fn new(state: Arc<RwLock<StoatState>>, server_id: String, name: String) -> Self {
+    pub(super) fn new(
+        client: Arc<StoatClient>,
+        state: Arc<RwLock<StoatState>>,
+        server_id: String,
+        name: String,
+    ) -> Self {
         let metadata = Metadata {
             fields: vec![
                 MetadataField {
@@ -95,6 +126,7 @@ impl StoatServerNode {
             ],
         };
         Self {
+            client,
             state,
             server_id,
             name,
@@ -123,6 +155,53 @@ impl Node for StoatServerNode {
 
     fn children_types(&self) -> Vec<NodeType> {
         vec![category_type().clone(), channel_type().clone()]
+    }
+
+    fn actions(&self) -> Vec<NodeAction> {
+        server_actions()
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        let name = form_field(&input, "name")?;
+        match action_id {
+            // A bare create — the channel lands in the server's
+            // uncategorized branch; the gateway echoes it back as a
+            // `ChannelCreate`, refreshing the tree.
+            "create_channel" => {
+                self.client
+                    .create_channel(&self.server_id, &name)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("Created channel #{name}")),
+                })
+            }
+            // Categories have no create endpoint — append to the server's
+            // full category list and PATCH it back. A fresh client-side id
+            // (Stoat accepts any unique string) keys the new category.
+            "create_category" => {
+                let existing = {
+                    let state = self.state.read().await;
+                    state
+                        .servers
+                        .get(&self.server_id)
+                        .map(|s| s.categories.clone())
+                        .unwrap_or_default()
+                };
+                let new_id = Uuid::new_v4().to_string();
+                let updated = categories_with_new(&existing, &new_id, &name);
+                self.client
+                    .update_server_categories(&self.server_id, &updated)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("Created category {name}")),
+                })
+            }
+            other => Err(ContentError::NotSupported(format!(
+                "execute: unknown action {other}"
+            ))),
+        }
     }
 
     async fn list(&self, params: ListParams) -> Result<ListResult> {
@@ -212,6 +291,29 @@ mod tests {
         }
     }
 
+    /// A synthetic client — no HTTP is performed in these list tests.
+    fn test_client() -> Arc<StoatClient> {
+        StoatClient::from_session(
+            "https://chat.example.invalid",
+            crate::client::StoatSession {
+                token: "synthetic".into(),
+                user_id: "U0".into(),
+                session_id: "S0".into(),
+                session_name: "test".into(),
+            },
+        )
+        .expect("client")
+    }
+
+    fn server_node(st: StoatState) -> StoatServerNode {
+        StoatServerNode::new(
+            test_client(),
+            Arc::new(RwLock::new(st)),
+            "S1".into(),
+            "Guild".into(),
+        )
+    }
+
     fn list_params(ty: &NodeType) -> ListParams {
         ListParams {
             node_type: ty.clone(),
@@ -242,7 +344,7 @@ mod tests {
                 channel("V1", "VoiceChannel", None),
             ],
         );
-        let node = StoatServerNode::new(Arc::new(RwLock::new(st)), "S1".into(), "Guild".into());
+        let node = server_node(st);
         let res = node.list(list_params(channel_type())).await.unwrap();
         let ids: Vec<&str> = res.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["C1", "C2", "V1"]);
@@ -277,7 +379,7 @@ mod tests {
                 channel("C2", "TextChannel", None),
             ],
         );
-        let node = StoatServerNode::new(Arc::new(RwLock::new(st)), "S1".into(), "Guild".into());
+        let node = server_node(st);
 
         // Category branch: one category, expandable, composite id.
         let cats = node.list(list_params(category_type())).await.unwrap();

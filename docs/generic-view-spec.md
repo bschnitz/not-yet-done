@@ -130,7 +130,16 @@ views:
       ratio: 50 # Prozent für die Preview-Seite
       keybinding: P
 
-    # Aktionen auf selektierten Nodes
+    # Aktionen auf selektierten Nodes.
+    #
+    # `key:` darf eine Einzeltaste (`e`) ODER ein Mehrzeichen-Chord
+    # (`al`, `ay`) sein. Chords funktionieren auf Content-Tabs ohne
+    # weitere Verdrahtung: Der App-Chord-Interceptor kennt zwar nur die
+    # getypten `keybindings.*`-Sektionen, fragt aber zusätzlich die
+    # View-Keymap über `ContentView::yaml_action_chord_prefix` ab — das
+    # erste Zeichen eines Chords wird als Präfix gestasht, das zweite
+    # löst aus. (Node-`shortcuts:` sind dagegen per Definition
+    # einzeichig und nie Chords.)
     actions:
       - name: Edit
         key: e

@@ -15,15 +15,64 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use not_yet_done_content::{
-    ContentError, ListParams, ListResult, Metadata, MetadataField, Node, NodeSummary, NodeType,
-    Result,
+    ActionInput, ActionOutcome, ContentError, FormFieldSpec, InputSpec, ListParams, ListResult,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::server::channel_summary;
 use super::types::{category_type, channel_type};
+use super::{form_field, other_err};
+use crate::client::StoatClient;
 use crate::gateway::StoatState;
+use crate::gateway::protocol::Category;
 
 const CAT_MARKER: &str = "/cat/";
+
+/// Actions a category exposes: create a channel directly inside it. Kept
+/// in lockstep with [`StoatCategoryNode::actions`].
+pub(super) fn category_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new(
+        "create_channel",
+        "new channel",
+        InputSpec::Form {
+            fields: vec![FormFieldSpec::text("name", "Channel name")],
+        },
+    )]
+}
+
+/// Append a fresh, empty category to a server's full category list.
+/// Stoat edits categories as a whole-list replacement, so creating one
+/// means sending the existing list plus the new entry.
+pub(super) fn categories_with_new(existing: &[Category], id: &str, title: &str) -> Vec<Category> {
+    let mut out = existing.to_vec();
+    out.push(Category {
+        id: id.to_string(),
+        title: title.to_string(),
+        channels: Vec::new(),
+    });
+    out
+}
+
+/// Return `existing` with `channel_id` added to the category `category_id`
+/// (idempotent — already-present ids aren't duplicated). Other categories
+/// pass through untouched. Used to drop a freshly-created channel into a
+/// category via the full-list PATCH.
+pub(super) fn categories_with_channel(
+    existing: &[Category],
+    category_id: &str,
+    channel_id: &str,
+) -> Vec<Category> {
+    existing
+        .iter()
+        .cloned()
+        .map(|mut cat| {
+            if cat.id == category_id && !cat.channels.iter().any(|c| c == channel_id) {
+                cat.channels.push(channel_id.to_string());
+            }
+            cat
+        })
+        .collect()
+}
 
 /// Build the composite id for a category row: `<server>/cat/<catid>`.
 pub(super) fn category_composite_id(server_id: &str, category_id: &str) -> String {
@@ -42,6 +91,7 @@ pub(super) fn split_category_composite(id: &str) -> Option<(&str, &str)> {
 }
 
 pub(super) struct StoatCategoryNode {
+    client: Arc<StoatClient>,
     state: Arc<RwLock<StoatState>>,
     /// The composite `<server>/cat/<catid>` — also what `id()` returns so
     /// tree paths stay consistent with the summary the server emitted.
@@ -54,6 +104,7 @@ pub(super) struct StoatCategoryNode {
 
 impl StoatCategoryNode {
     pub(super) fn new(
+        client: Arc<StoatClient>,
         state: Arc<RwLock<StoatState>>,
         server_id: String,
         category_id: String,
@@ -79,6 +130,7 @@ impl StoatCategoryNode {
             ],
         };
         Self {
+            client,
             state,
             composite_id,
             server_id,
@@ -109,6 +161,47 @@ impl Node for StoatCategoryNode {
 
     fn children_types(&self) -> Vec<NodeType> {
         vec![channel_type().clone()]
+    }
+
+    fn actions(&self) -> Vec<NodeAction> {
+        category_actions()
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match action_id {
+            // Two-step, because Stoat has no "create in category": make
+            // the channel (lands uncategorized), then PATCH the server's
+            // full category list with this channel added to us. Both
+            // gateway events (ChannelCreate + ServerUpdate) refresh the
+            // tree.
+            "create_channel" => {
+                let name = form_field(&input, "name")?;
+                let channel_id = self
+                    .client
+                    .create_channel(&self.server_id, &name)
+                    .await
+                    .map_err(other_err)?;
+                let existing = {
+                    let state = self.state.read().await;
+                    state
+                        .servers
+                        .get(&self.server_id)
+                        .map(|s| s.categories.clone())
+                        .unwrap_or_default()
+                };
+                let updated = categories_with_channel(&existing, &self.category_id, &channel_id);
+                self.client
+                    .update_server_categories(&self.server_id, &updated)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("Created channel #{name}")),
+                })
+            }
+            other => Err(ContentError::NotSupported(format!(
+                "execute: unknown action {other}"
+            ))),
+        }
     }
 
     async fn list(&self, params: ListParams) -> Result<ListResult> {
@@ -159,6 +252,50 @@ mod tests {
         }
     }
 
+    /// Synthetic client — the list test performs no HTTP.
+    fn test_client() -> Arc<StoatClient> {
+        StoatClient::from_session(
+            "https://chat.example.invalid",
+            crate::client::StoatSession {
+                token: "synthetic".into(),
+                user_id: "U0".into(),
+                session_id: "S0".into(),
+                session_name: "test".into(),
+            },
+        )
+        .expect("client")
+    }
+
+    fn cat(id: &str, channels: &[&str]) -> Category {
+        Category {
+            id: id.into(),
+            title: format!("title-{id}"),
+            channels: channels.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn categories_with_new_appends_empty_category() {
+        let existing = vec![cat("c1", &["X"])];
+        let out = categories_with_new(&existing, "c2", "New");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "c1");
+        assert_eq!(out[1].id, "c2");
+        assert_eq!(out[1].title, "New");
+        assert!(out[1].channels.is_empty());
+    }
+
+    #[test]
+    fn categories_with_channel_adds_to_target_only_and_is_idempotent() {
+        let existing = vec![cat("c1", &["A"]), cat("c2", &["B"])];
+        let out = categories_with_channel(&existing, "c2", "Z");
+        assert_eq!(out[0].channels, vec!["A"]); // untouched
+        assert_eq!(out[1].channels, vec!["B", "Z"]);
+        // Re-applying the same channel is a no-op (no duplicate).
+        let again = categories_with_channel(&out, "c2", "Z");
+        assert_eq!(again[1].channels, vec!["B", "Z"]);
+    }
+
     #[test]
     fn composite_round_trips() {
         let id = category_composite_id("S1", "cat1");
@@ -197,6 +334,7 @@ mod tests {
             ],
         );
         let node = StoatCategoryNode::new(
+            test_client(),
             Arc::new(RwLock::new(st)),
             "S1".into(),
             "cat1".into(),

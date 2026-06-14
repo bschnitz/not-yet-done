@@ -3798,6 +3798,24 @@ impl App {
                 self.sync_components();
                 return EditorRequest::None;
             }
+            // Content-tab YAML `actions:` chords (e.g. `al` → new
+            // channel). These keys live in the ContentView's pane/view
+            // keymaps, not the typed `content.*` section above, so route
+            // the assembled chord through the active ContentView. A clean
+            // miss returns `Unhandled` and falls through to the remaining
+            // chord resolution below.
+            if let Tab::Content(idx) = self.active_tab {
+                let msg = self
+                    .content_view_mut(idx)
+                    .map(|cv| cv.handle_key(&chord))
+                    .filter(|m| !matches!(m, SubViewMessage::Unhandled));
+                if let Some(msg) = msg {
+                    let _ = self.process_sub_view_message(msg);
+                    self.drain_content_cursor_closes(idx);
+                    self.sync_components();
+                    return EditorRequest::None;
+                }
+            }
             // Chord matches a user-defined cmdline shortcut?
             // (`cmdline_shortcuts:` in tui.yaml; the default ships
             // `mc`/`mp` for cut/paste-node.)
@@ -3816,6 +3834,8 @@ impl App {
                 || self.keybindings.trackings.bindings.values().any(|b| b.is_prefix(&chord))
                 || self.keybindings.content.bindings.values().any(|b| b.is_prefix(&chord))
                 || self.cmdline_shortcut_chord_prefix(&chord)
+                || matches!(self.active_tab, Tab::Content(idx)
+                    if self.content_view(idx).is_some_and(|cv| cv.yaml_action_chord_prefix(&chord)))
             {
                 self.pending_key = Some(chord);
                 self.sync_components();
@@ -4164,7 +4184,14 @@ impl App {
                 // `content.bindings`. Without this, `z` would never be
                 // stashed as a pending key on a Content tab and the chord
                 // would silently break into two single-key dispatches.
-                Tab::Content(_) => self.keybindings.content.bindings.values().any(|b| b.is_prefix(key)),
+                // YAML `actions:` chords (e.g. `al` → new channel) live in
+                // the ContentView's own keymaps instead, so consult it too.
+                Tab::Content(idx) => {
+                    self.keybindings.content.bindings.values().any(|b| b.is_prefix(key))
+                        || self
+                            .content_view(idx)
+                            .is_some_and(|cv| cv.yaml_action_chord_prefix(key))
+                }
             };
             let prefix_cmdline = self.cmdline_shortcut_chord_prefix(key);
             if prefix_global || prefix_common || prefix_tab || prefix_cmdline {

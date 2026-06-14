@@ -2923,10 +2923,11 @@ gegen die echte Instanz verifiziert (gegen `SavedMessages`).
 ## Stoat-Adapter (Phase 4 — Strukturelle Live-Events)
 
 Strukturänderungen werden live, ohne Reconnect. Auslösen im **offiziellen
-Stoat/Revolt-Client** (die TUI kann keine Channels/Kategorien anlegen), in
-einem Server, den du administrierst — die TUI mit dem Stoat-Tab offen und
-auf dem Server-Baum (oder in einem Channel) daneben halten. Wire-Shapes
-vorab per WS-Capture gegen die echte 0.13.7-Instanz verifiziert.
+Stoat/Revolt-Client** (oder seit dem Create-Feature direkt in der TUI, siehe
+nächster Abschnitt), in einem Server, den du administrierst — die TUI mit
+dem Stoat-Tab offen und auf dem Server-Baum (oder in einem Channel) daneben
+halten. Wire-Shapes vorab per WS-Capture gegen die echte 0.13.7-Instanz
+verifiziert.
 
 - [ ] **Channel anlegen:** Im Web-Client einen Text-Channel anlegen → er
       erscheint **ohne** `r` im TUI-Baum unter dem Server (uncategorized).
@@ -2947,6 +2948,34 @@ vorab per WS-Capture gegen die echte 0.13.7-Instanz verifiziert.
       zurück (bekannte Reload-Grenze, kein Bug) — Baum bleibt konsistent.
 - [ ] **Server beitreten/verlassen (Negativ-Check):** Erscheint/verschwindet
       **erst nach Reconnect** — bewusst nicht live (Phase-4-Scope-Grenze).
+
+## Stoat-Adapter — Channel/Kategorie anlegen (`al` / `ay`)
+
+Anlegen direkt aus der TUI. Voraussetzung: ein Server, den du
+administrierst, und die `al`/`ay`-Actions in `stoat.yaml` (Server-View +
+`categories`-ChildDef). `al`/`ay` sind **Mehrzeichen-Chords** — sie liegen
+nicht in `keybindings.content`, sondern werden generisch über die
+View-Keymap erkannt (`ContentView::yaml_action_chord_prefix`); das `a`
+wird als Chord-Präfix gestasht, das zweite Zeichen löst aus.
+
+- [ ] **Channel unter Server:** Cursor auf die **Server-Zeile**, `al` tippen
+      → Namens-Formular (ein Feld) öffnet. Name eingeben, bestätigen →
+      Channel erscheint live unter „uncategorized" (kein `r` nötig; der
+      Gateway echot `ChannelCreate`).
+- [ ] **Kategorie unter Server:** Cursor auf die **Server-Zeile**, `ay`
+      tippen → Formular → Name → Kategorie erscheint live als eigener
+      Branch (`ServerUpdate` mit voller Kategorie-Liste).
+- [ ] **Channel unter Kategorie:** Cursor auf eine **Kategorie-Zeile**, `al`
+      tippen → Formular → Name → Channel erscheint live **im
+      Kategorie-Branch**. (Zweistufig intern: Channel anlegen + Server-PATCH
+      — für den Nutzer ein Schritt.)
+- [ ] **Leerer Name:** Formular mit leerem/Whitespace-Namen bestätigen →
+      klare Fehlermeldung, kein namenloser Channel/Kategorie entsteht.
+- [ ] **`ay` auf Kategorie-Zeile:** nicht gebunden (Kategorien gibt es nur
+      unter dem Server) → `a` wird zwar als Präfix gestasht, `ay` löst
+      nichts aus und fällt sauber durch (kein Hänger, kein Fehler).
+- [ ] **Chord-Abbruch:** `a` tippen, dann `esc`/eine nicht-passende Taste →
+      kein Effekt, normale Bedienung läuft weiter.
 
 ## Stoat-Adapter — Chat-Layout (`row_layout`)
 
