@@ -7280,9 +7280,38 @@ impl ContentView {
         let mut patched = false;
         for tree in self.pane_trees.iter_mut() {
             tree.root.for_each_leaf_mut(&mut |leaf| {
+                // Depth-0 list rows (flat / condensed panes).
+                let mut item_hit = false;
                 if let Some(slot) = leaf.pane.items.iter_mut().find(|it| it.id == summary.id) {
                     *slot = summary.clone();
+                    item_hit = true;
+                }
+                // Tree rows at *any* depth (grouped / eager trees — a live
+                // tick patches a ticking duration cell on a deep tree-item or
+                // its bucket header, neither of which lives in `pane.items`).
+                // Swap the cached child wherever it sits in the tree cache,
+                // then rebuild the flattened entries so the new cell shows.
+                let mut tree_hit = false;
+                if let Some(state) = leaf.pane.tree.as_mut() {
+                    for node_state in state.cache.values_mut() {
+                        if let Some(slot) =
+                            node_state.children.iter_mut().find(|c| c.id == summary.id)
+                        {
+                            *slot = summary.clone();
+                            tree_hit = true;
+                        }
+                    }
+                    if tree_hit {
+                        if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
+                            state.rebuild_entries(vd);
+                        }
+                    }
+                }
+                if item_hit {
                     leaf.pane.rebuild_table_with(view_defs, &overlay);
+                    patched = true;
+                } else if tree_hit {
+                    leaf.pane.rebuild_table(view_defs);
                     patched = true;
                 }
             });
@@ -11039,6 +11068,50 @@ mod tests {
         assert!(!view.reload_now_bucket(pane_id, orphan, Subtree::default()));
         let tree = view.find_pane(pane_id).unwrap().tree.as_ref().unwrap();
         assert!(!tree.cache.contains_key(&vec!["db_new".to_string()]));
+    }
+
+    /// `patch_row` (the live-tick path) must reach a row wherever it lives in
+    /// the tree cache — a deep tree-item *and* its bucket header, neither of
+    /// which sits in `pane.items`. A miss leaves every row untouched.
+    #[test]
+    fn patch_row_swaps_deep_tree_rows_and_bucket_headers() {
+        let config = test_config_with_tree();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // Root level = two buckets (db1, db2); db1 has one (deep) child.
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["db1".into()],
+                vec![tnode("deep", "deep old", "mock:schema")],
+                None,
+            );
+            tree.expanded.insert(vec!["db1".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+
+        // Patch the deep tree-item (lives in cache[["db1"]], not pane.items).
+        assert!(view.patch_row(&tnode("deep", "deep ticked", "mock:schema")));
+        // Patch the bucket header (lives in cache[[]], the root level).
+        assert!(view.patch_row(&tnode("db1", "db1 ticked", "mock:db")));
+
+        let tree = view.active_pane().tree.as_ref().unwrap();
+        assert_eq!(
+            tree.cache[&vec!["db1".to_string()]].children[0].label,
+            "deep ticked",
+        );
+        let root_db1 = tree.cache[&Vec::<String>::new()]
+            .children
+            .iter()
+            .find(|c| c.id == "db1")
+            .unwrap();
+        assert_eq!(root_db1.label, "db1 ticked");
+
+        // An id present in no level patches nothing.
+        assert!(!view.patch_row(&tnode("ghost", "ghost", "mock:schema")));
     }
 
     #[test]

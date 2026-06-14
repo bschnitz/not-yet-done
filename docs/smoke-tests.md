@@ -3685,6 +3685,40 @@ zurück (damit der neue Bucket in Sortier-Position erscheint).
 - [ ] „No grouping" (ungebucketeter Tree): `s` lädt wie gehabt den ganzen
       (einen) Baum neu — kein Now-Bucket-Spezialfall, keine Regression.
 
+### Live-Tick im gruppierten Tree zählt nur den Now-Bucket hoch
+
+Der **statische** Tree-Fold bäckt alle Dauern gegen den Snapshot-Zeitpunkt —
+ein bloßes Neuladen desselben Snapshots tickt also _nicht_. Damit die Dauern
+im gruppierten Tree live hochzählen, faltet der Adapter pro Timer-Tick **nur
+den Now-Bucket** frisch gegen die aktuelle Uhrzeit: der neue Hook
+`live_group_rows(spec, query)` liefert den Bucket-Header (Total neu aufsummiert)
+plus die **laufende Kette** (laufende Task + ihre Vorfahren, deren kumulierte
+Dauer mitwächst) als `Invalidation::Row`-Patches — nur Zeilen, die sich
+tatsächlich bewegen, alle übrigen bleiben unberührt. Der Framework-Timer
+feuert dabei nur noch ein payload-freies `LiveTick`; die Faltung passiert erst
+im Frontend.
+
+**Hintergrund-Tab-Verhalten (bewusst):** Ein Tick eines _nicht aktiven_ Tabs
+hat **keine** Auswirkung auf den aktuellen Tab — er wird nicht neu gezeichnet.
+Der Tick wird nur als Flag (`pending_live_refresh`) vermerkt und **erst beim
+Zurückschalten** auf seinen Tab ausgewertet, und zwar **coalesced**: egal wie
+viele Ticks in der Abwesenheit anfielen, beim Zurückschalten läuft genau eine
+Faltung gegen den dann aktuellen Stand.
+
+> ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen, nie auf echten Zeilen.
+
+- [ ] Trackings (A) → `t` (Tree), nach Tag gruppiert: auf einem Wegwerf-Task
+      `s` starten. Im **heutigen** Bucket zählen Task-Zeile, deren Vorfahren
+      und das Tages-Total **sekündlich/live hoch** — die **anderen** Buckets
+      stehen still, flackern nicht und klappen nicht zu. Selektion bleibt.
+- [ ] Während die Buchung läuft, auf einen **anderen** Tab wechseln und ein
+      paar Sekunden bleiben: der aktuelle Tab zeichnet **nicht** wegen des
+      Trackings-Ticks neu. Zurückschalten → die Dauern springen **in einem
+      Schritt** auf den jetzt korrekten Wert (kein Nachholen jedes einzelnen
+      verpassten Ticks).
+- [ ] Idle (keine laufende Buchung): es passieren **keine** Live-Patches —
+      der Tree bleibt ruhig, kein unnötiges Neuzeichnen.
+
 ## Live-Frische Tasks/Trackings (A): Marker sofort, externe Starts, adaptives Ticken
 
 Drei Frische-Fixes für die Adapter-Tabs: (1) ein Root-Reload erneuert jetzt

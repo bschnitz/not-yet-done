@@ -1117,6 +1117,31 @@ pub trait ContentAdapter: Send + Sync {
         None
     }
 
+    /// The refreshed **rows of the now-bucket**, folded against the *live*
+    /// current instant — the live-tick counterpart of
+    /// [`bucket_for_now`](Self::bucket_for_now) for a grouped tree whose
+    /// durations count up. While [`live_rows`](Self::live_rows) ticks the flat
+    /// list (its rows are keyed independently of any grouping), a grouped
+    /// tree's rows carry grouping-dependent ids the spec-less `live_rows`
+    /// can't produce — so the frontend hands in the pane's [`GroupSpec`] and
+    /// saved-query `query` and gets back the bucket header (its total re-summed
+    /// to *now*) plus the tree rows on the running chain (their own/cumulated
+    /// re-folded to *now*), each keyed exactly as the rendered tree row so the
+    /// frontend's in-place row patch swaps the ticking cells without a reload.
+    ///
+    /// Returns only the rows that actually move (the running tasks and their
+    /// ancestors, whose cumulated grows, plus the header) — untouched siblings
+    /// keep their frozen value and aren't churned. Empty when nothing is
+    /// running (no now-bucket) or the bucket is empty. Default returns empty:
+    /// adapters without now-anchored grouping never tick a tree.
+    async fn live_group_rows(
+        &self,
+        _group_by: &GroupSpec,
+        _query: Option<&str>,
+    ) -> Vec<NodeSummary> {
+        Vec::new()
+    }
+
     /// Cheap staleness probe, called by the frontend when the user switches
     /// to a tab backed by this adapter. An adapter whose backing store can
     /// change *outside* the process (e.g. the local task/tracking DB written
