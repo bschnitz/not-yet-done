@@ -56,7 +56,7 @@ use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
     ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement, InputSpec,
     Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
-    SavedQueryStore, SortableColumn, TreeFindHit, TreeSearchResults,
+    SavedQueryStore, SortableColumn, Subtree, SubtreeNode, TreeFindHit, TreeSearchResults,
 };
 use not_yet_done_core::entity::task;
 use not_yet_done_core::error::AppError;
@@ -246,6 +246,37 @@ impl ForestSnapshot {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Walk the forest from `parent` (`None` = roots) down `depth` additional
+    /// levels, building the eager [`Subtree`] the engine ingests in one shot
+    /// (capability `supports_eager_subtree`). One level mirrors
+    /// [`Self::child_summaries`] (same `filter` = visible set under a saved
+    /// query); a node is descended only while depth budget remains and it has
+    /// visible children. `depth == u32::MAX` expands to every visible leaf.
+    /// Pure in-memory — replaces the per-node TUI expand cascade with a single
+    /// pass.
+    fn subtree(&self, parent: Option<Uuid>, filter: Option<&HashSet<Uuid>>, depth: u32) -> Subtree {
+        let items = self
+            .children
+            .get(&parent)
+            .map(|ids| {
+                ids.iter()
+                    .filter(|id| filter.map_or(true, |f| f.contains(id)))
+                    .filter_map(|id| {
+                        let row = self.by_id.get(id)?;
+                        let summary = self.summary(*id, row, filter);
+                        let children = if depth > 0 && summary.has_children == Some(true) {
+                            self.subtree(Some(*id), filter, depth - 1)
+                        } else {
+                            Subtree::default()
+                        };
+                        Some(SubtreeNode { summary, children })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Subtree { items, page: None }
     }
 
     fn summary(&self, id: Uuid, row: &TaskRow, filter: Option<&HashSet<Uuid>>) -> NodeSummary {
@@ -1083,6 +1114,23 @@ impl Node for TaskRootNode {
             self.snapshot.child_summaries(None, filter.as_ref()),
         ))
     }
+    async fn list_subtree(
+        &self,
+        params: not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        // The flat list view (`task:flat`) is a single level of leaf rows —
+        // no expansion, so depth is irrelevant.
+        if params.node_type.type_id == task_flat_type().type_id {
+            let filter = resolve_match_set(&self.handle, &params.query).await?;
+            return Ok(leaf_subtree(self.snapshot.flat_summaries(filter.as_ref())));
+        }
+        // Tree view: same visible-set semantics as `list`, expanded in one
+        // pass instead of a per-node cascade (capability
+        // `supports_eager_subtree`).
+        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
+        Ok(self.snapshot.subtree(None, filter.as_ref(), depth))
+    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.handle, id)
     }
@@ -1188,6 +1236,14 @@ impl Node for TaskItemNode {
             self.snapshot.child_summaries(Some(self.id), filter.as_ref()),
         ))
     }
+    async fn list_subtree(
+        &self,
+        params: not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
+        Ok(self.snapshot.subtree(Some(self.id), filter.as_ref(), depth))
+    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.handle, id)
     }
@@ -1248,6 +1304,21 @@ fn list_result(items: Vec<NodeSummary>) -> not_yet_done_content::ListResult {
         page: None,
         batch_download_available: false,
         downloaded: Vec::new(),
+    }
+}
+
+/// Wrap a flat list of summaries as a single-level [`Subtree`] of leaves —
+/// the eager-subtree shape for a non-tree (flat) view, where no row expands.
+fn leaf_subtree(items: Vec<NodeSummary>) -> Subtree {
+    Subtree {
+        items: items
+            .into_iter()
+            .map(|summary| SubtreeNode {
+                summary,
+                children: Subtree::default(),
+            })
+            .collect(),
+        page: None,
     }
 }
 
@@ -1431,6 +1502,10 @@ impl ContentAdapter for TaskAdapter {
             // depth — the engine threads the active query into subtree
             // expansion so a filtered tree stays filtered below the root.
             propagates_query_to_subtree: true,
+            // The whole task forest is in memory, so the tree view builds its
+            // entire expanded shape in one `list_subtree` projection walk —
+            // the engine skips the per-node expand cascade for it.
+            supports_eager_subtree: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -1566,6 +1641,62 @@ mod tests {
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].label, "Child task");
         assert_eq!(kids[0].has_children, Some(false));
+    }
+
+    #[test]
+    fn subtree_expands_forest_to_requested_depth() {
+        let root = Uuid::from_u128(1);
+        let mid = Uuid::from_u128(2);
+        let leaf = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            row(root, "Root", None),
+            row(mid, "Mid", Some(root)),
+            row(leaf, "Leaf", Some(mid)),
+        ]);
+
+        // depth 0 ⇔ child_summaries: roots only, nothing expanded.
+        let d0 = snap.subtree(None, None, 0);
+        assert_eq!(d0.items.len(), 1);
+        assert_eq!(d0.items[0].summary.label, "Root");
+        assert!(d0.items[0].children.items.is_empty());
+
+        // depth 1: Root → Mid, Mid not expanded further.
+        let d1 = snap.subtree(None, None, 1);
+        let m = &d1.items[0].children.items;
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].summary.label, "Mid");
+        assert!(m[0].children.items.is_empty());
+
+        // depth all: full chain, leaf stops naturally.
+        let dall = snap.subtree(None, None, u32::MAX);
+        let m = &dall.items[0].children.items[0];
+        assert_eq!(m.summary.label, "Mid");
+        let l = &m.children.items[0];
+        assert_eq!(l.summary.label, "Leaf");
+        assert_eq!(l.summary.has_children, Some(false));
+        assert!(l.children.items.is_empty());
+    }
+
+    #[test]
+    fn subtree_honours_visible_filter() {
+        // root → a (match) , root → b (not in visible set) ; only `a` shows.
+        let root = Uuid::from_u128(1);
+        let a = Uuid::from_u128(2);
+        let b = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            row(root, "Root", None),
+            row(a, "A", Some(root)),
+            row(b, "B", Some(root)),
+        ]);
+        let visible: HashSet<Uuid> = [root, a].into_iter().collect();
+        let st = snap.subtree(None, Some(&visible), u32::MAX);
+        let kids: Vec<_> = st.items[0]
+            .children
+            .items
+            .iter()
+            .map(|n| n.summary.label.clone())
+            .collect();
+        assert_eq!(kids, vec!["A"]); // `b` filtered out at every level
     }
 
     #[test]

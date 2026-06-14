@@ -35,7 +35,7 @@ use not_yet_done_table::{
 
 use not_yet_done_content::{
     AdapterStatus, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo, PageRequest,
-    SortDirection, SortKey, TreeFindHit,
+    SortDirection, SortKey, Subtree, TreeFindHit,
 };
 
 use crate::components::action_bar::ActionBarComponent;
@@ -2427,6 +2427,27 @@ impl ContentPane {
             item_label: node_label,
             child_def: Box::new(child_def),
         })
+    }
+
+    /// The `list_subtree` depth to request when this pane is an **eager**
+    /// tree — i.e. the adapter advertises `supports_eager_subtree` and the
+    /// view has a non-zero `expand_depth`. `None` means "not eligible": the
+    /// engine falls back to the per-node [`Self::pending_auto_expand_requests`]
+    /// cascade (remote adapters, flat views, `expand_depth: 0`).
+    ///
+    /// The mapping passes the cascade's level target straight through
+    /// (`all` → `u32::MAX`, `Levels(n)` → `n`): `list_subtree(depth)` yields
+    /// `depth + 1` visible levels — exactly the depths `0..=target` the
+    /// cascade would reach — so the two paths render an identical tree.
+    pub(crate) fn eager_subtree_depth(&self, view_defs: &[ViewDef]) -> Option<u32> {
+        if self.tree.is_none() || !self.capabilities.supports_eager_subtree {
+            return None;
+        }
+        match self.view_def(view_defs)?.expand_depth {
+            Some(ExpandDepth::All) => Some(u32::MAX),
+            Some(ExpandDepth::Levels(n)) if n > 0 => Some(n),
+            _ => None,
+        }
     }
 
     /// One-shot `expand_depth` auto-expansion cascade (root ViewDef
@@ -6792,6 +6813,46 @@ impl ContentView {
         self.sync_action_bar_hints();
     }
 
+    /// Ingest a whole eagerly-expanded subtree in one shot (capability
+    /// `supports_eager_subtree`): fill the tree cache for every level and mark
+    /// every node with children as `expanded`, then rebuild entries + table
+    /// ONCE. This is the eager counterpart of [`Self::apply_tree_children`] —
+    /// instead of one cache slot per round-trip + a rebuild per slot (the
+    /// O(N²) cascade), the adapter hands us the full structure and we lay it
+    /// down in a single pass.
+    ///
+    /// `parent_path` is the path the subtree hangs under — `vec![]` for a
+    /// root load. The adapter has already merged any multi-type children into
+    /// each node's ordered `children` list, so there is no per-type bucketing
+    /// to do here (unlike the cascade's `apply_multi_load_result`).
+    pub fn apply_subtree(&mut self, pane_id: PaneId, parent_path: Vec<String>, subtree: Subtree) {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return;
+        };
+        let view_defs = self.view_defs.clone();
+        let tree = &mut self.pane_trees[tree_idx];
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            let Some(state) = leaf.pane.tree.as_mut() else {
+                return;
+            };
+            ingest_subtree_level(state, parent_path, subtree);
+            if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
+                state.rebuild_entries(vd);
+            }
+            leaf.pane.rebuild_table(&view_defs);
+            // The whole expanded shape arrived at once, so the per-node
+            // expand cascade has nothing left to drive for this pane.
+            if let Some(state) = leaf.pane.tree.as_mut() {
+                state.auto_expand_pending = false;
+            }
+        }
+        self.sync_action_bar_hints();
+    }
+
     /// Initialise the tree cache entry for a parent that expects N
     /// per-type loads (heterogeneous fan-out). Called by the
     /// `ExpandTreeNodeMulti` dispatch before firing per-type loads.
@@ -8606,6 +8667,29 @@ fn parse_sizing(s: &str) -> ColStrategy {
         };
     }
     ColStrategy::Max
+}
+
+/// Recursively lay an eager [`Subtree`] level into the pane's tree cache:
+/// cache this level's children under `parent_path`, then for every node that
+/// carries children mark its own path `expanded` and recurse. Pure cache
+/// mutation — the single `rebuild_entries` + `rebuild_table` happens once in
+/// [`ContentView::apply_subtree`] after the whole walk. The path scheme is
+/// identical to the cascade's (`flatten_into`): a node's children live at
+/// `parent_path + [node.id]`, so a subtree laid down here and a subtree built
+/// by the cascade are indistinguishable to selection / collapse.
+fn ingest_subtree_level(state: &mut TreeState, parent_path: Vec<String>, subtree: Subtree) {
+    let next_page = next_page_after(subtree.page);
+    let summaries: Vec<NodeSummary> = subtree.items.iter().map(|n| n.summary.clone()).collect();
+    state.set_cached_children(parent_path.clone(), summaries, next_page);
+    for node in subtree.items {
+        if node.children.items.is_empty() {
+            continue;
+        }
+        let mut own_path = parent_path.clone();
+        own_path.push(node.summary.id.clone());
+        state.expanded.insert(own_path.clone());
+        ingest_subtree_level(state, own_path, node.children);
+    }
 }
 
 /// Derive the next-page request from a result's `PageInfo`. Mirrors
@@ -10698,6 +10782,132 @@ mod tests {
         };
         assert!(next_page_after(Some(info)).is_none());
         assert!(next_page_after(None).is_none());
+    }
+
+    /// A leaf summary with the given id (type is irrelevant to the cache
+    /// path scheme — `ingest_subtree_level` keys purely on `id`).
+    fn sub_summary(id: &str) -> NodeSummary {
+        NodeSummary {
+            id: id.into(),
+            label: id.into(),
+            node_type: not_yet_done_content::NodeType {
+                type_id: "mock:node".into(),
+                mime_type: "text/plain".into(),
+                syntax: None,
+                file_extension: ".txt".into(),
+                display_name: "Node".into(),
+            },
+            metadata: not_yet_done_content::Metadata::default(),
+            has_children: None,
+        }
+    }
+
+    fn sub_node(id: &str, children: Vec<not_yet_done_content::SubtreeNode>) -> not_yet_done_content::SubtreeNode {
+        not_yet_done_content::SubtreeNode {
+            summary: sub_summary(id),
+            children: Subtree {
+                items: children,
+                page: None,
+            },
+        }
+    }
+
+    /// The eager-ingest path must lay down a cache + `expanded` set that is
+    /// byte-for-byte identical to what the per-node cascade would build —
+    /// otherwise selection, collapse, and re-expand desync. This pins the
+    /// path scheme: a node's children live at `parent_path + [node.id]`, and
+    /// exactly the nodes that carry children end up in `expanded`.
+    #[test]
+    fn ingest_subtree_matches_cascade_path_scheme() {
+        // root → A → {A1 → A1a(leaf), A2(leaf)}, B(leaf)
+        let subtree = Subtree {
+            items: vec![
+                sub_node(
+                    "A",
+                    vec![sub_node("A1", vec![sub_node("A1a", vec![])]), sub_node("A2", vec![])],
+                ),
+                sub_node("B", vec![]),
+            ],
+            page: None,
+        };
+
+        let mut eager = TreeState::new();
+        ingest_subtree_level(&mut eager, Vec::new(), subtree);
+
+        // Cache key = full id-chain from root, identical to flatten_into.
+        assert_eq!(
+            eager.cache[&Vec::<String>::new()]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["A".to_string(), "B".to_string()],
+        );
+        assert_eq!(
+            eager.cache[&vec!["A".to_string()]]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["A1".to_string(), "A2".to_string()],
+        );
+        assert_eq!(
+            eager.cache[&vec!["A".to_string(), "A1".to_string()]]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["A1a".to_string()],
+        );
+        // Leaves get no cache slot (no children laid down).
+        assert!(!eager.cache.contains_key(&vec!["B".to_string()]));
+        assert!(!eager.cache.contains_key(&vec!["A".to_string(), "A2".to_string()]));
+        assert!(!eager
+            .cache
+            .contains_key(&vec!["A".to_string(), "A1".to_string(), "A1a".to_string()]));
+
+        // Exactly the parents-with-children are expanded.
+        let expected_expanded: std::collections::HashSet<Vec<String>> = [
+            vec!["A".to_string()],
+            vec!["A".to_string(), "A1".to_string()],
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(eager.expanded, expected_expanded);
+
+        // Now build the same shape the way the cascade does — one
+        // set_cached_children per parent path + one expanded.insert per
+        // opened node — and assert the two states are indistinguishable.
+        let mut cascade = TreeState::new();
+        cascade.set_cached_children(Vec::new(), vec![sub_summary("A"), sub_summary("B")], None);
+        cascade.expanded.insert(vec!["A".to_string()]);
+        cascade.set_cached_children(
+            vec!["A".to_string()],
+            vec![sub_summary("A1"), sub_summary("A2")],
+            None,
+        );
+        cascade.expanded.insert(vec!["A".to_string(), "A1".to_string()]);
+        cascade.set_cached_children(
+            vec!["A".to_string(), "A1".to_string()],
+            vec![sub_summary("A1a")],
+            None,
+        );
+
+        assert_eq!(eager.expanded, cascade.expanded);
+        assert_eq!(
+            eager.cache.keys().collect::<std::collections::HashSet<_>>(),
+            cascade.cache.keys().collect::<std::collections::HashSet<_>>(),
+        );
+        for (key, ec) in &eager.cache {
+            let cc = &cascade.cache[key];
+            assert_eq!(
+                ec.children.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+                cc.children.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+                "children mismatch at {key:?}",
+            );
+            assert_eq!(ec.loaded, cc.loaded, "loaded mismatch at {key:?}");
+            assert_eq!(ec.next_page, cc.next_page, "next_page mismatch at {key:?}");
+        }
     }
 
     #[test]

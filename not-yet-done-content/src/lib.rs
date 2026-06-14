@@ -258,6 +258,42 @@ pub struct ListResult {
 }
 
 // ---------------------------------------------------------------------------
+// Subtree / SubtreeNode (eager multi-level expansion)
+// ---------------------------------------------------------------------------
+
+/// One **level** of an eagerly-expanded tree: the nodes at this level plus
+/// that level's pagination state. Mirrors [`ListResult`] (`items` + `page`)
+/// but recursively — each [`SubtreeNode`] carries its own children as a
+/// nested `Subtree`. Returned by [`Node::list_subtree`].
+///
+/// The split (a level owns its `page`, a node owns its `children`) lets the
+/// frontend ingest the whole structure into its per-parent tree cache in one
+/// pass: one cache slot per node's `children` level, each with its own page.
+#[derive(Clone, Debug, Default)]
+pub struct Subtree {
+    pub items: Vec<SubtreeNode>,
+    /// Pagination state of THIS level, if the adapter paginates. Local
+    /// adapters (the only ones that opt into eager subtrees) load
+    /// all-or-nothing, so this is typically `None` for them.
+    pub page: Option<PageInfo>,
+}
+
+/// A single node in an eagerly-expanded tree.
+///
+/// `children.items` is empty when the node is a genuine leaf **or** the
+/// requested depth limit was reached (i.e. "not expanded here"). The two
+/// cases are distinguished by `summary.has_children`: `Some(false)` = real
+/// leaf, otherwise depth-limited and the frontend may still lazy-expand it
+/// on demand via the ordinary cascade.
+#[derive(Clone, Debug)]
+pub struct SubtreeNode {
+    /// Carries `id`, `label`, `node_type`, `metadata`, `has_children`.
+    pub summary: NodeSummary,
+    /// This node's already-expanded children (one tree level deeper).
+    pub children: Subtree,
+}
+
+// ---------------------------------------------------------------------------
 // QueryVariable (saved-query parameter binding)
 // ---------------------------------------------------------------------------
 
@@ -317,6 +353,21 @@ pub struct AdapterCapabilities {
     /// become claimable in tree mode and trigger a *reload* (the adapter
     /// must re-list) instead of an in-memory rebuild.
     pub group_by_via_adapter: bool,
+    /// Whether the adapter can build a whole multi-level subtree in one
+    /// [`Node::list_subtree`] call without per-level round-trips. Local
+    /// adapters that hold the full forest in memory (Tasks, Trackings) set
+    /// this `true`; the engine then expands a tree's initial / reloaded
+    /// state with a single eager call instead of the per-node `list()`
+    /// cascade (which is O(N²) in tree-rebuilds for `expand_depth: all`).
+    ///
+    /// Remote adapters leave this `false` on purpose: a blocking
+    /// `list_subtree` over a slow backend would freeze the UI, whereas the
+    /// progressive cascade keeps it responsive and shows levels as they
+    /// arrive. They still get a correct (but synchronous, round-trip-per-
+    /// level) default `list_subtree` impl — it is simply never driven by the
+    /// engine for them. Interactive single-node expansion always uses the
+    /// cascade regardless of this flag.
+    pub supports_eager_subtree: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,6 +1274,73 @@ pub trait Node: Send + Sync {
         Err(ContentError::NotSupported("list not supported".into()))
     }
 
+    /// List child nodes **and** eagerly expand their descendants up to
+    /// `depth` additional levels below the directly-listed children.
+    ///
+    /// Depth semantics (total visible levels = `depth + 1`):
+    /// - `depth == 0` — exactly [`Node::list`]: one level, every returned
+    ///   node has empty `children`. This is the default the engine requests
+    ///   for ordinary lists and interactive single-node expansion.
+    /// - `depth == 1` — the listed children plus one level beneath them.
+    /// - `depth == u32::MAX` — fully expanded (`expand_depth: all`); the
+    ///   recursion stops naturally at leaves (`has_children == Some(false)`
+    ///   or an empty `list`).
+    ///
+    /// The default implementation walks [`Node::list`] / [`Node::get_child`]
+    /// recursively, one round-trip per node per level. It is correct for any
+    /// adapter but only *fast* for adapters that hold their data in memory;
+    /// remote adapters keep [`AdapterCapabilities::supports_eager_subtree`]
+    /// `false` so the engine never drives this path for them (see that flag).
+    /// Adapters that can build the whole structure cheaply (Tasks, Trackings)
+    /// override this with a single in-memory projection walk.
+    ///
+    /// `params.query` is threaded down into every level's child `list`
+    /// (honouring [`AdapterCapabilities::propagates_query_to_subtree`]);
+    /// child levels are requested unpaginated (`page: None`).
+    async fn list_subtree(&self, params: ListParams, depth: u32) -> Result<Subtree> {
+        let query = params.query.clone();
+        let result = self.list(params).await?;
+        let page = result.page;
+        let mut items = Vec::with_capacity(result.items.len());
+        for summary in result.items {
+            // Only descend when we have budget AND the node isn't a known
+            // leaf. A node that claims children but whose get_child fails is
+            // treated as a leaf here (graceful) rather than failing the whole
+            // subtree; a genuine list error below propagates.
+            let children = if depth > 0 && summary.has_children != Some(false) {
+                match self.get_child(&summary.id).await {
+                    Ok(child) => {
+                        let mut merged = Subtree::default();
+                        for child_type in child.children_types() {
+                            let child_params = ListParams {
+                                node_type: child_type,
+                                query: query.clone(),
+                                sort: Vec::new(),
+                                page: None,
+                                download: false,
+                                group_by: None,
+                            };
+                            let mut sub = child.list_subtree(child_params, depth - 1).await?;
+                            merged.items.append(&mut sub.items);
+                            // Single child-type is the common case; keep the
+                            // first level's page. Multi-type local adapters
+                            // load all-or-nothing (page stays None).
+                            if merged.page.is_none() {
+                                merged.page = sub.page;
+                            }
+                        }
+                        merged
+                    }
+                    Err(_) => Subtree::default(),
+                }
+            } else {
+                Subtree::default()
+            };
+            items.push(SubtreeNode { summary, children });
+        }
+        Ok(Subtree { items, page })
+    }
+
     /// Navigate to a specific child by ID.
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         Err(ContentError::NotFound(id.to_string()))
@@ -1715,5 +1833,244 @@ mod mark_move_contract_tests {
             .unwrap();
         assert!(matches!(dispatch, ActionDispatch::Error(_)));
         assert!(node.last_marked.lock().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod list_subtree_default_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    fn nt(type_id: &str) -> NodeType {
+        NodeType {
+            type_id: type_id.into(),
+            mime_type: "text/plain".into(),
+            syntax: None,
+            file_extension: ".txt".into(),
+            display_name: type_id.into(),
+        }
+    }
+
+    fn params() -> ListParams {
+        ListParams {
+            node_type: nt("mock:item"),
+            query: None,
+            sort: Vec::new(),
+            page: None,
+            download: false,
+            group_by: None,
+        }
+    }
+
+    /// Shared adjacency for the mock forest: `parent id -> [(child id, child
+    /// type)]`. `liars` forces `has_children = Some(false)` on a node that
+    /// actually *does* have edges, so we can prove the depth walk honours the
+    /// leaf hint without calling `get_child`.
+    struct Tree {
+        edges: HashMap<String, Vec<(String, String)>>,
+        liars: HashSet<String>,
+    }
+
+    fn tree(edges: &[(&str, &str, &str)]) -> Arc<Tree> {
+        let mut map: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (p, c, t) in edges {
+            map.entry((*p).into())
+                .or_default()
+                .push(((*c).into(), (*t).into()));
+        }
+        Arc::new(Tree {
+            edges: map,
+            liars: HashSet::new(),
+        })
+    }
+
+    /// A node backed by the shared [`Tree`]. `list` returns the edges whose
+    /// child type matches the requested `node_type`; `children_types` reports
+    /// the distinct child types in insertion order; `get_child` re-roots a
+    /// fresh node at the requested id.
+    struct MockNode {
+        id: String,
+        node_type: NodeType,
+        metadata: Metadata,
+        tree: Arc<Tree>,
+    }
+
+    fn root(tree: Arc<Tree>) -> MockNode {
+        MockNode {
+            id: "root".into(),
+            node_type: nt("mock:node"),
+            metadata: Metadata::default(),
+            tree,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Node for MockNode {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn label(&self) -> &str {
+            &self.id
+        }
+        fn node_type(&self) -> &NodeType {
+            &self.node_type
+        }
+        fn metadata(&self) -> &Metadata {
+            &self.metadata
+        }
+
+        fn children_types(&self) -> Vec<NodeType> {
+            let mut out = Vec::new();
+            let mut seen = Vec::new();
+            if let Some(edges) = self.tree.edges.get(&self.id) {
+                for (_c, t) in edges {
+                    if !seen.contains(t) {
+                        seen.push(t.clone());
+                        out.push(nt(t));
+                    }
+                }
+            }
+            out
+        }
+
+        async fn list(&self, params: ListParams) -> Result<ListResult> {
+            let want = &params.node_type.type_id;
+            let items = self
+                .tree
+                .edges
+                .get(&self.id)
+                .map(|edges| {
+                    edges
+                        .iter()
+                        .filter(|(_c, t)| t == want)
+                        .map(|(c, _t)| {
+                            let has = !self.tree.liars.contains(c)
+                                && self
+                                    .tree
+                                    .edges
+                                    .get(c)
+                                    .map(|e| !e.is_empty())
+                                    .unwrap_or(false);
+                            NodeSummary {
+                                id: c.clone(),
+                                label: c.clone(),
+                                node_type: nt(want),
+                                metadata: Metadata::default(),
+                                has_children: Some(has),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(ListResult {
+                items,
+                applied_sort: Vec::new(),
+                page: None,
+                batch_download_available: false,
+                downloaded: Vec::new(),
+            })
+        }
+
+        async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+            Ok(Box::new(MockNode {
+                id: id.to_string(),
+                node_type: nt("mock:node"),
+                metadata: Metadata::default(),
+                tree: self.tree.clone(),
+            }))
+        }
+    }
+
+    fn child_ids(st: &Subtree) -> Vec<String> {
+        st.items.iter().map(|n| n.summary.id.clone()).collect()
+    }
+
+    fn find<'a>(st: &'a Subtree, id: &str) -> &'a SubtreeNode {
+        st.items
+            .iter()
+            .find(|n| n.summary.id == id)
+            .unwrap_or_else(|| panic!("node {id} not found"))
+    }
+
+    // root → a, b ; a → a1, a2 ; a1 → a1x ; (b, a2, a1x are leaves)
+    fn sample() -> Arc<Tree> {
+        tree(&[
+            ("root", "a", "mock:item"),
+            ("root", "b", "mock:item"),
+            ("a", "a1", "mock:item"),
+            ("a", "a2", "mock:item"),
+            ("a1", "a1x", "mock:item"),
+        ])
+    }
+
+    #[tokio::test]
+    async fn depth_zero_is_single_level() {
+        let r = root(sample());
+        let st = r.list_subtree(params(), 0).await.unwrap();
+        assert_eq!(child_ids(&st), vec!["a", "b"]);
+        // depth 0 ⇔ list(): no node is expanded.
+        assert!(st.items.iter().all(|n| n.children.items.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn depth_one_expands_exactly_one_level() {
+        let r = root(sample());
+        let st = r.list_subtree(params(), 1).await.unwrap();
+
+        let a = find(&st, "a");
+        assert_eq!(child_ids(&a.children), vec!["a1", "a2"]);
+        // one level only: a's children are not themselves expanded.
+        assert!(a.children.items.iter().all(|n| n.children.items.is_empty()));
+
+        // b is a genuine leaf (has_children == Some(false)) → not descended.
+        let b = find(&st, "b");
+        assert!(b.children.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn depth_all_reaches_deepest_leaf() {
+        let r = root(sample());
+        let st = r.list_subtree(params(), u32::MAX).await.unwrap();
+        let a = find(&st, "a");
+        let a1 = find(&a.children, "a1");
+        assert_eq!(child_ids(&a1.children), vec!["a1x"]);
+        // recursion stops naturally at the leaf, no depth limit needed.
+        assert!(a1.children.items[0].children.items.is_empty());
+        // sibling leaf a2 stays empty.
+        assert!(find(&a.children, "a2").children.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn has_children_false_short_circuits_descent() {
+        // `trap` has real edges but is flagged a liar → summary says leaf.
+        let mut map: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        map.insert("root".into(), vec![("trap".into(), "mock:item".into())]);
+        map.insert("trap".into(), vec![("hidden".into(), "mock:item".into())]);
+        let t = Arc::new(Tree {
+            edges: map,
+            liars: HashSet::from(["trap".to_string()]),
+        });
+        let r = root(t);
+        let st = r.list_subtree(params(), u32::MAX).await.unwrap();
+        let trap = find(&st, "trap");
+        assert_eq!(trap.summary.has_children, Some(false));
+        // Even at depth all, the leaf hint prevents descent.
+        assert!(trap.children.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn multi_child_type_merges_typed_lists_in_order() {
+        // root → p (mock:item); p has two child types x then y.
+        let t = tree(&[
+            ("root", "p", "mock:item"),
+            ("p", "x1", "mock:x"),
+            ("p", "y1", "mock:y"),
+        ]);
+        let r = root(t);
+        let st = r.list_subtree(params(), 1).await.unwrap();
+        let p = find(&st, "p");
+        // Both typed child lists merged, child-type (insertion) order kept.
+        assert_eq!(child_ids(&p.children), vec!["x1", "y1"]);
     }
 }

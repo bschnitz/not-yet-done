@@ -75,7 +75,8 @@ use not_yet_done_content::{
     grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore, GroupBucket, GroupSpec,
     HintPlacement, InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortableColumn,
+    NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortableColumn, Subtree,
+    SubtreeNode,
 };
 use not_yet_done_core::entity::tracking;
 use not_yet_done_core::error::AppError;
@@ -312,6 +313,37 @@ impl TreeProjection {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Walk this projection from `parent` (`None` = forest roots) down `depth`
+    /// additional levels, building the eager [`Subtree`] the engine ingests in
+    /// one shot (capability `supports_eager_subtree`). One level mirrors
+    /// [`Self::child_summaries`]; a node is only descended while there is depth
+    /// budget left and it actually has visible children. `depth == u32::MAX`
+    /// expands to every visible leaf. Pure in-memory — no DB, no async, no
+    /// per-node round-trip (the whole point: it replaces the O(N²) TUI
+    /// expand-cascade with a single pass).
+    fn subtree(&self, parent: Option<Uuid>, scope: Option<&BucketScope>, depth: u32) -> Subtree {
+        let items = self
+            .children
+            .get(&parent)
+            .map(|ids| {
+                ids.iter()
+                    .filter(|id| self.is_visible(**id))
+                    .filter_map(|id| {
+                        let row = self.by_id.get(id)?;
+                        let summary = self.summary(*id, row, scope);
+                        let children = if depth > 0 && summary.has_children == Some(true) {
+                            self.subtree(Some(*id), scope, depth - 1)
+                        } else {
+                            Subtree::default()
+                        };
+                        Some(SubtreeNode { summary, children })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Subtree { items, page: None }
     }
 
     fn summary(&self, id: Uuid, row: &TreeTaskRow, scope: Option<&BucketScope>) -> NodeSummary {
@@ -598,6 +630,39 @@ impl TrackingSnapshot {
                 group_summary(&scope, total_secs, active)
             })
             .collect()
+    }
+
+    /// Eager analogue of [`Self::group_summaries`]: build the grouped tree's
+    /// bucket level **and** fold each bucket's task subtree `depth - 1` levels
+    /// deep, reusing the same `(scope, query)`-memoized projections the
+    /// per-node cascade would. Bucket nodes form level 0, so a bucket's folded
+    /// forest hangs one level beneath them.
+    async fn group_subtree(
+        &self,
+        handle: &CoreHandle,
+        filter: Option<&HashSet<Uuid>>,
+        spec: &GroupSpec,
+        query: &Option<String>,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let mut items = Vec::new();
+        for summary in self.group_summaries(filter, spec) {
+            // Decode the bucket scope back out of the summary id — the same
+            // `treegrp:<scope>` shape `TrackingGroupNode::fetch` parses.
+            let scope = summary
+                .id
+                .strip_prefix(GROUP_ID_PREFIX)
+                .and_then(BucketScope::parse);
+            let children = match (depth > 0).then_some(()).and(scope) {
+                Some(scope) => self
+                    .scoped_projection(handle, Some(&scope), query)
+                    .await?
+                    .subtree(None, Some(&scope), depth - 1),
+                None => Subtree::default(),
+            };
+            items.push(SubtreeNode { summary, children });
+        }
+        Ok(Subtree { items, page: None })
     }
 
     /// The tracking ids that fall into `scope`'s bucket, optionally
@@ -1184,6 +1249,50 @@ impl Node for TrackingRootNode {
         let now = chrono::Utc::now();
         Ok(list_result(self.snapshot.entries(filter.as_deref(), now)))
     }
+    async fn list_subtree(
+        &self,
+        params: not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        // Mirrors `list`'s view dispatch, but expands the whole tree in one
+        // pass (capability `supports_eager_subtree`).
+        if params.node_type.type_id == tracking_tree_group_type().type_id {
+            if let Some(spec) = &params.group_by {
+                let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
+                return self
+                    .snapshot
+                    .group_subtree(&self.handle, filter.as_deref(), spec, &params.query, depth)
+                    .await;
+            }
+            // Grouping cycled off: the plain task forest, same as `list`.
+            return Ok(self
+                .snapshot
+                .scoped_projection(&self.handle, None, &params.query)
+                .await?
+                .subtree(None, None, depth));
+        }
+        if params.node_type.type_id == tracking_tree_item_type().type_id {
+            return Ok(self
+                .snapshot
+                .scoped_projection(&self.handle, None, &params.query)
+                .await?
+                .subtree(None, None, depth));
+        }
+        // Flat / condensed entry views aren't trees: one level of leaves,
+        // exactly what `list` returns (depth is irrelevant for leaf rows).
+        let result = self.list(params).await?;
+        Ok(Subtree {
+            items: result
+                .items
+                .into_iter()
+                .map(|summary| SubtreeNode {
+                    summary,
+                    children: Subtree::default(),
+                })
+                .collect(),
+            page: result.page,
+        })
+    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         if id.starts_with(GROUP_ID_PREFIX) {
             return TrackingGroupNode::fetch(&self.snapshot, &self.handle, id);
@@ -1368,6 +1477,17 @@ impl Node for TrackingGroupNode {
                 .child_summaries(None, Some(&self.scope)),
         ))
     }
+    async fn list_subtree(
+        &self,
+        params: not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        Ok(self
+            .snapshot
+            .scoped_projection(&self.handle, Some(&self.scope), &params.query)
+            .await?
+            .subtree(None, Some(&self.scope), depth))
+    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
     }
@@ -1469,6 +1589,20 @@ impl Node for TrackingTreeNode {
                 .await?
                 .child_summaries(Some(self.task_id), self.scope.as_ref()),
         ))
+    }
+    async fn list_subtree(
+        &self,
+        params: not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        // Same scope + query semantics as `list`, but walk the whole subtree
+        // in one in-memory pass instead of a single level (capability
+        // `supports_eager_subtree`).
+        Ok(self
+            .snapshot
+            .scoped_projection(&self.handle, self.scope.as_ref(), &params.query)
+            .await?
+            .subtree(Some(self.task_id), self.scope.as_ref(), depth))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
@@ -1743,6 +1877,11 @@ impl ContentAdapter for TrackingAdapter {
             // per group, each with a per-bucket re-folded subtree (the fold
             // the engine can't do itself). `zg`/`u` regroup via reload.
             group_by_via_adapter: true,
+            // The whole tracking forest is in memory, so the duration tree
+            // (and its grouped variants) builds its entire expanded shape in
+            // one `list_subtree` projection walk — the engine skips the
+            // per-node expand cascade for it (see the `list_subtree` impls).
+            supports_eager_subtree: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -2242,6 +2381,54 @@ mod tests {
         assert_eq!(kids[0].has_children, Some(false));
         // The empty branch itself is invisible.
         assert!(!proj.is_visible(empty_branch));
+    }
+
+    #[test]
+    fn subtree_walk_expands_to_requested_depth() {
+        let root = Uuid::from_u128(1);
+        let mid = Uuid::from_u128(2);
+        let leaf = Uuid::from_u128(3);
+        let sibling = Uuid::from_u128(4); // top-level leaf with its own time
+        let tm = task_map(&[
+            (root, "Root", None),
+            (mid, "Mid", Some(root)),
+            (leaf, "Leaf", Some(mid)),
+            (sibling, "Sibling", None),
+        ]);
+        // Only the deepest leaf + the sibling carry time; root/mid inherit a
+        // non-zero cumulated and stay visible.
+        let own: HashMap<Uuid, i64> = [(leaf, 30), (sibling, 10)].into_iter().collect();
+        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+
+        // depth 0 ⇔ child_summaries: top level only, nothing expanded. Ids
+        // carry the plain `tree:` prefix (no scope).
+        let d0 = proj.subtree(None, None, 0);
+        let top: Vec<_> = d0.items.iter().map(|n| n.summary.label.clone()).collect();
+        assert_eq!(top, vec!["Root", "Sibling"]); // sibling order is by id
+        assert_eq!(d0.items[0].summary.id, format!("{TREE_ID_PREFIX}{root}"));
+        assert!(d0.items.iter().all(|n| n.children.items.is_empty()));
+
+        // depth 1: Root expands exactly one level (to Mid); Mid stays unexpanded.
+        let d1 = proj.subtree(None, None, 1);
+        let r1 = d1.items.iter().find(|n| n.summary.label == "Root").unwrap();
+        assert_eq!(r1.children.items.len(), 1);
+        assert_eq!(r1.children.items[0].summary.label, "Mid");
+        assert!(r1.children.items[0].children.items.is_empty());
+        // The sibling is a genuine leaf — never expanded.
+        let sib = d1.items.iter().find(|n| n.summary.label == "Sibling").unwrap();
+        assert_eq!(sib.summary.has_children, Some(false));
+        assert!(sib.children.items.is_empty());
+
+        // depth all: the full chain Root → Mid → Leaf, stopping at the leaf.
+        let dall = proj.subtree(None, None, u32::MAX);
+        let r = dall.items.iter().find(|n| n.summary.label == "Root").unwrap();
+        let m = &r.children.items[0];
+        assert_eq!(m.summary.label, "Mid");
+        assert_eq!(m.children.items.len(), 1);
+        let l = &m.children.items[0];
+        assert_eq!(l.summary.label, "Leaf");
+        assert_eq!(l.summary.has_children, Some(false));
+        assert!(l.children.items.is_empty());
     }
 
     #[test]

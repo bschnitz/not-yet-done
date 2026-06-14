@@ -796,6 +796,49 @@ Zeilen mit Tiefe `< expand_depth` automatisch auf — `2` zeigt also drei Ebenen
   unter einem **zugeklappten** Vorfahren verborgen sind, werden nicht
   erneuert — sie holen sich frische Daten beim nächsten Aufklappen.
 
+#### Eager-Subtree (`supports_eager_subtree`) — der ganze Baum in einem Call
+
+Die oben beschriebene Kaskade ist korrekt, aber teuer: pro Ebene ein
+Adapter-Fan-out und pro gelandeter Antwort ein Tree-Rebuild. Bei
+`expand_depth: all` über einen tiefen In-Memory-Forest wird das quadratisch
+(O(N²) Rebuilds), weil jeder einzelne Knoten seine Kinder separat anfordert
+und der Baum nach jeder Antwort neu flach gerechnet wird. Für Adapter, deren
+Daten ohnehin komplett im Speicher liegen (Tasks, Trackings), ist das reine
+Verschwendung — sie könnten den ganzen Teilbaum in einem Rutsch liefern.
+
+Dafür gibt es den Vertrags-Zusatz `list_subtree(params, depth)` auf dem `Node`-
+Trait und das Capability-Gate `supports_eager_subtree` auf `AdapterCapabilities`:
+
+- **`list_subtree(params, depth)`** liefert einen rekursiven `Subtree`
+  (`{ items: Vec<SubtreeNode>, page }`, jeder `SubtreeNode` trägt sein
+  `summary` plus seinen eigenen `children: Subtree`). `depth` ist die
+  Ziel-Ebene: `list_subtree(depth)` liefert `depth + 1` sichtbare Ebenen, also
+  exakt die Tiefen `0..=depth`, die die Kaskade erreichen würde. Die
+  **Default-Implementierung** rekursiert über `list()` + `get_child()` (ein
+  Call pro Knoten, identisch zur Kaskade, nur server-seitig gebündelt) — jeder
+  Adapter erbt sie kostenlos. In-Memory-Adapter **überschreiben** sie mit einem
+  reinen Projektions-Walk über ihren Snapshot (kein I/O, ein Durchlauf). Knoten
+  mit `has_children == Some(false)` werden nicht weiter abgestiegen.
+- **`supports_eager_subtree`** schaltet die TUI von der Kaskade auf einen
+  einzigen `list_subtree`-Call um: Sobald die Root-Liste gelandet ist, fragt die
+  Engine — falls `expand_depth` non-zero ist — den ganzen erwarteten Teilbaum
+  (`all` → unbegrenzt, `Levels(n)` → Tiefe `n`) in **einem** Call an und legt ihn
+  in **einem** Pass in den Tree-Cache (`ingest_subtree_level`), gefolgt von
+  **einem** Rebuild. Das Pfad-Schema ist byte-genau das der Kaskade
+  (`parent_path + [node.id]`), damit Selektion, Collapse und Re-Expand
+  ununterscheidbar bleiben.
+- **Warum Gate statt immer:** Remote-Adapter (Jira, Taiga, Postgres,
+  Confluence) melden `supports_eager_subtree: false` und behalten die
+  progressive Kaskade — ein einzelner blockierender Call über viele Ebenen würde
+  die UI einfrieren, während die Kaskade Ebene für Ebene nachlädt und sichtbar
+  Fortschritt zeigt. Eager lohnt nur, wenn der Adapter den Baum ohne Netz-I/O
+  liefern kann.
+- **Fallback:** Schlägt der eager Call fehl, fällt die Engine automatisch auf
+  die Kaskade zurück (`drive_tree_auto_expand`) — der Baum klappt dann eben
+  progressiv auf. Pagination (`… N weitere`) und Live-Row-Patches bleiben
+  unberührt, weil pro Ebene dieselbe `PageInfo` durchgereicht wird und die IDs
+  identisch sind.
+
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 
 Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf

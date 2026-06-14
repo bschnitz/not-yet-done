@@ -91,6 +91,13 @@ pub trait Node: Send + Sync {
     /// List child nodes of a given type.
     async fn list(&self, params: ListParams) -> Result<ListResult>;
 
+    /// List a whole subtree eagerly, `depth + 1` levels deep, in one call.
+    /// Default impl recurses over `list()` + `get_child()` (one call per
+    /// node — same work as the per-node cascade, just bundled adapter-side).
+    /// In-memory adapters override it with a snapshot projection walk (no
+    /// I/O). Only consulted when `capabilities().supports_eager_subtree`.
+    async fn list_subtree(&self, params: ListParams, depth: u32) -> Result<Subtree>;
+
     /// Navigate to a specific child by ID.
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>>;
 
@@ -275,6 +282,21 @@ pub struct AdapterCapabilities {
     pub supports_batch_download: bool,
     /// Whether list() can return total counts.
     pub supports_total_count: bool,
+    /// Adapter computes subtree-cumulated values for tree nodes (M4).
+    pub supports_tree_aggregation: bool,
+    /// Active query threads into child list() calls at every depth, not
+    /// just the root — keeps a filtered tree filtered below the root.
+    pub propagates_query_to_subtree: bool,
+    /// Adapter groups its tree root level itself (one bucket node per
+    /// group with a folded subtree) when given `ListParams::group_by`.
+    pub group_by_via_adapter: bool,
+    /// Adapter can build a whole multi-level subtree in one
+    /// `list_subtree` call. In-memory adapters (Tasks, Trackings) set this
+    /// `true`; the engine then expands a tree's initial/reloaded state with
+    /// one eager call instead of the O(N²) per-node cascade. Remote
+    /// adapters leave it `false` to keep the progressive, responsive
+    /// cascade. See `docs/generic-view-spec.md` → Eager-Subtree.
+    pub supports_eager_subtree: bool,
 }
 ```
 
