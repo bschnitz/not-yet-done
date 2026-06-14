@@ -3769,6 +3769,27 @@ Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
 false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
       friert nicht ein — der eager Pfad greift dort bewusst nicht.
 
+## Fuzzy-Filter — Teilstring-Highlight (Tasks/Trackings (A))
+
+Parität zum nativen Tasks-Tab: der gematchte Teilstring wird hervorgehoben
+(Theme-`accent`, fett). Im Tree-Mode im **Label** der `tree_label`-Spalte (der
+Box-Connector behält seine `tree_connector`-Farbe), im Flat-Mode in den
+durchsuchten Spalten.
+
+- [ ] Tasks (A) Tree-View: `f` + Teil-Text eines Task-Titels tippen → in den
+      verbleibenden Zeilen ist genau der getroffene Teilstring farbig/fett
+      hervorgehoben; die Box-Connectors (`├──`/`└──`/`▶`) behalten ihre
+      eigene Farbe.
+- [ ] Mehrere Tokens (`foo bar`) → beide Treffer-Runs im selben Label sind
+      hervorgehoben.
+- [ ] Eine Zeile, die nur über ein anderes Feld (z. B. Tag) matcht, zeigt im
+      Label **keine** Markierung (kein falsches Highlight).
+- [ ] Filter leeren (`esc`) → Highlight verschwindet, Labels normal.
+- [ ] Flat-View (`v`): `f` + Text → Treffer in den durchsuchten Spalten
+      hervorgehoben; nicht durchsuchte Spalten bleiben unmarkiert.
+- [ ] Sehr schmale Spalte / langes Label: Highlight bleibt korrekt geclamped
+      (kein Panic, kein Übermalen des Connectors).
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

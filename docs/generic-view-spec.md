@@ -1538,6 +1538,17 @@ Suche auf die aktuell geladenen/aufgeklappten Knoten beschränkt: ein
 Treffer in einem ungeladenen Ast wird erst sichtbar, wenn dieser Ast
 geladen ist.
 
+**Der matchende Teilstring wird hervorgehoben** (Parität zum nativen
+Tasks-Tab): Im Tree-Mode werden die getroffenen Runs im **Label** der
+`tree_label`-Spalte in der Theme-`accent`-Farbe (fett) gezeichnet — der
+Box-Connector behält seine eigene `tree_connector`-Farbe. Im Flat-Mode
+bekommen die durchsuchten Spalten (`fields`, bzw. alle bei leerer Liste)
+ihre Treffer-Runs ebenfalls in `accent`. Jeder Whitespace-getrennte Token
+wird einzeln gematcht; die getroffenen Zeichen-Indizes werden vereinigt und
+zu zusammenhängenden Bereichen verschmolzen. Matcht ein Token nicht im
+Label/in der Spalte (die Zeile überlebte den Filter über ein anderes Feld),
+bleibt dort nichts markiert.
+
 ### Custom Actions
 
 Adapter registrieren eigene Aktionen:
