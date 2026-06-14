@@ -28,16 +28,26 @@ use crate::gateway::protocol::Category;
 
 const CAT_MARKER: &str = "/cat/";
 
-/// Actions a category exposes: create a channel directly inside it. Kept
-/// in lockstep with [`StoatCategoryNode::actions`].
+/// Actions a category exposes: create a channel directly inside it, or
+/// rename the category. Kept in lockstep with
+/// [`StoatCategoryNode::actions`].
 pub(super) fn category_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new(
-        "create_channel",
-        "new channel",
-        InputSpec::Form {
-            fields: vec![FormFieldSpec::text("name", "Channel name")],
-        },
-    )]
+    vec![
+        NodeAction::new(
+            "create_channel",
+            "new channel",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("name", "Channel name")],
+            },
+        ),
+        NodeAction::new(
+            "rename",
+            "rename",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("name", "Category name")],
+            },
+        ),
+    ]
 }
 
 /// Append a fresh, empty category to a server's full category list.
@@ -51,6 +61,27 @@ pub(super) fn categories_with_new(existing: &[Category], id: &str, title: &str) 
         channels: Vec::new(),
     });
     out
+}
+
+/// Return `existing` with the category `category_id` retitled to
+/// `title`. Other categories (and every channel assignment) pass through
+/// untouched — Stoat's server PATCH takes the whole list, so a rename is
+/// "the same list with one title changed".
+pub(super) fn categories_with_renamed(
+    existing: &[Category],
+    category_id: &str,
+    title: &str,
+) -> Vec<Category> {
+    existing
+        .iter()
+        .cloned()
+        .map(|mut cat| {
+            if cat.id == category_id {
+                cat.title = title.to_string();
+            }
+            cat
+        })
+        .collect()
 }
 
 /// Return `existing` with `channel_id` added to the category `category_id`
@@ -198,6 +229,28 @@ impl Node for StoatCategoryNode {
                     message: Some(format!("Created channel #{name}")),
                 })
             }
+            // Rename: edit the title in the server's full category list and
+            // PATCH it back (no per-category endpoint). The `ServerUpdate`
+            // echo refreshes the tree.
+            "rename" => {
+                let name = form_field(&input, "name")?;
+                let existing = {
+                    let state = self.state.read().await;
+                    state
+                        .servers
+                        .get(&self.server_id)
+                        .map(|s| s.categories.clone())
+                        .unwrap_or_default()
+                };
+                let updated = categories_with_renamed(&existing, &self.category_id, &name);
+                self.client
+                    .update_server_categories(&self.server_id, &updated)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("Renamed category to {name}")),
+                })
+            }
             other => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"
             ))),
@@ -294,6 +347,15 @@ mod tests {
         // Re-applying the same channel is a no-op (no duplicate).
         let again = categories_with_channel(&out, "c2", "Z");
         assert_eq!(again[1].channels, vec!["B", "Z"]);
+    }
+
+    #[test]
+    fn categories_with_renamed_changes_only_target_title() {
+        let existing = vec![cat("c1", &["A"]), cat("c2", &["B"])];
+        let out = categories_with_renamed(&existing, "c2", "Fresh Title");
+        assert_eq!(out[0].title, "title-c1"); // untouched
+        assert_eq!(out[1].title, "Fresh Title");
+        assert_eq!(out[1].channels, vec!["B"]); // channels preserved
     }
 
     #[test]

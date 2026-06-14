@@ -91,6 +91,11 @@ views:
         tree_label: name
         columns:
           - { key: name, label: Channel, source: label, sizing: "flex(1)" }
+        # Rename the channel under the cursor. `PATCH /channels/{id}` is a
+        # single-field delta; the gateway's ChannelUpdate echo refreshes
+        # the tree without a reload. `R` is a single char (no chord).
+        actions:
+          - { name: rename, key: R, type: custom, id: rename }
         # Enter on a channel has no tree-continuing child (messages carry
         # no tree_label), so it DRILLS into the message list. `split` opens
         # that list in a focused pane to the right (80%) while the channel
@@ -194,14 +199,22 @@ views:
         # the new channel added to this category. Same `al` chord as the
         # server level — `type: custom` resolves to whichever row the
         # cursor sits on, so one key serves both placements.
+        # Plus rename the category itself (R) — edits the title in the
+        # server's full category list and PATCHes it back (no per-category
+        # endpoint), echoed live via ServerUpdate.
         actions:
           - { name: new channel, key: al, type: custom, id: create_channel }
+          - { name: rename, key: R, type: custom, id: rename }
         children:
           - name: channels
             node_type: "stoat:channel"
             tree_label: name
             columns:
               - { key: name, label: Channel, source: label, sizing: "flex(1)" }
+            # Rename a channel inside a category — same action as the
+            # uncategorized branch.
+            actions:
+              - { name: rename, key: R, type: custom, id: rename }
             children:
               - name: messages
                 node_type: "stoat:message"

@@ -53,6 +53,26 @@ impl StoatClient {
         Ok(created.id)
     }
 
+    /// Rename a channel via `PATCH /api/channels/{id}` with a `name`
+    /// field. Unlike categories, channels have their own endpoint and a
+    /// rename is a single-field delta (not a full-object replacement).
+    /// The gateway echoes the change back as a `ChannelUpdate`, so the
+    /// tree refreshes without a reload.
+    pub async fn rename_channel(&self, channel_id: &str, name: &str) -> Result<(), String> {
+        let url = format!("{}/api/channels/{}", self.base_url(), channel_id);
+        http_log::log_request("PATCH", &url);
+        let resp = self
+            .http
+            .patch(&url)
+            .headers(self.auth_headers()?)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|e| http_log::network_error("PATCH", &url, e))?;
+        http_log::check_status("PATCH", &url, resp).await?;
+        Ok(())
+    }
+
     /// Replace the server's entire category list via `PATCH`. This is the
     /// only way to add a category or move a channel between categories —
     /// the API takes the full desired list, not a delta. The gateway
