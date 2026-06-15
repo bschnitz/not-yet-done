@@ -5783,7 +5783,12 @@ impl ContentView {
     }
 
     /// Push current view state into the bar. Called by App once per frame.
-    pub fn sync_action_bar(&mut self, active_editor: Option<&str>, tracking_active: bool) {
+    pub fn sync_action_bar(
+        &mut self,
+        active_editor: Option<&str>,
+        tracking_active: bool,
+        cut_active: bool,
+    ) {
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
         // before the mutable borrow on `action_bar` begins.
@@ -5822,6 +5827,9 @@ impl ContentView {
         // actions) while a tracking runs — same affordance as the native
         // Tasks/Trackings action bars.
         self.action_bar.set_tracking_active(tracking_active);
+        // Highlights the "cut" hint (adapter `mark-move` action) while a
+        // node sits on the move-clipboard, so the armed cut is visible.
+        self.action_bar.set_cut_active(cut_active);
         self.action_bar.set_active_filter_name(active_filter_name);
         self.action_bar.set_favorites(favs);
         self.action_bar.set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);

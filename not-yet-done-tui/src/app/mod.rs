@@ -5990,9 +5990,14 @@ impl App {
             .map(|s| s.to_string());
         self.tasks_view.sync_action_bar(tasks_active_editor, tracking_active);
         self.trackings_view.sync_action_bar(trackings_active_editor, tracking_active);
+        let cut_active = self.content_marked_node.is_some();
         if let Tab::Content(idx) = self.active_tab {
             if let Some(cv) = self.content_view_mut(idx) {
-                cv.sync_action_bar(content_active_editor.as_deref(), tracking_active);
+                cv.sync_action_bar(
+                    content_active_editor.as_deref(),
+                    tracking_active,
+                    cut_active,
+                );
             }
         }
 

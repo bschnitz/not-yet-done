@@ -3025,6 +3025,11 @@ Kategorien (`update_server_categories`), live via `ServerUpdate`.
       passiert (kein hängender Cut).
 - [ ] **`C` löscht nie:** nach `C` ist der Channel unverändert sichtbar; nur
       `P` verändert den Baum.
+- [ ] **`cut` in der oberen Leiste + Highlight:** Der `C cut`-Hint steht in der
+      **oberen Action-Bar** (nicht in der Status-Leiste). Nach `C` wird er in der
+      Akzentfarbe (fett + unterstrichen) hervorgehoben, solange ein Cut armiert
+      ist; nach `P` oder Abbruch (zweimal `C` / Tab-Wechsel) erlischt das
+      Highlight wieder.
 - [ ] **Fremder Server:** Channel von Server A `C`, dann `P` auf eine
       Kategorie/Server B → saubere Fehlermeldung („different server"), kein
       Move (Kategorien sind serverlokal).
