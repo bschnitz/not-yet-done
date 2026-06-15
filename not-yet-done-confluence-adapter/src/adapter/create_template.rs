@@ -1,6 +1,7 @@
-//! Shared editor-buffer template for the page-create flows on
-//! `confluence:space` (`create-page`) and `confluence:page`
-//! (`create-child`).
+//! Shared editor-buffer template for the title+body editor flows:
+//! page-create on `confluence:space` (`create-page`) and
+//! `confluence:page` (`create-child` / `clone`), and the page `edit`
+//! action (which prefills the title via [`render_filled`]).
 //!
 //! Format — three lines, hand-edited:
 //!
@@ -24,8 +25,11 @@
 
 const TITLE_PREFIX: &str = "title:";
 
+// Neutral "input error" wording: this banner is shared across the
+// create/clone *and* edit flows (the constant symbol keeps the historic
+// `CREATE_ERROR_` name to avoid churn at the call sites).
 pub(in crate::adapter) const CREATE_ERROR_BANNER_START: &str =
-    "<!-- ─── create error ─────────────────────────";
+    "<!-- ─── input error ──────────────────────────";
 pub(in crate::adapter) const CREATE_ERROR_BANNER_END: &str =
     "    ────────────────────────────────────────── -->";
 
@@ -39,6 +43,14 @@ pub(in crate::adapter) struct ParsedCreate {
 /// Render the initial template a new editor session opens with.
 pub(in crate::adapter) fn render_template() -> String {
     String::from("title: \n\n<p></p>\n")
+}
+
+/// Render a buffer pre-filled with an existing `title` and `body` — the
+/// `edit` flow opens the page's current title on the first line so it can
+/// be renamed in the same session. Shares the exact shape `parse_template`
+/// expects, so it round-trips.
+pub(in crate::adapter) fn render_filled(title: &str, body: &str) -> String {
+    format!("title: {title}\n\n{body}")
 }
 
 /// Strip a previously-rendered error banner so repeated reopens don't
@@ -146,6 +158,14 @@ mod tests {
         let with = render_with_error(original, "bad");
         let stripped = strip_error_banner(&with);
         assert_eq!(stripped, original);
+    }
+
+    #[test]
+    fn render_filled_round_trips_through_parse() {
+        let buf = render_filled("Existing Page", "<p>one</p>\n<p>two</p>\n");
+        let parsed = parse_template(&buf).expect("parses");
+        assert_eq!(parsed.title, "Existing Page");
+        assert_eq!(parsed.body, "<p>one</p>\n<p>two</p>\n");
     }
 
     #[test]

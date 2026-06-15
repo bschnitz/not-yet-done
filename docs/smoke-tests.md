@@ -2500,11 +2500,17 @@ sind Dokumentation.
 
 ### CF-9 — Edit Page + 3-Way Merge
 
-- [ ] `e` auf einer Page → `$EDITOR` öffnet mit Title + pretty-
-      printed `body.storage` (xmllint).
+- [ ] `e` auf einer Page → `$EDITOR` öffnet mit `title: <echter
+    Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
+      pretty-printed `body.storage` (xmllint).
 - [ ] Body trivial ändern (z.B. neuen Absatz einfügen), speichern,
       Editor schließen → `Updated page <Title> (v <n+1>)` Banner.
-- [ ] Confluence-Web: neue Version erscheint, Body korrekt.
+- [ ] Confluence-Web: neue Version erscheint, Body korrekt, **Titel
+      unverändert** (Regression-Guard: früher schrieb ein body-only
+      Edit die Page-Id als neuen Titel zurück).
+- [ ] **Rename**: nur die `title:`-Zeile ändern, Body gleich lassen,
+      speichern → Page heißt im Confluence-Web neu; keine NoChanges-
+      Kurzschluss.
 - [ ] **Disjoint-Merge**: vor Editor-Save in Confluence-Web die
       Page upstream ändern (eine andere Stelle als die Edits im
       Buffer). Speichern → 409 → auto-merge → `Merged on top of
