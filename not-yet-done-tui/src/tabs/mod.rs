@@ -11,6 +11,18 @@ pub use rendered_table::build_rendered_table;
 pub use tasks_state::{LoadState, TasksForm, TasksState};
 pub use trackings_state::{TrackingRow, TrackingsState};
 
+/// Compose a tab-bar label as `icon key name`, placing the key/autonumber
+/// hint **between** the icon and the title rather than after it. Empty
+/// parts (a tab without an icon, or with no key hint) are dropped so the
+/// result never carries double spaces.
+pub fn tab_label(icon: &str, key: &str, name: &str) -> String {
+    [icon, key, name]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Main tab — the top-level navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -268,6 +280,23 @@ impl TrackingsSubView {
             TrackingsSubView::Condensed => "condensed",
             TrackingsSubView::Tree => "tree",
         }
+    }
+}
+
+#[cfg(test)]
+mod tab_label_tests {
+    use super::tab_label;
+
+    #[test]
+    fn key_goes_between_icon_and_name() {
+        assert_eq!(tab_label("✅", "1", "Tasks"), "✅ 1 Tasks");
+    }
+
+    #[test]
+    fn empty_parts_are_dropped_without_double_spaces() {
+        assert_eq!(tab_label("", "1", "Tasks"), "1 Tasks");
+        assert_eq!(tab_label("✅", "", "Tasks"), "✅ Tasks");
+        assert_eq!(tab_label("", "", "Tasks"), "Tasks");
     }
 }
 

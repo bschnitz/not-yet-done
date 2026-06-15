@@ -5864,8 +5864,8 @@ impl App {
                     }
                 };
                 let label = match tab {
-                    Tab::Tasks => format!("󰝖 Tasks {key}").trim_end().to_string(),
-                    Tab::Trackings => format!("󱦗 Trackings {key}").trim_end().to_string(),
+                    Tab::Tasks => crate::tabs::tab_label("✅", &key, "Tasks"),
+                    Tab::Trackings => crate::tabs::tab_label("⏱️", &key, "Trackings"),
                     Tab::Content(idx) => {
                         let (name, icon) = self
                             .content_views
@@ -5877,7 +5877,7 @@ impl App {
                                 )
                             })
                             .unwrap_or_default();
-                        format!("{icon} {name} {key}").trim().to_string()
+                        crate::tabs::tab_label(&icon, &key, &name)
                     }
                 };
                 (tab, label)

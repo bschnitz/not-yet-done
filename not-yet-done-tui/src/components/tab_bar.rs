@@ -9,7 +9,7 @@ use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::config::{GlobalAction, CommonAction, TasksAction, TrackingsAction};
+use crate::config::{GlobalAction, TasksAction, TrackingsAction};
 use crate::tabs::{Tab, TasksSubView, TrackingsSubView};
 use std::sync::Arc;
 use crate::ui::theme::Theme;
@@ -49,12 +49,12 @@ impl TabBarComponent {
     ) -> Self {
         let gkb = &keybindings.global;
 
+        use crate::tabs::tab_label;
         let mut main_tab_labels = vec![
-            (Tab::Tasks, format!("✅ Tasks {}", gkb.label(&GlobalAction::TabTasks))),
-            (Tab::Trackings, format!("⏱️ Trackings {}", gkb.label(&GlobalAction::TabTrackings))),
+            (Tab::Tasks, tab_label("✅", &gkb.label(&GlobalAction::TabTasks), "Tasks")),
+            (Tab::Trackings, tab_label("⏱️", &gkb.label(&GlobalAction::TabTrackings), "Trackings")),
         ];
         for (i, info) in content_tabs.iter().enumerate() {
-            let icon = if info.icon.is_empty() { "" } else { &info.icon };
             let kb = match i {
                 0 => gkb.label(&GlobalAction::TabJira),
                 1 => gkb.label(&GlobalAction::TabTaiga),
@@ -64,7 +64,7 @@ impl TabBarComponent {
             };
             main_tab_labels.push((
                 Tab::Content(i),
-                format!("{icon} {} {kb}", info.name).trim().to_string(),
+                tab_label(&info.icon, &kb, &info.name),
             ));
         }
 
