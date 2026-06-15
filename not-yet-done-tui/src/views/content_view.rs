@@ -1803,8 +1803,9 @@ impl ContentPane {
             // An empty/unresolvable cursor level has no column set to
             // configure (empty tree); root level has an empty chain but
             // resolves fine.
-            self.cursor_tree_level(view_defs)?;
-            return Some(format!("tree:{}/{}", vd.name, chain.join("/")));
+            let level = self.cursor_tree_level(view_defs)?;
+            let owner_len = column_owner_chain_len(vd, &chain, level.columns);
+            return Some(format!("tree:{}/{}", vd.name, chain[..owner_len].join("/")));
         }
         if let Some(ref child) = self.active_child {
             if child.columns.is_empty() {
@@ -9563,6 +9564,32 @@ fn busy_banner(label: &str, started_at_unix_ms: u64, timeout_secs: u64) -> Strin
     }
 }
 
+/// Collapse a cursor's `node_type_chain` up to the level that *owns* its
+/// column layout, for the column-config override key (see
+/// [`ContentPane::column_level_key`]). Walks toward the root while each
+/// shallower tree level shows the **identical** column set, and returns the
+/// prefix length that identifies the owning level.
+///
+/// All depths of a tree render into one shared grid, so a deeper level that
+/// shows the same columns as the level above it — the signature of
+/// [`ViewFileConfig::inherit_tree_columns`] having filled an omitted
+/// `columns:` — should configure as the *same* coordinate, not one key per
+/// depth. This also folds every recursion depth (which resolves to one and
+/// the same `ChildDef`) onto a single key. A level whose columns actually
+/// differ from its parent's stops the walk and keeps its own per-level key,
+/// so a tree that deliberately diverges per depth stays independently
+/// configurable.
+fn column_owner_chain_len(vd: &ViewDef, chain: &[String], cursor_cols: &[ColumnDef]) -> usize {
+    let mut owner_len = chain.len();
+    while owner_len > 1 {
+        match tree_level_for_chain(vd, &chain[..owner_len - 1]) {
+            Some(parent) if parent.columns == cursor_cols => owner_len -= 1,
+            _ => break,
+        }
+    }
+    owner_len
+}
+
 /// Project a configured column set through a user override (column-config
 /// popup): keep only the keys in `visible`, in `visible`'s order. Keys the
 /// config no longer knows (stale persisted override after a YAML edit) are
@@ -14443,6 +14470,71 @@ mod tests {
             view.active_pane().column_level_key(&view_defs).as_deref(),
             Some("tree:databases/mock:db"),
         );
+    }
+
+    #[test]
+    fn tree_column_owner_collapses_inherited_and_recursive_levels() {
+        use crate::config::view_config::ViewFileConfig;
+        // Root declares columns; the recursive child omits `columns:` and
+        // inherits them. Every depth — including each recursion level, which
+        // resolves to the one recursive ChildDef — must collapse onto the
+        // root's single owning coordinate (prefix length 1).
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tasks
+    node_type: "task:item"
+    tree_label: title
+    columns:
+      - { key: title, source: label }
+      - { key: status }
+    children:
+      - name: subtasks
+        node_type: "task:item"
+        tree_label: title
+        recursive: true
+"#;
+        let mut cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.inherit_tree_columns();
+        let vd = &cfg.views[0];
+        let cols = &vd.columns; // child inherited exactly this set
+        let t = "task:item".to_string();
+        assert_eq!(column_owner_chain_len(vd, &[t.clone()], cols), 1);
+        assert_eq!(column_owner_chain_len(vd, &[t.clone(), t.clone()], cols), 1);
+        assert_eq!(column_owner_chain_len(vd, &[t.clone(), t.clone(), t.clone()], cols), 1);
+    }
+
+    #[test]
+    fn tree_column_owner_keeps_diverging_level_independent() {
+        use crate::config::view_config::ViewFileConfig;
+        // The child DECLARES its own, different columns → the walk stops at
+        // the divergence and the child keeps its own per-level key (prefix
+        // length 2), so a deliberately-diverging tree stays configurable
+        // per level.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tasks
+    node_type: "root"
+    tree_label: title
+    columns:
+      - { key: title, source: label }
+      - { key: status }
+    children:
+      - name: subtasks
+        node_type: "leaf"
+        tree_label: title
+        columns:
+          - { key: title, source: label }
+"#;
+        let mut cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.inherit_tree_columns();
+        let vd = &cfg.views[0];
+        let child_cols = &vd.children[0].columns; // its own, shorter set
+        let chain = vec!["root".to_string(), "leaf".to_string()];
+        assert_eq!(column_owner_chain_len(vd, &chain, child_cols), 2);
     }
 
     #[test]
