@@ -1612,6 +1612,25 @@ impl ContentPane {
             .unwrap_or_else(|| t.tree_connector())
     }
 
+    /// Resolve this view's unread-highlight color: the active view's per-view
+    /// `unread_style` (a theme color name) if set, else the global theme
+    /// `unread`. Used to fill [`UNREAD_STYLE_ID`].
+    fn unread_color(&self, view_defs: &[ViewDef], t: &Theme) -> ratatui::style::Color {
+        self.view_def(view_defs)
+            .and_then(|vd| vd.unread_style.as_deref())
+            .map(|name| resolve_theme_color(t, name))
+            .unwrap_or_else(|| t.unread())
+    }
+
+    /// The leading marker glyph prefixed to unread tree rows / message headers
+    /// in this view: the per-view `unread_marker` if set, else the default
+    /// `💬`. May be empty (marker suppressed, color-only highlight).
+    fn unread_marker<'a>(&self, view_defs: &'a [ViewDef]) -> &'a str {
+        self.view_def(view_defs)
+            .and_then(|vd| vd.unread_marker.as_deref())
+            .unwrap_or(DEFAULT_UNREAD_MARKER)
+    }
+
     /// Resolve this tree's drawing options from the view's `tree_lines` /
     /// `tree_markers` config: whether the `├──`/`└──`/`│` line connectors
     /// are drawn (default yes) and which expand/collapse markers prefix
@@ -3120,8 +3139,25 @@ impl ContentPane {
                         // resolved back into a styled segment when the widget
                         // row is built. The leaf glyph + label stay unstyled
                         // (the cell's default fg).
+                        // Unread chat items (Stoat): prefix the configured
+                        // `unread_marker` glyph (after the connector + leaf, so
+                        // the box prefix stays put) when the node carries an
+                        // `unread = "true"` metadata field. The marker + label
+                        // are painted in the unread color at the widget stage
+                        // (see `unread_rows` in `rebuild_table_with`); here we
+                        // only weave the glyph into the cell text so column
+                        // sizing accounts for its (double-cell) width.
+                        let unread = metadata_field_value(&entry.node, "unread") == "true";
+                        let marker = if unread {
+                            self.unread_marker(view_defs)
+                        } else {
+                            ""
+                        };
+                        let marker_prefix =
+                            if marker.is_empty() { String::new() } else { format!("{marker} ") };
                         let connector_chars = connector.chars().count();
-                        let text = format!("{connector}{leaf}{}", entry.node.label);
+                        let text =
+                            format!("{connector}{leaf}{marker_prefix}{}", entry.node.label);
                         let mut spans: Vec<StyledSpan> = Vec::new();
                         if connector_chars > 0 {
                             spans.push(StyledSpan {
@@ -3133,10 +3169,13 @@ impl ContentPane {
                         // the matched runs in the *label* so the filtered
                         // substring stands out. Ranges are computed against the
                         // bare label and shifted past the connector + leaf glyph
-                        // into the full-cell coordinate; the engine projects /
-                        // clamps them through truncation like any span.
+                        // (+ unread marker) into the full-cell coordinate; the
+                        // engine projects / clamps them through truncation like
+                        // any span.
                         if !self.table.filter_text.is_empty() {
-                            let prefix_chars = connector_chars + leaf.chars().count();
+                            let prefix_chars = connector_chars
+                                + leaf.chars().count()
+                                + marker_prefix.chars().count();
                             for r in fuzzy_label_ranges(&entry.node.label, &self.table.filter_text)
                             {
                                 spans.push(StyledSpan {
@@ -4232,8 +4271,8 @@ impl ContentPane {
                         ColumnStyles::new(content_col_styles(&columns, t)),
                         build_content_table_style(t),
                         // Grouped views are never trees, so the connector slot
-                        // is unused here — the default theme color is fine.
-                        content_style_map(t, t.tree_connector()),
+                        // is unused here — the default theme colors are fine.
+                        content_style_map(t, t.tree_connector(), t.unread()),
                         "  ",
                     );
                     return;
@@ -4295,8 +4334,23 @@ impl ContentPane {
         // lines per `row_layout` instead of one table row. No column header,
         // and the column cursor / horizontal scroll are unused here.
         if let Some(layout) = self.current_row_layout(view_defs) {
-            let (rows, style_map) =
-                build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, t);
+            // Per-row unread flags (chat adapters), in the same row order as
+            // `data_rows`: the flat path's `filtered_indices` maps each row
+            // back to its `self.items` summary so its `unread` field can paint
+            // the message header. Empty for the tree path (no chat multiline).
+            let unread_rows: Vec<bool> = self
+                .filtered_indices
+                .iter()
+                .map(|&i| {
+                    self.items
+                        .get(i)
+                        .is_some_and(|it| metadata_field_value(it, "unread") == "true")
+                })
+                .collect();
+            let unread_color = self.unread_color(view_defs, t);
+            let (rows, style_map) = build_multiline_widget_rows(
+                &data_rows, &columns, &col_ids, &config, &layout, t, &unread_rows, unread_color,
+            );
             self.last_col_widths = Vec::new();
             self.table.set_data(
                 rows,
@@ -4336,6 +4390,23 @@ impl ContentPane {
                 .and_then(|key| columns.iter().position(|c| c.key == key))
         } else {
             None
+        };
+        // Per-visible-row unread flag (chat adapters): the label cell of an
+        // unread channel/category paints its marker + name in the unread
+        // slot. Parallel to `tree_visible_indices`, so `ri` in the widget
+        // loop indexes it directly. Empty (all-false) outside tree mode or
+        // when no node carries the `unread` field.
+        let unread_rows: Vec<bool> = match self.tree.as_ref() {
+            Some(tree) => self
+                .tree_visible_indices
+                .iter()
+                .map(|&eidx| {
+                    tree.entries
+                        .get(eidx)
+                        .is_some_and(|e| metadata_field_value(&e.node, "unread") == "true")
+                })
+                .collect(),
+            None => Vec::new(),
         };
         // `group_headers:` rows: map each depth-0 (bucket) row to its label
         // so the loop below can swap in a `── label` summary row — same
@@ -4390,6 +4461,13 @@ impl ContentPane {
                                 .filter(|r| r.start > 0)
                                 .cloned()
                                 .collect();
+                            // Unread rows paint the label remainder (marker +
+                            // name) in the unread slot; matched runs still win.
+                            let base = if unread_rows.get(ri).copied().unwrap_or(false) {
+                                Some(UNREAD_STYLE_ID)
+                            } else {
+                                None
+                            };
                             return TableWidgetCell::from_segments(
                                 tree_label_segments_with_highlights(
                                     &fitted,
@@ -4397,6 +4475,7 @@ impl ContentPane {
                                     TREE_CONNECTOR_STYLE_ID,
                                     &matches,
                                     FUZZY_MATCH_STYLE_ID,
+                                    base,
                                 ),
                             );
                         }
@@ -4426,6 +4505,7 @@ impl ContentPane {
             .collect();
 
         let tree_connector_col = self.tree_connector_color(view_defs, t);
+        let unread_col = self.unread_color(view_defs, t);
         let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
         self.table.set_data(
             widget_rows,
@@ -4434,7 +4514,7 @@ impl ContentPane {
             vec![],
             ColumnStyles::new(content_col_styles(&columns, t)),
             build_content_table_style(t),
-            content_style_map(t, tree_connector_col),
+            content_style_map(t, tree_connector_col, unread_col),
             "  ",
         );
     }
@@ -8357,6 +8437,22 @@ const TREE_CONNECTOR_STYLE_ID: usize = 3;
 /// `StyleMap::new(...)` in `content_style_map`.
 const FUZZY_MATCH_STYLE_ID: usize = 4;
 
+/// StyleMap slot for the unread highlight in chat-style adapters (Stoat). A
+/// tree row whose node carries an `unread` metadata field set to `"true"`
+/// (a channel/category with unread messages) paints its label — and the
+/// leading `unread_marker` glyph — in this slot; an unread message paints
+/// its multi-line header line the same way. Painted in the per-view
+/// `unread_style` color (falling back to the theme `unread`), resolved into
+/// the slot by `content_style_map`. Kept in sync with the `StyleMap::new(...)`
+/// there.
+const UNREAD_STYLE_ID: usize = 5;
+
+/// Default leading marker glyph for unread chat items when a view sets no
+/// `unread_marker`. `💬` (speech balloon) — a colorful, at-a-glance "new
+/// message" cue. Emoji are two terminal cells wide; the tree-label builder
+/// accounts for the rendered width when prefixing it.
+const DEFAULT_UNREAD_MARKER: &str = "💬";
+
 /// Split an already-fitted tree-label cell into a styled connector segment +
 /// plain label. The first `connector_chars` characters (the `├──`/`└──`/`│`
 /// box prefix and any `▶`/`▼` expand arrow) carry `connector_style_id`; the
@@ -8365,13 +8461,18 @@ const FUZZY_MATCH_STYLE_ID: usize = 4;
 /// engine's char-indexed highlight projection); it is converted to a byte
 /// offset here. Mirrors [`path_cell_segments`] but splits at a fixed prefix
 /// length instead of a separator.
+/// `base_style_id` styles the label remainder (everything after the connector
+/// prefix) — `None` leaves it the cell default, `Some(id)` paints it in that
+/// slot (used for [`UNREAD_STYLE_ID`] so an unread channel's name + leading
+/// marker glow in the unread color).
 fn tree_label_cell_segments(
     fitted: &str,
     connector_chars: usize,
     connector_style_id: usize,
+    base_style_id: Option<usize>,
 ) -> Vec<(String, Option<usize>)> {
     if connector_chars == 0 {
-        return vec![(fitted.to_string(), None)];
+        return vec![(fitted.to_string(), base_style_id)];
     }
     let byte_idx = fitted
         .char_indices()
@@ -8381,7 +8482,7 @@ fn tree_label_cell_segments(
     let (connector, rest) = fitted.split_at(byte_idx);
     let mut segments = vec![(connector.to_string(), Some(connector_style_id))];
     if !rest.is_empty() {
-        segments.push((rest.to_string(), None));
+        segments.push((rest.to_string(), base_style_id));
     }
     segments
 }
@@ -8394,15 +8495,18 @@ fn tree_label_cell_segments(
 /// engine), parallel to and disjoint from the connector run. Falls back to the
 /// plain connector split when there is nothing to highlight, so the
 /// non-filtering hot path stays identical.
+/// `base_style_id` styles the non-connector, non-match runs (see
+/// [`tree_label_cell_segments`]); the matched runs always win over it.
 fn tree_label_segments_with_highlights(
     fitted: &str,
     connector_chars: usize,
     connector_style_id: usize,
     highlights: &[std::ops::Range<usize>],
     highlight_style_id: usize,
+    base_style_id: Option<usize>,
 ) -> Vec<(String, Option<usize>)> {
     if highlights.is_empty() {
-        return tree_label_cell_segments(fitted, connector_chars, connector_style_id);
+        return tree_label_cell_segments(fitted, connector_chars, connector_style_id, base_style_id);
     }
     let chars: Vec<char> = fitted.chars().collect();
     let len = chars.len();
@@ -8413,7 +8517,7 @@ fn tree_label_segments_with_highlights(
     if conn > 0 {
         segments.push((take(0..conn), Some(connector_style_id)));
     }
-    // Walk the label remainder, emitting plain runs interleaved with the
+    // Walk the label remainder, emitting base-styled runs interleaved with the
     // matched runs. `highlights` arrive sorted and non-overlapping (merged at
     // build time, order preserved through the engine's projection); clamp each
     // into the post-connector window so a connector-overlapping range can't
@@ -8426,13 +8530,13 @@ fn tree_label_segments_with_highlights(
             continue;
         }
         if start > cursor {
-            segments.push((take(cursor..start), None));
+            segments.push((take(cursor..start), base_style_id));
         }
         segments.push((take(start..end), Some(highlight_style_id)));
         cursor = end;
     }
     if cursor < len {
-        segments.push((take(cursor..len), None));
+        segments.push((take(cursor..len), base_style_id));
     }
     if segments.is_empty() {
         segments.push((fitted.to_string(), None));
@@ -9283,6 +9387,9 @@ fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
         // The dedicated tree-connector color, so a view's `tree_connector_style`
         // can point back at the global default (or any view at it explicitly).
         "tree_connector" => t.tree_connector(),
+        // The dedicated unread accent, so a view's `unread_style` can point
+        // back at the global default (or any view at it explicitly).
+        "unread" => t.unread(),
         _ => t.text_med(),
     }
 }
@@ -9347,13 +9454,20 @@ fn content_col_styles(columns: &[ColumnDef], t: &Theme) -> Vec<Style> {
 /// - slot 2 ([`GROUP_HEADER_STYLE_ID`]) — group headers + grand-total footer,
 /// - slot 3 ([`TREE_CONNECTOR_STYLE_ID`]) — tree connector glyphs + arrows,
 /// - slot 4 ([`FUZZY_MATCH_STYLE_ID`]) — fuzzy-match runs in the tree label.
+/// - slot 5 ([`UNREAD_STYLE_ID`]) — unread chat items (channel/category label
+///   + leading marker; unread message header line).
 ///
-/// The group-header, tree-connector, and fuzzy-match slots are always present
-/// (harmless when nothing is grouped / the view isn't a tree / no filter is
-/// active) so the same map serves every render path. `tree_connector` is
-/// resolved per view (the caller passes the view's `tree_connector_style`
-/// color, or the theme default).
-fn content_style_map(t: &Theme, tree_connector: ratatui::style::Color) -> StyleMap {
+/// The group-header, tree-connector, fuzzy-match, and unread slots are always
+/// present (harmless when nothing is grouped / the view isn't a tree / no
+/// filter is active / no node is unread) so the same map serves every render
+/// path. `tree_connector` and `unread` are resolved per view (the caller
+/// passes the view's `tree_connector_style` / `unread_style` colors, or the
+/// theme defaults).
+fn content_style_map(
+    t: &Theme,
+    tree_connector: ratatui::style::Color,
+    unread: ratatui::style::Color,
+) -> StyleMap {
     StyleMap::new(vec![
         Style::default().fg(t.text_dim()),
         Style::default()
@@ -9364,6 +9478,7 @@ fn content_style_map(t: &Theme, tree_connector: ratatui::style::Color) -> StyleM
             .add_modifier(Modifier::BOLD),
         Style::default().fg(tree_connector),
         Style::default().fg(t.accent()).add_modifier(Modifier::BOLD),
+        Style::default().fg(unread).add_modifier(Modifier::BOLD),
     ])
 }
 
@@ -9393,6 +9508,11 @@ fn build_header_row(
 /// `StyleMap` style id, so they apply regardless of the cell's position on
 /// its line. The column header is suppressed by the caller. Returns the rows
 /// plus the style map their cells index into.
+///
+/// `unread_rows` flags (parallel to `data_rows`) which messages are unread
+/// (chat adapters); an unread row's non-markdown lines — the author/time
+/// header — are repainted in `unread_color` so the unread message stands out
+/// without auto-acking it. Empty (or all-false) leaves every row plain.
 fn build_multiline_widget_rows(
     data_rows: &[TRow<u32>],
     columns: &[ColumnDef],
@@ -9400,6 +9520,8 @@ fn build_multiline_widget_rows(
     config: &TableConfig,
     layout: &[LineLayout],
     t: &Theme,
+    unread_rows: &[bool],
+    unread_color: ratatui::style::Color,
 ) -> (Vec<TableWidgetRow>, StyleMap) {
     // One style slot per declared column (fg from `style:` or `text_med`),
     // keyed by column name so any line can look its column's slot up.
@@ -9451,6 +9573,10 @@ fn build_multiline_widget_rows(
     // Markdown span styles are appended to the per-column styles in a single
     // shared map, so segment style ids don't collide with column style ids.
     let mut builder = StyleMapBuilder::from_styles(style_styles);
+    // The unread header style (chat adapters): interned once so every unread
+    // row's header line shares the slot.
+    let unread_style_id =
+        builder.intern(Style::default().fg(unread_color).add_modifier(Modifier::BOLD));
 
     let rows: Vec<TableWidgetRow> = computed_rows
         .into_iter()
@@ -9488,6 +9614,10 @@ fn build_multiline_widget_rows(
                     continue;
                 }
                 let line_keys = &layout[li].columns;
+                // An unread message paints its header (the non-markdown meta
+                // lines — author/time) in the unread slot, overriding the
+                // per-column colors so the whole line reads as "new".
+                let row_unread = unread_rows.get(ri).copied().unwrap_or(false);
                 let cells: Vec<TableWidgetCell> = cl
                     .cells
                     .into_iter()
@@ -9495,7 +9625,11 @@ fn build_multiline_widget_rows(
                     .enumerate()
                     .map(|(ci, (text, hl))| {
                         let mut cell = TableWidgetCell::with_highlights(text, hl);
-                        if let Some(idx) = line_keys.get(ci).and_then(|k| style_idx.get(k.as_str())) {
+                        if row_unread {
+                            cell = cell.with_style(unread_style_id);
+                        } else if let Some(idx) =
+                            line_keys.get(ci).and_then(|k| style_idx.get(k.as_str()))
+                        {
                             cell = cell.with_style(*idx);
                         }
                         cell
@@ -9587,7 +9721,7 @@ mod tests {
         ];
 
         let (rows, _style_map) =
-            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme);
+            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme, &[], theme.unread());
 
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -9636,7 +9770,7 @@ mod tests {
         ];
 
         let (rows, style_map) =
-            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme);
+            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme, &[], theme.unread());
 
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -9842,6 +9976,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -10012,6 +10148,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -10419,6 +10557,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -10587,6 +10727,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -10736,6 +10878,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -10929,6 +11073,54 @@ mod tests {
     }
 
     #[test]
+    fn unread_node_prefixes_marker_in_tree_label() {
+        use not_yet_done_content::{Metadata, MetadataField};
+        // A node carrying `unread = "true"` gets the configured marker woven
+        // into its tree-label cell (after the connector + expand arrow), so an
+        // unread channel reads as "new" at a glance. The default marker is 💬.
+        let unread = |id: &str, label: &str| -> NodeSummary {
+            let mut n = tnode(id, label, "mock:task");
+            n.metadata = Metadata {
+                fields: vec![MetadataField {
+                    key: "unread".into(),
+                    value: "true".into(),
+                    display_label: "Unread".into(),
+                    editable: false,
+                    allowed_values: None,
+                }],
+            };
+            n
+        };
+
+        let config = uniform_recursive_config();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![unread("root", "Root")], Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(vec!["root".into()], vec![unread("child", "Child")], None);
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let name_key = TColumnId::new("name");
+        let label = |i: usize| -> String {
+            rows[i].cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default()
+        };
+        // Root: expand arrow, then the marker, then the label.
+        assert_eq!(label(0), "▼ 💬 Root", "root: {:?}", label(0));
+        // Child: box connector + arrow, then marker, then label.
+        assert_eq!(label(1), "└── ▶ 💬 Child", "child: {:?}", label(1));
+    }
+
+    #[test]
     fn tree_label_cell_carries_connector_style_span() {
         // The connector run (box glyphs + expand arrow) of a tree-label cell
         // is tagged with `TREE_CONNECTOR_STYLE_ID` via a `StyledSpan`, so the
@@ -10988,7 +11180,7 @@ mod tests {
     #[test]
     fn tree_label_cell_segments_splits_connector_from_label() {
         // Helper: first `connector_chars` chars → styled segment, rest plain.
-        let segs = tree_label_cell_segments("└── Child  ", 4, TREE_CONNECTOR_STYLE_ID);
+        let segs = tree_label_cell_segments("└── Child  ", 4, TREE_CONNECTOR_STYLE_ID, None);
         assert_eq!(
             segs,
             vec![
@@ -10998,14 +11190,23 @@ mod tests {
         );
         // Zero-length connector (e.g. a flat leaf) → single plain segment.
         assert_eq!(
-            tree_label_cell_segments("Root  ", 0, TREE_CONNECTOR_STYLE_ID),
+            tree_label_cell_segments("Root  ", 0, TREE_CONNECTOR_STYLE_ID, None),
             vec![("Root  ".to_string(), None)],
         );
         // Connector longer than the (truncated) cell → whole cell is connector,
         // no trailing label segment. Guards the byte-offset clamp.
         assert_eq!(
-            tree_label_cell_segments("└─", 9, TREE_CONNECTOR_STYLE_ID),
+            tree_label_cell_segments("└─", 9, TREE_CONNECTOR_STYLE_ID, None),
             vec![("└─".to_string(), Some(TREE_CONNECTOR_STYLE_ID))],
+        );
+        // A `base_style_id` paints the label remainder (unread highlight) while
+        // leaving the connector run in its own slot.
+        assert_eq!(
+            tree_label_cell_segments("└── #general ", 4, TREE_CONNECTOR_STYLE_ID, Some(UNREAD_STYLE_ID)),
+            vec![
+                ("└── ".to_string(), Some(TREE_CONNECTOR_STYLE_ID)),
+                ("#general ".to_string(), Some(UNREAD_STYLE_ID)),
+            ],
         );
     }
 
@@ -11039,6 +11240,7 @@ mod tests {
             TREE_CONNECTOR_STYLE_ID,
             &[5..7],
             FUZZY_MATCH_STYLE_ID,
+            None,
         );
         assert_eq!(
             segs,
@@ -11057,8 +11259,27 @@ mod tests {
                 TREE_CONNECTOR_STYLE_ID,
                 &[],
                 FUZZY_MATCH_STYLE_ID,
+                None,
             ),
-            tree_label_cell_segments("└── Child ", 4, TREE_CONNECTOR_STYLE_ID),
+            tree_label_cell_segments("└── Child ", 4, TREE_CONNECTOR_STYLE_ID, None),
+        );
+        // With a base style, the plain runs around a match carry it (unread +
+        // fuzzy combined): connector, unread lead, matched run, unread tail.
+        assert_eq!(
+            tree_label_segments_with_highlights(
+                "└── Child ",
+                4,
+                TREE_CONNECTOR_STYLE_ID,
+                &[5..7],
+                FUZZY_MATCH_STYLE_ID,
+                Some(UNREAD_STYLE_ID),
+            ),
+            vec![
+                ("└── ".to_string(), Some(TREE_CONNECTOR_STYLE_ID)),
+                ("C".to_string(), Some(UNREAD_STYLE_ID)),
+                ("hi".to_string(), Some(FUZZY_MATCH_STYLE_ID)),
+                ("ld ".to_string(), Some(UNREAD_STYLE_ID)),
+            ],
         );
         // Zero connector (root leaf) + a match at the very start of the label.
         assert_eq!(
@@ -11068,6 +11289,7 @@ mod tests {
                 TREE_CONNECTOR_STYLE_ID,
                 &[0..4],
                 FUZZY_MATCH_STYLE_ID,
+                None,
             ),
             vec![
                 ("Root".to_string(), Some(FUZZY_MATCH_STYLE_ID)),
@@ -11133,6 +11355,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -12650,6 +12874,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -13543,6 +13769,8 @@ mod tests {
                 aggregates: Vec::new(),
                 summary_only: false,
                 tree_connector_style: None,
+                unread_style: None,
+                unread_marker: None,
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
@@ -14633,6 +14861,8 @@ mod tests {
             aggregates: Vec::new(),
             summary_only: false,
             tree_connector_style: None,
+            unread_style: None,
+            unread_marker: None,
             tree_lines: None,
             tree_markers: None,
             expand_depth: None,
@@ -15544,6 +15774,8 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             aggregates: Vec::new(),
             summary_only: false,
             tree_connector_style: None,
+            unread_style: None,
+            unread_marker: None,
             tree_lines: None,
             tree_markers: None,
             expand_depth: None,

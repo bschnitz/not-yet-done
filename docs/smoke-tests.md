@@ -3896,6 +3896,38 @@ Das Label-Alphabet kommt aus `navigation.jump_chars`.
 - [ ] Trackings (A) (Liste/Condensed/Tree): `Shift+J` verhält sich gleich.
 - [ ] Nativer Tasks-Tab unverändert: `p` öffnet dort weiterhin den Sprung.
 
+## Stoat: Ungelesen-Hervorhebung (`unread_style` / `unread_marker`)
+
+Channels/Kategorien mit ungelesenen Nachrichten + ungelesene
+Nachrichten-Header werden hervorgehoben (Marker-Glyph + Theme-Farbe
+`unread`, beide per View überschreibbar). Quelle ist der Revolt-Read-State
+(`sync/unreads` + Acks); Live-Reload bei jeder eintreffenden Nachricht.
+
+Voraussetzung: Stoat-Tab geöffnet, Gateway `Ready`, in einem Server mit
+mindestens einem Channel, der ungelesene Nachrichten enthält.
+
+- [ ] Channel mit ungelesenen Nachrichten zeigt im Tree den Marker (Default
+      💬) **vor** dem Channel-Namen, Name in der `unread`-Farbe (Default
+      `#89b4fa`, fett).
+- [ ] Die Kategorie, die einen solchen Channel enthält, ist ebenfalls
+      markiert (OR über ihre Channels).
+- [ ] In die Nachrichtenliste drillen: ungelesene Nachrichten haben einen
+      hervorgehobenen Header (Autor/Zeit-Zeile) in derselben Farbe; gelesene
+      Nachrichten normal.
+- [ ] Marker-Breite stimmt: das Emoji (2 Zellen) verschiebt Einrückung/
+      Folgespalten nicht, kein abgeschnittener Connector.
+- [ ] Fuzzy-Filter (`/`) auf einem ungelesenen Channel: die Treffer-Runs
+      bleiben in der Fuzzy-Match-Farbe (gewinnt über die Unread-Farbe), der
+      Rest des Labels in der Unread-Farbe.
+- [ ] In einem ungelesenen Channel eine Nachricht **senden** → Channel- und
+      Kategorie-Marker verschwinden (Ack-on-send), ohne manuelles `r`.
+- [ ] Eine neue Nachricht trifft in einem anderen Channel ein → dieser
+      Channel + seine Kategorie werden live markiert (kein manuelles `r`).
+- [ ] `unread_marker: ""` in der View gesetzt → kein Glyph, aber Name/Header
+      weiterhin in der Unread-Farbe.
+- [ ] `unread_style:` auf einen anderen Theme-Farbnamen gesetzt → Marker +
+      Name/Header in dieser Farbe.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

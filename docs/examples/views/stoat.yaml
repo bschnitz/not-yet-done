@@ -63,6 +63,16 @@ views:
     node_type: "stoat:server"
     default: true
     tree_label: name
+    # UNREAD highlight (read-state from Revolt `sync/unreads` + acks): a
+    # channel/category with unread messages gets the marker glyph + its name
+    # painted in the `unread` color throughout this tree; an unread message's
+    # header (author/time line) is painted the same way in the message list.
+    # The flag clears when you SEND in the channel or a `ChannelAck` arrives
+    # (from this or another client). `unread_style` is a theme color name
+    # (default: theme `unread`); `unread_marker` is the leading glyph (default
+    # 💬; "" suppresses it, color only). Both are optional — omit for defaults.
+    unread_style: unread
+    unread_marker: "💬"
     columns:
       - { key: name, label: Name, source: label, sizing: "flex(1)" }
     actions:

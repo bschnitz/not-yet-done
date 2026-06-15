@@ -762,6 +762,38 @@ views:
   Blatt-Symbol konfiguriert weiterhin `leaf_glyph` (pro Ebene), die Farbe des
   gesamten Laufs `tree_connector_style`.
 
+#### `unread_style:` / `unread_marker:` — Ungelesen-Hervorhebung (Chat-Adapter)
+
+Chat-Adapter (Stoat) markieren ungelesene Einträge: ein Kanal/eine Kategorie mit
+ungelesenen Nachrichten bekommt im Tree vor dem Label einen **Marker-Glyph** und
+Marker + Name in der Ungelesen-Farbe; die Kopfzeile (Autor/Zeit) einer
+ungelesenen Nachricht in der Nachrichtenliste wird in derselben Farbe gemalt. Der
+Träger ist ein `unread`-Metadatenfeld (`"true"`/leer) am Knoten — der Adapter
+setzt es, die Ansicht malt. Ohne dieses Feld haben beide Optionen keine Wirkung.
+
+```yaml
+views:
+  - name: servers
+    tree_label: name
+    unread_style: unread # optional; sonst Theme-Farbe `unread`
+    unread_marker: "💬" # optional; Default 💬, "" = nur Farbe, kein Glyph
+```
+
+- **`unread_style`** — ein Theme-Farbname (`unread`, `accent`, … — dasselbe
+  Vokabular wie bei einer Spalten-`style:`). Ohne Angabe gilt die globale
+  Theme-Farbe `unread` (`tui.yaml`). Warum pro View: die Ungelesen-Betonung
+  konkurriert mit den eigenen Akzenten der Ansicht (Selektion, Fuzzy-Treffer,
+  Gruppen-Header); ein dichter Server-Tree und eine flache Nachrichtenliste
+  wollen sie unterschiedlich stark.
+- **`unread_marker`** — der führende Glyph; Default `💬` (Sprechblase). Ein
+  leerer String unterdrückt den Marker (nur Farbe). Hinweis: ein Emoji-Marker
+  ist **zwei Zellen breit** — die Tree-Einrückung rechnet die gerenderte Breite
+  mit ein. Warum konfigurierbar: Emoji vs. Nerd-Font-Glyph rendern je nach
+  Terminal/Font verschieden; manche bevorzugen einen ruhigen ASCII-Punkt.
+- Der Fuzzy-Treffer-Highlight gewinnt über die Ungelesen-Farbe: bei aktiver
+  Suche bleibt der getroffene Teilstring in der Treffer-Farbe, der Rest des
+  Labels in der Ungelesen-Farbe.
+
 #### `expand_depth:` — initiale Aufklapptiefe pro Tree
 
 ```yaml

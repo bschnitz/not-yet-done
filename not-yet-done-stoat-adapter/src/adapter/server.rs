@@ -61,8 +61,10 @@ pub(super) fn server_actions() -> Vec<NodeAction> {
 
 /// Build the `NodeSummary` for a channel row. Shared by the server's
 /// uncategorized branch and [`StoatCategoryNode`](super::category) so a
-/// channel renders identically wherever it sits in the tree.
-pub(super) fn channel_summary(c: &Channel) -> NodeSummary {
+/// channel renders identically wherever it sits in the tree. `unread` (from
+/// [`StoatState::is_channel_unread`]) drives the unread highlight + marker
+/// the view paints on the tree label.
+pub(super) fn channel_summary(c: &Channel, unread: bool) -> NodeSummary {
     let is_voice = c.channel_type == "VoiceChannel";
     let label = c.name.clone().unwrap_or_else(|| c.id.clone());
     NodeSummary {
@@ -85,6 +87,7 @@ pub(super) fn channel_summary(c: &Channel) -> NodeSummary {
                     editable: false,
                     allowed_values: None,
                 },
+                super::unread_field(unread),
             ],
         },
         // Voice channels have no readable content; text channels are
@@ -241,13 +244,17 @@ impl Node for StoatServerNode {
                     label: cat.title.clone(),
                     node_type: category_type().clone(),
                     metadata: Metadata {
-                        fields: vec![MetadataField {
-                            key: "name".into(),
-                            value: cat.title.clone(),
-                            display_label: "Name".into(),
-                            editable: false,
-                            allowed_values: None,
-                        }],
+                        fields: vec![
+                            MetadataField {
+                                key: "name".into(),
+                                value: cat.title.clone(),
+                                display_label: "Name".into(),
+                                editable: false,
+                                allowed_values: None,
+                            },
+                            // A category is unread when any of its channels is.
+                            super::unread_field(state.is_category_unread(&self.server_id, &cat.id)),
+                        ],
                     },
                     has_children: Some(!cat.channels.is_empty()),
                 })
@@ -265,7 +272,7 @@ impl Node for StoatServerNode {
                     .iter()
                     .filter(|cid| !categorized.contains(cid.as_str()))
                     .filter_map(|cid| state.channels.get(cid))
-                    .map(channel_summary)
+                    .map(|c| channel_summary(c, state.is_channel_unread(&c.id)))
                     .collect()
             }
             other => {

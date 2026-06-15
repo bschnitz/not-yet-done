@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod members;
 pub mod messages;
 pub mod structure;
+pub mod sync;
 
 use std::sync::Arc;
 
