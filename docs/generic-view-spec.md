@@ -1000,6 +1000,21 @@ Default-Definition, das Popup ist der persönliche Override darüber.
   Wurzel-View, jede gedrillte Child-Ebene und im Tree-Mode jede
   `node_type_chain` (Cursor-Zeile entscheidet, welche Ebene konfiguriert
   wird). Splits derselben Ebene teilen sich das Layout.
+- **Tree-Ebenen mit gleichem Spaltensatz teilen sich einen Override.** Da
+  alle Ebenen eines Trees in **ein** Raster rendern, wäre ein Override pro
+  Tiefe widersinnig: `c` auf der Wurzel würde die Kinder nicht erfassen, und
+  zwei Tiefen könnten auseinanderlaufen. Darum klappt der Override-Key über
+  Tree-Ebenen, die den **identischen** Spaltensatz zeigen, auf die
+  spaltendeklarierende Vorfahr-Ebene zusammen — das ist genau der Fall, den
+  die [Tree-Spalten-Vererbung](#tree-spalten-vererbung--columns-einmal-an-der-wurzel)
+  erzeugt (geerbte Ebene == Wurzel), und es faltet auch jede Rekursionstiefe
+  (alle resolven zur selben `ChildDef`) auf **einen** Key. `c` auf
+  irgendeiner Tiefe konfiguriert damit den ganzen Tree. Eine Ebene, die
+  bewusst **abweichende** `columns:` deklariert, behält ihren eigenen
+  Per-Level-Key und bleibt unabhängig konfigurierbar. (Folge: alte, vor
+  dieser Regel pro Tiefe gespeicherte Overrides eines uniformen Trees passen
+  nicht mehr auf die neuen Keys und werden ignoriert — der Tree zeigt dann
+  wieder den YAML-Default, bis er neu konfiguriert wird.)
 - **Persistenz:** Eine Settings-Row pro Tab (`content_columns:<Tab-Name>`,
   JSON-Map Level-Key → sichtbare Spalten-Keys in Reihenfolge), geladen beim
   Start.

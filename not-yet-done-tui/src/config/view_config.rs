@@ -947,7 +947,7 @@ fn yaml_value_to_query_string(v: serde_yaml::Value) -> Result<String, serde_yaml
 // Columns
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ColumnDef {
     pub key: String,
     #[serde(default)]
