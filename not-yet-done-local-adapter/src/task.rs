@@ -148,6 +148,12 @@ struct ForestSnapshot {
     /// build time. Backs the `tracking` marker column and seeds the
     /// start/stop toggle's "is it already running?" check.
     tracked: HashSet<Uuid>,
+    /// Ids of tasks whose *subtree* carries a running tracking — the task
+    /// itself or any descendant. Folded once from [`tracked`] + the parent
+    /// chain. Backs the `tracking_rollup` marker (`collapsed_source` in
+    /// `views/tasks.yaml`): a collapsed node shows `⏱` when a tracking it
+    /// hides is running, even though its own row isn't the tracked one.
+    tracked_subtree: HashSet<Uuid>,
 }
 
 impl ForestSnapshot {
@@ -220,10 +226,12 @@ impl ForestSnapshot {
             .await
             .map(|active| active.into_iter().map(|t| t.task_id).collect())
             .unwrap_or_default();
+        let tracked_subtree = fold_tracked_subtree(&tracked, &by_id);
         Ok(Arc::new(ForestSnapshot {
             by_id,
             children,
             tracked,
+            tracked_subtree,
         }))
     }
 
@@ -293,7 +301,12 @@ impl ForestSnapshot {
             id: id.to_string(),
             label: row.task.description.clone(),
             node_type: task_item_type(),
-            metadata: task_metadata(row, self.tracked.contains(&id), self.ancestors_json(id)),
+            metadata: task_metadata(
+                row,
+                self.tracked.contains(&id),
+                self.tracked_subtree.contains(&id),
+                self.ancestors_json(id),
+            ),
             has_children: Some(has_children),
         }
     }
@@ -494,7 +507,34 @@ fn field(key: &str, value: String, label: &str) -> MetadataField {
 /// strings** the engine's typed columns (M2) parse: integers for `number`,
 /// RFC 3339 for `datetime`. `views/tasks.yaml` declares the `kind:` per
 /// column; the adapter only supplies the canonical form.
-fn task_metadata(row: &TaskRow, is_tracked: bool, ancestors_json: String) -> Metadata {
+/// Roll the running-tracking set up the parent chain: each tracked task
+/// marks itself and every ancestor as "subtree tracked". Walking `parent`
+/// (the re-rooted, cycle-free forest link) bounds each walk by the tree
+/// depth, and the `insert` short-circuit both dedupes shared ancestors and
+/// makes a corrupt cycle harmless (a node already inserted stops the walk).
+fn fold_tracked_subtree(
+    tracked: &HashSet<Uuid>,
+    by_id: &HashMap<Uuid, TaskRow>,
+) -> HashSet<Uuid> {
+    let mut subtree: HashSet<Uuid> = HashSet::new();
+    for &leaf in tracked {
+        let mut cur = Some(leaf);
+        while let Some(id) = cur {
+            if !subtree.insert(id) {
+                break; // already walked this ancestor (and its chain)
+            }
+            cur = by_id.get(&id).and_then(|r| r.parent);
+        }
+    }
+    subtree
+}
+
+fn task_metadata(
+    row: &TaskRow,
+    is_tracked: bool,
+    is_tracked_subtree: bool,
+    ancestors_json: String,
+) -> Metadata {
     let t = &row.task;
     Metadata {
         fields: vec![
@@ -505,6 +545,19 @@ fn task_metadata(row: &TaskRow, is_tracked: bool, ancestors_json: String) -> Met
                 "tracking",
                 if is_tracked { "⏱".to_string() } else { String::new() },
                 "Tracking",
+            ),
+            // Roll-up marker: `⏱` when this task *or any descendant* is
+            // tracked. `views/tasks.yaml` wires it as the `tracking` column's
+            // `collapsed_source`, so a collapsed node surfaces a running
+            // tracking it hides; an expanded node keeps showing only its own.
+            field(
+                "tracking_rollup",
+                if is_tracked_subtree {
+                    "⏱".to_string()
+                } else {
+                    String::new()
+                },
+                "Tracking (subtree)",
             ),
             field("status", status_icon(&t.status).to_string(), "Status"),
             field("priority", t.priority.to_string(), "Priority"),
@@ -1198,6 +1251,7 @@ impl TaskItemNode {
             metadata: task_metadata(
                 row,
                 snapshot.tracked.contains(&uuid),
+                snapshot.tracked_subtree.contains(&uuid),
                 snapshot.ancestors_json(uuid),
             ),
         }))
@@ -1620,7 +1674,34 @@ mod tests {
             by_id,
             children,
             tracked: HashSet::new(),
+            tracked_subtree: HashSet::new(),
         })
+    }
+
+    #[test]
+    fn fold_tracked_subtree_marks_self_and_ancestors_only() {
+        let root = Uuid::from_u128(1);
+        let mid = Uuid::from_u128(2);
+        let leaf = Uuid::from_u128(3);
+        let sibling = Uuid::from_u128(4); // untracked branch off root
+        let mut by_id = HashMap::new();
+        for (id, r) in [
+            row(root, "Root", None),
+            row(mid, "Mid", Some(root)),
+            row(leaf, "Leaf", Some(mid)),
+            row(sibling, "Sibling", Some(root)),
+        ] {
+            by_id.insert(id, r);
+        }
+        let tracked: HashSet<Uuid> = [leaf].into_iter().collect();
+        let subtree = fold_tracked_subtree(&tracked, &by_id);
+        // The tracked leaf and every ancestor up to the root are marked …
+        assert!(subtree.contains(&leaf));
+        assert!(subtree.contains(&mid));
+        assert!(subtree.contains(&root));
+        // … but an untracked sibling branch is not.
+        assert!(!subtree.contains(&sibling));
+        assert_eq!(subtree.len(), 3);
     }
 
     #[test]
@@ -1865,7 +1946,7 @@ mod tests {
         r.tag_names = "home, urgent".into();
         r.tag_symbols = "🔥".into();
         r.has_notes = true;
-        let md = task_metadata(&r, true, "[]".to_string());
+        let md = task_metadata(&r, true, true, "[]".to_string());
         let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
         assert_eq!(get("priority").as_deref(), Some("5"));
         // status is rendered as the native nerd-font glyph, not a text label.
@@ -1879,9 +1960,22 @@ mod tests {
         assert_eq!(get("last_tracked").as_deref(), Some(""));
         // The marker reflects the passed-in tracked flag.
         assert_eq!(get("tracking").as_deref(), Some("⏱"));
-        let md_off = task_metadata(&r, false, "[]".to_string());
+        // The roll-up marker reflects the passed-in subtree flag (separate
+        // from the own-marker so `collapsed_source` can pick it up).
+        assert_eq!(get("tracking_rollup").as_deref(), Some("⏱"));
+        // Own marker off, but a tracked descendant lights the roll-up only.
+        let md_rollup = task_metadata(&r, false, true, "[]".to_string());
+        let get_rollup =
+            |k: &str| md_rollup.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        assert_eq!(get_rollup("tracking").as_deref(), Some(""));
+        assert_eq!(get_rollup("tracking_rollup").as_deref(), Some("⏱"));
+        let md_off = task_metadata(&r, false, false, "[]".to_string());
         assert_eq!(
             md_off.fields.iter().find(|f| f.key == "tracking").map(|f| f.value.as_str()),
+            Some("")
+        );
+        assert_eq!(
+            md_off.fields.iter().find(|f| f.key == "tracking_rollup").map(|f| f.value.as_str()),
             Some("")
         );
     }

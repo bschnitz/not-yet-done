@@ -155,6 +155,12 @@ views:
         label: Tr
         style: accent
         sizing: max
+        # When this row is a *collapsed* tree node, render the adapter's
+        # roll-up field instead: `tracking_rollup` is `⏱` when this task OR
+        # any descendant is tracked, so a running tracking hidden under a
+        # collapsed parent still surfaces. Inert on expanded nodes, leaves,
+        # and the flat list (they show their own `tracking`).
+        collapsed_source: tracking_rollup
       # Tag symbols (icons only); `tag_names` ships hidden in native, omitted.
       - key: tag_symbols
         label: T
@@ -284,6 +290,9 @@ views:
             label: Tr
             style: accent
             sizing: max
+            # See the root level: a collapsed node surfaces `⏱` for a
+            # tracking running anywhere in its hidden subtree.
+            collapsed_source: tracking_rollup
           - key: tag_symbols
             label: T
             style: accent
@@ -381,6 +390,9 @@ views:
         label: Tr
         style: accent
         sizing: max
+        # Inert in the flat list (no collapse state); kept for parity with
+        # the tree views so all three columns read identically.
+        collapsed_source: tracking_rollup
       - key: tag_symbols
         label: T
         style: accent

@@ -3348,6 +3348,28 @@ Voraussetzung: `docs/examples/views/tasks.yaml` nach
 - [ ] `t` und der `tracking:`-Buffer-Toggle bleiben synchron (kein
       Stale-Marker): nach jedem Toggle spiegelt die Spalte den Live-Stand.
 
+### Tracking-Marker am eingeklappten Knoten (`collapsed_source`)
+
+Voraussetzung: `tasks.yaml` mit `collapsed_source: tracking_rollup` auf der
+`tracking`-Spalte (Root- **und** rekursive Subtask-Ebene — im Beispiel-Config
+gesetzt). Einen Task mit (mindestens) einem **Subtask** anlegen und das
+Tracking auf dem **Subtask** starten (`t`).
+
+- [ ] Eltern-Task **aufgeklappt**: `⏱` steht beim laufenden Subtask, der
+      Eltern-Task selbst ist leer (zeigt seinen eigenen `tracking` = leer).
+- [ ] Eltern-Task **einklappen** (`h`/←/`zc`): Der `⏱`-Marker „bubbelt" jetzt
+      sichtbar auf den eingeklappten Eltern-Task — der Subtree-Tracking-Stand
+      bleibt erkennbar, obwohl der laufende Task verborgen ist.
+- [ ] Wieder **aufklappen**: Eltern-Task wird wieder leer, `⏱` steht wieder am
+      Subtask (Marker springt nicht „hängen").
+- [ ] Mehrstufig: Tracking auf einem Enkel; zwei Ebenen darüber einklappen →
+      `⏱` erscheint am eingeklappten Großeltern-Knoten (Roll-up über die ganze
+      Vorfahrenkette).
+- [ ] Eingeklappter Eltern-Task **ohne** Tracking irgendwo im Teilbaum bleibt
+      leer (kein falscher `⏱`).
+- [ ] Flat-Liste (`v`): Die Spalte zeigt unverändert den **eigenen** Marker —
+      `collapsed_source` ist hier inert (es gibt keinen Einklapp-Zustand).
+
 ### A1c-2 — Saved Queries + FilterExpr-Filter (gefilterter Baum)
 
 Voraussetzung: `tasks.yaml` mit dem `query:`-Block (Default `open tasks`:
