@@ -16,3 +16,7 @@ not-yet-done-core    = { path = "../not-yet-done-core" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# tree_edit integration tests build a real in-memory SQLite DB directly.
+sea-orm = { workspace = true }
+shaku = { workspace = true }
+chrono = { workspace = true }

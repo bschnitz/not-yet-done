@@ -65,7 +65,13 @@ use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use crate::editor_templates::{self, FieldError, ParseResult};
-use crate::{notes, publish_row_patches, CoreHandle};
+use crate::{notes, publish_row_patches, tree_edit, CoreHandle};
+
+/// Indent width for the subtree-restructure outline buffer (`edit-tree`).
+/// The `tree_edit` parser infers depth from indentation per level, so any
+/// consistent width round-trips; 4 spaces matches the native editor default
+/// and `serialize`'s own default.
+const TREE_EDIT_INDENT: usize = 4;
 
 /// Stable id of the synthetic forest-root node.
 const ROOT_ID: &str = "task:root";
@@ -698,6 +704,12 @@ fn task_item_actions() -> Vec<NodeAction> {
         NodeAction::new("add", "Add subtask", InputSpec::Editor)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('a'),
+        // Subtree-restructure outline editor: edit the task and its whole
+        // subtree as one indented checkbox list — reparent, re-status,
+        // add/remove rows in a single buffer. Bound to `ctrl+n` in
+        // `tasks.yaml` (mirrors the native tab's "edit node" key); no
+        // `default_key` here because a ctrl-combo isn't a single `char`.
+        NodeAction::new("edit-tree", "edit node", InputSpec::Editor),
         NodeAction::new("delete", "Delete", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
@@ -734,6 +746,16 @@ fn subtree_ids(snapshot: &ForestSnapshot, root: Uuid) -> Vec<Uuid> {
         i += 1;
     }
     out
+}
+
+/// The task models for `root` plus all its descendants present in the
+/// snapshot — the `original_tasks` slice the `edit-tree` outline diffs
+/// against (serialize + [`tree_edit::apply_changes`] both operate on it).
+fn subtree_tasks(snapshot: &ForestSnapshot, root: Uuid) -> Vec<task::Model> {
+    subtree_ids(snapshot, root)
+        .into_iter()
+        .filter_map(|tid| snapshot.by_id.get(&tid).map(|r| r.task.clone()))
+        .collect()
 }
 
 /// True when reparenting `moving` under `new_parent` would form a cycle —
@@ -981,6 +1003,77 @@ async fn execute_edit(
                 message: Some("Task updated".to_string()),
             })
         }
+    }
+}
+
+/// `prepare` for the `edit-tree` action: serialize the selected task and
+/// its whole subtree into the indented checkbox outline `tree_edit`
+/// understands, with `-t` flags on the directly-tracked rows.
+///
+/// No version token — the buffer spans many tasks, so there is nothing
+/// single to conflict against; [`tree_edit::apply_changes`] reconciles each
+/// row by its short id, not by a version timestamp.
+fn prepare_edit_tree(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep> {
+    let root = snapshot
+        .by_id
+        .get(&id)
+        .map(|r| r.task.clone())
+        .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+    let subtree = subtree_tasks(snapshot, id);
+    let template =
+        tree_edit::serialize_with_indent(&root, &subtree, TREE_EDIT_INDENT, &snapshot.tracked);
+    Ok(EditorPrep {
+        template,
+        version: String::new(),
+        suffix: ".md".into(),
+    })
+}
+
+/// `execute` for the `edit-tree` action: diff the edited outline against the
+/// subtree snapshot and apply every create/update/delete/reparent through
+/// [`tree_edit::apply_changes`]. Returns `NoChanges` on an unedited buffer
+/// (the diff is a no-op) and reopens with the error message on failure so
+/// the user keeps their edits.
+async fn execute_edit_tree(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    id: Uuid,
+    text: &str,
+) -> Result<ActionOutcome> {
+    if !snapshot.by_id.contains_key(&id) {
+        return Err(ContentError::NotFound(id.to_string()));
+    }
+    let originals = subtree_tasks(snapshot, id);
+    match tree_edit::apply_changes(
+        text,
+        &originals,
+        id,
+        &handle.task_service,
+        &handle.tracking_repo,
+        &snapshot.tracked,
+        handle.allow_parallel_tracking,
+    )
+    .await
+    {
+        Ok(message) => {
+            // The outline can create/move/delete arbitrarily many tasks, so
+            // a single `TaskChanged` can't name them all — the bridge maps
+            // it to a full reload, which is what a structural edit needs.
+            emit_task_changed(handle, id);
+            Ok(ActionOutcome::Done {
+                message: Some(message),
+            })
+        }
+        Err(e) => Ok(ActionOutcome::Reopen {
+            content: editor_templates::render_with_errors(
+                text,
+                &[FieldError {
+                    field: "description",
+                    message: e,
+                }],
+            ),
+            new_version: None,
+        }),
     }
 }
 
@@ -1306,6 +1399,7 @@ impl Node for TaskItemNode {
             // Create a child task under this one (buffer's `parent:` wins).
             "add" => Ok(prepare_add(Some(self.id))),
             "edit" => prepare_edit(&self.handle, &self.snapshot, self.id).await,
+            "edit-tree" => prepare_edit_tree(&self.snapshot, self.id),
             other => Err(ContentError::NotSupported(format!(
                 "action `{other}` has no editor buffer"
             ))),
@@ -1318,6 +1412,9 @@ impl Node for TaskItemNode {
             }
             ("edit", ActionInput::Edited { text, original, .. }) => {
                 execute_edit(&self.handle, &self.snapshot, self.id, &text, &original).await
+            }
+            ("edit-tree", ActionInput::Edited { text, .. }) => {
+                execute_edit_tree(&self.handle, &self.snapshot, self.id, &text).await
             }
             // Reached via the generic `DeleteSelf` confirm flow, which calls
             // `execute("delete", None)` after the user confirms.
@@ -2068,6 +2165,7 @@ mod tests {
         let item = task_item_actions();
         for id in [
             "edit",
+            "edit-tree",
             "add",
             "delete",
             "undelete",
@@ -2077,6 +2175,35 @@ mod tests {
         ] {
             assert!(has(&item, id), "task:item missing action `{id}`");
         }
+    }
+
+    #[test]
+    fn prepare_edit_tree_serializes_subtree_with_tracked_flag() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let outside = Uuid::from_u128(9);
+        let mut snap = snapshot_from(vec![
+            row(a, "Root task", None),
+            row(b, "Child task", Some(a)),
+            row(c, "Grandchild", Some(b)),
+            row(outside, "Unrelated", None),
+        ]);
+        // The middle node is tracked → its outline row carries the `-t` flag.
+        Arc::get_mut(&mut snap).unwrap().tracked.insert(b);
+
+        let prep = prepare_edit_tree(&snap, a).expect("root resolves");
+        // The whole subtree is present, the unrelated root is not, and the
+        // tracked child is flagged for `tree_edit`'s round-trip.
+        assert!(prep.template.contains("Root task"));
+        assert!(prep.template.contains("Child task"));
+        assert!(prep.template.contains("Grandchild"));
+        assert!(!prep.template.contains("Unrelated"));
+        assert!(prep.template.contains("-t Child task"));
+        // A multi-task restructure has nothing single to version against.
+        assert!(prep.version.is_empty());
+        // A missing root is a clean NotFound, not a panic.
+        assert!(prepare_edit_tree(&snap, Uuid::from_u128(42)).is_err());
     }
 
     #[test]

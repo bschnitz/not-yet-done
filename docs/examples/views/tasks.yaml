@@ -201,6 +201,15 @@ views:
         key: e
         type: edit
         id: edit
+      # Edit the selected task AND its whole subtree as one indented
+      # checkbox outline (adapter action `edit-tree`): reparent, re-status,
+      # add or remove rows in a single buffer; `tree_edit` diffs the result
+      # and applies every create/move/delete. `ctrl+n` mirrors the native
+      # tab's "edit node" key.
+      - name: edit node
+        key: ctrl+n
+        type: edit
+        id: edit-tree
       # Create a task under the current container — at the root that's a
       # top-level task; the buffer's `parent:` field can override.
       - name: add task
@@ -333,6 +342,12 @@ views:
             key: e
             type: edit
             id: edit
+          # Subtree-restructure outline editor (see the root view's `edit
+          # node`); available at every depth so you can re-shape any branch.
+          - name: edit node
+            key: ctrl+n
+            type: edit
+            id: edit-tree
           - name: add subtask
             key: a
             type: create
@@ -430,6 +445,13 @@ views:
         key: e
         type: edit
         id: edit
+      # Subtree-restructure outline editor (see the tree view's `edit
+      # node`). In the flat list it still edits the selected task and its
+      # descendants as one outline — the rows are ordinary tasks.
+      - name: edit node
+        key: ctrl+n
+        type: edit
+        id: edit-tree
       - name: add task
         key: a
         type: create
