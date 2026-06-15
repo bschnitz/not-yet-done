@@ -3483,23 +3483,37 @@ created/…/ancestors}}}` (uniforme Node-Form, NICHT die native
       dem Item `<slug>#<n>` — identisch zum Verhalten auf dem nativen
       Tasks-Tab.
 
-### A1c (Komfort) — Add-Child-unter-Selektion (`A`) + Un-nest (`U`)
+### Task-1 — `a` (Kind / Top-Level), `A` (Sibling), Vererbung
 
-- [ ] Im Tree-Mode einen Task selektieren, `A` → Editor-Buffer mit
-      `parent:` auf den selektierten Task vorbefüllt; `:wq` → neuer Subtask
-      hängt **unter** dem selektierten Task (nicht als Top-Level).
-- [ ] `a` (klein) am selben Task → weiterhin Top-Level-Task am Container
-      (Verhalten unverändert).
-- [ ] `A` auf einem tief verschachtelten Task → Subtask landet auf der
-      nächsten Tiefe darunter, Baum klappt zum neuen Knoten auf.
-- [ ] `A`, dann im Buffer das `parent:`-Feld leeren → `:wq` → Task wird
-      doch Top-Level (Buffer-Override gewinnt).
+`a` und `A` verhalten sich wie im nativen Tasks-Tab:
+
+- [ ] **Tree-Mode, `a` auf selektiertem Task** → Editor-Buffer mit `parent:`
+      auf den selektierten Task vorbefüllt; `:wq` → neuer Task hängt **als
+      Kind** unter dem selektierten Task (nicht als Sibling/Top-Level).
+- [ ] **Tree-Mode, `A` auf selektiertem Task** → Buffer mit `parent:` auf
+      den **Eltern** des selektierten Tasks; `:wq` → neuer Task ist ein
+      **Sibling** (gleiche Ebene). Auf einem Top-Level-Task → neuer
+      Top-Level-Task.
+- [ ] **Leerer Baum (keine Tasks):** sowohl `a` als auch `A` → neuer
+      **Top-Level**-Task (Engine löst fehlende Selektion auf den Adapter-Root
+      auf).
+- [ ] **Flache Liste (`v`):** `a` → Top-Level-Task; `A` → Sibling des
+      selektierten Tasks (gleiche Eltern).
+- [ ] `a`/`A`, dann im Buffer das `parent:`-Feld editieren → `:wq` →
+      Buffer-Override gewinnt über das von der Taste gewählte Ziel.
 - [ ] `U` (Shift+U) auf einem verschachtelten Task → Task wandert auf die
       oberste Ebene (parent_id = None), erscheint als Top-Level-Knoten.
 - [ ] `U` auf einem bereits Top-Level-Task → Notification „already at the
       top level", keine Änderung.
-- [ ] `U` und `A` funktionieren im Tree-Mode (Root-View) und nach Drill in
-      einen Task (rekursiver Branch).
+
+**Action-/Shortcut-Vererbung** (rekursiver `subtasks`-Branch deklariert
+keine eigenen `actions:`/`shortcuts:`):
+
+- [ ] In einen Task drillen (rekursive Ebene) → `e`/`a`/`A`/`x`/`ctrl+n`/`r`
+      und die Shortcuts `d`/`u`/`s`/`m`/`p`/`U` funktionieren dort genauso wie
+      auf der Wurzel-Ebene (alle via `inherit: true` vererbt).
+- [ ] `f` (fuzzy filter) und `/` (tree find) sind **nur** auf der
+      Wurzel-Ebene aktiv (nicht vererbt — Validator-Regel).
 
 ## TrackingAdapter (adapterisierter Trackings-Tab) — A2a + A2b + A2c
 

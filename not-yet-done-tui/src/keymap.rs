@@ -68,9 +68,7 @@ pub enum PaneStateProfile {
     InputMode(InputMode),
     /// Normal table state. `drilldown = Some(false)` is root only,
     /// `Some(true)` is drilled-in only, `None` matches either.
-    Normal {
-        drilldown: Option<bool>,
-    },
+    Normal { drilldown: Option<bool> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,11 +84,10 @@ impl KeyScope {
         match (self, other) {
             (KeyScope::Global, _) | (_, KeyScope::Global) => true,
             (KeyScope::Tab(a), KeyScope::Tab(b)) => a == b,
-            (KeyScope::Tab(a), KeyScope::Pane(b, _))
-            | (KeyScope::Pane(b, _), KeyScope::Tab(a)) => a == b,
-            (KeyScope::Pane(a, pa), KeyScope::Pane(b, pb)) => {
-                a == b && profile_overlaps(pa, pb)
+            (KeyScope::Tab(a), KeyScope::Pane(b, _)) | (KeyScope::Pane(b, _), KeyScope::Tab(a)) => {
+                a == b
             }
+            (KeyScope::Pane(a, pa), KeyScope::Pane(b, pb)) => a == b && profile_overlaps(pa, pb),
         }
     }
 }
@@ -197,7 +194,11 @@ impl KeySource {
             Self::Window(a) => format!("window.{}", a),
             Self::Tasks(a) => format!("tasks.{}", a),
             Self::Trackings(a) => format!("trackings.{}", a),
-            Self::YamlAction { view, child_path, name } => {
+            Self::YamlAction {
+                view,
+                child_path,
+                name,
+            } => {
                 if child_path.is_empty() {
                     format!("views.{view}.actions[{name}]")
                 } else {
@@ -210,7 +211,10 @@ impl KeySource {
             Self::SavedQueryShortcut { view, name } => {
                 format!("views.{view}.saved_query[{name}]")
             }
-            Self::PostgresTableScriptShortcut { table_node_id, script } => {
+            Self::PostgresTableScriptShortcut {
+                table_node_id,
+                script,
+            } => {
                 format!("postgres.script[{table_node_id}/{script}]")
             }
             Self::YamlMenuKey { view } => format!("views.{view}.query.menu_key"),
@@ -225,7 +229,11 @@ impl KeySource {
                 }
             }
             Self::YamlSubtab { view } => format!("views.{view}.key"),
-            Self::YamlChildKeybinding { view, child_path, action } => {
+            Self::YamlChildKeybinding {
+                view,
+                child_path,
+                action,
+            } => {
                 format!(
                     "views.{view}.children.{}.keybindings.{action}",
                     child_path.join(".")
@@ -273,11 +281,21 @@ pub struct KeyClaim {
 
 impl KeyClaim {
     pub fn handler(key: KeyBinding, scope: KeyScope, source: KeySource) -> Self {
-        Self { key, scope, source, kind: KeyClaimKind::Handler }
+        Self {
+            key,
+            scope,
+            source,
+            kind: KeyClaimKind::Handler,
+        }
     }
 
     pub fn swallow(key: KeyBinding, scope: KeyScope, source: KeySource) -> Self {
-        Self { key, scope, source, kind: KeyClaimKind::Swallow }
+        Self {
+            key,
+            scope,
+            source,
+            kind: KeyClaimKind::Swallow,
+        }
     }
 }
 
@@ -473,7 +491,15 @@ fn push_child_leaves(
         kb,
     );
     push_child_actions(&mut km, tab, view, &path, child);
-    push_action_chain_claims(&mut km, tab, drilled_profile(), view, &path, Some(child), kb);
+    push_action_chain_claims(
+        &mut km,
+        tab,
+        drilled_profile(),
+        view,
+        &path,
+        Some(child),
+        kb,
+    );
     out.push(ViewLeafMap {
         view: view.name.clone(),
         child_path: path.clone(),
@@ -632,9 +658,8 @@ fn push_leaf_content_keys(
 
         let mut keys = binding;
         if column_cursor {
-            keys.0.retain(|k| {
-                k != COLUMN_CURSOR_LEFT_KEY && k != COLUMN_CURSOR_RIGHT_KEY
-            });
+            keys.0
+                .retain(|k| k != COLUMN_CURSOR_LEFT_KEY && k != COLUMN_CURSOR_RIGHT_KEY);
         }
         if keys.0.is_empty() {
             continue;
@@ -653,7 +678,9 @@ fn push_subtab_keys(km: &mut KeyMap, tab: &TabRef, views: &[ViewDef]) {
             km.push(KeyClaim::handler(
                 KeyBinding::new(k.clone()),
                 KeyScope::Tab(tab.clone()),
-                KeySource::YamlSubtab { view: v.name.clone() },
+                KeySource::YamlSubtab {
+                    view: v.name.clone(),
+                },
             ));
         }
     }
@@ -665,14 +692,20 @@ fn push_view_query_keys(km: &mut KeyMap, tab: &TabRef, view: &ViewDef) {
             km.push(KeyClaim::handler(
                 KeyBinding::new(menu_key.clone()),
                 KeyScope::Pane(tab.clone(), PaneStateProfile::Normal { drilldown: None }),
-                KeySource::YamlMenuKey { view: view.name.clone() },
+                KeySource::YamlMenuKey {
+                    view: view.name.clone(),
+                },
             ));
         }
     }
 }
 
 fn push_view_actions(km: &mut KeyMap, tab: &TabRef, view: &ViewDef, is_root: bool) {
-    let profile = if is_root { root_profile() } else { drilled_profile() };
+    let profile = if is_root {
+        root_profile()
+    } else {
+        drilled_profile()
+    };
     for action in &view.actions {
         push_action_claims(km, tab, profile.clone(), &view.name, &[], action);
     }
@@ -737,14 +770,18 @@ fn push_action_claims(
             km.push(KeyClaim::handler(
                 KeyBinding::new(k.clone()),
                 KeyScope::Pane(tab.clone(), profile.clone()),
-                KeySource::PaneSearchJump { direction: SearchJump::Next },
+                KeySource::PaneSearchJump {
+                    direction: SearchJump::Next,
+                },
             ));
         }
         if let Some(k) = &search.prev_key {
             km.push(KeyClaim::handler(
                 KeyBinding::new(k.clone()),
                 KeyScope::Pane(tab.clone(), profile),
-                KeySource::PaneSearchJump { direction: SearchJump::Prev },
+                KeySource::PaneSearchJump {
+                    direction: SearchJump::Prev,
+                },
             ));
         }
     }
@@ -807,11 +844,15 @@ fn push_action_chain_claims(
 }
 
 fn root_profile() -> PaneStateProfile {
-    PaneStateProfile::Normal { drilldown: Some(false) }
+    PaneStateProfile::Normal {
+        drilldown: Some(false),
+    }
 }
 
 fn drilled_profile() -> PaneStateProfile {
-    PaneStateProfile::Normal { drilldown: Some(true) }
+    PaneStateProfile::Normal {
+        drilldown: Some(true),
+    }
 }
 
 /// Check whether binding `shortcut` to the saved query `query_name`
@@ -852,9 +893,10 @@ pub fn saved_query_shortcut_conflict(
 ) -> Option<String> {
     // Same claim layer first: another saved query already wearing the
     // key. Rebinding the same query to its own key is fine.
-    if let Some((name, _)) = bound_saved_queries.iter().find(|(name, sc)| {
-        name != query_name && KeyBinding::new(sc.clone()).matches(shortcut)
-    }) {
+    if let Some((name, _)) = bound_saved_queries
+        .iter()
+        .find(|(name, sc)| name != query_name && KeyBinding::new(sc.clone()).matches(shortcut))
+    {
         return Some(format!("saved query '{name}'"));
     }
 
@@ -905,11 +947,11 @@ fn node_shortcut_conflict(views: &[ViewDef], shortcut: &str) -> Option<String> {
 fn find_node_shortcut(
     view_name: &str,
     child_path: &mut Vec<String>,
-    shortcuts: &std::collections::HashMap<char, String>,
+    shortcuts: &std::collections::HashMap<char, crate::config::view_config::ShortcutDef>,
     children: &[ChildDef],
     ch: char,
 ) -> Option<String> {
-    if let Some(action) = shortcuts.get(&ch) {
+    if let Some(action) = shortcuts.get(&ch).map(|sc| sc.action()) {
         return Some(if child_path.is_empty() {
             format!("views.{view_name}.shortcuts[{action}]")
         } else {
@@ -962,17 +1004,24 @@ mod tests {
     }
 
     fn root() -> PaneStateProfile {
-        PaneStateProfile::Normal { drilldown: Some(false) }
+        PaneStateProfile::Normal {
+            drilldown: Some(false),
+        }
     }
 
     fn drilled() -> PaneStateProfile {
-        PaneStateProfile::Normal { drilldown: Some(true) }
+        PaneStateProfile::Normal {
+            drilldown: Some(true),
+        }
     }
 
     fn yaml_action(view: &str, name: &str, key: &str) -> KeyClaim {
         KeyClaim::handler(
             KeyBinding::new(key),
-            KeyScope::Pane(tab("postgres"), PaneStateProfile::Normal { drilldown: None }),
+            KeyScope::Pane(
+                tab("postgres"),
+                PaneStateProfile::Normal { drilldown: None },
+            ),
             KeySource::YamlAction {
                 view: view.into(),
                 child_path: Vec::new(),
@@ -1036,7 +1085,10 @@ mod tests {
         let mut km = KeyMap::new();
         km.push(KeyClaim::handler(
             KeyBinding::new("enter"),
-            KeyScope::Pane(tab("postgres"), PaneStateProfile::Normal { drilldown: None }),
+            KeyScope::Pane(
+                tab("postgres"),
+                PaneStateProfile::Normal { drilldown: None },
+            ),
             KeySource::Content(ContentAction::Open),
         ));
         km.push(yaml_action("tables", "open_alt", "enter"));
@@ -1051,12 +1103,18 @@ mod tests {
         let mut km = KeyMap::new();
         km.push(KeyClaim::swallow(
             KeyBinding::new("f"),
-            KeyScope::Pane(tab("postgres"), PaneStateProfile::InputMode(InputMode::Fuzzy)),
+            KeyScope::Pane(
+                tab("postgres"),
+                PaneStateProfile::InputMode(InputMode::Fuzzy),
+            ),
             KeySource::Common(CommonAction::FuzzyFilterOpen),
         ));
         km.push(KeyClaim::handler(
             KeyBinding::new("f"),
-            KeyScope::Pane(tab("postgres"), PaneStateProfile::Normal { drilldown: None }),
+            KeyScope::Pane(
+                tab("postgres"),
+                PaneStateProfile::Normal { drilldown: None },
+            ),
             KeySource::YamlAction {
                 view: "tables".into(),
                 child_path: Vec::new(),
@@ -1074,7 +1132,9 @@ mod tests {
         km.push(KeyClaim::handler(
             KeyBinding::new("t"),
             KeyScope::Pane(tab("postgres"), root()),
-            KeySource::YamlSubtab { view: "tables".into() },
+            KeySource::YamlSubtab {
+                view: "tables".into(),
+            },
         ));
         km.push(KeyClaim::handler(
             KeyBinding::new("t"),
@@ -1095,11 +1155,16 @@ mod tests {
         km.push(KeyClaim::handler(
             KeyBinding::new("t"),
             KeyScope::Pane(tab("postgres"), root()),
-            KeySource::YamlSubtab { view: "tables".into() },
+            KeySource::YamlSubtab {
+                view: "tables".into(),
+            },
         ));
         km.push(KeyClaim::handler(
             KeyBinding::new("t"),
-            KeyScope::Pane(tab("postgres"), PaneStateProfile::Normal { drilldown: None }),
+            KeyScope::Pane(
+                tab("postgres"),
+                PaneStateProfile::Normal { drilldown: None },
+            ),
             KeySource::YamlAction {
                 view: "databases".into(),
                 child_path: Vec::new(),
@@ -1109,8 +1174,11 @@ mod tests {
         let cs = km.validate();
         assert_eq!(cs.len(), 1);
         // None-drilldown overlaps with Some(false) (root).
-        assert!(cs[0].human().contains("yamlsubtab") || cs[0].human().contains("YamlSubtab")
-            || cs[0].human().contains("views.tables.key"));
+        assert!(
+            cs[0].human().contains("yamlsubtab")
+                || cs[0].human().contains("YamlSubtab")
+                || cs[0].human().contains("views.tables.key")
+        );
     }
 
     #[test]
@@ -1183,10 +1251,9 @@ views:
             ContentAction::Back,
             KeyBinding::multi(vec!["backspace", "h"]),
         );
-        kb.content.bindings.insert(
-            ContentAction::Open,
-            KeyBinding::multi(vec!["enter", "l"]),
-        );
+        kb.content
+            .bindings
+            .insert(ContentAction::Open, KeyBinding::multi(vec!["enter", "l"]));
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &kb);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
@@ -1213,10 +1280,9 @@ views:
             ContentAction::Back,
             KeyBinding::multi(vec!["backspace", "h"]),
         );
-        kb.content.bindings.insert(
-            ContentAction::Open,
-            KeyBinding::multi(vec!["enter", "l"]),
-        );
+        kb.content
+            .bindings
+            .insert(ContentAction::Open, KeyBinding::multi(vec!["enter", "l"]));
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &kb);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
@@ -1229,12 +1295,10 @@ views:
             .find(|l| l.child_path == ["Rows".to_string()])
             .expect("Rows leaf present");
         let has_column_left = rows.keymap.claims.iter().any(|c| {
-            matches!(c.source, KeySource::Common(CommonAction::ColumnLeft))
-                && c.key.matches("h")
+            matches!(c.source, KeySource::Common(CommonAction::ColumnLeft)) && c.key.matches("h")
         });
         let has_column_right = rows.keymap.claims.iter().any(|c| {
-            matches!(c.source, KeySource::Common(CommonAction::ColumnRight))
-                && c.key.matches("l")
+            matches!(c.source, KeySource::Common(CommonAction::ColumnRight)) && c.key.matches("l")
         });
         let back_keys: Vec<String> = rows
             .keymap
@@ -1273,7 +1337,8 @@ views:
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
         assert!(
-            errs.iter().any(|e| e.contains("Rows") && e.contains("\"h\"")),
+            errs.iter()
+                .any(|e| e.contains("Rows") && e.contains("\"h\"")),
             "expected a Rows / 'h' conflict, got: {errs:?}"
         );
     }
@@ -1299,7 +1364,8 @@ views:
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
         assert!(
-            errs.iter().any(|e| e.contains("Rows") && e.contains("\"t\"")),
+            errs.iter()
+                .any(|e| e.contains("Rows") && e.contains("\"t\"")),
             "expected a Rows / 't' subtab conflict, got: {errs:?}"
         );
     }
@@ -1326,7 +1392,8 @@ views:
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
         assert!(
-            errs.iter().any(|e| e.contains("Rows") && e.contains("\"q\"")),
+            errs.iter()
+                .any(|e| e.contains("Rows") && e.contains("\"q\"")),
             "expected a Rows / 'q' menu_key conflict, got: {errs:?}"
         );
     }
@@ -1352,12 +1419,11 @@ views:
         let cfg = yaml_str(yaml);
         let mut kb = KeyBindingConfig::default();
         let chain = vec![crate::action::Action::Common(CommonAction::ListNext)];
-        kb.action_chains
-            .0
-            .insert("ctrl+n".into(), Some(chain));
+        kb.action_chains.0.insert("ctrl+n".into(), Some(chain));
         let errs = validate_view_file(&cfg, &kb);
         assert!(
-            errs.iter().any(|e| e.contains("Rows") && e.contains("ctrl+n")),
+            errs.iter()
+                .any(|e| e.contains("Rows") && e.contains("ctrl+n")),
             "expected a Rows / 'ctrl+n' chain conflict, got: {errs:?}"
         );
     }
@@ -1380,7 +1446,8 @@ views:
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
         assert!(
-            errs.iter().any(|e| e.contains("tables") && e.contains("\"j\"")),
+            errs.iter()
+                .any(|e| e.contains("tables") && e.contains("\"j\"")),
             "expected a tables / 'j' chain-vs-common conflict, got: {errs:?}"
         );
     }
@@ -1407,15 +1474,13 @@ views:
         let cfg = yaml_str(yaml);
         let mut kb = KeyBindingConfig::default();
         let chain = vec![crate::action::Action::Common(CommonAction::ListNext)];
-        kb.action_chains
-            .0
-            .insert("ctrl+n".into(), Some(chain));
+        kb.action_chains.0.insert("ctrl+n".into(), Some(chain));
         let errs = validate_view_file(&cfg, &kb);
         // The shadow action keeps living — but no chain claim is pushed
         // at this leaf, so no AppActionChain conflict appears.
-        let chain_err = errs.iter().find(|e| {
-            e.contains("Rows") && e.contains("ctrl+n") && e.contains("action_chains")
-        });
+        let chain_err = errs
+            .iter()
+            .find(|e| e.contains("Rows") && e.contains("ctrl+n") && e.contains("action_chains"));
         assert!(
             chain_err.is_none(),
             "child-level `null` must suppress chain claim at the leaf, got: {errs:?}"

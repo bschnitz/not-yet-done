@@ -14,11 +14,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult, Direction, Position};
 use tuirealm::component::Component;
@@ -39,7 +39,6 @@ use not_yet_done_content::{
 };
 
 use crate::components::action_bar::{ActionBarComponent, ActionHint};
-use crate::views::content_action_hints::{ActionBarHint, ActiveSource, ShortcutHint};
 use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
@@ -54,20 +53,19 @@ use crate::config::view_config::{
     GroupHeadersDef, GroupOrder, LineLayout, PaginationMode, PreviewConfig, SplitDirection,
     TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
-use crate::keymap::{
-    KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef,
-};
-use crate::views::column_format::{format_elapsed_since, format_typed_value};
-use crate::views::group_aggregate::{agg_value, bucket_display_label, group_label, to_group_bucket};
+use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
 use crate::ui::theme::Theme;
-use crate::views::markdown::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
+use crate::views::column_format::{format_elapsed_since, format_typed_value};
+use crate::views::content_action_hints::{ActionBarHint, ActiveSource, ShortcutHint};
 use crate::views::content_tree::{
-    child_def_for_type_chain, tree_child_def_at_depth, tree_level_at_depth,
-    effective_child_children, leaf_glyph_opt_for_chain, tree_level_children,
-    tree_level_children_for_chain,
-    tree_level_for_chain,
-    tree_self_at_depth, TreeLevel, TreeState,
+    TreeLevel, TreeState, child_def_for_type_chain, effective_child_children,
+    leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
+    tree_level_children_for_chain, tree_level_for_chain, tree_self_at_depth,
 };
+use crate::views::group_aggregate::{
+    agg_value, bucket_display_label, group_label, to_group_bucket,
+};
+use crate::views::markdown::{StyleMapBuilder, lines_to_widget_lines, render_markdown_lines};
 use crate::views::{
     BarHint, CmdlineKeyResult, CmdlineState, HasCmdline, PaginatedView, SearchKeyResult,
     SearchState, Searchable, SortableView, SubViewMessage, ViewRequest,
@@ -621,7 +619,12 @@ impl PaneNode {
                     SplitSide::Second => (Box::new(old), Box::new(PaneNode::Leaf(new_leaf))),
                     SplitSide::First => (Box::new(PaneNode::Leaf(new_leaf)), Box::new(old)),
                 };
-                *self = PaneNode::Branch { orientation, ratio, first, second };
+                *self = PaneNode::Branch {
+                    orientation,
+                    ratio,
+                    first,
+                    second,
+                };
                 Ok(())
             }
             PaneNode::Leaf(_) | PaneNode::Hole => Err(new_leaf),
@@ -664,7 +667,9 @@ impl PaneNode {
                         .border_style(border_style);
                     if let Some(&letter) = pane_tags.get(&leaf.id) {
                         let title_style = if is_focused {
-                            Style::default().fg(theme.accent()).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(theme.accent())
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(theme.text_dim())
                         };
@@ -696,7 +701,12 @@ impl PaneNode {
                     );
                 }
             }
-            PaneNode::Branch { orientation, ratio, first, second } => {
+            PaneNode::Branch {
+                orientation,
+                ratio,
+                first,
+                second,
+            } => {
                 let r1 = (*ratio * 100.0).clamp(1.0, 99.0) as u16;
                 let r2 = 100u16.saturating_sub(r1);
                 let constraints = [Constraint::Percentage(r1), Constraint::Percentage(r2)];
@@ -704,8 +714,26 @@ impl PaneNode {
                     SplitOrientation::Horizontal => Layout::horizontal(constraints).split(area),
                     SplitOrientation::Vertical => Layout::vertical(constraints).split(area),
                 };
-                first.render(frame, chunks[0], focused_id, multi, last_rects, pane_tags, theme, header_overlay);
-                second.render(frame, chunks[1], focused_id, multi, last_rects, pane_tags, theme, header_overlay);
+                first.render(
+                    frame,
+                    chunks[0],
+                    focused_id,
+                    multi,
+                    last_rects,
+                    pane_tags,
+                    theme,
+                    header_overlay,
+                );
+                second.render(
+                    frame,
+                    chunks[1],
+                    focused_id,
+                    multi,
+                    last_rects,
+                    pane_tags,
+                    theme,
+                    header_overlay,
+                );
             }
             PaneNode::Hole => {}
         }
@@ -794,7 +822,9 @@ impl PaneTree {
 
     /// Look up the leaf wearing this letter.
     pub fn pane_id_for_tag(&self, letter: char) -> Option<PaneId> {
-        self.pane_tags.iter().find_map(|(id, &c)| (c == letter).then_some(*id))
+        self.pane_tags
+            .iter()
+            .find_map(|(id, &c)| (c == letter).then_some(*id))
     }
 
     pub fn focused_leaf(&self) -> &LeafEntry {
@@ -855,10 +885,15 @@ impl PaneTree {
         new_pane: ContentPane,
     ) {
         let focus_id = self.focus;
-        let new_leaf = LeafEntry { id: new_id, pane: new_pane };
+        let new_leaf = LeafEntry {
+            id: new_id,
+            pane: new_pane,
+        };
         // The closest-to-leaf split fits because we only split the focused
         // leaf and `focus_id` exists exactly once in the tree.
-        let _ = self.root.split_leaf(focus_id, orientation, ratio, new_leaf, side);
+        let _ = self
+            .root
+            .split_leaf(focus_id, orientation, ratio, new_leaf, side);
         self.focus = new_id;
     }
 
@@ -1271,7 +1306,10 @@ impl ContentPane {
                 SubViewMessage::SelectionChanged(None)
             }
             TreeFindAdvance::NeedRootLoad => {
-                SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id })
+                SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                    view_index,
+                    pane_id,
+                })
             }
             TreeFindAdvance::NeedTreeExpand {
                 parent_path,
@@ -1289,9 +1327,7 @@ impl ContentPane {
                 append: false,
             }),
             TreeFindAdvance::NotInTree(reason) => {
-                SubViewMessage::Request(ViewRequest::Notify(format!(
-                    "Tree find: {reason}",
-                )))
+                SubViewMessage::Request(ViewRequest::Notify(format!("Tree find: {reason}",)))
             }
         }
     }
@@ -1354,9 +1390,7 @@ impl ContentPane {
         let _ = view_index; // reserved for future per-view dispatch differentiation
         let _ = pane_id;
         if view_def.tree_label.is_none() || self.tree.is_none() {
-            return TreeFindAdvance::NotInTree(
-                "Tree-find requires a tree-mode view".into(),
-            );
+            return TreeFindAdvance::NotInTree("Tree-find requires a tree-mode view".into());
         }
 
         // Walk each prefix of `path`. For depth d, the parent's
@@ -1430,15 +1464,17 @@ impl ContentPane {
             // visible-indices map. Usually means a fuzzy filter is
             // active and hides this leaf — surface as NotInTree so
             // the user knows to clear the filter.
-            TreeFindAdvance::NotInTree(
-                "Hit's leaf row is hidden (active fuzzy filter?)".into(),
-            )
+            TreeFindAdvance::NotInTree("Hit's leaf row is hidden (active fuzzy filter?)".into())
         }
     }
 
     /// Replace the link cache + adapter NodeRef prefix used by the
     /// `has_links` column. Called by [`ContentView::set_link_refs`].
-    pub fn set_link_context(&mut self, link_refs: &std::collections::HashSet<String>, prefix: Option<String>) {
+    pub fn set_link_context(
+        &mut self,
+        link_refs: &std::collections::HashSet<String>,
+        prefix: Option<String>,
+    ) {
         self.link_refs = link_refs.clone();
         self.link_node_ref_prefix = prefix;
     }
@@ -1464,23 +1500,21 @@ impl ContentPane {
         // positions and the bar flickers visibly (3 actions on a
         // postgres db_script node was the trigger that surfaced this).
         // Sorted-by-char gives a deterministic, predictable layout.
-        let mut out: std::collections::BTreeMap<char, String> =
-            std::collections::BTreeMap::new();
+        let mut out: std::collections::BTreeMap<char, String> = std::collections::BTreeMap::new();
         // Walk from deepest to root — first-seen wins. `resolve_shortcut`
         // does the same and `entry().or_insert_with()` keeps the
         // deeper-level binding.
         for end in (1..=chain.len()).rev() {
-            if let Some(child) = crate::views::content_tree::child_def_for_type_chain(
-                vd,
-                &chain[..end],
-            ) {
+            if let Some(child) =
+                crate::views::content_tree::child_def_for_type_chain(vd, &chain[..end])
+            {
                 for (k, v) in &child.shortcuts {
-                    out.entry(*k).or_insert_with(|| v.clone());
+                    out.entry(*k).or_insert_with(|| v.action().to_string());
                 }
             }
         }
         for (k, v) in &vd.shortcuts {
-            out.entry(*k).or_insert_with(|| v.clone());
+            out.entry(*k).or_insert_with(|| v.action().to_string());
         }
         out.into_iter().collect()
     }
@@ -1548,7 +1582,11 @@ impl ContentPane {
         }
         let chain = self.view_path_node_types(view_defs);
         let n = chain.len();
-        if n >= 2 { chain.get(n - 2).cloned() } else { None }
+        if n >= 2 {
+            chain.get(n - 2).cloned()
+        } else {
+            None
+        }
     }
 
     /// Cousin of the private `selected_parent_node_id` in
@@ -1604,8 +1642,7 @@ impl ContentPane {
             };
             let actions = adapter.actions_for_type(&nt);
             if let Some(action) = actions.iter().find(|a| a.id == action_name) {
-                let opens_input =
-                    !matches!(action.input, not_yet_done_content::InputSpec::None);
+                let opens_input = !matches!(action.input, not_yet_done_content::InputSpec::None);
                 let source = source_for_shortcut(&action.id, &action.label, opens_input);
                 out.push(ShortcutHint {
                     key: key.to_string(),
@@ -1822,10 +1859,7 @@ impl ContentPane {
     /// Mirror the owning view's override map into this pane. Called on
     /// construction of split panes and whenever the map changes so all
     /// panes of a tab agree on per-level column layouts.
-    fn set_column_overrides(
-        &mut self,
-        overrides: std::collections::HashMap<String, Vec<String>>,
-    ) {
+    fn set_column_overrides(&mut self, overrides: std::collections::HashMap<String, Vec<String>>) {
         self.column_overrides = overrides;
     }
 
@@ -1865,7 +1899,8 @@ impl ContentPane {
         if let Some(ref child) = self.active_child {
             child.row_layout.clone()
         } else {
-            self.view_def(view_defs).and_then(|vd| vd.row_layout.clone())
+            self.view_def(view_defs)
+                .and_then(|vd| vd.row_layout.clone())
         }
     }
 
@@ -1876,7 +1911,9 @@ impl ContentPane {
         if let Some(ref child) = self.active_child {
             child.smooth_scroll
         } else {
-            self.view_def(view_defs).map(|vd| vd.smooth_scroll).unwrap_or(false)
+            self.view_def(view_defs)
+                .map(|vd| vd.smooth_scroll)
+                .unwrap_or(false)
         }
     }
 
@@ -1931,7 +1968,9 @@ impl ContentPane {
         if let Some(ref child) = self.active_child {
             child.aggregates.clone()
         } else {
-            self.view_def(view_defs).map(|vd| vd.aggregates.clone()).unwrap_or_default()
+            self.view_def(view_defs)
+                .map(|vd| vd.aggregates.clone())
+                .unwrap_or_default()
         }
     }
 
@@ -1945,7 +1984,9 @@ impl ContentPane {
         if let Some(ref child) = self.active_child {
             child.summary_only
         } else {
-            self.view_def(view_defs).map(|vd| vd.summary_only).unwrap_or(false)
+            self.view_def(view_defs)
+                .map(|vd| vd.summary_only)
+                .unwrap_or(false)
         }
     }
 
@@ -1961,7 +2002,9 @@ impl ContentPane {
         if let Some(ref child) = self.active_child {
             child.then_by.clone()
         } else {
-            self.view_def(view_defs).map(|vd| vd.then_by.clone()).unwrap_or_default()
+            self.view_def(view_defs)
+                .map(|vd| vd.then_by.clone())
+                .unwrap_or_default()
         }
     }
 
@@ -2012,7 +2055,9 @@ impl ContentPane {
         if let Some(ref child) = self.active_child {
             child.group_by.is_some()
         } else {
-            self.view_def(view_defs).map(|vd| vd.group_by.is_some()).unwrap_or(false)
+            self.view_def(view_defs)
+                .map(|vd| vd.group_by.is_some())
+                .unwrap_or(false)
         }
     }
 
@@ -2036,10 +2081,7 @@ impl ContentPane {
     /// active level declares no `group_by` at all: there is then nothing
     /// to (re)group. Shared base of [`cycle_grouping`](Self::cycle_grouping)
     /// and [`set_grouping_bucket`](Self::set_grouping_bucket).
-    fn configured_grouping_base(
-        &self,
-        view_defs: &[ViewDef],
-    ) -> Option<(String, GroupOrder)> {
+    fn configured_grouping_base(&self, view_defs: &[ViewDef]) -> Option<(String, GroupOrder)> {
         // A tree only regroups through the adapter; without that capability
         // there is nothing a runtime override could apply to (this guards
         // the action-chain path, which bypasses the key-claim gate).
@@ -2050,7 +2092,10 @@ impl ContentPane {
             .map(|gb| (gb.column.clone(), gb.order))
             .or_else(|| {
                 if let Some(ref child) = self.active_child {
-                    child.group_by.as_ref().map(|gb| (gb.column.clone(), gb.order))
+                    child
+                        .group_by
+                        .as_ref()
+                        .map(|gb| (gb.column.clone(), gb.order))
                 } else {
                     self.view_def(view_defs)
                         .and_then(|vd| vd.group_by.as_ref().map(|gb| (gb.column.clone(), gb.order)))
@@ -2276,7 +2321,11 @@ impl ContentPane {
         self.tree.as_ref()?;
         for depth in 0..32 {
             let level = tree_level_at_depth(vd, depth)?;
-            if level.actions.iter().any(|a| a.action_type == "fuzzy_filter") {
+            if level
+                .actions
+                .iter()
+                .any(|a| a.action_type == "fuzzy_filter")
+            {
                 return Some(depth);
             }
         }
@@ -2496,8 +2545,11 @@ impl ContentPane {
                 .iter()
                 .collect(),
         };
-        let tree_children: Vec<&ChildDef> =
-            kids.iter().copied().filter(|c| c.tree_label.is_some()).collect();
+        let tree_children: Vec<&ChildDef> = kids
+            .iter()
+            .copied()
+            .filter(|c| c.tree_label.is_some())
+            .collect();
 
         // Branch 1: there is at least one tree-continuing child at
         // this entry — expand/collapse. With one tree-continuing
@@ -2513,11 +2565,7 @@ impl ContentPane {
                     need_load = false;
                 } else {
                     tree.expanded.insert(own_path.clone());
-                    let cached = tree
-                        .cache
-                        .get(&own_path)
-                        .map(|s| s.loaded)
-                        .unwrap_or(false);
+                    let cached = tree.cache.get(&own_path).map(|s| s.loaded).unwrap_or(false);
                     if cached {
                         tree.rebuild_entries(view_def);
                         need_load = false;
@@ -2540,7 +2588,8 @@ impl ContentPane {
                         append: false,
                     }));
                 }
-                let types: Vec<String> = tree_children.iter().map(|c| c.node_type.clone()).collect();
+                let types: Vec<String> =
+                    tree_children.iter().map(|c| c.node_type.clone()).collect();
                 return Some(SubViewMessage::Request(ViewRequest::ExpandTreeNodeMulti {
                     view_index,
                     pane_id,
@@ -2607,7 +2656,12 @@ impl ContentPane {
         pane_id: PaneId,
         view_defs: &[ViewDef],
     ) -> Vec<ViewRequest> {
-        if !self.tree.as_ref().map(|t| t.auto_expand_pending).unwrap_or(false) {
+        if !self
+            .tree
+            .as_ref()
+            .map(|t| t.auto_expand_pending)
+            .unwrap_or(false)
+        {
             return Vec::new();
         }
         let Some(view_def) = self.view_def(view_defs).cloned() else {
@@ -2654,7 +2708,10 @@ impl ContentPane {
                     }
                     let entry_child = child_def_for_type_chain(&view_def, &e.node_type_chain);
                     // Rows routing Enter to an adapter action never expand.
-                    if entry_child.and_then(|c| c.enter_action.as_deref()).is_some() {
+                    if entry_child
+                        .and_then(|c| c.enter_action.as_deref())
+                        .is_some()
+                    {
                         continue;
                     }
                     let kids: Vec<&ChildDef> = match entry_child {
@@ -2933,7 +2990,10 @@ impl ContentPane {
                 .position(|e| e.parent_path == parent_parent_path && e.node.id == parent_node_id)
         })?;
         self.rebuild_table(view_defs);
-        let new_row = self.tree_visible_indices.iter().position(|&i| i == new_eidx)?;
+        let new_row = self
+            .tree_visible_indices
+            .iter()
+            .position(|&i| i == new_eidx)?;
         self.table.set_selected(new_row);
         Some(SubViewMessage::SelectionChanged(None))
     }
@@ -3050,16 +3110,14 @@ impl ContentPane {
                     None => "",
                 };
                 let base = if opts.lines {
-                    not_yet_done_forest::forest_connector(
-                        not_yet_done_forest::ConnectorSpec {
-                            depth: d,
-                            is_last: is_last[i],
-                            prefix: &prefix,
-                            has_description: true,
-                            has_children: e.has_children,
-                            expanded: None,
-                        },
-                    )
+                    not_yet_done_forest::forest_connector(not_yet_done_forest::ConnectorSpec {
+                        depth: d,
+                        is_last: is_last[i],
+                        prefix: &prefix,
+                        has_description: true,
+                        has_children: e.has_children,
+                        expanded: None,
+                    })
                 } else {
                     "  ".repeat(d)
                 };
@@ -3092,13 +3150,17 @@ impl ContentPane {
                 let mut bucket_total: Option<String> = None;
                 let mut last_item_row: Option<usize> = None;
                 let close =
-                    |total: &Option<String>, row: Option<usize>, map: &mut std::collections::HashMap<usize, String>| {
+                    |total: &Option<String>,
+                     row: Option<usize>,
+                     map: &mut std::collections::HashMap<usize, String>| {
                         if let (Some(t), Some(r)) = (total.as_ref(), row) {
                             map.insert(r, t.clone());
                         }
                     };
                 for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
-                    let Some(e) = tree.entries.get(eidx) else { continue };
+                    let Some(e) = tree.entries.get(eidx) else {
+                        continue;
+                    };
                     if e.depth == 0 {
                         close(&bucket_total, last_item_row, &mut map);
                         bucket_total = Some(metadata_field_value(&e.node, field).to_string());
@@ -3140,9 +3202,8 @@ impl ContentPane {
                     .view_def(view_defs)
                     .and_then(|vd| tree_level_for_chain(vd, &entry.node_type_chain))
                     .map(|l| l.columns);
-                let entry_declares = |key: &str| {
-                    entry_cols.is_some_and(|cols| cols.iter().any(|c| c.key == key))
-                };
+                let entry_declares =
+                    |key: &str| entry_cols.is_some_and(|cols| cols.iter().any(|c| c.key == key));
                 // A row is *collapsed* when it has (visible) children but its
                 // own path is not in the expanded set — the same predicate the
                 // connector marker uses (Some(false)). Drives a column's
@@ -3150,13 +3211,11 @@ impl ContentPane {
                 // field that rolls up hidden-descendant state (e.g. the Tasks
                 // tree's `⏱` tracking marker). Leaves and the more-placeholder
                 // are never "collapsed".
-                let entry_is_collapsed = entry.has_children
-                    && !entry.is_more_placeholder
-                    && {
-                        let mut own = entry.parent_path.clone();
-                        own.push(entry.node.id.clone());
-                        !tree.expanded.contains(&own)
-                    };
+                let entry_is_collapsed = entry.has_children && !entry.is_more_placeholder && {
+                    let mut own = entry.parent_path.clone();
+                    own.push(entry.node.id.clone());
+                    !tree.expanded.contains(&own)
+                };
                 let mut row = TRow::new(row_idx as u32);
                 for (ci, col) in columns.iter().enumerate() {
                     // The synthetic group-total column: the bucket's total on
@@ -3164,7 +3223,10 @@ impl ContentPane {
                     // through the column's own `kind` so a duration total
                     // stays right-aligned like the data cells.
                     if total_col_idx == Some(ci) {
-                        let raw = closing_totals.get(&row_idx).map(String::as_str).unwrap_or("");
+                        let raw = closing_totals
+                            .get(&row_idx)
+                            .map(String::as_str)
+                            .unwrap_or("");
                         row = row.cell(&col.key, typed_cell_content(raw, col));
                         continue;
                     }
@@ -3182,9 +3244,7 @@ impl ContentPane {
                         let connector = connectors.get(row_idx).map(String::as_str).unwrap_or("");
                         let leaf = if !entry.is_more_placeholder && !entry.has_children {
                             self.view_def(view_defs)
-                                .and_then(|vd| {
-                                    leaf_glyph_opt_for_chain(vd, &entry.node_type_chain)
-                                })
+                                .and_then(|vd| leaf_glyph_opt_for_chain(vd, &entry.node_type_chain))
                                 .map(|g| format!("{g} "))
                                 .unwrap_or_default()
                         } else {
@@ -3212,11 +3272,13 @@ impl ContentPane {
                         } else {
                             ""
                         };
-                        let marker_prefix =
-                            if marker.is_empty() { String::new() } else { format!("{marker} ") };
+                        let marker_prefix = if marker.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{marker} ")
+                        };
                         let connector_chars = connector.chars().count();
-                        let text =
-                            format!("{connector}{leaf}{marker_prefix}{}", entry.node.label);
+                        let text = format!("{connector}{leaf}{marker_prefix}{}", entry.node.label);
                         let mut spans: Vec<StyledSpan> = Vec::new();
                         if connector_chars > 0 {
                             spans.push(StyledSpan {
@@ -3248,11 +3310,13 @@ impl ContentPane {
                         } else {
                             CellContent::text(text).with_spans(spans)
                         }
-                    } else if !entry.is_more_placeholder
-                        && entry_declares(col.key.as_str())
-                    {
+                    } else if !entry.is_more_placeholder && entry_declares(col.key.as_str()) {
                         if col.source.as_deref() == Some("has_links") {
-                            let icon = if self.item_has_link(&entry.node.id) { "🔗" } else { " " };
+                            let icon = if self.item_has_link(&entry.node.id) {
+                                "🔗"
+                            } else {
+                                " "
+                            };
                             CellContent::text(icon)
                         } else if let Some(field) = col
                             .collapsed_source
@@ -3396,7 +3460,9 @@ impl ContentPane {
             };
             return match child_def_for_type_chain(vd, &entry.node_type_chain) {
                 Some(c) => !effective_child_children(c).is_empty(),
-                None => !tree_level_children(vd, entry.depth).unwrap_or(&[]).is_empty(),
+                None => !tree_level_children(vd, entry.depth)
+                    .unwrap_or(&[])
+                    .is_empty(),
             };
         }
         !self.current_children(view_defs).is_empty()
@@ -3406,9 +3472,7 @@ impl ContentPane {
         if self.tree.is_some() {
             if let Some(vd) = self.view_def(view_defs) {
                 if let Some(entry) = self.tree_entry_at_row(self.table.selected_row()) {
-                    if let Some(kids) =
-                        tree_level_children_for_chain(vd, &entry.node_type_chain)
-                    {
+                    if let Some(kids) = tree_level_children_for_chain(vd, &entry.node_type_chain) {
                         return kids;
                     }
                 }
@@ -3591,7 +3655,11 @@ impl ContentPane {
                 return None;
             }
             if let Some(key) = action.node_id_from.as_deref() {
-                let value = entry.node.metadata.fields.iter()
+                let value = entry
+                    .node
+                    .metadata
+                    .fields
+                    .iter()
                     .find(|f| f.key == key)
                     .map(|f| f.value.as_str())
                     .unwrap_or("");
@@ -3605,7 +3673,10 @@ impl ContentPane {
         let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
         let item = self.items.get(item_idx)?;
         if let Some(key) = action.node_id_from.as_deref() {
-            let value = item.metadata.fields.iter()
+            let value = item
+                .metadata
+                .fields
+                .iter()
                 .find(|f| f.key == key)
                 .map(|f| f.value.as_str())
                 .unwrap_or("");
@@ -3621,7 +3692,13 @@ impl ContentPane {
 
     /// Prepare drill-down: snapshot current level, set child config.
     /// Returns the child_node_type so the caller can spawn the load.
-    fn drill_down_prepare(&mut self, item_id: &str, item_label: &str, child_def: &ChildDef, view_defs: &[ViewDef]) -> String {
+    fn drill_down_prepare(
+        &mut self,
+        item_id: &str,
+        item_label: &str,
+        child_def: &ChildDef,
+        view_defs: &[ViewDef],
+    ) -> String {
         // Tree mode terminates at any child without `tree_label`. Drop the
         // tree state into the frame so the leaf level renders flat, then
         // restore it on nav_back. For flat-mode panes this is a no-op
@@ -3781,14 +3858,21 @@ impl ContentPane {
         self.preview_description.clear();
         self.preview_scroll = 0;
         self.preview_loading = true;
-        Some(PreviewFetchParams { cache_key: row_id, node_id, action_id })
+        Some(PreviewFetchParams {
+            cache_key: row_id,
+            node_id,
+            action_id,
+        })
     }
 
     fn render_breadcrumbs(&self, frame: &mut Frame, area: Rect, view_defs: &[ViewDef]) {
         let t = &*self.theme;
         let mut spans = Vec::new();
 
-        let root_label = self.view_def(view_defs).map(|v| v.name.as_str()).unwrap_or("root");
+        let root_label = self
+            .view_def(view_defs)
+            .map(|v| v.name.as_str())
+            .unwrap_or("root");
         spans.push(Span::styled(root_label, Style::default().fg(t.accent())));
 
         for f in &self.nav_stack {
@@ -3798,7 +3882,10 @@ impl ContentPane {
 
         if let Some(ref child) = self.active_child {
             spans.push(Span::styled(" › ", Style::default().fg(t.text_dim())));
-            spans.push(Span::styled(&child.name, Style::default().fg(t.text_high())));
+            spans.push(Span::styled(
+                &child.name,
+                Style::default().fg(t.text_high()),
+            ));
         }
 
         let line = Line::from(spans);
@@ -3839,7 +3926,12 @@ impl ContentPane {
         let text: Vec<Line> = self
             .preview_description
             .lines()
-            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(t.text_med()))))
+            .map(|l| {
+                Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(t.text_med()),
+                ))
+            })
             .collect();
 
         let paragraph = Paragraph::new(text)
@@ -3855,11 +3947,9 @@ impl ContentPane {
     /// use that to position the sort-header overlay on the focused pane.
     fn render_table_and_preview(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         if self.preview_open {
-            let chunks = Layout::horizontal([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
-            .split(area);
+            let chunks =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(area);
             self.table.view(frame, chunks[0]);
             self.render_preview(frame, chunks[1]);
             chunks[0]
@@ -3874,7 +3964,9 @@ impl ContentPane {
             return;
         };
         let text = format_page_footer(info, &self.last_applied_sort);
-        let style = Style::default().fg(self.theme.text_dim()).bg(self.theme.bg());
+        let style = Style::default()
+            .fg(self.theme.text_dim())
+            .bg(self.theme.bg());
         let paragraph = Paragraph::new(Line::from(Span::styled(text, style)));
         frame.render_widget(paragraph, area);
     }
@@ -3916,9 +4008,10 @@ impl ContentPane {
         self.current_sort = sort;
         // Changing sort resets the page offset (a different ordering
         // makes the prior offset meaningless).
-        self.current_page = self
-            .current_page
-            .map(|p| PageRequest { offset: 0, limit: p.limit });
+        self.current_page = self.current_page.map(|p| PageRequest {
+            offset: 0,
+            limit: p.limit,
+        });
         true
     }
 
@@ -3964,7 +4057,10 @@ impl ContentPane {
         if let Some(p) = self.current_page {
             return Some(p);
         }
-        let pagination = self.active_child.as_ref().and_then(|c| c.pagination.as_ref())?;
+        let pagination = self
+            .active_child
+            .as_ref()
+            .and_then(|c| c.pagination.as_ref())?;
         match pagination.mode {
             PaginationMode::Server | PaginationMode::Cursor => Some(PageRequest {
                 offset: 0,
@@ -3996,7 +4092,10 @@ impl ContentPane {
             return None;
         }
         let prev_offset = info.offset.saturating_sub(info.limit);
-        Some(PageRequest { offset: prev_offset, limit: info.limit })
+        Some(PageRequest {
+            offset: prev_offset,
+            limit: info.limit,
+        })
     }
 
     /// Effective binding for `action` at the current drill level.
@@ -4055,7 +4154,10 @@ impl ContentPane {
                     child_node_type: child_type.to_string(),
                 })
             }
-            _ => SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id }),
+            _ => SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                view_index,
+                pane_id,
+            }),
         }
     }
 
@@ -4173,7 +4275,10 @@ impl ContentPane {
     }
 
     pub fn rebuild_table(&mut self, view_defs: &[ViewDef]) {
-        self.rebuild_table_with(view_defs, &crate::components::sort_header::HeaderOverlay::None);
+        self.rebuild_table_with(
+            view_defs,
+            &crate::components::sort_header::HeaderOverlay::None,
+        );
     }
 
     /// Variant that takes the active header overlay so the sort-mode
@@ -4278,7 +4383,10 @@ impl ContentPane {
         for col in &columns {
             let label = col.label.as_deref().unwrap_or(&col.key);
             let label = crate::components::sort_header::header_text(
-                label, &col.key, &self.last_applied_sort, header_overlay,
+                label,
+                &col.key,
+                &self.last_applied_sort,
+                header_overlay,
             );
             header = header.cell(&col.key, label);
         }
@@ -4317,7 +4425,8 @@ impl ContentPane {
                     let aggregates = self.current_aggregates(view_defs);
                     let summary_only = self.current_summary_only(view_defs);
                     self.last_column_keys = columns.iter().map(|c| c.key.clone()).collect();
-                    self.table.set_smooth_scroll(self.current_smooth_scroll(view_defs));
+                    self.table
+                        .set_smooth_scroll(self.current_smooth_scroll(view_defs));
                     let build = build_grouped_table(
                         &self.items,
                         &order,
@@ -4333,7 +4442,11 @@ impl ContentPane {
                     );
                     self.last_col_widths = build.col_widths;
                     self.filtered_indices = build.filtered_indices;
-                    let headers = vec![build_header_row(build.header_cells, &columns, header_overlay)];
+                    let headers = vec![build_header_row(
+                        build.header_cells,
+                        &columns,
+                        header_overlay,
+                    )];
                     self.table.set_data(
                         build.widget_rows,
                         vec![],
@@ -4369,7 +4482,11 @@ impl ContentPane {
                     let mut row = TRow::new(row_idx as u32);
                     for col in &columns {
                         if col.source.as_deref() == Some("has_links") {
-                            let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
+                            let icon = if has_link_lookup(&item.id) {
+                                "🔗"
+                            } else {
+                                " "
+                            };
                             row = row.cell(&col.key, icon);
                         } else {
                             let mut content = cell_content_for(item, col, now);
@@ -4399,7 +4516,8 @@ impl ContentPane {
 
         // Apply the active level's scroll mode before set_data: set_data →
         // set_rows consults the flag to preserve a line-wise scroll position.
-        self.table.set_smooth_scroll(self.current_smooth_scroll(view_defs));
+        self.table
+            .set_smooth_scroll(self.current_smooth_scroll(view_defs));
 
         // Multi-line (chat) layout: render each row as a stack of physical
         // lines per `row_layout` instead of one table row. No column header,
@@ -4420,7 +4538,14 @@ impl ContentPane {
                 .collect();
             let unread_color = self.unread_color(view_defs, t);
             let (rows, style_map) = build_multiline_widget_rows(
-                &data_rows, &columns, &col_ids, &config, &layout, t, &unread_rows, unread_color,
+                &data_rows,
+                &columns,
+                &col_ids,
+                &config,
+                &layout,
+                t,
+                &unread_rows,
+                unread_color,
             );
             self.last_col_widths = Vec::new();
             self.table.set_data(
@@ -4439,8 +4564,9 @@ impl ContentPane {
         let computed = compute_table(&data_rows, &config, &col_ids, Some(&header));
         self.last_col_widths = computed.col_widths.clone();
 
-        let computed_header =
-            computed.header.map(|h| build_header_row(h.cells, &columns, header_overlay));
+        let computed_header = computed
+            .header
+            .map(|h| build_header_row(h.cells, &columns, header_overlay));
 
         // `path`-kind columns get their separator drawn in the dedicated
         // style slot (see the StyleMap below); every other cell is plain.
@@ -4610,7 +4736,11 @@ impl ContentPane {
         for action in self.current_actions(view_defs) {
             if action.shows_in_action_bar() {
                 let source = source_for_action_type(&action.action_type, &action.name);
-                hints.push(ActionBarHint::new(action.key.clone(), action.name.clone(), source));
+                hints.push(ActionBarHint::new(
+                    action.key.clone(),
+                    action.name.clone(),
+                    source,
+                ));
             }
         }
         // SH: YAML `shortcuts:` entries whose adapter action declares
@@ -4640,7 +4770,11 @@ impl ContentPane {
         if self.nav_stack.is_empty() {
             if let Some(mk) = query_menu_key {
                 if !hints.iter().any(|h| h.key == mk) {
-                    hints.push(ActionBarHint::new(mk.to_string(), "queries", ActiveSource::QueryMenu));
+                    hints.push(ActionBarHint::new(
+                        mk.to_string(),
+                        "queries",
+                        ActiveSource::QueryMenu,
+                    ));
                 }
             }
         }
@@ -4793,11 +4927,7 @@ impl ContentPane {
         SubViewMessage::SelectionChanged(None)
     }
 
-    pub(crate) fn try_next_page(
-        &mut self,
-        view_index: usize,
-        pane_id: PaneId,
-    ) -> SubViewMessage {
+    pub(crate) fn try_next_page(&mut self, view_index: usize, pane_id: PaneId) -> SubViewMessage {
         let Some(req) = self.next_page_request() else {
             return SubViewMessage::Unhandled;
         };
@@ -4822,11 +4952,7 @@ impl ContentPane {
         self.reload_current_level(view_index, pane_id)
     }
 
-    pub(crate) fn try_prev_page(
-        &mut self,
-        view_index: usize,
-        pane_id: PaneId,
-    ) -> SubViewMessage {
+    pub(crate) fn try_prev_page(&mut self, view_index: usize, pane_id: PaneId) -> SubViewMessage {
         let Some(req) = self.prev_page_request() else {
             return SubViewMessage::Unhandled;
         };
@@ -4953,9 +5079,7 @@ impl ContentPane {
             if !claim.key.matches(key) {
                 continue;
             }
-            if let Some(msg) =
-                self.dispatch_claim(&claim.source, view_index, pane_id, view_defs)
-            {
+            if let Some(msg) = self.dispatch_claim(&claim.source, view_index, pane_id, view_defs) {
                 return msg;
             }
         }
@@ -5152,11 +5276,7 @@ impl ContentPane {
         // Pagination — `level_binding` honours per-child overrides.
         for ca in [ContentAction::NextPage, ContentAction::PrevPage] {
             if let Some(b) = self.level_binding(&ca, content_kb, view_defs) {
-                km.push(KeyClaim::handler(
-                    b,
-                    scope.clone(),
-                    KeySource::Content(ca),
-                ));
+                km.push(KeyClaim::handler(b, scope.clone(), KeySource::Content(ca)));
             }
         }
 
@@ -5177,20 +5297,21 @@ impl ContentPane {
         // `dispatch_claim`) picks the right backend at press time:
         // tree-find wins when active. Otherwise n/N stays free for
         // an action binding.
-        let tree_find_has_hits = self
-            .tree_find
-            .as_ref()
-            .is_some_and(|s| !s.hits.is_empty());
+        let tree_find_has_hits = self.tree_find.as_ref().is_some_and(|s| !s.hits.is_empty());
         if !self.search.matches().is_empty() || tree_find_has_hits {
             km.push(KeyClaim::handler(
                 KeyBinding::new(self.search_next_key.clone()),
                 scope.clone(),
-                KeySource::PaneSearchJump { direction: SearchJump::Next },
+                KeySource::PaneSearchJump {
+                    direction: SearchJump::Next,
+                },
             ));
             km.push(KeyClaim::handler(
                 KeyBinding::new(self.search_prev_key.clone()),
                 scope.clone(),
-                KeySource::PaneSearchJump { direction: SearchJump::Prev },
+                KeySource::PaneSearchJump {
+                    direction: SearchJump::Prev,
+                },
             ));
         }
 
@@ -5292,14 +5413,14 @@ impl ContentPane {
                 self.set_current_page(Some(req));
                 Some(self.reload_current_level(view_index, pane_id))
             }
-            KeySource::Content(ContentAction::EditQuery) => {
-                Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+            KeySource::Content(ContentAction::EditQuery) => Some(SubViewMessage::Request(
+                ViewRequest::OpenContentQueryEditor {
                     view_index,
                     pane_id,
                     save_name: None,
                     is_new: false,
-                }))
-            }
+                },
+            )),
             KeySource::Content(ContentAction::TreeCollapse) => {
                 self.try_tree_smart_collapse(view_defs)
             }
@@ -5406,7 +5527,12 @@ impl ContentPane {
 
     /// Helper used after every cursor move: emit a preview-fetch request
     /// when the new selection has no preview yet, otherwise just notify.
-    fn preview_after_nav(&mut self, view_index: usize, pane_id: PaneId, view_defs: &[ViewDef]) -> SubViewMessage {
+    fn preview_after_nav(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> SubViewMessage {
         if let Some(p) = self.update_preview_for_selection(view_defs) {
             return SubViewMessage::Request(ViewRequest::FetchContentPreview {
                 view_index,
@@ -5486,7 +5612,8 @@ impl ContentPane {
         match (result, mode) {
             (SearchKeyResult::QueryChanged, SearchMode::Local) => {
                 let descs = self.search_descriptions(view_defs);
-                let refs: Vec<(usize, &str)> = descs.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                let refs: Vec<(usize, &str)> =
+                    descs.iter().map(|(i, s)| (*i, s.as_str())).collect();
                 self.search.update_matches(&refs);
                 if let Some(row) = self.search.first_match() {
                     self.table.set_selected(row);
@@ -5498,7 +5625,10 @@ impl ContentPane {
                 self.search_mode = SearchMode::Local;
                 let query = render_text_search(template, &q);
                 self.set_query(query, None);
-                return SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id });
+                return SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                    view_index,
+                    pane_id,
+                });
             }
             (SearchKeyResult::Cancelled, SearchMode::Adapter { .. }) => {
                 self.search_mode = SearchMode::Local;
@@ -5539,7 +5669,9 @@ impl ContentPane {
             let vd = self.view_def(view_defs);
             let mut out = Vec::new();
             for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
-                let Some(entry) = tree.entries.get(eidx) else { continue };
+                let Some(entry) = tree.entries.get(eidx) else {
+                    continue;
+                };
                 if entry.is_more_placeholder {
                     continue;
                 }
@@ -5555,7 +5687,9 @@ impl ContentPane {
         let columns: Vec<ColumnDef> = self.current_columns(view_defs);
         let mut out = Vec::new();
         for (row_idx, &item_idx) in self.filtered_indices.iter().enumerate() {
-            let Some(item) = self.items.get(item_idx) else { continue };
+            let Some(item) = self.items.get(item_idx) else {
+                continue;
+            };
             let text = build_field_haystack(item, &columns, &self.search_fields);
             out.push((row_idx, text));
         }
@@ -5618,7 +5752,10 @@ impl ContentPane {
                 // copies, deleted parents, …). Drop tree_find so
                 // the user gets clean n/N + status hints again.
                 self.tree_find_clear();
-                return SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index, pane_id });
+                return SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                    view_index,
+                    pane_id,
+                });
             }
             "open_url" => {
                 // TODO: open node URL in browser
@@ -5649,7 +5786,16 @@ impl ContentPane {
                         self.current_child_node_type().map(str::to_string),
                     )
                 };
-                if let (Some(parent_id), Some(child_type)) = (parent_id, child_type) {
+                // A `None` parent means "create on the adapter root": an
+                // `under_selection` create with nothing selected (empty tree),
+                // or a container create at the un-drilled root level (nav stack
+                // empty). The async handler resolves it to `adapter.root()`.
+                // Either way we still need a child node_type for the reload
+                // drilldown; fall back to this view's own node_type when there's
+                // no selection/active child to read it from.
+                let child_type =
+                    child_type.or_else(|| self.view_def(view_defs).map(|v| v.node_type.clone()));
+                if let Some(child_type) = child_type {
                     return SubViewMessage::Request(ViewRequest::CreateContentChild {
                         view_index,
                         pane_id,
@@ -5663,7 +5809,9 @@ impl ContentPane {
                 }
             }
             "custom" => {
-                if let (Some(id), Some(action_id)) = (self.resolve_action_node_id(action), &action.id) {
+                if let (Some(id), Some(action_id)) =
+                    (self.resolve_action_node_id(action), &action.id)
+                {
                     return SubViewMessage::Request(ViewRequest::ExecuteContentAction {
                         view_index,
                         pane_id,
@@ -5679,10 +5827,14 @@ impl ContentPane {
                 });
             }
             "invalidate_session" => {
-                return SubViewMessage::Request(ViewRequest::InvalidateContentSession { view_index });
+                return SubViewMessage::Request(ViewRequest::InvalidateContentSession {
+                    view_index,
+                });
             }
             "invalidate_credentials" => {
-                return SubViewMessage::Request(ViewRequest::InvalidateContentCredentials { view_index });
+                return SubViewMessage::Request(ViewRequest::InvalidateContentCredentials {
+                    view_index,
+                });
             }
             "fuzzy_filter" => {
                 self.fuzzy_filter_fields = action
@@ -5743,10 +5895,7 @@ impl ContentPane {
                 // to "tree search…" if absent. Wipe any stale
                 // tree-find cache so re-opening doesn't surface
                 // yesterday's hits.
-                let prompt = action
-                    .tree_find
-                    .as_ref()
-                    .and_then(|c| c.prompt.clone());
+                let prompt = action.tree_find.as_ref().and_then(|c| c.prompt.clone());
                 self.tree_find_clear();
                 self.search_mode = SearchMode::TreeFind { prompt };
                 self.search.clear();
@@ -5788,7 +5937,11 @@ impl ContentView {
         let key_icons = keybindings.key_icons.clone();
         let action_bar = ActionBarComponent::new(Arc::clone(&theme));
 
-        let default_view = config.views.iter().find(|v| v.default).or(config.views.first());
+        let default_view = config
+            .views
+            .iter()
+            .find(|v| v.default)
+            .or(config.views.first());
         // Scope: NodeRef of the view root, structurally `<adapter>/<instance>/<view_name>`
         // (e.g. "jira/jira/tickets"). Path-segment form mirrors the
         // app-wide `NodeRef` convention so a shortcut row can in
@@ -5982,37 +6135,43 @@ impl ContentView {
         // before the mutable borrow on `action_bar` begins.
         let hints = self.action_bar_hints();
         let active_filter_name = self.active_pane().active_query_name.clone();
-        let favs: Vec<(String, String)> = self.db_saved_queries.iter()
+        let favs: Vec<(String, String)> = self
+            .db_saved_queries
+            .iter()
             .filter_map(|sq| sq.shortcut.as_ref().map(|s| (sq.name.clone(), s.clone())))
             .collect();
         let (fuzzy_active, fuzzy_query, fuzzy_cursor) = {
             let p = self.active_pane();
-            (p.table.fuzzy_active, p.table.fuzzy_query.clone(), p.table.fuzzy_cursor)
+            (
+                p.table.fuzzy_active,
+                p.table.fuzzy_query.clone(),
+                p.table.fuzzy_cursor,
+            )
         };
         let search_state = self.active_pane().search.state();
         let cmdline_state = self.cmdline.state();
-        let (chrome_prefix, chrome_placeholder, chrome_local) = match &self.active_pane().search_mode {
-            SearchMode::Local => (None, None, true),
-            SearchMode::Adapter { prompt, .. } => {
-                let placeholder = prompt
-                    .clone()
-                    .unwrap_or_else(|| "free-text search…".to_string());
-                (Some("? ".to_string()), Some(placeholder), false)
-            }
-            SearchMode::TreeFind { prompt } => {
-                let placeholder = prompt
-                    .clone()
-                    .unwrap_or_else(|| "tree search…".to_string());
-                (Some("? ".to_string()), Some(placeholder), false)
-            }
-        };
+        let (chrome_prefix, chrome_placeholder, chrome_local) =
+            match &self.active_pane().search_mode {
+                SearchMode::Local => (None, None, true),
+                SearchMode::Adapter { prompt, .. } => {
+                    let placeholder = prompt
+                        .clone()
+                        .unwrap_or_else(|| "free-text search…".to_string());
+                    (Some("? ".to_string()), Some(placeholder), false)
+                }
+                SearchMode::TreeFind { prompt } => {
+                    let placeholder = prompt.clone().unwrap_or_else(|| "tree search…".to_string());
+                    (Some("? ".to_string()), Some(placeholder), false)
+                }
+            };
 
         let mode_label = self.action_bar_mode_label();
         self.action_bar.set_hints(hints);
         self.action_bar.set_mode_label(mode_label);
         self.action_bar.set_active_filter_name(active_filter_name);
         self.action_bar.set_favorites(favs);
-        self.action_bar.set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);
+        self.action_bar
+            .set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);
         self.action_bar.set_search(
             search_state.active,
             &search_state.query,
@@ -6020,8 +6179,13 @@ impl ContentView {
             search_state.current,
             search_state.match_count,
         );
-        self.action_bar.set_cmdline(cmdline_state.active, &cmdline_state.query, cmdline_state.cursor);
-        self.action_bar.set_search_chrome(chrome_prefix, chrome_placeholder, chrome_local);
+        self.action_bar.set_cmdline(
+            cmdline_state.active,
+            &cmdline_state.query,
+            cmdline_state.cursor,
+        );
+        self.action_bar
+            .set_search_chrome(chrome_prefix, chrome_placeholder, chrome_local);
     }
 
     pub fn action_bar_height(&self, width: u16) -> u16 {
@@ -6118,13 +6282,17 @@ impl ContentView {
     /// currently-active subtab.
     pub fn subtab_labels(&self) -> Vec<(String, bool)> {
         let active = self.active_subtab;
-        self.view_defs.iter().enumerate().map(|(i, vd)| {
-            let label = match vd.key.as_deref() {
-                Some(k) => format!("{} {}", vd.name, k),
-                None => vd.name.clone(),
-            };
-            (label, i == active)
-        }).collect()
+        self.view_defs
+            .iter()
+            .enumerate()
+            .map(|(i, vd)| {
+                let label = match vd.key.as_deref() {
+                    Some(k) => format!("{} {}", vd.name, k),
+                    None => vd.name.clone(),
+                };
+                (label, i == active)
+            })
+            .collect()
     }
 
     /// Switch the active subtab. Returns whether a load is needed for
@@ -6188,11 +6356,7 @@ impl ContentView {
             return Some(SubViewMessage::SelectionChanged(None));
         }
         // Are any window bindings prefixed with this key?
-        let is_prefix = self
-            .window_kb
-            .bindings
-            .values()
-            .any(|b| b.is_prefix(key));
+        let is_prefix = self.window_kb.bindings.values().any(|b| b.is_prefix(key));
         if is_prefix {
             self.window_pending = Some(key.to_string());
             return Some(SubViewMessage::SelectionChanged(None));
@@ -6268,9 +6432,9 @@ impl ContentView {
                 .active_pane_mut()
                 .try_tree_collapse_all(&view_defs)
                 .unwrap_or(SubViewMessage::Unhandled),
-            ContentAction::CycleGrouping => {
-                self.active_pane_mut().try_cycle_grouping(&view_defs, view_index, pane_id)
-            }
+            ContentAction::CycleGrouping => self
+                .active_pane_mut()
+                .try_cycle_grouping(&view_defs, view_index, pane_id),
             ContentAction::GroupMenu => {
                 if self.active_pane().level_has_group_by(&self.view_defs) {
                     self.open_group_menu();
@@ -6290,7 +6454,12 @@ impl ContentView {
                 SubViewMessage::SelectionChanged(None)
             }
         };
-        if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
+        if let SubViewMessage::ContentDrill {
+            item_id,
+            item_label,
+            child_def,
+        } = msg
+        {
             return self.dispatch_content_drill(item_id, item_label, *child_def);
         }
         msg
@@ -6326,8 +6495,8 @@ impl ContentView {
                     .unwrap_or(false)
             })
         };
-        let target = parent_via_backlink
-            .or_else(|| self.pane_trees[active_subtab].sibling_of(focus_id));
+        let target =
+            parent_via_backlink.or_else(|| self.pane_trees[active_subtab].sibling_of(focus_id));
         if let Some(t) = target {
             self.pane_trees[active_subtab].focus = t;
             self.sync_action_bar_hints();
@@ -6345,8 +6514,8 @@ impl ContentView {
         let child_via_backlink = self
             .find_pane(focus_id)
             .and_then(|p| p.linked_child.as_ref().map(|(_, child)| *child));
-        let target = child_via_backlink
-            .or_else(|| self.pane_trees[active_subtab].sibling_of(focus_id));
+        let target =
+            child_via_backlink.or_else(|| self.pane_trees[active_subtab].sibling_of(focus_id));
         if let Some(t) = target {
             self.pane_trees[active_subtab].focus = t;
             self.sync_action_bar_hints();
@@ -6364,8 +6533,12 @@ impl ContentView {
         let new_pane = {
             let theme = Arc::clone(&self.theme);
             let source = self.active_pane();
-            let mut p =
-                ContentPane::new(theme, view_def_index, tree_enabled, source.capabilities.clone());
+            let mut p = ContentPane::new(
+                theme,
+                view_def_index,
+                tree_enabled,
+                source.capabilities.clone(),
+            );
             p.active_query = source.active_query.clone();
             p.active_query_name = source.active_query_name.clone();
             p.active_query_vars = source.active_query_vars.clone();
@@ -6402,9 +6575,12 @@ impl ContentView {
                 // In-place drill — mutate the focused pane.
                 let view_defs = self.view_defs.clone();
                 let pane_id = self.active_pane_id();
-                let child_node_type = self
-                    .active_pane_mut()
-                    .drill_down_prepare(&item_id, &item_label, &child_def, &view_defs);
+                let child_node_type = self.active_pane_mut().drill_down_prepare(
+                    &item_id,
+                    &item_label,
+                    &child_def,
+                    &view_defs,
+                );
                 SubViewMessage::Request(ViewRequest::DrillDown {
                     view_index,
                     pane_id,
@@ -6432,7 +6608,11 @@ impl ContentView {
                         let view_defs = self.view_defs.clone();
                         let (source_items, source_selected_row, source_active_child) = {
                             let s = self.find_pane(source_id).expect("source alive");
-                            (s.items.clone(), s.table.selected_row(), s.active_child.clone())
+                            (
+                                s.items.clone(),
+                                s.table.selected_row(),
+                                s.active_child.clone(),
+                            )
                         };
                         let child_node_type = self
                             .find_pane_mut(child_pane_id)
@@ -6490,8 +6670,12 @@ impl ContentView {
 
                 let mut new_pane = {
                     let source = self.active_pane();
-                    let mut p =
-                        ContentPane::new(theme, view_def_index, tree_enabled, source.capabilities.clone());
+                    let mut p = ContentPane::new(
+                        theme,
+                        view_def_index,
+                        tree_enabled,
+                        source.capabilities.clone(),
+                    );
                     // Inherit query/sort/page so any child-level fetch params
                     // line up with what the source had.
                     p.active_query = source.active_query.clone();
@@ -6547,7 +6731,8 @@ impl ContentView {
         let view_defs = self.view_defs.clone();
         let table_node_id = format!("{database}/schemas/{schema}/tables/{table}");
         let table_label = table.clone();
-        let target_pane_id = self.split_for_query_into_child(&table_node_id, &table_label, &view_defs);
+        let target_pane_id =
+            self.split_for_query_into_child(&table_node_id, &table_label, &view_defs);
         SubViewMessage::Request(ViewRequest::RunPostgresScript {
             view_index,
             pane_id: target_pane_id,
@@ -6590,8 +6775,12 @@ impl ContentView {
             return self.active_pane_id();
         };
         let Some(split_def) = child_def.split.clone() else {
-            self.active_pane_mut()
-                .drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
+            self.active_pane_mut().drill_down_prepare(
+                table_node_id,
+                table_label,
+                &child_def,
+                view_defs,
+            );
             return self.active_pane_id();
         };
         // Reuse an existing coupled child pane if one is alive for the
@@ -6632,8 +6821,12 @@ impl ContentView {
         let tree_enabled = child_def.tree_label.is_some();
         let mut new_pane = {
             let source = self.active_pane();
-            let mut p =
-                ContentPane::new(theme, view_def_index, tree_enabled, source.capabilities.clone());
+            let mut p = ContentPane::new(
+                theme,
+                view_def_index,
+                tree_enabled,
+                source.capabilities.clone(),
+            );
             p.active_query = source.active_query.clone();
             p.active_query_name = source.active_query_name.clone();
             p.active_query_vars = source.active_query_vars.clone();
@@ -6761,7 +6954,8 @@ impl ContentView {
     }
 
     pub fn set_preview_description(&mut self, key: &str, description: String) {
-        self.active_pane_mut().set_preview_description(key, description);
+        self.active_pane_mut()
+            .set_preview_description(key, description);
     }
 
     /// Returns the load parameters needed for the root-level adapter call.
@@ -6850,7 +7044,8 @@ impl ContentView {
         name: Option<String>,
         vars: std::collections::HashMap<String, String>,
     ) {
-        self.active_pane_mut().set_query_with_vars(query, name, vars);
+        self.active_pane_mut()
+            .set_query_with_vars(query, name, vars);
     }
 
     /// Pane-targeted variant of `set_query_with_vars`. The App-side
@@ -6885,12 +7080,16 @@ impl ContentView {
 
     /// Open the query menu popup with merged YAML + DB queries.
     pub fn open_query_popup(&mut self) {
-        let entries: Vec<QueryMenuEntry> = self.db_saved_queries.iter().map(|sq| QueryMenuEntry {
-            name: sq.name.clone(),
-            query: sq.query.clone(),
-            shortcut: sq.shortcut.clone(),
-            is_default: self.default_saved_query.as_deref() == Some(sq.name.as_str()),
-        }).collect();
+        let entries: Vec<QueryMenuEntry> = self
+            .db_saved_queries
+            .iter()
+            .map(|sq| QueryMenuEntry {
+                name: sq.name.clone(),
+                query: sq.query.clone(),
+                shortcut: sq.shortcut.clone(),
+                is_default: self.default_saved_query.as_deref() == Some(sq.name.as_str()),
+            })
+            .collect();
         self.query_menu_mode = QueryMenuMode::SavedQueries;
         self.query_menu.open(&entries, &self.query_menu_kb);
     }
@@ -6913,7 +7112,8 @@ impl ContentView {
             table,
         };
         // Scripts are files, not queries — no default-query semantics.
-        self.query_menu.open_without_default(&entries, &self.query_menu_kb);
+        self.query_menu
+            .open_without_default(&entries, &self.query_menu_kb);
     }
 
     /// Handle key events when the query popup is open.
@@ -6933,82 +7133,133 @@ impl ContentView {
             | (_, QueryMenuMessage::Closed) => noop,
 
             // ── Saved queries (existing behaviour) ────────────────────
-            (QueryMenuMode::SavedQueries, QueryMenuMessage::Apply { name, query }) => {
-                Some(SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::Apply { name, query }) => Some(
+                SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
                     view_index,
                     pane_id,
                     query,
                     name,
-                }))
-            }
+                }),
+            ),
             (QueryMenuMode::SavedQueries, QueryMenuMessage::EditExisting { name, query }) => {
                 let pane = self.active_pane_mut();
                 pane.active_query = Some(query);
                 pane.active_query_name = Some(name.clone());
-                Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
-                    view_index,
-                    pane_id,
-                    save_name: Some(name),
-                    is_new: false,
-                }))
+                Some(SubViewMessage::Request(
+                    ViewRequest::OpenContentQueryEditor {
+                        view_index,
+                        pane_id,
+                        save_name: Some(name),
+                        is_new: false,
+                    },
+                ))
             }
             (QueryMenuMode::SavedQueries, QueryMenuMessage::Delete { name }) => {
                 let scope = self.query_scope.clone();
                 Some(SubViewMessage::Request(ViewRequest::DeleteContentQuery {
-                    view_index, scope, name,
+                    view_index,
+                    scope,
+                    name,
                 }))
             }
             (QueryMenuMode::SavedQueries, QueryMenuMessage::EditShortcut { name, query }) => {
                 let scope = self.query_scope.clone();
-                Some(SubViewMessage::Request(ViewRequest::PromptContentQueryShortcut {
-                    view_index, scope, name, query,
-                }))
+                Some(SubViewMessage::Request(
+                    ViewRequest::PromptContentQueryShortcut {
+                        view_index,
+                        scope,
+                        name,
+                        query,
+                    },
+                ))
             }
-            (QueryMenuMode::SavedQueries, QueryMenuMessage::CreateNew { name }) => {
-                Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::CreateNew { name }) => Some(
+                SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
                     view_index,
                     pane_id,
                     save_name: Some(name),
                     is_new: true,
-                }))
-            }
-            (QueryMenuMode::SavedQueries, QueryMenuMessage::SetDefault { name }) => {
-                Some(SubViewMessage::Request(ViewRequest::SetDefaultContentQuery {
-                    view_index, name,
-                }))
-            }
+                }),
+            ),
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::SetDefault { name }) => Some(
+                SubViewMessage::Request(ViewRequest::SetDefaultContentQuery { view_index, name }),
+            ),
             // Unreachable — the scripts popup opens via
             // `open_without_default`, which never emits SetDefault.
             (QueryMenuMode::PostgresScripts { .. }, QueryMenuMessage::SetDefault { .. }) => noop,
 
             // ── Postgres table scripts (new) ──────────────────────────
             (
-                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMode::PostgresScripts {
+                    database,
+                    schema,
+                    table,
+                },
                 QueryMenuMessage::Apply { name, .. },
             ) => Some(self.dispatch_postgres_script_apply(database, schema, table, name)),
             (
-                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMode::PostgresScripts {
+                    database,
+                    schema,
+                    table,
+                },
                 QueryMenuMessage::EditExisting { name, .. },
             ) => Some(SubViewMessage::Request(ViewRequest::EditPostgresScript {
-                view_index, pane_id, database, schema, table, script: name, is_new: false,
+                view_index,
+                pane_id,
+                database,
+                schema,
+                table,
+                script: name,
+                is_new: false,
             })),
             (
-                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMode::PostgresScripts {
+                    database,
+                    schema,
+                    table,
+                },
                 QueryMenuMessage::Delete { name },
             ) => Some(SubViewMessage::Request(ViewRequest::DeletePostgresScript {
-                view_index, pane_id, database, schema, table, script: name,
+                view_index,
+                pane_id,
+                database,
+                schema,
+                table,
+                script: name,
             })),
             (
-                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMode::PostgresScripts {
+                    database,
+                    schema,
+                    table,
+                },
                 QueryMenuMessage::EditShortcut { name, .. },
-            ) => Some(SubViewMessage::Request(ViewRequest::PromptPostgresScriptShortcut {
-                view_index, pane_id, database, schema, table, script: name,
-            })),
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::PromptPostgresScriptShortcut {
+                    view_index,
+                    pane_id,
+                    database,
+                    schema,
+                    table,
+                    script: name,
+                },
+            )),
             (
-                QueryMenuMode::PostgresScripts { database, schema, table },
+                QueryMenuMode::PostgresScripts {
+                    database,
+                    schema,
+                    table,
+                },
                 QueryMenuMessage::CreateNew { name },
             ) => Some(SubViewMessage::Request(ViewRequest::EditPostgresScript {
-                view_index, pane_id, database, schema, table, script: name, is_new: true,
+                view_index,
+                pane_id,
+                database,
+                schema,
+                table,
+                script: name,
+                is_new: true,
             })),
         }
     }
@@ -7119,7 +7370,11 @@ impl ContentView {
     pub fn merge_saved_queries(&mut self, db_models: Vec<(String, String, Option<String>)>) {
         self.db_saved_queries = db_models
             .into_iter()
-            .map(|(name, query, shortcut)| MergedSavedQuery { name, query, shortcut })
+            .map(|(name, query, shortcut)| MergedSavedQuery {
+                name,
+                query,
+                shortcut,
+            })
             .collect();
     }
 
@@ -7134,14 +7389,7 @@ impl ContentView {
         error: Option<String>,
     ) {
         let pane_id = self.active_pane_id();
-        self.set_items_for_pane(
-            pane_id,
-            items,
-            applied_sort,
-            page,
-            sortable_columns,
-            error,
-        );
+        self.set_items_for_pane(pane_id, items, applied_sort, page, sortable_columns, error);
     }
 
     /// Apply the result of a custom adapter query (e.g. raw SQL from
@@ -7378,7 +7626,8 @@ impl ContentView {
             // placeholder `Server` because it has no view-config
             // reference).
             let mode = leaf.pane.resolve_pagination_mode(view_defs);
-            leaf.pane.set_items(items, Vec::new(), page, Vec::new(), None, view_defs);
+            leaf.pane
+                .set_items(items, Vec::new(), page, Vec::new(), None, view_defs);
             if let Some(info) = page {
                 leaf.pane.set_current_page(Some(PageRequest {
                     offset: info.offset,
@@ -7420,7 +7669,14 @@ impl ContentView {
         let view_defs = &self.view_defs;
         let tree = &mut self.pane_trees[tree_idx];
         if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
-            leaf.pane.set_items(items, applied_sort, page, sortable_columns, error, view_defs);
+            leaf.pane.set_items(
+                items,
+                applied_sort,
+                page,
+                sortable_columns,
+                error,
+                view_defs,
+            );
         }
         self.sync_action_bar_hints();
     }
@@ -7443,10 +7699,9 @@ impl ContentView {
         let view_defs = self.view_defs.clone();
         let tree = &mut self.pane_trees[tree_idx];
         match tree.root.find_leaf_mut(pane_id) {
-            Some(leaf) => {
-                leaf.pane
-                    .pending_auto_expand_requests(view_index, pane_id, &view_defs)
-            }
+            Some(leaf) => leaf
+                .pane
+                .pending_auto_expand_requests(view_index, pane_id, &view_defs),
             None => Vec::new(),
         }
     }
@@ -7467,7 +7722,12 @@ impl ContentView {
     }
 
     /// Apply a preview-fetch result to a specific pane by id.
-    pub fn set_preview_description_for_pane(&mut self, pane_id: PaneId, key: &str, description: String) {
+    pub fn set_preview_description_for_pane(
+        &mut self,
+        pane_id: PaneId,
+        key: &str,
+        description: String,
+    ) {
         if let Some(pane) = self.find_pane_mut(pane_id) {
             pane.set_preview_description(key, description);
         }
@@ -7530,15 +7790,17 @@ impl ContentView {
             return Some(format!("Configuration error: {err}"));
         }
         match &self.auth_status {
-            AdapterStatus::Connecting { retry, max_retries, timeout_secs } => Some(format!(
+            AdapterStatus::Connecting {
+                retry,
+                max_retries,
+                timeout_secs,
+            } => Some(format!(
                 "Connecting… ({retry}/{max_retries}) Timeout: {timeout_secs}s"
             )),
             AdapterStatus::NeedsCreds { .. } => {
                 Some("Login required (press the action key to enter credentials)".into())
             }
-            AdapterStatus::Failed { reason } => {
-                Some(format!("Connection failed: {reason}"))
-            }
+            AdapterStatus::Failed { reason } => Some(format!("Connection failed: {reason}")),
             AdapterStatus::Busy {
                 label,
                 started_at_unix_ms,
@@ -7585,15 +7847,12 @@ impl ContentView {
         if self.active_pane().loaded {
             return None;
         }
-        let reload_key = self
-            .view_defs
-            .get(self.active_subtab)
-            .and_then(|vd| {
-                vd.actions
-                    .iter()
-                    .find(|a| a.action_type == "reload")
-                    .map(|a| a.key.clone())
-            });
+        let reload_key = self.view_defs.get(self.active_subtab).and_then(|vd| {
+            vd.actions
+                .iter()
+                .find(|a| a.action_type == "reload")
+                .map(|a| a.key.clone())
+        });
         Some(match reload_key {
             Some(k) => format!("Auto-connect disabled — press `{k}` to connect"),
             None => "Auto-connect disabled — no `reload` action configured for this view".into(),
@@ -7720,9 +7979,10 @@ impl ContentView {
     /// changes, so the `has_links` YAML column always reads from a
     /// current set without going through App on every rebuild.
     pub fn set_link_refs(&mut self, link_refs: &std::collections::HashSet<String>) {
-        let prefix = self.adapter.as_ref().map(|a| {
-            format!("{}/{}", a.adapter_type(), a.instance_id())
-        });
+        let prefix = self
+            .adapter
+            .as_ref()
+            .map(|a| format!("{}/{}", a.adapter_type(), a.instance_id()));
         for tree in self.pane_trees.iter_mut() {
             let mut ids = Vec::new();
             tree.root.collect_leaf_ids(&mut ids);
@@ -7775,7 +8035,10 @@ impl ContentView {
     /// from the data and aren't configurable).
     pub fn column_config_entries(
         &self,
-    ) -> Option<(Vec<String>, Vec<crate::components::column_config_popup::ColumnEntry>)> {
+    ) -> Option<(
+        Vec<String>,
+        Vec<crate::components::column_config_popup::ColumnEntry>,
+    )> {
         use crate::components::column_config_popup::ColumnEntry;
         let pane = self.active_pane();
         let (raw, tree_label) = pane.column_config_source(&self.view_defs)?;
@@ -7809,10 +8072,7 @@ impl ContentView {
     /// default). Distributes to all panes and rebuilds. Returns `false`
     /// when the level isn't configurable (no level key).
     pub fn apply_column_config(&mut self, visible: Vec<String>) -> bool {
-        let Some((raw, _)) = self
-            .active_pane()
-            .column_config_source(&self.view_defs)
-        else {
+        let Some((raw, _)) = self.active_pane().column_config_source(&self.view_defs) else {
             return false;
         };
         let Some(key) = self.active_pane().column_level_key(&self.view_defs) else {
@@ -7837,7 +8097,9 @@ impl ContentView {
 
         // Query popup mode — intercepts every key. Outside the keymap.
         if self.query_menu.is_open() {
-            return self.handle_query_popup_key(key).unwrap_or(SubViewMessage::Unhandled);
+            return self
+                .handle_query_popup_key(key)
+                .unwrap_or(SubViewMessage::Unhandled);
         }
 
         // Group-by menu — same popup-mode interception.
@@ -7924,7 +8186,12 @@ impl ContentView {
                 .pane
                 .handle_key(key, view_index, pane_id, view_defs, common_kb, content_kb)
         };
-        if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
+        if let SubViewMessage::ContentDrill {
+            item_id,
+            item_label,
+            child_def,
+        } = msg
+        {
             return self.dispatch_content_drill(item_id, item_label, *child_def);
         }
         // A plain navigation (or any in-pane key) may have landed the cursor
@@ -8013,7 +8280,9 @@ impl ContentView {
                 km.push(KeyClaim::handler(
                     KeyBinding::new(k.to_string()),
                     scope.clone(),
-                    KeySource::YamlSubtab { view: vd.name.clone() },
+                    KeySource::YamlSubtab {
+                        view: vd.name.clone(),
+                    },
                 ));
             }
         }
@@ -8126,10 +8395,7 @@ impl ContentView {
     fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
         match source {
             KeySource::YamlSubtab { view } => {
-                let target = self
-                    .view_defs
-                    .iter()
-                    .position(|vd| vd.name == *view)?;
+                let target = self.view_defs.iter().position(|vd| vd.name == *view)?;
                 if target == self.active_subtab {
                     // Already on this subtab — consume the key.
                     return Some(SubViewMessage::SelectionChanged(None));
@@ -8156,12 +8422,14 @@ impl ContentView {
                     .find(|sq| sq.name == *name)
                     .cloned()?;
                 let pane_id = self.active_pane_id();
-                Some(SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
-                    view_index: self.view_index,
-                    pane_id,
-                    query: sq.query,
-                    name: sq.name,
-                }))
+                Some(SubViewMessage::Request(
+                    ViewRequest::ApplyContentSavedQuery {
+                        view_index: self.view_index,
+                        pane_id,
+                        query: sq.query,
+                        name: sq.name,
+                    },
+                ))
             }
             KeySource::Content(ContentAction::GroupMenu) => {
                 self.open_group_menu();
@@ -8171,13 +8439,18 @@ impl ContentView {
                 let view_index = self.view_index;
                 let pane_id = self.active_pane_id();
                 let table_node_id = self.target_postgres_table_node_id()?;
-                Some(SubViewMessage::Request(ViewRequest::OpenPostgresScriptsMenu {
-                    view_index,
-                    pane_id,
-                    table_node_id,
-                }))
+                Some(SubViewMessage::Request(
+                    ViewRequest::OpenPostgresScriptsMenu {
+                        view_index,
+                        pane_id,
+                        table_node_id,
+                    },
+                ))
             }
-            KeySource::PostgresTableScriptShortcut { table_node_id, script } => {
+            KeySource::PostgresTableScriptShortcut {
+                table_node_id,
+                script,
+            } => {
                 let (db, schema, table) = parse_postgres_table_node_id(table_node_id)?;
                 Some(self.dispatch_postgres_script_apply(db, schema, table, script.clone()))
             }
@@ -8221,7 +8494,11 @@ impl ContentView {
                 .content_kb
                 .hint_label(&ContentAction::OpenScriptsMenu, &self.key_icons);
             if !hints.iter().any(|h| h.key == q_key) {
-                hints.push(ActionBarHint::new(q_key, "queries", ActiveSource::QueryMenu));
+                hints.push(ActionBarHint::new(
+                    q_key,
+                    "queries",
+                    ActiveSource::QueryMenu,
+                ));
             }
         }
         // Group-by menu hint — same gate as the claim in `build_view_claims`
@@ -8242,7 +8519,11 @@ impl ContentView {
                 .common_kb
                 .hint_label(&CommonAction::ColumnConfig, &self.key_icons);
             if !hints.iter().any(|h| h.key == c_key) {
-                hints.push(ActionBarHint::new(c_key, "columns", ActiveSource::ColumnConfig));
+                hints.push(ActionBarHint::new(
+                    c_key,
+                    "columns",
+                    ActiveSource::ColumnConfig,
+                ));
             }
         }
         // Jump-mode hint — always claimable (native Tasks tab shows `p jump`;
@@ -8459,11 +8740,7 @@ impl Component for ContentView {
         // Reserve a top line for the auth-status banner when set.
         let banner_text = self.auth_status_banner();
         let (banner_area, after_banner) = if banner_text.is_some() {
-            let chunks = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .split(area);
+            let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
             (Some(chunks[0]), chunks[1])
         } else {
             (None, area)
@@ -8472,11 +8749,8 @@ impl Component for ContentView {
         // Reserve a line for breadcrumbs when drilled down (active pane).
         let drilled = !self.active_pane().nav_stack.is_empty();
         let (breadcrumb_area, content_area) = if drilled {
-            let chunks = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .split(after_banner);
+            let chunks =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(after_banner);
             (Some(chunks[0]), chunks[1])
         } else {
             (None, after_banner)
@@ -8501,16 +8775,14 @@ impl Component for ContentView {
 
         // Render breadcrumbs.
         if let Some(bc_area) = breadcrumb_area {
-            self.active_pane().render_breadcrumbs(frame, bc_area, &self.view_defs);
+            self.active_pane()
+                .render_breadcrumbs(frame, bc_area, &self.view_defs);
         }
 
         // Reserve one line at the bottom for the pagination footer when set.
         let (content_area, page_footer_area) = if self.active_pane().last_page_info.is_some() {
-            let chunks = Layout::vertical([
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
+            let chunks =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(content_area);
             (chunks[0], Some(chunks[1]))
         } else {
             (content_area, None)
@@ -8525,7 +8797,12 @@ impl Component for ContentView {
         let multi = tree.leaf_count() > 1;
         let focused_id = tree.focus;
         tree.last_rects.clear();
-        let PaneTree { root, last_rects, pane_tags, .. } = tree;
+        let PaneTree {
+            root,
+            last_rects,
+            pane_tags,
+            ..
+        } = tree;
         root.render(
             frame,
             content_area,
@@ -8617,7 +8894,11 @@ fn typed_cell_content(raw: &str, col: &ColumnDef) -> CellContent {
 /// rendered as `now − that instant`; every other kind is the pure,
 /// time-independent [`typed_cell_content`]. Called per row build, so
 /// passing a fresh `now` on each repaint tick makes the timer advance.
-fn cell_content_for(item: &NodeSummary, col: &ColumnDef, now: chrono::DateTime<chrono::Local>) -> CellContent {
+fn cell_content_for(
+    item: &NodeSummary,
+    col: &ColumnDef,
+    now: chrono::DateTime<chrono::Local>,
+) -> CellContent {
     if col.kind == ColumnKind::Elapsed {
         let src_key = col.elapsed_from.as_deref().unwrap_or(col.key.as_str());
         let (text, alignment) = format_elapsed_since(metadata_field_value(item, src_key), now);
@@ -8727,7 +9008,12 @@ fn tree_label_segments_with_highlights(
     base_style_id: Option<usize>,
 ) -> Vec<(String, Option<usize>)> {
     if highlights.is_empty() {
-        return tree_label_cell_segments(fitted, connector_chars, connector_style_id, base_style_id);
+        return tree_label_cell_segments(
+            fitted,
+            connector_chars,
+            connector_style_id,
+            base_style_id,
+        );
     }
     let chars: Vec<char> = fitted.chars().collect();
     let len = chars.len();
@@ -8826,7 +9112,11 @@ struct TreeDrawOptions<'a> {
 /// (and trailing alignment padding) carries `None` = the cell's default
 /// style. Mirrors the legacy Trackings taskpath styling, but operates on the
 /// post-fit string so column sizing stays the table engine's job.
-fn path_cell_segments(fitted: &str, separator: &str, sep_style_id: usize) -> Vec<(String, Option<usize>)> {
+fn path_cell_segments(
+    fitted: &str,
+    separator: &str,
+    sep_style_id: usize,
+) -> Vec<(String, Option<usize>)> {
     if separator.is_empty() {
         return vec![(fitted.to_string(), None)];
     }
@@ -8925,7 +9215,9 @@ fn fuzzy_filtered_order(
                 return true;
             }
             let haystack = build_field_haystack(item, columns, fields);
-            tokens.iter().all(|tok| matcher.fuzzy_match(&haystack, tok).is_some())
+            tokens
+                .iter()
+                .all(|tok| matcher.fuzzy_match(&haystack, tok).is_some())
         })
         .map(|(i, _)| i)
         .collect()
@@ -8948,8 +9240,12 @@ fn raw_value_by_key<'a>(item: &'a NodeSummary, columns: &[ColumnDef], key: &str)
 /// formatter, so a `duration` total prints `H:MM:SS` and a `number` total
 /// prints verbatim — matching the data cells in the same column.
 fn format_total(total: i64, col: &ColumnDef) -> String {
-    let (text, _) =
-        format_typed_value(&total.to_string(), col.kind, col.format.as_deref(), path_separator(col));
+    let (text, _) = format_typed_value(
+        &total.to_string(),
+        col.kind,
+        col.format.as_deref(),
+        path_separator(col),
+    );
     text
 }
 
@@ -8985,9 +9281,8 @@ fn summary_row(
         label
     };
 
-    let mut cells = vec![
-        TableWidgetCell::grouped(label, label_span).with_style(GROUP_HEADER_STYLE_ID),
-    ];
+    let mut cells =
+        vec![TableWidgetCell::grouped(label, label_span).with_style(GROUP_HEADER_STYLE_ID)];
     for ci in label_span..ncols {
         match totals.iter().find(|&&(c, _)| c == ci) {
             Some(&(_, total)) => {
@@ -9076,7 +9371,12 @@ fn build_grouped_table(
         .map(|&i| {
             let path: Vec<String> = levels
                 .iter()
-                .map(|lvl| group_label(raw_value_by_key(&items[i], columns, &lvl.column), lvl.bucket))
+                .map(|lvl| {
+                    group_label(
+                        raw_value_by_key(&items[i], columns, &lvl.column),
+                        lvl.bucket,
+                    )
+                })
                 .collect();
             (i, path)
         })
@@ -9110,7 +9410,12 @@ fn build_grouped_table(
         .iter()
         .enumerate()
         .filter(|(_, a)| a.total_column.is_none())
-        .filter_map(|(ai, a)| columns.iter().position(|c| c.key == a.column).map(|ci| (ai, ci)))
+        .filter_map(|(ai, a)| {
+            columns
+                .iter()
+                .position(|c| c.key == a.column)
+                .map(|ci| (ai, ci))
+        })
         .collect();
     let column_total_aggs: Vec<(usize, usize)> = aggregates
         .iter()
@@ -9140,19 +9445,20 @@ fn build_grouped_table(
     let mut pos_totals: std::collections::HashMap<usize, Vec<(usize, i64)>> =
         std::collections::HashMap::new();
     if !column_total_aggs.is_empty() {
-        let close = |outer: Option<usize>,
-                     last: Option<usize>,
-                     map: &mut std::collections::HashMap<usize, Vec<(usize, i64)>>| {
-            if let (Some(g), Some(p)) = (outer, last) {
-                map.insert(
-                    p,
-                    column_total_aggs
-                        .iter()
-                        .map(|&(ai, ci)| (ci, plan.group_totals[g][ai]))
-                        .collect(),
-                );
-            }
-        };
+        let close =
+            |outer: Option<usize>,
+             last: Option<usize>,
+             map: &mut std::collections::HashMap<usize, Vec<(usize, i64)>>| {
+                if let (Some(g), Some(p)) = (outer, last) {
+                    map.insert(
+                        p,
+                        column_total_aggs
+                            .iter()
+                            .map(|&(ai, ci)| (ci, plan.group_totals[g][ai]))
+                            .collect(),
+                    );
+                }
+            };
         let mut outer_group: Option<usize> = None;
         let mut last_pos: Option<usize> = None;
         let mut data_pos = 0usize;
@@ -9199,7 +9505,11 @@ fn build_grouped_table(
             if total_target_cols.contains(&ci) {
                 row = row.cell(&col.key, total_cell(row_idx, ci, col));
             } else if col.source.as_deref() == Some("has_links") {
-                let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
+                let icon = if has_link_lookup(&item.id) {
+                    "🔗"
+                } else {
+                    " "
+                };
                 row = row.cell(&col.key, icon);
             } else {
                 row = row.cell(&col.key, cell_content_for(item, col, now));
@@ -9221,7 +9531,11 @@ fn build_grouped_table(
                 // column kind's alignment, exactly like a plain data cell.
                 row = row.cell(&col.key, typed_cell_content(&totals[slot].to_string(), col));
             } else if col.source.as_deref() == Some("has_links") {
-                let icon = if has_link_lookup(&item.id) { "🔗" } else { " " };
+                let icon = if has_link_lookup(&item.id) {
+                    "🔗"
+                } else {
+                    " "
+                };
                 row = row.cell(&col.key, icon);
             } else {
                 row = row.cell(&col.key, cell_content_for(item, col, now));
@@ -9243,8 +9557,17 @@ fn build_grouped_table(
                 data_rows.push(item_row(data_rows.len(), *index));
                 data_filtered.push(sorted_idx[*index]);
             }
-            PlanRow::Header { level, group, representative, .. } if summary_only && *level == deepest => {
-                data_rows.push(repr_row(data_rows.len(), *representative, &plan.group_totals[*group]));
+            PlanRow::Header {
+                level,
+                group,
+                representative,
+                ..
+            } if summary_only && *level == deepest => {
+                data_rows.push(repr_row(
+                    data_rows.len(),
+                    *representative,
+                    &plan.group_totals[*group],
+                ));
                 data_filtered.push(sorted_idx[*representative]);
             }
             _ => {}
@@ -9285,7 +9608,12 @@ fn build_grouped_table(
                 filtered_indices.push(data_filtered[next_data]);
                 next_data += 1;
             }
-            PlanRow::Header { label, level, group, .. } => {
+            PlanRow::Header {
+                label,
+                level,
+                group,
+                ..
+            } => {
                 // A `── label ──` group header, indented by nesting depth.
                 // The ISO group key stays the sort identity; only the
                 // rendered text goes through the human-facing mapping.
@@ -9326,10 +9654,21 @@ fn build_grouped_table(
             .map(|&(ai, ci)| (ci, plan.grand_totals[ai]))
             .collect();
         totals.sort_by_key(|&(ci, _)| ci);
-        vec![summary_row("── Σ ".to_string(), &totals, columns, &col_widths)]
+        vec![summary_row(
+            "── Σ ".to_string(),
+            &totals,
+            columns,
+            &col_widths,
+        )]
     };
 
-    GroupedBuild { widget_rows, footers, header_cells, filtered_indices, col_widths }
+    GroupedBuild {
+        widget_rows,
+        footers,
+        header_cells,
+        filtered_indices,
+        col_widths,
+    }
 }
 
 /// Render a free-text search query by substituting placeholders in `template`.
@@ -9354,7 +9693,7 @@ fn render_text_search(template: &str, input: &str) -> String {
     for ch in input.chars() {
         match ch {
             '\\' => escaped.push_str("\\\\"),
-            '"'  => escaped.push_str("\\\""),
+            '"' => escaped.push_str("\\\""),
             other => escaped.push(other),
         }
     }
@@ -9380,14 +9719,22 @@ fn render_text_search(template: &str, input: &str) -> String {
 /// (starting with a letter), then `-`, then one or more digits. Case-insensitive
 /// on the prefix; whitespace must already be trimmed by the caller.
 fn looks_like_issue_key(s: &str) -> bool {
-    let Some((prefix, suffix)) = s.split_once('-') else { return false };
+    let Some((prefix, suffix)) = s.split_once('-') else {
+        return false;
+    };
     if prefix.is_empty() || suffix.is_empty() {
         return false;
     }
-    if !prefix.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+    if !prefix
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+    {
         return false;
     }
-    prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
         && suffix.chars().all(|c| c.is_ascii_digit())
 }
 
@@ -9405,7 +9752,11 @@ pub(crate) fn parse_postgres_table_node_id(node_id: &str) -> Option<(String, Str
     if parts[0].is_empty() || parts[2].is_empty() || parts[4].is_empty() {
         return None;
     }
-    Some((parts[0].to_string(), parts[2].to_string(), parts[4].to_string()))
+    Some((
+        parts[0].to_string(),
+        parts[2].to_string(),
+        parts[4].to_string(),
+    ))
 }
 
 const DEFAULT_AUTO_MIN: usize = 5;
@@ -9425,7 +9776,10 @@ fn parse_sizing(s: &str) -> ColStrategy {
             max: DEFAULT_AUTO_MAX,
         };
     }
-    if let Some(inner) = trimmed.strip_prefix("flex(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("flex(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         if let Ok(n) = inner.parse::<usize>() {
             return ColStrategy::Flex(n);
         }
@@ -9434,12 +9788,18 @@ fn parse_sizing(s: &str) -> ColStrategy {
     // budget (unlike `auto(min,max)`, which deliberately overflows into
     // horizontal scroll). Use it to cap a column without pushing trailing
     // columns off-screen.
-    if let Some(inner) = trimmed.strip_prefix("fixed(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("fixed(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         if let Ok(n) = inner.parse::<usize>() {
             return ColStrategy::Fixed(n);
         }
     }
-    if let Some(inner) = trimmed.strip_prefix("auto(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("auto(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
         if parts.len() == 2 {
             if let (Ok(min), Ok(max)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
@@ -9822,8 +10182,11 @@ fn build_multiline_widget_rows(
     let mut builder = StyleMapBuilder::from_styles(style_styles);
     // The unread header style (chat adapters): interned once so every unread
     // row's header line shares the slot.
-    let unread_style_id =
-        builder.intern(Style::default().fg(unread_color).add_modifier(Modifier::BOLD));
+    let unread_style_id = builder.intern(
+        Style::default()
+            .fg(unread_color)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<TableWidgetRow> = computed_rows
         .into_iter()
@@ -9888,7 +10251,11 @@ fn build_multiline_widget_rows(
                 });
             }
             let row = TableWidgetRow::multiline(lines);
-            if selectable { row } else { row.not_selectable() }
+            if selectable {
+                row
+            } else {
+                row.not_selectable()
+            }
         })
         .collect();
 
@@ -9902,9 +10269,9 @@ fn build_multiline_widget_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use not_yet_done_content::mock::*;
     use crate::config::ThemeConfig;
     use crate::config::view_config::*;
+    use not_yet_done_content::mock::*;
 
     fn test_theme() -> Arc<Theme> {
         Arc::new(Theme::new(ThemeConfig::default()))
@@ -9941,9 +10308,48 @@ mod tests {
     fn multiline_widget_rows_chat_layout() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef {
+                key: "author".into(),
+                label: None,
+                source: Some("author".into()),
+                style: Some("accent".into()),
+                sizing: "max".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
+            ColumnDef {
+                key: "time".into(),
+                label: None,
+                source: Some("time".into()),
+                style: Some("text_dim".into()),
+                sizing: "max".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
+            ColumnDef {
+                key: "content".into(),
+                label: None,
+                source: Some("label".into()),
+                style: None,
+                sizing: "flex(1)".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -9962,13 +10368,30 @@ mod tests {
                 .cell("content", "hello"),
         ];
         let layout = vec![
-            LineLayout { columns: vec!["author".into(), "time".into()], highlight_on_select: true },
-            LineLayout { columns: vec!["content".into()], highlight_on_select: true },
-            LineLayout { columns: vec![], highlight_on_select: false },
+            LineLayout {
+                columns: vec!["author".into(), "time".into()],
+                highlight_on_select: true,
+            },
+            LineLayout {
+                columns: vec!["content".into()],
+                highlight_on_select: true,
+            },
+            LineLayout {
+                columns: vec![],
+                highlight_on_select: false,
+            },
         ];
 
-        let (rows, _style_map) =
-            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme, &[], theme.unread());
+        let (rows, _style_map) = build_multiline_widget_rows(
+            &data_rows,
+            &columns,
+            &col_ids,
+            &config,
+            &layout,
+            &theme,
+            &[],
+            theme.unread(),
+        );
 
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -9991,8 +10414,34 @@ mod tests {
     fn multiline_widget_rows_markdown_expands_body() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef {
+                key: "author".into(),
+                label: None,
+                source: Some("author".into()),
+                style: Some("accent".into()),
+                sizing: "max".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
+            ColumnDef {
+                key: "content".into(),
+                label: None,
+                source: Some("content".into()),
+                style: None,
+                sizing: "flex(1)".into(),
+                markdown: true,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -10008,16 +10457,35 @@ mod tests {
         let body = "First paragraph.\n\nSecond paragraph that is deliberately long \
                     so it has to wrap across several physical lines.";
         let data_rows = vec![
-            TRow::new(0u32).cell("author", "alice").cell("content", body),
+            TRow::new(0u32)
+                .cell("author", "alice")
+                .cell("content", body),
         ];
         let layout = vec![
-            LineLayout { columns: vec!["author".into()], highlight_on_select: true },
-            LineLayout { columns: vec!["content".into()], highlight_on_select: true },
-            LineLayout { columns: vec![], highlight_on_select: false },
+            LineLayout {
+                columns: vec!["author".into()],
+                highlight_on_select: true,
+            },
+            LineLayout {
+                columns: vec!["content".into()],
+                highlight_on_select: true,
+            },
+            LineLayout {
+                columns: vec![],
+                highlight_on_select: false,
+            },
         ];
 
-        let (rows, style_map) =
-            build_multiline_widget_rows(&data_rows, &columns, &col_ids, &config, &layout, &theme, &[], theme.unread());
+        let (rows, style_map) = build_multiline_widget_rows(
+            &data_rows,
+            &columns,
+            &col_ids,
+            &config,
+            &layout,
+            &theme,
+            &[],
+            theme.unread(),
+        );
 
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -10028,9 +10496,11 @@ mod tests {
         let body_lines = &row.lines[1..row.lines.len() - 1];
         assert!(body_lines.len() > 1, "body should span multiple lines");
         assert!(
-            body_lines
-                .iter()
-                .any(|l| l.cells.first().map(|c| !c.segments.is_empty()).unwrap_or(false)),
+            body_lines.iter().any(|l| l
+                .cells
+                .first()
+                .map(|c| !c.segments.is_empty())
+                .unwrap_or(false)),
             "at least one body line carries markdown segments"
         );
         // Every interned segment id is valid in the returned StyleMap.
@@ -10057,13 +10527,22 @@ mod tests {
 
     #[test]
     fn parse_postgres_table_node_id_rejects_wrong_markers() {
-        assert_eq!(parse_postgres_table_node_id("live/x/public/tables/users"), None);
-        assert_eq!(parse_postgres_table_node_id("live/schemas/public/y/users"), None);
+        assert_eq!(
+            parse_postgres_table_node_id("live/x/public/tables/users"),
+            None
+        );
+        assert_eq!(
+            parse_postgres_table_node_id("live/schemas/public/y/users"),
+            None
+        );
     }
 
     #[test]
     fn parse_postgres_table_node_id_rejects_arity_mismatch() {
-        assert_eq!(parse_postgres_table_node_id("live/schemas/public/tables"), None);
+        assert_eq!(
+            parse_postgres_table_node_id("live/schemas/public/tables"),
+            None
+        );
         assert_eq!(
             parse_postgres_table_node_id("live/schemas/public/tables/users/extra"),
             None,
@@ -10072,9 +10551,18 @@ mod tests {
 
     #[test]
     fn parse_postgres_table_node_id_rejects_empty_segments() {
-        assert_eq!(parse_postgres_table_node_id("/schemas/public/tables/users"), None);
-        assert_eq!(parse_postgres_table_node_id("live/schemas//tables/users"), None);
-        assert_eq!(parse_postgres_table_node_id("live/schemas/public/tables/"), None);
+        assert_eq!(
+            parse_postgres_table_node_id("/schemas/public/tables/users"),
+            None
+        );
+        assert_eq!(
+            parse_postgres_table_node_id("live/schemas//tables/users"),
+            None
+        );
+        assert_eq!(
+            parse_postgres_table_node_id("live/schemas/public/tables/"),
+            None
+        );
     }
 
     #[test]
@@ -10092,7 +10580,10 @@ mod tests {
             render_text_search(tpl, r"path\to\file"),
             r#"text ~ "path\\to\\file" ORDER BY updated DESC"#,
         );
-        assert_eq!(render_text_search("status = Open", "anything"), "status = Open");
+        assert_eq!(
+            render_text_search("status = Open", "anything"),
+            "status = Open"
+        );
     }
 
     #[test]
@@ -10163,8 +10654,18 @@ mod tests {
 
     fn test_config_with_children() -> ViewFileConfig {
         ViewFileConfig {
-            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
-            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            tab: TabConfig {
+                name: "Test".into(),
+                order: 0,
+                icon: None,
+            },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
             views: vec![ViewDef {
                 row_layout: None,
                 smooth_scroll: false,
@@ -10174,43 +10675,101 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ],
-                preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
-                actions: vec![
-                    ActionDef { name: "edit".into(), key: "e".into(), action_type: "edit".into(), id: None, node_id_from: None, navigate_to: None, fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: false, editor: None, under_selection: false, commit_on_save: false},
-                ],
-                children: vec![
-                    ChildDef {
-                        row_layout: None,
-                smooth_scroll: false,
-                        name: "Comments".into(),
-                        node_type: "mock:comment".into(),
-                        columns: vec![
-                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                        ],
-                        preview: None,
-                        actions: vec![],
-                        children: vec![],
-                        split: None,
-                        pagination: None,
-                        keybindings: HashMap::new(),
-                        action_chains: Default::default(),
-                        column_cursor: false,
-                        tree_label: None,
-                        shortcuts: HashMap::new(),
-                        enter_action: None,
-                        recursive: false,
-            editor_in_place: false,
-                        leaf_glyph: None,
-                        group_by: None,
-                        then_by: Vec::new(),
-                        aggregates: Vec::new(),
-                        summary_only: false,
-                        mark_read_on_reach_end: None,
+                    ColumnDef {
+                        key: "key".into(),
+                        label: Some("Key".into()),
+                        source: None,
+                        style: None,
+                        sizing: "max".into(),
+                        markdown: false,
+                        kind: ColumnKind::Text,
+                        format: None,
+                        separator: None,
+                        elapsed_from: None,
+                        tree_aggregate: None,
+                        collapsed_source: None,
+                    },
+                    ColumnDef {
+                        key: "summary".into(),
+                        label: None,
+                        source: Some("label".into()),
+                        style: None,
+                        sizing: "flex(1)".into(),
+                        markdown: false,
+                        kind: ColumnKind::Text,
+                        format: None,
+                        separator: None,
+                        elapsed_from: None,
+                        tree_aggregate: None,
+                        collapsed_source: None,
                     },
                 ],
+                preview: Some(PreviewConfig {
+                    enabled: true,
+                    source: "content".into(),
+                    action: None,
+                    node_id_from: None,
+                    split: "horizontal".into(),
+                    ratio: 50,
+                    keybinding: Some("p".into()),
+                    markdown: false,
+                }),
+                actions: vec![ActionDef {
+                    name: "edit".into(),
+                    key: "e".into(),
+                    action_type: "edit".into(),
+                    id: None,
+                    node_id_from: None,
+                    navigate_to: None,
+                    fuzzy_filter: None,
+                    search: None,
+                    text_search: None,
+                    tree_find: None,
+                    hide_from_bar: false,
+                    editor: None,
+                    under_selection: false,
+                    commit_on_save: false,
+                    inherit: false,
+                }],
+                children: vec![ChildDef {
+                    row_layout: None,
+                    smooth_scroll: false,
+                    name: "Comments".into(),
+                    node_type: "mock:comment".into(),
+                    columns: vec![ColumnDef {
+                        key: "body".into(),
+                        label: Some("Comment".into()),
+                        source: Some("label".into()),
+                        style: None,
+                        sizing: "flex(1)".into(),
+                        markdown: false,
+                        kind: ColumnKind::Text,
+                        format: None,
+                        separator: None,
+                        elapsed_from: None,
+                        tree_aggregate: None,
+                        collapsed_source: None,
+                    }],
+                    preview: None,
+                    actions: vec![],
+                    children: vec![],
+                    split: None,
+                    pagination: None,
+                    keybindings: HashMap::new(),
+                    action_chains: Default::default(),
+                    column_cursor: false,
+                    tree_label: None,
+                    shortcuts: HashMap::new(),
+                    enter_action: None,
+                    recursive: false,
+                    editor_in_place: false,
+                    leaf_glyph: None,
+                    group_by: None,
+                    then_by: Vec::new(),
+                    aggregates: Vec::new(),
+                    summary_only: false,
+                    mark_read_on_reach_end: None,
+                }],
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
@@ -10229,7 +10788,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -10237,18 +10796,25 @@ mod tests {
     fn mock_issues() -> Vec<NodeSummary> {
         vec![
             NodeSummary {
-                id: "ISS-1".into(), label: "First issue".into(),
-                node_type: issue_type(), metadata: not_yet_done_content::Metadata {
+                id: "ISS-1".into(),
+                label: "First issue".into(),
+                node_type: issue_type(),
+                metadata: not_yet_done_content::Metadata {
                     fields: vec![not_yet_done_content::MetadataField {
-                        key: "key".into(), value: "ISS-1".into(), display_label: "Key".into(),
-                        editable: false, allowed_values: None,
+                        key: "key".into(),
+                        value: "ISS-1".into(),
+                        display_label: "Key".into(),
+                        editable: false,
+                        allowed_values: None,
                     }],
                 },
                 has_children: None,
             },
             NodeSummary {
-                id: "ISS-2".into(), label: "Second issue".into(),
-                node_type: issue_type(), metadata: not_yet_done_content::Metadata::default(),
+                id: "ISS-2".into(),
+                label: "Second issue".into(),
+                node_type: issue_type(),
+                metadata: not_yet_done_content::Metadata::default(),
                 has_children: None,
             },
         ]
@@ -10257,13 +10823,17 @@ mod tests {
     fn mock_comments() -> Vec<NodeSummary> {
         vec![
             NodeSummary {
-                id: "COM-1".into(), label: "Great work".into(),
-                node_type: comment_type(), metadata: not_yet_done_content::Metadata::default(),
+                id: "COM-1".into(),
+                label: "Great work".into(),
+                node_type: comment_type(),
+                metadata: not_yet_done_content::Metadata::default(),
                 has_children: None,
             },
             NodeSummary {
-                id: "COM-2".into(), label: "Needs fix".into(),
-                node_type: comment_type(), metadata: not_yet_done_content::Metadata::default(),
+                id: "COM-2".into(),
+                label: "Needs fix".into(),
+                node_type: comment_type(),
+                metadata: not_yet_done_content::Metadata::default(),
                 has_children: None,
             },
         ]
@@ -10329,6 +10899,7 @@ mod tests {
             editor: None,
             under_selection: false,
             commit_on_save: false,
+            inherit: false,
         });
         // `a` begins the `al` chord → detected as a prefix …
         assert!(view.yaml_action_chord_prefix("a"));
@@ -10344,7 +10915,10 @@ mod tests {
     fn current_preview_at_root() {
         let config = test_config_with_children();
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        let preview = view.active_pane().current_preview_config(&view.view_defs).unwrap();
+        let preview = view
+            .active_pane()
+            .current_preview_config(&view.view_defs)
+            .unwrap();
         assert_eq!(preview.keybinding.as_deref(), Some("p"));
     }
 
@@ -10364,12 +10938,28 @@ mod tests {
     /// message list.
     fn smooth_chat_config() -> ViewFileConfig {
         ViewFileConfig {
-            tab: TabConfig { name: "Chat".into(), order: 0, icon: None },
-            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            tab: TabConfig {
+                name: "Chat".into(),
+                order: 0,
+                icon: None,
+            },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
             views: vec![ViewDef {
                 row_layout: Some(vec![
-                    LineLayout { columns: vec!["body".into()], highlight_on_select: true },
-                    LineLayout { columns: vec![], highlight_on_select: false },
+                    LineLayout {
+                        columns: vec!["body".into()],
+                        highlight_on_select: true,
+                    },
+                    LineLayout {
+                        columns: vec![],
+                        highlight_on_select: false,
+                    },
                 ]),
                 smooth_scroll: true,
                 name: "messages".into(),
@@ -10377,9 +10967,20 @@ mod tests {
                 default: true,
                 key: None,
                 query: None,
-                columns: vec![
-                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ],
+                columns: vec![ColumnDef {
+                    key: "body".into(),
+                    label: None,
+                    source: Some("label".into()),
+                    style: None,
+                    sizing: "flex(1)".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                }],
                 preview: None,
                 actions: vec![],
                 children: vec![],
@@ -10401,7 +11002,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -10419,7 +11020,9 @@ mod tests {
         let config = smooth_chat_config();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // 30 two-line messages = 60 physical lines, far past a 12-row view.
-        let items: Vec<_> = (0..30).map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg")).collect();
+        let items: Vec<_> = (0..30)
+            .map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg"))
+            .collect();
         view.set_items(items, Vec::new(), None, Vec::new(), None);
 
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -10457,7 +11060,9 @@ mod tests {
         let config = smooth_chat_config();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // Only 3 two-line messages = 6 physical lines, well within a 20-row view.
-        let items: Vec<_> = (0..3).map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg")).collect();
+        let items: Vec<_> = (0..3)
+            .map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg"))
+            .collect();
         view.set_items(items, Vec::new(), None, Vec::new(), None);
 
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
@@ -10542,17 +11147,40 @@ mod tests {
         root.smooth_scroll = false;
         root.children = vec![ChildDef {
             row_layout: Some(vec![
-                LineLayout { columns: vec!["body".into()], highlight_on_select: true },
-                LineLayout { columns: vec![], highlight_on_select: false },
+                LineLayout {
+                    columns: vec!["body".into()],
+                    highlight_on_select: true,
+                },
+                LineLayout {
+                    columns: vec![],
+                    highlight_on_select: false,
+                },
             ]),
             smooth_scroll: true,
             name: "messages".into(),
             node_type: "mock:msg".into(),
-            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None }],
+            columns: vec![ColumnDef {
+                key: "body".into(),
+                label: None,
+                source: Some("label".into()),
+                style: None,
+                sizing: "flex(1)".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            }],
             preview: None,
             actions: Vec::new(),
             children: Vec::new(),
-            split: Some(SplitDef { direction: SplitDirection::Right, ratio: 0.8, coupled: false }),
+            split: Some(SplitDef {
+                direction: SplitDirection::Right,
+                ratio: 0.8,
+                coupled: false,
+            }),
             pagination: None,
             keybindings: HashMap::new(),
             action_chains: Default::default(),
@@ -10571,7 +11199,13 @@ mod tests {
         }];
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.set_items(vec![tnode("chan1", "general", "mock:channel")], Vec::new(), None, Vec::new(), None);
+        view.set_items(
+            vec![tnode("chan1", "general", "mock:channel")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
         let child_def = view.view_defs[0].children[0].clone();
 
         // Drill into the channel → split messages pane (focused).
@@ -10581,10 +11215,19 @@ mod tests {
             other => panic!("expected DrillDown, got {other:?}"),
         };
         // Load 30 two-line messages into the split pane.
-        let items: Vec<_> = (0..30).map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg")).collect();
+        let items: Vec<_> = (0..30)
+            .map(|i| tnode(&format!("m{i}"), &format!("message {i}"), "mock:msg"))
+            .collect();
         view.set_items_for_pane(pane_id, items, Vec::new(), None, Vec::new(), None);
-        assert_eq!(view.active_pane_id(), pane_id, "split pane is focused after drill");
-        assert!(view.active_pane().current_smooth_scroll(&view.view_defs), "messages pane is smooth");
+        assert_eq!(
+            view.active_pane_id(),
+            pane_id,
+            "split pane is focused after drill"
+        );
+        assert!(
+            view.active_pane().current_smooth_scroll(&view.view_defs),
+            "messages pane is smooth"
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         let render = |view: &mut ContentView, terminal: &mut Terminal<TestBackend>| {
@@ -10602,7 +11245,10 @@ mod tests {
         view.rebuild_table();
         let after = render(&mut view, &mut terminal);
 
-        assert_ne!(before, after, "pressing `j` must scroll the split smooth pane");
+        assert_ne!(
+            before, after,
+            "pressing `j` must scroll the split smooth pane"
+        );
     }
 
     /// The real chat uses a `markdown: true` column that expands into N
@@ -10621,7 +11267,9 @@ mod tests {
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // Long, multi-paragraph bodies so each message wraps to several lines.
         let body = "# Heading\n\nFirst paragraph with enough words to wrap across the narrow pane width.\n\n- bullet one\n- bullet two";
-        let items: Vec<_> = (0..20).map(|i| tnode(&format!("m{i}"), &format!("{body} ({i})"), "mock:msg")).collect();
+        let items: Vec<_> = (0..20)
+            .map(|i| tnode(&format!("m{i}"), &format!("{body} ({i})"), "mock:msg"))
+            .collect();
         view.set_items(items, Vec::new(), None, Vec::new(), None);
 
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -10640,16 +11288,28 @@ mod tests {
         view.rebuild_table();
         let after = render(&mut view, &mut terminal);
 
-        assert_ne!(before, after, "pressing `j` must scroll the markdown smooth pane");
+        assert_ne!(
+            before, after,
+            "pressing `j` must scroll the markdown smooth pane"
+        );
     }
 
     #[test]
     fn set_items_with_error() {
         let config = test_config_with_children();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.set_items(vec![], Vec::new(), None, Vec::new(), Some("connection failed".into()));
+        view.set_items(
+            vec![],
+            Vec::new(),
+            None,
+            Vec::new(),
+            Some("connection failed".into()),
+        );
         assert!(view.active_pane().items.is_empty());
-        assert_eq!(view.active_pane().fetch_error.as_deref(), Some("connection failed"));
+        assert_eq!(
+            view.active_pane().fetch_error.as_deref(),
+            Some("connection failed")
+        );
     }
 
     #[test]
@@ -10660,12 +11320,20 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        let child_type = view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        let child_type = view.active_pane_mut().drill_down_prepare(
+            "ISS-1",
+            "First issue",
+            &child_def,
+            &view_defs,
+        );
 
         assert_eq!(child_type, "mock:comment");
         assert_eq!(view.nav_depth(), 1);
         assert!(view.active_pane().active_child.is_some());
-        assert_eq!(view.active_pane().active_child.as_ref().unwrap().node_type, "mock:comment");
+        assert_eq!(
+            view.active_pane().active_child.as_ref().unwrap().node_type,
+            "mock:comment"
+        );
         assert!(view.active_pane().items.is_empty());
 
         view.set_items(mock_comments(), Vec::new(), None, Vec::new(), None);
@@ -10681,7 +11349,8 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
 
         let cols = view.active_pane().current_columns(&view.view_defs);
         assert_eq!(cols.len(), 1);
@@ -10696,9 +11365,14 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
 
-        assert!(view.active_pane().current_children(&view.view_defs).is_empty());
+        assert!(
+            view.active_pane()
+                .current_children(&view.view_defs)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10709,7 +11383,8 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
 
         let crumbs = view.breadcrumbs();
         assert_eq!(crumbs.len(), 2);
@@ -10726,7 +11401,8 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
         view.set_items(mock_comments(), Vec::new(), None, Vec::new(), None);
         assert_eq!(view.active_pane().items.len(), 2);
 
@@ -10749,8 +11425,18 @@ mod tests {
 
     fn test_config_with_tree() -> ViewFileConfig {
         ViewFileConfig {
-            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
-            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            tab: TabConfig {
+                name: "Test".into(),
+                order: 0,
+                icon: None,
+            },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
             views: vec![ViewDef {
                 row_layout: None,
                 smooth_scroll: false,
@@ -10759,41 +11445,61 @@ mod tests {
                 default: true,
                 key: None,
                 query: None,
-                columns: vec![
-                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ],
+                columns: vec![ColumnDef {
+                    key: "name".into(),
+                    label: Some("Name".into()),
+                    source: Some("label".into()),
+                    style: None,
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                }],
                 preview: None,
                 actions: vec![],
-                children: vec![
-                    ChildDef {
-                        row_layout: None,
-                smooth_scroll: false,
-                        name: "Schemas".into(),
-                        node_type: "mock:schema".into(),
-                        columns: vec![
-                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                        ],
-                        preview: None,
-                        actions: vec![],
-                        children: vec![],
-                        split: None,
-                        pagination: None,
-                        keybindings: HashMap::new(),
-                        action_chains: Default::default(),
-                        column_cursor: false,
-                        tree_label: Some("name".into()),
-                        shortcuts: HashMap::new(),
-                        enter_action: None,
-                        recursive: false,
-            editor_in_place: false,
-                        leaf_glyph: None,
-                        group_by: None,
-                        then_by: Vec::new(),
-                        aggregates: Vec::new(),
-                        summary_only: false,
-                        mark_read_on_reach_end: None,
-                    },
-                ],
+                children: vec![ChildDef {
+                    row_layout: None,
+                    smooth_scroll: false,
+                    name: "Schemas".into(),
+                    node_type: "mock:schema".into(),
+                    columns: vec![ColumnDef {
+                        key: "name".into(),
+                        label: Some("Name".into()),
+                        source: Some("label".into()),
+                        style: None,
+                        sizing: "max".into(),
+                        markdown: false,
+                        kind: ColumnKind::Text,
+                        format: None,
+                        separator: None,
+                        elapsed_from: None,
+                        tree_aggregate: None,
+                        collapsed_source: None,
+                    }],
+                    preview: None,
+                    actions: vec![],
+                    children: vec![],
+                    split: None,
+                    pagination: None,
+                    keybindings: HashMap::new(),
+                    action_chains: Default::default(),
+                    column_cursor: false,
+                    tree_label: Some("name".into()),
+                    shortcuts: HashMap::new(),
+                    enter_action: None,
+                    recursive: false,
+                    editor_in_place: false,
+                    leaf_glyph: None,
+                    group_by: None,
+                    then_by: Vec::new(),
+                    aggregates: Vec::new(),
+                    summary_only: false,
+                    mark_read_on_reach_end: None,
+                }],
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
@@ -10812,7 +11518,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -10820,20 +11526,26 @@ mod tests {
     fn mock_dbs() -> Vec<NodeSummary> {
         vec![
             NodeSummary {
-                id: "db1".into(), label: "db1".into(),
+                id: "db1".into(),
+                label: "db1".into(),
                 node_type: not_yet_done_content::NodeType {
-                    type_id: "mock:db".into(), mime_type: "text/plain".into(),
-                    syntax: None, file_extension: ".txt".into(),
+                    type_id: "mock:db".into(),
+                    mime_type: "text/plain".into(),
+                    syntax: None,
+                    file_extension: ".txt".into(),
                     display_name: "DB".into(),
                 },
                 metadata: not_yet_done_content::Metadata::default(),
                 has_children: None,
             },
             NodeSummary {
-                id: "db2".into(), label: "db2".into(),
+                id: "db2".into(),
+                label: "db2".into(),
                 node_type: not_yet_done_content::NodeType {
-                    type_id: "mock:db".into(), mime_type: "text/plain".into(),
-                    syntax: None, file_extension: ".txt".into(),
+                    type_id: "mock:db".into(),
+                    mime_type: "text/plain".into(),
+                    syntax: None,
+                    file_extension: ".txt".into(),
                     display_name: "DB".into(),
                 },
                 metadata: not_yet_done_content::Metadata::default(),
@@ -10845,20 +11557,26 @@ mod tests {
     fn mock_schemas() -> Vec<NodeSummary> {
         vec![
             NodeSummary {
-                id: "public".into(), label: "public".into(),
+                id: "public".into(),
+                label: "public".into(),
                 node_type: not_yet_done_content::NodeType {
-                    type_id: "mock:schema".into(), mime_type: "text/plain".into(),
-                    syntax: None, file_extension: ".txt".into(),
+                    type_id: "mock:schema".into(),
+                    mime_type: "text/plain".into(),
+                    syntax: None,
+                    file_extension: ".txt".into(),
                     display_name: "Schema".into(),
                 },
                 metadata: not_yet_done_content::Metadata::default(),
                 has_children: None,
             },
             NodeSummary {
-                id: "private".into(), label: "private".into(),
+                id: "private".into(),
+                label: "private".into(),
                 node_type: not_yet_done_content::NodeType {
-                    type_id: "mock:schema".into(), mime_type: "text/plain".into(),
-                    syntax: None, file_extension: ".txt".into(),
+                    type_id: "mock:schema".into(),
+                    mime_type: "text/plain".into(),
+                    syntax: None,
+                    file_extension: ".txt".into(),
                     display_name: "Schema".into(),
                 },
                 metadata: not_yet_done_content::Metadata::default(),
@@ -10941,12 +11659,34 @@ mod tests {
     ///         └─ cat (key `title`) ── chan (key `title`) ── msg (leaf)  [deeper, divergent key]
     fn heterogeneous_uneven_tree_config() -> ViewFileConfig {
         let dm_msg = hchild("dm_msg", "mock:dmmsg", None, vec![hcol("body")], vec![]);
-        let dm = hchild("dm", "mock:dm", Some("name"), vec![hcol("name")], vec![dm_msg]);
+        let dm = hchild(
+            "dm",
+            "mock:dm",
+            Some("name"),
+            vec![hcol("name")],
+            vec![dm_msg],
+        );
         let chan_msg = hchild("chan_msg", "mock:msg", None, vec![hcol("body")], vec![]);
-        let chan = hchild("chan", "mock:chan", Some("title"), vec![hcol("title")], vec![chan_msg]);
-        let cat = hchild("cat", "mock:cat", Some("title"), vec![hcol("title")], vec![chan]);
+        let chan = hchild(
+            "chan",
+            "mock:chan",
+            Some("title"),
+            vec![hcol("title")],
+            vec![chan_msg],
+        );
+        let cat = hchild(
+            "cat",
+            "mock:cat",
+            Some("title"),
+            vec![hcol("title")],
+            vec![chan],
+        );
         ViewFileConfig {
-            tab: TabConfig { name: "Chat".into(), order: 0, icon: None },
+            tab: TabConfig {
+                name: "Chat".into(),
+                order: 0,
+                icon: None,
+            },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
                 id: None,
@@ -10984,7 +11724,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -11015,7 +11755,10 @@ mod tests {
             // server → DM (first branch) + category (second branch)
             tree.set_cached_children(
                 vec!["srv1".into()],
-                vec![tnode("dm1", "dm1", "mock:dm"), tnode("cat1", "Cat", "mock:cat")],
+                vec![
+                    tnode("dm1", "dm1", "mock:dm"),
+                    tnode("cat1", "Cat", "mock:cat"),
+                ],
                 None,
             );
             tree.expanded.insert(vec!["srv1".into()]);
@@ -11036,14 +11779,18 @@ mod tests {
         // DFS order: srv1, dm1, cat1, chan1.
         let tree = pane.tree.as_ref().unwrap();
         assert_eq!(
-            tree.entries.iter().map(|e| e.node.id.as_str()).collect::<Vec<_>>(),
+            tree.entries
+                .iter()
+                .map(|e| e.node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["srv1", "dm1", "cat1", "chan1"],
         );
 
         let columns = pane.current_columns(&view_defs);
         // Cursor level is the root → its label column key is "name".
         let label_key = TColumnId::new("name");
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 4, "every visible entry produces a row");
 
         // Every row — including the deep, divergent-key channel — must
@@ -11097,7 +11844,11 @@ mod tests {
         );
         child.recursive = true;
         ViewFileConfig {
-            tab: TabConfig { name: "Tasks".into(), order: 0, icon: None },
+            tab: TabConfig {
+                name: "Tasks".into(),
+                order: 0,
+                icon: None,
+            },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
                 id: None,
@@ -11135,7 +11886,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -11149,8 +11900,7 @@ mod tests {
         // empty. Now each entry fills the columns its OWN level declares, so
         // every depth shows its data.
         let config = uniform_recursive_config();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
             vec![tnode_val("root", "Root", "ROOTVAL")],
             Vec::new(),
@@ -11176,7 +11926,8 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 2, "root + expanded child");
         let val_key = TColumnId::new("val");
         let cell = |i: usize| {
@@ -11200,8 +11951,7 @@ mod tests {
         // forest helpers), identical to the native task tree — not a plain
         // indent + `·`.
         let config = uniform_recursive_config();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
             vec![tnode_val("root", "Root", "RV")],
             Vec::new(),
@@ -11225,10 +11975,16 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
-        let label =
-            |i: usize| rows[i].cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default();
+        let label = |i: usize| {
+            rows[i]
+                .cells
+                .get(&name_key)
+                .map(|c| c.text.clone())
+                .unwrap_or_default()
+        };
         // Root (depth 0, expanded): expand glyph, no box prefix.
         assert!(label(0).starts_with("▼ "), "root label: {:?}", label(0));
         assert!(label(0).contains("Root"));
@@ -11245,8 +12001,7 @@ mod tests {
     /// from `config` and return the rendered tree-label cell texts.
     /// Shared by the `tree_lines` / `tree_markers` config tests.
     fn tree_label_texts(config: ViewFileConfig) -> Vec<String> {
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
             vec![tnode_val("root", "Root", "RV")],
             Vec::new(),
@@ -11270,10 +12025,16 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
         rows.iter()
-            .map(|r| r.cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default())
+            .map(|r| {
+                r.cells
+                    .get(&name_key)
+                    .map(|c| c.text.clone())
+                    .unwrap_or_default()
+            })
             .collect()
     }
 
@@ -11303,7 +12064,11 @@ mod tests {
         });
         let labels = tree_label_texts(config);
         assert!(labels[0].starts_with("- Root"), "root: {:?}", labels[0]);
-        assert!(labels[1].starts_with("└── + Child"), "child: {:?}", labels[1]);
+        assert!(
+            labels[1].starts_with("└── + Child"),
+            "child: {:?}",
+            labels[1]
+        );
     }
 
     #[test]
@@ -11345,9 +12110,14 @@ mod tests {
         };
 
         let config = uniform_recursive_config();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.set_items(vec![unread("root", "Root")], Vec::new(), None, Vec::new(), None);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![unread("root", "Root")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
         let view_defs = view.view_defs.clone();
         {
             let pane = view.active_pane_mut();
@@ -11364,7 +12134,11 @@ mod tests {
             pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
         let label = |i: usize| -> String {
-            rows[i].cells.get(&name_key).map(|c| c.text.clone()).unwrap_or_default()
+            rows[i]
+                .cells
+                .get(&name_key)
+                .map(|c| c.text.clone())
+                .unwrap_or_default()
         };
         // Root: expand arrow, then the marker, then the label.
         assert_eq!(label(0), "▼ 💬 Root", "root: {:?}", label(0));
@@ -11421,7 +12195,11 @@ mod tests {
         view.active_pane_mut().table.set_selected(1);
         view.detect_mark_read_reached(0);
         match view.take_pending_mark_read() {
-            Some(ViewRequest::InvokeNodeAction { node_id, action_name, .. }) => {
+            Some(ViewRequest::InvokeNodeAction {
+                node_id,
+                action_name,
+                ..
+            }) => {
                 assert_eq!(node_id, "m2");
                 assert_eq!(action_name, "mark-read");
             }
@@ -11432,7 +12210,10 @@ mod tests {
         let mut view = setup(true);
         view.active_pane_mut().table.set_selected(1);
         view.detect_mark_read_reached(1);
-        assert!(view.take_pending_mark_read().is_none(), "no arrival, no ack");
+        assert!(
+            view.take_pending_mark_read().is_none(),
+            "no arrival, no ack"
+        );
 
         // Arrival, but the last row is already read → nothing queued.
         let mut view = setup(false);
@@ -11448,8 +12229,7 @@ mod tests {
         // render path can paint it apart from the label. The span must cover
         // exactly the connector prefix — not the label text.
         let config = uniform_recursive_config();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
             vec![tnode_val("root", "Root", "RV")],
             Vec::new(),
@@ -11473,7 +12253,8 @@ mod tests {
 
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         let name_key = TColumnId::new("name");
         let cell = |i: usize| rows[i].cells.get(&name_key).expect("label cell");
 
@@ -11495,7 +12276,11 @@ mod tests {
         // The child is itself expandable (uniform recursive tree), so its
         // connector is the box prefix *plus* the collapsed-arrow — both are
         // part of the styled connector run, the label `Child` is not.
-        assert_eq!(span_prefix(1), "└── ▶ ", "child connector = box glyphs + arrow");
+        assert_eq!(
+            span_prefix(1),
+            "└── ▶ ",
+            "child connector = box glyphs + arrow"
+        );
     }
 
     #[test]
@@ -11523,7 +12308,12 @@ mod tests {
         // A `base_style_id` paints the label remainder (unread highlight) while
         // leaving the connector run in its own slot.
         assert_eq!(
-            tree_label_cell_segments("└── #general ", 4, TREE_CONNECTOR_STYLE_ID, Some(UNREAD_STYLE_ID)),
+            tree_label_cell_segments(
+                "└── #general ",
+                4,
+                TREE_CONNECTOR_STYLE_ID,
+                Some(UNREAD_STYLE_ID)
+            ),
             vec![
                 ("└── ".to_string(), Some(TREE_CONNECTOR_STYLE_ID)),
                 ("#general ".to_string(), Some(UNREAD_STYLE_ID)),
@@ -11644,7 +12434,11 @@ mod tests {
             }),
         };
         ViewFileConfig {
-            tab: TabConfig { name: "Worklog".into(), order: 0, icon: None },
+            tab: TabConfig {
+                name: "Worklog".into(),
+                order: 0,
+                icon: None,
+            },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
                 id: None,
@@ -11682,7 +12476,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -11713,7 +12507,9 @@ mod tests {
             allowed_values: None,
         };
         let mut n = tnode(id, label, "mock:task");
-        n.metadata = Metadata { fields: vec![field("dur", own), field("dur_cum", cumulated)] };
+        n.metadata = Metadata {
+            fields: vec![field("dur", own), field("dur_cum", cumulated)],
+        };
         n
     }
 
@@ -11745,7 +12541,8 @@ mod tests {
         }
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 1, "exactly one visible row");
         rows[0]
             .cells
@@ -11757,7 +12554,10 @@ mod tests {
     #[test]
     fn tree_aggregate_default_own_shows_node_value() {
         // No toggle, default `own` → the column's own `dur` field (30).
-        assert_eq!(tree_aggregate_dur_cell(TreeAggregateDefault::Own, false), "30");
+        assert_eq!(
+            tree_aggregate_dur_cell(TreeAggregateDefault::Own, false),
+            "30"
+        );
     }
 
     #[test]
@@ -11772,7 +12572,10 @@ mod tests {
     #[test]
     fn tree_aggregate_toggle_flips_own_to_cumulated() {
         // Default `own` (30) → one toggle flips to the cumulated field (100).
-        assert_eq!(tree_aggregate_dur_cell(TreeAggregateDefault::Own, true), "100");
+        assert_eq!(
+            tree_aggregate_dur_cell(TreeAggregateDefault::Own, true),
+            "100"
+        );
     }
 
     #[test]
@@ -11912,7 +12715,10 @@ mod tests {
         }
     }
 
-    fn sub_node(id: &str, children: Vec<not_yet_done_content::SubtreeNode>) -> not_yet_done_content::SubtreeNode {
+    fn sub_node(
+        id: &str,
+        children: Vec<not_yet_done_content::SubtreeNode>,
+    ) -> not_yet_done_content::SubtreeNode {
         not_yet_done_content::SubtreeNode {
             summary: sub_summary(id),
             children: Subtree {
@@ -11934,7 +12740,10 @@ mod tests {
             items: vec![
                 sub_node(
                     "A",
-                    vec![sub_node("A1", vec![sub_node("A1a", vec![])]), sub_node("A2", vec![])],
+                    vec![
+                        sub_node("A1", vec![sub_node("A1a", vec![])]),
+                        sub_node("A2", vec![]),
+                    ],
                 ),
                 sub_node("B", vec![]),
             ],
@@ -11971,10 +12780,16 @@ mod tests {
         );
         // Leaves get no cache slot (no children laid down).
         assert!(!eager.cache.contains_key(&vec!["B".to_string()]));
-        assert!(!eager.cache.contains_key(&vec!["A".to_string(), "A2".to_string()]));
-        assert!(!eager
-            .cache
-            .contains_key(&vec!["A".to_string(), "A1".to_string(), "A1a".to_string()]));
+        assert!(
+            !eager
+                .cache
+                .contains_key(&vec!["A".to_string(), "A2".to_string()])
+        );
+        assert!(!eager.cache.contains_key(&vec![
+            "A".to_string(),
+            "A1".to_string(),
+            "A1a".to_string()
+        ]));
 
         // Exactly the parents-with-children are expanded.
         let expected_expanded: std::collections::HashSet<Vec<String>> = [
@@ -11996,7 +12811,9 @@ mod tests {
             vec![sub_summary("A1"), sub_summary("A2")],
             None,
         );
-        cascade.expanded.insert(vec!["A".to_string(), "A1".to_string()]);
+        cascade
+            .expanded
+            .insert(vec!["A".to_string(), "A1".to_string()]);
         cascade.set_cached_children(
             vec!["A".to_string(), "A1".to_string()],
             vec![sub_summary("A1a")],
@@ -12006,7 +12823,10 @@ mod tests {
         assert_eq!(eager.expanded, cascade.expanded);
         assert_eq!(
             eager.cache.keys().collect::<std::collections::HashSet<_>>(),
-            cascade.cache.keys().collect::<std::collections::HashSet<_>>(),
+            cascade
+                .cache
+                .keys()
+                .collect::<std::collections::HashSet<_>>(),
         );
         for (key, ec) in &eager.cache {
             let cc = &cascade.cache[key];
@@ -12028,8 +12848,7 @@ mod tests {
     #[test]
     fn reload_now_bucket_splices_one_bucket_and_leaves_siblings() {
         let config = test_config_with_tree();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // Root level = two buckets (db1, db2), each with one schema child.
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         let view_defs = view.view_defs.clone();
@@ -12101,8 +12920,7 @@ mod tests {
     #[test]
     fn patch_row_swaps_deep_tree_rows_and_bucket_headers() {
         let config = test_config_with_tree();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // Root level = two buckets (db1, db2); db1 has one (deep) child.
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         let view_defs = view.view_defs.clone();
@@ -12156,7 +12974,10 @@ mod tests {
             tree.set_cached_children(
                 vec!["db1".into()],
                 mock_schemas(),
-                Some(PageRequest { offset: 2, limit: 2 }),
+                Some(PageRequest {
+                    offset: 2,
+                    limit: 2,
+                }),
             );
             tree.expanded.insert(vec!["db1".into()]);
             tree.rebuild_entries(&view_defs[0]);
@@ -12296,7 +13117,11 @@ mod tests {
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         let view_defs = view.view_defs.clone();
         view.active_pane_mut().table.set_selected(0);
-        assert!(view.active_pane_mut().try_tree_smart_collapse(&view_defs).is_none());
+        assert!(
+            view.active_pane_mut()
+                .try_tree_smart_collapse(&view_defs)
+                .is_none()
+        );
     }
 
     #[test]
@@ -12326,7 +13151,10 @@ mod tests {
         }
         let pane = view.active_pane();
         let tree = pane.tree.as_ref().unwrap();
-        assert!(!tree.expanded.contains(&vec!["db1".to_string()]), "db1 stayed expanded");
+        assert!(
+            !tree.expanded.contains(&vec!["db1".to_string()]),
+            "db1 stayed expanded"
+        );
         assert_eq!(tree.entries.len(), 2, "only db1 + db2 remain");
         assert_eq!(tree.entries[0].node.id, "db1");
         assert_eq!(tree.entries[1].node.id, "db2");
@@ -12358,12 +13186,17 @@ mod tests {
 
         // The query-apply path: set_query clears the tree, set_items
         // feeds the (single) filtered root back in.
-        view.active_pane_mut().set_query("filtered".into(), Some("sq".into()));
+        view.active_pane_mut()
+            .set_query("filtered".into(), Some("sq".into()));
         let filtered_root = vec![mock_dbs().remove(0)];
         view.set_items(filtered_root, Vec::new(), None, Vec::new(), None);
 
         let pane = view.active_pane();
-        assert_eq!(pane.tree_visible_indices.len(), 1, "one filtered root entry");
+        assert_eq!(
+            pane.tree_visible_indices.len(),
+            1,
+            "one filtered root entry"
+        );
         assert_eq!(
             pane.table.selected_row(),
             0,
@@ -12388,13 +13221,17 @@ mod tests {
             id: None,
             node_id_from: None,
             navigate_to: None,
-            fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig { fields: Vec::new() }),
+            fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig {
+                fields: Vec::new(),
+            }),
             search: None,
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -12497,7 +13334,8 @@ mod tests {
         // Expanded while the filter is "open": db1 + its two schemas + db2.
         assert_eq!(view.active_pane().tree.as_ref().unwrap().entries.len(), 4);
 
-        view.active_pane_mut().restore_tree_filter_expand(&view_defs);
+        view.active_pane_mut()
+            .restore_tree_filter_expand(&view_defs);
 
         let pane = view.active_pane();
         assert!(pane.tree_filter_expand_stash.is_none());
@@ -12587,7 +13425,10 @@ mod tests {
             tree.set_cached_children(
                 vec!["db1".into()],
                 mock_schemas(),
-                Some(PageRequest { offset: 2, limit: 2 }),
+                Some(PageRequest {
+                    offset: 2,
+                    limit: 2,
+                }),
             );
             tree.expanded.insert(vec!["db1".into()]);
             tree.rebuild_entries(&view_defs[0]);
@@ -12604,7 +13445,12 @@ mod tests {
         let visible: Vec<(&str, bool)> = pane
             .tree_visible_indices
             .iter()
-            .map(|&i| (tree.entries[i].node.id.as_str(), tree.entries[i].is_more_placeholder))
+            .map(|&i| {
+                (
+                    tree.entries[i].node.id.as_str(),
+                    tree.entries[i].is_more_placeholder,
+                )
+            })
             .collect();
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].0, "db1");
@@ -12628,7 +13474,10 @@ mod tests {
             tree.set_cached_children(
                 vec!["db1".into()],
                 mock_schemas(),
-                Some(PageRequest { offset: 2, limit: 2 }),
+                Some(PageRequest {
+                    offset: 2,
+                    limit: 2,
+                }),
             );
             tree.expanded.insert(vec!["db1".into()]);
             tree.rebuild_entries(&view_defs[0]);
@@ -12755,8 +13604,7 @@ mod tests {
             mark_read_on_reach_end: None,
         });
 
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         let view_defs = view.view_defs.clone();
         let source_pane_id = view.active_pane_id();
@@ -12779,9 +13627,11 @@ mod tests {
             .try_tree_open(view_index, source_pane_id, &view_defs)
             .expect("schema row yields a drill message");
         let (item_id, item_label, child_def) = match msg {
-            SubViewMessage::ContentDrill { item_id, item_label, child_def } => {
-                (item_id, item_label, *child_def)
-            }
+            SubViewMessage::ContentDrill {
+                item_id,
+                item_label,
+                child_def,
+            } => (item_id, item_label, *child_def),
             other => panic!("expected ContentDrill, got {other:?}"),
         };
         assert!(child_def.tree_label.is_none(), "leaf has no tree_label");
@@ -12851,8 +13701,7 @@ mod tests {
             mark_read_on_reach_end: None,
         });
 
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         let view_defs = view.view_defs.clone();
         let pane_id = view.active_pane_id();
@@ -12873,9 +13722,11 @@ mod tests {
             .try_tree_open(view_index, pane_id, &view_defs)
             .expect("depth-1 row yields drill");
         let (item_id, item_label, child_def) = match msg {
-            SubViewMessage::ContentDrill { item_id, item_label, child_def } => {
-                (item_id, item_label, *child_def)
-            }
+            SubViewMessage::ContentDrill {
+                item_id,
+                item_label,
+                child_def,
+            } => (item_id, item_label, *child_def),
             other => panic!("expected ContentDrill, got {other:?}"),
         };
         assert!(child_def.split.is_none(), "leaf is in-place");
@@ -12894,7 +13745,10 @@ mod tests {
             "in-place drill into a leaf must turn off tree mode"
         );
         assert!(
-            pane.active_child.as_ref().map(|c| c.name == "Rows").unwrap_or(false),
+            pane.active_child
+                .as_ref()
+                .map(|c| c.name == "Rows")
+                .unwrap_or(false),
             "active_child set to leaf"
         );
 
@@ -12934,7 +13788,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
@@ -12951,7 +13807,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
@@ -12967,7 +13825,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         config
     }
@@ -13050,7 +13910,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
@@ -13072,7 +13934,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
@@ -13087,7 +13951,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -13105,10 +13971,16 @@ mod tests {
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         // Depth 0: view has one tree-continuing child (schemas).
-        assert_eq!(view.active_pane().current_children(&view.view_defs).len(), 1);
+        assert_eq!(
+            view.active_pane().current_children(&view.view_defs).len(),
+            1
+        );
         expand_db1_and_select(&mut view, 1);
         // Depth 1: schemas has no children at all.
-        assert_eq!(view.active_pane().current_children(&view.view_defs).len(), 0);
+        assert_eq!(
+            view.active_pane().current_children(&view.view_defs).len(),
+            0
+        );
     }
 
     #[test]
@@ -13144,8 +14016,7 @@ mod tests {
     #[test]
     fn tree_action_chain_scopes_pushes_active_child_first() {
         let mut config = test_config_with_tree();
-        config.views[0]
-            .children[0]
+        config.views[0].children[0]
             .action_chains
             .0
             .insert("ctrl+x".into(), None);
@@ -13166,8 +14037,18 @@ mod tests {
 
     fn test_config_with_query() -> ViewFileConfig {
         ViewFileConfig {
-            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
-            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            tab: TabConfig {
+                name: "Test".into(),
+                order: 0,
+                icon: None,
+            },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
             views: vec![ViewDef {
                 row_layout: None,
                 smooth_scroll: false,
@@ -13181,9 +14062,20 @@ mod tests {
                     menu_key: Some("q".into()),
                     inherit_default: false,
                 }),
-                columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ],
+                columns: vec![ColumnDef {
+                    key: "key".into(),
+                    label: Some("Key".into()),
+                    source: None,
+                    style: None,
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                }],
                 preview: None,
                 actions: vec![],
                 children: vec![],
@@ -13205,7 +14097,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -13220,12 +14112,21 @@ mod tests {
             direction: SortDirection::Desc,
         }]);
         assert!(changed);
-        let changed = view.set_current_page(Some(PageRequest { offset: 50, limit: 50 }));
+        let changed = view.set_current_page(Some(PageRequest {
+            offset: 50,
+            limit: 50,
+        }));
         assert!(changed);
         let req = view.root_load_request().unwrap();
         assert_eq!(req.sort.len(), 1);
         assert_eq!(req.sort[0].column, "modified");
-        assert_eq!(req.page, Some(PageRequest { offset: 50, limit: 50 }));
+        assert_eq!(
+            req.page,
+            Some(PageRequest {
+                offset: 50,
+                limit: 50
+            })
+        );
     }
 
     #[test]
@@ -13238,7 +14139,13 @@ mod tests {
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let req = view.root_load_request().unwrap();
-        assert_eq!(req.page, Some(PageRequest { offset: 0, limit: 30 }));
+        assert_eq!(
+            req.page,
+            Some(PageRequest {
+                offset: 0,
+                limit: 30
+            })
+        );
     }
 
     #[test]
@@ -13251,7 +14158,13 @@ mod tests {
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let req = view.root_load_request().unwrap();
-        assert_eq!(req.page, Some(PageRequest { offset: 0, limit: 0 }));
+        assert_eq!(
+            req.page,
+            Some(PageRequest {
+                offset: 0,
+                limit: 0
+            })
+        );
     }
 
     #[test]
@@ -13272,12 +14185,21 @@ mod tests {
         use not_yet_done_content::SortDirection;
         let config = test_config_with_query();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.set_current_page(Some(PageRequest { offset: 100, limit: 50 }));
+        view.set_current_page(Some(PageRequest {
+            offset: 100,
+            limit: 50,
+        }));
         view.set_current_sort(vec![SortKey {
             column: "modified".into(),
             direction: SortDirection::Desc,
         }]);
-        assert_eq!(view.current_page(), Some(PageRequest { offset: 0, limit: 50 }));
+        assert_eq!(
+            view.current_page(),
+            Some(PageRequest {
+                offset: 0,
+                limit: 50
+            })
+        );
     }
 
     #[test]
@@ -13317,7 +14239,10 @@ mod tests {
             has_next: false,
             has_prev: false,
         };
-        let sort = vec![SortKey { column: "modified".into(), direction: SortDirection::Desc }];
+        let sort = vec![SortKey {
+            column: "modified".into(),
+            direction: SortDirection::Desc,
+        }];
         let text = format_page_footer(info, &sort);
         assert!(text.contains("Sort: modified\u{25BC}"), "{text}");
     }
@@ -13335,9 +14260,21 @@ mod tests {
         };
         view.set_items(vec![], Vec::new(), Some(info), Vec::new(), None);
         let next = view.next_page_request().unwrap();
-        assert_eq!(next, PageRequest { offset: 75, limit: 25 });
+        assert_eq!(
+            next,
+            PageRequest {
+                offset: 75,
+                limit: 25
+            }
+        );
         let prev = view.prev_page_request().unwrap();
-        assert_eq!(prev, PageRequest { offset: 25, limit: 25 });
+        assert_eq!(
+            prev,
+            PageRequest {
+                offset: 25,
+                limit: 25
+            }
+        );
     }
 
     #[test]
@@ -13366,10 +14303,7 @@ mod tests {
         config
     }
 
-    fn cursor_pane_with_state(
-        view: &mut ContentView,
-        cursor_id: Option<String>,
-    ) {
+    fn cursor_pane_with_state(view: &mut ContentView, cursor_id: Option<String>) {
         let info = PageInfo {
             offset: 0,
             limit: 100,
@@ -13395,8 +14329,7 @@ mod tests {
     #[test]
     fn apply_custom_query_result_patches_mode_from_view_config() {
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         cursor_pane_with_state(&mut view, Some("c1".into()));
         let cq = view
             .active_pane()
@@ -13410,8 +14343,7 @@ mod tests {
     #[test]
     fn try_next_page_emits_continue_when_cursor_id_present() {
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         cursor_pane_with_state(&mut view, Some("c1".into()));
         let view_index = view.view_index;
         let pane_id = view.active_pane_id();
@@ -13428,8 +14360,7 @@ mod tests {
     #[test]
     fn try_next_page_emits_open_when_cursor_id_missing() {
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         cursor_pane_with_state(&mut view, None);
         let view_index = view.view_index;
         let pane_id = view.active_pane_id();
@@ -13446,8 +14377,7 @@ mod tests {
     #[test]
     fn try_prev_page_reissues_open_in_cursor_mode() {
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         cursor_pane_with_state(&mut view, Some("c1".into()));
         let view_index = view.view_index;
         let pane_id = view.active_pane_id();
@@ -13467,8 +14397,7 @@ mod tests {
         // "would empty the tree". Focused pane has a cursor; the other
         // pane is plain. Expect exactly one harvested id.
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.split_focused(SplitOrientation::Horizontal);
         // After split, focus stays on the source pane (first leaf).
         cursor_pane_with_state(&mut view, Some("c-harvest".into()));
@@ -13484,8 +14413,7 @@ mod tests {
     #[test]
     fn close_focused_no_cursor_yields_empty_queue() {
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.split_focused(SplitOrientation::Horizontal);
         // Focused pane has no active custom-query — nothing to harvest.
 
@@ -13500,8 +14428,7 @@ mod tests {
         // the tree. The cursor must NOT be harvested in that case — the
         // pane is still alive and still owns the cursor.
         let config = test_config_with_cursor_pagination();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         cursor_pane_with_state(&mut view, Some("c-keep".into()));
 
         view.execute_window_action(WindowAction::Close);
@@ -13519,8 +14446,7 @@ mod tests {
     #[test]
     fn try_next_page_server_mode_keeps_limit_offset_path() {
         let config = test_config_with_query();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let info = PageInfo {
             offset: 0,
             limit: 100,
@@ -13544,10 +14470,7 @@ mod tests {
         let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
         assert!(matches!(
             msg,
-            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
-                cursor: None,
-                ..
-            })
+            SubViewMessage::Request(ViewRequest::RunPostgresQuery { cursor: None, .. })
         ));
     }
 
@@ -13590,7 +14513,10 @@ mod tests {
         view.set_query("type = Bug".into(), Some("My Bugs".into()));
         let req = view.root_load_request().unwrap();
         assert_eq!(req.query.as_deref(), Some("type = Bug"));
-        assert_eq!(view.active_pane().active_query_name.as_deref(), Some("My Bugs"));
+        assert_eq!(
+            view.active_pane().active_query_name.as_deref(),
+            Some("My Bugs")
+        );
     }
 
     #[test]
@@ -13669,9 +14595,11 @@ mod tests {
         // with the right query/name.
         let config = test_config_with_query();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.merge_saved_queries(vec![
-            ("My Bugs".into(), "type = Bug".into(), Some("1".into())),
-        ]);
+        view.merge_saved_queries(vec![(
+            "My Bugs".into(),
+            "type = Bug".into(),
+            Some("1".into()),
+        )]);
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
         let msg = view.handle_key("1");
         match msg {
@@ -13691,16 +14619,14 @@ mod tests {
         // so the App can toggle + persist the per-scope default.
         let config = test_config_with_query();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.merge_saved_queries(vec![
-            ("My Bugs".into(), "type = Bug".into(), None),
-        ]);
+        view.merge_saved_queries(vec![("My Bugs".into(), "type = Bug".into(), None)]);
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
         view.open_query_popup();
         let msg = view.handle_query_popup_key("ctrl+t");
         match msg {
-            Some(SubViewMessage::Request(ViewRequest::SetDefaultContentQuery {
-                name, ..
-            })) => assert_eq!(name, "My Bugs"),
+            Some(SubViewMessage::Request(ViewRequest::SetDefaultContentQuery { name, .. })) => {
+                assert_eq!(name, "My Bugs")
+            }
             other => panic!("Expected SetDefaultContentQuery, got {other:?}"),
         }
         assert!(!view.has_query_popup());
@@ -13737,7 +14663,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -13769,6 +14697,7 @@ mod tests {
             editor: None,
             under_selection: true,
             commit_on_save: false,
+            inherit: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let issues = mock_issues();
@@ -13777,7 +14706,8 @@ mod tests {
         match view.handle_key("A") {
             SubViewMessage::Request(ViewRequest::CreateContentChild { parent_node_id, .. }) => {
                 assert_eq!(
-                    parent_node_id, first_id,
+                    parent_node_id,
+                    Some(first_id),
                     "under_selection create should parent on the selected row"
                 );
             }
@@ -13803,7 +14733,9 @@ mod tests {
             tree_find: None,
             hide_from_bar: false,
             editor: None,
-            under_selection: false, commit_on_save: false,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -13822,13 +14754,18 @@ mod tests {
         assert!(hints.iter().any(|h| h.key == "q" && h.desc == "queries"));
 
         view.set_query("type = Bug".into(), Some("My Bugs".into()));
-        assert_eq!(view.active_pane().active_query_name.as_deref(), Some("My Bugs"));
+        assert_eq!(
+            view.active_pane().active_query_name.as_deref(),
+            Some("My Bugs")
+        );
 
         view.merge_saved_queries(vec![
             ("My Bugs".into(), "type = Bug".into(), Some("1".into())),
             ("Sprint".into(), "sprint in open".into(), Some("2".into())),
         ]);
-        let favs: Vec<(&str, &str)> = view.db_saved_queries.iter()
+        let favs: Vec<(&str, &str)> = view
+            .db_saved_queries
+            .iter()
             .filter_map(|sq| sq.shortcut.as_deref().map(|s| (sq.name.as_str(), s)))
             .collect();
         assert!(favs.contains(&("My Bugs", "1")));
@@ -13847,7 +14784,8 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
 
         let hints = view.status_bar_hints();
         assert!(hints.iter().any(|(k, v)| v == "back" && k == "⌫"));
@@ -13866,22 +14804,27 @@ mod tests {
     #[test]
     fn is_busy_tracks_adapter_status() {
         let config = test_config_with_children();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         assert!(!view.is_busy(), "fresh view is Ready, not Busy");
         view.set_auth_status(AdapterStatus::Busy {
             label: "Running query".into(),
             started_at_unix_ms: 0,
             timeout_secs: 7,
         });
-        assert!(view.is_busy(), "Busy drives the ~1 Hz live-banner redraw nudge");
+        assert!(
+            view.is_busy(),
+            "Busy drives the ~1 Hz live-banner redraw nudge"
+        );
         // Connecting counts as a static banner, not a wall-clock one.
         view.set_auth_status(AdapterStatus::Connecting {
             retry: 1,
             max_retries: 3,
             timeout_secs: 30,
         });
-        assert!(!view.is_busy(), "Connecting banner text is static, not live");
+        assert!(
+            !view.is_busy(),
+            "Connecting banner text is static, not live"
+        );
         view.set_auth_status(AdapterStatus::Ready);
         assert!(!view.is_busy());
     }
@@ -13990,7 +14933,9 @@ mod tests {
                 tree_find: None,
                 hide_from_bar: false,
                 editor: None,
-            under_selection: false, commit_on_save: false,
+                under_selection: false,
+                commit_on_save: false,
+                inherit: false,
             });
         }
         config
@@ -14037,9 +14982,27 @@ mod tests {
         view_shortcuts: HashMap<char, String>,
         child_shortcuts: HashMap<char, String>,
     ) -> ViewFileConfig {
+        let view_shortcuts: HashMap<char, ShortcutDef> = view_shortcuts
+            .into_iter()
+            .map(|(k, v)| (k, ShortcutDef::Action(v)))
+            .collect();
+        let child_shortcuts: HashMap<char, ShortcutDef> = child_shortcuts
+            .into_iter()
+            .map(|(k, v)| (k, ShortcutDef::Action(v)))
+            .collect();
         ViewFileConfig {
-            tab: TabConfig { name: "Test".into(), order: 0, icon: None },
-            adapter: AdapterConfig { adapter_type: "mock".into(), id: None, config: None, config_inline: None, manual_connect: false },
+            tab: TabConfig {
+                name: "Test".into(),
+                order: 0,
+                icon: None,
+            },
+            adapter: AdapterConfig {
+                adapter_type: "mock".into(),
+                id: None,
+                config: None,
+                config_inline: None,
+                manual_connect: false,
+            },
             views: vec![ViewDef {
                 row_layout: None,
                 smooth_scroll: false,
@@ -14048,41 +15011,61 @@ mod tests {
                 default: true,
                 key: None,
                 query: None,
-                columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ],
+                columns: vec![ColumnDef {
+                    key: "label".into(),
+                    label: Some("Label".into()),
+                    source: Some("label".into()),
+                    style: None,
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                }],
                 preview: None,
                 actions: vec![],
-                children: vec![
-                    ChildDef {
-                        row_layout: None,
-                smooth_scroll: false,
-                        name: "Comments".into(),
-                        node_type: "mock:comment".into(),
-                        columns: vec![
-                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                        ],
-                        preview: None,
-                        actions: vec![],
-                        children: vec![],
-                        split: None,
-                        pagination: None,
-                        keybindings: HashMap::new(),
-                        action_chains: Default::default(),
-                        column_cursor: false,
-                        tree_label: None,
-                        shortcuts: child_shortcuts,
-                        enter_action: None,
-                        recursive: false,
-            editor_in_place: false,
-                        leaf_glyph: None,
-                        group_by: None,
-                        then_by: Vec::new(),
-                        aggregates: Vec::new(),
-                        summary_only: false,
-                        mark_read_on_reach_end: None,
-                    },
-                ],
+                children: vec![ChildDef {
+                    row_layout: None,
+                    smooth_scroll: false,
+                    name: "Comments".into(),
+                    node_type: "mock:comment".into(),
+                    columns: vec![ColumnDef {
+                        key: "label".into(),
+                        label: Some("Comment".into()),
+                        source: Some("label".into()),
+                        style: None,
+                        sizing: "flex(1)".into(),
+                        markdown: false,
+                        kind: ColumnKind::Text,
+                        format: None,
+                        separator: None,
+                        elapsed_from: None,
+                        tree_aggregate: None,
+                        collapsed_source: None,
+                    }],
+                    preview: None,
+                    actions: vec![],
+                    children: vec![],
+                    split: None,
+                    pagination: None,
+                    keybindings: HashMap::new(),
+                    action_chains: Default::default(),
+                    column_cursor: false,
+                    tree_label: None,
+                    shortcuts: child_shortcuts,
+                    enter_action: None,
+                    recursive: false,
+                    editor_in_place: false,
+                    leaf_glyph: None,
+                    group_by: None,
+                    then_by: Vec::new(),
+                    aggregates: Vec::new(),
+                    summary_only: false,
+                    mark_read_on_reach_end: None,
+                }],
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
@@ -14101,7 +15084,7 @@ mod tests {
                 tree_lines: None,
                 tree_markers: None,
                 expand_depth: None,
-            group_headers: None,
+                group_headers: None,
             }],
         }
     }
@@ -14141,7 +15124,8 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
 
         let mut entries = view.active_pane().current_shortcuts(&view.view_defs);
         entries.sort_by_key(|(k, _)| *k);
@@ -14162,14 +15146,27 @@ mod tests {
 
     #[async_trait::async_trait]
     impl not_yet_done_content::ContentAdapter for ShortcutTestAdapter {
-        fn as_any(&self) -> &dyn std::any::Any { self }
-        fn adapter_type(&self) -> &str { "mock" }
-        fn instance_id(&self) -> &str { "mock" }
-        async fn root(&self) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
-            Err(not_yet_done_content::ContentError::NotSupported("test stub".into()))
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
-        async fn get_by_id(&self, _id: &str) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
-            Err(not_yet_done_content::ContentError::NotSupported("test stub".into()))
+        fn adapter_type(&self) -> &str {
+            "mock"
+        }
+        fn instance_id(&self) -> &str {
+            "mock"
+        }
+        async fn root(&self) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
+            Err(not_yet_done_content::ContentError::NotSupported(
+                "test stub".into(),
+            ))
+        }
+        async fn get_by_id(
+            &self,
+            _id: &str,
+        ) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
+            Err(not_yet_done_content::ContentError::NotSupported(
+                "test stub".into(),
+            ))
         }
         fn capabilities(&self) -> not_yet_done_content::AdapterCapabilities {
             Default::default()
@@ -14237,7 +15234,10 @@ mod tests {
         let hints = view
             .active_pane()
             .collect_shortcut_hints(&view.view_defs, Some(&adapter));
-        assert!(hints.is_empty(), "missing action_id → hint dropped silently");
+        assert!(
+            hints.is_empty(),
+            "missing action_id → hint dropped silently"
+        );
     }
 
     #[test]
@@ -14267,7 +15267,8 @@ mod tests {
 
         let child_def = config.views[0].children[0].clone();
         let view_defs = view.view_defs.clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
         view.set_items(mock_comments(), Vec::new(), None, Vec::new(), None);
 
         // Adapter advertises `promote` for `mock:issue` (the parent's
@@ -14276,7 +15277,11 @@ mod tests {
         // action under the parent type.
         let adapter = test_adapter(&[(
             "mock:issue",
-            vec![make_action("promote", "Promote Parent", HintPlacement::ActionBar)],
+            vec![make_action(
+                "promote",
+                "Promote Parent",
+                HintPlacement::ActionBar,
+            )],
         )]);
 
         let hints = view
@@ -14411,10 +15416,15 @@ mod tests {
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
 
-        let (current, entries) = view.column_config_entries().expect("root level configurable");
+        let (current, entries) = view
+            .column_config_entries()
+            .expect("root level configurable");
         assert_eq!(current, vec!["key".to_string(), "summary".to_string()]);
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().all(|e| e.hideable), "flat levels have no fixed column");
+        assert!(
+            entries.iter().all(|e| e.hideable),
+            "flat levels have no fixed column"
+        );
         assert_eq!(entries[0].display_name, "Key", "label wins as display name");
         assert_eq!(entries[1].display_name, "summary", "no label → key");
 
@@ -14455,7 +15465,8 @@ mod tests {
             Some("view:issues"),
         );
         let child_def = config.views[0].children[0].clone();
-        view.active_pane_mut().drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
         assert_eq!(
             view.active_pane().column_level_key(&view_defs).as_deref(),
             Some("child:issues/Comments"),
@@ -14502,7 +15513,10 @@ views:
         let t = "task:item".to_string();
         assert_eq!(column_owner_chain_len(vd, &[t.clone()], cols), 1);
         assert_eq!(column_owner_chain_len(vd, &[t.clone(), t.clone()], cols), 1);
-        assert_eq!(column_owner_chain_len(vd, &[t.clone(), t.clone(), t.clone()], cols), 1);
+        assert_eq!(
+            column_owner_chain_len(vd, &[t.clone(), t.clone(), t.clone()], cols),
+            1
+        );
     }
 
     #[test]
@@ -14550,7 +15564,11 @@ views:
         let view_defs = view.view_defs.clone();
         let cols = view.active_pane().current_columns(&view_defs);
         let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
-        assert_eq!(keys, ["name"], "tree-label column re-inserted despite empty override");
+        assert_eq!(
+            keys,
+            ["name"],
+            "tree-label column re-inserted despite empty override"
+        );
     }
 
     #[test]
@@ -14670,9 +15688,9 @@ views:
                         "mock:task".into(),
                     );
                 }
-                other => panic!(
-                    "Enter on `{expect_parent}` must yield ExpandTreeNode, got {other:?}"
-                ),
+                other => {
+                    panic!("Enter on `{expect_parent}` must yield ExpandTreeNode, got {other:?}")
+                }
             }
         };
 
@@ -14693,13 +15711,20 @@ views:
             .iter()
             .map(|e| (e.node.id.clone(), e.depth))
             .collect();
-        assert!(depths.contains(&("g".to_string(), 2)), "grandchild at depth 2: {depths:?}");
-        assert!(depths.contains(&("gg".to_string(), 3)), "great-grandchild at depth 3: {depths:?}");
+        assert!(
+            depths.contains(&("g".to_string(), 2)),
+            "grandchild at depth 2: {depths:?}"
+        );
+        assert!(
+            depths.contains(&("gg".to_string(), 3)),
+            "great-grandchild at depth 3: {depths:?}"
+        );
 
         // … and they actually RENDER as rows (not blanked out).
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
         assert_eq!(rows.len(), 4, "work + h + g + gg all render");
     }
 
@@ -14729,8 +15754,9 @@ views:
         assert!(view.active_pane().cursor_can_open(&view_defs), "root opens");
 
         // Expand Work → child h, then put the cursor on h (depth 1).
-        if let Some(SubViewMessage::Request(ViewRequest::ExpandTreeNode { parent_path, .. })) =
-            view.active_pane_mut().try_tree_open(view_index, pane_id, &view_defs)
+        if let Some(SubViewMessage::Request(ViewRequest::ExpandTreeNode { parent_path, .. })) = view
+            .active_pane_mut()
+            .try_tree_open(view_index, pane_id, &view_defs)
         {
             view.apply_tree_children(
                 pane_id,
@@ -14759,7 +15785,10 @@ views:
         let config = uniform_recursive_config();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
-            vec![tnode_val("work", "Work", "W"), tnode_val("priv", "Priv", "P")],
+            vec![
+                tnode_val("work", "Work", "W"),
+                tnode_val("priv", "Priv", "P"),
+            ],
             Vec::new(),
             None,
             Vec::new(),
@@ -14773,7 +15802,8 @@ views:
         {
             let tree = view.active_pane_mut().tree.as_mut().unwrap();
             tree.expanded.insert(vec!["work".to_string()]);
-            tree.expanded.insert(vec!["work".to_string(), "h".to_string()]);
+            tree.expanded
+                .insert(vec!["work".to_string(), "h".to_string()]);
         }
         view.apply_tree_children(
             pane_id,
@@ -14794,7 +15824,10 @@ views:
 
         // A reload lands: depth-0 replaced, deeper caches untouched.
         view.set_items(
-            vec![tnode_val("work", "Work", "W2"), tnode_val("priv", "Priv", "P")],
+            vec![
+                tnode_val("work", "Work", "W2"),
+                tnode_val("priv", "Priv", "P"),
+            ],
             Vec::new(),
             None,
             Vec::new(),
@@ -14808,7 +15841,11 @@ views:
                 other => panic!("expected ExpandTreeNode, got {other:?}"),
             })
             .collect();
-        assert_eq!(parents, vec!["work", "h"], "every expanded path refreshes: {reqs:?}");
+        assert_eq!(
+            parents,
+            vec!["work", "h"],
+            "every expanded path refreshes: {reqs:?}"
+        );
 
         // An expanded path whose children are still in flight (cache not
         // `loaded`) is skipped — its landing already brings fresh data.
@@ -14856,7 +15893,9 @@ views:
 
         assert!(view.active_pane_mut().focus_item_by_id("h"));
         let pane = view.find_pane(pane_id).unwrap();
-        let item = pane.selected_item().expect("nested row resolves to its summary");
+        let item = pane
+            .selected_item()
+            .expect("nested row resolves to its summary");
         assert_eq!(item.id, "h");
         assert_eq!(item.label, "Nested");
         assert!(
@@ -14886,7 +15925,12 @@ views:
         // Pass 1 (root rows landed): depth-0 `work` auto-expands.
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
         assert_eq!(reqs.len(), 1, "one depth-0 expand request: {reqs:?}");
-        let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+        let ViewRequest::ExpandTreeNode {
+            parent_path,
+            parent_node_id,
+            ..
+        } = &reqs[0]
+        else {
             panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
         };
         assert_eq!(parent_node_id, "work");
@@ -14902,7 +15946,12 @@ views:
         // Pass 2 (depth-1 children landed): `h` (depth 1 < 2) expands too.
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
         assert_eq!(reqs.len(), 1, "one depth-1 expand request: {reqs:?}");
-        let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+        let ViewRequest::ExpandTreeNode {
+            parent_path,
+            parent_node_id,
+            ..
+        } = &reqs[0]
+        else {
             panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
         };
         assert_eq!(parent_node_id, "h");
@@ -14919,7 +15968,12 @@ views:
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
         assert!(reqs.is_empty(), "cascade complete: {reqs:?}");
         assert!(
-            !view.active_pane().tree.as_ref().unwrap().auto_expand_pending,
+            !view
+                .active_pane()
+                .tree
+                .as_ref()
+                .unwrap()
+                .auto_expand_pending,
             "cascade must disarm once nothing is left to load"
         );
         let depths: Vec<(String, usize)> = view
@@ -14977,7 +16031,12 @@ views:
         for (parent, child) in [("work", "h"), ("h", "g"), ("g", "leaf")] {
             let reqs = view.pending_auto_expand_requests(view_index, pane_id);
             assert_eq!(reqs.len(), 1, "expand request for `{parent}`: {reqs:?}");
-            let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+            let ViewRequest::ExpandTreeNode {
+                parent_path,
+                parent_node_id,
+                ..
+            } = &reqs[0]
+            else {
                 panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
             };
             assert_eq!(parent_node_id, parent);
@@ -14995,7 +16054,12 @@ views:
         // back empty → the next pass has nothing left and disarms.
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
         assert_eq!(reqs.len(), 1, "leaf still probed under `all`: {reqs:?}");
-        let ViewRequest::ExpandTreeNode { parent_path, parent_node_id, .. } = &reqs[0] else {
+        let ViewRequest::ExpandTreeNode {
+            parent_path,
+            parent_node_id,
+            ..
+        } = &reqs[0]
+        else {
             panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
         };
         assert_eq!(parent_node_id, "leaf");
@@ -15010,7 +16074,12 @@ views:
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
         assert!(reqs.is_empty(), "cascade complete: {reqs:?}");
         assert!(
-            !view.active_pane().tree.as_ref().unwrap().auto_expand_pending,
+            !view
+                .active_pane()
+                .tree
+                .as_ref()
+                .unwrap()
+                .auto_expand_pending,
             "cascade must disarm once a pass finds nothing expandable"
         );
         let depths: Vec<(String, usize)> = view
@@ -15062,10 +16131,13 @@ views:
         // bucket(0) → t1(1) → t2(2) → t3(3, leaf). The cascade must keep
         // descending past depth 2 exactly like the uniform tree does.
         let config = grouped_recursive_tree_config();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
-            vec![hc_node("treegrp:started:day:2026-06-09", "tracking:tree-group", true)],
+            vec![hc_node(
+                "treegrp:started:day:2026-06-09",
+                "tracking:tree-group",
+                true,
+            )],
             Vec::new(),
             None,
             Vec::new(),
@@ -15112,16 +16184,28 @@ views:
             .iter()
             .map(|e| (e.node.id.clone(), e.depth))
             .collect();
-        assert!(depths.contains(&("tree:s:t2".to_string(), 2)), "depth-2 task: {depths:?}");
-        assert!(depths.contains(&("tree:s:t3".to_string(), 3)), "depth-3 task: {depths:?}");
+        assert!(
+            depths.contains(&("tree:s:t2".to_string(), 2)),
+            "depth-2 task: {depths:?}"
+        );
+        assert!(
+            depths.contains(&("tree:s:t3".to_string(), 3)),
+            "depth-3 task: {depths:?}"
+        );
 
         // … and they RENDER (group_headers maps the bucket to a header row;
         // the three task rows must all survive into the table).
         let view_defs = view.view_defs.clone();
         let pane = view.active_pane();
         let columns = pane.current_columns(&view_defs);
-        let rows = pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
-        assert_eq!(rows.len(), 4, "bucket header + t1 + t2 + t3 all render: {} rows", rows.len());
+        let rows =
+            pane.build_tree_data_rows(&columns, &view_defs, chrono::Local::now(), false, None);
+        assert_eq!(
+            rows.len(),
+            4,
+            "bucket header + t1 + t2 + t3 all render: {} rows",
+            rows.len()
+        );
     }
 
     #[test]
@@ -15138,8 +16222,7 @@ views:
         //        → t2 → t2a → t2b → L2(leaf)
         let mut config = uniform_recursive_config();
         config.views[0].expand_depth = Some(ExpandDepth::All);
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(
             vec![hc_node("root", "mock:task", true)],
             Vec::new(),
@@ -15158,23 +16241,50 @@ views:
         };
 
         // root → [t1, t2]
-        pump(&mut view, vec!["root".into()], vec![hc_node("t1", "mock:task", true), hc_node("t2", "mock:task", true)]);
+        pump(
+            &mut view,
+            vec!["root".into()],
+            vec![
+                hc_node("t1", "mock:task", true),
+                hc_node("t2", "mock:task", true),
+            ],
+        );
         // t1 → [t1a]
-        pump(&mut view, vec!["root".into(), "t1".into()], vec![hc_node("t1a", "mock:task", true)]);
+        pump(
+            &mut view,
+            vec!["root".into(), "t1".into()],
+            vec![hc_node("t1a", "mock:task", true)],
+        );
         // t2 → [t2a]   (t1a now queued for expansion, t2a about to be)
-        pump(&mut view, vec!["root".into(), "t2".into()], vec![hc_node("t2a", "mock:task", true)]);
+        pump(
+            &mut view,
+            vec!["root".into(), "t2".into()],
+            vec![hc_node("t2a", "mock:task", true)],
+        );
         // t1a → [L1 leaf]   ← this pump finds no NEW candidate (t2a is
         // expanded-but-in-flight, L1 is a leaf). The cascade must stay armed.
-        pump(&mut view, vec!["root".into(), "t1".into(), "t1a".into()], vec![hc_node("L1", "mock:task", false)]);
+        pump(
+            &mut view,
+            vec!["root".into(), "t1".into(), "t1a".into()],
+            vec![hc_node("L1", "mock:task", false)],
+        );
 
         assert!(
-            view.active_pane().tree.as_ref().unwrap().auto_expand_pending,
+            view.active_pane()
+                .tree
+                .as_ref()
+                .unwrap()
+                .auto_expand_pending,
             "cascade disarmed while the t2 branch is still in flight — deeper \
              levels of t2 will never auto-expand",
         );
 
         // t2a → [t2b]   if still armed, the next pump expands t2b.
-        pump(&mut view, vec!["root".into(), "t2".into(), "t2a".into()], vec![hc_node("t2b", "mock:task", true)]);
+        pump(
+            &mut view,
+            vec!["root".into(), "t2".into(), "t2a".into()],
+            vec![hc_node("t2b", "mock:task", true)],
+        );
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
         assert!(
             reqs.iter().any(|r| matches!(r, ViewRequest::ExpandTreeNode { parent_node_id, .. } if parent_node_id == "t2b")),
@@ -15214,9 +16324,20 @@ views:
             default: true,
             key: None,
             query: None,
-            columns: vec![
-                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-            ],
+            columns: vec![ColumnDef {
+                key: "label".into(),
+                label: Some("Label".into()),
+                source: Some("label".into()),
+                style: None,
+                sizing: "max".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            }],
             preview: None,
             actions: vec![],
             children: vec![ChildDef {
@@ -15224,9 +16345,20 @@ views:
                 smooth_scroll: false,
                 name: "pages".into(),
                 node_type: "mock:page".into(),
-                columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ],
+                columns: vec![ColumnDef {
+                    key: "label".into(),
+                    label: Some("Page".into()),
+                    source: Some("label".into()),
+                    style: None,
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                }],
                 preview: None,
                 actions: vec![],
                 children: vec![],
@@ -15366,15 +16498,17 @@ views:
         // children at parent_path=[SPACE] are the pages.
         let tree = pane.tree.as_mut().unwrap();
         tree.set_cached_children(Vec::new(), vec![space_node("SPACE", "Space")], None);
-        tree.set_cached_children(
-            vec!["SPACE".into()],
-            vec![page_node("p1", "P1")],
-            None,
-        );
+        tree.set_cached_children(vec!["SPACE".into()], vec![page_node("p1", "P1")], None);
         match pane.advance_tree_find(0, 0, &vds) {
             TreeFindAdvance::Ready(_row) => {
                 // SPACE prefix is marked expanded so the page surfaces.
-                assert!(pane.tree.as_ref().unwrap().expanded.contains(&vec!["SPACE".to_string()]));
+                assert!(
+                    pane.tree
+                        .as_ref()
+                        .unwrap()
+                        .expanded
+                        .contains(&vec!["SPACE".to_string()])
+                );
             }
             other => panic!("expected Ready, got {other:?}"),
         }
@@ -15432,8 +16566,34 @@ views:
 
     fn group_columns() -> Vec<ColumnDef> {
         vec![
-            ColumnDef { key: "category".into(), label: None, source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-            ColumnDef { key: "dur".into(), label: None, source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef {
+                key: "category".into(),
+                label: None,
+                source: Some("label".into()),
+                style: None,
+                sizing: "max".into(),
+                markdown: false,
+                kind: ColumnKind::Text,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
+            ColumnDef {
+                key: "dur".into(),
+                label: None,
+                source: None,
+                style: None,
+                sizing: "max".into(),
+                markdown: false,
+                kind: ColumnKind::Number,
+                format: None,
+                separator: None,
+                elapsed_from: None,
+                tree_aggregate: None,
+                collapsed_source: None,
+            },
         ]
     }
 
@@ -15482,10 +16642,16 @@ views:
         for c in &columns {
             header = header.cell(&c.key, c.key.clone());
         }
-        let levels =
-            vec![GroupBy { column: "category".into(), bucket: None, order: GroupOrder::Asc }];
-        let aggregates =
-            vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum, total_column: None }];
+        let levels = vec![GroupBy {
+            column: "category".into(),
+            bucket: None,
+            order: GroupOrder::Asc,
+        }];
+        let aggregates = vec![AggregateDef {
+            column: "dur".into(),
+            op: AggregateOp::Sum,
+            total_column: None,
+        }];
         let no_links = |_: &str| false;
 
         let build = build_grouped_table(
@@ -15504,7 +16670,10 @@ views:
 
         // Total = the trimmed text of the last cell on each summary row.
         let total_of = |r: &TableWidgetRow| {
-            r.primary_line().last().map(|c| c.text.trim().to_string()).unwrap_or_default()
+            r.primary_line()
+                .last()
+                .map(|c| c.text.trim().to_string())
+                .unwrap_or_default()
         };
         let header_totals: Vec<String> = build
             .widget_rows
@@ -15544,7 +16713,10 @@ views:
         // Group-header labels carry the bucket/category text and are styled.
         let header_a = &build.widget_rows[0];
         assert!(header_a.primary_line()[0].text.contains('A'));
-        assert_eq!(header_a.primary_line()[0].style_id, Some(GROUP_HEADER_STYLE_ID));
+        assert_eq!(
+            header_a.primary_line()[0].style_id,
+            Some(GROUP_HEADER_STYLE_ID)
+        );
     }
 
     #[test]
@@ -15566,7 +16738,10 @@ views:
         // The aggregate column shows the GROUP total (A=30, B=70), not the
         // representative member's own value.
         let dur_of = |r: &TableWidgetRow| {
-            r.primary_line().last().map(|c| c.text.trim().to_string()).unwrap_or_default()
+            r.primary_line()
+                .last()
+                .map(|c| c.text.trim().to_string())
+                .unwrap_or_default()
         };
         let totals: Vec<String> = build.widget_rows.iter().map(dur_of).collect();
         assert_eq!(totals, vec!["30".to_string(), "70".to_string()]);
@@ -15606,11 +16781,22 @@ views:
         // Inner level keys on `dur` (distinct per item here) so each item is
         // its own inner group; outer on `category`.
         let levels = vec![
-            GroupBy { column: "category".into(), bucket: None, order: GroupOrder::Asc },
-            GroupBy { column: "dur".into(), bucket: None, order: GroupOrder::Asc },
+            GroupBy {
+                column: "category".into(),
+                bucket: None,
+                order: GroupOrder::Asc,
+            },
+            GroupBy {
+                column: "dur".into(),
+                bucket: None,
+                order: GroupOrder::Asc,
+            },
         ];
-        let aggregates =
-            vec![AggregateDef { column: "dur".into(), op: AggregateOp::Sum, total_column: None }];
+        let aggregates = vec![AggregateDef {
+            column: "dur".into(),
+            op: AggregateOp::Sum,
+            total_column: None,
+        }];
         let no_links = |_: &str| false;
 
         let build = build_grouped_table(
@@ -15641,7 +16827,10 @@ views:
 
         // Outer header A subtotal = 30, B = 10+20... wait B = 30; A = 10+20=30.
         let last_text = |r: &TableWidgetRow| {
-            r.primary_line().last().map(|c| c.text.trim().to_string()).unwrap_or_default()
+            r.primary_line()
+                .last()
+                .map(|c| c.text.trim().to_string())
+                .unwrap_or_default()
         };
         assert_eq!(last_text(&build.widget_rows[0]), "30"); // outer A = 10+20
         assert_eq!(last_text(&build.widget_rows[3]), "30"); // outer B = 30
@@ -15662,7 +16851,20 @@ views:
     #[test]
     fn grouped_table_desc_order_and_total_column() {
         let mut columns = group_columns();
-        columns.push(ColumnDef { key: "total".into(), label: Some("Total".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None });
+        columns.push(ColumnDef {
+            key: "total".into(),
+            label: Some("Total".into()),
+            source: None,
+            style: None,
+            sizing: "max".into(),
+            markdown: false,
+            kind: ColumnKind::Number,
+            format: None,
+            separator: None,
+            elapsed_from: None,
+            tree_aggregate: None,
+            collapsed_source: None,
+        });
         let items = vec![
             group_item("0", "B", "30"),
             group_item("1", "A", "10"),
@@ -15683,8 +16885,11 @@ views:
         for c in &columns {
             header = header.cell(&c.key, c.key.clone());
         }
-        let levels =
-            vec![GroupBy { column: "category".into(), bucket: None, order: GroupOrder::Desc }];
+        let levels = vec![GroupBy {
+            column: "category".into(),
+            bucket: None,
+            order: GroupOrder::Desc,
+        }];
         let aggregates = vec![AggregateDef {
             column: "dur".into(),
             op: AggregateOp::Sum,
@@ -15713,7 +16918,10 @@ views:
         );
 
         let last_text = |r: &TableWidgetRow| {
-            r.primary_line().last().map(|c| c.text.trim().to_string()).unwrap_or_default()
+            r.primary_line()
+                .last()
+                .map(|c| c.text.trim().to_string())
+                .unwrap_or_default()
         };
         // Header rows carry NO total any more (it moved to the data rows):
         // with nothing to right-align, the label spans the whole row.
@@ -15747,8 +16955,7 @@ views:
         // Native Tasks-tab parity: the jump action arms the table's hop
         // overlay (phase 1). The App-level interceptor drives the rest.
         let config = test_config_with_children();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // The App sets this from `navigation.jump_chars`; without an
         // alphabet the table refuses to open (no labels to hand out).
         view.set_nav_chars(&['a', 'b', 'c']);
@@ -15792,8 +16999,7 @@ views:
         // No `group_by` on the level → the menu must not open (same gate
         // as the keybinding claim; this covers the action-chain path).
         let config = test_config_with_children();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let msg = view.dispatch_content_action(ContentAction::GroupMenu);
         assert!(matches!(msg, SubViewMessage::Unhandled));
         assert!(!view.group_menu.is_open());
@@ -15802,8 +17008,7 @@ views:
     #[test]
     fn group_menu_jumps_grouping_state() {
         let config = test_config_with_group_by();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
 
         // Open the menu and jump straight to Week via its hotkey.
         let msg = view.dispatch_content_action(ContentAction::GroupMenu);
@@ -15822,10 +17027,11 @@ views:
         view.dispatch_content_action(ContentAction::GroupMenu);
         view.handle_key("n");
         assert!(!view.group_menu.is_open());
-        assert!(view
-            .active_pane()
-            .current_group_by(&view.view_defs)
-            .is_none());
+        assert!(
+            view.active_pane()
+                .current_group_by(&view.view_defs)
+                .is_none()
+        );
     }
 
     // ── Adapter-grouped tree (group_by_via_adapter) ──────────────────
@@ -15879,12 +17085,7 @@ views:
 
         // Flat mode never hands the adapter a grouping — flat lists group
         // engine-side.
-        let flat = ContentPane::new(
-            test_theme(),
-            0,
-            false,
-            tree_pane(true).capabilities.clone(),
-        );
+        let flat = ContentPane::new(test_theme(), 0, false, tree_pane(true).capabilities.clone());
         assert!(flat.adapter_group_spec(&view_defs).is_none());
     }
 
@@ -15899,7 +17100,10 @@ views:
         let msg = pane.try_cycle_grouping(&view_defs, 3, 7);
         assert!(matches!(
             msg,
-            SubViewMessage::Request(ViewRequest::SpawnContentLoad { view_index: 3, pane_id: 7 })
+            SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                view_index: 3,
+                pane_id: 7
+            })
         ));
         assert_eq!(
             pane.current_group_by(&view_defs).and_then(|gb| gb.bucket),
@@ -15944,7 +17148,11 @@ views:
         assert!(pane.tree_group_headers_def(&view_defs).is_some());
 
         // Capability missing → buckets never arrive, headers stay off.
-        assert!(tree_pane(false).tree_group_headers_def(&view_defs).is_none());
+        assert!(
+            tree_pane(false)
+                .tree_group_headers_def(&view_defs)
+                .is_none()
+        );
 
         // Grouping cycled off → the adapter returns plain rows at depth 0,
         // so the header rendering must switch off with it.
@@ -15997,7 +17205,10 @@ views:
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.active_pane_mut().capabilities.group_by_via_adapter = true;
         view.set_items(
-            vec![bucket_node("b1", "Mon", "1:00"), bucket_node("b2", "Tue", "0:30")],
+            vec![
+                bucket_node("b1", "Mon", "1:00"),
+                bucket_node("b2", "Tue", "0:30"),
+            ],
             Vec::new(),
             None,
             Vec::new(),
@@ -16048,11 +17259,19 @@ views:
         // Bucket rows: non-selectable placeholders with an empty label.
         let label_key = TColumnId::new("name");
         let cell = |r: usize, key: &TColumnId| {
-            rows[r].cells.get(key).map(|c| c.text.clone()).unwrap_or_default()
+            rows[r]
+                .cells
+                .get(key)
+                .map(|c| c.text.clone())
+                .unwrap_or_default()
         };
         for b in [0usize, 3] {
             assert!(!rows[b].selectable, "bucket row {b} must not be selectable");
-            assert_eq!(cell(b, &label_key), "", "bucket row {b} renders at the widget stage");
+            assert_eq!(
+                cell(b, &label_key),
+                "",
+                "bucket row {b} renders at the widget stage"
+            );
         }
         // Items shed the bucket's indent level: the first-level task has no
         // box connector (it is a forest root now), its subtask has one.
@@ -16070,16 +17289,23 @@ views:
         let total_key = TColumnId::new("total");
         assert_eq!(cell(0, &total_key), "");
         assert_eq!(cell(1, &total_key), "");
-        assert_eq!(cell(2, &total_key), "1:00", "b1's total sits on its last row");
+        assert_eq!(
+            cell(2, &total_key),
+            "1:00",
+            "b1's total sits on its last row"
+        );
         assert_eq!(cell(3, &total_key), "");
-        assert_eq!(cell(4, &total_key), "0:30", "b2's total sits on its last row");
+        assert_eq!(
+            cell(4, &total_key),
+            "0:30",
+            "b2's total sits on its last row"
+        );
     }
 
     #[test]
     fn group_menu_in_adapter_tree_requests_reload() {
         let config = test_config_with_group_by();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         {
             let pane = view.active_pane_mut();
             pane.tree = Some(TreeState::new());
@@ -16129,11 +17355,76 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
-                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+                ColumnDef {
+                    key: "key".into(),
+                    label: Some("Key".into()),
+                    source: None,
+                    style: Some("accent".into()),
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                },
+                ColumnDef {
+                    key: "type".into(),
+                    label: Some("Type".into()),
+                    source: None,
+                    style: None,
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                },
+                ColumnDef {
+                    key: "status".into(),
+                    label: Some("Status".into()),
+                    source: None,
+                    style: Some("success".into()),
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                },
+                ColumnDef {
+                    key: "priority".into(),
+                    label: Some("Priority".into()),
+                    source: None,
+                    style: Some("warning".into()),
+                    sizing: "max".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                },
+                ColumnDef {
+                    key: "summary".into(),
+                    label: Some("Summary".into()),
+                    source: Some("label".into()),
+                    style: Some("text_high".into()),
+                    sizing: "flex(1)".into(),
+                    markdown: false,
+                    kind: ColumnKind::Text,
+                    format: None,
+                    separator: None,
+                    elapsed_from: None,
+                    tree_aggregate: None,
+                    collapsed_source: None,
+                },
             ],
             preview: Some(PreviewConfig {
                 enabled: true,
@@ -16159,7 +17450,9 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_find: None,
                     hide_from_bar: false,
                     editor: None,
-            under_selection: false, commit_on_save: false,
+                    under_selection: false,
+                    commit_on_save: false,
+                    inherit: false,
                 },
                 ActionDef {
                     name: "refresh".to_string(),
@@ -16174,7 +17467,9 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_find: None,
                     hide_from_bar: false,
                     editor: None,
-            under_selection: false, commit_on_save: false,
+                    under_selection: false,
+                    commit_on_save: false,
+                    inherit: false,
                 },
             ],
             children: vec![],

@@ -3,7 +3,7 @@
 //! Each `.yaml` file in `~/.config/not_yet_done/views/` defines a main tab
 //! backed by a ContentAdapter.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -49,6 +49,45 @@ impl ViewFileConfig {
             let parent_cols = view.columns.clone();
             for child in &mut view.children {
                 inherit_columns_into(child, &parent_cols);
+            }
+        }
+    }
+
+    /// Propagate inheritable per-row actions/shortcuts down the tree so a
+    /// recursive tree (e.g. the task forest) declares them once at the root
+    /// instead of repeating the identical block at every depth.
+    ///
+    /// Per-entry opt-in: only [`ActionDef::inherit`] actions and
+    /// [`ShortcutDef::inherit`] shortcuts propagate; everything else stays
+    /// local. The scope mirrors [`Self::inherit_tree_columns`]:
+    /// - only tree-continuation levels inherit (gated on `tree_label`); a
+    ///   plain drill child is left alone,
+    /// - a child that binds the **same key** itself overrides the inherited
+    ///   entry (the local binding wins, the inherited one is dropped),
+    /// - inherited entries keep their `inherit` flag, so they cascade to
+    ///   every depth (the recursive branch is its own deeper level),
+    /// - the single-level search family (`tree_find`/`search`/`fuzzy_filter`)
+    ///   is never propagated — those are declared once at the tree root and
+    ///   already apply tree-wide; copying them down would trip the
+    ///   one-level-only validator ([`check_tree`]).
+    ///
+    /// Runs after parse, **before** [`Self::validate`], in both load paths.
+    pub fn inherit_tree_actions(&mut self) {
+        for view in &mut self.views {
+            let parent_actions: Vec<ActionDef> = view
+                .actions
+                .iter()
+                .filter(|a| a.inherit && is_inheritable_action_type(&a.action_type))
+                .cloned()
+                .collect();
+            let parent_shortcuts: HashMap<char, ShortcutDef> = view
+                .shortcuts
+                .iter()
+                .filter(|(_, sc)| sc.inherit())
+                .map(|(k, sc)| (*k, sc.clone()))
+                .collect();
+            for child in &mut view.children {
+                inherit_actions_into(child, &parent_actions, &parent_shortcuts);
             }
         }
     }
@@ -113,7 +152,11 @@ impl ViewFileConfig {
             // `>`/`<` navigation.
         }
         errors.extend(crate::keymap::validate_view_file(self, kb));
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -199,7 +242,7 @@ fn check_row_layout(
 fn check_shortcuts(
     view: &str,
     child: Option<&str>,
-    shortcuts: &HashMap<char, String>,
+    shortcuts: &HashMap<char, ShortcutDef>,
     actions: &[ActionDef],
     errors: &mut Vec<String>,
 ) {
@@ -207,13 +250,12 @@ fn check_shortcuts(
         Some(c) => format!("views.{view}.children.{c}.shortcuts"),
         None => format!("views.{view}.shortcuts"),
     };
-    for (key, action_id) in shortcuts {
+    for (key, shortcut) in shortcuts {
+        let action_id = shortcut.action();
         // The `parent:` prefix selects the target node and is stripped
         // here before checking emptiness. We don't validate the action
         // name itself — adapters expose actions lazily.
-        let body = action_id
-            .strip_prefix("parent:")
-            .unwrap_or(action_id.as_str());
+        let body = action_id.strip_prefix("parent:").unwrap_or(action_id);
         if body.trim().is_empty() {
             errors.push(format!(
                 "{scope}['{key}']: action id is empty — bind to an adapter action name \
@@ -223,9 +265,7 @@ fn check_shortcuts(
         for a in actions {
             // ActionDef.key is a string (may include modifiers like "ctrl+n");
             // a single-char shortcut conflicts only with single-char action keys.
-            if a.key.chars().count() == 1
-                && a.key.chars().next() == Some(*key)
-            {
+            if a.key.chars().count() == 1 && a.key.chars().next() == Some(*key) {
                 errors.push(format!(
                     "{scope}['{key}']: key already bound to view-level action '{}' \
                      (type={}). Remove either the shortcut or the action's key.",
@@ -273,6 +313,56 @@ fn inherit_columns_into(child: &mut ChildDef, parent_cols: &[ColumnDef]) {
     };
     for grandchild in &mut child.children {
         inherit_columns_into(grandchild, &ctx);
+    }
+}
+
+/// Action types that are declared once at the tree root and apply tree-wide;
+/// they must never be propagated to child levels or the one-level-only
+/// validator ([`check_tree`]) would reject the duplicate. Everything else is
+/// eligible for inheritance when marked [`ActionDef::inherit`].
+fn is_inheritable_action_type(action_type: &str) -> bool {
+    !matches!(action_type, "tree_find" | "search" | "fuzzy_filter")
+}
+
+/// Recursive worker for [`ViewFileConfig::inherit_tree_actions`]. Copies the
+/// parent level's inheritable actions/shortcuts into a tree-continuation
+/// `child` (unless the child binds the same key itself), then recurses
+/// carrying the child's *effective* inheritable set so entries cascade to
+/// every depth.
+fn inherit_actions_into(
+    child: &mut ChildDef,
+    parent_actions: &[ActionDef],
+    parent_shortcuts: &HashMap<char, ShortcutDef>,
+) {
+    if child.tree_label.is_some() {
+        // A child's own binding on the same key overrides the inherited one.
+        let local_keys: HashSet<String> = child.actions.iter().map(|a| a.key.clone()).collect();
+        for action in parent_actions {
+            if !local_keys.contains(&action.key) {
+                child.actions.push(action.clone());
+            }
+        }
+        for (key, sc) in parent_shortcuts {
+            child.shortcuts.entry(*key).or_insert_with(|| sc.clone());
+        }
+    }
+
+    // Carry the child's effective inheritable set further down. Inherited
+    // entries kept their `inherit` flag, so they reappear here and cascade.
+    let next_actions: Vec<ActionDef> = child
+        .actions
+        .iter()
+        .filter(|a| a.inherit && is_inheritable_action_type(&a.action_type))
+        .cloned()
+        .collect();
+    let next_shortcuts: HashMap<char, ShortcutDef> = child
+        .shortcuts
+        .iter()
+        .filter(|(_, sc)| sc.inherit())
+        .map(|(k, sc)| (*k, sc.clone()))
+        .collect();
+    for grandchild in &mut child.children {
+        inherit_actions_into(grandchild, &next_actions, &next_shortcuts);
     }
 }
 
@@ -485,13 +575,18 @@ fn check_action(
         // `edit` may omit `id` and falls back to `"edit_full"` for legacy
         // configs; `create` and `custom` have no fallback.
         "create" | "custom" if a.id.is_none() => {
-            errors.push(format!("{scope}: type='{}' requires `id` (e.g. id: create_comment)", a.action_type));
+            errors.push(format!(
+                "{scope}: type='{}' requires `id` (e.g. id: create_comment)",
+                a.action_type
+            ));
         }
         "navigate" if a.navigate_to.is_none() => {
             errors.push(format!("{scope}: type='navigate' requires `navigate_to`"));
         }
         "text_search" if a.text_search.is_none() => {
-            errors.push(format!("{scope}: type='text_search' requires `text_search.query_template`"));
+            errors.push(format!(
+                "{scope}: type='text_search' requires `text_search.query_template`"
+            ));
         }
         _ => {}
     }
@@ -544,6 +639,40 @@ impl AdapterConfig {
     /// `adapter_type`.
     pub fn effective_instance_id(&self) -> &str {
         self.id.as_deref().unwrap_or(&self.adapter_type)
+    }
+}
+
+/// A `shortcuts:` map value. Either a bare action name (`d: delete`) or a
+/// detailed form that also marks the shortcut inheritable
+/// (`s: { action: toggle-tracking, inherit: true }`). An inheritable shortcut
+/// propagates to tree-continuation child levels that don't bind the same key —
+/// the per-entry counterpart of [`ActionDef::inherit`] for the fire-and-forget
+/// `shortcuts:` map. See [`ViewFileConfig::inherit_tree_actions`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ShortcutDef {
+    /// `key: action-name` — bound here only, not inherited.
+    Action(String),
+    /// `key: { action: ..., inherit: <bool> }`.
+    Detailed {
+        action: String,
+        #[serde(default)]
+        inherit: bool,
+    },
+}
+
+impl ShortcutDef {
+    /// The adapter action id this key invokes.
+    pub fn action(&self) -> &str {
+        match self {
+            ShortcutDef::Action(a) => a,
+            ShortcutDef::Detailed { action, .. } => action,
+        }
+    }
+
+    /// Whether this shortcut propagates to tree-continuation child levels.
+    pub fn inherit(&self) -> bool {
+        matches!(self, ShortcutDef::Detailed { inherit: true, .. })
     }
 }
 
@@ -634,7 +763,7 @@ pub struct ViewDef {
     /// pressing a key bound to an unknown action surfaces an error in
     /// the status bar.
     #[serde(default)]
-    pub shortcuts: HashMap<char, String>,
+    pub shortcuts: HashMap<char, ShortcutDef>,
     /// Glyph shown in the tree-mode label column when a row of this
     /// level is *not* expandable (no children). `None` falls back to
     /// the default `·`. Set this to a semantic glyph (e.g. `📄` on a
@@ -1245,10 +1374,18 @@ pub struct PreviewConfig {
     pub markdown: bool,
 }
 
-fn default_true() -> bool { true }
-fn default_content_source() -> String { "content".to_string() }
-fn default_split() -> String { "horizontal".to_string() }
-fn default_ratio() -> u16 { 50 }
+fn default_true() -> bool {
+    true
+}
+fn default_content_source() -> String {
+    "content".to_string()
+}
+fn default_split() -> String {
+    "horizontal".to_string()
+}
+fn default_ratio() -> u16 {
+    50
+}
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -1327,6 +1464,19 @@ pub struct ActionDef {
     /// ticket edit would push a partial body on every keystroke-save.
     #[serde(default)]
     pub commit_on_save: bool,
+    /// Propagate this action down to tree-continuation child levels
+    /// (`tree_label` set) that don't bind the same key themselves. Lets a
+    /// recursive tree (e.g. the task forest) declare its per-row actions once
+    /// at the tree root instead of repeating the identical block at every
+    /// depth — the inheritance pass ([`ViewFileConfig::inherit_tree_actions`])
+    /// copies inheritable actions into each child before validation. An
+    /// inherited action keeps its `inherit` flag, so it cascades to every
+    /// depth. A child that declares its own action on the same key overrides
+    /// the inherited one. The single-level search family (`tree_find`,
+    /// `search`, `fuzzy_filter`) is never inherited — those are declared once
+    /// at the tree root and already apply tree-wide. Default `false`.
+    #[serde(default)]
+    pub inherit: bool,
 }
 
 impl ActionDef {
@@ -1481,7 +1631,7 @@ pub struct ChildDef {
     /// as `ViewDef::shortcuts` — maps single-char keys to adapter
     /// `Node::actions` ids dispatched through `Node::invoke_action`.
     #[serde(default)]
-    pub shortcuts: HashMap<char, String>,
+    pub shortcuts: HashMap<char, ShortcutDef>,
     /// Override Enter (the `content.open` key) on a row of this
     /// ChildDef's node-type so it dispatches a `Node::invoke_action`
     /// instead of the default drill-down. Used for "synthetic" child
@@ -1800,7 +1950,10 @@ views:
         let config: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         let condensed = &config.views[0];
         assert_eq!(condensed.group_by.as_ref().unwrap().column, "started");
-        assert_eq!(condensed.group_by.as_ref().unwrap().bucket, Some(DateBucket::Day));
+        assert_eq!(
+            condensed.group_by.as_ref().unwrap().bucket,
+            Some(DateBucket::Day)
+        );
         assert_eq!(condensed.then_by.len(), 1);
         assert_eq!(condensed.then_by[0].column, "task_id");
         assert!(condensed.then_by[0].bucket.is_none());
@@ -1852,13 +2005,21 @@ views:
     #[test]
     fn shows_in_action_bar_defaults() {
         let make = |action_type: &str| ActionDef {
-            name: "test".into(), key: "x".into(), action_type: action_type.into(), id: None,
+            name: "test".into(),
+            key: "x".into(),
+            action_type: action_type.into(),
+            id: None,
             node_id_from: None,
             navigate_to: None,
-            fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: false,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
+            inherit: false,
         };
         // Modal/persistent state actions → action bar
         assert!(make("edit").shows_in_action_bar());
@@ -1880,13 +2041,21 @@ views:
     #[test]
     fn hide_from_bar_overrides_default() {
         let action = ActionDef {
-            name: "edit".into(), key: "e".into(), action_type: "edit".into(), id: None,
+            name: "edit".into(),
+            key: "e".into(),
+            action_type: "edit".into(),
+            id: None,
             node_id_from: None,
             navigate_to: None,
-            fuzzy_filter: None, search: None, text_search: None, tree_find: None, hide_from_bar: true,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: None,
+            hide_from_bar: true,
             editor: None,
             under_selection: false,
             commit_on_save: false,
+            inherit: false,
         };
         assert!(!action.shows_in_action_bar());
     }
@@ -1953,7 +2122,12 @@ views:
       - { name: c, key: c, node_type: t2, actions: [{ name: add, key: a, type: create }] }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("create") && errs[0].contains("id"));
     }
@@ -1967,24 +2141,36 @@ views:
         let yaml = include_str!("../../../docs/examples/views/tasks.yaml");
         let mut cfg: ViewFileConfig =
             serde_yaml::from_str(yaml).expect("tasks.yaml should deserialize");
-        // The loader fills tree-continuation columns right after parse, so the
-        // recursive subtask branch (which ships no `columns:`) inherits the
-        // root's set. Mirror that here before asserting on the child columns.
+        // The loader fills tree-continuation columns AND inheritable
+        // actions/shortcuts right after parse, so the recursive subtask
+        // branch (which ships neither `columns:` nor `actions:`/`shortcuts:`)
+        // inherits the root's set. Mirror both passes here before asserting.
         cfg.inherit_tree_columns();
+        cfg.inherit_tree_actions();
         assert_eq!(cfg.adapter.adapter_type, "tasks");
         assert_eq!(cfg.views[0].tree_label.as_deref(), Some("description"));
         assert!(
-            cfg.views[0].columns.iter().any(|c| c.key == "priority"
-                && matches!(c.kind, ColumnKind::Number)),
+            cfg.views[0]
+                .columns
+                .iter()
+                .any(|c| c.key == "priority" && matches!(c.kind, ColumnKind::Number)),
             "priority column should be kind: number"
         );
         // A1b mutation bindings: edit/add as typed actions, the
         // delete/undelete/reparent quartet as generic shortcuts, on both
         // the root view and the recursive subtask branch.
         let root = &cfg.views[0];
-        let edit = root.actions.iter().find(|a| a.action_type == "edit").unwrap();
+        let edit = root
+            .actions
+            .iter()
+            .find(|a| a.action_type == "edit")
+            .unwrap();
         assert_eq!(edit.id.as_deref(), Some("edit"));
-        let add = root.actions.iter().find(|a| a.action_type == "create").unwrap();
+        let add = root
+            .actions
+            .iter()
+            .find(|a| a.action_type == "create")
+            .unwrap();
         assert_eq!(add.id.as_deref(), Some("add"));
         for (k, name) in [
             ('d', "delete"),
@@ -1993,25 +2179,38 @@ views:
             ('m', "mark-move"),
             ('p', "paste-move"),
         ] {
-            assert_eq!(root.shortcuts.get(&k), Some(&name.to_string()));
+            assert_eq!(root.shortcuts.get(&k).map(|s| s.action()), Some(name));
         }
         // A1c-1: the tracking marker column is declared on both levels.
         assert!(
             root.columns.iter().any(|c| c.key == "tracking"),
             "root view should declare the tracking marker column"
         );
+        // The subtask branch ships no actions/shortcuts of its own; the
+        // inheritable entries from the root view cascade in via
+        // `inherit_tree_actions` (called above), so edit/create + the
+        // d/s shortcuts are present at this depth too.
         let child = &root.children[0];
         assert!(child.actions.iter().any(|a| a.action_type == "edit"));
         assert!(child.actions.iter().any(|a| a.action_type == "create"));
-        assert_eq!(child.shortcuts.get(&'d'), Some(&"delete".to_string()));
-        assert_eq!(child.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
+        assert_eq!(
+            child.shortcuts.get(&'d').map(|s| s.action()),
+            Some("delete")
+        );
+        assert_eq!(
+            child.shortcuts.get(&'s').map(|s| s.action()),
+            Some("toggle-tracking")
+        );
         // The subtask branch ships no `columns:` of its own — it inherits the
         // root's set (incl. the tracking marker) via `inherit_tree_columns`.
         assert!(child.columns.iter().any(|c| c.key == "tracking"));
         // A1c-2: the root view declares a saved-query block — editable, with
         // a `q` menu key. No `default` body ships: like the native tab, the
         // whole (non-deleted) forest is shown including done tasks (parity).
-        let query = root.query.as_ref().expect("root view should declare a query block");
+        let query = root
+            .query
+            .as_ref()
+            .expect("root view should declare a query block");
         assert!(query.editable, "tasks query should be editable");
         assert_eq!(query.menu_key.as_deref(), Some("q"));
         assert!(
@@ -2048,20 +2247,35 @@ views:
         // A1c (scripts): a `type: script` action on both levels reaches the
         // generic script menu (key `x`). The validator does not restrict
         // `script` to the tree root (unlike search/fuzzy_filter/tree_find).
-        let root_script = root.actions.iter().find(|a| a.action_type == "script").unwrap();
+        let root_script = root
+            .actions
+            .iter()
+            .find(|a| a.action_type == "script")
+            .unwrap();
         assert_eq!(root_script.key, "x");
         assert!(child.actions.iter().any(|a| a.action_type == "script"));
-        // A1c comfort extras: `A` adds a child under the selected node
-        // (`under_selection`), `U` un-nests to the top level. Both on both
-        // levels so they work in tree mode (root view) and when drilled.
-        let add_child = root.actions.iter().find(|a| a.key == "A").unwrap();
-        assert_eq!(add_child.action_type, "create");
-        assert_eq!(add_child.id.as_deref(), Some("add"));
-        assert!(add_child.under_selection);
-        assert_eq!(root.shortcuts.get(&'U'), Some(&"unnest".to_string()));
-        let child_add = child.actions.iter().find(|a| a.key == "A").unwrap();
-        assert!(child_add.under_selection);
-        assert_eq!(child.shortcuts.get(&'U'), Some(&"unnest".to_string()));
+        // Task-1 semantics: `a` adds a child of the selected node in the
+        // tree (`under_selection`, adapter id `add`); `A` adds a *sibling*
+        // (adapter id `add-sibling`). `U` un-nests to the top level. All
+        // three inherit down to the recursive branch.
+        let add = root.actions.iter().find(|a| a.key == "a").unwrap();
+        assert_eq!(add.id.as_deref(), Some("add"));
+        assert!(
+            add.under_selection,
+            "tree `a` re-targets onto the selection"
+        );
+        let add_sibling = root.actions.iter().find(|a| a.key == "A").unwrap();
+        assert_eq!(add_sibling.action_type, "create");
+        assert_eq!(add_sibling.id.as_deref(), Some("add-sibling"));
+        assert!(add_sibling.under_selection);
+        assert_eq!(root.shortcuts.get(&'U').map(|s| s.action()), Some("unnest"));
+        let child_sibling = child.actions.iter().find(|a| a.key == "A").unwrap();
+        assert_eq!(child_sibling.id.as_deref(), Some("add-sibling"));
+        assert!(child_sibling.under_selection);
+        assert_eq!(
+            child.shortcuts.get(&'U').map(|s| s.action()),
+            Some("unnest")
+        );
 
         cfg.validate(
             &KeyBindingConfig::default(),
@@ -2111,8 +2325,14 @@ views:
         assert!(tree.columns.iter().any(|c| c.key == "duration_cumulated"));
         // Buckets render as `── label` header rows; the appended Total
         // column reads the bucket's `duration` metadata field.
-        let gh = tree.group_headers.as_ref().expect("tree view declares group_headers");
-        let total = gh.total.as_ref().expect("group_headers carries a total column");
+        let gh = tree
+            .group_headers
+            .as_ref()
+            .expect("tree view declares group_headers");
+        let total = gh
+            .total
+            .as_ref()
+            .expect("group_headers carries a total column");
         assert_eq!(total.key, "total");
         assert_eq!(total.source.as_deref(), Some("duration"));
         // Group buckets are read-only aggregates — no shortcuts on the root
@@ -2126,7 +2346,10 @@ views:
         assert_eq!(sub.node_type, "tracking:tree-item");
         assert!(sub.columns.iter().any(|c| c.key == "duration"));
         assert!(sub.columns.iter().any(|c| c.key == "duration_cumulated"));
-        assert_eq!(sub.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
+        assert_eq!(
+            sub.shortcuts.get(&'s').map(|s| s.action()),
+            Some("toggle-tracking")
+        );
 
         cfg.validate(
             &KeyBindingConfig::default(),
@@ -2155,7 +2378,11 @@ views:
             )
             .unwrap_err();
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].contains("nope") && errs[0].contains("editors"), "got: {}", errs[0]);
+        assert!(
+            errs[0].contains("nope") && errs[0].contains("editors"),
+            "got: {}",
+            errs[0]
+        );
     }
 
     #[test]
@@ -2178,11 +2405,13 @@ views:
             )
             .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("group_headers") && e.contains("tree_label")),
+            errs.iter()
+                .any(|e| e.contains("group_headers") && e.contains("tree_label")),
             "got: {errs:?}"
         );
         assert!(
-            errs.iter().any(|e| e.contains("group_headers") && e.contains("group_by")),
+            errs.iter()
+                .any(|e| e.contains("group_headers") && e.contains("group_by")),
             "got: {errs:?}"
         );
     }
@@ -2201,7 +2430,8 @@ views:
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         let editors: crate::config::editor::EditorsConfig =
             serde_yaml::from_str("default: {}\ncompose-below: {}").unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &editors).unwrap();
+        cfg.validate(&KeyBindingConfig::default(), &editors)
+            .unwrap();
     }
 
     #[test]
@@ -2234,7 +2464,12 @@ views:
       - { name: tr, key: t, type: custom }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("custom") && errs[0].contains("id"));
     }
@@ -2251,7 +2486,12 @@ views:
       - { name: free, key: s, type: text_search }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("text_search") && errs[0].contains("query_template"));
     }
@@ -2269,7 +2509,11 @@ views:
     pagination: { mode: server }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
         let p = cfg.views[0].pagination.as_ref().unwrap();
         assert_eq!(p.mode, PaginationMode::Server);
         assert_eq!(p.page_size, None);
@@ -2286,7 +2530,11 @@ views:
     pagination: { mode: server, page_size: 30 }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
         let p = cfg.views[0].pagination.as_ref().unwrap();
         assert_eq!(p.mode, PaginationMode::Server);
         assert_eq!(p.page_size, Some(30));
@@ -2303,7 +2551,11 @@ views:
     pagination: { mode: all }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
         let p = cfg.views[0].pagination.as_ref().unwrap();
         assert_eq!(p.mode, PaginationMode::All);
     }
@@ -2324,7 +2576,11 @@ views:
           query_template: 'text ~ "{q}"'
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
         let action = &cfg.views[0].actions[0];
         assert_eq!(action.action_type, "text_search");
         assert!(action.shows_in_action_bar());
@@ -2346,7 +2602,12 @@ views:
       - { name: nav, key: n, type: navigate }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(errs[0].contains("navigate_to"));
     }
 
@@ -2368,7 +2629,9 @@ views:
         let default = q.default.as_deref().unwrap();
         // Re-serialized YAML — must parse back as a sequence with both projects.
         let parsed: serde_yaml::Value = serde_yaml::from_str(default).unwrap();
-        let seq = parsed.as_sequence().expect("default should be a YAML sequence");
+        let seq = parsed
+            .as_sequence()
+            .expect("default should be a YAML sequence");
         assert_eq!(seq.len(), 2);
         assert_eq!(seq[0].get("project").unwrap().as_u64(), Some(2));
         assert_eq!(seq[1].get("project").unwrap().as_u64(), Some(3));
@@ -2405,7 +2668,11 @@ views:
       - { name: refresh, key: r, type: reload }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2442,7 +2709,11 @@ views:
         columns: [{ key: name }]
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
         assert_eq!(cfg.views[0].tree_label.as_deref(), Some("name"));
         assert_eq!(cfg.views[0].children[0].tree_label.as_deref(), Some("name"));
     }
@@ -2459,7 +2730,12 @@ views:
     columns: [{ key: name }]
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("tree_label 'missing'")),
             "got: {errs:?}"
@@ -2488,7 +2764,8 @@ views:
             )
             .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("row_layout") && e.contains("'nope'")),
+            errs.iter()
+                .any(|e| e.contains("row_layout") && e.contains("'nope'")),
             "got: {errs:?}"
         );
     }
@@ -2569,7 +2846,10 @@ views:
         let view = &cfg.views[0];
         let layout = view.row_layout.as_ref().unwrap();
         assert!(!layout[2].highlight_on_select, "empty spacer defaults off");
-        assert!(layout[0].highlight_on_select, "shorthand non-empty defaults on");
+        assert!(
+            layout[0].highlight_on_select,
+            "shorthand non-empty defaults on"
+        );
         assert!(!layout[3].highlight_on_select, "explicit override off");
         // Validation passes (no unknown-column errors).
         let res = cfg.validate(
@@ -2622,9 +2902,15 @@ views:
         columns: [{ key: label }]
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("tree_label 'oops'") && e.contains("schema")),
+            errs.iter()
+                .any(|e| e.contains("tree_label 'oops'") && e.contains("schema")),
             "got: {errs:?}"
         );
     }
@@ -2645,9 +2931,15 @@ views:
         columns: [{ key: name }]
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("no ancestor has tree_label")),
+            errs.iter()
+                .any(|e| e.contains("no ancestor has tree_label")),
             "got: {errs:?}"
         );
     }
@@ -2668,7 +2960,13 @@ views:
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         // Unique node_types among tree-continuing children → OK.
-        assert!(cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).is_ok());
+        assert!(
+            cfg.validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default()
+            )
+            .is_ok()
+        );
     }
 
     /// The Stoat tree shape: a heterogeneous server level (category +
@@ -2714,9 +3012,17 @@ views:
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(
-            cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).is_ok(),
+            cfg.validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default()
+            )
+            .is_ok(),
             "got: {:?}",
-            cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err()
+            cfg.validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default()
+            )
+            .unwrap_err()
         );
     }
 
@@ -2741,7 +3047,12 @@ views:
         columns: [{ key: name }]
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("duplicate node_type")),
             "got: {errs:?}"
@@ -2768,7 +3079,12 @@ views:
         recursive: true
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
             errs.iter()
                 .any(|e| e.contains("recursive: true requires tree_label")),
@@ -2799,7 +3115,11 @@ views:
           - { name: leaf, node_type: leaf, columns: [{ key: name }] }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2822,7 +3142,12 @@ views:
           - { name: b, node_type: same, tree_label: name, columns: [{ key: name }] }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("duplicate node_type")),
             "got: {errs:?}"
@@ -2850,9 +3175,15 @@ views:
           - { name: ff, key: g, type: fuzzy_filter }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("fuzzy_filter is defined at multiple tree levels")),
+            errs.iter()
+                .any(|e| e.contains("fuzzy_filter is defined at multiple tree levels")),
             "got: {errs:?}"
         );
     }
@@ -2876,7 +3207,11 @@ views:
         columns: [{ key: name }]
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
     }
 
     /// CT-4: `tree_find` only makes sense on tree-enabled levels — it
@@ -2895,10 +3230,15 @@ views:
       - { name: tf, key: '/', type: tree_find }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("type='tree_find'")
-                && e.contains("tree_label")),
+            errs.iter()
+                .any(|e| e.contains("type='tree_find'") && e.contains("tree_label")),
             "got: {errs:?}"
         );
     }
@@ -2923,10 +3263,15 @@ views:
           - { name: tf, key: '/', type: tree_find }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("type='tree_find'")
-                && e.contains("tree_label")),
+            errs.iter()
+                .any(|e| e.contains("type='tree_find'") && e.contains("tree_label")),
             "got: {errs:?}"
         );
     }
@@ -2948,7 +3293,11 @@ views:
       - { name: tree-find, key: '/', type: tree_find }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
         let action = &cfg.views[0].actions[0];
         assert_eq!(action.action_type, "tree_find");
         assert!(action.shows_in_action_bar());
@@ -2978,9 +3327,15 @@ views:
           - { name: tf2, key: '?', type: tree_find }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("tree_find is defined at multiple tree levels")),
+            errs.iter()
+                .any(|e| e.contains("tree_find is defined at multiple tree levels")),
             "got: {errs:?}"
         );
     }
@@ -3001,9 +3356,15 @@ views:
       - { name: find,  key: f, type: custom, id: find }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("views.tables") && e.contains("\"f\"")),
+            errs.iter()
+                .any(|e| e.contains("views.tables") && e.contains("\"f\"")),
             "expected a tables/'f' conflict, got: {errs:?}"
         );
     }
@@ -3027,11 +3388,14 @@ views:
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         let view = &cfg.views[0];
-        assert_eq!(view.shortcuts.get(&'x'), Some(&"execute".to_string()));
-        assert_eq!(view.shortcuts.get(&'e'), Some(&"edit".to_string()));
         assert_eq!(
-            view.children[0].shortcuts.get(&'d'),
-            Some(&"delete".to_string())
+            view.shortcuts.get(&'x').map(|s| s.action()),
+            Some("execute")
+        );
+        assert_eq!(view.shortcuts.get(&'e').map(|s| s.action()), Some("edit"));
+        assert_eq!(
+            view.children[0].shortcuts.get(&'d').map(|s| s.action()),
+            Some("delete")
         );
     }
 
@@ -3060,10 +3424,15 @@ views:
       x: ""
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("views.v.shortcuts['x']")
-                && e.contains("action id is empty")),
+            errs.iter()
+                .any(|e| e.contains("views.v.shortcuts['x']") && e.contains("action id is empty")),
             "expected an empty-id error for views.v shortcut 'x', got: {errs:?}"
         );
     }
@@ -3085,10 +3454,15 @@ views:
       r: execute
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg.validate(&KeyBindingConfig::default(), &crate::config::editor::EditorsConfig::default()).unwrap_err();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("views.v.shortcuts['r']")
-                && e.contains("already bound")),
+            errs.iter()
+                .any(|e| e.contains("views.v.shortcuts['r']") && e.contains("already bound")),
             "expected a collision error for shortcut 'r' vs action 'refresh', got: {errs:?}"
         );
     }
@@ -3164,4 +3538,3 @@ views:
         assert!(rows.columns.is_empty());
     }
 }
-
