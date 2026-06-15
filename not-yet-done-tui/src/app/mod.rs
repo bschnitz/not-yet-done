@@ -6002,12 +6002,24 @@ impl App {
         self.tasks_view.sync_action_bar(tasks_active_editor, tracking_active);
         self.trackings_view.sync_action_bar(trackings_active_editor, tracking_active);
         let cut_active = self.content_marked_node.is_some();
+        // Active sources owned by the App (popups / detached scripts) — pushed
+        // into the focused content view so its hint resolver can light up the
+        // matching top-bar shortcut while the affordance is open.
+        let confirm_active = matches!(
+            self.pending_confirmation,
+            Some((_, PendingConfirmation::DeleteContentNode { .. }))
+        );
+        let column_config_active = self.column_config_popup.is_some();
+        let script_active = self.detached_script.is_some();
         if let Tab::Content(idx) = self.active_tab {
             if let Some(cv) = self.content_view_mut(idx) {
                 cv.sync_action_bar(
                     content_active_editor.as_deref(),
                     tracking_active,
                     cut_active,
+                    confirm_active,
+                    column_config_active,
+                    script_active,
                 );
             }
         }

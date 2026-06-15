@@ -1,6 +1,7 @@
 //! View components — each tab/sub-view is an autonomous component.
 
 pub mod column_format;
+pub mod content_action_hints;
 pub mod content_tree;
 pub mod group_aggregate;
 pub mod content_view;

@@ -1240,21 +1240,42 @@ Eine erreichbare Postgres-Instanz ist konfiguriert.
 - [ ] Cursor auf DB-Zeile (Depth 0) → `gh` → no-op (kein
       Window-Close, keine Pane-Schließung).
 
-### Smart-Collapse `c`
+### Smart-Collapse `backspace` (war `c`)
 
-- [ ] Cursor auf expanded DB-Zeile (mit `▼`) → `c` → DB kollabiert
-      (`▼` → `▶`, Children weg), **Cursor bleibt auf derselben Zeile**.
+> Seit dem Action-Bar-Refactor liegt der Smart-Collapse auf `backspace`
+> (nicht mehr `c`), damit `c` **überall** das ColumnConfig-Popup öffnet.
+> `backspace` ist ohnehin schon die „eine Ebene zurück"-Geste (`Back`):
+> im Tree-Modus klappt `Back` zum Eltern-Knoten zu, das überschneidet
+> sich bewusst mit Smart-Collapse.
+
+- [ ] Cursor auf expanded DB-Zeile (mit `▼`) → `backspace` → DB
+      kollabiert (`▼` → `▶`, Children weg), **Cursor bleibt auf
+      derselben Zeile**.
 - [ ] Cursor auf eine Schema-Zeile (Depth 1), die selbst **nicht**
-      aufgeklappt ist → `c` → Eltern-DB kollabiert und Cursor springt
-      hoch auf die DB-Zeile (gleiches Verhalten wie `gh`/Back).
-- [ ] Cursor auf expanded Schema-Zeile (Depth 1, mit `▼`) → `c` →
-      Schema kollabiert, Cursor bleibt auf der Schema-Zeile.
-- [ ] Cursor auf eine kollabierte Top-Level-DB (Depth 0, `▶`) → `c`
-      → no-op (kein Window-Close, kein Beep).
-- [ ] `c` außerhalb von Tree-Modus (Tasks-/Trackings-Tab) → öffnet
-      weiterhin das ColumnConfig-Popup (unverändert). In nicht-Tree
-      ContentView-Panes (z. B. `tables`-Subtab oder Rows-Split-Pane)
-      ist `c` ohne Effekt — keine TreeCollapse-Aktion mehr aktiv.
+      aufgeklappt ist → `backspace` → Eltern-DB kollabiert und Cursor
+      springt hoch auf die DB-Zeile.
+- [ ] Cursor auf expanded Schema-Zeile (Depth 1, mit `▼`) →
+      `backspace` → Schema kollabiert, Cursor bleibt auf der
+      Schema-Zeile.
+- [ ] Cursor auf eine kollabierte Top-Level-DB (Depth 0, `▶`) →
+      `backspace` → no-op (kein Window-Close, kein Beep).
+
+### Action-Bar Active-State + `c` = columns (Refactor 2026-06-15)
+
+- [ ] `c` öffnet das ColumnConfig-Popup **auf jedem Content-Tab** —
+      auch im Tree-Modus (Tasks-(A)/Trackings-(A)/Postgres-Tree). Der
+      Shortcut erscheint als `c columns` in der oberen Action-Bar.
+- [ ] Solange ein Popup/Modus offen ist, leuchtet der zugehörige
+      Top-Bar-Hint auf (Akzent + fett + unterstrichen): `d delete`
+      während des y/n-Confirm, `q queries` während des Query-Menüs,
+      `u group` während des Group-Menüs, `c columns` während des
+      ColumnConfig-Popups, `e edit`/`a add` während der Editor-Session
+      offen ist, `J jump` im Jump-Modus, `s track` bei laufendem
+      Tracking, `C cut` bei armiertem Cut, sowie der Script-Hint
+      während ein detached Script läuft.
+- [ ] In der oberen Action-Bar steht **nichts** mehr, das nicht
+      aktivierbar ist: Confluence `o open in browser` und `d download`
+      sind in die untere Status-Bar gewandert.
 
 ### Pagination innerhalb Tree (Phase 5)
 
@@ -2501,7 +2522,7 @@ sind Dokumentation.
 ### CF-9 — Edit Page + 3-Way Merge
 
 - [ ] `e` auf einer Page → `$EDITOR` öffnet mit `title: <echter
-    Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
+  Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
       pretty-printed `body.storage` (xmllint).
 - [ ] Body trivial ändern (z.B. neuen Absatz einfügen), speichern,
       Editor schließen → `Updated page <Title> (v <n+1>)` Banner.
