@@ -558,8 +558,10 @@ pub enum ContentAction {
     /// if it is expanded, otherwise close its parent (moving the
     /// cursor up to that parent). No-op at depth 0 on a collapsed
     /// node. Only registered on tree-mode panes (`tree_label` set on
-    /// the root view); ignored elsewhere so the default key (`c`)
-    /// stays free for the ColumnConfig popup on Tasks/Trackings.
+    /// the root view). Bound to `backspace` (a navigation gesture) so it
+    /// never competes with [`CommonAction::ColumnConfig`] on `c` — fold is
+    /// navigation and carries no action-bar entry; `c` must always open the
+    /// column-config popup, including on tree panes.
     TreeCollapse,
     /// Collapse every expanded node in a tree-mode pane back to the
     /// root listing. Mirrors the Tasks tab's `zm` chord. Only registered
@@ -1144,7 +1146,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::NextPage, KeyBinding::new(">"));
         m.insert(ContentAction::EditQuery, KeyBinding::new("Q"));
         m.insert(ContentAction::OpenScriptsMenu, KeyBinding::new("q"));
-        m.insert(ContentAction::TreeCollapse, KeyBinding::new("c"));
+        m.insert(ContentAction::TreeCollapse, KeyBinding::new("backspace"));
         m.insert(ContentAction::TreeCollapseAll, KeyBinding::new("zm"));
         m.insert(ContentAction::CycleGrouping, KeyBinding::new("zg"));
         m.insert(ContentAction::GroupMenu, KeyBinding::new("u"));

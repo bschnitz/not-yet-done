@@ -102,8 +102,10 @@ pub(super) fn page_actions() -> Vec<NodeAction> {
         NodeAction::new("delete", "delete (Trash)", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('D'),
+        // open-in-browser is fire-and-forget (no input, no popup) → it can
+        // never be "active", so it belongs in the status bar, not the top
+        // action bar. Default `StatusBar` placement (no `with_placement`).
         NodeAction::new("open-in-browser", "open in browser", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
             .with_default_key('o'),
     ]
 }

@@ -48,8 +48,9 @@ pub(super) fn space_actions() -> Vec<NodeAction> {
         NodeAction::new("create-page", "create top-level page", InputSpec::Editor)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('a'),
+        // open-in-browser is fire-and-forget (no input, no popup) → never
+        // "active", so it stays in the status bar (default placement).
         NodeAction::new("open-in-browser", "open in browser", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
             .with_default_key('o'),
     ]
 }

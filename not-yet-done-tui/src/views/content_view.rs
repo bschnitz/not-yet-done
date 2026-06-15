@@ -39,6 +39,7 @@ use not_yet_done_content::{
 };
 
 use crate::components::action_bar::{ActionBarComponent, ActionHint};
+use crate::views::content_action_hints::{ActionBarHint, ActiveSource, ShortcutHint};
 use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
@@ -913,6 +914,13 @@ pub struct ContentView {
     active_editor: Option<String>,
     tracking_active: bool,
     cut_active: bool,
+    /// A content-delete confirmation popup is open (App-owned
+    /// `pending_confirmation` is a `DeleteContentNode`).
+    confirm_active: bool,
+    /// The column-config popup is open (App-owned `column_config_popup`).
+    column_config_active: bool,
+    /// A detached script is running (App-owned `detached_script`).
+    script_active: bool,
     /// Command-line component, driven by `:`. Tab-global — operates
     /// on the active pane.
     pub cmdline: CmdlineComponent,
@@ -1558,10 +1566,11 @@ impl ContentPane {
 
     /// Render shortcut hints for the current chain position by
     /// joining each visible YAML `shortcuts:` entry with the
-    /// adapter's `actions_for_type()` lookup. Returns `(key, label,
-    /// placement)` triples (unknown node_type or action_id → drop
-    /// silently). Caller splits by placement for the action / status
-    /// bars.
+    /// adapter's `actions_for_type()` lookup. Returns one
+    /// [`ShortcutHint`] per resolvable entry (unknown node_type or
+    /// action_id → drop silently), carrying the adapter's `placement`
+    /// and the [`ActiveSource`] derived from the action's `id` + input
+    /// shape. Caller splits by placement for the action / status bars.
     ///
     /// Synchronous: the adapter is required to answer without I/O
     /// (`actions_for_type` is instance-free and type-keyed). No
@@ -1570,8 +1579,9 @@ impl ContentPane {
         &self,
         view_defs: &[ViewDef],
         adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
-    ) -> Vec<(String, String, not_yet_done_content::HintPlacement)> {
+    ) -> Vec<ShortcutHint> {
         use crate::app::node_actions::parse_shortcut_value;
+        use crate::views::content_action_hints::source_for_shortcut;
         let Some(adapter) = adapter else {
             return Vec::new();
         };
@@ -1594,7 +1604,15 @@ impl ContentPane {
             };
             let actions = adapter.actions_for_type(&nt);
             if let Some(action) = actions.iter().find(|a| a.id == action_name) {
-                out.push((key.to_string(), action.label.clone(), action.placement));
+                let opens_input =
+                    !matches!(action.input, not_yet_done_content::InputSpec::None);
+                let source = source_for_shortcut(&action.id, &action.label, opens_input);
+                out.push(ShortcutHint {
+                    key: key.to_string(),
+                    label: action.label.clone(),
+                    placement: action.placement,
+                    source,
+                });
             }
         }
         out
@@ -4573,6 +4591,11 @@ impl ContentPane {
 
     // ── Bar hints ────────────────────────────────────────────────────
 
+    /// Build the action-bar hints for the current chain position. Each
+    /// hint carries its [`ActiveSource`] (derived at build time from the
+    /// action's type / id), so the view's resolver — not the renderer —
+    /// decides active-ness. The structural contract holds: every entry here
+    /// has a source, so nothing fire-and-forget reaches the top bar.
     pub fn action_bar_hints(
         &self,
         view_defs: &[ViewDef],
@@ -4580,40 +4603,52 @@ impl ContentPane {
         content_kb: &KeyBindingSection<ContentAction>,
         key_icons: &KeyIconMap,
         adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
-    ) -> Vec<BarHint> {
-        let mut hints = Vec::new();
+    ) -> Vec<ActionBarHint> {
+        use crate::views::content_action_hints::source_for_action_type;
+        let mut hints: Vec<ActionBarHint> = Vec::new();
         for action in self.current_actions(view_defs) {
             if action.shows_in_action_bar() {
-                hints.push((action.key.clone(), action.name.clone()));
+                let source = source_for_action_type(&action.action_type, &action.name);
+                hints.push(ActionBarHint::new(action.key.clone(), action.name.clone(), source));
             }
         }
         // SH: YAML `shortcuts:` entries whose adapter action declares
-        // `placement: ActionBar`. Unknown adapter or unknown
-        // node_type → drop silently. Deduplicate against the
-        // `actions:`-derived entries above to avoid double-display
-        // when the user binds both `actions:` and `shortcuts:` to the
-        // same key (rare but possible).
-        for (key, label, placement) in self.collect_shortcut_hints(view_defs, adapter) {
-            if placement != not_yet_done_content::HintPlacement::ActionBar {
+        // `placement: ActionBar`. Unknown adapter or unknown node_type →
+        // drop silently. Deduplicate against the `actions:`-derived entries
+        // above to avoid double-display when the user binds both `actions:`
+        // and `shortcuts:` to the same key (rare but possible). An
+        // action-bar entry with no derivable source is an adapter bug
+        // (asserted); in release it stays visible but never lights up.
+        for sh in self.collect_shortcut_hints(view_defs, adapter) {
+            if sh.placement != not_yet_done_content::HintPlacement::ActionBar {
                 continue;
             }
-            if hints.iter().any(|(k, _)| k == &key) {
+            if hints.iter().any(|h| h.key == sh.key) {
                 continue;
             }
-            hints.push((key, label));
+            let source = sh.source.unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "shortcut '{}' is action-bar placed but has no ActiveSource",
+                    sh.label
+                );
+                ActiveSource::Editor(sh.label.clone())
+            });
+            hints.push(ActionBarHint::new(sh.key, sh.label, source));
         }
         if self.nav_stack.is_empty() {
             if let Some(mk) = query_menu_key {
-                if !hints.iter().any(|(k, _)| k == mk) {
-                    hints.push((mk.to_string(), "queries".into()));
+                if !hints.iter().any(|h| h.key == mk) {
+                    hints.push(ActionBarHint::new(mk.to_string(), "queries", ActiveSource::QueryMenu));
                 }
             }
         }
         if self.nav_stack.is_empty() && self.is_query_editable(view_defs) {
-            if !hints.iter().any(|(_, v)| v == "edit query") {
-                hints.push((
+            if !hints.iter().any(|h| h.label == "edit query") {
+                hints.push(ActionBarHint::new(
                     content_kb.hint_label(&ContentAction::EditQuery, key_icons),
-                    "edit query".into(),
+                    "edit query",
+                    ActiveSource::Editor("edit query".to_string()),
                 ));
             }
         }
@@ -4670,14 +4705,14 @@ impl ContentPane {
         // SH: YAML `shortcuts:` entries whose adapter action declares
         // `placement: StatusBar`. Mirror of the action-bar branch
         // above, with the same dedup-against-existing-key guard.
-        for (key, label, placement) in self.collect_shortcut_hints(view_defs, adapter) {
-            if placement != not_yet_done_content::HintPlacement::StatusBar {
+        for sh in self.collect_shortcut_hints(view_defs, adapter) {
+            if sh.placement != not_yet_done_content::HintPlacement::StatusBar {
                 continue;
             }
-            if hints.iter().any(|(k, _)| k == &key) {
+            if hints.iter().any(|(k, _)| k == &sh.key) {
                 continue;
             }
-            hints.push((key, label));
+            hints.push((sh.key, sh.label));
         }
         if let Some(preview) = self.current_preview_config(view_defs) {
             if let Some(ref kb) = preview.keybinding {
@@ -4979,9 +5014,9 @@ impl ContentPane {
         }
 
         // Tree smart-collapse — only on tree-mode panes (root has
-        // `tree_label`). Defaults to `c`; `strip_reserved` keeps it
-        // out of the way if column_cursor ever co-exists with a
-        // tree leaf.
+        // `tree_label`). Defaults to `backspace` (a navigation gesture) so
+        // it never shadows `c`/ColumnConfig; `strip_reserved` keeps it out
+        // of the way if column_cursor ever co-exists with a tree leaf.
         if self.tree.is_some() {
             if let Some(b) = content_kb
                 .get(&ContentAction::TreeCollapse)
@@ -5800,6 +5835,9 @@ impl ContentView {
             active_editor: None,
             tracking_active: false,
             cut_active: false,
+            confirm_active: false,
+            column_config_active: false,
+            script_active: false,
             theme,
             cmdline: CmdlineComponent::new(),
             tab_name: config.tab.name.clone(),
@@ -5924,13 +5962,19 @@ impl ContentView {
         active_editor: Option<&str>,
         tracking_active: bool,
         cut_active: bool,
+        confirm_active: bool,
+        column_config_active: bool,
+        script_active: bool,
     ) {
         // Store the cross-cutting active state so the hint builder can
-        // stamp each hint's `active` flag (the bar no longer special-cases
+        // resolve each hint's `active` flag (the bar no longer special-cases
         // descriptions). Must happen before `action_bar_hints()` reads it.
         self.active_editor = active_editor.map(|s| s.to_string());
         self.tracking_active = tracking_active;
         self.cut_active = cut_active;
+        self.confirm_active = confirm_active;
+        self.column_config_active = column_config_active;
+        self.script_active = script_active;
 
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
@@ -8169,13 +8213,14 @@ impl ContentView {
         // condition as the keybinding claim in `build_view_claims`.
         // Per-node-action shortcut hints (e.g. `Q sql`) are not yet
         // surfaced here; the bindings work via the async shortcut
-        // dispatcher in `ContentPane::try_node_action_shortcut`.
+        // dispatcher in `ContentPane::try_node_action_shortcut`. Reuses the
+        // shared `query_menu` popup, hence `ActiveSource::QueryMenu`.
         if self.target_postgres_table_node_id().is_some() {
             let q_key = self
                 .content_kb
                 .hint_label(&ContentAction::OpenScriptsMenu, &self.key_icons);
-            if !hints.iter().any(|(k, _)| k == &q_key) {
-                hints.push((q_key, "queries".to_string()));
+            if !hints.iter().any(|h| h.key == q_key) {
+                hints.push(ActionBarHint::new(q_key, "queries", ActiveSource::QueryMenu));
             }
         }
         // Group-by menu hint — same gate as the claim in `build_view_claims`
@@ -8184,8 +8229,19 @@ impl ContentView {
             let u_key = self
                 .content_kb
                 .hint_label(&ContentAction::GroupMenu, &self.key_icons);
-            if !hints.iter().any(|(k, _)| k == &u_key) {
-                hints.push((u_key, "group".to_string()));
+            if !hints.iter().any(|h| h.key == u_key) {
+                hints.push(ActionBarHint::new(u_key, "group", ActiveSource::GroupMenu));
+            }
+        }
+        // Column-config hint — `c` opens the generic column-config popup
+        // whenever the active level exposes configurable columns. Gating on
+        // `column_config_entries().is_some()` mirrors `open_column_config_popup`.
+        if self.column_config_entries().is_some() {
+            let c_key = self
+                .common_kb
+                .hint_label(&CommonAction::ColumnConfig, &self.key_icons);
+            if !hints.iter().any(|h| h.key == c_key) {
+                hints.push(ActionBarHint::new(c_key, "columns", ActiveSource::ColumnConfig));
             }
         }
         // Jump-mode hint — always claimable (native Tasks tab shows `p jump`;
@@ -8193,25 +8249,50 @@ impl ContentView {
         let jump_key = self
             .content_kb
             .hint_label(&ContentAction::JumpMode, &self.key_icons);
-        if !hints.iter().any(|(k, _)| k == &jump_key) {
-            hints.push((jump_key.clone(), "jump".to_string()));
+        if !hints.iter().any(|h| h.key == jump_key) {
+            hints.push(ActionBarHint::new(jump_key, "jump", ActiveSource::Jump));
         }
 
-        // Stamp each hint's `active` flag. Jump-mode is matched by key
-        // (configurable, read live from the pane); the editor / track /
-        // cut affordances are matched by their semantic label against the
-        // cross-cutting state the App pushed via `sync_action_bar`.
-        let jump_active = self.active_pane().table.jump_active();
+        // Resolve each hint's `active` flag from its build-time `ActiveSource`
+        // against live UI state — the single resolver replaces the old
+        // per-description string matching.
         hints
             .into_iter()
-            .map(|(key, desc)| {
-                let active = (key == jump_key && jump_active)
-                    || self.active_editor.as_deref() == Some(desc.as_str())
-                    || (desc == "track" && self.tracking_active)
-                    || (desc == "cut" && self.cut_active);
-                ActionHint { key, desc, active }
+            .map(|h| {
+                let active = self.resolve_active(&h.source);
+                ActionHint {
+                    key: h.key,
+                    desc: h.label,
+                    active,
+                }
             })
             .collect()
+    }
+
+    /// Resolve whether an action-bar hint with the given [`ActiveSource`] is
+    /// currently active, reading live UI state (popups open, modes armed,
+    /// editor focused). The cross-cutting App-owned flags
+    /// (`active_editor` / `tracking_active` / `cut_active` /
+    /// `column_config_active` / `confirm_active` / `script_active`) are
+    /// pushed in once per frame by [`Self::sync_action_bar`]; the rest live
+    /// on this view or its focused pane.
+    fn resolve_active(&self, source: &ActiveSource) -> bool {
+        match source {
+            ActiveSource::Editor(label) => self.active_editor.as_deref() == Some(label.as_str()),
+            ActiveSource::Confirm => self.confirm_active,
+            ActiveSource::QueryMenu => self.query_menu.is_open(),
+            ActiveSource::GroupMenu => self.group_menu.is_open(),
+            ActiveSource::ColumnConfig => self.column_config_active,
+            ActiveSource::Fuzzy => self.active_pane().table.fuzzy_active,
+            ActiveSource::Search => {
+                let pane = self.active_pane();
+                pane.search.active() || pane.tree_find_active()
+            }
+            ActiveSource::Jump => self.active_pane().table.jump_active(),
+            ActiveSource::Tracking => self.tracking_active,
+            ActiveSource::MarkMove => self.cut_active,
+            ActiveSource::Script => self.script_active,
+        }
     }
 
     /// Hints rendered while the window-leader chord is pending. Lists
@@ -14100,10 +14181,14 @@ mod tests {
         let mut hints = view
             .active_pane()
             .collect_shortcut_hints(&view.view_defs, Some(&adapter));
-        hints.sort_by(|a, b| a.0.cmp(&b.0));
+        hints.sort_by(|a, b| a.key.cmp(&b.key));
         assert_eq!(hints.len(), 2, "exactly the two configured shortcuts");
-        assert_eq!(hints[0], ("a".into(), "Alpha".into(), HintPlacement::ActionBar));
-        assert_eq!(hints[1], ("s".into(), "Sigma".into(), HintPlacement::StatusBar));
+        assert_eq!(hints[0].key, "a");
+        assert_eq!(hints[0].label, "Alpha");
+        assert_eq!(hints[0].placement, HintPlacement::ActionBar);
+        assert_eq!(hints[1].key, "s");
+        assert_eq!(hints[1].label, "Sigma");
+        assert_eq!(hints[1].placement, HintPlacement::StatusBar);
     }
 
     #[test]
@@ -14171,7 +14256,9 @@ mod tests {
             .active_pane()
             .collect_shortcut_hints(&view.view_defs, Some(&adapter));
         assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0], ("p".into(), "Promote Parent".into(), HintPlacement::ActionBar));
+        assert_eq!(hints[0].key, "p");
+        assert_eq!(hints[0].label, "Promote Parent");
+        assert_eq!(hints[0].placement, HintPlacement::ActionBar);
     }
 
     // ── CT-5: TreeFindState lifecycle ────────────────────────────────

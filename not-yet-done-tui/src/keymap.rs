@@ -602,6 +602,15 @@ fn push_leaf_content_keys(
         ContentAction::PrevPage,
         ContentAction::EditQuery,
     ] {
+        // `Back` is only meaningful when drilled in (runtime gate:
+        // `!nav_stack.is_empty()`, see `ContentView::build_view_claims`).
+        // On the root leaf it is a no-op, so it must NOT be claimed there —
+        // otherwise its default `backspace` binding would statically collide
+        // with `TreeCollapse` (also `backspace`, root-leaf only). Mirroring
+        // the runtime gate here keeps the two disjoint by drilldown level.
+        if action == ContentAction::Back && child.is_none() {
+            continue;
+        }
         let (binding, source) = match child.and_then(|c| c.keybindings.get(&action)) {
             // Child sets `action: null` → disabled at this leaf.
             Some(None) => continue,

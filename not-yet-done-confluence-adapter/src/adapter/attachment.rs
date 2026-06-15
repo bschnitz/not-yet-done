@@ -34,8 +34,9 @@ pub(super) fn attachment_node_type() -> NodeType {
 /// resolver can populate the action bar without instantiating a node.
 pub(super) fn attachment_actions() -> Vec<NodeAction> {
     vec![
+        // download is fire-and-forget (no input, no popup) → never "active",
+        // so it stays in the status bar (default placement).
         NodeAction::new("download", "download", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
     ]
 }
