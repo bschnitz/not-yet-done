@@ -257,7 +257,12 @@ impl ContentAdapter for StoatAdapter {
             // `@username` and the edit path can build `@uu-…` slugs.
             let users =
                 members::channel_user_map(&self.state, &self.members, &client, channel_id).await;
-            return Ok(Box::new(StoatMessageNode::new(client, view, users)));
+            return Ok(Box::new(StoatMessageNode::new(
+                client,
+                view,
+                users,
+                Arc::clone(&self.state),
+            )));
         }
 
         if id == "root" {

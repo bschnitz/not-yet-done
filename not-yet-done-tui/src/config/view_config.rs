@@ -1476,6 +1476,24 @@ pub struct ChildDef {
     /// (M3). Same semantics as [`ViewDef::summary_only`].
     #[serde(default)]
     pub summary_only: bool,
+    /// When the selection moves onto the **last** row of this (flat) drill
+    /// level and that row is still unread (its `unread` metadata is
+    /// `"true"`), the engine invokes the named `Node::invoke_action` on the
+    /// selected row exactly once. Used by the Stoat `messages` level
+    /// (`mark_read_on_reach_end: mark-read`) so scrolling to the newest
+    /// message acknowledges the channel — clearing the unread highlight
+    /// without an explicit keypress.
+    ///
+    /// Why a generic config hook rather than Stoat-specific wiring: "reached
+    /// the end of the list" is a view-level event, and acking is just an
+    /// adapter action keyed by id — keeping the trigger in the engine lets
+    /// any chat-/feed-style adapter opt in by naming an action, with no
+    /// frontend code change. The unread gate makes it idempotent: after the
+    /// ack the row reloads as read, so the hook does not re-fire (and it
+    /// never fires for an already-read list). `None` disables it. Ignored in
+    /// tree mode.
+    #[serde(default)]
+    pub mark_read_on_reach_end: Option<String>,
 }
 
 /// Split direction relative to the source pane: where the new pane lands.

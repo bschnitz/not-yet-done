@@ -14,14 +14,16 @@ use async_trait::async_trait;
 use chrono::DateTime;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, Content, ContentError, EditorPrep, HintPlacement, InputSpec,
-    Metadata, MetadataField, Node, NodeAction, NodeType, Result,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
+    HintPlacement, InputSpec, Metadata, MetadataField, Node, NodeAction, NodeType, Result,
 };
+use tokio::sync::RwLock;
 
 use super::mentions;
 use super::other_err;
 use super::types::message_type;
 use crate::client::{MessageView, StoatClient};
+use crate::gateway::StoatState;
 
 /// Build the composite node id the tree uses for a message.
 pub(super) fn composite_id(channel_id: &str, message_id: &str) -> String {
@@ -84,6 +86,10 @@ pub(super) struct StoatMessageNode {
     content_body: String,
     /// Server-scoped `id → username` map for resolving mentions.
     users: Arc<HashMap<String, String>>,
+    /// Live tree state — lets the `mark-read` hook record the channel's
+    /// read marker locally so the unread highlight clears immediately,
+    /// without waiting for the server's `ChannelAck` WS echo.
+    state: Arc<RwLock<StoatState>>,
     metadata: Metadata,
 }
 
@@ -92,6 +98,7 @@ impl StoatMessageNode {
         client: Arc<StoatClient>,
         view: MessageView,
         users: Arc<HashMap<String, String>>,
+        state: Arc<RwLock<StoatState>>,
     ) -> Self {
         let composite_id = composite_id(&view.channel_id, &view.id);
         let timestamp = format_ts(view.timestamp_ms);
@@ -154,6 +161,7 @@ impl StoatMessageNode {
             label,
             content_body: view.content,
             users,
+            state,
             metadata: Metadata { fields },
         }
     }
@@ -183,6 +191,31 @@ impl Node for StoatMessageNode {
 
     fn actions(&self) -> Vec<NodeAction> {
         message_actions()
+    }
+
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // `mark-read` is the engine's cursor-reach-end hook target
+            // (a view's `mark_read_on_reach_end: mark-read`): the user
+            // scrolled onto the newest message, so acknowledge the channel
+            // up to this message. Acking up to the *newest* message clears
+            // the whole channel's unread state. We also record the read
+            // locally so the marker clears at once; the server's own
+            // `ChannelAck` echo then repaints the tree via `Invalidation::All`
+            // (and repairs us if the ack failed). Best-effort — a network
+            // hiccup just leaves the channel flagged until the next ack or
+            // `Ready` resync. Not listed in `actions()`: it carries no hint
+            // and is never a user keybinding, only the automatic hook.
+            "mark-read" => {
+                let _ = self.client.ack(&self.channel_id, &self.message_id).await;
+                self.state
+                    .write()
+                    .await
+                    .mark_read(&self.channel_id, &self.message_id);
+                ActionDispatch::Reload
+            }
+            _ => ActionDispatch::Noop,
+        })
     }
 
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
@@ -317,6 +350,12 @@ mod tests {
         Arc::new(HashMap::new())
     }
 
+    /// Fresh empty tree state — these tests never touch the `mark-read`
+    /// path, so an empty `StoatState` satisfies the constructor.
+    fn no_state() -> Arc<RwLock<StoatState>> {
+        Arc::new(RwLock::new(StoatState::default()))
+    }
+
     fn sample_view() -> MessageView {
         MessageView {
             id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
@@ -329,6 +368,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn mark_read_acks_and_records_channel_read() {
+        use crate::gateway::protocol::Channel;
+        let state = no_state();
+        // A channel whose newest message is exactly the one under the cursor
+        // (the cursor-reach-end case): unread until acknowledged.
+        let newest = sample_view().id;
+        state.write().await.channels.insert(
+            "C1".into(),
+            Channel {
+                id: "C1".into(),
+                channel_type: "TextChannel".into(),
+                server: Some("S1".into()),
+                name: Some("general".into()),
+                last_message_id: Some(newest),
+                recipients: None,
+            },
+        );
+        assert!(state.read().await.is_channel_unread("C1"));
+
+        let node =
+            StoatMessageNode::new(test_client(), sample_view(), no_users(), Arc::clone(&state));
+        // The HTTP ack targets the `.invalid` test host and fails fast; the
+        // arm swallows it (best-effort) and still records the local read.
+        let dispatch = node
+            .invoke_action("mark-read", &ActionContext::default())
+            .await
+            .unwrap();
+        assert!(matches!(dispatch, ActionDispatch::Reload));
+        // The read marker now reaches the channel's newest message → read.
+        assert!(!state.read().await.is_channel_unread("C1"));
+    }
+
     #[test]
     fn composite_id_roundtrips() {
         let id = composite_id("C1", "M1");
@@ -339,7 +411,7 @@ mod tests {
 
     #[test]
     fn node_flattens_label_and_keeps_body() {
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         assert_eq!(node.id(), "C1/msg/01ARZ3NDEKTSV4RRFFQ69G5FAV");
         // Newlines collapsed for the table row …
         assert_eq!(node.label(), "line one line two");
@@ -349,7 +421,7 @@ mod tests {
 
     #[test]
     fn metadata_carries_author_time_and_edited() {
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let m = node.metadata();
         assert_eq!(m.fields[0].key, "author");
         assert_eq!(m.fields[0].value, "alice");
@@ -362,7 +434,7 @@ mod tests {
     fn metadata_content_field_keeps_raw_newlines() {
         // The `content` field is the unflattened source a `markdown: true`
         // column reads — it must keep newlines that `label` collapses.
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let content = node
             .metadata()
             .fields
@@ -375,14 +447,14 @@ mod tests {
 
     #[tokio::test]
     async fn content_reads_full_body() {
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let body = node.content().unwrap().read().await.unwrap();
         assert_eq!(String::from_utf8(body).unwrap(), "line one\nline two");
     }
 
     #[test]
     fn declares_edit_delete_react_actions() {
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let actions = node.actions();
         let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["edit_message", "delete_message", "react"]);
@@ -395,7 +467,7 @@ mod tests {
     async fn prepare_edit_returns_raw_body_unwrapped() {
         // No header is added — Markdown messages may start with `#`, which
         // a header-strip would eat. The template is the verbatim body.
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let prep = node.prepare("edit_message").await.unwrap();
         assert_eq!(prep.template, "line one\nline two");
         assert_eq!(prep.suffix, ".md");
@@ -404,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_edit_is_a_noop() {
-        let mut node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let mut node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let outcome = node
             .execute(
                 "edit_message",
@@ -422,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn react_offers_emoji_options() {
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users());
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let opts = node.picker_options("react").await.unwrap();
         assert_eq!(opts.len(), REACTION_EMOJI.len());
         assert_eq!(opts[0].value, "👍");
@@ -450,7 +522,7 @@ mod tests {
 
     #[test]
     fn display_resolves_mention_in_label_and_content() {
-        let node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice());
+        let node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
         // Label and the markdown `content` field both show `@alice`.
         assert_eq!(node.label(), "hi @alice");
         let content = node
@@ -464,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_edit_renders_mention_as_slug_with_cache() {
-        let node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice());
+        let node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
         let prep = node.prepare("edit_message").await.unwrap();
         // The wire `<@ID>` becomes a `@uu-…` slug in the buffer …
         assert!(prep.template.starts_with("hi @uu-alice"));
@@ -477,7 +549,7 @@ mod tests {
     async fn unchanged_edit_roundtrips_slug_back_to_code() {
         // Editing with the slug form (and the CACHE section appended) must
         // resolve back to the original `<@ID>` body → a no-op.
-        let mut node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice());
+        let mut node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
         let prep = node.prepare("edit_message").await.unwrap();
         let outcome = node
             .execute(
@@ -495,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_rejects_unknown_mention_slug() {
-        let mut node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice());
+        let mut node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
         let result = node
             .execute(
                 "edit_message",

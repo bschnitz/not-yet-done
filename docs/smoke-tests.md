@@ -3928,6 +3928,25 @@ mindestens einem Channel, der ungelesene Nachrichten enthält.
 - [ ] `unread_style:` auf einen anderen Theme-Farbnamen gesetzt → Marker +
       Name/Header in dieser Farbe.
 
+### Ack bei Cursor auf der neuesten Nachricht (`mark_read_on_reach_end`)
+
+Der Channel-Marker verschwindet auch, wenn man den Cursor auf die unterste
+(neueste) Nachricht der Liste bewegt — ohne zu senden und ohne manuelles `r`.
+Konfiguriert über `mark_read_on_reach_end: mark-read` auf der Nachrichten-Ebene
+(beide Branches in `stoat.yaml`: Channels im und außerhalb einer Kategorie).
+
+- [ ] In einen ungelesenen Channel drillen, der **mehrere** ungelesene
+      Nachrichten hat → die ungelesenen Header sind hervorgehoben, der Cursor
+      steht oben/auf einer der oberen Zeilen; Channel-/Kategorie-Marker bleiben
+      noch sichtbar (kein Auto-Ack beim Öffnen).
+- [ ] Cursor mit `j`/Pfeil-runter bis auf die **unterste** (neueste) Zeile
+      bewegen → Channel- und Kategorie-Marker im Tree verschwinden (Ack), die
+      Header-Hervorhebung der Liste klingt nach dem Reload ab.
+- [ ] Erneut am Listenende eine Taste drücken / wieder hoch- und runterfahren →
+      kein erneutes Ack-Flackern (idempotent: Zeile ist nun gelesen).
+- [ ] In einem bereits gelesenen Channel drillen und ans Ende fahren → keine
+      Änderung (nichts zu acken).
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor

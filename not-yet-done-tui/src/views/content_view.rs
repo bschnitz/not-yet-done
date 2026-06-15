@@ -1007,6 +1007,15 @@ pub struct ContentView {
     /// [`ContentView::close_focused`].
     pending_cursor_closes: Vec<String>,
 
+    /// A `mark_read_on_reach_end` action queued by [`Self::handle_key`] when
+    /// the selection just landed on the (unread) last row of a flat drill
+    /// level. The App drains it right after `handle_key` (see
+    /// [`Self::take_pending_mark_read`]) and dispatches it as a normal
+    /// `InvokeNodeAction`, so the selection-changed side effects of the same
+    /// keystroke still run. At most one is held — a fresh detection
+    /// overwrites a stale one.
+    pending_mark_read: Option<ViewRequest>,
+
     /// Lazy cache of Postgres per-table script shortcuts, keyed by the
     /// adapter-internal table node id (e.g. `live/schemas/public/tables/users`)
     /// and holding `(script_name, key_chord)` pairs (SQ-8d). Populated
@@ -1842,6 +1851,15 @@ impl ContentPane {
         } else {
             self.view_def(view_defs).map(|vd| vd.smooth_scroll).unwrap_or(false)
         }
+    }
+
+    /// The active flat drill level's `mark_read_on_reach_end` action id, if
+    /// configured. Only the drilled-in `ChildDef` carries it (the hook is a
+    /// flat-list, reach-the-end notion); the root `ViewDef` never does.
+    fn mark_read_action(&self) -> Option<&str> {
+        self.active_child
+            .as_ref()
+            .and_then(|c| c.mark_read_on_reach_end.as_deref())
     }
 
     /// The active level's configured `group_by` (M3), read from the same
@@ -5775,6 +5793,7 @@ impl ContentView {
             source_path: None,
             manual_connect: config.adapter.manual_connect,
             pending_cursor_closes: Vec::new(),
+            pending_mark_read: None,
             postgres_table_shortcuts: std::collections::HashMap::new(),
             column_overrides: std::collections::HashMap::new(),
             nav_chars: Vec::new(),
@@ -7812,6 +7831,9 @@ impl ContentView {
         }
         let view_index = self.view_index;
         let pane_id = self.active_pane_id();
+        // Selection row before the key, so the mark-read hook can tell an
+        // arrival at the last row from a key pressed while already there.
+        let before_row = self.focused_pane_selected_row();
         let msg = {
             let view_defs = &self.view_defs;
             let common_kb = &self.common_kb;
@@ -7824,7 +7846,72 @@ impl ContentView {
         if let SubViewMessage::ContentDrill { item_id, item_label, child_def } = msg {
             return self.dispatch_content_drill(item_id, item_label, *child_def);
         }
+        // A plain navigation (or any in-pane key) may have landed the cursor
+        // on the newest unread row — queue the configured mark-read action
+        // for the App to drain alongside `msg`.
+        self.detect_mark_read_reached(before_row);
         msg
+    }
+
+    /// Index of the focused pane's currently-selected visible row.
+    fn focused_pane_selected_row(&self) -> usize {
+        self.pane_trees[self.active_subtab]
+            .focused_leaf()
+            .pane
+            .table
+            .selected_row()
+    }
+
+    /// After the focused pane handled a key, queue a `mark_read_on_reach_end`
+    /// action if the selection just moved onto the (still-unread) last row of
+    /// a flat drill level. The arrival gate (`before_row != last`) keeps mere
+    /// opening of a list — or a key pressed while already at the bottom —
+    /// from acking; the unread gate keeps it from re-firing after the
+    /// ack-driven reload (the row then reads as read).
+    fn detect_mark_read_reached(&mut self, before_row: usize) {
+        let resolved: Option<(String, String)> = {
+            let pane = &self.pane_trees[self.active_subtab].focused_leaf().pane;
+            // Flat lists only — a tree pane never carries chat messages.
+            match (pane.tree.is_some(), pane.mark_read_action()) {
+                (false, Some(action)) => {
+                    let last = pane.filtered_indices.len().checked_sub(1);
+                    let row = pane.table.selected_row();
+                    match last {
+                        Some(last) if row == last && before_row != last => {
+                            let unread = pane
+                                .selected_item()
+                                .map(|it| metadata_field_value(it, "unread") == "true")
+                                .unwrap_or(false);
+                            if unread {
+                                pane.selected_item_id()
+                                    .map(|id| (id.to_string(), action.to_string()))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some((node_id, action_name)) = resolved {
+            let view_index = self.view_index;
+            let pane_id = self.active_pane_id();
+            self.pending_mark_read = Some(ViewRequest::InvokeNodeAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_name,
+            });
+        }
+    }
+
+    /// Drain a queued `mark_read_on_reach_end` action (see
+    /// [`Self::detect_mark_read_reached`]). The App calls this right after
+    /// `handle_key` and dispatches the returned request.
+    pub fn take_pending_mark_read(&mut self) -> Option<ViewRequest> {
+        self.pending_mark_read.take()
     }
 
     /// Tab-level claims (subtab switch, query menu, saved-query
@@ -9961,6 +10048,7 @@ mod tests {
                         then_by: Vec::new(),
                         aggregates: Vec::new(),
                         summary_only: false,
+                        mark_read_on_reach_end: None,
                     },
                 ],
                 pagination: None,
@@ -10319,6 +10407,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            mark_read_on_reach_end: None,
         }];
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
@@ -10542,6 +10631,7 @@ mod tests {
                         then_by: Vec::new(),
                         aggregates: Vec::new(),
                         summary_only: false,
+                        mark_read_on_reach_end: None,
                     },
                 ],
                 pagination: None,
@@ -10666,6 +10756,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            mark_read_on_reach_end: None,
         }
     }
 
@@ -11118,6 +11209,75 @@ mod tests {
         assert_eq!(label(0), "▼ 💬 Root", "root: {:?}", label(0));
         // Child: box connector + arrow, then marker, then label.
         assert_eq!(label(1), "└── ▶ 💬 Child", "child: {:?}", label(1));
+    }
+
+    #[test]
+    fn mark_read_on_reach_end_queues_only_on_fresh_arrival_at_unread_last() {
+        use not_yet_done_content::{Metadata, MetadataField};
+        // The generic `mark_read_on_reach_end` hook fires once when the cursor
+        // first lands on the still-unread LAST row of a flat drill level. Two
+        // gates keep it honest: arrival (`before_row != last`, so merely
+        // opening the list or pressing a key while already at the bottom does
+        // not ack) and unread (so it never re-fires after the ack-driven
+        // reload, which flips the row to read).
+        let msg = |id: &str, unread: bool| -> NodeSummary {
+            let mut n = tnode(id, id, "mock:msg");
+            if unread {
+                n.metadata = Metadata {
+                    fields: vec![MetadataField {
+                        key: "unread".into(),
+                        value: "true".into(),
+                        display_label: "Unread".into(),
+                        editable: false,
+                        allowed_values: None,
+                    }],
+                };
+            }
+            n
+        };
+
+        // Configure the focused pane as a flat message list whose ChildDef
+        // carries the hook, with two rows (an older read one, a newest one).
+        let setup = |last_unread: bool| -> ContentView {
+            let config = heterogeneous_uneven_tree_config();
+            let mut view =
+                ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+            let view_defs = view.view_defs.clone();
+            let mut child = hchild("messages", "mock:msg", None, vec![hcol("name")], vec![]);
+            child.mark_read_on_reach_end = Some("mark-read".into());
+            let pane = view.active_pane_mut();
+            pane.tree = None; // flat list, not tree mode
+            pane.active_child = Some(child);
+            pane.items = vec![msg("m1", false), msg("m2", last_unread)];
+            pane.filtered_indices = vec![0, 1];
+            pane.rebuild_table(&view_defs);
+            view
+        };
+
+        // Fresh arrival at the unread last row → queues a mark-read invoke on
+        // that very node.
+        let mut view = setup(true);
+        view.active_pane_mut().table.set_selected(1);
+        view.detect_mark_read_reached(0);
+        match view.take_pending_mark_read() {
+            Some(ViewRequest::InvokeNodeAction { node_id, action_name, .. }) => {
+                assert_eq!(node_id, "m2");
+                assert_eq!(action_name, "mark-read");
+            }
+            other => panic!("expected an InvokeNodeAction, got {other:?}"),
+        }
+
+        // Already at the last row (no arrival) → nothing queued.
+        let mut view = setup(true);
+        view.active_pane_mut().table.set_selected(1);
+        view.detect_mark_read_reached(1);
+        assert!(view.take_pending_mark_read().is_none(), "no arrival, no ack");
+
+        // Arrival, but the last row is already read → nothing queued.
+        let mut view = setup(false);
+        view.active_pane_mut().table.set_selected(1);
+        view.detect_mark_read_reached(0);
+        assert!(view.take_pending_mark_read().is_none(), "read row → no ack");
     }
 
     #[test]
@@ -12429,6 +12589,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            mark_read_on_reach_end: None,
         });
 
         let mut view =
@@ -12523,6 +12684,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            mark_read_on_reach_end: None,
         });
 
         let mut view =
@@ -13754,6 +13916,7 @@ mod tests {
                         then_by: Vec::new(),
                         aggregates: Vec::new(),
                         summary_only: false,
+                        mark_read_on_reach_end: None,
                     },
                 ],
                 pagination: None,
@@ -14847,6 +15010,7 @@ mod tests {
                 then_by: Vec::new(),
                 aggregates: Vec::new(),
                 summary_only: false,
+                mark_read_on_reach_end: None,
             }],
             pagination: None,
             action_chains: Default::default(),
