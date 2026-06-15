@@ -12,7 +12,7 @@ use tuirealm::command::{Cmd, CmdResult, Direction, Position};
 use tuirealm::component::Component;
 
 use crate::app::SavedQuery;
-use crate::components::action_bar::ActionBarComponent;
+use crate::components::action_bar::{ActionBarComponent, ActionHint};
 use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
@@ -114,7 +114,7 @@ impl TrackingsView {
             taskpath_separator: "/".to_string(),
             link_refs: std::collections::HashSet::new(),
         };
-        view.action_bar.set_hints(view.bar_hints());
+        view.action_bar.set_hints(view.bar_hints(None, false));
         view
     }
 
@@ -133,21 +133,27 @@ impl TrackingsView {
     }
 
     /// Hints for the action bar (without the leading "Fuzzy Filter" entry,
-    /// which the bar renders via its `fuzzy_label`).
-    fn bar_hints(&self) -> Vec<BarHint> {
+    /// which the bar renders via its `fuzzy_label`). Each hint's `active`
+    /// flag is stamped from the cross-cutting state: the editor hint whose
+    /// description matches `active_editor`, and the "track" hint while a
+    /// tracking runs.
+    fn bar_hints(&self, active_editor: Option<&str>, tracking_active: bool) -> Vec<ActionHint> {
         let ckb = &self.keybindings.common;
         let tkb = &self.keybindings.trackings;
+        let mk = |key: String, desc: &str| {
+            let active = active_editor == Some(desc) || (desc == "track" && tracking_active);
+            ActionHint::new(key, desc).active(active)
+        };
         vec![
-            (ckb.label(&CommonAction::SavedFilterSelect), "queries".into()),
-            (tkb.label(&TrackingsAction::TrackingScriptRun), "scripts".into()),
-            (ckb.label(&CommonAction::TrackingToggle), "track".into()),
+            mk(ckb.label(&CommonAction::SavedFilterSelect), "queries"),
+            mk(tkb.label(&TrackingsAction::TrackingScriptRun), "scripts"),
+            mk(ckb.label(&CommonAction::TrackingToggle), "track"),
         ]
     }
 
     /// Push current view state into the bar. Called by App once per frame.
     pub fn sync_action_bar(&mut self, active_editor: Option<&str>, tracking_active: bool) {
-        self.action_bar.set_active_editor(active_editor);
-        self.action_bar.set_tracking_active(tracking_active);
+        self.action_bar.set_hints(self.bar_hints(active_editor, tracking_active));
         self.action_bar.set_active_filter_name(self.active_filter_name.clone());
         let favs: Vec<(String, String)> = self.favorites.iter()
             .filter_map(|f| f.shortcut.as_ref().map(|s| (f.name.clone(), s.clone())))

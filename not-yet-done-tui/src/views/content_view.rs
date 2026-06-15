@@ -38,7 +38,7 @@ use not_yet_done_content::{
     SortDirection, SortKey, Subtree, TreeFindHit,
 };
 
-use crate::components::action_bar::ActionBarComponent;
+use crate::components::action_bar::{ActionBarComponent, ActionHint};
 use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
@@ -906,6 +906,13 @@ pub enum QueryMenuMode {
 pub struct ContentView {
     pub theme: Arc<Theme>,
     pub action_bar: ActionBarComponent,
+    /// Cross-cutting "active" state pushed by the App once per frame via
+    /// [`sync_action_bar`], stored so the hint builder can stamp each
+    /// [`ActionHint`]'s `active` flag. (Jump-mode is read live from the
+    /// pane and needs no storage.)
+    active_editor: Option<String>,
+    tracking_active: bool,
+    cut_active: bool,
     /// Command-line component, driven by `:`. Tab-global — operates
     /// on the active pane.
     pub cmdline: CmdlineComponent,
@@ -5763,6 +5770,9 @@ impl ContentView {
         let group_menu = TabSetPopup::new(Arc::clone(&theme)).with_title("Group by");
         let mut cv = Self {
             action_bar,
+            active_editor: None,
+            tracking_active: false,
+            cut_active: false,
             theme,
             cmdline: CmdlineComponent::new(),
             tab_name: config.tab.name.clone(),
@@ -5888,6 +5898,13 @@ impl ContentView {
         tracking_active: bool,
         cut_active: bool,
     ) {
+        // Store the cross-cutting active state so the hint builder can
+        // stamp each hint's `active` flag (the bar no longer special-cases
+        // descriptions). Must happen before `action_bar_hints()` reads it.
+        self.active_editor = active_editor.map(|s| s.to_string());
+        self.tracking_active = tracking_active;
+        self.cut_active = cut_active;
+
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
         // before the mutable borrow on `action_bar` begins.
@@ -5921,14 +5938,6 @@ impl ContentView {
         let mode_label = self.action_bar_mode_label();
         self.action_bar.set_hints(hints);
         self.action_bar.set_mode_label(mode_label);
-        self.action_bar.set_active_editor(active_editor);
-        // Highlights any hint labelled "track" (adapter `toggle-tracking`
-        // actions) while a tracking runs — same affordance as the native
-        // Tasks/Trackings action bars.
-        self.action_bar.set_tracking_active(tracking_active);
-        // Highlights the "cut" hint (adapter `mark-move` action) while a
-        // node sits on the move-clipboard, so the armed cut is visible.
-        self.action_bar.set_cut_active(cut_active);
         self.action_bar.set_active_filter_name(active_filter_name);
         self.action_bar.set_favorites(favs);
         self.action_bar.set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);
@@ -8118,7 +8127,7 @@ impl ContentView {
         self.nav_chars = chars.to_vec();
     }
 
-    pub fn action_bar_hints(&self) -> Vec<BarHint> {
+    pub fn action_bar_hints(&self) -> Vec<ActionHint> {
         if self.window_pending.is_some() {
             return self.window_mode_hints();
         }
@@ -8158,16 +8167,32 @@ impl ContentView {
             .content_kb
             .hint_label(&ContentAction::JumpMode, &self.key_icons);
         if !hints.iter().any(|(k, _)| k == &jump_key) {
-            hints.push((jump_key, "jump".to_string()));
+            hints.push((jump_key.clone(), "jump".to_string()));
         }
+
+        // Stamp each hint's `active` flag. Jump-mode is matched by key
+        // (configurable, read live from the pane); the editor / track /
+        // cut affordances are matched by their semantic label against the
+        // cross-cutting state the App pushed via `sync_action_bar`.
+        let jump_active = self.active_pane().table.jump_active();
         hints
+            .into_iter()
+            .map(|(key, desc)| {
+                let active = (key == jump_key && jump_active)
+                    || self.active_editor.as_deref() == Some(desc.as_str())
+                    || (desc == "track" && self.tracking_active)
+                    || (desc == "cut" && self.cut_active);
+                ActionHint { key, desc, active }
+            })
+            .collect()
     }
 
     /// Hints rendered while the window-leader chord is pending. Lists
     /// the resolution key for each `WindowAction` plus a pane-tag-switch
     /// reminder when the active subtab has more than one pane.
-    fn window_mode_hints(&self) -> Vec<BarHint> {
-        let mut hints: Vec<BarHint> = Vec::new();
+    fn window_mode_hints(&self) -> Vec<ActionHint> {
+        // Window-leader chord prompts — momentary key hints, never "active".
+        let mut hints: Vec<ActionHint> = Vec::new();
         for (action, binding) in &self.window_kb.bindings {
             let Some(last) = binding.0.first().and_then(|s| s.chars().last()) else {
                 continue;
@@ -8179,15 +8204,15 @@ impl ContentView {
                 WindowAction::FocusParent => "focus parent",
                 WindowAction::FocusChild => "focus child",
             };
-            hints.push((last.to_string(), label.to_string()));
+            hints.push(ActionHint::new(last.to_string(), label));
         }
-        hints.sort_by(|a, b| a.1.cmp(&b.1));
+        hints.sort_by(|a, b| a.desc.cmp(&b.desc));
         let tree = &self.pane_trees[self.active_subtab];
         if tree.pane_tags.len() > 1 {
             let mut tags: Vec<char> = tree.pane_tags.values().copied().collect();
             tags.sort();
             let tags_str: String = tags.iter().collect();
-            hints.push((tags_str, "switch pane".to_string()));
+            hints.push(ActionHint::new(tags_str, "switch pane"));
         }
         hints
     }
@@ -13644,7 +13669,7 @@ mod tests {
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
         assert!(
-            hints.iter().any(|(k, v)| k == "x" && v == "script"),
+            hints.iter().any(|h| h.key == "x" && h.desc == "script"),
             "expected [x] script in action bar, got: {hints:?}"
         );
     }
@@ -13654,8 +13679,8 @@ mod tests {
         let config = test_config_with_query();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
-        assert!(hints.iter().any(|(k, _)| k == "Q"));
-        assert!(hints.iter().any(|(k, v)| k == "q" && v == "queries"));
+        assert!(hints.iter().any(|h| h.key == "Q"));
+        assert!(hints.iter().any(|h| h.key == "q" && h.desc == "queries"));
 
         view.set_query("type = Bug".into(), Some("My Bugs".into()));
         assert_eq!(view.active_pane().active_query_name.as_deref(), Some("My Bugs"));
@@ -15518,10 +15543,28 @@ mod tests {
         // alphabet the table refuses to open (no labels to hand out).
         view.set_nav_chars(&['a', 'b', 'c']);
         assert!(!view.active_pane().table.jump_active());
+
+        // Before arming, the jump hint exists but is not active.
+        let jump_key = view
+            .content_kb
+            .hint_label(&ContentAction::JumpMode, &view.key_icons);
+        let jump_hint = |v: &ContentView| -> bool {
+            v.action_bar_hints()
+                .into_iter()
+                .find(|h| h.key == jump_key && h.desc == "jump")
+                .map(|h| h.active)
+                .expect("jump hint present")
+        };
+        assert!(!jump_hint(&view));
+
         let msg = view.dispatch_content_action(ContentAction::JumpMode);
         assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
         assert!(view.active_pane().table.jump_active());
         assert!(view.active_pane().table.jump_waiting_for_char());
+
+        // Arming jump mode flips the hint's `active` flag (key-identity,
+        // configurable key, read live from the pane).
+        assert!(jump_hint(&view));
     }
 
     #[test]
