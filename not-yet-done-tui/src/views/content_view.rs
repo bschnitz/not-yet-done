@@ -1752,6 +1752,7 @@ impl ContentPane {
                 key: f.key.clone(),
                 label: Some(f.display_label.clone()),
                 source: None,
+                collapsed_source: None,
                 style: None,
                 sizing: "auto".into(),
                 markdown: false,
@@ -3123,6 +3124,20 @@ impl ContentPane {
                 let entry_declares = |key: &str| {
                     entry_cols.is_some_and(|cols| cols.iter().any(|c| c.key == key))
                 };
+                // A row is *collapsed* when it has (visible) children but its
+                // own path is not in the expanded set — the same predicate the
+                // connector marker uses (Some(false)). Drives a column's
+                // `collapsed_source`: a collapsed node can surface a metadata
+                // field that rolls up hidden-descendant state (e.g. the Tasks
+                // tree's `⏱` tracking marker). Leaves and the more-placeholder
+                // are never "collapsed".
+                let entry_is_collapsed = entry.has_children
+                    && !entry.is_more_placeholder
+                    && {
+                        let mut own = entry.parent_path.clone();
+                        own.push(entry.node.id.clone());
+                        !tree.expanded.contains(&own)
+                    };
                 let mut row = TRow::new(row_idx as u32);
                 for (ci, col) in columns.iter().enumerate() {
                     // The synthetic group-total column: the bucket's total on
@@ -3220,6 +3235,18 @@ impl ContentPane {
                         if col.source.as_deref() == Some("has_links") {
                             let icon = if self.item_has_link(&entry.node.id) { "🔗" } else { " " };
                             CellContent::text(icon)
+                        } else if let Some(field) = col
+                            .collapsed_source
+                            .as_deref()
+                            .filter(|_| entry_is_collapsed)
+                        {
+                            // Collapsed tree node: read the roll-up field
+                            // instead of the node's own value, so a marker
+                            // surfaces a hidden-descendant state (e.g. `⏱`).
+                            // Typed through the column's own `kind` for layout
+                            // parity with the expanded-state cell.
+                            let raw = metadata_field_value(&entry.node, field);
+                            typed_cell_content(raw, col)
                         } else if let Some(ta) = col
                             .tree_aggregate
                             .as_ref()
@@ -9806,9 +9833,9 @@ mod tests {
     fn multiline_widget_rows_chat_layout() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef { key: "time".into(), label: None, source: Some("time".into()), style: Some("text_dim".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -9856,8 +9883,8 @@ mod tests {
     fn multiline_widget_rows_markdown_expands_body() {
         let theme = test_theme();
         let columns = vec![
-            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "author".into(), label: None, source: Some("author".into()), style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef { key: "content".into(), label: None, source: Some("content".into()), style: None, sizing: "flex(1)".into(), markdown: true, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
         let mut strategies = std::collections::HashMap::new();
@@ -10039,8 +10066,8 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+                    ColumnDef { key: "summary".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                 ],
                 preview: Some(PreviewConfig { enabled: true, source: "content".into(), action: None, node_id_from: None, split: "horizontal".into(), ratio: 50, keybinding: Some("p".into()), markdown: false }),
                 actions: vec![
@@ -10053,7 +10080,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                            ColumnDef { key: "body".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -10243,7 +10270,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -10413,7 +10440,7 @@ mod tests {
             smooth_scroll: true,
             name: "messages".into(),
             node_type: "mock:msg".into(),
-            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None }],
+            columns: vec![ColumnDef { key: "body".into(), label: None, source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None }],
             preview: None,
             actions: Vec::new(),
             children: Vec::new(),
@@ -10625,7 +10652,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -10636,7 +10663,7 @@ mod tests {
                         name: "Schemas".into(),
                         node_type: "mock:schema".into(),
                         columns: vec![
-                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                            ColumnDef { key: "name".into(), label: Some("Name".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -10739,6 +10766,7 @@ mod tests {
             key: key.into(),
             label: Some(key.into()),
             source: Some("label".into()),
+            collapsed_source: None,
             style: None,
             sizing: "max".into(),
             markdown: false,
@@ -11494,6 +11522,7 @@ mod tests {
             key: "dur".into(),
             label: Some("Dur".into()),
             source: None,
+            collapsed_source: None,
             style: None,
             sizing: "max".into(),
             markdown: false,
@@ -12583,6 +12612,7 @@ mod tests {
                 key: "id".into(),
                 label: Some("Id".into()),
                 source: Some("label".into()),
+                collapsed_source: None,
                 style: None,
                 sizing: "max".into(),
                 markdown: false,
@@ -12682,6 +12712,7 @@ mod tests {
                 key: "id".into(),
                 label: Some("Id".into()),
                 source: Some("label".into()),
+                collapsed_source: None,
                 style: None,
                 sizing: "max".into(),
                 markdown: false,
@@ -13043,7 +13074,7 @@ mod tests {
                     inherit_default: false,
                 }),
                 columns: vec![
-                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -13910,7 +13941,7 @@ mod tests {
                 key: None,
                 query: None,
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -13921,7 +13952,7 @@ mod tests {
                         name: "Comments".into(),
                         node_type: "mock:comment".into(),
                         columns: vec![
-                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                            ColumnDef { key: "label".into(), label: Some("Comment".into()), source: Some("label".into()), style: None, sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                         ],
                         preview: None,
                         actions: vec![],
@@ -15005,7 +15036,7 @@ mod tests {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                ColumnDef { key: "label".into(), label: Some("Label".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
             ],
             preview: None,
             actions: vec![],
@@ -15015,7 +15046,7 @@ mod tests {
                 name: "pages".into(),
                 node_type: "mock:page".into(),
                 columns: vec![
-                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                    ColumnDef { key: "label".into(), label: Some("Page".into()), source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
                 ],
                 preview: None,
                 actions: vec![],
@@ -15222,8 +15253,8 @@ mod tests {
 
     fn group_columns() -> Vec<ColumnDef> {
         vec![
-            ColumnDef { key: "category".into(), label: None, source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-            ColumnDef { key: "dur".into(), label: None, source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+            ColumnDef { key: "category".into(), label: None, source: Some("label".into()), style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+            ColumnDef { key: "dur".into(), label: None, source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
         ]
     }
 
@@ -15452,7 +15483,7 @@ mod tests {
     #[test]
     fn grouped_table_desc_order_and_total_column() {
         let mut columns = group_columns();
-        columns.push(ColumnDef { key: "total".into(), label: Some("Total".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None });
+        columns.push(ColumnDef { key: "total".into(), label: Some("Total".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Number, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None });
         let items = vec![
             group_item("0", "B", "30"),
             group_item("1", "A", "10"),
@@ -15919,11 +15950,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             key: None,
             query: None,
             columns: vec![
-                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
-                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None },
+                ColumnDef { key: "key".into(), label: Some("Key".into()), source: None, style: Some("accent".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+                ColumnDef { key: "type".into(), label: Some("Type".into()), source: None, style: None, sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+                ColumnDef { key: "status".into(), label: Some("Status".into()), source: None, style: Some("success".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+                ColumnDef { key: "priority".into(), label: Some("Priority".into()), source: None, style: Some("warning".into()), sizing: "max".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
+                ColumnDef { key: "summary".into(), label: Some("Summary".into()), source: Some("label".into()), style: Some("text_high".into()), sizing: "flex(1)".into(), markdown: false, kind: ColumnKind::Text, format: None, separator: None, elapsed_from: None, tree_aggregate: None, collapsed_source: None },
             ],
             preview: Some(PreviewConfig {
                 enabled: true,

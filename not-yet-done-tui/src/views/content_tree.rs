@@ -699,6 +699,7 @@ mod tests {
             key: key.into(),
             label: None,
             source: None,
+            collapsed_source: None,
             style: None,
             sizing: "max".into(),
             markdown: false,

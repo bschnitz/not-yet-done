@@ -707,6 +707,41 @@ ist View-State (nicht persistiert).
 > engine-seitig nur in Flat-Listen greift (im Tree gruppiert der Adapter,
 > siehe `group_by_via_adapter` oben).
 
+#### `collapsed_source:` — anderes Metadaten-Feld am eingeklappten Knoten
+
+Eine Spalte kann ein **anderes Metadaten-Feld** rendern, solange ihre Zeile ein
+**eingeklappter** Tree-Knoten ist (hat Kinder, ist nicht aufgeklappt). Auf
+aufgeklappten Knoten, Blättern und in Flat-Listen zeigt sie unverändert ihr
+`source:`/`key:`-Feld.
+
+```yaml
+columns:
+  - key: tracking
+    label: Tr
+    # Eingeklappter Knoten → zeigt das Roll-up-Feld des Adapters statt des
+    # eigenen `tracking`; aufgeklappt/Blatt/flat → wieder `tracking`.
+    collapsed_source: tracking_rollup
+```
+
+**Wofür?** Marker, die ein Zustand _im Teilbaum_ sind und beim Einklappen sonst
+verschwinden würden. Beispiel Tasks-Tree: der `⏱`-Tracking-Marker hängt am
+laufenden Task; klappt man dessen Eltern zu, läge der Marker im verborgenen Ast.
+Der Adapter liefert zusätzlich ein Roll-up-Feld (`tracking_rollup` = `⏱`, wenn
+der Knoten **oder ein Nachfahre** getrackt ist), und `collapsed_source` zeigt es
+genau dann, wenn der Knoten eingeklappt ist — der Marker „bubbelt" sichtbar an
+den zugeklappten Elternknoten.
+
+- **Warum nicht immer hochpropagieren?** Die Engine kennt den **Einklapp-Zustand**
+  (`tree.expanded`), der Adapter nicht; der Adapter kennt den **Teilbaum**, die
+  Engine (lazy geladen) nicht. `collapsed_source` teilt die Zuständigkeit:
+  Adapter faltet das Roll-up-Feld, Engine entscheidet anhand des Einklapp-Zustands,
+  ob Eigen- oder Roll-up-Feld gezeigt wird.
+- **Rein additiv & generisch.** Kein Capability-Gate, keine eigene Aktion — fehlt
+  das Roll-up-Feld in den Metadaten, rendert die Zelle leer (wie jedes fehlende
+  Feld). Beliebig für andere Subtree-Marker wiederverwendbar (Notizen, Links …).
+- **Nur im Tree.** In Flat-Listen gibt es keinen Einklapp-Zustand; dort ist
+  `collapsed_source` inert und die Spalte zeigt immer ihr `source:`/`key:`-Feld.
+
 #### `tree_connector_style:` — Farbe der Connector-Glyphen pro Tree
 
 Im Tree-Mode malt die `tree_label`-Spalte vor das Label einen **Connector-Lauf**:

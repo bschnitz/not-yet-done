@@ -906,6 +906,15 @@ pub struct ColumnDef {
     /// "label" = use node.label(), otherwise metadata key.
     #[serde(default)]
     pub source: Option<String>,
+    /// Metadata field this cell reads **instead of** `source`/`key` while the
+    /// row is a *collapsed* tree node (has children, not expanded). Lets a
+    /// marker roll a hidden-descendant state up onto the parent that hides it
+    /// — e.g. the Tasks tree's `tracking` column points `collapsed_source` at
+    /// the adapter's subtree-rollup field so a collapsed node shows `⏱` when a
+    /// tracking it hides is running, while an expanded node keeps showing only
+    /// its own marker. Ignored for expanded nodes, leaves, and the label cell.
+    #[serde(default)]
+    pub collapsed_source: Option<String>,
     /// Theme color reference (e.g. "accent", "text_med", "success").
     #[serde(default)]
     pub style: Option<String>,
