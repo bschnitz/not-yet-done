@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 
+use not_yet_done_content::Invalidation;
+use tokio::sync::broadcast;
+
 use super::protocol::{Channel, ChannelPatch, Server, ServerPatch, User};
 
 #[derive(Default, Debug)]
@@ -26,6 +29,14 @@ pub struct StoatState {
     /// reconnect (the background unread refetch overwrites it) so the tree
     /// doesn't flash every channel as unread mid-resync.
     pub reads: HashMap<String, String>,
+    /// Invalidation sink, set once by the adapter at construction (the gateway
+    /// shares the same `Arc<RwLock<StoatState>>`). When a read marker actually
+    /// advances in [`Self::mark_read`] we push [`Invalidation::All`] here so
+    /// every bound view repaints — the channel/category unread markers in the
+    /// tree clear immediately on a local ack, without waiting for the server's
+    /// `ChannelAck` echo (which it may not send back to the originating
+    /// client). `None` in unit tests built from `StoatState::default()`.
+    inv_tx: Option<broadcast::Sender<Invalidation>>,
 }
 
 impl StoatState {
@@ -110,13 +121,29 @@ impl StoatState {
             .collect();
     }
 
+    /// Set the invalidation sink (see the `inv_tx` field). Called once by the
+    /// adapter right after construction, before the state is shared.
+    pub fn set_invalidations(&mut self, tx: broadcast::Sender<Invalidation>) {
+        self.inv_tx = Some(tx);
+    }
+
     /// Record a local read up to `message_id` (ack-on-send, mark-read, or a
     /// `ChannelAck` echo). Monotonic: never moves the marker backwards, so
     /// an out-of-order ack for an older message can't re-flag a channel.
+    ///
+    /// When the marker actually advances, push [`Invalidation::All`] so the
+    /// tree's channel/category unread markers repaint at once — this is the
+    /// single choke point for "a read happened", so every caller (mark-read
+    /// hook, ack-on-send, `ChannelAck` echo) repaints without each having to
+    /// remember to. No-op emit when the marker doesn't move (duplicate/older
+    /// ack → nothing changed → no repaint) or when no sink is wired (tests).
     pub fn mark_read(&mut self, channel_id: &str, message_id: &str) {
         let entry = self.reads.entry(channel_id.to_string()).or_default();
         if message_id > entry.as_str() {
             *entry = message_id.to_string();
+            if let Some(tx) = &self.inv_tx {
+                let _ = tx.send(Invalidation::All);
+            }
         }
     }
 
@@ -340,6 +367,25 @@ mod tests {
         // An older ack must not move the marker backwards.
         st.mark_read("C1", OLDER_MSG);
         assert_eq!(st.reads.get("C1").map(String::as_str), Some(NEWER_MSG));
+    }
+
+    #[test]
+    fn mark_read_emits_all_only_when_marker_advances() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut st = StoatState::default();
+        st.set_invalidations(tx);
+
+        // First read of a never-read channel advances the marker → emit.
+        st.mark_read("C1", OLDER_MSG);
+        assert_eq!(rx.try_recv().unwrap(), Invalidation::All);
+
+        // Advancing to a newer message → emit again.
+        st.mark_read("C1", NEWER_MSG);
+        assert_eq!(rx.try_recv().unwrap(), Invalidation::All);
+
+        // An older (out-of-order) ack doesn't move the marker → no emit.
+        st.mark_read("C1", OLDER_MSG);
+        assert!(rx.try_recv().is_err(), "no repaint when nothing changed");
     }
 
     #[test]

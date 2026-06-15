@@ -2522,7 +2522,7 @@ sind Dokumentation.
 ### CF-9 — Edit Page + 3-Way Merge
 
 - [ ] `e` auf einer Page → `$EDITOR` öffnet mit `title: <echter
-  Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
+Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
       pretty-printed `body.storage` (xmllint).
 - [ ] Body trivial ändern (z.B. neuen Absatz einfügen), speichern,
       Editor schließen → `Updated page <Title> (v <n+1>)` Banner.
@@ -4006,6 +4006,13 @@ Der Channel-Marker verschwindet auch, wenn man den Cursor auf die unterste
 (neueste) Nachricht der Liste bewegt — ohne zu senden und ohne manuelles `r`.
 Konfiguriert über `mark_read_on_reach_end: mark-read` auf der Nachrichten-Ebene
 (beide Branches in `stoat.yaml`: Channels im und außerhalb einer Kategorie).
+Fehlt der Hook in der View-Config, passiert **nichts** (kein Ack, Marker bleibt
+ewig stehen) — häufigste Ursache, wenn eine ältere `stoat.yaml` installiert ist.
+
+Der Tree-Marker (Channel + Kategorie) wird **lokal** gecleart: `mark_read` ist
+der einzige Choke-Point für „gelesen" und schickt selbst `Invalidation::All`,
+sobald die Lese-Marke vorrückt. Damit repaintet der Tree sofort, unabhängig
+davon, ob der Server das eigene Ack als `ChannelAck` zurückspielt.
 
 - [ ] In einen ungelesenen Channel drillen, der **mehrere** ungelesene
       Nachrichten hat → die ungelesenen Header sind hervorgehoben, der Cursor

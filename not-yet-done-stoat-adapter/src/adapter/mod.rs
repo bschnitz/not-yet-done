@@ -117,6 +117,12 @@ impl StoatAdapter {
         // just coarsened.
         let (inv_tx, _) = broadcast::channel(64);
 
+        // Wire the invalidation sink into the shared state before sharing it,
+        // so a local read (`mark_read`) repaints the tree itself rather than
+        // depending on the server echoing the ack back.
+        let mut initial_state = StoatState::default();
+        initial_state.set_invalidations(inv_tx.clone());
+
         // Forward the auth orchestrator's status into our own channel so
         // interactive login (NeedsCreds / Connecting / Failed) still
         // surfaces. We deliberately drop its `Ready` — the gateway is
@@ -144,7 +150,7 @@ impl StoatAdapter {
             auth,
             name,
             instance_id,
-            state: Arc::new(RwLock::new(StoatState::default())),
+            state: Arc::new(RwLock::new(initial_state)),
             status_tx,
             _status_keepalive: status_rx,
             inv_tx,

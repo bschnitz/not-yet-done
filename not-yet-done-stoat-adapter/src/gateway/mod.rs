@@ -234,9 +234,12 @@ async fn handle_text(
             spawn_unread_refresh(client, state, inv_tx);
         }
         ServerMessage::ChannelAck { id, message_id } => {
+            // `mark_read` itself pushes `Invalidation::All` when the marker
+            // advances (the single choke point for a read), so we don't send
+            // here — and a no-op ack (marker unchanged) correctly skips the
+            // repaint.
             if !message_id.is_empty() {
                 state.write().await.mark_read(&id, &message_id);
-                let _ = inv_tx.send(Invalidation::All);
             }
         }
         ServerMessage::Pong { .. } => {}
@@ -310,9 +313,14 @@ mod tests {
         broadcast::Sender<Invalidation>,
         broadcast::Receiver<Invalidation>,
     ) {
-        let state = Arc::new(RwLock::new(StoatState::default()));
         let (status_tx, status_rx) = watch::channel(AdapterStatus::Idle);
         let (inv_tx, inv_rx) = broadcast::channel(8);
+        // Mirror the adapter: the shared state owns the same invalidation
+        // sink, so a `mark_read` repaint lands on the same channel the test
+        // listens on.
+        let mut st = StoatState::default();
+        st.set_invalidations(inv_tx.clone());
+        let state = Arc::new(RwLock::new(st));
         (state, status_tx, status_rx, inv_tx, inv_rx)
     }
 
