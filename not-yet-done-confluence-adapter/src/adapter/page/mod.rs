@@ -424,15 +424,34 @@ impl ConfluencePageNode {
         })
     }
 
-    fn open_via_xdg(&self) -> Result<ActionOutcome> {
-        if self.web_url.is_empty() {
+    /// Resolve the full web URL, hydrating the page detail when the node
+    /// was built without a `webui` link. The TUI re-resolves every action
+    /// target via `ContentAdapter::get_by_id`, which synthesizes a stub
+    /// `PageMeta` with an empty `webui` (the listing's link is discarded on
+    /// that round-trip). So `web_url` is reliably empty for action targets;
+    /// fall back to a `GET /content/{id}` detail fetch (which carries
+    /// `_links.webui`) to recover the link instead of erroring out.
+    async fn resolve_web_url(&self) -> Result<String> {
+        if !self.web_url.is_empty() {
+            return Ok(self.web_url.clone());
+        }
+        let webui = &self.detail().await?.webui;
+        if webui.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!("{}{}", self.base_url.trim_end_matches('/'), webui))
+    }
+
+    async fn open_via_xdg(&self) -> Result<ActionOutcome> {
+        let web_url = self.resolve_web_url().await?;
+        if web_url.is_empty() {
             return Err(other_err(format!(
                 "Page {} has no webui link — cannot open in browser",
                 self.page.id
             )));
         }
         std::process::Command::new("xdg-open")
-            .arg(&self.web_url)
+            .arg(&web_url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -592,7 +611,7 @@ impl Node for ConfluencePageNode {
         input: ActionInput,
     ) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("open-in-browser", ActionInput::None) => self.open_via_xdg(),
+            ("open-in-browser", ActionInput::None) => self.open_via_xdg().await,
             ("edit", ActionInput::Edited { text, original, version }) => {
                 self.execute_edit(&text, &original, &version).await
             }
@@ -826,7 +845,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_rejects_open_when_webui_missing() {
+    async fn open_with_empty_webui_hydrates_then_errors_not_spawns() {
+        // A node built without a `webui` link (the shape `get_by_id`
+        // synthesizes for every action target) no longer rejects up
+        // front — it falls back to a `GET /content/{id}` detail fetch to
+        // recover the link. Against the unreachable `.invalid` host that
+        // fetch fails, so the action surfaces an error instead of
+        // spawning a browser on an empty URL. The safety property under
+        // test: an empty webui never yields `Ok` (no stub browser spawn).
         let page = PageMeta {
             id: "9".into(),
             title: "Bare".into(),
@@ -840,8 +866,8 @@ mod tests {
             page,
         );
         match node.execute("open-in-browser", ActionInput::None).await {
-            Err(e) => assert!(format!("{e}").contains("9"), "error mentions id: {e}"),
-            Ok(_) => panic!("missing webui must be rejected"),
+            Err(_) => {}
+            Ok(_) => panic!("empty webui must never spawn a browser"),
         }
     }
 
