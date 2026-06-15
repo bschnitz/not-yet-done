@@ -15,8 +15,8 @@ use tokio::sync::RwLock;
 
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, EditorPrep,
-    FormFieldSpec, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result,
+    FormFieldSpec, HintPlacement, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node,
+    NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::category::move_marked_channel;
@@ -51,7 +51,12 @@ pub(super) fn channel_actions() -> Vec<NodeAction> {
                 fields: vec![FormFieldSpec::text("name", "Channel name")],
             },
         ),
-        NodeAction::new("mark-move", "cut", InputSpec::None),
+        // `cut` lives in the action bar (top) so it sits beside the other
+        // primary verbs and can light up while a cut is armed. `paste
+        // channel` stays a status-bar hint (a paste target only matters
+        // once something is cut).
+        NodeAction::new("mark-move", "cut", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar),
         NodeAction::new("paste-move", "paste channel", InputSpec::None),
     ]
 }
@@ -326,5 +331,17 @@ mod tests {
         assert_eq!(node.label(), "general");
         assert_eq!(node.metadata().fields[0].value, "general");
         assert_eq!(node.children_types()[0].type_id, "stoat:message");
+    }
+
+    #[test]
+    fn cut_hint_is_action_bar_placed() {
+        // `cut` (mark-move) belongs in the top action bar so it can light
+        // up while a cut is armed; `paste channel` stays a status-bar hint.
+        let actions = channel_actions();
+        let cut = actions.iter().find(|a| a.id == "mark-move").expect("mark-move");
+        assert_eq!(cut.label, "cut");
+        assert_eq!(cut.placement, HintPlacement::ActionBar);
+        let paste = actions.iter().find(|a| a.id == "paste-move").expect("paste-move");
+        assert_eq!(paste.placement, HintPlacement::StatusBar);
     }
 }

@@ -14,7 +14,8 @@
 //!
 //! Active editor: hint matching `active_editor` description is rendered
 //! bold + underlined. The "track" hint additionally highlights when
-//! `tracking_active` is set.
+//! `tracking_active` is set; the "cut" hint highlights when `cut_active`
+//! is set (a node is on the move-clipboard).
 
 use std::sync::Arc;
 
@@ -86,6 +87,9 @@ pub struct ActionBarComponent {
     active_editor: Option<String>,
     /// Highlights the hint with description == "track" when set.
     tracking_active: bool,
+    /// Highlights the hint with description == "cut" when set (a node is
+    /// currently cut to the move-clipboard, awaiting paste).
+    cut_active: bool,
     /// Active filter / saved-query name shown after the hints.
     active_filter_name: Option<String>,
     /// Favorites (name, shortcut).
@@ -112,6 +116,7 @@ impl ActionBarComponent {
             hints: Vec::new(),
             active_editor: None,
             tracking_active: false,
+            cut_active: false,
             active_filter_name: None,
             favorites: Vec::new(),
             fuzzy: FuzzyState::default(),
@@ -149,6 +154,10 @@ impl ActionBarComponent {
 
     pub fn set_tracking_active(&mut self, active: bool) {
         self.tracking_active = active;
+    }
+
+    pub fn set_cut_active(&mut self, active: bool) {
+        self.cut_active = active;
     }
 
     pub fn set_active_filter_name(&mut self, name: Option<String>) {
@@ -477,7 +486,8 @@ impl ActionBarComponent {
 
             let is_editor_active = self.active_editor.as_deref() == Some(desc.as_str());
             let is_tracking_active = desc == "track" && self.tracking_active;
-            let is_active = is_editor_active || is_tracking_active;
+            let is_cut_active = desc == "cut" && self.cut_active;
+            let is_active = is_editor_active || is_tracking_active || is_cut_active;
             let fg = if is_active { t.accent() } else { t.secondary() };
             let mods = if is_active {
                 Modifier::UNDERLINED | Modifier::BOLD

@@ -90,6 +90,9 @@ views:
     # (switching tabs aborts it) and pressing `C` again on the same row
     # cancels it. These are generic `shortcuts:` (the shared mark/paste-move
     # vocabulary, dispatched via `invoke_action`), not editor actions.
+    # The `cut` hint lives in the TOP action bar (the adapter places the
+    # `mark-move` action there) and lights up in the accent color while a
+    # channel is cut, so the armed cut stays visible until `P` or a cancel.
     shortcuts:
       P: paste-move
     children:
