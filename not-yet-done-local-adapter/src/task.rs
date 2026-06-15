@@ -686,9 +686,19 @@ async fn resolve_match_set(
 /// (the new node's parent comes from the buffer's `parent:` field, blank
 /// by default).
 fn task_root_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("add", "Add task", InputSpec::Editor)
-        .with_placement(HintPlacement::ActionBar)
-        .with_default_key('a')]
+    vec![
+        NodeAction::new("add", "Add task", InputSpec::Editor)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('a'),
+        // Sibling-of-a-top-level-task *is* a top-level task, so on the root
+        // `add-sibling` aliases `add` (both → `prepare_add(None)`). It exists
+        // here only so the empty-tree create fallback — which invokes the
+        // configured action id on the forest root when nothing is selected —
+        // finds the id rather than erroring.
+        NodeAction::new("add-sibling", "Add task", InputSpec::Editor)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('A'),
+    ]
 }
 
 /// Actions a single task exposes. `add` makes a task a valid `type: create`
@@ -704,6 +714,13 @@ fn task_item_actions() -> Vec<NodeAction> {
         NodeAction::new("add", "Add subtask", InputSpec::Editor)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('a'),
+        // Add a *sibling* of this task: the new node's parent is this task's
+        // own (effective, re-rooted) parent, so it lands next to it rather
+        // than nested under it. At a top-level task the parent is `None`, so
+        // the sibling is another top-level task.
+        NodeAction::new("add-sibling", "Add sibling", InputSpec::Editor)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('A'),
         // Subtree-restructure outline editor: edit the task and its whole
         // subtree as one indented checkbox list — reparent, re-status,
         // add/remove rows in a single buffer. Bound to `ctrl+n` in
@@ -1283,7 +1300,8 @@ impl Node for TaskRootNode {
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         match action_id {
             // Create a top-level task; the buffer's `parent:` may override.
-            "add" => Ok(prepare_add(None)),
+            // `add-sibling` aliases `add` here (sibling of root = top-level).
+            "add" | "add-sibling" => Ok(prepare_add(None)),
             other => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the task root"
             ))),
@@ -1291,7 +1309,7 @@ impl Node for TaskRootNode {
     }
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("add", ActionInput::Edited { text, original, .. }) => {
+            ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
@@ -1398,6 +1416,11 @@ impl Node for TaskItemNode {
         match action_id {
             // Create a child task under this one (buffer's `parent:` wins).
             "add" => Ok(prepare_add(Some(self.id))),
+            // Create a sibling: parent is this task's own effective parent
+            // (re-rooted), so a top-level task gets another top-level sibling.
+            "add-sibling" => Ok(prepare_add(
+                self.snapshot.by_id.get(&self.id).and_then(|r| r.parent),
+            )),
             "edit" => prepare_edit(&self.handle, &self.snapshot, self.id).await,
             "edit-tree" => prepare_edit_tree(&self.snapshot, self.id),
             other => Err(ContentError::NotSupported(format!(
@@ -1407,7 +1430,7 @@ impl Node for TaskItemNode {
     }
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("add", ActionInput::Edited { text, original, .. }) => {
+            ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
             }
             ("edit", ActionInput::Edited { text, original, .. }) => {
@@ -2160,13 +2183,18 @@ mod tests {
     fn root_and_item_expose_expected_actions() {
         let has = |actions: &[NodeAction], id: &str| actions.iter().any(|a| a.id == id);
         let root = task_root_actions();
+        // `add` (top-level task) plus the `add-sibling` alias — both map to
+        // `prepare_add(None)` on the root, so the empty-tree `a`/`A` fallback
+        // resolves either action id to a top-level create.
         assert!(has(&root, "add"));
-        assert_eq!(root.len(), 1);
+        assert!(has(&root, "add-sibling"));
+        assert_eq!(root.len(), 2);
         let item = task_item_actions();
         for id in [
             "edit",
             "edit-tree",
             "add",
+            "add-sibling",
             "delete",
             "undelete",
             "toggle-tracking",

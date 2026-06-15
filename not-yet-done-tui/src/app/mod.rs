@@ -14,26 +14,28 @@ use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
 use uuid::Uuid;
 
 use crate::action::{self, Action};
+use crate::components::content_form_popup::{ContentFormEvent, ContentFormPopup};
 use crate::components::data_table::DataTable;
-use crate::views::content_view::ContentView;
-use crate::views::tasks_view::TasksView;
-use crate::views::trackings_view::TrackingsView;
-use crate::views::{SubViewMessage, ViewRequest};
 use crate::components::form_pane::FormPaneComponent;
-use crate::components::view_pane::ViewPaneComponent;
 use crate::components::notification_bar::NotificationBarComponent;
 use crate::components::query_error_bar::QueryErrorBarComponent;
-use crate::components::searchable_popup::{SearchablePopup, PopupItem};
-use crate::components::content_form_popup::{ContentFormPopup, ContentFormEvent};
+use crate::components::searchable_popup::{PopupItem, SearchablePopup};
 use crate::components::status_bar::{StatusBarComponent, StatusMode};
 use crate::components::tab_bar::TabBarComponent;
+use crate::components::view_pane::ViewPaneComponent;
 use crate::config::{
     CommonAction, FormAction, GlobalAction, KeyBindingConfig, TasksAction, TrackingsAction,
     TuiConfig,
 };
 use crate::filter_builder;
-use crate::tabs::{FilterField, LoadState, Tab, TabLayout, TasksSubView, TrackingsSubView, TasksForm};
+use crate::tabs::{
+    FilterField, LoadState, Tab, TabLayout, TasksForm, TasksSubView, TrackingsSubView,
+};
 use crate::ui::theme::Theme;
+use crate::views::content_view::ContentView;
+use crate::views::tasks_view::TasksView;
+use crate::views::trackings_view::TrackingsView;
+use crate::views::{SubViewMessage, ViewRequest};
 
 // ---------------------------------------------------------------------------
 // Messages from the async loader back to the main thread
@@ -331,7 +333,9 @@ fn generate_sort_labels(count: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(count);
     'outer: for first in &alphabet {
         for second in &alphabet {
-            if out.len() >= count { break 'outer; }
+            if out.len() >= count {
+                break 'outer;
+            }
             out.push(format!("{}{}", first, second));
         }
     }
@@ -351,11 +355,14 @@ fn parse_sort_state(s: &str) -> Vec<not_yet_done_content::SortKey> {
                 return None;
             }
             let direction = match dir.trim() {
-                "asc"  => SortDirection::Asc,
+                "asc" => SortDirection::Asc,
                 "desc" => SortDirection::Desc,
-                _      => return None,
+                _ => return None,
             };
-            Some(SortKey { column: col.to_string(), direction })
+            Some(SortKey {
+                column: col.to_string(),
+                direction,
+            })
         })
         .collect()
 }
@@ -603,9 +610,9 @@ pub struct App {
     pub tab_layout: TabLayout,
     // TasksState now lives in tasks_view.state, sub_view in tasks_view.sub_view()
     pub keybindings: KeyBindingConfig,
-    pub theme:       Theme,
+    pub theme: Theme,
     pub shared_theme: Arc<Theme>,
-    pub config:      TuiConfig,
+    pub config: TuiConfig,
     pub should_quit: bool,
 
     task_service: Arc<dyn TaskService>,
@@ -617,7 +624,7 @@ pub struct App {
     pub link_repo: Arc<dyn LinkRepository>,
 
     pub load_rx: tokio::sync::mpsc::UnboundedReceiver<LoadMsg>,
-    load_tx:     tokio::sync::mpsc::UnboundedSender<LoadMsg>,
+    load_tx: tokio::sync::mpsc::UnboundedSender<LoadMsg>,
 
     /// Per-view live-refresh timers (M9 — adapter-driven live rows). Key =
     /// `view_index`. Each handle drives a `tokio::time::interval` that pulls
@@ -725,14 +732,12 @@ pub struct App {
 
     /// Adapter credentials popup (login form for adapters that surface
     /// `AdapterStatus::NeedsCreds`).
-    pub adapter_creds_popup:
-        Option<crate::components::adapter_creds_popup::AdapterCredsPopup>,
+    pub adapter_creds_popup: Option<crate::components::adapter_creds_popup::AdapterCredsPopup>,
 
     /// Query-variable input popup. Set when applying a saved query that
     /// the adapter reports as having `${var}` placeholders; cleared on
     /// submit (after the load) or cancel.
-    pub query_var_popup:
-        Option<crate::components::query_var_popup::QueryVarPopup>,
+    pub query_var_popup: Option<crate::components::query_var_popup::QueryVarPopup>,
 
     /// `:config` picker popup — lists YAML files under the config dir.
     /// Activating a row opens it in a [`crate::edit_session::FileEditSession`].
@@ -748,7 +753,6 @@ pub struct App {
 
     /// Pending key for chord sequences (e.g. "g" waiting for "g" to form "gg").
     pub pending_key: Option<String>,
-
 
     /// When true, the next keypress is captured as a shortcut for a new favorite.
     pub awaiting_favorite_shortcut: Option<(String, String, String)>, // (scope, name, query)
@@ -766,7 +770,6 @@ pub struct App {
 
     /// Pending confirmation dialog — blocks input until y/n.
     pub pending_confirmation: Option<(String, PendingConfirmation)>,
-
 
     /// Trackings tab state.
     // TrackingsState now lives in trackings_view.state
@@ -849,14 +852,18 @@ impl App {
         self.content_views.get(idx).and_then(|s| s.as_view())
     }
     pub fn content_view_mut(&mut self, idx: usize) -> Option<&mut ContentView> {
-        self.content_views.get_mut(idx).and_then(|s| s.as_view_mut())
+        self.content_views
+            .get_mut(idx)
+            .and_then(|s| s.as_view_mut())
     }
     /// Iterate working content views (skips broken slots).
     pub fn content_views_iter(&self) -> impl Iterator<Item = &ContentView> {
         self.content_views.iter().filter_map(|s| s.as_view())
     }
     pub fn content_views_iter_mut(&mut self) -> impl Iterator<Item = &mut ContentView> {
-        self.content_views.iter_mut().filter_map(|s| s.as_view_mut())
+        self.content_views
+            .iter_mut()
+            .filter_map(|s| s.as_view_mut())
     }
     /// Iterate working views with their slot index — skips broken slots
     /// while preserving the global slot numbering used by `Tab::Content`.
@@ -878,24 +885,36 @@ impl App {
         tracking_repo: Arc<dyn TrackingRepository>,
         link_repo: Arc<dyn LinkRepository>,
         adapter_factory_builder: Box<
-            dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>
-                + Send
+            dyn Fn() -> std::collections::HashMap<
+                    String,
+                    Box<dyn not_yet_done_content::AdapterFactory>,
+                > + Send
                 + Sync,
         >,
     ) -> Self {
         let keybindings = config.keybindings.clone();
         let shared_theme = Arc::new(Theme::new(config.theme.clone()));
         // Load content views from YAML config files (must happen before tab_bar).
-        let content_views = load_content_views(&shared_theme, &config.keybindings, &config.editors, adapter_factory_builder());
-        let content_tab_infos: Vec<crate::components::tab_bar::ContentTabInfo> = content_views.iter().map(|slot| {
-            crate::components::tab_bar::ContentTabInfo {
+        let content_views = load_content_views(
+            &shared_theme,
+            &config.keybindings,
+            &config.editors,
+            adapter_factory_builder(),
+        );
+        let content_tab_infos: Vec<crate::components::tab_bar::ContentTabInfo> = content_views
+            .iter()
+            .map(|slot| crate::components::tab_bar::ContentTabInfo {
                 name: slot.tab_name().to_string(),
                 icon: slot.tab_icon().unwrap_or_default().to_string(),
-            }
-        }).collect();
+            })
+            .collect();
         let (tab_layout, tab_layout_error) = build_tab_layout(&config.tabs, &content_views);
         let initial_tab = tab_layout.first();
-        let tab_bar = TabBarComponent::new(Arc::clone(&shared_theme), &config.keybindings, &content_tab_infos);
+        let tab_bar = TabBarComponent::new(
+            Arc::clone(&shared_theme),
+            &config.keybindings,
+            &content_tab_infos,
+        );
         let status_bar = StatusBarComponent::new(Arc::clone(&shared_theme), &config.keybindings);
         let tasks_view = TasksView::new(
             Arc::clone(&shared_theme),
@@ -903,7 +922,13 @@ impl App {
             Arc::clone(&task_service),
             config.tasks.tree.default_expand_depth,
         );
-        let mut trackings_view = TrackingsView::new(Arc::clone(&shared_theme), config.keybindings.clone(), Arc::clone(&tracking_repo), Arc::clone(&saved_query_repo), Arc::clone(&settings_repo));
+        let mut trackings_view = TrackingsView::new(
+            Arc::clone(&shared_theme),
+            config.keybindings.clone(),
+            Arc::clone(&tracking_repo),
+            Arc::clone(&saved_query_repo),
+            Arc::clone(&settings_repo),
+        );
         trackings_view.set_taskpath_separator(config.tracking.taskpath_separator.clone());
 
         let view_pane = ViewPaneComponent::new(Arc::clone(&shared_theme));
@@ -921,7 +946,7 @@ impl App {
         let popup_icons = keybindings.key_icons.clone();
 
         let mut app = Self {
-            active_tab:  initial_tab,
+            active_tab: initial_tab,
             tab_layout,
             keybindings,
             theme,
@@ -1053,8 +1078,12 @@ impl App {
     /// silently (the view falls back to its YAML `query.default`).
     pub fn apply_default_content_queries(&mut self) {
         for idx in 0..self.content_views.len() {
-            let Some(cv) = self.content_view_mut(idx) else { continue };
-            let Some(name) = cv.default_saved_query.clone() else { continue };
+            let Some(cv) = self.content_view_mut(idx) else {
+                continue;
+            };
+            let Some(name) = cv.default_saved_query.clone() else {
+                continue;
+            };
             let Some(body) = cv
                 .db_saved_queries
                 .iter()
@@ -1080,14 +1109,20 @@ impl App {
         } else {
             let build_result = filter_builder::build(&self.tasks_view.state.filter);
 
-            self.tasks_view.state.filter.created_after_err  = None;
+            self.tasks_view.state.filter.created_after_err = None;
             self.tasks_view.state.filter.created_before_err = None;
-            self.tasks_view.state.filter.priority_err       = None;
+            self.tasks_view.state.filter.priority_err = None;
             for e in &build_result.errors {
                 match e.field {
-                    "Created after"  => self.tasks_view.state.filter.created_after_err  = Some(e.message.clone()),
-                    "Created before" => self.tasks_view.state.filter.created_before_err = Some(e.message.clone()),
-                    "Priority \u{2265}" => self.tasks_view.state.filter.priority_err    = Some(e.message.clone()),
+                    "Created after" => {
+                        self.tasks_view.state.filter.created_after_err = Some(e.message.clone())
+                    }
+                    "Created before" => {
+                        self.tasks_view.state.filter.created_before_err = Some(e.message.clone())
+                    }
+                    "Priority \u{2265}" => {
+                        self.tasks_view.state.filter.priority_err = Some(e.message.clone())
+                    }
                     _ => {}
                 }
             }
@@ -1095,13 +1130,13 @@ impl App {
         };
 
         let service = Arc::clone(&self.task_service);
-        let tx      = self.load_tx.clone();
+        let tx = self.load_tx.clone();
         let options = self.tasks_view.active_filter_options.clone();
 
         tokio::spawn(async move {
             let msg = match service.list_filtered_with_options(&expr, &options).await {
                 Ok(tasks) => LoadMsg::Tasks(tasks),
-                Err(e)    => LoadMsg::Error(e.to_string()),
+                Err(e) => LoadMsg::Error(e.to_string()),
             };
             let _ = tx.send(msg);
         });
@@ -1112,7 +1147,7 @@ impl App {
     /// columns simply stay blank until the next reload tries again.
     fn spawn_load_task_tags(&self, ids: Vec<Uuid>) {
         let service = Arc::clone(&self.task_service);
-        let tx      = self.load_tx.clone();
+        let tx = self.load_tx.clone();
         tokio::spawn(async move {
             if let Ok(map) = service.load_tags_for_tasks(&ids).await {
                 let _ = tx.send(LoadMsg::TaskTags(map));
@@ -1130,7 +1165,8 @@ impl App {
         tokio::spawn(async move {
             // Load all tasks for description + parent lookup.
             let tasks = task_service.list_tasks(None).await.unwrap_or_default();
-            let task_map: std::collections::HashMap<Uuid, (String, Option<Uuid>)> = tasks.into_iter()
+            let task_map: std::collections::HashMap<Uuid, (String, Option<Uuid>)> = tasks
+                .into_iter()
                 .map(|t| (t.id, (t.description, t.parent_id)))
                 .collect();
 
@@ -1146,7 +1182,9 @@ impl App {
                 seen.insert(task_id);
                 let mut current = task_map.get(&task_id).and_then(|(_, p)| *p);
                 while let Some(id) = current {
-                    if !seen.insert(id) { break; }
+                    if !seen.insert(id) {
+                        break;
+                    }
                     match task_map.get(&id) {
                         Some((desc, parent)) => {
                             chain.push(desc.clone());
@@ -1179,9 +1217,11 @@ impl App {
             };
 
             let now = chrono::Utc::now();
-            let rows: Vec<crate::tabs::TrackingRow> = trackings.into_iter()
+            let rows: Vec<crate::tabs::TrackingRow> = trackings
+                .into_iter()
                 .map(|t| {
-                    let desc = task_map.get(&t.task_id)
+                    let desc = task_map
+                        .get(&t.task_id)
                         .map(|(d, _)| d.clone())
                         .unwrap_or_else(|| format!("(deleted {})", &t.task_id.to_string()[..8]));
                     let path = path_for(t.task_id);
@@ -1216,8 +1256,12 @@ impl App {
         view_index: usize,
         values: std::collections::HashMap<String, String>,
     ) {
-        let Some(cv) = self.content_view(view_index) else { return; };
-        let Some(adapter) = cv.adapter.as_ref() else { return; };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
         let adapter = Arc::clone(adapter);
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
@@ -1228,8 +1272,12 @@ impl App {
     }
 
     pub fn spawn_content_status_watcher(&self, view_index: usize) {
-        let Some(cv) = self.content_view(view_index) else { return; };
-        let Some(adapter) = cv.adapter.as_ref() else { return; };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
         let mut rx = adapter.subscribe_status();
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
@@ -1251,8 +1299,12 @@ impl App {
     /// On `Lagged` we resync the conservative way — a full reload — so a
     /// momentarily-slow frontend never silently drops a change.
     pub fn spawn_content_invalidation_watcher(&self, view_index: usize) {
-        let Some(cv) = self.content_view(view_index) else { return; };
-        let Some(adapter) = cv.adapter.as_ref() else { return; };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
         let mut rx = adapter.subscribe_invalidations();
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
@@ -1282,11 +1334,7 @@ impl App {
     /// tab (a background tick must not touch the visible tab). A respawn aborts
     /// the existing handle first, so the cadence the adapter last declared
     /// always wins and timers never accumulate across re-pacings.
-    fn set_live_refresh_timer(
-        &mut self,
-        view_index: usize,
-        interval: Option<std::time::Duration>,
-    ) {
+    fn set_live_refresh_timer(&mut self, view_index: usize, interval: Option<std::time::Duration>) {
         // Re-pacing replaces the running timer; `None` leaves it stopped.
         if let Some(handle) = self.live_refresh_timers.remove(&view_index) {
             handle.abort();
@@ -1327,8 +1375,12 @@ impl App {
     /// [`Invalidation::Row`]: not_yet_done_content::Invalidation::Row
     /// [`GroupSpec`]: not_yet_done_content::GroupSpec
     pub fn spawn_live_refresh(&self, view_index: usize) {
-        let Some(cv) = self.content_view(view_index) else { return };
-        let Some(adapter) = cv.adapter.as_ref() else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
         let adapter = Arc::clone(adapter);
         // Each grouped *eager* tree pane's (spec, saved query). A flat /
         // condensed / ungrouped pane has no spec and is served by `live_rows`
@@ -1478,12 +1530,18 @@ impl App {
                 Some((parent, child))
             });
         match drill {
-            Some((parent, child)) => self.spawn_content_drill_down(view_index, pane_id, parent, child),
+            Some((parent, child)) => {
+                self.spawn_content_drill_down(view_index, pane_id, parent, child)
+            }
             None => self.spawn_content_load(view_index, pane_id),
         }
     }
 
-    pub fn spawn_content_load(&self, view_index: usize, pane_id: crate::views::content_view::PaneId) {
+    pub fn spawn_content_load(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
             None => return,
@@ -1526,7 +1584,8 @@ impl App {
                 let group_by = group_by.clone();
                 async move {
                     let root = adapter.root().await.map_err(|e| e.to_string())?;
-                    let node_type = root.children_types()
+                    let node_type = root
+                        .children_types()
                         .into_iter()
                         .find(|t| t.type_id == node_type_id)
                         .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
@@ -1637,7 +1696,9 @@ impl App {
                         download: false,
                         group_by,
                     };
-                    root.list_subtree(params, depth).await.map_err(|e| e.to_string())
+                    root.list_subtree(params, depth)
+                        .await
+                        .map_err(|e| e.to_string())
                 }
             })
             .await;
@@ -1750,8 +1811,8 @@ impl App {
         };
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
-            let mut ctx = not_yet_done_content::CustomQueryContext::new()
-                .with("database", database.clone());
+            let mut ctx =
+                not_yet_done_content::CustomQueryContext::new().with("database", database.clone());
             if let Some(p) = page {
                 ctx = ctx.with_page(p);
             }
@@ -1787,7 +1848,11 @@ impl App {
                     status,
                 }
             });
-            let _ = tx.send(LoadMsg::CustomQueryItems { view_index, pane_id, result });
+            let _ = tx.send(LoadMsg::CustomQueryItems {
+                view_index,
+                pane_id,
+                result,
+            });
         });
     }
 
@@ -1963,24 +2028,25 @@ impl App {
     /// [`Self::marked_link`] UX — the status bar shows the indicator
     /// until paste or Esc clears it.
     fn mark_db_script_for_move(&mut self, node_id: String) {
-        self.notify(format!("Marked '{node_id}' for move — paste with `p` on the target dir"));
+        self.notify(format!(
+            "Marked '{node_id}' for move — paste with `p` on the target dir"
+        ));
         self.marked_db_script_for_move = Some(node_id);
     }
 
     /// DSF-4: paste the marked source into the target dir (or root
     /// group). Validates same-database, calls `move_db_script_entry`,
     /// reloads, and clears the mark.
-    fn paste_db_script_move(
-        &mut self,
-        target_node_id: String,
-    ) {
+    fn paste_db_script_move(&mut self, target_node_id: String) {
         use crate::app::node_actions::{db_script_rel_path_str, parse_db_script_node_id};
         let Some(source_node_id) = self.marked_db_script_for_move.clone() else {
             self.notify("No DB-script marked for move (use `m` first)".to_string());
             return;
         };
         let Some((src_db, src_segs)) = parse_db_script_node_id(&source_node_id) else {
-            self.notify_error(format!("Marked source '{source_node_id}' is not a DB-script id"));
+            self.notify_error(format!(
+                "Marked source '{source_node_id}' is not a DB-script id"
+            ));
             self.marked_db_script_for_move = None;
             return;
         };
@@ -1999,7 +2065,9 @@ impl App {
         // dst's rel_path. Source name is the last segment; the file
         // keeps its name in the destination.
         let Some(src_name) = src_segs.last().cloned() else {
-            self.notify_error(format!("Marked source '{source_node_id}' has no name segment"));
+            self.notify_error(format!(
+                "Marked source '{source_node_id}' has no name segment"
+            ));
             return;
         };
         let dst_rel = if dst_segs.is_empty() {
@@ -2059,9 +2127,7 @@ impl App {
         database: String,
         rel_path: String,
     ) {
-        let msg = format!(
-            "Delete empty DB-script folder '{rel_path}' in '{database}'? (y/n)"
-        );
+        let msg = format!("Delete empty DB-script folder '{rel_path}' in '{database}'? (y/n)");
         self.modal_message = Some(msg.clone());
         self.pending_confirmation = Some((
             msg,
@@ -2128,42 +2194,36 @@ impl App {
         match sub {
             "new" => {
                 if rest.is_empty() {
-                    self.modal_message =
-                        Some(":db-script new expects <name>".to_string());
+                    self.modal_message = Some(":db-script new expects <name>".to_string());
                     return;
                 }
                 self.db_script_new_in_current_dir(rest);
             }
             "new-dir" => {
                 if rest.is_empty() {
-                    self.modal_message =
-                        Some(":db-script new-dir expects <name>".to_string());
+                    self.modal_message = Some(":db-script new-dir expects <name>".to_string());
                     return;
                 }
                 self.db_script_new_dir_in_current_dir(rest);
             }
             "rename" => {
                 if rest.is_empty() {
-                    self.modal_message =
-                        Some(":db-script rename expects <new-name>".to_string());
+                    self.modal_message = Some(":db-script rename expects <new-name>".to_string());
                     return;
                 }
                 self.db_script_rename_selected(rest);
             }
             "move" => {
                 if rest.is_empty() {
-                    self.modal_message = Some(
-                        ":db-script move expects <dest-dir> (use '/' for root)"
-                            .to_string(),
-                    );
+                    self.modal_message =
+                        Some(":db-script move expects <dest-dir> (use '/' for root)".to_string());
                     return;
                 }
                 self.db_script_move_selected_or_marked(rest);
             }
             "delete" => {
                 if !rest.is_empty() {
-                    self.modal_message =
-                        Some(":db-script delete takes no arguments".to_string());
+                    self.modal_message = Some(":db-script delete takes no arguments".to_string());
                     return;
                 }
                 self.db_script_delete_selected();
@@ -2207,12 +2267,13 @@ impl App {
             (id, cv.active_pane_id())
         };
         let Some(selected_id) = selected_id else {
-            self.modal_message =
-                Some(format!(":db-script {sub} — no row selected"));
+            self.modal_message = Some(format!(":db-script {sub} — no row selected"));
             return None;
         };
         // Parse the id. If it doesn't look like a db-script id, bail.
-        let Some((database, segments)) = crate::app::node_actions::parse_db_script_node_id(&selected_id) else {
+        let Some((database, segments)) =
+            crate::app::node_actions::parse_db_script_node_id(&selected_id)
+        else {
             // Maybe the user is on the db_scripts group itself
             // (`<db>/db_scripts` with no trailing segment). Detect:
             let mut parts = selected_id.split('/');
@@ -2272,11 +2333,7 @@ impl App {
     /// `rename_db_script_entry`, but we surface early so the user
     /// gets a clean error instead of a generic io::Error.
     fn validate_db_script_name(&mut self, sub: &str, name: &str) -> bool {
-        if name.is_empty()
-            || name.contains('/')
-            || name.contains('\\')
-            || name.starts_with('.')
-        {
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
             self.modal_message = Some(format!(
                 ":db-script {sub} — invalid name '{name}' (no slashes or leading dot)"
             ));
@@ -2401,8 +2458,9 @@ impl App {
             return;
         };
         let Some((rel_path, _is_dir)) = selected else {
-            self.modal_message =
-                Some(":db-script rename — selected row is the group node, not an entry".to_string());
+            self.modal_message = Some(
+                ":db-script rename — selected row is the group node, not an entry".to_string(),
+            );
             return;
         };
         let instance_dir = adapter.instance_data_dir();
@@ -2440,7 +2498,8 @@ impl App {
         // selected row. The marked source can be cross-pane — but
         // same-database is enforced below.
         let (src_db, src_rel) = if let Some(marked) = self.marked_db_script_for_move.clone() {
-            let Some((db, segs)) = crate::app::node_actions::parse_db_script_node_id(&marked) else {
+            let Some((db, segs)) = crate::app::node_actions::parse_db_script_node_id(&marked)
+            else {
                 self.notify_error(format!("Marked source '{marked}' is not a DB-script id"));
                 self.marked_db_script_for_move = None;
                 return;
@@ -2448,9 +2507,8 @@ impl App {
             (db, crate::app::node_actions::db_script_rel_path_str(&segs))
         } else {
             let Some((rel, _)) = selected else {
-                self.modal_message = Some(
-                    ":db-script move — no marked source and no entry selected".to_string(),
-                );
+                self.modal_message =
+                    Some(":db-script move — no marked source and no entry selected".to_string());
                 return;
             };
             (database.clone(), rel)
@@ -2545,9 +2603,7 @@ impl App {
         database: String,
         script: String,
     ) {
-        let msg = format!(
-            "Delete DB script '{script}' in database '{database}'? (y/n)"
-        );
+        let msg = format!("Delete DB script '{script}' in database '{database}'? (y/n)");
         self.modal_message = Some(msg.clone());
         self.pending_confirmation = Some((
             msg,
@@ -2696,9 +2752,15 @@ impl App {
         let group_id = format!("{database}/db_scripts");
         let sub_prefix = format!("{group_id}/");
         let paths: Vec<(Vec<String>, String)> = {
-            let Some(cv) = self.content_view(view_index) else { return; };
-            let Some(pane) = cv.find_pane(pane_id) else { return; };
-            let Some(tree) = pane.tree.as_ref() else { return; };
+            let Some(cv) = self.content_view(view_index) else {
+                return;
+            };
+            let Some(pane) = cv.find_pane(pane_id) else {
+                return;
+            };
+            let Some(tree) = pane.tree.as_ref() else {
+                return;
+            };
             tree.cache
                 .keys()
                 .filter_map(|p| {
@@ -2744,18 +2806,15 @@ impl App {
         let database = match tokens.next() {
             Some(s) => s.to_string(),
             None => {
-                self.modal_message = Some(
-                    ":db-script-new expects <database> <script>".to_string(),
-                );
+                self.modal_message = Some(":db-script-new expects <database> <script>".to_string());
                 return;
             }
         };
         let script = match tokens.next() {
             Some(s) => s.to_string(),
             None => {
-                self.modal_message = Some(
-                    ":db-script-new expects a script name after the database".to_string(),
-                );
+                self.modal_message =
+                    Some(":db-script-new expects a script name after the database".to_string());
                 return;
             }
         };
@@ -2793,8 +2852,7 @@ impl App {
             .and_then(|cv| cv.adapter.as_ref())
             .map(Arc::clone)
         else {
-            self.modal_message =
-                Some(":db-script-new — active tab has no adapter".to_string());
+            self.modal_message = Some(":db-script-new — active tab has no adapter".to_string());
             return;
         };
         let instance_dir = adapter.instance_data_dir();
@@ -2848,7 +2906,8 @@ impl App {
                     .and_then(|cv| cv.active_view_def())
                     .map(|v| crate::app::node_actions::editor_in_place_for_node_id(v, ""))
                     .unwrap_or(false);
-                let _ = self.open_adapter_db_script_editor(view_index, pane_id, database, script, in_place);
+                let _ = self
+                    .open_adapter_db_script_editor(view_index, pane_id, database, script, in_place);
             }
             Ok(false) => {
                 self.modal_message = Some(format!(
@@ -2903,7 +2962,10 @@ impl App {
         // and fall back to the historical hard-coded first page of 50.
         let page = pane
             .drill_load_page()
-            .unwrap_or(not_yet_done_content::PageRequest { offset: 0, limit: 50 });
+            .unwrap_or(not_yet_done_content::PageRequest {
+                offset: 0,
+                limit: 50,
+            });
         // Filtered-tree adapters (capability `propagates_query_to_subtree`)
         // want the pane's active query honored at every depth, so the
         // drilled child list stays filtered. Flat adapters leave the
@@ -2922,13 +2984,17 @@ impl App {
                 let child_node_type = child_node_type.clone();
                 let subtree_query = subtree_query.clone();
                 async move {
-                    let parent = adapter.get_by_id(&node_id).await.map_err(|e| e.to_string())?;
-                    let node_type = parent.children_types()
+                    let parent = adapter
+                        .get_by_id(&node_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let node_type = parent
+                        .children_types()
                         .into_iter()
                         .find(|t| t.type_id == child_node_type)
-                        .ok_or_else(|| format!(
-                            "Node type '{child_node_type}' not available on '{node_id}'"
-                        ))?;
+                        .ok_or_else(|| {
+                            format!("Node type '{child_node_type}' not available on '{node_id}'")
+                        })?;
                     let sortable_columns = parent.sortable_columns(&node_type);
                     let params = not_yet_done_content::ListParams {
                         node_type,
@@ -3005,40 +3071,44 @@ impl App {
             .and_then(|p| Self::subtree_query_for_pane(cv, p, &adapter));
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
-            let payload = run_with_retries(retries, &tx, view_index, pane_id, || {
-                let adapter = Arc::clone(&adapter);
-                let parent_node_id = parent_node_id.clone();
-                let child_node_type = child_node_type.clone();
-                let subtree_query = subtree_query.clone();
-                async move {
-                    let parent = adapter.get_by_id(&parent_node_id).await.map_err(|e| e.to_string())?;
-                    let node_type = parent.children_types()
+            let payload =
+                run_with_retries(retries, &tx, view_index, pane_id, || {
+                    let adapter = Arc::clone(&adapter);
+                    let parent_node_id = parent_node_id.clone();
+                    let child_node_type = child_node_type.clone();
+                    let subtree_query = subtree_query.clone();
+                    async move {
+                        let parent = adapter
+                            .get_by_id(&parent_node_id)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let node_type = parent.children_types()
                         .into_iter()
                         .find(|t| t.type_id == child_node_type)
                         .ok_or_else(|| format!(
                             "Node type '{child_node_type}' not available on '{parent_node_id}'"
                         ))?;
-                    let page_request = page.unwrap_or(not_yet_done_content::PageRequest {
-                        offset: 0,
-                        limit: page_size,
-                    });
-                    let params = not_yet_done_content::ListParams {
-                        node_type,
-                        query: subtree_query,
-                        sort: Vec::new(),
-                        page: Some(page_request),
-                        download: false,
-                        group_by: None,
-                    };
-                    let list = parent.list(params).await.map_err(|e| e.to_string())?;
-                    Ok(TreeChildrenPayload {
-                        items: list.items,
-                        page_info: list.page,
-                        child_node_type: child_node_type.clone(),
-                    })
-                }
-            })
-            .await;
+                        let page_request = page.unwrap_or(not_yet_done_content::PageRequest {
+                            offset: 0,
+                            limit: page_size,
+                        });
+                        let params = not_yet_done_content::ListParams {
+                            node_type,
+                            query: subtree_query,
+                            sort: Vec::new(),
+                            page: Some(page_request),
+                            download: false,
+                            group_by: None,
+                        };
+                        let list = parent.list(params).await.map_err(|e| e.to_string())?;
+                        Ok(TreeChildrenPayload {
+                            items: list.items,
+                            page_info: list.page,
+                            child_node_type: child_node_type.clone(),
+                        })
+                    }
+                })
+                .await;
             let _ = tx.send(LoadMsg::TreeChildren {
                 view_index,
                 pane_id,
@@ -3116,8 +3186,12 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
     ) {
-        let Some(cv) = self.content_view_mut(view_index) else { return; };
-        let Some(msg) = cv.drive_tree_find(view_index, pane_id) else { return; };
+        let Some(cv) = self.content_view_mut(view_index) else {
+            return;
+        };
+        let Some(msg) = cv.drive_tree_find(view_index, pane_id) else {
+            return;
+        };
         let _ = self.process_sub_view_message(msg);
     }
 
@@ -3202,13 +3276,28 @@ impl App {
                     self.trackings_view.state.set_load_error(e.clone());
                     self.notify_error(format!("Tracking filter error: {e}"));
                 }
-                LoadMsg::ContentItems { view_index, pane_id, items, applied_sort, page, sortable_columns, error } => {
+                LoadMsg::ContentItems {
+                    view_index,
+                    pane_id,
+                    items,
+                    applied_sort,
+                    page,
+                    sortable_columns,
+                    error,
+                } => {
                     if let Some(err) = error.as_ref() {
                         not_yet_done_content::http_log::log_error("content_load", err);
                         self.last_error = Some(err.clone());
                     }
                     if let Some(cv) = self.content_view_mut(view_index) {
-                        cv.set_items_for_pane(pane_id, items, applied_sort, page, sortable_columns, error);
+                        cv.set_items_for_pane(
+                            pane_id,
+                            items,
+                            applied_sort,
+                            page,
+                            sortable_columns,
+                            error,
+                        );
                     }
                     // Eager tree (capability `supports_eager_subtree`): the
                     // root rows are in; pull the WHOLE expanded subtree in one
@@ -3265,7 +3354,13 @@ impl App {
                         let _ = self.process_view_request(req);
                     }
                 }
-                LoadMsg::TreeChildren { view_index, pane_id, parent_path, result, append } => {
+                LoadMsg::TreeChildren {
+                    view_index,
+                    pane_id,
+                    parent_path,
+                    result,
+                    append,
+                } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         if let Some(pane) = cv.find_pane_mut(pane_id) {
                             pane.retry_state = None;
@@ -3301,7 +3396,12 @@ impl App {
                         }
                     }
                 }
-                LoadMsg::Subtree { view_index, pane_id, parent_path, result } => {
+                LoadMsg::Subtree {
+                    view_index,
+                    pane_id,
+                    parent_path,
+                    result,
+                } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         if let Some(pane) = cv.find_pane_mut(pane_id) {
                             pane.retry_state = None;
@@ -3328,13 +3428,19 @@ impl App {
                         }
                     }
                 }
-                LoadMsg::NowBucketReload { view_index, pane_id, result } => {
+                LoadMsg::NowBucketReload {
+                    view_index,
+                    pane_id,
+                    result,
+                } => {
                     // `None` = the now-bucket couldn't be resolved (no
                     // trackings / a load error) — leave the pane as-is.
                     if let Some(payload) = result {
                         let spliced = self
                             .content_view_mut(view_index)
-                            .map(|cv| cv.reload_now_bucket(pane_id, payload.header, payload.subtree))
+                            .map(|cv| {
+                                cv.reload_now_bucket(pane_id, payload.header, payload.subtree)
+                            })
                             .unwrap_or(false);
                         // A *start* can mint a brand-new bucket (the task's
                         // first booking of the period) that isn't a visible
@@ -3361,35 +3467,46 @@ impl App {
                     }
                     return false;
                 }
-                LoadMsg::CustomQueryItems { view_index, pane_id, result } => {
-                    match result {
-                        Ok(payload) => {
-                            if let Some(cv) = self.content_view_mut(view_index) {
-                                cv.apply_custom_query_result(
-                                    pane_id,
-                                    payload.items,
-                                    payload.page,
-                                    Some(payload.custom_query),
-                                );
-                            }
-                            self.set_query_error(None);
-                            if let Some(s) = payload.status {
-                                self.notify(s);
-                            }
+                LoadMsg::CustomQueryItems {
+                    view_index,
+                    pane_id,
+                    result,
+                } => match result {
+                    Ok(payload) => {
+                        if let Some(cv) = self.content_view_mut(view_index) {
+                            cv.apply_custom_query_result(
+                                pane_id,
+                                payload.items,
+                                payload.page,
+                                Some(payload.custom_query),
+                            );
                         }
-                        Err(e) => {
-                            not_yet_done_content::http_log::log_error("custom_query", &e);
-                            self.last_error = Some(e.clone());
-                            self.notify_error(format!("Query error: {e}"));
+                        self.set_query_error(None);
+                        if let Some(s) = payload.status {
+                            self.notify(s);
                         }
                     }
-                }
-                LoadMsg::ContentPreview { view_index, pane_id, cache_key, text } => {
+                    Err(e) => {
+                        not_yet_done_content::http_log::log_error("custom_query", &e);
+                        self.last_error = Some(e.clone());
+                        self.notify_error(format!("Query error: {e}"));
+                    }
+                },
+                LoadMsg::ContentPreview {
+                    view_index,
+                    pane_id,
+                    cache_key,
+                    text,
+                } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         cv.set_preview_description_for_pane(pane_id, &cache_key, text);
                     }
                 }
-                LoadMsg::EditorSessionReady { node_id, token, result } => {
+                LoadMsg::EditorSessionReady {
+                    node_id,
+                    token,
+                    result,
+                } => {
                     // A newer open (higher token) or a cancel superseded this
                     // one — it owns the loading state now, so drop this stale
                     // session without touching the indicator.
@@ -3410,7 +3527,11 @@ impl App {
                         Err(e) => self.notify_error(format!("Failed to load {node_id}: {e}")),
                     }
                 }
-                LoadMsg::ContentActionDone { view_index, pane_id, result } => {
+                LoadMsg::ContentActionDone {
+                    view_index,
+                    pane_id,
+                    result,
+                } => {
                     match result {
                         Ok(msg) => self.notify(msg),
                         Err(msg) => {
@@ -3420,8 +3541,24 @@ impl App {
                     }
                     self.reload_content_pane_current_level(view_index, pane_id);
                 }
-                LoadMsg::NodeActionDispatched { view_index, pane_id, node_id, action_name, result, node_label, node_type } => {
-                    self.handle_node_action_dispatched(view_index, pane_id, node_id, action_name, result, node_label, node_type);
+                LoadMsg::NodeActionDispatched {
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_name,
+                    result,
+                    node_label,
+                    node_type,
+                } => {
+                    self.handle_node_action_dispatched(
+                        view_index,
+                        pane_id,
+                        node_id,
+                        action_name,
+                        result,
+                        node_label,
+                        node_type,
+                    );
                 }
                 LoadMsg::ContentAdapterStatus { view_index, status } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
@@ -3449,7 +3586,12 @@ impl App {
                         }
                     }
                 }
-                LoadMsg::TreeFindResult { view_index, pane_id, query, result } => {
+                LoadMsg::TreeFindResult {
+                    view_index,
+                    pane_id,
+                    query,
+                    result,
+                } => {
                     // Late-arrival sanity check (CT-6): the user may
                     // have re-typed (clearing + restarting via CT-9)
                     // before this in-flight call returned. If the
@@ -3465,8 +3607,12 @@ impl App {
                         Failed(String),
                     }
                     let outcome = {
-                        let Some(cv) = self.content_view_mut(view_index) else { return true; };
-                        let Some(pane) = cv.find_pane_mut(pane_id) else { return true; };
+                        let Some(cv) = self.content_view_mut(view_index) else {
+                            return true;
+                        };
+                        let Some(pane) = cv.find_pane_mut(pane_id) else {
+                            return true;
+                        };
                         let stale = pane
                             .tree_find
                             .as_ref()
@@ -3515,9 +3661,7 @@ impl App {
                             }
                         }
                         Outcome::Unsupported => {
-                            self.notify_error(
-                                "Adapter doesn't support tree search.".to_string(),
-                            );
+                            self.notify_error("Adapter doesn't support tree search.".to_string());
                         }
                         Outcome::Failed(e) => {
                             not_yet_done_content::http_log::log_error("tree_find", &e);
@@ -3554,7 +3698,11 @@ impl App {
 
     pub fn handle_key(&mut self, key: &str) -> EditorRequest {
         // Quit always works, regardless of mode/popups.
-        if self.keybindings.global.bindings.get(&GlobalAction::Quit)
+        if self
+            .keybindings
+            .global
+            .bindings
+            .get(&GlobalAction::Quit)
             .map_or(false, |b| b.matches(key))
         {
             self.should_quit = true;
@@ -3598,10 +3746,8 @@ impl App {
                 let chord = key.to_string();
                 let script_label = coords.script.clone();
                 self.bind_postgres_script_shortcut(coords, &chord);
-                self.modal_message = Some(format!(
-                    "Script '{}' bound to [{}]",
-                    script_label, chord
-                ));
+                self.modal_message =
+                    Some(format!("Script '{}' bound to [{}]", script_label, chord));
             }
             self.sync_components();
             return EditorRequest::None;
@@ -3621,7 +3767,8 @@ impl App {
                 self.awaiting_favorite_shortcut = Some((scope, name, query));
             } else {
                 self.add_favorite(&scope, name.clone(), key.to_string(), query);
-                self.modal_message = Some(format!("Favorite '{}' added with shortcut [{}]", name, key));
+                self.modal_message =
+                    Some(format!("Favorite '{}' added with shortcut [{}]", name, key));
             }
             self.sync_components();
             return EditorRequest::None;
@@ -3658,18 +3805,21 @@ impl App {
 
         // Command line mode: delegate to active view's CmdlineComponent.
         {
-            use crate::views::{HasCmdline, CmdlineKeyResult};
+            use crate::views::{CmdlineKeyResult, HasCmdline};
             let cmdline_active = match self.active_tab {
                 Tab::Tasks => self.tasks_view.cmdline_active(),
                 Tab::Trackings => self.trackings_view.cmdline_active(),
-                Tab::Content(idx) => self.content_view(idx)
-                    .map(|cv| cv.cmdline_active()).unwrap_or(false),
+                Tab::Content(idx) => self
+                    .content_view(idx)
+                    .map(|cv| cv.cmdline_active())
+                    .unwrap_or(false),
             };
             if cmdline_active {
                 let result = match self.active_tab {
                     Tab::Tasks => self.tasks_view.cmdline_handle_key(key),
                     Tab::Trackings => self.trackings_view.cmdline_handle_key(key),
-                    Tab::Content(idx) => self.content_view_mut(idx)
+                    Tab::Content(idx) => self
+                        .content_view_mut(idx)
                         .map(|cv| cv.cmdline_handle_key(key))
                         .unwrap_or(CmdlineKeyResult::Closed),
                 };
@@ -3686,7 +3836,7 @@ impl App {
 
         // Search input mode: delegate to active view's SearchComponent.
         {
-            use crate::views::{Searchable, SearchKeyResult};
+            use crate::views::{SearchKeyResult, Searchable};
             let search_active = match self.active_tab {
                 Tab::Tasks => self.tasks_view.search_active(),
                 Tab::Trackings => self.trackings_view.search_active(),
@@ -3699,8 +3849,10 @@ impl App {
                     Tab::Content(_) => SearchKeyResult::Cancelled,
                 };
                 match result {
-                    SearchKeyResult::Accepted | SearchKeyResult::Cancelled
-                    | SearchKeyResult::QueryChanged | SearchKeyResult::Handled => {}
+                    SearchKeyResult::Accepted
+                    | SearchKeyResult::Cancelled
+                    | SearchKeyResult::QueryChanged
+                    | SearchKeyResult::Handled => {}
                 }
                 self.sync_components();
                 return EditorRequest::None;
@@ -3719,7 +3871,11 @@ impl App {
             // Check if the chord matches any binding.
             // Global comes first so chords like `gl` land here regardless
             // of the active tab.
-            let global_chord = self.keybindings.global.bindings.iter()
+            let global_chord = self
+                .keybindings
+                .global
+                .bindings
+                .iter()
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
             if let Some(action) = global_chord {
@@ -3727,7 +3883,11 @@ impl App {
                 self.sync_components();
                 return EditorRequest::None;
             }
-            let common_chord = self.keybindings.common.bindings.iter()
+            let common_chord = self
+                .keybindings
+                .common
+                .bindings
+                .iter()
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
             if let Some(action) = common_chord {
@@ -3743,7 +3903,11 @@ impl App {
             // we are on its tab — otherwise fall through to the next
             // section so the right one can pick the chord up.
             if self.active_tab == Tab::Tasks {
-                let tasks_chord = self.keybindings.tasks.bindings.iter()
+                let tasks_chord = self
+                    .keybindings
+                    .tasks
+                    .bindings
+                    .iter()
                     .find(|(_, b)| b.matches(&chord))
                     .map(|(a, _)| a.clone());
                 if let Some(action) = tasks_chord {
@@ -3766,7 +3930,11 @@ impl App {
                 }
             }
             if self.active_tab == Tab::Trackings {
-                let trackings_chord = self.keybindings.trackings.bindings.iter()
+                let trackings_chord = self
+                    .keybindings
+                    .trackings
+                    .bindings
+                    .iter()
                     .find(|(_, b)| b.matches(&chord))
                     .map(|(a, _)| a.clone());
                 if let Some(action) = trackings_chord {
@@ -3779,7 +3947,11 @@ impl App {
             // through the active ContentView's central dispatcher so the
             // tree-mode guard + drill post-processing match the single-
             // key path.
-            let content_chord = self.keybindings.content.bindings.iter()
+            let content_chord = self
+                .keybindings
+                .content
+                .bindings
+                .iter()
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
             if let Some(action) = content_chord {
@@ -3828,11 +4000,36 @@ impl App {
             // a prefix of an even longer binding (e.g. `gl` → `glm`/`glp`),
             // keep stashing so the next key can complete it. Without this
             // branch the dispatcher would top out at 2-char chords.
-            if self.keybindings.global.bindings.values().any(|b| b.is_prefix(&chord))
-                || self.keybindings.common.bindings.values().any(|b| b.is_prefix(&chord))
-                || self.keybindings.tasks.bindings.values().any(|b| b.is_prefix(&chord))
-                || self.keybindings.trackings.bindings.values().any(|b| b.is_prefix(&chord))
-                || self.keybindings.content.bindings.values().any(|b| b.is_prefix(&chord))
+            if self
+                .keybindings
+                .global
+                .bindings
+                .values()
+                .any(|b| b.is_prefix(&chord))
+                || self
+                    .keybindings
+                    .common
+                    .bindings
+                    .values()
+                    .any(|b| b.is_prefix(&chord))
+                || self
+                    .keybindings
+                    .tasks
+                    .bindings
+                    .values()
+                    .any(|b| b.is_prefix(&chord))
+                || self
+                    .keybindings
+                    .trackings
+                    .bindings
+                    .values()
+                    .any(|b| b.is_prefix(&chord))
+                || self
+                    .keybindings
+                    .content
+                    .bindings
+                    .values()
+                    .any(|b| b.is_prefix(&chord))
                 || self.cmdline_shortcut_chord_prefix(&chord)
                 || matches!(self.active_tab, Tab::Content(idx)
                     if self.content_view(idx).is_some_and(|cv| cv.yaml_action_chord_prefix(&chord)))
@@ -3908,10 +4105,7 @@ impl App {
                     self.query_var_popup = None;
                 }
                 QueryVarKeyOutcome::Submit { values } => {
-                    let target = self
-                        .query_var_popup
-                        .as_ref()
-                        .map(|p| p.target().clone());
+                    let target = self.query_var_popup.as_ref().map(|p| p.target().clone());
                     self.query_var_popup = None;
                     if let Some(target) = target {
                         self.apply_query_with_vars(target, values);
@@ -3937,7 +4131,9 @@ impl App {
 
         // Tasks query menu — delegated to TasksView.
         if self.active_tab == Tab::Tasks && self.tasks_view.has_query_menu() {
-            let result = self.tasks_view.handle_query_menu_key(key)
+            let result = self
+                .tasks_view
+                .handle_query_menu_key(key)
                 .map(|msg| self.process_sub_view_message(msg))
                 .unwrap_or(EditorRequest::None);
             self.sync_components();
@@ -3945,7 +4141,9 @@ impl App {
         }
         // Trackings query menu — delegated to TrackingsView.
         if self.active_tab == Tab::Trackings && self.trackings_view.has_query_menu() {
-            let result = self.trackings_view.handle_query_menu_key(key)
+            let result = self
+                .trackings_view
+                .handle_query_menu_key(key)
                 .map(|msg| self.process_trackings_message(msg))
                 .unwrap_or(EditorRequest::None);
             self.sync_components();
@@ -3963,8 +4161,7 @@ impl App {
         }
 
         // Trackings tab: delegate to TrackingsView component.
-        let trackings_has_popup = self.script_menu.is_open()
-            || self.column_config_popup.is_some();
+        let trackings_has_popup = self.script_menu.is_open() || self.column_config_popup.is_some();
         if self.active_tab == Tab::Trackings && !trackings_has_popup {
             if self.trackings_view.state.fuzzy_active {
                 let handled = self.handle_trackings_fuzzy_key(key);
@@ -3992,9 +4189,7 @@ impl App {
         // Content file-picker popup (e.g. Taiga attachment upload) —
         // intercepts every key while open. The picker handles its own
         // Esc/submit via `FilePickerEvent`.
-        if matches!(self.active_tab, Tab::Content(_))
-            && self.content_file_picker_popup.is_some()
-        {
+        if matches!(self.active_tab, Tab::Content(_)) && self.content_file_picker_popup.is_some() {
             if let Some(ev) = crate::events::key_string_to_tuirealm(key) {
                 let popup = self.content_file_picker_popup.as_mut().unwrap();
                 let outcome = tuirealm::component::AppComponent::on(
@@ -4143,8 +4338,7 @@ impl App {
         }
 
         // Tasks tab: delegate to TasksView component.
-        let has_popup = self.script_menu.is_open()
-            || self.column_config_popup.is_some();
+        let has_popup = self.script_menu.is_open() || self.column_config_popup.is_some();
 
         if self.active_tab == Tab::Tasks && !has_popup && !self.tasks_view.state.form_visible() {
             // Fuzzy mode: delegate to view's fuzzy handler.
@@ -4174,7 +4368,8 @@ impl App {
         let mode = action::input_mode(
             self.script_menu.is_open(),
             false, // fuzzy handled above for tasks; trackings uses its own path
-            self.active_tab == Tab::Tasks && self.tasks_view.state.active_form == Some(TasksForm::Filter),
+            self.active_tab == Tab::Tasks
+                && self.tasks_view.state.active_form == Some(TasksForm::Filter),
         );
 
         // Chord-prefix detection runs BEFORE single-key resolution: when
@@ -4186,11 +4381,31 @@ impl App {
         // sections only count for their tab so e.g. trackings `v` isn't
         // suppressed by tasks `vt`/`vl` when the trackings tab is active.
         if mode == action::InputMode::Normal && self.pending_key.is_none() {
-            let prefix_global = self.keybindings.global.bindings.values().any(|b| b.is_prefix(key));
-            let prefix_common = self.keybindings.common.bindings.values().any(|b| b.is_prefix(key));
+            let prefix_global = self
+                .keybindings
+                .global
+                .bindings
+                .values()
+                .any(|b| b.is_prefix(key));
+            let prefix_common = self
+                .keybindings
+                .common
+                .bindings
+                .values()
+                .any(|b| b.is_prefix(key));
             let prefix_tab = match self.active_tab {
-                Tab::Tasks => self.keybindings.tasks.bindings.values().any(|b| b.is_prefix(key)),
-                Tab::Trackings => self.keybindings.trackings.bindings.values().any(|b| b.is_prefix(key)),
+                Tab::Tasks => self
+                    .keybindings
+                    .tasks
+                    .bindings
+                    .values()
+                    .any(|b| b.is_prefix(key)),
+                Tab::Trackings => self
+                    .keybindings
+                    .trackings
+                    .bindings
+                    .values()
+                    .any(|b| b.is_prefix(key)),
                 // Content chords (e.g. `zm` → TreeCollapseAll) live in
                 // `content.bindings`. Without this, `z` would never be
                 // stashed as a pending key on a Content tab and the chord
@@ -4198,7 +4413,11 @@ impl App {
                 // YAML `actions:` chords (e.g. `al` → new channel) live in
                 // the ContentView's own keymaps instead, so consult it too.
                 Tab::Content(idx) => {
-                    self.keybindings.content.bindings.values().any(|b| b.is_prefix(key))
+                    self.keybindings
+                        .content
+                        .bindings
+                        .values()
+                        .any(|b| b.is_prefix(key))
                         || self
                             .content_view(idx)
                             .is_some_and(|cv| cv.yaml_action_chord_prefix(key))
@@ -4280,7 +4499,10 @@ impl App {
             Action::Common(c) => self.handle_common_action(c),
             Action::Tasks(t) => self.handle_tasks_action(t),
             Action::Trackings(t) => self.handle_trackings_action(t),
-            Action::Form(f) => { self.handle_form_action(f); EditorRequest::None }
+            Action::Form(f) => {
+                self.handle_form_action(f);
+                EditorRequest::None
+            }
             Action::Content(_) | Action::Window(_) | Action::QueryMenu(_) => {
                 // Not produced by `resolve_key` (these reach the App via the
                 // chain interceptor in Phase 2). Routed centrally through
@@ -4289,14 +4511,35 @@ impl App {
                 let _ = self.dispatch_chained_action(action.clone());
                 EditorRequest::None
             }
-            Action::InsertChar(c) => { self.dispatch_insert(c); EditorRequest::None }
-            Action::Backspace => { self.dispatch_backspace(); EditorRequest::None }
-            Action::CursorLeft => { self.dispatch_cursor_left(); EditorRequest::None }
-            Action::CursorRight => { self.dispatch_cursor_right(); EditorRequest::None }
-            Action::Escape => { self.dispatch_escape(); EditorRequest::None }
+            Action::InsertChar(c) => {
+                self.dispatch_insert(c);
+                EditorRequest::None
+            }
+            Action::Backspace => {
+                self.dispatch_backspace();
+                EditorRequest::None
+            }
+            Action::CursorLeft => {
+                self.dispatch_cursor_left();
+                EditorRequest::None
+            }
+            Action::CursorRight => {
+                self.dispatch_cursor_right();
+                EditorRequest::None
+            }
+            Action::Escape => {
+                self.dispatch_escape();
+                EditorRequest::None
+            }
             Action::Submit => self.dispatch_submit(),
-            Action::Toggle => { self.dispatch_toggle(); EditorRequest::None }
-            Action::Reset => { self.dispatch_reset(); EditorRequest::None }
+            Action::Toggle => {
+                self.dispatch_toggle();
+                EditorRequest::None
+            }
+            Action::Reset => {
+                self.dispatch_reset();
+                EditorRequest::None
+            }
             Action::Blocked | Action::Noop => EditorRequest::None,
         }
     }
@@ -4615,7 +4858,10 @@ impl App {
     /// `key` and starts with it — i.e. `key` is a chord-prefix that
     /// should be stashed and waited on (e.g. `m` for `mc`/`mp`).
     fn cmdline_shortcut_chord_prefix(&self, key: &str) -> bool {
-        self.config.cmdline_shortcuts.keys().any(|k| k.len() > key.len() && k.starts_with(key))
+        self.config
+            .cmdline_shortcuts
+            .keys()
+            .any(|k| k.len() > key.len() && k.starts_with(key))
     }
 
     /// Clear notification bar, sticky notification, and the most recent
@@ -4662,7 +4908,8 @@ impl App {
             return;
         }
         let Some(cut_id) = self.cut_node_id else {
-            self.modal_message = Some(":paste-node — nothing cut (use :cut-node / mc first)".to_string());
+            self.modal_message =
+                Some(":paste-node — nothing cut (use :cut-node / mc first)".to_string());
             return;
         };
         let Some(target_id) = self.selected_task_id() else {
@@ -4686,9 +4933,8 @@ impl App {
         let mut cur = Some(target_id);
         while let Some(node) = cur {
             if node == cut_id {
-                self.modal_message = Some(
-                    ":paste-node — cannot move a task into its own subtree".to_string(),
-                );
+                self.modal_message =
+                    Some(":paste-node — cannot move a task into its own subtree".to_string());
                 return;
             }
             cur = parent_of.get(&node).copied();
@@ -4820,8 +5066,7 @@ impl App {
                 }
             }
             None => {
-                self.modal_message =
-                    Some(format!(":jump — unknown tab '{head}'"));
+                self.modal_message = Some(format!(":jump — unknown tab '{head}'"));
             }
         }
     }
@@ -4879,65 +5124,68 @@ impl App {
         let path = rest;
 
         let rows = &self.tasks_view.state.task_rows;
-        let target = match not_yet_done_core::task_path::walk_task_path(rows, path, case_insensitive) {
-            not_yet_done_core::task_path::WalkOutcome::Found(id) => id,
-            not_yet_done_core::task_path::WalkOutcome::MissingLeadingSlash => {
-                self.modal_message = Some(
-                    ":focus-task expects a /-rooted path (e.g. /work/clients/acme)".to_string(),
-                );
-                return;
-            }
-            not_yet_done_core::task_path::WalkOutcome::EmptyPath => {
-                self.modal_message = Some(":focus-task — path is empty".to_string());
-                return;
-            }
-            not_yet_done_core::task_path::WalkOutcome::BadRegex { msg, .. } => {
-                self.modal_message = Some(format!(":focus-task — {msg}"));
-                return;
-            }
-            not_yet_done_core::task_path::WalkOutcome::NotFound { depth, seg, .. } => {
-                let segments: Vec<&str> = path
-                    .strip_prefix('/')
-                    .unwrap_or("")
-                    .split('/')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let scope = if depth == 0 {
-                    "root level".to_string()
-                } else {
-                    format!("under '{}'", segments[depth - 1])
-                };
-                self.modal_message = Some(format!(
-                    ":focus-task — no task matching '{seg}' at {scope}"
-                ));
-                return;
-            }
-            not_yet_done_core::task_path::WalkOutcome::Ambiguous { seg, candidates, .. } => {
-                let descs: Vec<String> = candidates
-                    .iter()
-                    .take(5)
-                    .filter_map(|id| rows.iter().find(|t| t.id == *id))
-                    .map(|t| format!("'{}'", t.description))
-                    .collect();
-                let more = if candidates.len() > 5 {
-                    format!(", … (+{})", candidates.len() - 5)
-                } else {
-                    String::new()
-                };
-                self.modal_message = Some(format!(
-                    ":focus-task — '{seg}' is ambiguous: {}{}",
-                    descs.join(", "),
-                    more
-                ));
-                return;
-            }
-        };
+        let target =
+            match not_yet_done_core::task_path::walk_task_path(rows, path, case_insensitive) {
+                not_yet_done_core::task_path::WalkOutcome::Found(id) => id,
+                not_yet_done_core::task_path::WalkOutcome::MissingLeadingSlash => {
+                    self.modal_message = Some(
+                        ":focus-task expects a /-rooted path (e.g. /work/clients/acme)".to_string(),
+                    );
+                    return;
+                }
+                not_yet_done_core::task_path::WalkOutcome::EmptyPath => {
+                    self.modal_message = Some(":focus-task — path is empty".to_string());
+                    return;
+                }
+                not_yet_done_core::task_path::WalkOutcome::BadRegex { msg, .. } => {
+                    self.modal_message = Some(format!(":focus-task — {msg}"));
+                    return;
+                }
+                not_yet_done_core::task_path::WalkOutcome::NotFound { depth, seg, .. } => {
+                    let segments: Vec<&str> = path
+                        .strip_prefix('/')
+                        .unwrap_or("")
+                        .split('/')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let scope = if depth == 0 {
+                        "root level".to_string()
+                    } else {
+                        format!("under '{}'", segments[depth - 1])
+                    };
+                    self.modal_message =
+                        Some(format!(":focus-task — no task matching '{seg}' at {scope}"));
+                    return;
+                }
+                not_yet_done_core::task_path::WalkOutcome::Ambiguous {
+                    seg, candidates, ..
+                } => {
+                    let descs: Vec<String> = candidates
+                        .iter()
+                        .take(5)
+                        .filter_map(|id| rows.iter().find(|t| t.id == *id))
+                        .map(|t| format!("'{}'", t.description))
+                        .collect();
+                    let more = if candidates.len() > 5 {
+                        format!(", … (+{})", candidates.len() - 5)
+                    } else {
+                        String::new()
+                    };
+                    self.modal_message = Some(format!(
+                        ":focus-task — '{seg}' is ambiguous: {}{}",
+                        descs.join(", "),
+                        more
+                    ));
+                    return;
+                }
+            };
 
         // Use the same transient-open mechanism as `/`-search, then
         // commit it so the path stays open after the focus.
         let rows_clone: Vec<Task> = self.tasks_view.state.task_rows.clone();
-        self.tasks_view.tree_set_transient_open_for(target, &rows_clone);
+        self.tasks_view
+            .tree_set_transient_open_for(target, &rows_clone);
         self.tasks_view.tree_commit_transient_open(&rows_clone);
         self.tasks_view.set_pending_focus(target);
         // Force a rebuild so the newly-opened path is visible and the
@@ -4959,9 +5207,8 @@ impl App {
         let options = self.tasks_view.active_filter_options.clone();
         let service = Arc::clone(&self.task_service);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                service.list_filtered_with_options(&expr, &options).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { service.list_filtered_with_options(&expr, &options).await })
         });
         match result {
             Ok(tasks) => {
@@ -5201,18 +5448,16 @@ impl App {
     ///   - the synchronous reload returns an adapter error
     fn query_apply_command(&mut self, raw_args: &str) {
         // ── 1. Parse `[--var k=v]* [-t <Tab>[:<view>]] <name>` ──────────
-        let (vars_prefilled, target, name_str) =
-            match parse_query_apply_args(raw_args) {
-                Ok(parsed) => parsed,
-                Err(msg) => {
-                    self.modal_message = Some(format!(":query apply — {msg}"));
-                    return;
-                }
-            };
+        let (vars_prefilled, target, name_str) = match parse_query_apply_args(raw_args) {
+            Ok(parsed) => parsed,
+            Err(msg) => {
+                self.modal_message = Some(format!(":query apply — {msg}"));
+                return;
+            }
+        };
         if name_str.is_empty() {
-            self.modal_message = Some(
-                ":query apply expects [--var k=v]* [-t <Tab>[:<view>]] <name>".to_string(),
-            );
+            self.modal_message =
+                Some(":query apply expects [--var k=v]* [-t <Tab>[:<view>]] <name>".to_string());
             return;
         }
 
@@ -5223,9 +5468,8 @@ impl App {
                 .iter()
                 .position(|slot| slot.tab_name().eq_ignore_ascii_case(&tab_name));
             let Some(tab_idx) = tab_idx else {
-                self.modal_message = Some(format!(
-                    ":query apply — '{tab_name}' is not a content tab"
-                ));
+                self.modal_message =
+                    Some(format!(":query apply — '{tab_name}' is not a content tab"));
                 return;
             };
             self.set_active_tab(Tab::Content(tab_idx));
@@ -5354,11 +5598,8 @@ impl App {
             ));
             return;
         }
-        let session = crate::edit_session::SavedQueryEditSession::new(
-            path,
-            view_index,
-            name.to_string(),
-        );
+        let session =
+            crate::edit_session::SavedQueryEditSession::new(path, view_index, name.to_string());
         let _ = self.open_session(Box::new(session));
     }
 
@@ -5371,11 +5612,13 @@ impl App {
             Some(idx) => idx,
             None => return,
         };
-        let scope = match self.content_view(view_index).map(|cv| cv.query_scope.clone()) {
+        let scope = match self
+            .content_view(view_index)
+            .map(|cv| cv.query_scope.clone())
+        {
             Some(s) => s,
             None => {
-                self.modal_message =
-                    Some(":query delete — active tab has no scope".to_string());
+                self.modal_message = Some(":query delete — active tab has no scope".to_string());
                 return;
             }
         };
@@ -5389,9 +5632,7 @@ impl App {
     /// content tab / is in an error state.
     fn current_content_view_index_or_modal(&mut self, sub: &str) -> Option<usize> {
         let Tab::Content(tab_idx) = self.active_tab else {
-            self.modal_message = Some(format!(
-                ":query {sub} — not on a content tab"
-            ));
+            self.modal_message = Some(format!(":query {sub} — not on a content tab"));
             return None;
         };
         match &self.content_views[tab_idx] {
@@ -5418,8 +5659,7 @@ impl App {
     ) -> Option<std::path::PathBuf> {
         let cv = self.content_view(view_index)?;
         let Some(adapter) = cv.adapter.as_ref() else {
-            self.modal_message =
-                Some(format!(":query {sub} — this tab has no adapter"));
+            self.modal_message = Some(format!(":query {sub} — this tab has no adapter"));
             return None;
         };
         let Some(store) = adapter.saved_query_store() else {
@@ -5464,11 +5704,10 @@ impl App {
             }
         };
         let vars = adapter.query_variables(&target.raw_query);
-        let any_required_missing = vars.iter().any(|v| {
-            v.default.is_none() && !prefilled.contains_key(&v.name)
-        });
-        let needs_popup =
-            !vars.is_empty() && (force_popup || any_required_missing);
+        let any_required_missing = vars
+            .iter()
+            .any(|v| v.default.is_none() && !prefilled.contains_key(&v.name));
+        let needs_popup = !vars.is_empty() && (force_popup || any_required_missing);
         if !needs_popup {
             self.apply_query_with_vars(target, prefilled);
             return;
@@ -5477,15 +5716,13 @@ impl App {
             Some(n) => format!("Query: {n}"),
             None => "Query variables".to_string(),
         };
-        self.query_var_popup = Some(
-            crate::components::query_var_popup::QueryVarPopup::new(
-                Arc::clone(&self.shared_theme),
-                title,
-                target,
-                vars,
-                prefilled,
-            ),
-        );
+        self.query_var_popup = Some(crate::components::query_var_popup::QueryVarPopup::new(
+            Arc::clone(&self.shared_theme),
+            title,
+            target,
+            vars,
+            prefilled,
+        ));
     }
 
     /// Apply a saved query with the given variable bindings: set the
@@ -5519,8 +5756,7 @@ impl App {
             let adapter = match cv.adapter.as_ref() {
                 Some(a) => Arc::clone(a),
                 None => {
-                    self.modal_message =
-                        Some(":query apply — this tab has no adapter".to_string());
+                    self.modal_message = Some(":query apply — this tab has no adapter".to_string());
                     return;
                 }
             };
@@ -5621,8 +5857,7 @@ fn parse_query_apply_args(
     ),
     String,
 > {
-    let mut vars: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut vars: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut target: Option<(String, Option<String>)> = None;
     let mut rest = raw.trim();
     loop {
@@ -5734,10 +5969,22 @@ impl App {
 
     fn handle_trackings_fuzzy_key(&mut self, key: &str) -> bool {
         let needs_rebuild;
-        if self.keybindings.common.bindings.get(&CommonAction::FuzzyFilterAccept).map_or(false, |b| b.matches(key)) {
+        if self
+            .keybindings
+            .common
+            .bindings
+            .get(&CommonAction::FuzzyFilterAccept)
+            .map_or(false, |b| b.matches(key))
+        {
             self.trackings_view.state.fuzzy_close();
             needs_rebuild = true;
-        } else if self.keybindings.common.bindings.get(&CommonAction::FuzzyFilterCancel).map_or(false, |b| b.matches(key)) {
+        } else if self
+            .keybindings
+            .common
+            .bindings
+            .get(&CommonAction::FuzzyFilterCancel)
+            .map_or(false, |b| b.matches(key))
+        {
             if self.trackings_view.state.fuzzy_query.is_empty() {
                 self.trackings_view.state.fuzzy_close();
             } else {
@@ -5746,18 +5993,35 @@ impl App {
                 self.trackings_view.state.refilter();
             }
             needs_rebuild = true;
-        } else if self.keybindings.common.bindings.get(&CommonAction::FuzzyFilterClear).map_or(false, |b| b.matches(key)) {
+        } else if self
+            .keybindings
+            .common
+            .bindings
+            .get(&CommonAction::FuzzyFilterClear)
+            .map_or(false, |b| b.matches(key))
+        {
             self.trackings_view.state.fuzzy_query.clear();
             self.trackings_view.state.fuzzy_cursor = 0;
             self.trackings_view.state.refilter();
             needs_rebuild = true;
         } else {
             needs_rebuild = match key {
-                "backspace" => { self.trackings_view.state.fuzzy_backspace(); true }
-                "left" => { self.trackings_view.state.fuzzy_cursor_left(); false }
-                "right" => { self.trackings_view.state.fuzzy_cursor_right(); false }
+                "backspace" => {
+                    self.trackings_view.state.fuzzy_backspace();
+                    true
+                }
+                "left" => {
+                    self.trackings_view.state.fuzzy_cursor_left();
+                    false
+                }
+                "right" => {
+                    self.trackings_view.state.fuzzy_cursor_right();
+                    false
+                }
                 ch if ch.chars().count() == 1 && !ch.chars().next().unwrap().is_control() => {
-                    self.trackings_view.state.fuzzy_insert(ch.chars().next().unwrap());
+                    self.trackings_view
+                        .state
+                        .fuzzy_insert(ch.chars().next().unwrap());
                     true
                 }
                 _ => return false,
@@ -5979,7 +6243,8 @@ impl App {
         let main_tab_labels = self.build_main_tab_labels();
         self.tab_bar.set_main_tab_labels(main_tab_labels);
         self.tab_bar.set_tasks_sub_view(self.tasks_view.sub_view());
-        self.tab_bar.set_trackings_sub_view(self.trackings_view.state.sub_view);
+        self.tab_bar
+            .set_trackings_sub_view(self.trackings_view.state.sub_view);
         let subtab_labels: Vec<(usize, Vec<(String, bool)>)> = self
             .content_views_indexed()
             .map(|(idx, cv)| (idx, cv.subtab_labels()))
@@ -5996,11 +6261,19 @@ impl App {
         };
         let tasks_active_editor = session_label(crate::edit_session::SessionScope::Tasks);
         let trackings_active_editor = session_label(crate::edit_session::SessionScope::Trackings)
-            .or_else(|| if self.detached_script.is_some() { Some("run") } else { None });
-        let content_active_editor = session_label(crate::edit_session::SessionScope::Content)
-            .map(|s| s.to_string());
-        self.tasks_view.sync_action_bar(tasks_active_editor, tracking_active);
-        self.trackings_view.sync_action_bar(trackings_active_editor, tracking_active);
+            .or_else(|| {
+                if self.detached_script.is_some() {
+                    Some("run")
+                } else {
+                    None
+                }
+            });
+        let content_active_editor =
+            session_label(crate::edit_session::SessionScope::Content).map(|s| s.to_string());
+        self.tasks_view
+            .sync_action_bar(tasks_active_editor, tracking_active);
+        self.trackings_view
+            .sync_action_bar(trackings_active_editor, tracking_active);
         let cut_active = self.content_marked_node.is_some();
         // Active sources owned by the App (popups / detached scripts) — pushed
         // into the focused content view so its hint resolver can light up the
@@ -6027,9 +6300,8 @@ impl App {
         if let Tab::Content(idx) = self.active_tab {
             // Content tabs use dynamic hints from ContentView.
             let gkb = &self.keybindings.global;
-            let mut hints: Vec<(String, String)> = vec![
-                (gkb.label(&GlobalAction::Quit), "quit".to_string()),
-            ];
+            let mut hints: Vec<(String, String)> =
+                vec![(gkb.label(&GlobalAction::Quit), "quit".to_string())];
             if let Some(cv) = self.content_view(idx) {
                 for (k, v) in cv.status_bar_hints() {
                     hints.push((k, v));
@@ -6040,20 +6312,25 @@ impl App {
                 "sort".to_string(),
             ));
             hints.push((
-                format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
+                format!(
+                    "{}/{}",
+                    gkb.label(&GlobalAction::TabNext),
+                    gkb.label(&GlobalAction::TabPrev)
+                ),
                 "cycle tabs".to_string(),
             ));
             self.status_bar.set_custom_hints(hints);
         } else {
-            let status_mode = if self.active_tab == Tab::Tasks && self.tasks_view.state.form_visible() {
-                StatusMode::TasksFormOpen
-            } else if self.active_tab == Tab::Tasks {
-                StatusMode::TasksNormal
-            } else if self.active_tab == Tab::Trackings {
-                StatusMode::Trackings
-            } else {
-                StatusMode::Other
-            };
+            let status_mode =
+                if self.active_tab == Tab::Tasks && self.tasks_view.state.form_visible() {
+                    StatusMode::TasksFormOpen
+                } else if self.active_tab == Tab::Tasks {
+                    StatusMode::TasksNormal
+                } else if self.active_tab == Tab::Trackings {
+                    StatusMode::Trackings
+                } else {
+                    StatusMode::Other
+                };
             self.status_bar.set_mode(status_mode, &self.keybindings);
         }
 
@@ -6097,7 +6374,9 @@ impl App {
                 EditorRequest::None
             }
             SubViewMessage::EditorOpened(_) | SubViewMessage::EditorClosed => EditorRequest::None,
-            SubViewMessage::ActionBarHints(_) | SubViewMessage::StatusBarHints(_) => EditorRequest::None,
+            SubViewMessage::ActionBarHints(_) | SubViewMessage::StatusBarHints(_) => {
+                EditorRequest::None
+            }
             SubViewMessage::ContentDrill { .. } => {
                 // ContentDrill is internal to ContentView — it should be
                 // intercepted there and rewritten as a `ViewRequest::DrillDown`
@@ -6115,14 +6394,17 @@ impl App {
                 // Uses the existing method which reads selected_task_id from the view.
                 self.open_editor_for_add()
             }
-            ViewRequest::OpenEditorForEdit(_id) => {
-                self.open_editor_for_edit()
-            }
-            ViewRequest::OpenEditorForEditNode(_id) => {
-                self.open_editor_for_restructure()
-            }
+            ViewRequest::OpenEditorForEdit(_id) => self.open_editor_for_edit(),
+            ViewRequest::OpenEditorForEditNode(_id) => self.open_editor_for_restructure(),
             ViewRequest::OpenEditorForNotes(id) => {
-                if let Some(task) = self.tasks_view.state.task_rows.iter().find(|t| t.id == id).cloned() {
+                if let Some(task) = self
+                    .tasks_view
+                    .state
+                    .task_rows
+                    .iter()
+                    .find(|t| t.id == id)
+                    .cloned()
+                {
                     let session = crate::edit_session::TaskNotesSession::new(
                         task,
                         self.tasks_view.state.task_rows.clone(),
@@ -6163,8 +6445,15 @@ impl App {
                 EditorRequest::None
             }
             // Content views (generic adapter-driven)
-            ViewRequest::FetchContentPreview { view_index, pane_id, cache_key, node_id, action_id } => {
-                let adapter = self.content_view(view_index)
+            ViewRequest::FetchContentPreview {
+                view_index,
+                pane_id,
+                cache_key,
+                node_id,
+                action_id,
+            } => {
+                let adapter = self
+                    .content_view(view_index)
                     .and_then(|cv| cv.adapter.as_ref())
                     .map(Arc::clone);
                 let Some(adapter) = adapter else {
@@ -6187,14 +6476,26 @@ impl App {
                     };
                     if let Some(text) = text {
                         let _ = tx.send(LoadMsg::ContentPreview {
-                            view_index, pane_id, cache_key, text,
+                            view_index,
+                            pane_id,
+                            cache_key,
+                            text,
                         });
                     }
                 });
                 EditorRequest::None
             }
-            ViewRequest::OpenContentEditor { view_index, pane_id, node_id, action_id, label, editor_profile, commit_on_save } => {
-                let adapter = self.content_view(view_index)
+            ViewRequest::OpenContentEditor {
+                view_index,
+                pane_id,
+                node_id,
+                action_id,
+                label,
+                editor_profile,
+                commit_on_save,
+            } => {
+                let adapter = self
+                    .content_view(view_index)
                     .and_then(|cv| cv.adapter.as_ref())
                     .map(Arc::clone);
                 let Some(adapter) = adapter else {
@@ -6216,7 +6517,10 @@ impl App {
                 // `LoadMsg::EditorSessionReady` and is opened from
                 // `handle_load_msg`; the wait is bounded by the adapter's own
                 // request timeout, and the UI stays responsive throughout.
-                let reload = Some(crate::edit_session::ReloadTarget { view_index, pane_id });
+                let reload = Some(crate::edit_session::ReloadTarget {
+                    view_index,
+                    pane_id,
+                });
                 self.editor_load_token = self.editor_load_token.wrapping_add(1);
                 let token = self.editor_load_token;
                 let msg = format!("⏳ Opening editor: {label}…");
@@ -6225,21 +6529,38 @@ impl App {
                 let tx = self.load_tx.clone();
                 tokio::spawn(async move {
                     let result = crate::edit_session::NodeActionEditSession::new(
-                        adapter, node_id.clone(), action_id, label, None, reload,
-                        editor_profile, commit_on_save,
+                        adapter,
+                        node_id.clone(),
+                        action_id,
+                        label,
+                        None,
+                        reload,
+                        editor_profile,
+                        commit_on_save,
                     )
                     .await
                     .map(|s| Box::new(s) as Box<dyn crate::edit_session::EditSession>)
                     .map_err(|e| e.to_string());
-                    let _ = tx.send(LoadMsg::EditorSessionReady { node_id, token, result });
+                    let _ = tx.send(LoadMsg::EditorSessionReady {
+                        node_id,
+                        token,
+                        result,
+                    });
                 });
                 EditorRequest::None
             }
-            ViewRequest::SpawnContentLoad { view_index, pane_id } => {
+            ViewRequest::SpawnContentLoad {
+                view_index,
+                pane_id,
+            } => {
                 self.spawn_content_load(view_index, pane_id);
                 EditorRequest::None
             }
-            ViewRequest::TreeFindStart { view_index, pane_id, query } => {
+            ViewRequest::TreeFindStart {
+                view_index,
+                pane_id,
+                query,
+            } => {
                 // Stamp the loading state synchronously so the status
                 // hint shows the moment the user hits Enter — the
                 // adapter call lives off in a tokio task.
@@ -6251,7 +6572,12 @@ impl App {
                 self.spawn_tree_find(view_index, pane_id, query, Self::TREE_FIND_DEFAULT_LIMIT);
                 EditorRequest::None
             }
-            ViewRequest::ApplyContentSavedQuery { view_index, pane_id, query, name } => {
+            ViewRequest::ApplyContentSavedQuery {
+                view_index,
+                pane_id,
+                query,
+                name,
+            } => {
                 let target = crate::components::query_var_popup::QueryVarPopupTarget {
                     tab_idx: view_index,
                     pane_id,
@@ -6261,29 +6587,61 @@ impl App {
                 self.start_query_apply(target, std::collections::HashMap::new(), true);
                 EditorRequest::None
             }
-            ViewRequest::DrillDown { view_index, pane_id, node_id, node_label: _, child_node_type } => {
+            ViewRequest::DrillDown {
+                view_index,
+                pane_id,
+                node_id,
+                node_label: _,
+                child_node_type,
+            } => {
                 self.spawn_content_drill_down(view_index, pane_id, node_id, child_node_type);
                 EditorRequest::None
             }
             ViewRequest::ExpandTreeNode {
-                view_index, pane_id, parent_path, parent_node_id, child_node_type, page_size, page, append,
+                view_index,
+                pane_id,
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                page_size,
+                page,
+                append,
             } => {
                 self.spawn_tree_expand(
-                    view_index, pane_id, parent_path, parent_node_id, child_node_type, page_size, page, append,
+                    view_index,
+                    pane_id,
+                    parent_path,
+                    parent_node_id,
+                    child_node_type,
+                    page_size,
+                    page,
+                    append,
                 );
                 EditorRequest::None
             }
-            ViewRequest::EagerExpandSubtree { view_index, pane_id } => {
+            ViewRequest::EagerExpandSubtree {
+                view_index,
+                pane_id,
+            } => {
                 // Fuzzy filter opened on an eager tree: pull the whole subtree
                 // so the filter matches across collapsed / unpaged branches.
                 self.spawn_subtree_load(view_index, pane_id, u32::MAX);
                 EditorRequest::None
             }
             ViewRequest::ExpandTreeNodeMulti {
-                view_index, pane_id, parent_path, parent_node_id, child_node_types, page_size,
+                view_index,
+                pane_id,
+                parent_path,
+                parent_node_id,
+                child_node_types,
+                page_size,
             } => {
                 if let Some(cv) = self.content_view_mut(view_index) {
-                    cv.begin_tree_multi_load(pane_id, parent_path.clone(), child_node_types.clone());
+                    cv.begin_tree_multi_load(
+                        pane_id,
+                        parent_path.clone(),
+                        child_node_types.clone(),
+                    );
                 }
                 for ty in child_node_types {
                     self.spawn_tree_expand(
@@ -6299,60 +6657,141 @@ impl App {
                 }
                 EditorRequest::None
             }
-            ViewRequest::OpenContentQueryEditor { view_index, pane_id: _, save_name, is_new } => {
-                let query_text = self.content_view(view_index)
-                    .map(|cv| if is_new { cv.default_query_text() } else { cv.current_query_text() })
+            ViewRequest::OpenContentQueryEditor {
+                view_index,
+                pane_id: _,
+                save_name,
+                is_new,
+            } => {
+                let query_text = self
+                    .content_view(view_index)
+                    .map(|cv| {
+                        if is_new {
+                            cv.default_query_text()
+                        } else {
+                            cv.current_query_text()
+                        }
+                    })
                     .unwrap_or_default();
                 let session = crate::edit_session::ContentQueryFilterSession::new(
                     view_index, save_name, is_new, query_text,
                 );
                 self.open_session(Box::new(session))
             }
-            ViewRequest::OpenAdapterQueryEditor { view_index, pane_id, parent_node_id } => {
-                self.open_adapter_query_editor(view_index, pane_id, parent_node_id)
-            }
-            ViewRequest::OpenPostgresScriptsMenu { view_index, pane_id, table_node_id } => {
-                self.open_postgres_scripts_menu(view_index, pane_id, table_node_id)
-            }
-            ViewRequest::RunPostgresScript { view_index, pane_id, database, schema, table, script } => {
-                self.run_postgres_script(view_index, pane_id, database, schema, table, script)
-            }
-            ViewRequest::RunPostgresQuery { view_index, pane_id, database, query, page, cursor } => {
+            ViewRequest::OpenAdapterQueryEditor {
+                view_index,
+                pane_id,
+                parent_node_id,
+            } => self.open_adapter_query_editor(view_index, pane_id, parent_node_id),
+            ViewRequest::OpenPostgresScriptsMenu {
+                view_index,
+                pane_id,
+                table_node_id,
+            } => self.open_postgres_scripts_menu(view_index, pane_id, table_node_id),
+            ViewRequest::RunPostgresScript {
+                view_index,
+                pane_id,
+                database,
+                schema,
+                table,
+                script,
+            } => self.run_postgres_script(view_index, pane_id, database, schema, table, script),
+            ViewRequest::RunPostgresQuery {
+                view_index,
+                pane_id,
+                database,
+                query,
+                page,
+                cursor,
+            } => {
                 self.spawn_postgres_query(view_index, pane_id, database, query, Some(page), cursor);
                 EditorRequest::None
             }
-            ViewRequest::CloseAdapterCursor { view_index, cursor_id } => {
+            ViewRequest::CloseAdapterCursor {
+                view_index,
+                cursor_id,
+            } => {
                 self.spawn_close_adapter_cursor(view_index, cursor_id);
                 EditorRequest::None
             }
-            ViewRequest::RunAdapterDbScript { view_index, pane_id, source_node_id, source_label, database, sql } => {
-                self.run_adapter_db_script(view_index, pane_id, source_node_id, source_label, database, sql);
+            ViewRequest::RunAdapterDbScript {
+                view_index,
+                pane_id,
+                source_node_id,
+                source_label,
+                database,
+                sql,
+            } => {
+                self.run_adapter_db_script(
+                    view_index,
+                    pane_id,
+                    source_node_id,
+                    source_label,
+                    database,
+                    sql,
+                );
                 EditorRequest::None
             }
-            ViewRequest::OpenAdapterDbScriptEditor { view_index, pane_id, database, script, in_place } => {
+            ViewRequest::OpenAdapterDbScriptEditor {
+                view_index,
+                pane_id,
+                database,
+                script,
+                in_place,
+            } => {
                 self.open_adapter_db_script_editor(view_index, pane_id, database, script, in_place)
             }
-            ViewRequest::OpenDbScriptNewPrompt { view_index, pane_id, database, parent_rel } => {
+            ViewRequest::OpenDbScriptNewPrompt {
+                view_index,
+                pane_id,
+                database,
+                parent_rel,
+            } => {
                 self.open_db_script_new_prompt(view_index, pane_id, database, parent_rel);
                 EditorRequest::None
             }
-            ViewRequest::OpenDbScriptDirNewPrompt { view_index, pane_id, database, parent_rel } => {
+            ViewRequest::OpenDbScriptDirNewPrompt {
+                view_index,
+                pane_id,
+                database,
+                parent_rel,
+            } => {
                 self.open_db_script_dir_new_prompt(view_index, pane_id, database, parent_rel);
                 EditorRequest::None
             }
-            ViewRequest::ConfirmDeleteAdapterDbScript { view_index, pane_id, database, script } => {
+            ViewRequest::ConfirmDeleteAdapterDbScript {
+                view_index,
+                pane_id,
+                database,
+                script,
+            } => {
                 self.confirm_delete_adapter_db_script(view_index, pane_id, database, script);
                 EditorRequest::None
             }
-            ViewRequest::ConfirmDeleteAdapterDbScriptDir { view_index, pane_id, database, rel_path } => {
+            ViewRequest::ConfirmDeleteAdapterDbScriptDir {
+                view_index,
+                pane_id,
+                database,
+                rel_path,
+            } => {
                 self.confirm_delete_adapter_db_script_dir(view_index, pane_id, database, rel_path);
                 EditorRequest::None
             }
-            ViewRequest::ConfirmDeleteContentNode { view_index, pane_id, node_id } => {
+            ViewRequest::ConfirmDeleteContentNode {
+                view_index,
+                pane_id,
+                node_id,
+            } => {
                 self.confirm_delete_content_node(view_index, pane_id, node_id);
                 EditorRequest::None
             }
-            ViewRequest::OpenDbScriptRenamePrompt { view_index, pane_id, database, rel_path, is_dir } => {
+            ViewRequest::OpenDbScriptRenamePrompt {
+                view_index,
+                pane_id,
+                database,
+                rel_path,
+                is_dir,
+            } => {
                 self.open_db_script_rename_prompt(view_index, pane_id, database, rel_path, is_dir);
                 EditorRequest::None
             }
@@ -6364,22 +6803,53 @@ impl App {
                 self.paste_db_script_move(target_node_id);
                 EditorRequest::None
             }
-            ViewRequest::EditPostgresScript { view_index, pane_id, database, schema, table, script, is_new } => {
-                self.edit_postgres_script(view_index, pane_id, database, schema, table, script, is_new)
-            }
-            ViewRequest::DeletePostgresScript { view_index, pane_id, database, schema, table, script } => {
+            ViewRequest::EditPostgresScript {
+                view_index,
+                pane_id,
+                database,
+                schema,
+                table,
+                script,
+                is_new,
+            } => self
+                .edit_postgres_script(view_index, pane_id, database, schema, table, script, is_new),
+            ViewRequest::DeletePostgresScript {
+                view_index,
+                pane_id,
+                database,
+                schema,
+                table,
+                script,
+            } => {
                 self.delete_postgres_script(view_index, pane_id, database, schema, table, script);
                 EditorRequest::None
             }
-            ViewRequest::PromptPostgresScriptShortcut { view_index, pane_id: _, database, schema, table, script } => {
+            ViewRequest::PromptPostgresScriptShortcut {
+                view_index,
+                pane_id: _,
+                database,
+                schema,
+                table,
+                script,
+            } => {
                 self.prompt_postgres_script_shortcut(view_index, database, schema, table, script);
                 EditorRequest::None
             }
-            ViewRequest::ExecuteContentAction { view_index, pane_id, node_id, action_id } => {
+            ViewRequest::ExecuteContentAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_id,
+            } => {
                 self.open_content_action_popup(view_index, pane_id, node_id, action_id);
                 EditorRequest::None
             }
-            ViewRequest::InvokeNodeAction { view_index, pane_id, node_id, action_name } => {
+            ViewRequest::InvokeNodeAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_name,
+            } => {
                 self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name);
                 EditorRequest::None
             }
@@ -6391,41 +6861,84 @@ impl App {
                 self.spawn_invalidate_auth(view_index, AuthInvalidate::Credentials);
                 EditorRequest::None
             }
-            ViewRequest::CreateContentChild { view_index, pane_id, parent_node_id, child_node_type, action_id, label, editor_profile, commit_on_save } => {
-                let adapter = self.content_view(view_index)
+            ViewRequest::CreateContentChild {
+                view_index,
+                pane_id,
+                parent_node_id,
+                child_node_type,
+                action_id,
+                label,
+                editor_profile,
+                commit_on_save,
+            } => {
+                let adapter = self
+                    .content_view(view_index)
                     .and_then(|cv| cv.adapter.as_ref())
                     .map(Arc::clone);
                 let Some(adapter) = adapter else {
                     self.notify("No adapter available".to_string());
                     return EditorRequest::None;
                 };
-                let nav = crate::edit_session::NavContext {
+                let reload = Some(crate::edit_session::ReloadTarget {
                     view_index,
-                    parent_node_id: parent_node_id.clone(),
-                    child_node_type,
-                };
-                let reload = Some(crate::edit_session::ReloadTarget { view_index, pane_id });
+                    pane_id,
+                });
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
+                        // `None` parent → create on the adapter's root container
+                        // (empty tree / un-drilled root level). Resolve its id
+                        // here, in the same async context that builds the session.
+                        let node_id = match parent_node_id {
+                            Some(id) => id,
+                            None => adapter
+                                .root()
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .id()
+                                .to_string(),
+                        };
+                        let nav = crate::edit_session::NavContext {
+                            view_index,
+                            parent_node_id: node_id.clone(),
+                            child_node_type,
+                        };
                         crate::edit_session::NodeActionEditSession::new(
-                            adapter, parent_node_id.clone(), action_id, label, Some(nav), reload, editor_profile, commit_on_save,
-                        ).await
+                            adapter,
+                            node_id,
+                            action_id,
+                            label,
+                            Some(nav),
+                            reload,
+                            editor_profile,
+                            commit_on_save,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
                     })
                 });
                 match result {
                     Ok(session) => self.open_session(Box::new(session)),
                     Err(e) => {
-                        self.notify_error(format!("Failed to load {parent_node_id}: {e}"));
+                        self.notify_error(format!("Failed to create content child: {e}"));
                         EditorRequest::None
                     }
                 }
             }
-            ViewRequest::SaveContentQuery { view_index, scope: _, name, query } => {
+            ViewRequest::SaveContentQuery {
+                view_index,
+                scope: _,
+                name,
+                query,
+            } => {
                 self.save_content_query_body(view_index, &name, &query);
                 self.reload_content_saved_queries(view_index);
                 EditorRequest::None
             }
-            ViewRequest::DeleteContentQuery { view_index, scope, name } => {
+            ViewRequest::DeleteContentQuery {
+                view_index,
+                scope,
+                name,
+            } => {
                 self.delete_content_query(view_index, &scope, &name);
                 self.reload_content_saved_queries(view_index);
                 self.notify(format!("Deleted query '{name}'"));
@@ -6435,14 +6948,27 @@ impl App {
                 self.set_default_content_query(view_index, &name);
                 EditorRequest::None
             }
-            ViewRequest::PromptContentQueryShortcut { view_index, scope, name, query } => {
+            ViewRequest::PromptContentQueryShortcut {
+                view_index,
+                scope,
+                name,
+                query,
+            } => {
                 self.save_content_query_body(view_index, &name, &query);
                 self.reload_content_saved_queries(view_index);
-                self.modal_message = Some(format!("Press a shortcut key for '{}'\n\nEsc to cancel", name));
+                self.modal_message = Some(format!(
+                    "Press a shortcut key for '{}'\n\nEsc to cancel",
+                    name
+                ));
                 self.awaiting_favorite_shortcut = Some((scope, name, query));
                 EditorRequest::None
             }
-            ViewRequest::RenameContentQuery { view_index, scope, old_name, new_name } => {
+            ViewRequest::RenameContentQuery {
+                view_index,
+                scope,
+                old_name,
+                new_name,
+            } => {
                 self.rename_content_query(view_index, &scope, &old_name, &new_name);
                 self.reload_content_saved_queries(view_index);
                 EditorRequest::None
@@ -6450,9 +6976,12 @@ impl App {
             ViewRequest::ApplySavedQuery { scope, content } => {
                 self.apply_saved_query(&scope, &content)
             }
-            ViewRequest::OpenSavedQueryEditor { scope, name, current_query, is_new } => {
-                self.open_editor_for_saved_query(&scope, name, current_query, is_new)
-            }
+            ViewRequest::OpenSavedQueryEditor {
+                scope,
+                name,
+                current_query,
+                is_new,
+            } => self.open_editor_for_saved_query(&scope, name, current_query, is_new),
             ViewRequest::DeleteSavedQuery { scope, name } => {
                 self.delete_saved_query(&scope, &name);
                 EditorRequest::None
@@ -6465,7 +6994,10 @@ impl App {
                 self.set_default_saved_query(&scope, &name);
                 EditorRequest::None
             }
-            ViewRequest::OpenScriptMenuForNode { view_index, pane_id } => {
+            ViewRequest::OpenScriptMenuForNode {
+                view_index,
+                pane_id,
+            } => {
                 self.open_script_menu_for_content(view_index, pane_id);
                 EditorRequest::None
             }
@@ -6509,7 +7041,10 @@ impl App {
                 self.open_script_menu_for_trackings();
                 EditorRequest::None
             }
-            ViewRequest::OpenScriptMenuForNode { view_index, pane_id } => {
+            ViewRequest::OpenScriptMenuForNode {
+                view_index,
+                pane_id,
+            } => {
                 self.open_script_menu_for_content(view_index, pane_id);
                 EditorRequest::None
             }
@@ -6532,9 +7067,12 @@ impl App {
             ViewRequest::ApplySavedQuery { scope, content } => {
                 self.apply_saved_query(&scope, &content)
             }
-            ViewRequest::OpenSavedQueryEditor { scope, name, current_query, is_new } => {
-                self.open_editor_for_saved_query(&scope, name, current_query, is_new)
-            }
+            ViewRequest::OpenSavedQueryEditor {
+                scope,
+                name,
+                current_query,
+                is_new,
+            } => self.open_editor_for_saved_query(&scope, name, current_query, is_new),
             ViewRequest::DeleteSavedQuery { scope, name } => {
                 self.delete_saved_query(&scope, &name);
                 EditorRequest::None
@@ -6734,7 +7272,9 @@ impl App {
             };
             let result: Result<String, String> = match outcome {
                 Ok(()) => Ok(match kind {
-                    AuthInvalidate::Session => "Session invalidated, re-authenticating…".to_string(),
+                    AuthInvalidate::Session => {
+                        "Session invalidated, re-authenticating…".to_string()
+                    }
                     AuthInvalidate::Credentials => {
                         "Credentials invalidated, re-authenticating…".to_string()
                     }
@@ -6749,7 +7289,13 @@ impl App {
         });
     }
 
-    fn open_content_action_popup(&mut self, view_index: usize, pane_id: crate::views::content_view::PaneId, node_id: String, action_id: String) {
+    fn open_content_action_popup(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+    ) {
         let adapter = self
             .content_view(view_index)
             .and_then(|cv| cv.adapter.as_ref())
@@ -6793,7 +7339,8 @@ impl App {
                 tokio::spawn(async move {
                     let outcome = async {
                         let mut node = adapter.get_by_id(&node_id).await?;
-                        node.execute(&action_id, not_yet_done_content::ActionInput::None).await
+                        node.execute(&action_id, not_yet_done_content::ActionInput::None)
+                            .await
                     }
                     .await;
                     let result = match outcome {
@@ -6863,8 +7410,8 @@ impl App {
             }
             not_yet_done_content::InputSpec::FilePicker { multi: _ } => {
                 use not_yet_done_ratatui::{
-                    FilePickerStyle, SelectListStyle, SelectListStyleType,
-                    TextInputStyle, TextInputStyleType,
+                    FilePickerStyle, SelectListStyle, SelectListStyleType, TextInputStyle,
+                    TextInputStyleType,
                 };
                 use ratatui::style::{Modifier, Style};
                 use tuirealm::component::Component;
@@ -6880,48 +7427,81 @@ impl App {
 
                 let text_inactive = TextInputStyle::new()
                     .prefix_color(primary)
-                    .set_style(TextInputStyleType::Title, Style::default().fg(primary).bg(panel_bg))
-                    .set_style(TextInputStyleType::Input, Style::default().fg(text_high).bg(panel_bg))
+                    .set_style(
+                        TextInputStyleType::Title,
+                        Style::default().fg(primary).bg(panel_bg),
+                    )
+                    .set_style(
+                        TextInputStyleType::Input,
+                        Style::default().fg(text_high).bg(panel_bg),
+                    )
                     .placeholder_color(dim);
                 let text_active = TextInputStyle::new()
                     .prefix_color(accent)
                     .set_style(
                         TextInputStyleType::Title,
-                        Style::default().fg(accent).bg(input_bg).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(accent)
+                            .bg(input_bg)
+                            .add_modifier(Modifier::BOLD),
                     )
-                    .set_style(TextInputStyleType::Input, Style::default().fg(text_high).bg(input_bg))
+                    .set_style(
+                        TextInputStyleType::Input,
+                        Style::default().fg(text_high).bg(input_bg),
+                    )
                     .placeholder_color(dim);
 
                 let list_inactive = SelectListStyle::default()
                     .prefix_color(primary)
                     .placeholder_color(dim)
-                    .set_style(SelectListStyleType::Item, Style::default().fg(text_high).bg(panel_bg))
+                    .set_style(
+                        SelectListStyleType::Item,
+                        Style::default().fg(text_high).bg(panel_bg),
+                    )
                     .set_style(
                         SelectListStyleType::ItemSelected,
                         Style::default().fg(text_high).bg(input_bg),
                     )
-                    .set_style(SelectListStyleType::ItemCursor, Style::default().fg(text_high).bg(panel_bg))
+                    .set_style(
+                        SelectListStyleType::ItemCursor,
+                        Style::default().fg(text_high).bg(panel_bg),
+                    )
                     .set_style(
                         SelectListStyleType::ItemCursorSelected,
                         Style::default().fg(text_high).bg(input_bg),
                     )
-                    .set_style(SelectListStyleType::FilterInput, Style::default().fg(dim).bg(panel_bg))
-                    .set_style(SelectListStyleType::Footer, Style::default().fg(dim).bg(panel_bg));
+                    .set_style(
+                        SelectListStyleType::FilterInput,
+                        Style::default().fg(dim).bg(panel_bg),
+                    )
+                    .set_style(
+                        SelectListStyleType::Footer,
+                        Style::default().fg(dim).bg(panel_bg),
+                    );
                 let list_active = SelectListStyle::default()
                     .prefix_color(accent)
                     .placeholder_color(dim)
-                    .set_style(SelectListStyleType::Item, Style::default().fg(text_high).bg(input_bg))
+                    .set_style(
+                        SelectListStyleType::Item,
+                        Style::default().fg(text_high).bg(input_bg),
+                    )
                     .set_style(
                         SelectListStyleType::ItemSelected,
                         Style::default().fg(text_high).bg(panel_bg),
                     )
                     .set_style(
                         SelectListStyleType::ItemCursor,
-                        Style::default().fg(accent).bg(input_bg).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(accent)
+                            .bg(input_bg)
+                            .add_modifier(Modifier::BOLD),
                     )
                     .set_style(
                         SelectListStyleType::ItemCursorSelected,
-                        Style::default().fg(accent).bg(panel_bg).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(accent)
+                            .bg(panel_bg)
+                            .add_modifier(Modifier::BOLD),
                     )
                     .set_style(
                         SelectListStyleType::FilterInput,
@@ -6929,9 +7509,15 @@ impl App {
                     )
                     .set_style(
                         SelectListStyleType::FilterCursor,
-                        Style::default().fg(input_bg).bg(accent).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(input_bg)
+                            .bg(accent)
+                            .add_modifier(Modifier::BOLD),
                     )
-                    .set_style(SelectListStyleType::Footer, Style::default().fg(dim).bg(input_bg));
+                    .set_style(
+                        SelectListStyleType::Footer,
+                        Style::default().fg(dim).bg(input_bg),
+                    );
 
                 let picker_style = FilePickerStyle::new()
                     .with_text_input_inactive(text_inactive)
@@ -6939,11 +7525,24 @@ impl App {
                     .with_select_list_inactive(list_inactive)
                     .with_select_list_active(list_active)
                     .with_panel_bg(panel_bg)
-                    .with_title_style(Style::default().fg(accent).bg(panel_bg).add_modifier(Modifier::BOLD))
-                    .with_help_keys_style(Style::default().fg(primary).bg(panel_bg).add_modifier(Modifier::BOLD))
+                    .with_title_style(
+                        Style::default()
+                            .fg(accent)
+                            .bg(panel_bg)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .with_help_keys_style(
+                        Style::default()
+                            .fg(primary)
+                            .bg(panel_bg)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .with_help_labels_style(Style::default().fg(dim).bg(panel_bg))
                     .with_paste_error_style(
-                        Style::default().fg(theme.error()).bg(panel_bg).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.error())
+                            .bg(panel_bg)
+                            .add_modifier(Modifier::BOLD),
                     );
 
                 let mut picker = FilePicker::default()
@@ -7016,11 +7615,8 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(
-                    &action_id,
-                    not_yet_done_content::ActionInput::Files(paths),
-                )
-                .await
+                node.execute(&action_id, not_yet_done_content::ActionInput::Files(paths))
+                    .await
             }
             .await;
             let result = match outcome {
@@ -7061,11 +7657,8 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(
-                    &action_id,
-                    not_yet_done_content::ActionInput::Form(values),
-                )
-                .await
+                node.execute(&action_id, not_yet_done_content::ActionInput::Form(values))
+                    .await
             }
             .await;
             let result = match outcome {
@@ -7083,7 +7676,14 @@ impl App {
         });
     }
 
-    fn execute_content_action(&mut self, view_index: usize, pane_id: crate::views::content_view::PaneId, node_id: String, action_id: String, value: String) {
+    fn execute_content_action(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+        value: String,
+    ) {
         let adapter = self
             .content_view(view_index)
             .and_then(|cv| cv.adapter.as_ref())
@@ -7099,11 +7699,8 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(
-                    &action_id,
-                    not_yet_done_content::ActionInput::Picked(value),
-                )
-                .await
+                node.execute(&action_id, not_yet_done_content::ActionInput::Picked(value))
+                    .await
             }
             .await;
             let result = match outcome {
@@ -7121,27 +7718,34 @@ impl App {
         });
     }
 
-
     fn handle_common_action(&mut self, action: CommonAction) -> EditorRequest {
         match action {
             CommonAction::ListNext => {
                 if let Some(table) = self.active_table_mut() {
-                    table.handle_nav(tuirealm::command::Cmd::Move(tuirealm::command::Direction::Down));
+                    table.handle_nav(tuirealm::command::Cmd::Move(
+                        tuirealm::command::Direction::Down,
+                    ));
                 }
             }
             CommonAction::ListPrev => {
                 if let Some(table) = self.active_table_mut() {
-                    table.handle_nav(tuirealm::command::Cmd::Move(tuirealm::command::Direction::Up));
+                    table.handle_nav(tuirealm::command::Cmd::Move(
+                        tuirealm::command::Direction::Up,
+                    ));
                 }
             }
             CommonAction::ListFirst => {
                 if let Some(table) = self.active_table_mut() {
-                    table.handle_nav(tuirealm::command::Cmd::GoTo(tuirealm::command::Position::Begin));
+                    table.handle_nav(tuirealm::command::Cmd::GoTo(
+                        tuirealm::command::Position::Begin,
+                    ));
                 }
             }
             CommonAction::ListLast => {
                 if let Some(table) = self.active_table_mut() {
-                    table.handle_nav(tuirealm::command::Cmd::GoTo(tuirealm::command::Position::End));
+                    table.handle_nav(tuirealm::command::Cmd::GoTo(
+                        tuirealm::command::Position::End,
+                    ));
                 }
             }
             CommonAction::ScrollHalfUp => {
@@ -7261,13 +7865,11 @@ impl App {
             CommonAction::ColumnConfig => {
                 self.open_column_config_popup();
             }
-            CommonAction::TrackingToggle => {
-                match self.active_tab {
-                    Tab::Trackings => self.toggle_tracking_from_trackings_view(),
-                    Tab::Tasks => self.toggle_tracking(),
-                    Tab::Content(_) => {}
-                }
-            }
+            CommonAction::TrackingToggle => match self.active_tab {
+                Tab::Trackings => self.toggle_tracking_from_trackings_view(),
+                Tab::Tasks => self.toggle_tracking(),
+                Tab::Content(_) => {}
+            },
             CommonAction::FormClose => {
                 if self.active_tab == Tab::Tasks {
                     self.tasks_view.state.close_form();
@@ -7336,9 +7938,7 @@ impl App {
             TasksAction::OpenScriptMenu => {
                 self.open_script_menu_for_tasks();
             }
-            TasksAction::TreeToggle
-            | TasksAction::TreeExpandAll
-            | TasksAction::TreeCollapseAll => {
+            TasksAction::TreeToggle | TasksAction::TreeExpandAll | TasksAction::TreeCollapseAll => {
                 // Handled by TasksView.handle_key() in tree sub-view.
                 // Reachable here only via chord-fallback dispatch.
             }
@@ -7401,7 +8001,7 @@ impl App {
 
     fn open_column_config_popup(&mut self) {
         use crate::components::column_config_popup::{ColumnConfigPopup, ColumnEntry};
-        use crate::tabs::columns::{resolve_color, ColumnMeta, ALL_COLUMNS, ALL_TRACKING_COLUMNS};
+        use crate::tabs::columns::{ALL_COLUMNS, ALL_TRACKING_COLUMNS, ColumnMeta, resolve_color};
 
         // Native tabs read from the static column registry; content tabs
         // ask their view for the active level's configured columns.
@@ -7428,7 +8028,10 @@ impl App {
                 native_entries(ALL_COLUMNS, &self.shared_theme),
             ),
             Tab::Content(idx) => {
-                match self.content_view(idx).and_then(|cv| cv.column_config_entries()) {
+                match self
+                    .content_view(idx)
+                    .and_then(|cv| cv.column_config_entries())
+                {
                     Some(pair) => pair,
                     None => {
                         self.notify("This level has no configurable columns".to_string());
@@ -7452,9 +8055,8 @@ impl App {
                 self.trackings_view.column_config = config;
                 let value = self.trackings_view.column_config.join(",");
                 let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        settings.set("tracking_columns", &value).await
-                    })
+                    tokio::runtime::Handle::current()
+                        .block_on(async { settings.set("tracking_columns", &value).await })
                 });
                 self.rebuild_trackings_table();
             }
@@ -7462,14 +8064,15 @@ impl App {
                 self.tasks_view.column_config = config;
                 let value = self.tasks_view.column_config.join(",");
                 let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        settings.set("tree_columns", &value).await
-                    })
+                    tokio::runtime::Handle::current()
+                        .block_on(async { settings.set("tree_columns", &value).await })
                 });
                 self.spawn_load();
             }
             Tab::Content(idx) => {
-                let Some(cv) = self.content_view_mut(idx) else { return };
+                let Some(cv) = self.content_view_mut(idx) else {
+                    return;
+                };
                 if !cv.apply_column_config(config) {
                     return;
                 }
@@ -7496,9 +8099,8 @@ impl App {
         let settings = Arc::clone(&self.settings_repo);
         let value = label.to_string();
         let _ = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                settings.set("tracking_grouping", &value).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { settings.set("tracking_grouping", &value).await })
         });
     }
 
@@ -7506,12 +8108,12 @@ impl App {
         use crate::tabs::trackings_state::TrackingGrouping;
         let settings = Arc::clone(&self.settings_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                settings.get("tracking_grouping").await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { settings.get("tracking_grouping").await })
         });
         if let Ok(Some(value)) = result {
-            let grouping = TrackingGrouping::ALL.iter()
+            let grouping = TrackingGrouping::ALL
+                .iter()
                 .find(|g| g.label() == value)
                 .copied()
                 .unwrap_or(TrackingGrouping::None);
@@ -7541,7 +8143,8 @@ impl App {
     fn active_table_mut(&mut self) -> Option<&mut DataTable> {
         match self.active_tab {
             Tab::Trackings => Some(&mut self.trackings_view.table),
-            Tab::Content(idx) => self.content_view_mut(idx)
+            Tab::Content(idx) => self
+                .content_view_mut(idx)
                 .map(|cv| &mut cv.active_pane_mut().table),
             Tab::Tasks => Some(self.task_table_mut()),
         }
@@ -7549,22 +8152,22 @@ impl App {
 
     /// Rebuild the task table component.
     pub fn refresh_task_table(&mut self) {
-        self.tasks_view.refresh_from_own_state(
-            &self.tracked_ids,
-            &self.link_refs,
-        );
+        self.tasks_view
+            .refresh_from_own_state(&self.tracked_ids, &self.link_refs);
     }
 
     /// Load column configuration from DB.
     pub fn load_column_config(&mut self) {
         let settings = Arc::clone(&self.settings_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                settings.get("tree_columns").await
-            })
+            tokio::runtime::Handle::current().block_on(async { settings.get("tree_columns").await })
         });
         if let Ok(Some(value)) = result {
-            let cols: Vec<String> = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let cols: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             if !cols.is_empty() {
                 self.tasks_view.column_config = cols;
             }
@@ -7572,12 +8175,15 @@ impl App {
         // Load tracking columns.
         let settings = Arc::clone(&self.settings_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                settings.get("tracking_columns").await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { settings.get("tracking_columns").await })
         });
         if let Ok(Some(value)) = result {
-            let cols: Vec<String> = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let cols: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             if !cols.is_empty() {
                 self.trackings_view.column_config = cols;
             }
@@ -7593,13 +8199,11 @@ impl App {
             let settings = Arc::clone(&self.settings_repo);
             let key = format!("content_columns:{tab_name}");
             let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { settings.get(&key).await })
+                tokio::runtime::Handle::current().block_on(async { settings.get(&key).await })
             });
             if let Ok(Some(value)) = result {
-                if let Ok(map) = serde_json::from_str::<
-                    std::collections::HashMap<String, Vec<String>>,
-                >(&value)
+                if let Ok(map) =
+                    serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(&value)
                 {
                     if !map.is_empty() {
                         if let Some(cv) = self.content_view_mut(idx) {
@@ -7618,9 +8222,7 @@ impl App {
         use crate::views::SortableView;
         let settings = Arc::clone(&self.settings_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                settings.get("tasks.sort").await
-            })
+            tokio::runtime::Handle::current().block_on(async { settings.get("tasks.sort").await })
         });
         if let Ok(Some(value)) = result {
             let sort = parse_sort_state(&value);
@@ -7651,15 +8253,22 @@ impl App {
     /// before the first content load fires.
     pub fn load_content_sort_states(&mut self) {
         use crate::views::SortableView;
-        let entries: Vec<(usize, std::sync::Arc<dyn not_yet_done_content::ContentAdapter>, String)> =
-            self.content_views_indexed()
-                .filter_map(|(i, cv)| cv.adapter.as_ref().map(|a| (i, Arc::clone(a), cv.query_scope.clone())))
-                .collect();
+        let entries: Vec<(
+            usize,
+            std::sync::Arc<dyn not_yet_done_content::ContentAdapter>,
+            String,
+        )> = self
+            .content_views_indexed()
+            .filter_map(|(i, cv)| {
+                cv.adapter
+                    .as_ref()
+                    .map(|a| (i, Arc::clone(a), cv.query_scope.clone()))
+            })
+            .collect();
         for (idx, adapter, scope) in entries {
             let res = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    adapter.load_view_sort(&scope).await
-                })
+                tokio::runtime::Handle::current()
+                    .block_on(async { adapter.load_view_sort(&scope).await })
             });
             if let Ok(sort) = res {
                 if !sort.is_empty() {
@@ -7676,15 +8285,18 @@ impl App {
     /// a column's direction.
     pub fn save_content_sort(&self, view_index: usize) {
         use crate::views::SortableView;
-        let Some(cv) = self.content_view(view_index) else { return };
-        let Some(adapter) = cv.adapter.as_ref() else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
         let adapter = Arc::clone(adapter);
         let scope = cv.query_scope.clone();
         let sort = SortableView::current_sort(cv).to_vec();
         let _ = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                adapter.save_view_sort(&scope, &sort).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { adapter.save_view_sort(&scope, &sort).await })
         });
     }
 
@@ -7697,7 +8309,12 @@ impl App {
 
         let (target, overlay) = match &self.sort_hint_phase {
             SortHintPhase::Off => (None, HeaderOverlay::None),
-            SortHintPhase::WaitingForColumn { target, labels, columns, input } => {
+            SortHintPhase::WaitingForColumn {
+                target,
+                labels,
+                columns,
+                input,
+            } => {
                 // Only labels still matching the typed prefix become candidates.
                 let mut map: HashMap<String, String> = HashMap::new();
                 for (col_idx, label) in labels {
@@ -7709,11 +8326,22 @@ impl App {
                     }
                 }
                 let input_len = input.chars().count();
-                (Some(*target), HeaderOverlay::PickColumn { labels: map, input_len })
+                (
+                    Some(*target),
+                    HeaderOverlay::PickColumn {
+                        labels: map,
+                        input_len,
+                    },
+                )
             }
-            SortHintPhase::WaitingForDirection { target, column_id, .. } => {
-                (Some(*target), HeaderOverlay::PickDirection { column_key: column_id.clone() })
-            }
+            SortHintPhase::WaitingForDirection {
+                target, column_id, ..
+            } => (
+                Some(*target),
+                HeaderOverlay::PickDirection {
+                    column_key: column_id.clone(),
+                },
+            ),
         };
 
         // Clear all overlays first, then set the target.
@@ -7742,7 +8370,10 @@ impl App {
     pub fn enter_sort_hint_mode(&mut self) {
         use crate::views::SortableView;
         let (target, columns) = match self.active_tab {
-            Tab::Tasks => (SortTarget::Tasks, SortableView::sortable_columns(&self.tasks_view)),
+            Tab::Tasks => (
+                SortTarget::Tasks,
+                SortableView::sortable_columns(&self.tasks_view),
+            ),
             Tab::Content(idx) => match self.content_view(idx) {
                 Some(cv) => (SortTarget::Content(idx), SortableView::sortable_columns(cv)),
                 None => return,
@@ -7777,18 +8408,25 @@ impl App {
         let current = std::mem::replace(&mut self.sort_hint_phase, SortHintPhase::Off);
         match current {
             SortHintPhase::Off => {}
-            SortHintPhase::WaitingForColumn { target, labels, columns, mut input } => {
+            SortHintPhase::WaitingForColumn {
+                target,
+                labels,
+                columns,
+                mut input,
+            } => {
                 if key.chars().count() != 1 {
                     self.sort_hint_phase = SortHintPhase::WaitingForColumn {
-                        target, labels, columns, input,
+                        target,
+                        labels,
+                        columns,
+                        input,
                     };
                     return;
                 }
                 let ch = key.chars().next().unwrap();
                 input.push(ch);
-                let still_matching: usize = labels.iter()
-                    .filter(|(_, l)| l.starts_with(&input))
-                    .count();
+                let still_matching: usize =
+                    labels.iter().filter(|(_, l)| l.starts_with(&input)).count();
                 if still_matching == 0 {
                     self.notify(format!("No sort column for '{}'", input));
                     return;
@@ -7803,10 +8441,17 @@ impl App {
                     return;
                 }
                 self.sort_hint_phase = SortHintPhase::WaitingForColumn {
-                    target, labels, columns, input,
+                    target,
+                    labels,
+                    columns,
+                    input,
                 };
             }
-            SortHintPhase::WaitingForDirection { target, column_id, column_name } => {
+            SortHintPhase::WaitingForDirection {
+                target,
+                column_id,
+                column_name,
+            } => {
                 let action = match key {
                     "+" | "a" => Some(SortAction::Asc),
                     "-" | "d" => Some(SortAction::Desc),
@@ -7817,7 +8462,9 @@ impl App {
                     Some(act) => self.apply_sort(target, &column_id, act, &column_name),
                     None => {
                         self.sort_hint_phase = SortHintPhase::WaitingForDirection {
-                            target, column_id, column_name,
+                            target,
+                            column_id,
+                            column_name,
                         };
                     }
                 }
@@ -7899,18 +8546,15 @@ impl App {
     pub fn load_saved_queries(&mut self) {
         let repo = Arc::clone(&self.saved_query_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                repo.list_by_scope("task").await
-            })
+            tokio::runtime::Handle::current().block_on(async { repo.list_by_scope("task").await })
         });
         if let Ok(models) = result {
             self.tasks_view.favorites = models.into_iter().map(SavedQuery::from_db).collect();
         }
         let repo = Arc::clone(&self.saved_query_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                repo.list_by_scope("tracking").await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { repo.list_by_scope("tracking").await })
         });
         if let Ok(models) = result {
             self.trackings_view.favorites = models.into_iter().map(SavedQuery::from_db).collect();
@@ -7952,7 +8596,11 @@ impl App {
             "tracking" => self.trackings_view.default_query_name.as_deref(),
             _ => self.tasks_view.default_query_name.as_deref(),
         };
-        let new = if current == Some(name) { None } else { Some(name.to_string()) };
+        let new = if current == Some(name) {
+            None
+        } else {
+            Some(name.to_string())
+        };
         self.persist_default_query(scope, new.as_deref());
         match scope {
             "tracking" => self.trackings_view.default_query_name = new.clone(),
@@ -7967,10 +8615,16 @@ impl App {
     /// Content-tab counterpart of [`Self::set_default_saved_query`] —
     /// keyed on the view's `query_scope`.
     fn set_default_content_query(&mut self, view_index: usize, name: &str) {
-        let Some(cv) = self.content_view(view_index) else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
         let scope = cv.query_scope.clone();
         let current = cv.default_saved_query.clone();
-        let new = if current.as_deref() == Some(name) { None } else { Some(name.to_string()) };
+        let new = if current.as_deref() == Some(name) {
+            None
+        } else {
+            Some(name.to_string())
+        };
         self.persist_default_query(&scope, new.as_deref());
         if let Some(cv) = self.content_view_mut(view_index) {
             cv.default_saved_query = new.clone();
@@ -7998,7 +8652,9 @@ impl App {
         let name_owned = name.to_string();
         let _ = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                if let Ok(Some(model)) = repo.find_by_scope_and_name(&scope_owned, &name_owned).await {
+                if let Ok(Some(model)) =
+                    repo.find_by_scope_and_name(&scope_owned, &name_owned).await
+                {
                     repo.delete(model.id).await
                 } else {
                     Ok(())
@@ -8018,11 +8674,15 @@ impl App {
         let query_for_save = query.clone();
         let _ = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                repo.upsert(&scope_for_save, &name_for_save, &query_for_save, None).await
+                repo.upsert(&scope_for_save, &name_for_save, &query_for_save, None)
+                    .await
             })
         });
         self.load_saved_queries();
-        self.modal_message = Some(format!("Press a shortcut key for '{}'\n\nEsc to cancel", name));
+        self.modal_message = Some(format!(
+            "Press a shortcut key for '{}'\n\nEsc to cancel",
+            name
+        ));
         self.awaiting_favorite_shortcut = Some((scope, name, query));
     }
 
@@ -8058,8 +8718,12 @@ impl App {
                         .await
                         .ok()
                         .flatten();
-                    let Some(adapter) = adapter.as_ref() else { return (Vec::new(), default_query) };
-                    let Some(store) = adapter.saved_query_store() else { return (Vec::new(), default_query) };
+                    let Some(adapter) = adapter.as_ref() else {
+                        return (Vec::new(), default_query);
+                    };
+                    let Some(store) = adapter.saved_query_store() else {
+                        return (Vec::new(), default_query);
+                    };
                     let names = match store.list().await {
                         Ok(n) => n,
                         Err(_) => return (Vec::new(), default_query),
@@ -8135,12 +8799,18 @@ impl App {
     /// keypress; insulated from non-Postgres adapters by the cheap
     /// `adapter_type()`/`target_postgres_table_node_id()` checks.
     pub fn ensure_postgres_table_shortcuts_loaded(&mut self, view_index: usize) {
-        let Some(cv) = self.content_view(view_index) else { return };
-        let Some(adapter) = cv.adapter.as_ref() else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
         if adapter.adapter_type() != "postgres" {
             return;
         }
-        let Some(table_node_id) = cv.target_postgres_table_node_id() else { return };
+        let Some(table_node_id) = cv.target_postgres_table_node_id() else {
+            return;
+        };
         if cv.postgres_table_shortcuts.contains_key(&table_node_id) {
             return;
         }
@@ -8152,9 +8822,7 @@ impl App {
             // claim path quietly stays disabled until the parsers catch up.
             return;
         };
-        let scope = format!(
-            "postgres/{instance_id}/{db}/schemas/{schema}/tables/{table}",
-        );
+        let scope = format!("postgres/{instance_id}/{db}/schemas/{schema}/tables/{table}",);
         let repo = Arc::clone(&self.query_shortcut_repo);
         let entries: Vec<(String, String)> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -8185,7 +8853,12 @@ impl App {
     /// favorites); content-view scopes route through the keymap-based
     /// check so a saved-query shortcut can never shadow any key active
     /// in its tab (the `j`-shadows-list-navigation class of bug).
-    fn favorite_shortcut_conflict(&self, scope: &str, name: &str, shortcut: &str) -> Option<String> {
+    fn favorite_shortcut_conflict(
+        &self,
+        scope: &str,
+        name: &str,
+        shortcut: &str,
+    ) -> Option<String> {
         if scope == "tracking" || scope == "task" {
             return self
                 .is_shortcut_taken(shortcut)
@@ -8193,16 +8866,44 @@ impl App {
         }
         self.content_views_indexed()
             .find(|(_, cv)| cv.query_scope == scope)
-            .and_then(|(_, cv)| {
-                cv.saved_query_shortcut_conflict(&self.keybindings, name, shortcut)
-            })
+            .and_then(|(_, cv)| cv.saved_query_shortcut_conflict(&self.keybindings, name, shortcut))
     }
 
     fn is_shortcut_taken(&self, shortcut: &str) -> bool {
-        if self.keybindings.global.bindings.values().any(|b| b.matches(shortcut)) { return true; }
-        if self.keybindings.tasks.bindings.values().any(|b| b.matches(shortcut)) { return true; }
-        if self.tasks_view.favorites.iter().any(|f| f.shortcut.as_deref() == Some(shortcut)) { return true; }
-        if self.trackings_view.favorites.iter().any(|f| f.shortcut.as_deref() == Some(shortcut)) { return true; }
+        if self
+            .keybindings
+            .global
+            .bindings
+            .values()
+            .any(|b| b.matches(shortcut))
+        {
+            return true;
+        }
+        if self
+            .keybindings
+            .tasks
+            .bindings
+            .values()
+            .any(|b| b.matches(shortcut))
+        {
+            return true;
+        }
+        if self
+            .tasks_view
+            .favorites
+            .iter()
+            .any(|f| f.shortcut.as_deref() == Some(shortcut))
+        {
+            return true;
+        }
+        if self
+            .trackings_view
+            .favorites
+            .iter()
+            .any(|f| f.shortcut.as_deref() == Some(shortcut))
+        {
+            return true;
+        }
         false
     }
 
@@ -8212,7 +8913,8 @@ impl App {
             let scope_owned = scope.to_string();
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    repo.upsert(&scope_owned, &name, &query, Some(&shortcut)).await
+                    repo.upsert(&scope_owned, &name, &query, Some(&shortcut))
+                        .await
                 })
             });
             if let Ok(model) = result {
@@ -8242,7 +8944,9 @@ impl App {
                 let shortcut_owned = shortcut.clone();
                 let _ = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        shortcut_repo.set(&scope_owned, &name_owned, &shortcut_owned).await
+                        shortcut_repo
+                            .set(&scope_owned, &name_owned, &shortcut_owned)
+                            .await
                     })
                 });
                 self.reload_content_saved_queries(idx);
@@ -8254,21 +8958,29 @@ impl App {
     /// view at `view_index`. No-op if the adapter doesn't expose a
     /// store (e.g. Postgres).
     fn save_content_query_body(&self, view_index: usize, name: &str, body: &str) {
-        let Some(cv) = self.content_view(view_index) else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
         let adapter = cv.adapter.clone();
         let name_owned = name.to_string();
         let body_owned = body.to_string();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let Some(adapter) = adapter.as_ref() else { return };
-                let Some(store) = adapter.saved_query_store() else { return };
+                let Some(adapter) = adapter.as_ref() else {
+                    return;
+                };
+                let Some(store) = adapter.saved_query_store() else {
+                    return;
+                };
                 let _ = store.save(&name_owned, &body_owned).await;
             })
         });
     }
 
     fn delete_content_query(&self, view_index: usize, scope: &str, name: &str) {
-        let Some(cv) = self.content_view(view_index) else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
         let adapter = cv.adapter.clone();
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let scope_owned = scope.to_string();
@@ -8286,7 +8998,9 @@ impl App {
     }
 
     fn rename_content_query(&self, view_index: usize, scope: &str, old_name: &str, new_name: &str) {
-        let Some(cv) = self.content_view(view_index) else { return };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
         let adapter = cv.adapter.clone();
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let scope_owned = scope.to_string();
@@ -8303,7 +9017,9 @@ impl App {
                         }
                     }
                 }
-                let _ = shortcut_repo.rename(&scope_owned, &old_owned, &new_owned).await;
+                let _ = shortcut_repo
+                    .rename(&scope_owned, &old_owned, &new_owned)
+                    .await;
             })
         });
     }
@@ -8329,7 +9045,8 @@ impl App {
                     let scope_owned = scope.to_string();
                     let _ = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            repo.upsert(&scope_owned, &name, &query, shortcut.as_deref()).await
+                            repo.upsert(&scope_owned, &name, &query, shortcut.as_deref())
+                                .await
                         })
                     });
                 }
@@ -8384,9 +9101,8 @@ impl App {
             };
             let repo = Arc::clone(&self.tracking_repo);
             let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    repo.stop(tracking_id, chrono::Utc::now()).await
-                })
+                tokio::runtime::Handle::current()
+                    .block_on(async { repo.stop(tracking_id, chrono::Utc::now()).await })
             });
             match result {
                 Ok(_) => {
@@ -8452,7 +9168,9 @@ impl App {
 
     fn execute_cmdline(&mut self, cmd: &str) {
         let args: Vec<&str> = cmd.trim().split_whitespace().collect();
-        if args.is_empty() { return; }
+        if args.is_empty() {
+            return;
+        }
 
         // Adapter-level commands routed in-process. They target whichever
         // content tab is currently active and have no CLI counterpart —
@@ -8492,8 +9210,7 @@ impl App {
 
         if args[0] == "dismiss-notifications" {
             if args.len() > 1 {
-                self.modal_message =
-                    Some(":dismiss-notifications takes no arguments".to_string());
+                self.modal_message = Some(":dismiss-notifications takes no arguments".to_string());
                 return;
             }
             self.dismiss_notifications();
@@ -8531,10 +9248,13 @@ impl App {
         if args[0] == "focus-task" {
             // Everything after the command name is the path (may contain
             // spaces — name segments are split on `/` only).
-            let rest = cmd.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+            let rest = cmd
+                .trim()
+                .splitn(2, char::is_whitespace)
+                .nth(1)
+                .unwrap_or("");
             if rest.trim().is_empty() {
-                self.modal_message =
-                    Some(":focus-task expects a /-separated path".to_string());
+                self.modal_message = Some(":focus-task expects a /-separated path".to_string());
                 return;
             }
             self.focus_task_command(rest.trim());
@@ -8545,11 +9265,14 @@ impl App {
             // Everything after the command name is target + path; path may
             // contain `|` and other shell-active chars, so we hand the whole
             // rest off to `focus_node_command` unsplit.
-            let rest = cmd.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+            let rest = cmd
+                .trim()
+                .splitn(2, char::is_whitespace)
+                .nth(1)
+                .unwrap_or("");
             if rest.trim().is_empty() {
-                self.modal_message = Some(
-                    ":focus-node expects <Tab>[:<view>] /col|pattern".to_string(),
-                );
+                self.modal_message =
+                    Some(":focus-node expects <Tab>[:<view>] /col|pattern".to_string());
                 return;
             }
             self.focus_node_command(rest.trim());
@@ -8560,11 +9283,13 @@ impl App {
             // Everything after the command name is target + query; the
             // tab name may be quoted and the query may contain `:` etc,
             // so hand the whole rest off to `tree_find_command` unsplit.
-            let rest = cmd.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+            let rest = cmd
+                .trim()
+                .splitn(2, char::is_whitespace)
+                .nth(1)
+                .unwrap_or("");
             if rest.trim().is_empty() {
-                self.modal_message = Some(
-                    ":tree-find expects <Tab>[:<view>] <query>".to_string(),
-                );
+                self.modal_message = Some(":tree-find expects <Tab>[:<view>] <query>".to_string());
                 return;
             }
             self.tree_find_command(rest.trim());
@@ -8573,8 +9298,7 @@ impl App {
 
         if args[0] == "reload-tasks" {
             if args.len() > 1 {
-                self.modal_message =
-                    Some(":reload-tasks takes no arguments".to_string());
+                self.modal_message = Some(":reload-tasks takes no arguments".to_string());
                 return;
             }
             self.reload_tasks_command();
@@ -8582,7 +9306,11 @@ impl App {
         }
 
         if args[0] == "db-script-new" {
-            let rest = cmd.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+            let rest = cmd
+                .trim()
+                .splitn(2, char::is_whitespace)
+                .nth(1)
+                .unwrap_or("");
             self.db_script_new_command(rest.trim());
             return;
         }
@@ -8592,7 +9320,8 @@ impl App {
         // see `db_script_command` for the per-subcommand contract.
         if args[0] == "db-script" {
             let sub = args.get(1).copied().unwrap_or("");
-            let rest = cmd.trim()
+            let rest = cmd
+                .trim()
                 .splitn(3, char::is_whitespace)
                 .nth(2)
                 .unwrap_or("")
@@ -8607,7 +9336,8 @@ impl App {
             // saved-query store (write). The unsplit remainder after
             // the subcommand is the name (may contain whitespace).
             let sub = args.get(1).copied().unwrap_or("");
-            let rest = cmd.trim()
+            let rest = cmd
+                .trim()
                 .splitn(3, char::is_whitespace)
                 .nth(2)
                 .unwrap_or("")
@@ -8615,41 +9345,36 @@ impl App {
             match sub {
                 "apply" => {
                     if rest.is_empty() {
-                        self.modal_message = Some(
-                            ":query apply expects [-t <Tab>[:<view>]] <name>".to_string(),
-                        );
+                        self.modal_message =
+                            Some(":query apply expects [-t <Tab>[:<view>]] <name>".to_string());
                         return;
                     }
                     self.query_apply_command(rest);
                 }
                 "edit" => {
                     if rest.is_empty() {
-                        self.modal_message =
-                            Some(":query edit expects <name>".to_string());
+                        self.modal_message = Some(":query edit expects <name>".to_string());
                         return;
                     }
                     self.query_edit_command(rest);
                 }
                 "new" => {
                     if rest.is_empty() {
-                        self.modal_message =
-                            Some(":query new expects <name>".to_string());
+                        self.modal_message = Some(":query new expects <name>".to_string());
                         return;
                     }
                     self.query_new_command(rest);
                 }
                 "delete" => {
                     if rest.is_empty() {
-                        self.modal_message =
-                            Some(":query delete expects <name>".to_string());
+                        self.modal_message = Some(":query delete expects <name>".to_string());
                         return;
                     }
                     self.query_delete_command(rest);
                 }
                 "" => {
                     self.modal_message = Some(
-                        ":query expects a subcommand (apply | edit | new | delete)"
-                            .to_string(),
+                        ":query expects a subcommand (apply | edit | new | delete)".to_string(),
                     );
                 }
                 other => {
@@ -8667,8 +9392,7 @@ impl App {
             _ => None,
         } {
             if args.len() > 1 {
-                self.modal_message =
-                    Some(format!(":{} takes no arguments", args[0]));
+                self.modal_message = Some(format!(":{} takes no arguments", args[0]));
                 return;
             }
             match self.active_tab {
@@ -8676,8 +9400,7 @@ impl App {
                     self.spawn_invalidate_auth(view_index, kind);
                 }
                 _ => {
-                    self.modal_message =
-                        Some(format!(":{} only works on a content tab", args[0]));
+                    self.modal_message = Some(format!(":{} only works on a content tab", args[0]));
                 }
             }
             return;
@@ -8692,7 +9415,11 @@ impl App {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 let msg = if output.status.success() {
-                    if stdout.is_empty() { format!(":{cmd} — done") } else { stdout }
+                    if stdout.is_empty() {
+                        format!(":{cmd} — done")
+                    } else {
+                        stdout
+                    }
                 } else if !stderr.is_empty() {
                     stderr
                 } else {
@@ -8765,10 +9492,18 @@ impl App {
             return;
         };
 
-        let has_children = self.tasks_view.state.task_rows.iter()
+        let has_children = self
+            .tasks_view
+            .state
+            .task_rows
+            .iter()
             .any(|t| t.parent_id == Some(task_id) && !t.deleted);
 
-        let task_desc = self.tasks_view.state.task_rows.iter()
+        let task_desc = self
+            .tasks_view
+            .state
+            .task_rows
+            .iter()
             .find(|t| t.id == task_id)
             .map(|t| t.description.clone())
             .unwrap_or_default();
@@ -8776,7 +9511,8 @@ impl App {
         if has_children {
             let msg = format!("Delete task '{}' and all children? (y/n)", task_desc);
             self.modal_message = Some(msg.clone());
-            self.pending_confirmation = Some((msg, PendingConfirmation::DeleteTaskRecursive(task_id)));
+            self.pending_confirmation =
+                Some((msg, PendingConfirmation::DeleteTaskRecursive(task_id)));
         } else {
             let msg = format!("Delete task '{}'? (y/n)", task_desc);
             self.modal_message = Some(msg.clone());
@@ -8791,7 +9527,10 @@ impl App {
             return;
         };
 
-        let task_desc = self.trackings_view.state.task_description_at(selected)
+        let task_desc = self
+            .trackings_view
+            .state
+            .task_description_at(selected)
             .unwrap_or_default();
 
         let msg = format!("Delete tracking for '{}'? (y/n)", task_desc);
@@ -8801,20 +9540,28 @@ impl App {
 
     fn execute_confirmation(&mut self, confirmation: PendingConfirmation) {
         match confirmation {
-            PendingConfirmation::DeleteTask(task_id) | PendingConfirmation::DeleteTaskRecursive(task_id) => {
+            PendingConfirmation::DeleteTask(task_id)
+            | PendingConfirmation::DeleteTaskRecursive(task_id) => {
                 let service = Arc::clone(&self.task_service);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        service.delete_task_recursive(task_id).await
-                    })
+                    tokio::runtime::Handle::current()
+                        .block_on(async { service.delete_task_recursive(task_id).await })
                 });
                 match result {
                     Ok(count) => {
-                        let subtree_ids: Vec<_> = self.tasks_view.state.task_rows.iter()
+                        let subtree_ids: Vec<_> = self
+                            .tasks_view
+                            .state
+                            .task_rows
+                            .iter()
                             .filter(|t| t.id == task_id || t.parent_id == Some(task_id))
-                            .cloned().collect();
+                            .cloned()
+                            .collect();
                         for task in &subtree_ids {
-                            crate::notes::mark_notes_deleted(task, &self.tasks_view.state.task_rows);
+                            crate::notes::mark_notes_deleted(
+                                task,
+                                &self.tasks_view.state.task_rows,
+                            );
                         }
                         if count > 1 {
                             self.notify(format!("Deleted subtree ({count} tasks)"));
@@ -8829,9 +9576,8 @@ impl App {
             PendingConfirmation::DeleteTracking(tracking_id) => {
                 let repo = Arc::clone(&self.tracking_repo);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        repo.soft_delete_keeping_times(tracking_id).await
-                    })
+                    tokio::runtime::Handle::current()
+                        .block_on(async { repo.soft_delete_keeping_times(tracking_id).await })
                 });
                 match result {
                     Ok(_) => {
@@ -8913,13 +9659,20 @@ impl App {
     fn undelete_last(&mut self) {
         // Find the most recent deleted_at timestamp among all loaded tasks
         // so we can identify which tasks will be restored.
-        let latest_deleted_at = self.tasks_view.state.task_rows.iter()
+        let latest_deleted_at = self
+            .tasks_view
+            .state
+            .task_rows
+            .iter()
             .filter(|t| t.deleted && t.deleted_at.is_some())
             .max_by_key(|t| t.deleted_at)
             .and_then(|t| t.deleted_at);
 
         let tasks_to_restore: Vec<_> = if let Some(ts) = latest_deleted_at {
-            self.tasks_view.state.task_rows.iter()
+            self.tasks_view
+                .state
+                .task_rows
+                .iter()
                 .filter(|t| t.deleted_at == Some(ts))
                 .cloned()
                 .collect()
@@ -8929,9 +9682,7 @@ impl App {
 
         let service = Arc::clone(&self.task_service);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                service.undelete_last().await
-            })
+            tokio::runtime::Handle::current().block_on(async { service.undelete_last().await })
         });
         match result {
             Ok(0) => self.notify("Nothing to undelete".to_string()),
@@ -8958,9 +9709,8 @@ impl App {
     pub fn reload_link_refs(&mut self) {
         let repo = Arc::clone(&self.link_repo);
         let rows = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                repo.list_all().await.unwrap_or_default()
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async move { repo.list_all().await.unwrap_or_default() })
         });
         let mut set = HashSet::with_capacity(rows.len() * 2);
         for row in rows {
@@ -8982,7 +9732,8 @@ impl App {
         let repo = Arc::clone(&self.tracking_repo);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                repo.find_all_active().await
+                repo.find_all_active()
+                    .await
                     .unwrap_or_default()
                     .into_iter()
                     .map(|t| t.task_id)
@@ -8995,9 +9746,7 @@ impl App {
     /// previous commit is still being processed in the background. Both
     /// states should reject a new editor open.
     pub fn editor_busy(&self) -> bool {
-        self.detached_editor.is_some()
-            || self.commit_in_flight
-            || self.editor_loading_msg.is_some()
+        self.detached_editor.is_some() || self.commit_in_flight || self.editor_loading_msg.is_some()
     }
 
     /// Returns `true` if a session is awaiting a buffer from the editor
@@ -9073,20 +9822,31 @@ impl App {
     /// repaints only on those ticks rather than every frame.
     pub fn tick_active_trackings(&mut self) -> bool {
         let has_active = self.trackings_view.state.rows.iter().any(|r| r.active);
-        if !has_active { return false; }
+        if !has_active {
+            return false;
+        }
 
         // Determine shortest active tracking duration for adaptive interval.
         let now_utc = chrono::Utc::now();
-        let shortest = self.trackings_view.state.rows.iter()
+        let shortest = self
+            .trackings_view
+            .state
+            .rows
+            .iter()
             .filter(|r| r.active)
             .map(|r| (now_utc - r.started_at).num_seconds())
             .min()
             .unwrap_or(0);
 
-        let interval_secs = if shortest < 60 { 5 }
-            else if shortest < 600 { 10 }
-            else if shortest < 3600 { 30 }
-            else { 60 };
+        let interval_secs = if shortest < 60 {
+            5
+        } else if shortest < 600 {
+            10
+        } else if shortest < 3600 {
+            30
+        } else {
+            60
+        };
 
         let elapsed = self.last_tracking_tick.elapsed();
         if elapsed < std::time::Duration::from_secs(interval_secs) {
@@ -9123,11 +9883,20 @@ impl App {
     /// Get a clone of the currently selected task, respecting the active view.
     fn selected_task(&self) -> Option<Task> {
         let id = self.selected_task_id()?;
-        self.tasks_view.state.task_rows.iter().find(|t| t.id == id).cloned()
+        self.tasks_view
+            .state
+            .task_rows
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
     }
 
     fn restore_selected_tracking(&mut self) {
-        let Some(tracking_id) = self.trackings_view.state.tracking_id_at(self.trackings_view.table.selected_row()) else {
+        let Some(tracking_id) = self
+            .trackings_view
+            .state
+            .tracking_id_at(self.trackings_view.table.selected_row())
+        else {
             self.notify("No tracking selected".to_string());
             return;
         };
@@ -9135,10 +9904,13 @@ impl App {
         let repo = Arc::clone(&self.tracking_repo);
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let tracking = repo.find_by_id(tracking_id).await?
-                    .ok_or(not_yet_done_core::error::AppError::TrackingNotFound(tracking_id))?;
+                let tracking = repo.find_by_id(tracking_id).await?.ok_or(
+                    not_yet_done_core::error::AppError::TrackingNotFound(tracking_id),
+                )?;
                 if !tracking.deleted {
-                    return Err(not_yet_done_core::error::AppError::TrackingNotDeleted(tracking_id));
+                    return Err(not_yet_done_core::error::AppError::TrackingNotDeleted(
+                        tracking_id,
+                    ));
                 }
 
                 // BFS: find and hard-delete all successors.
@@ -9172,7 +9944,11 @@ impl App {
     fn restore_all_deleted_trackings(&mut self) {
         // Collect IDs of all deleted trackings currently visible.
         let repo = Arc::clone(&self.tracking_repo);
-        let deleted_ids: Vec<Uuid> = self.trackings_view.state.filtered_indices.iter()
+        let deleted_ids: Vec<Uuid> = self
+            .trackings_view
+            .state
+            .filtered_indices
+            .iter()
             .filter_map(|&i| {
                 let row = &self.trackings_view.state.rows[i];
                 // We can't check `deleted` on TrackingRow since it's not stored there.
@@ -9193,7 +9969,10 @@ impl App {
                 for id in &deleted_ids {
                     let tracking = match repo.find_by_id(*id).await? {
                         Some(t) => t,
-                        None => { skipped += 1; continue; }
+                        None => {
+                            skipped += 1;
+                            continue;
+                        }
                     };
                     if !tracking.deleted {
                         skipped += 1;
@@ -9241,8 +10020,12 @@ impl App {
     /// Returns `true` when a detached script finished and its output was
     /// processed this tick; `false` while none is pending or still running.
     pub fn poll_detached_script(&mut self) -> bool {
-        let Some(ref script) = self.detached_script else { return false; };
-        if !script.is_done() { return false; }
+        let Some(ref script) = self.detached_script else {
+            return false;
+        };
+        if !script.is_done() {
+            return false;
+        }
 
         let output_path = script.output_path.clone();
         let output = script.read_output();
@@ -9287,7 +10070,9 @@ fn copy_to_clipboard(text: &str) {
 /// `clipboard` feature is off or no text is available.
 #[cfg(feature = "clipboard")]
 fn clipboard_text() -> Option<String> {
-    arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok())
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut c| c.get_text().ok())
 }
 
 #[cfg(not(feature = "clipboard"))]
@@ -9311,7 +10096,10 @@ pub(crate) fn is_in_subtree(task: &Task, root_id: Uuid, all_tasks: &[Task]) -> b
         if pid == root_id {
             return true;
         }
-        current = all_tasks.iter().find(|t| t.id == pid).and_then(|t| t.parent_id);
+        current = all_tasks
+            .iter()
+            .find(|t| t.id == pid)
+            .and_then(|t| t.parent_id);
     }
     false
 }
@@ -9342,12 +10130,9 @@ fn build_tab_layout(
         available.push((slot.tab_name().to_string(), Tab::Content(idx)));
     }
 
-    match crate::tabs::resolve_tab_layout(
-        tabs_cfg,
-        &available,
-        content_views.len(),
-        |w| not_yet_done_content::http_log::log_error("tab_layout", &w),
-    ) {
+    match crate::tabs::resolve_tab_layout(tabs_cfg, &available, content_views.len(), |w| {
+        not_yet_done_content::http_log::log_error("tab_layout", &w)
+    }) {
         Ok(layout) => (layout, None),
         Err(hard) => {
             not_yet_done_content::http_log::log_error("tab_layout", &hard);
@@ -9374,7 +10159,10 @@ fn load_content_views(
         .flatten()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "yaml" || ext == "yml"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|ext| ext == "yaml" || ext == "yml")
+        })
         .collect();
     yaml_files.sort();
 
@@ -9390,7 +10178,10 @@ fn load_content_views(
     for path in &yaml_files {
         let yaml = match std::fs::read_to_string(path) {
             Ok(y) => y,
-            Err(e) => { eprintln!("Warning: {}: {e}", path.display()); continue; }
+            Err(e) => {
+                eprintln!("Warning: {}: {e}", path.display());
+                continue;
+            }
         };
         // Heuristic: a view-config has top-level `tab` AND `adapter` keys.
         // Files without both (e.g. adapter credentials like jira-adapter.yaml)
@@ -9400,7 +10191,9 @@ fn load_content_views(
             Err(_) => continue,
         };
         let is_view_config = raw.get("tab").is_some() && raw.get("adapter").is_some();
-        if !is_view_config { continue; }
+        if !is_view_config {
+            continue;
+        }
 
         // YAML-parse failure: take the file's stem as a fallback tab name
         // (the actual `tab.name` is unreadable).
@@ -9412,10 +10205,13 @@ fn load_content_views(
                     .and_then(|s| s.to_str())
                     .unwrap_or("?")
                     .to_string();
-                loaded.push((path.clone(), Loaded::Broken {
-                    name,
-                    errors: vec![format!("YAML parse error: {e}")],
-                }));
+                loaded.push((
+                    path.clone(),
+                    Loaded::Broken {
+                        name,
+                        errors: vec![format!("YAML parse error: {e}")],
+                    },
+                ));
                 continue;
             }
         };
@@ -9424,13 +10220,19 @@ fn load_content_views(
         // above them, before validation reads them (so `tree_label` etc.
         // resolve against the inherited set).
         config.inherit_tree_columns();
+        // Propagate inheritable per-row actions/shortcuts (marked `inherit`)
+        // down tree-continuation levels, likewise before validation.
+        config.inherit_tree_actions();
 
         match config.validate(keybindings, editors) {
             Ok(()) => loaded.push((path.clone(), Loaded::Ok(config))),
-            Err(errors) => loaded.push((path.clone(), Loaded::Broken {
-                name: config.tab.name.clone(),
-                errors,
-            })),
+            Err(errors) => loaded.push((
+                path.clone(),
+                Loaded::Broken {
+                    name: config.tab.name.clone(),
+                    errors,
+                },
+            )),
         }
     }
 
@@ -9462,45 +10264,51 @@ fn load_content_views(
             Loaded::Ok(config) => {
                 let path_ref = path.as_path();
                 let mut init_error: Option<String> = None;
-                let adapter: Option<Arc<dyn not_yet_done_content::ContentAdapter>> =
-                    match factories.get(&config.adapter.adapter_type) {
-                        None => {
-                            init_error = Some(format!(
-                                "no adapter factory registered for type '{}'",
-                                config.adapter.adapter_type
-                            ));
-                            None
-                        }
-                        Some(factory) => {
-                            let adapter_config = config.adapter.config_inline.as_ref().cloned()
-                                .or_else(|| {
-                                    config.adapter.config.as_ref().and_then(|cfg_path| {
-                                        let resolved = if std::path::Path::new(cfg_path).is_absolute() {
-                                            std::path::PathBuf::from(cfg_path)
-                                        } else {
-                                            path_ref.parent().unwrap_or(std::path::Path::new(".")).join(cfg_path)
-                                        };
-                                        std::fs::read_to_string(&resolved).ok()
-                                    })
-                                });
-                            match adapter_config {
-                                None => {
-                                    init_error = Some(
+                let adapter: Option<Arc<dyn not_yet_done_content::ContentAdapter>> = match factories
+                    .get(&config.adapter.adapter_type)
+                {
+                    None => {
+                        init_error = Some(format!(
+                            "no adapter factory registered for type '{}'",
+                            config.adapter.adapter_type
+                        ));
+                        None
+                    }
+                    Some(factory) => {
+                        let adapter_config =
+                            config.adapter.config_inline.as_ref().cloned().or_else(|| {
+                                config.adapter.config.as_ref().and_then(|cfg_path| {
+                                    let resolved = if std::path::Path::new(cfg_path).is_absolute() {
+                                        std::path::PathBuf::from(cfg_path)
+                                    } else {
+                                        path_ref
+                                            .parent()
+                                            .unwrap_or(std::path::Path::new("."))
+                                            .join(cfg_path)
+                                    };
+                                    std::fs::read_to_string(&resolved).ok()
+                                })
+                            });
+                        match adapter_config {
+                            None => {
+                                init_error = Some(
                                         "adapter config missing (neither `config_inline` nor a readable `config:` path)"
                                             .into(),
                                     );
-                                    None
-                                }
-                                Some(cfg) => match factory.create(config.adapter.effective_instance_id(), &cfg) {
+                                None
+                            }
+                            Some(cfg) => {
+                                match factory.create(config.adapter.effective_instance_id(), &cfg) {
                                     Ok(a) => Some(Arc::from(a)),
                                     Err(e) => {
                                         init_error = Some(e.to_string());
                                         None
                                     }
-                                },
+                                }
                             }
                         }
-                    };
+                    }
+                };
 
                 let mut view = ContentView::new(Arc::clone(theme), &config, adapter, keybindings);
                 if let Some(err) = init_error {
@@ -9578,4 +10386,3 @@ mod tests {
         assert_eq!(rest, "");
     }
 }
-

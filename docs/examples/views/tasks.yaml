@@ -33,11 +33,22 @@
 # always-blank, so it is left out.)
 #
 # Mutations go through the generic action vocabulary:
-#   * `e` edit / `a` add — open a markdown buffer (`---` frontmatter +
-#     `## Description:` / `## Notes:`). `add` is a `type: create` on the
-#     current container (root → top-level task; drilled-into task → child);
-#     `edit` a `type: edit` on the selected task. The buffer's `tracking:`
-#     flag starts/stops time tracking.
+#   * `e` edit — open the selected task in a markdown buffer (`---`
+#     frontmatter + `## Description:` / `## Notes:`); a `type: edit`. The
+#     buffer's `tracking:` flag starts/stops time tracking.
+#   * `a` add / `A` add-sibling — both open the same markdown buffer; they
+#     differ only in where the new task lands (native-tab parity):
+#       - In the **tree** view `a` adds a *child* of the selected task
+#         (`under_selection` → the adapter's `add` re-parents onto the
+#         highlighted row). In the **flat list** `a` adds a *top-level*
+#         task (the list has no hierarchy, so the container is the root).
+#       - `A` adds a *sibling* of the selected task in both views: the
+#         adapter's `add-sibling` resolves the parent to the selected
+#         task's own (re-rooted) parent, so a top-level task gets another
+#         top-level task and a child gets another child of the same parent.
+#       - With **no selection** (empty tree) both fall back to a top-level
+#         task: the engine resolves the absent parent to the adapter root,
+#         which maps `add`/`add-sibling` to a top-level create.
 #   * `d` delete (recursive, with confirm) / `u` undelete (restores the
 #     last deletion) — generic `shortcuts:` dispatched via `invoke_action`.
 #   * `s` toggle-tracking — start/stop time tracking for the selected task
@@ -45,11 +56,19 @@
 #     Respects the host's exclusivity policy (`tracking.allow_parallel`).
 #   * `m` mark-move / `p` paste-move — reparent: mark a task, move onto the
 #     target task (which becomes its new parent). Cycles are rejected.
-#   * `A` add-child — add a subtask under the *selected* node (vs. `a`,
-#     which adds at the container level). Nests under the tree cursor
-#     without drilling in first (`under_selection`).
 #   * `U` un-nest — move the selected task back to the top level. The
 #     target-free inverse of mark/paste-move.
+#
+# ## Action / shortcut inheritance down the tree
+#
+# The recursive `subtasks` branch ships **no** `actions:` or `shortcuts:`
+# of its own. Every entry the root view marks `inherit: true` (the action
+# `inherit` flag; the `{ action: …, inherit: true }` shortcut form)
+# cascades down each tree-continuation level — analogous to column
+# inheritance — unless the child re-declares the same key (then the
+# child's wins, per field). The single-level search family
+# (`fuzzy_filter` / `tree_find`) is deliberately *not* marked inheritable:
+# the validator restricts it to the tree root.
 #
 # ## A1c scope (saved queries + filtering)
 #
@@ -197,10 +216,13 @@ views:
 
     actions:
       # Edit the selected task in a markdown buffer (adapter action `edit`).
+      # `inherit: true` — available at every subtask depth without the
+      # recursive branch re-declaring it.
       - name: edit
         key: e
         type: edit
         id: edit
+        inherit: true
       # Edit the selected task AND its whole subtree as one indented
       # checkbox outline (adapter action `edit-tree`): reparent, re-status,
       # add or remove rows in a single buffer; `tree_edit` diffs the result
@@ -210,12 +232,17 @@ views:
         key: ctrl+n
         type: edit
         id: edit-tree
-      # Create a task under the current container — at the root that's a
-      # top-level task; the buffer's `parent:` field can override.
+        inherit: true
+      # Add a task. In the tree view `under_selection: true` makes `a` add a
+      # *child* of the selected task (the adapter's `add` re-parents onto the
+      # highlighted row); with no selection it falls back to a top-level
+      # task. The buffer's `parent:` field can still override.
       - name: add task
         key: a
         type: create
         id: add
+        under_selection: true
+        inherit: true
       # Run a script against the selected task. Opens the generic `:script`
       # fuzzy menu (also reachable via the `:script` cmdline). Scripts live
       # under `<data>/not_yet_done/scripts/tasks/task_item/` — one dir per
@@ -231,17 +258,20 @@ views:
       - name: script
         key: x
         type: script
-      # Add a subtask directly under the *selected* tree node (vs. `a`,
-      # which adds at the container level — a top-level task at the root).
-      # `under_selection: true` re-targets the create onto the highlighted
-      # row, so in tree mode `A` nests under the cursor without drilling in
-      # first. The editor buffer's `parent:` field still wins if edited.
-      - name: add child
+        inherit: true
+      # Add a *sibling* of the selected task (adapter action `add-sibling`):
+      # the new task's parent is the selected task's own (re-rooted) parent,
+      # so a top-level task gets another top-level task. `under_selection`
+      # targets the highlighted row; no selection falls back to a top-level
+      # task. The editor buffer's `parent:` field still wins if edited.
+      - name: add sibling
         key: A
         type: create
-        id: add
+        id: add-sibling
         under_selection: true
-      # Local filter-while-typing over the loaded rows.
+        inherit: true
+      # Local filter-while-typing over the loaded rows. NOT inheritable —
+      # the validator restricts fuzzy_filter to the tree root.
       - name: fuzzy filter
         key: f
         type: fuzzy_filter
@@ -252,6 +282,7 @@ views:
       # first hit, and n/N cycle the rest in tree-render order. Declared
       # once here at the tree root (the validator rejects re-declaring
       # search/fuzzy_filter on the recursive branch below).
+      # NOT inheritable — the validator restricts tree_find to the tree root.
       - name: tree find
         key: /
         type: tree_find
@@ -260,21 +291,26 @@ views:
       - name: refresh
         key: r
         type: reload
+        inherit: true
 
     # Fire-and-forget actions dispatched through the adapter's
     # `invoke_action`. `delete` routes through the confirm-then-delete flow;
     # `undelete` restores the last deletion; `mark-move`/`paste-move`
     # reparent a task. Keys must not collide with any `actions:` key above.
+    #
+    # Each entry uses the `{ action: …, inherit: true }` form so it cascades
+    # down the recursive subtask branch (which declares no shortcuts of its
+    # own). A bare `key: action` would NOT be inherited.
     shortcuts:
-      d: delete
-      u: undelete
-      s: toggle-tracking
-      m: mark-move
-      p: paste-move
+      d: { action: delete, inherit: true }
+      u: { action: undelete, inherit: true }
+      s: { action: toggle-tracking, inherit: true }
+      m: { action: mark-move, inherit: true }
+      p: { action: paste-move, inherit: true }
       # Un-nest: move the selected task back to the top level (parent_id =
       # None). The comfort inverse of mark/paste-move — no target needed.
       # No-op (notification) when the task is already top-level.
-      U: unnest
+      U: { action: unnest, inherit: true }
 
     children:
       # Recursive subtask branch — the same ChildDef serves every depth.
@@ -291,46 +327,12 @@ views:
         # identical columns at every level only invites drift. Declare
         # `columns:` here only to deliberately diverge from the root.
 
-        # Edit/add/delete/reparent work at every depth, so the recursive
-        # branch repeats them. fuzzy_filter / tree_find are NOT repeated —
-        # they're declared once at the tree root (validator rule).
-        actions:
-          - name: edit
-            key: e
-            type: edit
-            id: edit
-          # Subtree-restructure outline editor (see the root view's `edit
-          # node`); available at every depth so you can re-shape any branch.
-          - name: edit node
-            key: ctrl+n
-            type: edit
-            id: edit-tree
-          - name: add subtask
-            key: a
-            type: create
-            id: add
-          # Same script menu at any depth (the scripts dir is the view
-          # path, stable across the recursive branch → one shared dir).
-          - name: script
-            key: x
-            type: script
-          # Add a subtask under the selected row (see the root view).
-          - name: add child
-            key: A
-            type: create
-            id: add
-            under_selection: true
-          - name: refresh
-            key: r
-            type: reload
-
-        shortcuts:
-          d: delete
-          u: undelete
-          s: toggle-tracking
-          m: mark-move
-          p: paste-move
-          U: unnest
+        # No `actions:` or `shortcuts:` here either. Every entry the root
+        # view marks `inherit: true` (edit / edit node / add / script /
+        # add-sibling / refresh; d/u/s/m/p/U) cascades down to this branch
+        # at load time. Re-declare a key here only to override it at depth.
+        # fuzzy_filter / tree_find are intentionally absent — they're not
+        # inheritable and the validator restricts them to the tree root.
 
   # Flat list view (native `vl` parity): every task in the forest as one
   # flat table, depth-first order — no hierarchy, no expand glyphs. `v`
@@ -409,10 +411,19 @@ views:
         key: ctrl+n
         type: edit
         id: edit-tree
+      # Flat list: no hierarchy, so `a` adds a *top-level* task (the
+      # container is the root — no `under_selection`).
       - name: add task
         key: a
         type: create
         id: add
+      # `A` adds a *sibling* of the selected task (same parent), exactly as
+      # in the tree view — the rows are ordinary tasks with real parents.
+      - name: add sibling
+        key: A
+        type: create
+        id: add-sibling
+        under_selection: true
       - name: script
         key: x
         type: script

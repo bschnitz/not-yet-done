@@ -40,15 +40,15 @@ pub fn discover_config_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn walk_yaml(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
             walk_yaml(&path, out);
-        } else if ft.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some("yaml")
-        {
+        } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("yaml") {
             out.push(path);
         }
     }
@@ -282,8 +282,12 @@ impl App {
 
         // Rebuild content views too — they hold keybinding/theme refs.
         let factories = (self.adapter_factory_builder)();
-        let new_content_views =
-            super::load_content_views(&shared_theme, &new_keybindings, &new_config.editors, factories);
+        let new_content_views = super::load_content_views(
+            &shared_theme,
+            &new_keybindings,
+            &new_config.editors,
+            factories,
+        );
 
         self.config = new_config;
         self.keybindings = new_keybindings;
@@ -308,17 +312,13 @@ impl App {
 
     /// Replace a single view slot by re-parsing its YAML. Preserves the
     /// rest of the App state — other tabs untouched.
-    fn reload_single_view(
-        &mut self,
-        slot_idx: usize,
-        path: &Path,
-    ) -> Result<String, String> {
+    fn reload_single_view(&mut self, slot_idx: usize, path: &Path) -> Result<String, String> {
         use crate::config::view_config::ViewFileConfig;
 
-        let yaml = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let raw: serde_yaml::Value = serde_yaml::from_str(&yaml)
-            .map_err(|e| format!("YAML parse: {e}"))?;
+        let yaml =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let raw: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).map_err(|e| format!("YAML parse: {e}"))?;
         if raw.get("tab").is_none() || raw.get("adapter").is_none() {
             return Err(format!(
                 "{} is missing `tab:` and/or `adapter:` — not a view config",
@@ -330,6 +330,7 @@ impl App {
         // Mirror the startup loader: inherit tree-continuation columns
         // before validating, so an in-app config edit is judged the same way.
         config.inherit_tree_columns();
+        config.inherit_tree_actions();
         if let Err(errors) = config.validate(&self.keybindings, &self.config.editors) {
             return Err(format!("view-config validation:\n{}", errors.join("\n")));
         }
@@ -352,9 +353,7 @@ impl App {
                     let resolved = if Path::new(cfg_path).is_absolute() {
                         PathBuf::from(cfg_path)
                     } else {
-                        path.parent()
-                            .unwrap_or(Path::new("."))
-                            .join(cfg_path)
+                        path.parent().unwrap_or(Path::new(".")).join(cfg_path)
                     };
                     std::fs::read_to_string(&resolved).ok()
                 })
@@ -400,9 +399,7 @@ impl App {
 
         Ok(format!(
             "Reloaded view {}",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
         ))
     }
 
@@ -412,8 +409,12 @@ impl App {
     /// theme + keybindings + tasks_view + trackings_view.
     fn reload_all_content_views(&mut self) -> Result<String, String> {
         let factories = (self.adapter_factory_builder)();
-        let new_content_views =
-            super::load_content_views(&self.shared_theme, &self.keybindings, &self.config.editors, factories);
+        let new_content_views = super::load_content_views(
+            &self.shared_theme,
+            &self.keybindings,
+            &self.config.editors,
+            factories,
+        );
         self.content_views = new_content_views;
 
         let content_tab_infos: Vec<crate::components::tab_bar::ContentTabInfo> = self
@@ -439,20 +440,13 @@ impl App {
     /// current on-disk content (the user's last save) and prepends an
     /// error banner with `error`. Used by [`FollowUp::ReloadConfig`]'s
     /// failure arm.
-    pub fn reopen_config_with_error(
-        &mut self,
-        path: PathBuf,
-        error: String,
-    ) {
+    pub fn reopen_config_with_error(&mut self, path: PathBuf, error: String) {
         match crate::edit_session::FileEditSession::with_error(path.clone(), error) {
             Ok(session) => {
                 let _ = self.open_session(Box::new(session));
             }
             Err(e) => {
-                self.notify_error(format!(
-                    "Cannot reopen {}: {e}",
-                    path.display()
-                ));
+                self.notify_error(format!("Cannot reopen {}: {e}", path.display()));
             }
         }
     }

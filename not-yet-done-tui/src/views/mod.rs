@@ -3,9 +3,9 @@
 pub mod column_format;
 pub mod content_action_hints;
 pub mod content_tree;
-pub mod group_aggregate;
 pub mod content_view;
 pub mod focus_node;
+pub mod group_aggregate;
 pub mod markdown;
 pub mod tasks_list_view;
 pub mod tasks_tree_state;
@@ -13,8 +13,8 @@ pub mod tasks_tree_view;
 pub mod tasks_view;
 pub mod trackings_view;
 
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use uuid::Uuid;
 
 use not_yet_done_content::{CursorIntent, PageInfo, PageRequest, SortKey, SortableColumn};
@@ -88,12 +88,19 @@ pub enum SubViewMessage {
 #[derive(Debug)]
 pub enum ViewRequest {
     // Editor
-    OpenEditorForAdd { parent_id: Option<Uuid> },
+    OpenEditorForAdd {
+        parent_id: Option<Uuid>,
+    },
     OpenEditorForEdit(Uuid),
     OpenEditorForEditNode(Uuid),
     OpenEditorForNotes(Uuid),
-    OpenEditorForSearch { entity: String, name: String },
-    OpenEditorForTrackingSearch { name: String },
+    OpenEditorForSearch {
+        entity: String,
+        name: String,
+    },
+    OpenEditorForTrackingSearch {
+        name: String,
+    },
 
     // Service calls
     DeleteTask(Uuid),
@@ -110,7 +117,10 @@ pub enum ViewRequest {
     /// Open the `:script` fuzzy menu seeded with the selected content
     /// node's context. App reads the node from the focused pane and
     /// builds the per-`(tab, node_type)` scripts directory.
-    OpenScriptMenuForNode { view_index: usize, pane_id: PaneId },
+    OpenScriptMenuForNode {
+        view_index: usize,
+        pane_id: PaneId,
+    },
     /// Open the `:script` fuzzy menu seeded with the selected task.
     /// App reads the selection from `tasks_view.selected_id()` and
     /// walks `parent_id` for the ancestor chain. Scripts directory is
@@ -154,9 +164,20 @@ pub enum ViewRequest {
     },
     /// Open editor for an `InputSpec::Editor` action on a content node.
     /// `action_id` is the node-side action identifier (e.g. `"edit_full"`).
-    OpenContentEditor { view_index: usize, pane_id: PaneId, node_id: String, action_id: String, label: String, editor_profile: Option<String>, commit_on_save: bool },
+    OpenContentEditor {
+        view_index: usize,
+        pane_id: PaneId,
+        node_id: String,
+        action_id: String,
+        label: String,
+        editor_profile: Option<String>,
+        commit_on_save: bool,
+    },
     /// Reload items for a content view (async).
-    SpawnContentLoad { view_index: usize, pane_id: PaneId },
+    SpawnContentLoad {
+        view_index: usize,
+        pane_id: PaneId,
+    },
     /// Apply a saved query to a pane via the App-side dispatcher that
     /// handles adapter-reported query variables (popup if any). When
     /// the adapter reports no variables, this falls through to a normal
@@ -170,9 +191,18 @@ pub enum ViewRequest {
     /// Toggle a content-view saved query as this tab's default —
     /// applied automatically on app start instead of the view-YAML
     /// `query.default`. Selecting the current default clears it.
-    SetDefaultContentQuery { view_index: usize, name: String },
+    SetDefaultContentQuery {
+        view_index: usize,
+        name: String,
+    },
     /// Drill down into a child node (async).
-    DrillDown { view_index: usize, pane_id: PaneId, node_id: String, node_label: String, child_node_type: String },
+    DrillDown {
+        view_index: usize,
+        pane_id: PaneId,
+        node_id: String,
+        node_label: String,
+        child_node_type: String,
+    },
     /// Load the children of a tree node into the pane's tree cache
     /// at `parent_path`, then re-flatten its `entries`. Used by the
     /// expand-on-Enter path in tree mode. Mirrors `DrillDown` (calls
@@ -221,27 +251,47 @@ pub enum ViewRequest {
     /// collapsed and not-yet-paged branches — the native "filter sees the
     /// entire forest" behaviour. Routes into [`App::spawn_subtree_load`]; the
     /// pre-filter expansion is restored locally when the filter clears.
-    EagerExpandSubtree { view_index: usize, pane_id: PaneId },
+    EagerExpandSubtree {
+        view_index: usize,
+        pane_id: PaneId,
+    },
     /// Open editor for the content view's query (JQL etc.).
     /// If `save_name` is set, the query will be saved to DB under that name after editing.
     /// `is_new` triggers the shortcut prompt after save (only on creation, not edit).
-    OpenContentQueryEditor { view_index: usize, pane_id: PaneId, save_name: Option<String>, is_new: bool },
+    OpenContentQueryEditor {
+        view_index: usize,
+        pane_id: PaneId,
+        save_name: Option<String>,
+        is_new: bool,
+    },
     /// Open editor for an adapter-native, free-form query (e.g. raw SQL
     /// for Postgres). Triggered at a drill-down level where the active
     /// pane shows rows of a single addressable container (table, sheet,
     /// …). Carries the parent node id so the App can extract the
     /// adapter-specific addressing (database / schema / table).
-    OpenAdapterQueryEditor { view_index: usize, pane_id: PaneId, parent_node_id: String },
+    OpenAdapterQueryEditor {
+        view_index: usize,
+        pane_id: PaneId,
+        parent_node_id: String,
+    },
     /// Open the Postgres per-table scripts menu (the new `q` keybind
     /// on the `tables` subtab). App parses `table_node_id`, lists the
     /// scripts under `<instance_data_dir>/queries/<db>/<schema>/<table>/`
     /// and calls back into the `ContentView` to populate the popup.
-    OpenPostgresScriptsMenu { view_index: usize, pane_id: PaneId, table_node_id: String },
+    OpenPostgresScriptsMenu {
+        view_index: usize,
+        pane_id: PaneId,
+        table_node_id: String,
+    },
     /// Run a Postgres script for `(db, schema, table, script)` against
     /// the adapter and display the result in the focused pane.
     RunPostgresScript {
-        view_index: usize, pane_id: PaneId,
-        database: String, schema: String, table: String, script: String,
+        view_index: usize,
+        pane_id: PaneId,
+        database: String,
+        schema: String,
+        table: String,
+        script: String,
     },
     /// Re-execute a free-form Postgres custom query with a different
     /// page offset. Triggered by the pane's next/prev-page keys when
@@ -373,29 +423,45 @@ pub enum ViewRequest {
     /// subsequent move. App stores it in `marked_db_script_for_move`
     /// and shows a status-bar indicator until the move completes or
     /// is cleared with Esc.
-    MarkDbScriptForMove { node_id: String },
+    MarkDbScriptForMove {
+        node_id: String,
+    },
     /// DSF-4: paste the previously-marked node into `target_node_id`
     /// (a dir or the db_scripts group). App fetches the marked source,
     /// calls `move_db_script_entry`, reloads, and clears the mark.
-    PasteDbScriptMove { target_node_id: String },
+    PasteDbScriptMove {
+        target_node_id: String,
+    },
     /// Open the SQL editor for an existing or brand-new Postgres script
     /// under `(db, schema, table)`. When `is_new` we still create the
     /// file on first save; otherwise it's read from disk.
     EditPostgresScript {
-        view_index: usize, pane_id: PaneId,
-        database: String, schema: String, table: String, script: String,
+        view_index: usize,
+        pane_id: PaneId,
+        database: String,
+        schema: String,
+        table: String,
+        script: String,
         is_new: bool,
     },
     /// Remove a Postgres script `.sql` file and its sidecar shortcut.
     DeletePostgresScript {
-        view_index: usize, pane_id: PaneId,
-        database: String, schema: String, table: String, script: String,
+        view_index: usize,
+        pane_id: PaneId,
+        database: String,
+        schema: String,
+        table: String,
+        script: String,
     },
     /// Prompt the user for a key chord to bind to a Postgres script;
     /// captured key is written to `.shortcuts.yaml` alongside the file.
     PromptPostgresScriptShortcut {
-        view_index: usize, pane_id: PaneId,
-        database: String, schema: String, table: String, script: String,
+        view_index: usize,
+        pane_id: PaneId,
+        database: String,
+        schema: String,
+        table: String,
+        script: String,
     },
     /// Execute a custom action on a content node (e.g. Jira transition).
     /// If the action needs_input, App fetches options and shows a popup first.
@@ -422,12 +488,16 @@ pub enum ViewRequest {
     /// Resolver caches (cookie/keyring values) are kept; only the
     /// derived session blob is wiped. Surfaced as the `invalidate_session`
     /// action type and the `:invalidate-session` cmdline command.
-    InvalidateContentSession { view_index: usize },
+    InvalidateContentSession {
+        view_index: usize,
+    },
     /// Drop session AND every credential resolver / prompt cache so the
     /// next login re-resolves from scratch. Forces a re-prompt for any
     /// `prompt`-provider field. Surfaced as the `invalidate_credentials`
     /// action type and the `:invalidate-credentials` cmdline command.
-    InvalidateContentCredentials { view_index: usize },
+    InvalidateContentCredentials {
+        view_index: usize,
+    },
     /// Create a new child node (e.g. add comment to an issue).
     /// Opens an editor for the new content body.
     /// `action_id` is the node-side action identifier on the parent
@@ -435,7 +505,12 @@ pub enum ViewRequest {
     CreateContentChild {
         view_index: usize,
         pane_id: PaneId,
-        parent_node_id: String,
+        /// Node the create action is invoked on. `None` means the adapter's
+        /// root container — used when nothing is selected (empty tree) or a
+        /// non-`under_selection` create fires at the un-drilled root level,
+        /// where neither a selected row nor a nav-stack parent exists. The
+        /// async handler resolves it to `adapter.root().id()`.
+        parent_node_id: Option<String>,
         child_node_type: String,
         action_id: String,
         label: String,
@@ -485,7 +560,10 @@ pub enum ViewRequest {
 
     // ── Saved-query menu (tasks / trackings) ─────────────────────────
     /// Apply a saved query to the active filter (scope routes to the right view).
-    ApplySavedQuery { scope: String, content: String },
+    ApplySavedQuery {
+        scope: String,
+        content: String,
+    },
     /// Open the YAML editor for a saved query, either to edit (`current_query=Some`)
     /// an existing one or create a new one (`is_new=true`, `current_query=None`).
     OpenSavedQueryEditor {
@@ -495,12 +573,22 @@ pub enum ViewRequest {
         is_new: bool,
     },
     /// Delete a saved query by scope+name.
-    DeleteSavedQuery { scope: String, name: String },
+    DeleteSavedQuery {
+        scope: String,
+        name: String,
+    },
     /// Prompt the user for a shortcut key for a saved query.
-    PromptSavedQueryShortcut { scope: String, name: String, query: String },
+    PromptSavedQueryShortcut {
+        scope: String,
+        name: String,
+        query: String,
+    },
     /// Toggle a saved query as the per-scope default (applied on app
     /// start). Selecting the current default clears it.
-    SetDefaultSavedQuery { scope: String, name: String },
+    SetDefaultSavedQuery {
+        scope: String,
+        name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

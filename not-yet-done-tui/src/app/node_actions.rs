@@ -226,7 +226,10 @@ pub fn resolve_shortcut<'a>(
 ) -> Option<ResolvedShortcut<'a>> {
     let raw = lookup_shortcut_raw(view_def, type_chain, key)?;
     let (target, action_name) = parse_shortcut_value(raw);
-    Some(ResolvedShortcut { action_name, target })
+    Some(ResolvedShortcut {
+        action_name,
+        target,
+    })
 }
 
 /// Walk a [`ViewDef`]'s ChildDef tree and report whether any ChildDef
@@ -264,12 +267,12 @@ fn lookup_shortcut_raw<'a>(
 ) -> Option<&'a str> {
     for end in (1..=type_chain.len()).rev() {
         if let Some(child) = child_def_for_type_chain(view_def, &type_chain[..end]) {
-            if let Some(name) = child.shortcuts.get(&key) {
-                return Some(name.as_str());
+            if let Some(sc) = child.shortcuts.get(&key) {
+                return Some(sc.action());
             }
         }
     }
-    view_def.shortcuts.get(&key).map(String::as_str)
+    view_def.shortcuts.get(&key).map(|sc| sc.action())
 }
 
 /// Translate an [`ActionDispatch`] into the [`ViewRequest`] the App
@@ -451,7 +454,10 @@ pub fn dispatch_to_view_request(
                 node_id,
             }),
         },
-        ActionDispatch::Reload => Some(ViewRequest::SpawnContentLoad { view_index, pane_id }),
+        ActionDispatch::Reload => Some(ViewRequest::SpawnContentLoad {
+            view_index,
+            pane_id,
+        }),
         ActionDispatch::Noop => None,
         ActionDispatch::Error(msg) => Some(ViewRequest::Notify(msg)),
     }
@@ -461,13 +467,13 @@ pub fn dispatch_to_view_request(
 mod tests {
     use super::*;
     use crate::action::ActionChains;
-    use crate::config::view_config::{ChildDef, ViewDef};
+    use crate::config::view_config::{ChildDef, ShortcutDef, ViewDef};
     use std::collections::HashMap;
 
     fn view(node_type: &str, shortcuts: &[(char, &str)]) -> ViewDef {
         let mut sc = HashMap::new();
         for (k, name) in shortcuts {
-            sc.insert(*k, (*name).to_string());
+            sc.insert(*k, ShortcutDef::Action((*name).to_string()));
         }
         ViewDef {
             row_layout: None,
@@ -506,7 +512,7 @@ mod tests {
     fn child(node_type: &str, shortcuts: &[(char, &str)]) -> ChildDef {
         let mut sc = HashMap::new();
         for (k, name) in shortcuts {
-            sc.insert(*k, (*name).to_string());
+            sc.insert(*k, ShortcutDef::Action((*name).to_string()));
         }
         ChildDef {
             row_layout: None,
@@ -537,11 +543,17 @@ mod tests {
     }
 
     fn selected(name: &str) -> ResolvedShortcut<'_> {
-        ResolvedShortcut { action_name: name, target: ShortcutTarget::Selected }
+        ResolvedShortcut {
+            action_name: name,
+            target: ShortcutTarget::Selected,
+        }
     }
 
     fn parent(name: &str) -> ResolvedShortcut<'_> {
-        ResolvedShortcut { action_name: name, target: ShortcutTarget::Parent }
+        ResolvedShortcut {
+            action_name: name,
+            target: ShortcutTarget::Parent,
+        }
     }
 
     #[test]
@@ -563,7 +575,10 @@ mod tests {
         let mut vd = view("mock:root", &[('x', "view-level")]);
         vd.children.push(child("mock:row", &[('x', "child-level")]));
         let chain = vec!["mock:root".to_string(), "mock:row".to_string()];
-        assert_eq!(resolve_shortcut(&vd, &chain, 'x'), Some(selected("child-level")));
+        assert_eq!(
+            resolve_shortcut(&vd, &chain, 'x'),
+            Some(selected("child-level"))
+        );
     }
 
     #[test]
@@ -588,9 +603,15 @@ mod tests {
             "mock:leaf".to_string(),
         ];
         // Leaf has no shortcut; mid's 'm' wins (closer than root).
-        assert_eq!(resolve_shortcut(&vd, &chain, 'm'), Some(selected("mid-action")));
+        assert_eq!(
+            resolve_shortcut(&vd, &chain, 'm'),
+            Some(selected("mid-action"))
+        );
         // Root still reachable for 'r' (no closer ancestor binds it).
-        assert_eq!(resolve_shortcut(&vd, &chain, 'r'), Some(selected("root-action")));
+        assert_eq!(
+            resolve_shortcut(&vd, &chain, 'r'),
+            Some(selected("root-action"))
+        );
     }
 
     #[test]
@@ -606,7 +627,10 @@ mod tests {
         // Chain references a type that doesn't exist under root.
         let chain = vec!["mock:root".to_string(), "mock:nope".to_string()];
         // 'x' from view-level still resolves.
-        assert_eq!(resolve_shortcut(&vd, &chain, 'x'), Some(selected("execute")));
+        assert_eq!(
+            resolve_shortcut(&vd, &chain, 'x'),
+            Some(selected("execute"))
+        );
         // Child-only key doesn't.
         assert_eq!(resolve_shortcut(&vd, &chain, 'e'), None);
     }
@@ -614,7 +638,8 @@ mod tests {
     #[test]
     fn parent_prefix_yields_parent_target() {
         let mut vd = view("mock:root", &[]);
-        vd.children.push(child("mock:row", &[('q', "parent:edit_sql")]));
+        vd.children
+            .push(child("mock:row", &[('q', "parent:edit_sql")]));
         let chain = vec!["mock:root".to_string(), "mock:row".to_string()];
         assert_eq!(resolve_shortcut(&vd, &chain, 'q'), Some(parent("edit_sql")));
     }
@@ -627,12 +652,24 @@ mod tests {
 
     #[test]
     fn parse_shortcut_value_strips_only_parent_prefix() {
-        assert_eq!(parse_shortcut_value("foo"), (ShortcutTarget::Selected, "foo"));
-        assert_eq!(parse_shortcut_value("parent:foo"), (ShortcutTarget::Parent, "foo"));
+        assert_eq!(
+            parse_shortcut_value("foo"),
+            (ShortcutTarget::Selected, "foo")
+        );
+        assert_eq!(
+            parse_shortcut_value("parent:foo"),
+            (ShortcutTarget::Parent, "foo")
+        );
         // Only the leading `parent:` is stripped — colons elsewhere stay.
-        assert_eq!(parse_shortcut_value("foo:bar"), (ShortcutTarget::Selected, "foo:bar"));
+        assert_eq!(
+            parse_shortcut_value("foo:bar"),
+            (ShortcutTarget::Selected, "foo:bar")
+        );
         // Other prefixes are not recognised.
-        assert_eq!(parse_shortcut_value("self:foo"), (ShortcutTarget::Selected, "self:foo"));
+        assert_eq!(
+            parse_shortcut_value("self:foo"),
+            (ShortcutTarget::Selected, "self:foo")
+        );
     }
 
     #[test]
@@ -659,7 +696,10 @@ mod tests {
             false,
         );
         match req {
-            Some(ViewRequest::SpawnContentLoad { view_index, pane_id }) => {
+            Some(ViewRequest::SpawnContentLoad {
+                view_index,
+                pane_id,
+            }) => {
                 assert_eq!(view_index, 7);
                 assert_eq!(pane_id, 3);
             }
@@ -773,7 +813,9 @@ mod tests {
             false,
         );
         match req {
-            Some(ViewRequest::OpenAdapterDbScriptEditor { database, script, .. }) => {
+            Some(ViewRequest::OpenAdapterDbScriptEditor {
+                database, script, ..
+            }) => {
                 assert_eq!(database, "live");
                 assert_eq!(script, "report");
             }
@@ -796,7 +838,11 @@ mod tests {
             parse_db_script_node_id("live/db_scripts/maint/vacuum/full"),
             Some((
                 "live".to_string(),
-                vec!["maint".to_string(), "vacuum".to_string(), "full".to_string()],
+                vec![
+                    "maint".to_string(),
+                    "vacuum".to_string(),
+                    "full".to_string()
+                ],
             ))
         );
     }
@@ -905,7 +951,9 @@ mod tests {
     #[test]
     fn dispatch_create_child_unknown_hint_yields_notify() {
         let req = dispatch_to_view_request(
-            ActionDispatch::CreateChild { hint: "table:rows".into() },
+            ActionDispatch::CreateChild {
+                hint: "table:rows".into(),
+            },
             0,
             1,
             "n".into(),
@@ -982,9 +1030,7 @@ mod tests {
         );
         match req {
             Some(ViewRequest::ConfirmDeleteAdapterDbScriptDir {
-                database,
-                rel_path,
-                ..
+                database, rel_path, ..
             }) => {
                 assert_eq!(database, "live");
                 assert_eq!(rel_path, "maint/vacuum");

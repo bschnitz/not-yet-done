@@ -987,6 +987,63 @@ views:
         # … kein columns: — erbt St/Task von der Wurzel.
 ```
 
+#### Tree-Action-/Shortcut-Vererbung — `inherit:` pro Eintrag
+
+Analog zu den Spalten lassen sich auch `actions:`- und `shortcuts:`-Einträge
+die Tree-Fortsetzungs-Ebenen **hinunter vererben**, damit der rekursive
+Branch sie nicht wortgleich wiederholen muss. Die Vererbung ist **fein
+granular und pro Eintrag opt-in**, nicht alles-oder-nichts:
+
+- Ein `actions:`-Eintrag wird vererbt, wenn er `inherit: true` trägt.
+- Ein `shortcuts:`-Eintrag wird vererbt, wenn er die ausführliche Form
+  `{ action: <name>, inherit: true }` statt der Kurzform `<key>: <name>`
+  benutzt (siehe [Per-Node-Aktionen](#per-node-aktionen-shortcuts)).
+
+Die Vererbung läuft **einmalig direkt nach dem Parse** (`inherit_tree_actions`,
+neben `inherit_tree_columns`), bevor Validator und Laufzeit die Config lesen.
+Geltungsbereich bewusst eng — dieselben drei Regeln wie bei den Spalten plus
+eine **Override-pro-Feld**-Regel:
+
+- **Nur Tree-Fortsetzungs-Ebenen erben** (Gate: `tree_label` gesetzt).
+- **Override per Key, pro Feld:** Deklariert die Kind-Ebene denselben Key
+  (Action-`key` bzw. Shortcut-Char) selbst, gewinnt der lokale Eintrag — der
+  geerbte wird für genau diesen Key nicht kopiert. So lässt sich gezielt
+  _eines_ erben und _ein anderes_ überschreiben.
+- **Geerbte Einträge behalten ihre Vererbbarkeit** und kaskadieren weiter
+  nach unten (relevant bei mehr als einer Fortsetzungs-Ebene).
+- **Separate Views erben nicht über die View-Grenze** (eine flache
+  Listen-`ViewDef` neben dem Tree bindet ihre Keys selbst).
+- **Die Single-Level-Suchfamilie wird nie vererbt:** `fuzzy_filter`,
+  `search` und `tree_find` sind von der Vererbung ausgenommen (auch wenn
+  `inherit: true` gesetzt würde), weil der Validator sie ohnehin auf die
+  Tree-Wurzel beschränkt.
+
+```yaml
+views:
+  - name: tasks
+    tree_label: description
+    actions:
+      - { name: edit, key: e, type: edit, id: edit, inherit: true }
+      - {
+          name: add,
+          key: a,
+          type: create,
+          id: add,
+          under_selection: true,
+          inherit: true,
+        }
+      - { name: fuzzy filter, key: f, type: fuzzy_filter } # nicht vererbbar
+    shortcuts:
+      d: { action: delete, inherit: true } # vererbt
+      s: toggle-tracking # Kurzform → NICHT vererbt
+    children:
+      - name: subtasks
+        tree_label: description
+        recursive: true
+        # kein actions:/shortcuts: — erbt edit/add + `d` von der Wurzel.
+        # `s` (Kurzform) und `f` (Suchfamilie) werden nicht vererbt.
+```
+
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 
 Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf
@@ -1359,6 +1416,30 @@ gegen den selektierten. Beispiel:
   shortcuts:
     Q: "parent:edit_sql" # → wirkt auf den zugrundeliegenden Table-Node
 ```
+
+Ein Shortcut-Wert kennt **zwei Formen**: die Kurzform `<key>: <action>`
+(oben) und die ausführliche Map-Form `<key>: { action: <action>, inherit:
+<bool> }`. Beide binden denselben Action-Namen; die Map-Form trägt
+zusätzlich das `inherit`-Flag (Default `false`), das den Shortcut die
+Tree-Fortsetzungs-Ebenen hinunter vererbt (siehe
+[Tree-Action-/Shortcut-Vererbung](#tree-action-shortcut-vererbung--inherit-pro-eintrag)).
+Der `parent:`-Prefix funktioniert in beiden Formen.
+
+```yaml
+shortcuts:
+  d: delete # Kurzform — nur auf dieser Ebene
+  s: { action: toggle-tracking, inherit: true } # erbt nach unten
+```
+
+**`under_selection` auf `type: create`-Actions:** Standardmäßig legt eine
+`create`-Action das neue Kind im aktuell gedrillten Container an (Wurzel →
+Top-Level, in einen Task gedrillt → dessen Kind). Mit `under_selection:
+true` wird stattdessen die **markierte Zeile** zum Ziel-Parent — in einem
+Tree nistet der Create damit unter dem Cursor, ohne vorher hineinzudrillen.
+Ist nichts selektiert (leerer Tree), löst die Engine den Parent auf den
+Adapter-Root auf, sodass beide Fälle zu einem Top-Level-Create werden. So
+realisiert der Tasks-Tab `a` (Kind der Selektion / Top-Level via Adapter-ID
+`add`) und `A` (Sibling via Adapter-ID `add-sibling`).
 
 Was `Node::invoke_action(name, ctx)` zurückgibt, beschreibt das
 [`ActionDispatch`](../not-yet-done-content/src/lib.rs)-Enum
