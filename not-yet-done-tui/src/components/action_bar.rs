@@ -12,10 +12,15 @@
 //!
 //! Visual style mirrors the historic Tasks-view bar.
 //!
-//! Active editor: hint matching `active_editor` description is rendered
-//! bold + underlined. The "track" hint additionally highlights when
-//! `tracking_active` is set; the "cut" hint highlights when `cut_active`
-//! is set (a node is on the move-clipboard).
+//! Active state: each [`ActionHint`] carries its own `active` flag and the
+//! bar renders active hints bold + underlined + accent. The component does
+//! not know *why* a hint is active — the view stamps `active` while building
+//! its hints (tracking running, cut armed, jump-mode open, editor focused,
+//! …). This is the structural contract: the top action bar holds shortcuts
+//! that can be momentarily active, the bottom status bar holds shortcuts that
+//! never are. Carrying `active` on the hint enforces that the active-ness is
+//! considered for every action-bar entry, rather than special-casing a few
+//! hardcoded descriptions.
 
 use std::sync::Arc;
 
@@ -33,8 +38,48 @@ use crate::ui::theme::Theme;
 /// Per-favorite entry shown in the bar: (name, shortcut).
 pub type Favorite = (String, String);
 
-/// (key_label, description). The key is shown dim, the description bright.
-pub type Hint = (String, String);
+/// An action-bar hint: a shortcut that can be *momentarily active* (a mode
+/// is armed — tracking running, cut on the move-clipboard, jump-mode open,
+/// an editor focused, …). The bar marks it while `active`.
+///
+/// This is deliberately distinct from the status bar's plain `(key, desc)`
+/// tuple: the top bar holds activatable shortcuts, the bottom bar holds
+/// shortcuts that are never active. Carrying `active` as a field makes the
+/// component enforce that distinction instead of matching individual
+/// descriptions. The `key` is shown dim, the `desc` bright (accent + bold +
+/// underline while active).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ActionHint {
+    pub key: String,
+    pub desc: String,
+    pub active: bool,
+}
+
+impl ActionHint {
+    pub fn new(key: impl Into<String>, desc: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            desc: desc.into(),
+            active: false,
+        }
+    }
+
+    /// Builder: set the active flag (mode armed → highlighted).
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+}
+
+impl From<(String, String)> for ActionHint {
+    fn from((key, desc): (String, String)) -> Self {
+        Self {
+            key,
+            desc,
+            active: false,
+        }
+    }
+}
 
 #[derive(Default)]
 struct FuzzyState {
@@ -81,15 +126,9 @@ struct CmdlineState {
 pub struct ActionBarComponent {
     theme: Arc<Theme>,
 
-    /// Hints for normal mode.
-    hints: Vec<Hint>,
-    /// Hint description currently bound to an open editor (highlighted).
-    active_editor: Option<String>,
-    /// Highlights the hint with description == "track" when set.
-    tracking_active: bool,
-    /// Highlights the hint with description == "cut" when set (a node is
-    /// currently cut to the move-clipboard, awaiting paste).
-    cut_active: bool,
+    /// Hints for normal mode. Each carries its own `active` flag, stamped
+    /// by the owning view while building its hints.
+    hints: Vec<ActionHint>,
     /// Active filter / saved-query name shown after the hints.
     active_filter_name: Option<String>,
     /// Favorites (name, shortcut).
@@ -114,9 +153,6 @@ impl ActionBarComponent {
         Self {
             theme,
             hints: Vec::new(),
-            active_editor: None,
-            tracking_active: false,
-            cut_active: false,
             active_filter_name: None,
             favorites: Vec::new(),
             fuzzy: FuzzyState::default(),
@@ -144,20 +180,8 @@ impl ActionBarComponent {
         }
     }
 
-    pub fn set_hints(&mut self, hints: Vec<Hint>) {
+    pub fn set_hints(&mut self, hints: Vec<ActionHint>) {
         self.hints = hints;
-    }
-
-    pub fn set_active_editor(&mut self, name: Option<&str>) {
-        self.active_editor = name.map(|s| s.to_string());
-    }
-
-    pub fn set_tracking_active(&mut self, active: bool) {
-        self.tracking_active = active;
-    }
-
-    pub fn set_cut_active(&mut self, active: bool) {
-        self.cut_active = active;
     }
 
     pub fn set_active_filter_name(&mut self, name: Option<String>) {
@@ -220,7 +244,6 @@ impl ActionBarComponent {
             && self.fuzzy_label.is_none()
             && self.active_filter_name.is_none()
             && self.favorites.is_empty()
-            && self.active_editor.is_none()
             && self.mode_label.is_none()
         {
             return 0;
@@ -236,7 +259,7 @@ impl ActionBarComponent {
         let hint_widths: Vec<usize> = self
             .hints
             .iter()
-            .map(|(key, desc)| key.chars().count() + 1 + desc.chars().count() + 2)
+            .map(|h| h.key.chars().count() + 1 + h.desc.chars().count() + 2)
             .collect();
         let total: usize = 1 + prefix + hint_widths.iter().sum::<usize>();
         let w = available_width as usize;
@@ -476,28 +499,24 @@ impl ActionBarComponent {
             write_run(buf, &mut x, &mut y, right, bottom, "  │  ", t.text_dim(), bg, Modifier::empty());
         }
 
-        for (key_label, desc) in &self.hints {
+        for hint in &self.hints {
             let hint_width =
-                (key_label.chars().count() + 1 + desc.chars().count() + 2) as u16;
+                (hint.key.chars().count() + 1 + hint.desc.chars().count() + 2) as u16;
             if x + hint_width > right && x > left + 1 && y + 1 < bottom {
                 y += 1;
                 x = left + 1;
             }
 
-            let is_editor_active = self.active_editor.as_deref() == Some(desc.as_str());
-            let is_tracking_active = desc == "track" && self.tracking_active;
-            let is_cut_active = desc == "cut" && self.cut_active;
-            let is_active = is_editor_active || is_tracking_active || is_cut_active;
-            let fg = if is_active { t.accent() } else { t.secondary() };
-            let mods = if is_active {
+            let fg = if hint.active { t.accent() } else { t.secondary() };
+            let mods = if hint.active {
                 Modifier::UNDERLINED | Modifier::BOLD
             } else {
                 Modifier::empty()
             };
 
-            write_run(buf, &mut x, &mut y, right, bottom, key_label, t.text_dim(), bg, Modifier::empty());
+            write_run(buf, &mut x, &mut y, right, bottom, &hint.key, t.text_dim(), bg, Modifier::empty());
             write_run(buf, &mut x, &mut y, right, bottom, " ", fg, bg, Modifier::empty());
-            write_run(buf, &mut x, &mut y, right, bottom, desc, fg, bg, mods);
+            write_run(buf, &mut x, &mut y, right, bottom, &hint.desc, fg, bg, mods);
             write_run(buf, &mut x, &mut y, right, bottom, "  ", t.text_dim(), bg, Modifier::empty());
         }
 

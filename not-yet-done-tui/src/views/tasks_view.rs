@@ -14,7 +14,7 @@ use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::Component;
 
 use crate::app::SavedQuery;
-use crate::components::action_bar::ActionBarComponent;
+use crate::components::action_bar::{ActionBarComponent, ActionHint};
 use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
@@ -114,22 +114,29 @@ impl TasksView {
             default_query_name: None,
             header_overlay: HeaderOverlay::default(),
         };
-        view.action_bar.set_hints(view.bar_hints());
+        view.action_bar.set_hints(view.bar_hints(None, false));
         view
     }
 
     /// Hints for the action bar (without the leading "Fuzzy Filter" entry,
-    /// which the bar renders via its `fuzzy_label`).
-    fn bar_hints(&self) -> Vec<BarHint> {
+    /// which the bar renders via its `fuzzy_label`). Each hint's `active`
+    /// flag is stamped from the cross-cutting state: the editor hint whose
+    /// description matches `active_editor`, and the "track" hint while a
+    /// tracking runs.
+    fn bar_hints(&self, active_editor: Option<&str>, tracking_active: bool) -> Vec<ActionHint> {
         let ckb = &self.keybindings.common;
         let tkb = &self.keybindings.tasks;
+        let mk = |key: String, desc: &str| {
+            let active = active_editor == Some(desc) || (desc == "track" && tracking_active);
+            ActionHint::new(key, desc).active(active)
+        };
         vec![
-            (ckb.label(&CommonAction::SavedFilterSelect), "queries".into()),
-            (tkb.label(&TasksAction::FormAdd), "add".into()),
-            (tkb.label(&TasksAction::FormEdit), "edit".into()),
-            (tkb.label(&TasksAction::FormEditNode), "edit node".into()),
-            (tkb.label(&TasksAction::OpenNotes), "notes".into()),
-            (ckb.label(&CommonAction::TrackingToggle), "track".into()),
+            mk(ckb.label(&CommonAction::SavedFilterSelect), "queries"),
+            mk(tkb.label(&TasksAction::FormAdd), "add"),
+            mk(tkb.label(&TasksAction::FormEdit), "edit"),
+            mk(tkb.label(&TasksAction::FormEditNode), "edit node"),
+            mk(tkb.label(&TasksAction::OpenNotes), "notes"),
+            mk(ckb.label(&CommonAction::TrackingToggle), "track"),
         ]
     }
 
@@ -137,8 +144,7 @@ impl TasksView {
     /// `active_editor` is the description of the open editor (if any).
     /// `tracking_active` is true if any task is currently being tracked.
     pub fn sync_action_bar(&mut self, active_editor: Option<&str>, tracking_active: bool) {
-        self.action_bar.set_active_editor(active_editor);
-        self.action_bar.set_tracking_active(tracking_active);
+        self.action_bar.set_hints(self.bar_hints(active_editor, tracking_active));
         self.action_bar.set_active_filter_name(self.active_filter_name.clone());
         let favs: Vec<(String, String)> = self.favorites.iter()
             .filter_map(|f| f.shortcut.as_ref().map(|s| (f.name.clone(), s.clone())))

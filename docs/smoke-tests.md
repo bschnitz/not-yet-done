@@ -116,6 +116,29 @@ beim App-Start auf jeder als View-Config erkannten YAML-Datei (hat
       → `a` bei Comments-Child jetzt mit `id: create_comment`,
       neu testen.
 
+### Aktiv-Markierung der Action-Bar-Hints
+
+Die obere Action-Bar markiert jeden Shortcut, der gerade _aktiv_
+(„scharf") ist, mit Akzentfarbe + fett + unterstrichen. Jeder
+`ActionHint` trägt sein `active`-Flag selbst — die Komponente kennt
+keine Sonderfälle mehr.
+
+- [ ] **Jump**: `J` (bzw. konfigurierter `jump_mode`-Key) drücken →
+      `jump`-Hint wird markiert, solange der Hop-Overlay offen ist;
+      nach Auswahl/`Esc` erlischt die Markierung. Über alle
+      Content-Tabs (Tasks (A), Trackings (A), Jira, …) und in allen
+      Ansichten (Liste/Tree/Condensed).
+- [ ] **Track**: in Tasks (A) / Trackings (A) ein Tracking starten
+      (`t`/`s`) → `track`-Hint bleibt markiert, solange ein Tracking
+      läuft; Stop → Markierung weg.
+- [ ] **Cut**: einen Knoten mit `C` (mark-move) auf das Move-Clipboard
+      legen → `cut`-Hint markiert, bis Paste/Abbruch/Tab-Wechsel.
+- [ ] **Editor**: einen Editor öffnen (`e`/`a`) → der zugehörige Hint
+      (`edit`/`add`/…) ist markiert, solange die Edit-Session offen ist.
+- [ ] Rebinding-Test: `jump_mode` in `tui.yaml` auf eine andere Taste
+      legen → Hint zeigt die neue Taste UND markiert weiterhin korrekt
+      (Identität über die konfigurierte Taste, nicht hartcodiert).
+
 ## EditSession — Jira (Refactor Phase 7)
 
 - [x] Issue editieren via `e` → 3b-Layout sehen, beliebiges Feld
