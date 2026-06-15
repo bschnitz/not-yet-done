@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 use not_yet_done_content::{
     ActionInput, AdapterCapabilities, AdapterStatus, ContentAdapter, ContentError, Invalidation,
-    Node, NodeType, Result,
+    MetadataField, Node, NodeType, Result,
 };
 
 use crate::gateway::{StoatGateway, StoatState};
@@ -65,6 +65,20 @@ pub(in crate::adapter) fn form_field(input: &ActionInput, key: &str) -> Result<S
         _ => Err(ContentError::NotSupported(
             "expected form input".into(),
         )),
+    }
+}
+
+/// Build the `unread` metadata field carried on channel/category/message
+/// summaries. Value is `"true"` when unread, empty otherwise — the view's
+/// styling layer paints the unread highlight + leading marker when it's
+/// non-empty (mirrors the tasks adapter's `tracking` marker field).
+pub(in crate::adapter) fn unread_field(unread: bool) -> MetadataField {
+    MetadataField {
+        key: "unread".into(),
+        value: if unread { "true".into() } else { String::new() },
+        display_label: "Unread".into(),
+        editable: false,
+        allowed_values: None,
     }
 }
 
@@ -172,13 +186,7 @@ impl StoatAdapter {
                     return;
                 }
             };
-            let gw = StoatGateway::spawn(
-                ws_url,
-                client.token().to_string(),
-                state,
-                status_tx,
-                inv_tx,
-            );
+            let gw = StoatGateway::spawn(ws_url, client, state, status_tx, inv_tx);
             *guard = Some(gw);
         });
     }

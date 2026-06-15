@@ -92,6 +92,15 @@ pub struct ThemeConfig {
     #[serde(default = "d_group_header")]
     pub group_header: HexColor,
 
+    // ── Unread ───────────────────────────────────────────────────────────
+    /// Color of the unread highlight in chat-style adapters (Stoat): the
+    /// name of a channel/category that holds unread messages, plus the
+    /// header line of an unread message in the message list, render in this
+    /// accent and are prefixed with the configurable `unread_marker` glyph.
+    /// Defaults to a vivid blue so unread items pop against the dim tree.
+    #[serde(default = "d_unread")]
+    pub unread: HexColor,
+
     // ── Tab bar ─────────────────────────────────────────────────────────
     #[serde(default = "d_tab_active")]
     pub tab_active: HexColor,
@@ -181,6 +190,9 @@ fn d_taskpath_separator() -> HexColor {
 fn d_group_header() -> HexColor {
     hex("#f9e2af")
 }
+fn d_unread() -> HexColor {
+    hex("#89b4fa")
+}
 fn d_tab_active() -> HexColor {
     hex("#B8BB26")
 }
@@ -226,6 +238,7 @@ impl Default for ThemeConfig {
             tree_connector: d_tree_connector(),
             taskpath_separator: d_taskpath_separator(),
             group_header: d_group_header(),
+            unread: d_unread(),
             tab_active: d_tab_active(),
             tab_active_bg: d_tab_active_bg(),
             sub_tab_active: d_sub_tab_active(),

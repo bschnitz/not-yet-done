@@ -26,6 +26,7 @@ use not_yet_done_content::{AdapterStatus, Invalidation};
 
 pub use state::StoatState;
 
+use crate::client::StoatClient;
 use protocol::{ClientMessage, ServerMessage};
 
 /// Heartbeat period. Revolt's default client pings well inside the
@@ -46,12 +47,12 @@ impl StoatGateway {
     /// and used inside one).
     pub fn spawn(
         ws_url: String,
-        token: String,
+        client: Arc<StoatClient>,
         state: Arc<RwLock<StoatState>>,
         status_tx: watch::Sender<AdapterStatus>,
         inv_tx: broadcast::Sender<Invalidation>,
     ) -> Self {
-        let handle = tokio::spawn(run(ws_url, token, state, status_tx, inv_tx));
+        let handle = tokio::spawn(run(ws_url, client, state, status_tx, inv_tx));
         Self { handle }
     }
 }
@@ -66,7 +67,7 @@ impl Drop for StoatGateway {
 /// drop aborts the task.
 async fn run(
     ws_url: String,
-    token: String,
+    client: Arc<StoatClient>,
     state: Arc<RwLock<StoatState>>,
     status_tx: watch::Sender<AdapterStatus>,
     inv_tx: broadcast::Sender<Invalidation>,
@@ -81,7 +82,7 @@ async fn run(
             timeout_secs: 0,
         });
 
-        match connect_once(&ws_url, &token, &state, &status_tx, &inv_tx).await {
+        match connect_once(&ws_url, &client, &state, &status_tx, &inv_tx).await {
             // Clean close → reset backoff and reconnect promptly.
             Ok(()) => backoff = Duration::from_secs(1),
             Err(e) => {
@@ -107,7 +108,7 @@ async fn run(
 /// with a human-readable reason otherwise.
 async fn connect_once(
     ws_url: &str,
-    token: &str,
+    client: &Arc<StoatClient>,
     state: &Arc<RwLock<StoatState>>,
     status_tx: &watch::Sender<AdapterStatus>,
     inv_tx: &broadcast::Sender<Invalidation>,
@@ -118,7 +119,7 @@ async fn connect_once(
     let (mut write, mut read) = ws_stream.split();
 
     let auth = serde_json::to_string(&ClientMessage::Authenticate {
-        token: token.to_string(),
+        token: client.token().to_string(),
     })
     .map_err(|e| format!("encode Authenticate: {e}"))?;
     write
@@ -143,7 +144,7 @@ async fn connect_once(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(txt))) => {
-                        handle_text(&txt, state, status_tx, inv_tx).await;
+                        handle_text(&txt, client, state, status_tx, inv_tx).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         // Answer transport-level pings to stay alive.
@@ -164,14 +165,18 @@ async fn connect_once(
 ///
 /// Live-layer: a fresh `Ready` pushes [`Invalidation::All`] (so the
 /// initially-empty tree populates and a reconnect resyncs every view
-/// without a manual `r`); message events push [`Invalidation::Node`] for
-/// just their channel, so only a view currently showing that channel's
-/// messages reloads. Structural events (`ChannelCreate`/`ChannelUpdate`/
-/// `ChannelDelete`/`ServerUpdate`) mutate [`StoatState`] and push
-/// [`Invalidation::All`] — the tree shape changed, so every bound view
-/// reloads its current level off the updated snapshot.
+/// without a manual `r`) and kicks off a background `GET /sync/unreads`
+/// that repaints with a second `All` once read-state lands. A **new**
+/// `Message` bumps the channel's `last_message_id` and pushes
+/// [`Invalidation::All`] so unread highlighting updates live across the
+/// whole tree; the other message events (edit/delete/react) still push
+/// [`Invalidation::Node`] for just their channel. `ChannelAck` updates the
+/// read marker and pushes `All` to clear the highlight. Structural events
+/// (`ChannelCreate`/`ChannelUpdate`/`ChannelDelete`/`ServerUpdate`) mutate
+/// [`StoatState`] and push `All` — the tree shape changed.
 async fn handle_text(
     txt: &str,
+    client: &Arc<StoatClient>,
     state: &Arc<RwLock<StoatState>>,
     status_tx: &watch::Sender<AdapterStatus>,
     inv_tx: &broadcast::Sender<Invalidation>,
@@ -181,8 +186,22 @@ async fn handle_text(
         Err(_) => return,
     };
 
-    // Message-level events only invalidate one channel's list — handle
-    // them uniformly before the structural match below.
+    // A new message bumps the channel's last_message_id so unread state is
+    // live; reload the whole tree (highlight) rather than just one list.
+    if let ServerMessage::Message { id, channel } = &msg {
+        state.write().await.patch_channel(
+            channel,
+            protocol::ChannelPatch {
+                name: None,
+                last_message_id: Some(id.clone()),
+            },
+        );
+        let _ = inv_tx.send(Invalidation::All);
+        return;
+    }
+
+    // The remaining message-level events (edit/delete/react) only
+    // invalidate one channel's list.
     if let Some(channel) = msg.affected_channel() {
         let _ = inv_tx.send(Invalidation::Node {
             id: channel.to_string(),
@@ -208,6 +227,17 @@ async fn handle_text(
             // The tree structure just (re)appeared — tell every bound
             // view to reload its current level.
             let _ = inv_tx.send(Invalidation::All);
+            // Seed read-state in the background so unread highlighting
+            // starts correct; a second `All` repaints once it lands. Kept
+            // off the event loop so a slow/failed fetch never stalls the
+            // socket (and a unit test's synthetic client just no-ops).
+            spawn_unread_refresh(client, state, inv_tx);
+        }
+        ServerMessage::ChannelAck { id, message_id } => {
+            if !message_id.is_empty() {
+                state.write().await.mark_read(&id, &message_id);
+                let _ = inv_tx.send(Invalidation::All);
+            }
         }
         ServerMessage::Pong { .. } => {}
         ServerMessage::Error { .. } => {
@@ -244,6 +274,28 @@ async fn handle_text(
     }
 }
 
+/// Fetch `GET /sync/unreads` off the event loop and fold it into the read
+/// markers, emitting one more [`Invalidation::All`] so the tree repaints
+/// with unread highlighting. Best-effort: a failed fetch leaves the markers
+/// as they are (the next `Ready` retries). In unit tests the synthetic
+/// client's request fails fast and this is a silent no-op.
+fn spawn_unread_refresh(
+    client: &Arc<StoatClient>,
+    state: &Arc<RwLock<StoatState>>,
+    inv_tx: &broadcast::Sender<Invalidation>,
+) {
+    let client = Arc::clone(client);
+    let state = Arc::clone(state);
+    let inv_tx = inv_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(unreads) = client.get_unreads().await {
+            let entries = unreads.into_iter().map(|u| u.into_pair()).collect();
+            state.write().await.apply_unreads(entries);
+            let _ = inv_tx.send(Invalidation::All);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,12 +316,50 @@ mod tests {
         (state, status_tx, status_rx, inv_tx, inv_rx)
     }
 
+    /// A synthetic REST client pointing at a guaranteed-unresolvable host.
+    /// `handle_text` only *uses* it for the background unread refetch, which
+    /// fails fast (and silently) in tests — no real instance is contacted.
+    fn test_client() -> Arc<StoatClient> {
+        StoatClient::from_session(
+            "https://chat.example.invalid",
+            crate::client::StoatSession {
+                token: "synthetic".into(),
+                user_id: "U0".into(),
+                session_id: "S0".into(),
+                session_name: "test".into(),
+            },
+        )
+        .expect("client")
+    }
+
     #[tokio::test]
-    async fn message_event_pushes_node_invalidation() {
-        // Invented ids — no real instance data.
+    async fn new_message_bumps_last_message_and_pushes_all() {
+        // A new message reloads the whole tree (live unread highlight) and
+        // records itself as the channel's last_message_id. Invented ids.
+        let (state, status_tx, _sr, inv_tx, mut inv_rx) = sinks();
+        seed_one_server(&state).await;
+        handle_text(
+            r#"{"type":"Message","_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","channel":"C0001","author":"U0001","content":"hi"}"#,
+            &test_client(),
+            &state,
+            &status_tx,
+            &inv_tx,
+        )
+        .await;
+        assert_eq!(inv_rx.try_recv().unwrap(), Invalidation::All);
+        assert_eq!(
+            state.read().await.channels["C0001"].last_message_id.as_deref(),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+    }
+
+    #[tokio::test]
+    async fn message_edit_pushes_node_invalidation() {
+        // Edit/delete/react still reload only the one channel's list.
         let (state, status_tx, _sr, inv_tx, mut inv_rx) = sinks();
         handle_text(
-            r#"{"type":"Message","_id":"M0001","channel":"C0009","author":"U0001","content":"hi"}"#,
+            r#"{"type":"MessageUpdate","id":"M0001","channel":"C0009"}"#,
+            &test_client(),
             &state,
             &status_tx,
             &inv_tx,
@@ -282,12 +372,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_ack_marks_read_and_pushes_all() {
+        // An ack (from another client) clears unread for the channel.
+        let (state, status_tx, _sr, inv_tx, mut inv_rx) = sinks();
+        seed_one_server(&state).await;
+        handle_text(
+            r#"{"type":"ChannelAck","id":"C0001","user":"U0","message_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#,
+            &test_client(),
+            &state,
+            &status_tx,
+            &inv_tx,
+        )
+        .await;
+        assert_eq!(
+            state.read().await.reads.get("C0001").map(String::as_str),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+        assert_eq!(inv_rx.try_recv().unwrap(), Invalidation::All);
+    }
+
+    #[tokio::test]
     async fn ready_populates_state_and_pushes_all() {
         let (state, status_tx, mut st_rx, inv_tx, mut inv_rx) = sinks();
         handle_text(
             r#"{"type":"Ready","users":[],
                 "servers":[{"_id":"S0001","name":"guild","channels":[]}],
                 "channels":[]}"#,
+            &test_client(),
             &state,
             &status_tx,
             &inv_tx,
@@ -329,6 +440,7 @@ mod tests {
         handle_text(
             r#"{"type":"ChannelCreate","channel_type":"TextChannel",
                 "_id":"C0002","server":"S0001","name":"new"}"#,
+            &test_client(),
             &state,
             &status_tx,
             &inv_tx,
@@ -346,6 +458,7 @@ mod tests {
         seed_one_server(&state).await;
         handle_text(
             r#"{"type":"ChannelDelete","id":"C0001"}"#,
+            &test_client(),
             &state,
             &status_tx,
             &inv_tx,
@@ -364,6 +477,7 @@ mod tests {
         handle_text(
             r#"{"type":"ServerUpdate","id":"S0001","data":{"categories":[
                 {"id":"cat1","title":"General","channels":["C0001"]}]},"clear":[]}"#,
+            &test_client(),
             &state,
             &status_tx,
             &inv_tx,
@@ -378,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn non_content_event_pushes_nothing() {
         let (state, status_tx, _sr, inv_tx, mut inv_rx) = sinks();
-        handle_text(r#"{"type":"Pong","data":7}"#, &state, &status_tx, &inv_tx).await;
+        handle_text(r#"{"type":"Pong","data":7}"#, &test_client(), &state, &status_tx, &inv_tx).await;
         assert!(inv_rx.try_recv().is_err());
     }
 }

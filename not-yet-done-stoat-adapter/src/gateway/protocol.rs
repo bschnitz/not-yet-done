@@ -141,10 +141,13 @@ pub enum ServerMessage {
         #[serde(default)]
         error: String,
     },
-    /// A new message was posted. The full message object is inline; we
-    /// only need its `channel` to know which view level is now stale (the
-    /// body is re-pulled over REST on reload).
+    /// A new message was posted. The full message object is inline; we read
+    /// its `channel` (which view level is now stale) and its `_id` — the new
+    /// `last_message_id`, so unread highlighting updates live without a REST
+    /// round-trip.
     Message {
+        #[serde(rename = "_id", default)]
+        id: String,
         #[serde(alias = "channel_id")]
         channel: String,
     },
@@ -184,6 +187,15 @@ pub enum ServerMessage {
     },
     /// A channel was deleted.
     ChannelDelete { id: String },
+    /// The user read a channel (from this or another of their clients).
+    /// `id` is the channel, `message_id` the message read up to. Updates
+    /// the read marker so unread highlighting clears in lockstep across
+    /// clients. Verified against Stoat 0.13.7.
+    ChannelAck {
+        id: String,
+        #[serde(default)]
+        message_id: String,
+    },
     /// A server property changed. Carries category and channel-list
     /// changes (full-list replacement) plus server rename — see
     /// [`ServerPatch`].
@@ -204,7 +216,7 @@ impl ServerMessage {
     /// `Other`) — those are handled separately (or ignored).
     pub fn affected_channel(&self) -> Option<&str> {
         match self {
-            ServerMessage::Message { channel }
+            ServerMessage::Message { channel, .. }
             | ServerMessage::MessageUpdate { channel }
             | ServerMessage::MessageDelete { channel }
             | ServerMessage::MessageReact { channel }
@@ -275,13 +287,38 @@ mod tests {
     }
 
     #[test]
-    fn message_event_exposes_channel() {
+    fn message_event_exposes_channel_and_id() {
         // Invented ids — no real instance data. A live `Message` carries
-        // the full object inline; we only read `channel`.
+        // the full object inline; we read `channel` and the `_id` (the new
+        // last_message_id used for live unread state).
         let json = r#"{"type":"Message","_id":"M0001","channel":"C0001",
                        "author":"U0001","content":"hi"}"#;
         let m: ServerMessage = serde_json::from_str(json).unwrap();
         assert_eq!(m.affected_channel(), Some("C0001"));
+        match m {
+            ServerMessage::Message { id, channel } => {
+                assert_eq!(id, "M0001");
+                assert_eq!(channel, "C0001");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_ack_parses_channel_and_message() {
+        // Invented ids — no real instance data.
+        let json = r#"{"type":"ChannelAck","id":"C0001","user":"U0001",
+                       "message_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#;
+        let m: ServerMessage = serde_json::from_str(json).unwrap();
+        // An ack is not a message-list event.
+        assert_eq!(m.affected_channel(), None);
+        match m {
+            ServerMessage::ChannelAck { id, message_id } => {
+                assert_eq!(id, "C0001");
+                assert_eq!(message_id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+            }
+            other => panic!("expected ChannelAck, got {other:?}"),
+        }
     }
 
     #[test]

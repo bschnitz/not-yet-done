@@ -641,6 +641,32 @@ pub struct ViewDef {
     /// connector color on every tree. Ignored outside tree mode.
     #[serde(default)]
     pub tree_connector_style: Option<String>,
+    /// Foreground color for the unread highlight in chat-style adapters
+    /// (Stoat): a channel/category whose `unread` metadata is `"true"` paints
+    /// its `tree_label` (and the leading `unread_marker`) in this color, and
+    /// an unread message paints its multi-line header line the same way. A
+    /// theme color name (`unread`, `accent`, …; resolved via the same table
+    /// as `ColumnDef.style`). `None` falls back to the global theme `unread`
+    /// color.
+    ///
+    /// Why per-view: unread emphasis competes with the view's own accents
+    /// (selection, fuzzy match, group headers); a dense server tree and a
+    /// flat message list want it tuned to different contrast. Per-view keeps
+    /// that adjustable without a global override. Ignored where no node
+    /// carries an `unread` field.
+    #[serde(default)]
+    pub unread_style: Option<String>,
+    /// Leading glyph prefixed to an unread tree row's label (channel/category)
+    /// and the unread message header. `None` falls back to the default `💬`
+    /// (speech balloon). Set to the empty string to suppress the marker and
+    /// rely on `unread_style` color alone.
+    ///
+    /// Why configurable: the marker is the at-a-glance "something new" cue;
+    /// terminals and fonts vary in how they render emoji vs. Nerd-Font glyphs,
+    /// and some users prefer a quiet ASCII dot. Note an emoji marker is two
+    /// cells wide — the tree indentation accounts for the rendered width.
+    #[serde(default)]
+    pub unread_marker: Option<String>,
     /// Draw the `├──`/`└──`/`│` box-drawing line connectors in tree mode.
     /// `false` replaces the lines with plain indentation (two spaces per
     /// depth level); the expand markers (see `tree_markers`) and the

@@ -17,6 +17,15 @@ pub struct StoatState {
     pub servers: HashMap<String, Server>,
     pub channels: HashMap<String, Channel>,
     pub users: HashMap<String, User>,
+    /// Read-state: `channel_id → last-read message id`. Seeded from
+    /// `GET /api/sync/unreads` after each `Ready`, updated by `ChannelAck`
+    /// WS events and local acks (send / mark-read). A channel is **unread**
+    /// when its `last_message_id` is newer than its entry here (ULID
+    /// lexicographic compare); a channel with messages but **no** entry has
+    /// never been read and counts as unread. Deliberately kept across a
+    /// reconnect (the background unread refetch overwrites it) so the tree
+    /// doesn't flash every channel as unread mid-resync.
+    pub reads: HashMap<String, String>,
 }
 
 impl StoatState {
@@ -88,6 +97,54 @@ impl StoatState {
                 server.categories = categories;
             }
         }
+    }
+
+    /// Replace read-state from a fresh `GET /api/sync/unreads`. Each entry
+    /// is `(channel_id, last_read_id)`; entries with no `last_id` (a tracked
+    /// channel that has never been read) are dropped, so the channel falls
+    /// back to the "no entry = unread" rule.
+    pub fn apply_unreads(&mut self, entries: Vec<(String, Option<String>)>) {
+        self.reads = entries
+            .into_iter()
+            .filter_map(|(channel, last)| last.map(|l| (channel, l)))
+            .collect();
+    }
+
+    /// Record a local read up to `message_id` (ack-on-send, mark-read, or a
+    /// `ChannelAck` echo). Monotonic: never moves the marker backwards, so
+    /// an out-of-order ack for an older message can't re-flag a channel.
+    pub fn mark_read(&mut self, channel_id: &str, message_id: &str) {
+        let entry = self.reads.entry(channel_id.to_string()).or_default();
+        if message_id > entry.as_str() {
+            *entry = message_id.to_string();
+        }
+    }
+
+    /// Whether `channel_id` has unread messages: its `last_message_id` is
+    /// strictly newer than the last-read marker (ULID lexicographic), or it
+    /// has messages but no read marker at all. Channels without messages
+    /// (idle text, voice) are never unread.
+    pub fn is_channel_unread(&self, channel_id: &str) -> bool {
+        let Some(channel) = self.channels.get(channel_id) else {
+            return false;
+        };
+        let Some(last_msg) = channel.last_message_id.as_deref() else {
+            return false;
+        };
+        match self.reads.get(channel_id) {
+            Some(last_read) => last_msg > last_read.as_str(),
+            None => true,
+        }
+    }
+
+    /// Whether a category has any unread channel (the OR over its members).
+    /// `category_id` is the plain (non-composite) id within `server_id`.
+    pub fn is_category_unread(&self, server_id: &str, category_id: &str) -> bool {
+        self.servers
+            .get(server_id)
+            .and_then(|s| s.categories.iter().find(|c| c.id == category_id))
+            .map(|cat| cat.channels.iter().any(|ch| self.is_channel_unread(ch)))
+            .unwrap_or(false)
     }
 
     /// Channels that are direct messages or group DMs (no `server`).
@@ -238,6 +295,83 @@ mod tests {
         assert_eq!(s.channels, vec!["C1", "C2"]);
         assert_eq!(s.categories.len(), 1);
         assert_eq!(s.categories[0].channels, vec!["C1"]);
+    }
+
+    /// Two ULIDs that sort `older < newer` lexicographically (the same as
+    /// chronologically, by ULID design). Invented values — no real data.
+    const OLDER_MSG: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const NEWER_MSG: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+
+    #[test]
+    fn channel_unread_compares_last_message_against_read_marker() {
+        let mut st = StoatState::default();
+        st.apply_ready(vec![], vec![server("S1", &["C1"])], vec![{
+            let mut c = text_channel("C1", "S1");
+            c.last_message_id = Some(NEWER_MSG.into());
+            c
+        }]);
+
+        // No read marker yet → a channel with messages is unread.
+        assert!(st.is_channel_unread("C1"));
+
+        // Read up to the latest message → no longer unread.
+        st.mark_read("C1", NEWER_MSG);
+        assert!(!st.is_channel_unread("C1"));
+
+        // A new message (newer ULID arrives) → unread again.
+        st.patch_channel(
+            "C1",
+            ChannelPatch {
+                name: None,
+                last_message_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".into()),
+            },
+        );
+        assert!(st.is_channel_unread("C1"));
+
+        // An idle channel (no messages) is never unread.
+        st.apply_ready(vec![], vec![server("S2", &["C2"])], vec![text_channel("C2", "S2")]);
+        assert!(!st.is_channel_unread("C2"));
+    }
+
+    #[test]
+    fn mark_read_is_monotonic() {
+        let mut st = StoatState::default();
+        st.mark_read("C1", NEWER_MSG);
+        // An older ack must not move the marker backwards.
+        st.mark_read("C1", OLDER_MSG);
+        assert_eq!(st.reads.get("C1").map(String::as_str), Some(NEWER_MSG));
+    }
+
+    #[test]
+    fn apply_unreads_drops_entries_without_last_id() {
+        let mut st = StoatState::default();
+        st.apply_unreads(vec![
+            ("C1".into(), Some(NEWER_MSG.into())),
+            ("C2".into(), None),
+        ]);
+        assert_eq!(st.reads.get("C1").map(String::as_str), Some(NEWER_MSG));
+        assert!(!st.reads.contains_key("C2"));
+    }
+
+    #[test]
+    fn category_unread_is_or_over_member_channels() {
+        let mut st = StoatState::default();
+        let mut s = server("S1", &["C1", "C2"]);
+        s.categories = vec![Category {
+            id: "cat1".into(),
+            title: "General".into(),
+            channels: vec!["C1".into(), "C2".into()],
+        }];
+        let mut c1 = text_channel("C1", "S1");
+        c1.last_message_id = Some(NEWER_MSG.into());
+        let c2 = text_channel("C2", "S1"); // no messages
+        st.apply_ready(vec![], vec![s], vec![c1, c2]);
+
+        // C1 unread (no read marker) → category unread.
+        assert!(st.is_category_unread("S1", "cat1"));
+        // Read C1 → category no longer unread (C2 has no messages).
+        st.mark_read("C1", NEWER_MSG);
+        assert!(!st.is_category_unread("S1", "cat1"));
     }
 
     #[test]

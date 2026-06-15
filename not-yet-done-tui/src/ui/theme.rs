@@ -96,6 +96,13 @@ impl Theme {
         self.cfg.group_header.to_ratatui()
     }
 
+    // ── Unread ───────────────────────────────────────────────────────────
+    /// Accent for unread chat items: channel/category names with unread
+    /// messages, and the header line of an unread message in the list.
+    pub fn unread(&self) -> Color {
+        self.cfg.unread.to_ratatui()
+    }
+
     // ── Tab bar ─────────────────────────────────────────────────────────
     pub fn tab_active(&self) -> Color {
         self.cfg.tab_active.to_ratatui()

@@ -369,7 +369,7 @@ impl Node for StoatCategoryNode {
             .unwrap_or(&[])
             .iter()
             .filter_map(|cid| state.channels.get(cid))
-            .map(channel_summary)
+            .map(|c| channel_summary(c, state.is_channel_unread(&c.id)))
             .collect();
 
         Ok(ListResult {

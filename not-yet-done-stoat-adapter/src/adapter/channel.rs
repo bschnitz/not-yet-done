@@ -181,6 +181,15 @@ impl Node for StoatChannelNode {
                     .send_message(&self.channel_id, &content)
                     .await
                     .map_err(other_err)?;
+                // Sending reads the channel: ack it and record the read
+                // locally so the channel doesn't flag itself unread off its
+                // own `Message` echo. Best-effort — a failed ack is repaired
+                // by the WS `ChannelAck` or the next `Ready` resync.
+                let _ = self.client.ack(&self.channel_id, &message_id).await;
+                self.state
+                    .write()
+                    .await
+                    .mark_read(&self.channel_id, &message_id);
                 // Return the created message's composite id so callers can
                 // navigate to it (and the `commit_on_save` editor flow can
                 // retarget later saves at this message's `edit_message`).
@@ -276,16 +285,27 @@ impl Node for StoatChannelNode {
         // page; each message node renders `<@ID>` → `@username` against it.
         let users = self.user_map().await;
 
+        // The last-read marker for this channel: a message is unread when
+        // its id sorts after it (ULID lexicographic), or when there is no
+        // marker at all (the channel has never been read).
+        let last_read = self.state.read().await.reads.get(&self.channel_id).cloned();
+
         let items = views
             .into_iter()
             .map(|v| {
                 let id = composite_id(&v.channel_id, &v.id);
+                let unread = match &last_read {
+                    Some(read) => v.id.as_str() > read.as_str(),
+                    None => true,
+                };
                 let node = StoatMessageNode::new(Arc::clone(&self.client), v, Arc::clone(&users));
+                let mut metadata = node.metadata().clone();
+                metadata.fields.push(super::unread_field(unread));
                 NodeSummary {
                     id,
                     label: node.label().to_string(),
                     node_type: message_type().clone(),
-                    metadata: node.metadata().clone(),
+                    metadata,
                     // Messages are leaves.
                     has_children: Some(false),
                 }
