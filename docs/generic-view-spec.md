@@ -794,6 +794,39 @@ views:
   Suche bleibt der getroffene Teilstring in der Treffer-Farbe, der Rest des
   Labels in der Ungelesen-Farbe.
 
+#### `mark_read_on_reach_end:` — Aktion bei Cursor auf der letzten Zeile
+
+Ein generischer Engine-Hook auf Drill-Ebene (`children:`): erreicht der Cursor
+**zum ersten Mal** die letzte (unterste) Zeile einer flachen Liste **und** ist
+diese Zeile noch ungelesen, ruft die Engine genau **einmal** die benannte
+Aktion auf dem selektierten Knoten auf.
+
+```yaml
+children:
+  - name: messages
+    node_type: "stoat:message"
+    mark_read_on_reach_end: mark-read # Aktions-ID auf dem Nachrichtenknoten
+```
+
+- **Wert** — die `id` einer `invoke_action`, die der Adapter auf dem Zeilen-
+  knoten versteht (bei Stoat ackt `mark-read` den Kanal bis zu dieser Nachricht
+  und merkt sich den Lesestand lokal, worauf der Ungelesen-Marker verschwindet).
+  Fehlt das Feld, ist der Hook aus.
+- **Zwei Gates, damit es ehrlich bleibt:** _Ankunft_ — der Cursor muss neu auf
+  der letzten Zeile landen (nicht schon dort sein), sodass bloßes Öffnen der
+  Liste oder ein Tastendruck am Listenende nichts auslöst. _Ungelesen_ — die
+  Zeile muss das `unread`-Metadatenfeld tragen, damit der Hook nach dem durch
+  das Ack ausgelösten Reload (die Zeile gilt dann als gelesen) nicht erneut
+  feuert. Beides zusammen macht ihn idempotent.
+- **Warum generisch statt adapter-spezifisch:** „Cursor erreicht das Listenende"
+  ist ein reines View-Ereignis (die Engine kennt Selektion und Zeilenzahl), das
+  Acken dagegen eine Adapter-Aktion (nur der Adapter kennt das REST-`ack`). Der
+  Hook verbindet beide über eine Aktions-`id`, ohne dass die Engine den Chat-
+  Begriff „lesen" kennen muss — jeder Adapter kann ihn für ein „bis hierher
+  gesehen"-Semantik nutzen.
+- **Nur im Flat-Modus** (Listen). In Tree-Ansichten ohne klar definiertes
+  „Ende" wird das Feld ignoriert.
+
 #### `expand_depth:` — initiale Aufklapptiefe pro Tree
 
 ```yaml

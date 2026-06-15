@@ -4115,14 +4115,25 @@ impl App {
             self.ensure_postgres_table_shortcuts_loaded(idx);
             if let Some(cv) = self.content_view_mut(idx) {
                 let msg = cv.handle_key(key);
+                // A `mark_read_on_reach_end` hook may have armed during the
+                // keypress (cursor reached the newest unread row). Drain it
+                // here so it dispatches alongside the key's own message,
+                // keeping the selection-changed side effects intact.
+                let mark_read = cv.take_pending_mark_read();
                 match msg {
                     SubViewMessage::Unhandled => {
                         // Fall through to global/chords. Still drain any
                         // cursor closes the view queued during dispatch.
+                        if let Some(req) = mark_read {
+                            self.process_view_request(req);
+                        }
                         self.drain_content_cursor_closes(idx);
                     }
                     other => {
                         let result = self.process_sub_view_message(other);
+                        if let Some(req) = mark_read {
+                            self.process_view_request(req);
+                        }
                         self.drain_content_cursor_closes(idx);
                         self.sync_components();
                         return result;

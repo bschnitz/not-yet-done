@@ -735,6 +735,7 @@ mod tests {
             then_by: Vec::new(),
             aggregates: Vec::new(),
             summary_only: false,
+            mark_read_on_reach_end: None,
         }
     }
 

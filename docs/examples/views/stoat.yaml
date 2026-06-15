@@ -139,6 +139,19 @@ views:
             # off to a neighbour once that message scrolls fully off an edge.
             # Default is `false` (classic row-by-row scrolling).
             smooth_scroll: true
+            # `mark_read_on_reach_end:` is a generic engine hook: when the
+            # cursor first lands on the LAST (newest) row of this flat list
+            # AND that row is still unread, the engine invokes the named
+            # action (`mark-read`) on the selected message node once. The
+            # message node acks the channel up to that message (PUT ack) and
+            # records the read locally, so the channel's unread marker clears.
+            # This is the "cursor onto the newest message clears the flag"
+            # behaviour — NOT auto-ack on open: drilling in selects the last
+            # message only if there's a single message; otherwise you must
+            # scroll to the bottom. The unread gate makes it idempotent (it
+            # never re-fires after the ack-driven reload). Drop the line to
+            # disable. Ignored in tree mode (flat lists only).
+            mark_read_on_reach_end: mark-read
             # `columns:` defines the data + sizing + per-column fg color
             # (`style:` is a theme reference). `row_layout:` arranges those
             # columns onto multiple physical lines per message — a chat look:
@@ -259,6 +272,8 @@ views:
                 # Smooth line-wise scrolling + same chat layout as the
                 # uncategorized-channels branch above.
                 smooth_scroll: true
+                # Same cursor-on-newest ack hook as the uncategorized branch.
+                mark_read_on_reach_end: mark-read
                 columns:
                   - { key: author, source: author, style: accent, sizing: max }
                   - { key: time, source: time, style: text_dim, sizing: max }

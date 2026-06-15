@@ -298,7 +298,12 @@ impl Node for StoatChannelNode {
                     Some(read) => v.id.as_str() > read.as_str(),
                     None => true,
                 };
-                let node = StoatMessageNode::new(Arc::clone(&self.client), v, Arc::clone(&users));
+                let node = StoatMessageNode::new(
+                    Arc::clone(&self.client),
+                    v,
+                    Arc::clone(&users),
+                    Arc::clone(&self.state),
+                );
                 let mut metadata = node.metadata().clone();
                 metadata.fields.push(super::unread_field(unread));
                 NodeSummary {
