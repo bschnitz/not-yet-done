@@ -24,6 +24,35 @@ pub struct ViewFileConfig {
 }
 
 impl ViewFileConfig {
+    /// Propagate columns down each tree-continuation chain so a tree need
+    /// only declare its columns once, at the root.
+    ///
+    /// All rows of a tree render into **one** shared column grid, so a
+    /// `ChildDef` that continues the tree (`tree_label` set) and omits
+    /// `columns:` should show the same columns as the level above it.
+    /// Rather than re-declaring the identical set at every depth (which
+    /// drifts), such a level inherits the nearest non-empty ancestor's
+    /// columns here, once, right after deserialisation — so the validator
+    /// and every runtime column lookup see a fully-populated set and need
+    /// no inheritance logic of their own.
+    ///
+    /// Scope is deliberately narrow:
+    /// - only tree-continuation levels inherit (gated on `tree_label`); a
+    ///   plain drill child with no columns keeps the metadata auto-fallback
+    ///   (e.g. the Postgres rows view),
+    /// - a level that declares its own `columns:` is untouched and becomes
+    ///   the inheritance source for any tree-continuation levels below it,
+    /// - separate views (a non-tree sibling `ViewDef`, e.g. a flat list)
+    ///   are independent and never inherit across the view boundary.
+    pub fn inherit_tree_columns(&mut self) {
+        for view in &mut self.views {
+            let parent_cols = view.columns.clone();
+            for child in &mut view.children {
+                inherit_columns_into(child, &parent_cols);
+            }
+        }
+    }
+
     /// Check semantic constraints that the deserialiser cannot enforce
     /// (e.g. `id` is required for action types that route through
     /// `Node::execute`). Returns one human-readable error per problem.
@@ -227,6 +256,26 @@ fn check_shortcuts(
 ///    drives a tree-aware search that needs a tree to expand into.
 ///    Defined on a non-tree view or below a non-tree-continuing
 ///    ChildDef → error.
+/// Recursive worker for [`ViewFileConfig::inherit_tree_columns`]. Fills a
+/// tree-continuation level's empty `columns` from `parent_cols`, then
+/// recurses into its own children carrying the nearest non-empty column set
+/// as their inheritance source.
+fn inherit_columns_into(child: &mut ChildDef, parent_cols: &[ColumnDef]) {
+    if child.tree_label.is_some() && child.columns.is_empty() {
+        child.columns = parent_cols.to_vec();
+    }
+    // Descendants inherit from the closest ancestor that actually has
+    // columns — this level if it now has them, else keep looking upward.
+    let ctx = if child.columns.is_empty() {
+        parent_cols.to_vec()
+    } else {
+        child.columns.clone()
+    };
+    for grandchild in &mut child.children {
+        inherit_columns_into(grandchild, &ctx);
+    }
+}
+
 fn check_tree(view: &ViewDef, errors: &mut Vec<String>) {
     let path = format!("views.{}", view.name);
     let view_has_tree = view.tree_label.is_some();
@@ -1916,8 +1965,12 @@ views:
         // semantic validator (tree_label chain, recursive branch, typed
         // columns, tree_find/fuzzy_filter only at the tree root).
         let yaml = include_str!("../../../docs/examples/views/tasks.yaml");
-        let cfg: ViewFileConfig =
+        let mut cfg: ViewFileConfig =
             serde_yaml::from_str(yaml).expect("tasks.yaml should deserialize");
+        // The loader fills tree-continuation columns right after parse, so the
+        // recursive subtask branch (which ships no `columns:`) inherits the
+        // root's set. Mirror that here before asserting on the child columns.
+        cfg.inherit_tree_columns();
         assert_eq!(cfg.adapter.adapter_type, "tasks");
         assert_eq!(cfg.views[0].tree_label.as_deref(), Some("description"));
         assert!(
@@ -1952,6 +2005,8 @@ views:
         assert!(child.actions.iter().any(|a| a.action_type == "create"));
         assert_eq!(child.shortcuts.get(&'d'), Some(&"delete".to_string()));
         assert_eq!(child.shortcuts.get(&'s'), Some(&"toggle-tracking".to_string()));
+        // The subtask branch ships no `columns:` of its own — it inherits the
+        // root's set (incl. the tracking marker) via `inherit_tree_columns`.
         assert!(child.columns.iter().any(|c| c.key == "tracking"));
         // A1c-2: the root view declares a saved-query block — editable, with
         // a `q` menu key. No `default` body ships: like the native tab, the
@@ -3036,6 +3091,77 @@ views:
                 && e.contains("already bound")),
             "expected a collision error for shortcut 'r' vs action 'refresh', got: {errs:?}"
         );
+    }
+
+    #[test]
+    fn inherit_tree_columns_fills_continuation_levels() {
+        // Root declares columns; the recursive tree-continuation child omits
+        // them and must inherit. A separate non-tree view stays independent,
+        // and an explicit column set is left untouched.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tree
+    node_type: t
+    tree_label: title
+    columns:
+      - { key: title, source: label }
+      - { key: status }
+    children:
+      - name: kids
+        node_type: t
+        tree_label: title
+        recursive: true
+      - name: own
+        node_type: u
+        tree_label: title
+        columns:
+          - { key: title, source: label }
+  - name: flat
+    node_type: f
+    columns:
+      - { key: only }
+"#;
+        let mut cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.inherit_tree_columns();
+
+        let tree = &cfg.views[0];
+        // The recursive continuation child inherited the root's two columns.
+        let kids = tree.children.iter().find(|c| c.name == "kids").unwrap();
+        let kid_keys: Vec<&str> = kids.columns.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(kid_keys, vec!["title", "status"]);
+        // A child that declares its own columns keeps exactly those.
+        let own = tree.children.iter().find(|c| c.name == "own").unwrap();
+        assert_eq!(own.columns.len(), 1);
+        assert_eq!(own.columns[0].key, "title");
+        // A separate non-tree view does not inherit across the view boundary.
+        let flat = &cfg.views[1];
+        let flat_keys: Vec<&str> = flat.columns.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(flat_keys, vec!["only"]);
+    }
+
+    #[test]
+    fn inherit_tree_columns_leaves_non_tree_drill_child_empty() {
+        // A drill child WITHOUT tree_label (a metadata-fallback level, e.g.
+        // postgres rows) must stay empty — it does not join the tree's grid.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    tree_label: title
+    columns:
+      - { key: title, source: label }
+    children:
+      - name: rows
+        node_type: r
+"#;
+        let mut cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.inherit_tree_columns();
+        let rows = &cfg.views[0].children[0];
+        assert!(rows.columns.is_empty());
     }
 }
 

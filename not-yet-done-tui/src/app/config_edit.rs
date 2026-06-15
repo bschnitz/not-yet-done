@@ -325,8 +325,11 @@ impl App {
                 path.display()
             ));
         }
-        let config: ViewFileConfig =
+        let mut config: ViewFileConfig =
             serde_yaml::from_str(&yaml).map_err(|e| format!("view-config parse: {e}"))?;
+        // Mirror the startup loader: inherit tree-continuation columns
+        // before validating, so an in-app config edit is judged the same way.
+        config.inherit_tree_columns();
         if let Err(errors) = config.validate(&self.keybindings, &self.config.editors) {
             return Err(format!("view-config validation:\n{}", errors.join("\n")));
         }
