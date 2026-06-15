@@ -3359,6 +3359,36 @@ Voraussetzung: `docs/examples/views/tasks.yaml` nach
 - [ ] Mutation in diesem Tab → nativer Tasks-Tab (falls offen) repaint/
       reload via DomainEvent.
 
+### `edit node` (`ctrl+n`) — Subtree-Restructure-Outline-Editor
+
+Parität zum alten nativen Tasks-Tab (`ctrl+n` = „edit node"). Voraussetzung:
+`tasks.yaml` mit der `edit node`-Action (`key: ctrl+n`, `type: edit`,
+`id: edit-tree`) auf allen drei Ebenen (Tree-Wurzel, rekursive Subtask-Ebene,
+flache `list`-View — im Beispiel-Config gesetzt). Einen Task mit mehreren
+Subtasks/Enkeln anlegen.
+
+- [ ] `ctrl+n` auf einem Task → Editor öffnet mit dem Task **und seinem ganzen
+      Teilbaum** als eingerückte Checkbox-Outline (`- [ ] Beschreibung (p=… id=…)`),
+      Kinder unter dem Eltern-Task eingerückt.
+- [ ] Eine Zeile umhängen (Einrückung ändern) → `:wq` → Task wird re-parented;
+      Notes wandern mit. Im Baum steht der Knoten an der neuen Stelle.
+- [ ] Status-Marker einer Zeile ändern (`[ ]`→`[x]`) → `:wq` → Status
+      übernommen. Priorität via `(p=N)` ändern → übernommen.
+- [ ] Neue Zeile hinzufügen (passend eingerückt, ohne `id=`) → `:wq` → neuer
+      Subtask angelegt; verschachtelte neue Zeilen erben den richtigen Parent.
+- [ ] Eine Zeile löschen (aus dem Buffer entfernen) → `:wq` → Task soft-deleted
+      (per `u`/undelete rückholbar); ganze entfernte Teilbäume verschwinden.
+- [ ] Mehrere Änderungen in einem Buffer (umhängen + neu + löschen + Status) →
+      `:wq` → alle in einem Durchgang angewandt; Meldung nennt die Bilanz.
+- [ ] Bei `tracking.allow_parallel=false` zwei Zeilen mit `-t`-Flag markieren →
+      `:wq` → Reopen mit Fehler („Only one task can be tracked at a time …"),
+      Edits bleiben erhalten.
+- [ ] Buffer unverändert speichern → keine Änderung (Diff ist No-op).
+- [ ] `ctrl+n` auch in der flachen `list`-View (`v`) und auf jeder Drill-Tiefe
+      erreichbar (editiert dort den selektierten Task + Nachfahren als Outline).
+- [ ] Nach Anwenden: Baum re-snapshottet (DomainEvent → voller Reload),
+      nativer Tasks-Tab (falls offen) zieht nach.
+
 ### A1c-1 — Tracking-Marker-Spalte + Start/Stop-Taste
 
 - [ ] `⏱`-Spalte zwischen Task und Status sichtbar. Tasks mit laufendem

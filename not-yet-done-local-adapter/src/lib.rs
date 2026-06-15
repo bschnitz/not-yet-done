@@ -30,6 +30,11 @@ pub mod editor_templates;
 pub mod notes;
 pub mod task;
 pub mod tracking;
+// Subtree-restructure tree editor (serialize → parse → diff → apply). Moved
+// here from the TUI crate: `apply_changes` drives `task_service` + the local
+// `notes::move_notes`, so it belongs with the task-domain operations. Both the
+// TaskAdapter and the transitional native `RestructureSession` consume it.
+pub mod tree_edit;
 pub use task::{TaskAdapter, TaskAdapterFactory};
 pub use tracking::{TrackingAdapter, TrackingAdapterFactory};
 
