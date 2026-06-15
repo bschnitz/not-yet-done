@@ -9404,7 +9404,7 @@ fn load_content_views(
 
         // YAML-parse failure: take the file's stem as a fallback tab name
         // (the actual `tab.name` is unreadable).
-        let config: ViewFileConfig = match serde_yaml::from_str(&yaml) {
+        let mut config: ViewFileConfig = match serde_yaml::from_str(&yaml) {
             Ok(c) => c,
             Err(e) => {
                 let name = path
@@ -9419,6 +9419,11 @@ fn load_content_views(
                 continue;
             }
         };
+
+        // Fill tree-continuation levels that omit `columns:` from the level
+        // above them, before validation reads them (so `tree_label` etc.
+        // resolve against the inherited set).
+        config.inherit_tree_columns();
 
         match config.validate(keybindings, editors) {
             Ok(()) => loaded.push((path.clone(), Loaded::Ok(config))),

@@ -285,54 +285,11 @@ views:
         tree_label: description
         recursive: true
 
-        columns:
-          - key: status
-            label: St
-            style: tertiary
-            sizing: max
-          - key: priority
-            label: Pri
-            kind: number
-            style: tertiary
-            sizing: max
-          - key: tracking
-            label: Tr
-            style: accent
-            sizing: max
-            # See the root level: a collapsed node surfaces `⏱` for a
-            # tracking running anywhere in its hidden subtree.
-            collapsed_source: tracking_rollup
-          - key: tag_symbols
-            label: T
-            style: accent
-            sizing: max
-          - key: description
-            label: Task
-            source: label
-            style: text_med
-            sizing: fit # only as wide as the task title needs, never crowds out the date columns
-          - key: created
-            label: Created
-            kind: datetime
-            format: "%Y-%m-%d"
-            style: secondary
-            sizing: max
-          - key: updated
-            label: Updated
-            kind: datetime
-            format: "%Y-%m-%d"
-            style: secondary
-            sizing: max
-          - key: last_tracked
-            label: Tracked
-            kind: datetime
-            format: "%Y-%m-%d"
-            style: accent
-            sizing: max
-          - key: notes
-            label: N
-            style: tertiary
-            sizing: max
+        # No `columns:` here: a tree-continuation level (`tree_label` set)
+        # that omits its columns inherits the tree root's set. All depths of
+        # a tree render into one shared column grid, so re-declaring the
+        # identical columns at every level only invites drift. Declare
+        # `columns:` here only to deliberately diverge from the root.
 
         # Edit/add/delete/reparent work at every depth, so the recursive
         # branch repeats them. fuzzy_filter / tree_find are NOT repeated —

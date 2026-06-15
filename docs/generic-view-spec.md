@@ -948,6 +948,45 @@ Trait und das Capability-Gate `supports_eager_subtree` auf `AdapterCapabilities`
   unberührt, weil pro Ebene dieselbe `PageInfo` durchgereicht wird und die IDs
   identisch sind.
 
+#### Tree-Spalten-Vererbung — `columns:` einmal an der Wurzel
+
+Alle Zeilen eines Trees rendern in **ein** gemeinsames Spaltenraster. Eine
+`ChildDef`, die den Tree fortsetzt (`tree_label` gesetzt) und **keinen**
+eigenen `columns:`-Block deklariert, erbt darum die Spalten der nächsten
+darüberliegenden Ebene, die welche hat. Ein Tree muss seine Spalten also nur
+**einmal an der Wurzel** deklarieren statt sie auf jeder Tiefe identisch zu
+wiederholen (was unweigerlich auseinanderdriftet).
+
+Die Vererbung läuft **einmalig direkt nach dem Parse** (`inherit_tree_columns`),
+bevor der Validator und jede Laufzeit-Spaltenabfrage die Config lesen — beide
+sehen also bereits einen vollständig gefüllten Satz und brauchen keine eigene
+Vererbungslogik. Geltungsbereich bewusst eng:
+
+- **Nur Tree-Fortsetzungs-Ebenen erben** (Gate: `tree_label` gesetzt). Ein
+  reiner Drill-Child ohne `tree_label` bleibt leer und behält den
+  Auto-Fallback aus den Item-Metadaten (z. B. die Postgres-Rows-Ebene, siehe
+  unten).
+- **Eine Ebene mit eigenem `columns:` bleibt unangetastet** und wird selbst
+  zur Vererbungsquelle für darunterliegende Fortsetzungs-Ebenen — wer
+  bewusst abweichen will, deklariert eigene Spalten.
+- **Separate Views erben nicht über die View-Grenze** (eine flache
+  Listen-`ViewDef` neben dem Tree bleibt unabhängig und deklariert ihre
+  Spalten selbst).
+
+```yaml
+views:
+  - name: tasks
+    tree_label: description
+    columns: # einmal hier deklariert …
+      - { key: status, label: St }
+      - { key: description, label: Task, source: label }
+    children:
+      - name: subtasks
+        tree_label: description
+        recursive: true
+        # … kein columns: — erbt St/Task von der Wurzel.
+```
+
 #### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
 
 Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf
