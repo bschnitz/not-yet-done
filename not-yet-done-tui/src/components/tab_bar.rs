@@ -50,8 +50,8 @@ impl TabBarComponent {
         let gkb = &keybindings.global;
 
         let mut main_tab_labels = vec![
-            (Tab::Tasks, format!("󰝖 Tasks {}", gkb.label(&GlobalAction::TabTasks))),
-            (Tab::Trackings, format!("󱦗 Trackings {}", gkb.label(&GlobalAction::TabTrackings))),
+            (Tab::Tasks, format!("✅ Tasks {}", gkb.label(&GlobalAction::TabTasks))),
+            (Tab::Trackings, format!("⏱️ Trackings {}", gkb.label(&GlobalAction::TabTrackings))),
         ];
         for (i, info) in content_tabs.iter().enumerate() {
             let icon = if info.icon.is_empty() { "" } else { &info.icon };
@@ -123,8 +123,11 @@ impl TabBarComponent {
     fn bar_width(items: &[BarItem]) -> usize {
         // Each item: border + "  label  " + border + 1 gap = label.chars() + 7
         // Inactive: "  label  " + 1 gap = label.chars() + 5
-        // Rough: sum of label widths + 7 per item
-        items.iter().map(|it| it.label.chars().count() + 7).sum()
+        // Rough: sum of display widths + 7 per item. Display width (not
+        // `chars().count()`) so 2-cell emoji icons are measured correctly
+        // for the one-line-vs-two-line decision.
+        use unicode_width::UnicodeWidthStr;
+        items.iter().map(|it| it.label.width() + 7).sum()
     }
 
     fn main_items(&self) -> Vec<BarItem> {
@@ -173,33 +176,25 @@ impl TabBarComponent {
         inactive_fg: ratatui::style::Color,
     ) -> u16 {
         for item in items {
-            if item.active {
-                let body = format!("  {}  ", item.label);
-                let style = if let Some(bg) = active_bg {
-                    Style::default().fg(active_fg).bg(bg).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(active_fg).bg(bar_bg).add_modifier(Modifier::BOLD)
-                };
-                for ch in body.chars() {
-                    if x >= right { break; }
-                    if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
-                        cell.set_char(ch);
-                        cell.set_style(style);
-                    }
-                    x += 1;
-                }
-            } else {
-                let text = format!("  {}  ", item.label);
-                let style = Style::default().fg(inactive_fg).bg(bar_bg);
-                for ch in text.chars() {
-                    if x >= right { break; }
-                    if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
-                        cell.set_char(ch);
-                        cell.set_style(style);
-                    }
-                    x += 1;
-                }
+            if x >= right {
+                break;
             }
+            let body = format!("  {}  ", item.label);
+            let style = if item.active {
+                Style::default()
+                    .fg(active_fg)
+                    .bg(active_bg.unwrap_or(bar_bg))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(inactive_fg).bg(bar_bg)
+            };
+            // `set_stringn` is grapheme- and display-width-aware: a 2-cell
+            // emoji (incl. VS16 sequences like ⏱️) advances `x` by 2 and
+            // blanks its trailing half, so labels after an emoji stay
+            // aligned. A naive `x += 1` per `char` would misplace them.
+            let max = right.saturating_sub(x) as usize;
+            let (nx, _) = buf.set_stringn(x, y, &body, max, style);
+            x = nx;
         }
         x
     }
