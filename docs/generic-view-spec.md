@@ -1732,6 +1732,7 @@ Die View-YAML kennt folgende generische Action-Typen:
 | `open_url`     | URL aus Metadata im Browser öffnen               | ❌         |
 | `download`     | `node.content().read()` → in Datei speichern     | ❌         |
 | `script`       | Externes Script mit Node-JSON auf stdin starten  | ❌         |
+| `tag`          | Tag-Verwaltungs-Menü für den selektierten Task   | ✅ (modal) |
 | `custom`       | Adapter-spezifische Aktion (via `custom_action`) | ❌         |
 | `delete`       | Node löschen (mit Bestätigung)                   | ❌         |
 
@@ -1898,6 +1899,37 @@ Der stdin-Schlüssel heißt aus Backcompat-Gründen `tracking_ids` — der
 Engine-Pfad selbst ist generisch, sodass die historischen Trackings-Scripts
 (`daily_report.py`, `hours_report.py`, …) unverändert über den
 Adapter-Tab laufen.
+
+### Tag-Verwaltung (`type: tag`)
+
+```yaml
+actions:
+  - name: tags
+    key: T
+    type: tag
+```
+
+Eine `tag`-Action öffnet das **globale Tag-Verwaltungs-Menü** (`:tag`),
+angeheftet an den aktuell selektierten Knoten der Pane. Es ist dasselbe
+Menü wie auf dem nativen Tasks-Tab — der Action-Typ verdrahtet es generisch
+an jeden Content-/Adapter-Tab:
+
+- **Enter** auf einem Tag: weist es dem Task zu / entfernt es (Toggle). Der
+  Ist-Zustand wird beim Öffnen frisch geladen, nicht aus einem Cache.
+- **Name tippen + Enter**: legt einen neuen Tag an und weist ihn dem Task zu.
+- **ctrl+e**: öffnet das YAML-Formular eines Tags (Symbol / Name / Farbe).
+- **ctrl+d**: löscht den Tag (von allen Tasks).
+
+Nach jeder Änderung wird die Pane neu geladen, sodass die `tag_symbols`- /
+`tag_names`-Spalten den neuen Stand zeigen.
+
+Tags sind ein Task-Konzept: Der selektierte Knoten muss eine Task-ID tragen
+(der `tasks`-Adapter liefert die nackte UUID als Node-ID). Auf einem Knoten
+ohne Task-ID quittiert das Menü mit einer Notiz statt zu öffnen.
+
+Konvention: Shortcut **`T` (shift+t)**, weil `t` auf dem Tasks-Tab den
+Tree-/List-View-Wechsel belegt. Im Tree mit `inherit: true` deklarieren,
+damit die Action auf jeder Subtask-Ebene greift.
 
 ### Custom Actions
 

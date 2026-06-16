@@ -197,6 +197,15 @@ pub enum FollowUp {
         pane_id: PaneId,
         message: String,
     },
+    /// A tag create/edit committed from a content/adapter tab (`type: tag`)
+    /// succeeded; reload the originating content pane so its `tag_symbols` /
+    /// `tag_names` columns re-render. Kept distinct from the in-place
+    /// content-row patch path so the tag flow stays self-contained.
+    ReloadContentPaneForTag {
+        view_index: usize,
+        pane_id: PaneId,
+        message: String,
+    },
     /// Live-apply a YAML task filter without persisting.
     ApplyTaskFilter { content: String },
     /// Live-apply a YAML tracking filter without persisting.

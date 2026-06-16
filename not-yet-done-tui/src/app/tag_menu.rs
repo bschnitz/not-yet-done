@@ -7,18 +7,78 @@
 use uuid::Uuid;
 
 use crate::app::App;
+use crate::app::ContentSlot;
 use crate::app::EditorRequest;
 use crate::components::tag_menu::{TagMenuEntry, TagMenuMessage};
 use crate::edit_session::TagFormSession;
 use crate::tabs::Tab;
+use crate::views::content_view::PaneId;
 use not_yet_done_core::repository::ResolvedTag;
 use not_yet_done_core::service::TagItem;
 
+/// Where a tag-menu opened from a content/adapter tab assigns tags and
+/// which pane to refresh once an assignment changes. Set by
+/// [`App::open_tag_menu_for_content`]; consulted by `tag_assign_target`
+/// and the toggle/create/delete paths so the generic tag menu works on a
+/// ContentView the same way it does on the native Tasks tab.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentTagTarget {
+    /// Task the menu assigns/unassigns/creates tags against.
+    pub task_id: Uuid,
+    /// Originating content view + pane, reloaded after a change so the
+    /// `tag_symbols` / `tag_names` columns reflect the new assignment.
+    pub view_index: usize,
+    pub pane_id: PaneId,
+}
+
 impl App {
+    /// Open the tag menu from the native Tasks tab (`:tag`). Clears any
+    /// content-tab target so assignment falls back to `tasks_view`.
+    pub fn open_tag_menu(&mut self) {
+        self.content_tag_target = None;
+        self.build_and_open_tag_menu();
+    }
+
+    /// Open the tag menu from a content/adapter tab (a `type: tag` action,
+    /// e.g. the Tasks-(A) `T` key). Resolves the focused pane's selected
+    /// node to a task id and pins the menu to it; the menu then assigns,
+    /// creates and deletes tags exactly as on the native tab, refreshing
+    /// this pane afterwards. Tags are a task concept, so a non-task node
+    /// (id that isn't a task UUID) is rejected with a notice.
+    pub fn open_tag_menu_for_content(&mut self, view_index: usize, pane_id: PaneId) {
+        let node_id = {
+            let Some(ContentSlot::Working(cv)) = self.content_views.get(view_index) else {
+                self.notify("Content view is unavailable".to_string());
+                return;
+            };
+            let Some(pane) = cv.find_pane(pane_id) else {
+                self.notify("Pane not found".to_string());
+                return;
+            };
+            // Tree-aware: the selected summary lives on the tree entry, not
+            // in `pane.items` (depth-0 only).
+            let Some(item) = pane.selected_item() else {
+                self.notify("No row selected".to_string());
+                return;
+            };
+            item.id.clone()
+        };
+        let Ok(task_id) = Uuid::parse_str(&node_id) else {
+            self.notify("Tags can only be assigned to tasks".to_string());
+            return;
+        };
+        self.content_tag_target = Some(ContentTagTarget {
+            task_id,
+            view_index,
+            pane_id,
+        });
+        self.build_and_open_tag_menu();
+    }
+
     /// Build a menu entry list from the current tag database and open
     /// the popup. Global tags first, then project tags (each suffixed
     /// with their project name).
-    pub fn open_tag_menu(&mut self) {
+    fn build_and_open_tag_menu(&mut self) {
         let svc = self.tag_service.clone();
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move { svc.list_all().await })
@@ -67,18 +127,21 @@ impl App {
             }
             TagMenuMessage::CreateNew { name } => {
                 let assign_to = self.tag_assign_target();
+                let content_reload = self.content_tag_reload();
                 let session = TagFormSession::create_with_name(
                     self.tag_service.clone(),
                     &name,
                     assign_to.map(|tid| (tid, self.task_service.clone())),
+                    content_reload,
                 );
                 self.open_session(Box::new(session))
             }
             TagMenuMessage::EditExisting { id, label: _ } => {
                 let svc = self.tag_service.clone();
+                let content_reload = self.content_tag_reload();
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
-                        .block_on(async move { TagFormSession::edit(svc, id).await })
+                        .block_on(async move { TagFormSession::edit(svc, id, content_reload).await })
                 });
                 match result {
                     Ok(session) => self.open_session(Box::new(session)),
@@ -92,12 +155,25 @@ impl App {
     }
 
     /// Return the task id eligible for tag assignment, or `None` when
-    /// the user isn't on the Tasks tab or has no task selected.
+    /// there is no eligible target. A content-tab target (set by
+    /// [`Self::open_tag_menu_for_content`]) wins; otherwise the native
+    /// Tasks tab's selected task is used.
     fn tag_assign_target(&self) -> Option<Uuid> {
+        if let Some(target) = &self.content_tag_target {
+            return Some(target.task_id);
+        }
         if self.active_tab != Tab::Tasks {
             return None;
         }
         self.tasks_view.selected_id()
+    }
+
+    /// The content pane to reload after a session-based tag commit
+    /// (create/edit), or `None` when the menu was opened from the native
+    /// Tasks tab. Threaded into [`TagFormSession`].
+    fn content_tag_reload(&self) -> Option<(usize, PaneId)> {
+        self.content_tag_target
+            .map(|t| (t.view_index, t.pane_id))
     }
 
     fn toggle_tag_assignment(&mut self, tag_id: &str, label: &str) {
@@ -106,13 +182,7 @@ impl App {
             return;
         };
 
-        let assigned = self
-            .tasks_view
-            .state
-            .task_tags
-            .get(&task_id)
-            .map(|tags| tags.iter().any(|rt| tag_matches_id(rt, tag_id)))
-            .unwrap_or(false);
+        let assigned = self.tag_currently_assigned(task_id, tag_id);
 
         let svc = self.task_service.clone();
         let id_str = tag_id.to_string();
@@ -130,11 +200,46 @@ impl App {
             Ok(_) => {
                 let action = if assigned { "Unassigned" } else { "Assigned" };
                 self.notify(format!("{action} tag {label}"));
-                let ids: Vec<Uuid> =
-                    self.tasks_view.state.task_rows.iter().map(|t| t.id).collect();
-                self.spawn_load_task_tags(ids);
+                self.refresh_after_tag_change();
             }
             Err(e) => self.notify_error(format!("Failed to toggle tag: {e}")),
+        }
+    }
+
+    /// Is `tag_id` (`global-tag:`/`project-tag:` form) currently on
+    /// `task_id`? On a content tab the `tasks_view` cache is stale/empty,
+    /// so fetch this one task's tags live; on the native tab reuse the
+    /// already-loaded relationship cache.
+    fn tag_currently_assigned(&self, task_id: Uuid, tag_id: &str) -> bool {
+        if self.content_tag_target.is_some() {
+            let svc = self.task_service.clone();
+            let map = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async move { svc.load_tags_for_tasks(&[task_id]).await })
+            });
+            return map
+                .ok()
+                .and_then(|m| m.get(&task_id).map(|tags| tags.to_vec()))
+                .map(|tags| tags.iter().any(|rt| tag_matches_id(rt, tag_id)))
+                .unwrap_or(false);
+        }
+        self.tasks_view
+            .state
+            .task_tags
+            .get(&task_id)
+            .map(|tags| tags.iter().any(|rt| tag_matches_id(rt, tag_id)))
+            .unwrap_or(false)
+    }
+
+    /// Refresh whichever surface owns the assignment after a tag change.
+    /// Content tab: reload the originating pane so its tag columns
+    /// re-render. Native tab: re-fetch tags for the visible task rows.
+    fn refresh_after_tag_change(&mut self) {
+        if let Some(target) = self.content_tag_target {
+            self.reload_content_pane_current_level(target.view_index, target.pane_id);
+        } else {
+            let ids: Vec<Uuid> = self.tasks_view.state.task_rows.iter().map(|t| t.id).collect();
+            self.spawn_load_task_tags(ids);
         }
     }
 
@@ -145,7 +250,12 @@ impl App {
             tokio::runtime::Handle::current().block_on(async move { svc.delete(id_str).await })
         });
         match result {
-            Ok(()) => self.notify(format!("Deleted tag {label}")),
+            Ok(()) => {
+                self.notify(format!("Deleted tag {label}"));
+                // The tag is gone from every task it was on, so re-render
+                // the rows (drops it from the tag columns).
+                self.refresh_after_tag_change();
+            }
             Err(e) => self.notify_error(format!("Failed to delete tag: {e}")),
         }
     }
