@@ -16,6 +16,72 @@
 //! the build paths below `debug_assert!` on that case instead of letting a
 //! dead shortcut sit in the top bar forever.
 
+use crate::config::keybindings::{CommonAction, ContentAction};
+use crate::keymap::KeySource;
+
+/// Which bar a claim-derived nav hint belongs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintBar {
+    Action,
+    Status,
+}
+
+/// A hint derived directly from a [`crate::keymap::KeySource`] in the pane's
+/// `build_claims` set — the typed Content/Common navigation & fold family
+/// (back, open, paging, tree collapse/expand, grouping, aggregate toggle).
+///
+/// Deriving these from the *same* claim builder the dispatcher uses is what
+/// makes the bars automatic: a fold chord like `zm`/`zr` shows up the moment
+/// its claim is registered, with no per-feature hint wiring, and can never
+/// drift from what actually dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavHint {
+    pub label: &'static str,
+    pub bar: HintBar,
+}
+
+/// Map a typed Content/Common claim source to its bar hint, or `None` when the
+/// source is either too elementary to surface (list-move, scroll, column
+/// cursor — universal keys that would only clutter the bar) or rendered
+/// through a richer path that carries its own metadata (YAML `actions:`,
+/// preview, search-jump status line, the query/group/column menus and jump
+/// mode, all built with their own [`ActiveSource`] in the action-bar builder).
+pub fn nav_hint_for_source(source: &KeySource) -> Option<NavHint> {
+    match source {
+        KeySource::Content(a) => content_nav_hint(a),
+        KeySource::Common(a) => common_nav_hint(a),
+        _ => None,
+    }
+}
+
+fn content_nav_hint(action: &ContentAction) -> Option<NavHint> {
+    use ContentAction::*;
+    let (label, bar) = match action {
+        Back => ("back", HintBar::Status),
+        Open => ("open", HintBar::Status),
+        NextPage => ("next page", HintBar::Status),
+        PrevPage => ("prev page", HintBar::Status),
+        TreeCollapse => ("collapse", HintBar::Status),
+        TreeCollapseAll => ("collapse all", HintBar::Status),
+        TreeExpandAll => ("expand all", HintBar::Status),
+        CycleGrouping => ("cycle group", HintBar::Status),
+        ToggleTreeAggregate => ("aggregate", HintBar::Status),
+        // Activatable / richer-path sources: surfaced (with their
+        // ActiveSource) by the action-bar builder, not here.
+        EditQuery | OpenScriptsMenu | GroupMenu | JumpMode => return None,
+    };
+    Some(NavHint { label, bar })
+}
+
+fn common_nav_hint(action: &CommonAction) -> Option<NavHint> {
+    // Every Common source is either universal navigation (list move, scroll,
+    // column cursor — deliberately omitted to keep the bar focused) or driven
+    // by the action-bar builder (fuzzy, search, column-config, tracking,
+    // jump, command line, …). Nothing to surface in the status bar today.
+    let _ = action;
+    None
+}
+
 /// Why an action-bar hint can light up. Carried on each hint from build time
 /// so the resolver — not the renderer — decides active-ness from real state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,5 +234,69 @@ mod tests {
         // An input-less, non-popup action (e.g. open-in-browser) is not
         // activatable → must not sit in the action bar.
         assert_eq!(source_for_shortcut("open-in-browser", "open", false), None);
+    }
+
+    #[test]
+    fn fold_chords_resolve_to_status_bar_nav_hints() {
+        // The bug this whole change fixes: zm/zr (and backspace-collapse)
+        // must derive a status-bar hint straight from their claim source.
+        for (action, label) in [
+            (ContentAction::TreeCollapse, "collapse"),
+            (ContentAction::TreeCollapseAll, "collapse all"),
+            (ContentAction::TreeExpandAll, "expand all"),
+        ] {
+            let hint = nav_hint_for_source(&KeySource::Content(action))
+                .expect("fold chord must derive a hint");
+            assert_eq!(hint.bar, HintBar::Status);
+            assert_eq!(hint.label, label);
+        }
+    }
+
+    #[test]
+    fn back_open_paging_grouping_are_status_nav_hints() {
+        for action in [
+            ContentAction::Back,
+            ContentAction::Open,
+            ContentAction::NextPage,
+            ContentAction::PrevPage,
+            ContentAction::CycleGrouping,
+            ContentAction::ToggleTreeAggregate,
+        ] {
+            let hint = nav_hint_for_source(&KeySource::Content(action)).unwrap();
+            assert_eq!(hint.bar, HintBar::Status);
+        }
+    }
+
+    #[test]
+    fn activatable_and_richer_path_sources_have_no_nav_hint() {
+        // These are surfaced by the action-bar builder with an ActiveSource,
+        // so the nav resolver must stay silent to avoid double-display.
+        for action in [
+            ContentAction::EditQuery,
+            ContentAction::OpenScriptsMenu,
+            ContentAction::GroupMenu,
+            ContentAction::JumpMode,
+        ] {
+            assert_eq!(nav_hint_for_source(&KeySource::Content(action)), None);
+        }
+    }
+
+    #[test]
+    fn common_and_other_sources_have_no_nav_hint() {
+        // Universal navigation keys stay out of the bar.
+        assert_eq!(nav_hint_for_source(&KeySource::Common(CommonAction::ListNext)), None);
+        assert_eq!(
+            nav_hint_for_source(&KeySource::Common(CommonAction::ScrollHalfDown)),
+            None
+        );
+        // A non-typed source (YAML action) is handled by its own builder.
+        assert_eq!(
+            nav_hint_for_source(&KeySource::YamlAction {
+                view: "v".into(),
+                child_path: Vec::new(),
+                name: "do".into(),
+            }),
+            None
+        );
     }
 }

@@ -56,7 +56,9 @@ use crate::config::view_config::{
 use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
 use crate::ui::theme::Theme;
 use crate::views::column_format::{format_elapsed_since, format_typed_value};
-use crate::views::content_action_hints::{ActionBarHint, ActiveSource, ShortcutHint};
+use crate::views::content_action_hints::{
+    ActionBarHint, ActiveSource, HintBar, ShortcutHint, nav_hint_for_source,
+};
 use crate::views::content_tree::{
     TreeLevel, TreeState, child_def_for_type_chain, effective_child_children,
     leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
@@ -4220,17 +4222,6 @@ impl ContentPane {
         content_kb.get(action).cloned()
     }
 
-    fn level_hint_label(
-        &self,
-        action: &ContentAction,
-        content_kb: &KeyBindingSection<ContentAction>,
-        icons: &KeyIconMap,
-        view_defs: &[ViewDef],
-    ) -> Option<String> {
-        self.level_binding(action, content_kb, view_defs)
-            .map(|b| b.hint_label(icons))
-    }
-
     /// Build the request that re-fetches items at the **current**
     /// drill level. At root → `SpawnContentLoad` (uses ViewDef). Inside
     /// a drill → `DrillDown` (uses `active_child` + parent id) so the
@@ -4885,6 +4876,7 @@ impl ContentPane {
     pub fn status_bar_hints(
         &self,
         view_defs: &[ViewDef],
+        common_kb: &KeyBindingSection<CommonAction>,
         content_kb: &KeyBindingSection<ContentAction>,
         key_icons: &KeyIconMap,
         adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
@@ -4917,12 +4909,29 @@ impl ContentPane {
             let keys = format!("{}/{}", self.search_next_key, self.search_prev_key);
             hints.push((keys, body));
         }
-        if !self.nav_stack.is_empty() {
-            if let Some(label) =
-                self.level_hint_label(&ContentAction::Back, content_kb, key_icons, view_defs)
-            {
-                hints.push((label, "back".into()));
+        // Typed Content/Common navigation & fold hints (back, open, paging,
+        // tree collapse/expand, grouping, aggregate), derived from the very
+        // claim set the dispatcher uses (`build_claims`). This is the heart
+        // of the "automatic by design" contract: every claim that the
+        // resolver maps to a status-bar nav hint appears here with its live
+        // key binding, so a new fold chord like `zm`/`zr` shows up the moment
+        // it is claimed — no per-feature hint wiring, and the bar can never
+        // drift from what actually dispatches. The resolver returns `None`
+        // for elementary keys (list-move, scroll) and for sources rendered
+        // through their own richer path below (YAML actions, shortcuts,
+        // preview) or in the action bar (menus, jump, edit-query).
+        for claim in self.build_claims(view_defs, common_kb, content_kb).claims {
+            let Some(nav) = nav_hint_for_source(&claim.source) else {
+                continue;
+            };
+            if nav.bar != HintBar::Status {
+                continue;
             }
+            let key = claim.key.hint_label(key_icons);
+            if hints.iter().any(|(k, _)| k == &key) {
+                continue;
+            }
+            hints.push((key, nav.label.to_string()));
         }
         for action in self.current_actions(view_defs) {
             if !action.shows_in_action_bar() {
@@ -4946,35 +4955,10 @@ impl ContentPane {
                 hints.push((kb.clone(), "preview".into()));
             }
         }
-        if self.cursor_can_open(view_defs) {
-            if let Some(label) =
-                self.level_hint_label(&ContentAction::Open, content_kb, key_icons, view_defs)
-            {
-                hints.push((label, "open".into()));
-            }
-        }
-        if let Some(info) = self.last_page_info {
-            if info.has_prev {
-                if let Some(label) = self.level_hint_label(
-                    &ContentAction::PrevPage,
-                    content_kb,
-                    key_icons,
-                    view_defs,
-                ) {
-                    hints.push((label, "prev page".into()));
-                }
-            }
-            if info.has_next {
-                if let Some(label) = self.level_hint_label(
-                    &ContentAction::NextPage,
-                    content_kb,
-                    key_icons,
-                    view_defs,
-                ) {
-                    hints.push((label, "next page".into()));
-                }
-            }
-        }
+        // `open` and `prev/next page` are no longer hand-listed here: they are
+        // ContentActions claimed by `build_claims` (Open under `cursor_can_open`,
+        // paging gated on live page info) and so emitted by the claim-derived
+        // loop above.
         hints
     }
 
@@ -5246,6 +5230,19 @@ impl ContentPane {
                     KeySource::Content(ContentAction::TreeCollapse),
                 ));
             }
+            // Fold-all chords `zm`/`zr` (TreeCollapseAll / TreeExpandAll).
+            // These arrive as `z`-prefix chords that the App-level chord
+            // interceptor resolves via `dispatch_content_action`, so they
+            // never reach this pane's dispatch loop — but they belong in the
+            // claim set all the same: it is the single source the status bar
+            // and `yaml_action_chord_prefix` derive from, so a fold chord is
+            // surfaced (and recognised as a chord prefix) automatically,
+            // exactly under the same `tree.is_some()` gate as smart-collapse.
+            for ca in [ContentAction::TreeCollapseAll, ContentAction::TreeExpandAll] {
+                if let Some(b) = content_kb.get(&ca).cloned().and_then(strip_reserved) {
+                    km.push(KeyClaim::handler(b, scope.clone(), KeySource::Content(ca)));
+                }
+            }
         }
 
         // Grouping cycle (M3) — only where the level declares a `group_by`.
@@ -5365,8 +5362,22 @@ impl ContentPane {
             }
         }
 
-        // Pagination — `level_binding` honours per-child overrides.
+        // Pagination — `level_binding` honours per-child overrides. Gated on
+        // the live page info so a claim only exists when paging that way is
+        // actually possible: this is what lets the status bar derive the
+        // `next page` / `prev page` hints straight from the claim set without
+        // re-checking `has_next` / `has_prev` itself. Pressing the key at a
+        // boundary was already a no-op (`*_page_request()` returns `None`);
+        // now the binding simply isn't claimed there.
         for ca in [ContentAction::NextPage, ContentAction::PrevPage] {
+            let can_page = match ca {
+                ContentAction::NextPage => self.last_page_info.is_some_and(|i| i.has_next),
+                ContentAction::PrevPage => self.last_page_info.is_some_and(|i| i.has_prev),
+                _ => unreachable!(),
+            };
+            if !can_page {
+                continue;
+            }
             if let Some(b) = self.level_binding(&ca, content_kb, view_defs) {
                 km.push(KeyClaim::handler(b, scope.clone(), KeySource::Content(ca)));
             }
@@ -8730,6 +8741,7 @@ impl ContentView {
     pub fn status_bar_hints(&self) -> Vec<BarHint> {
         self.active_pane().status_bar_hints(
             &self.view_defs,
+            &self.common_kb,
             &self.content_kb,
             &self.key_icons,
             self.adapter.as_deref(),
@@ -15007,6 +15019,39 @@ mod tests {
         let hints = view.status_bar_hints();
         assert!(hints.iter().any(|(k, v)| v == "back" && k == "⌫"));
         assert!(!hints.iter().any(|(_, v)| v == "open"));
+    }
+
+    #[test]
+    fn status_bar_hints_include_fold_chords_on_tree_pane() {
+        // The regression that motivated the claim-derived bar: `zm`/`zr`
+        // (and backspace smart-collapse) must surface in the status bar on a
+        // tree pane *automatically*, because `build_claims` now claims them
+        // and the bar derives its nav hints from that same claim set — no
+        // hand-listed hint entry.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        assert!(view.active_pane().tree.is_some(), "fixture must be tree mode");
+
+        let hints = view.status_bar_hints();
+        assert!(
+            hints.iter().any(|(k, v)| v == "collapse all" && k == "zm"),
+            "expected [zm] collapse all, got: {hints:?}"
+        );
+        assert!(
+            hints.iter().any(|(k, v)| v == "expand all" && k == "zr"),
+            "expected [zr] expand all, got: {hints:?}"
+        );
+        assert!(
+            hints.iter().any(|(_, v)| v == "collapse"),
+            "expected smart-collapse hint, got: {hints:?}"
+        );
     }
 
     // -- Auth-status banner --

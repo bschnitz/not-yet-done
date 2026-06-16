@@ -116,6 +116,26 @@ beim App-Start auf jeder als View-Config erkannten YAML-Datei (hat
       → `a` bei Comments-Child jetzt mit `id: create_comment`,
       neu testen.
 
+### Status-Bar leitet Nav/Fold-Hints aus den Claims ab
+
+Die Status-Bar zählt `back`/`open`/Paging/Fold-Chords nicht mehr von Hand
+auf, sondern leitet sie aus demselben Claim-Satz ab, den auch der
+Dispatcher nutzt (`ContentPane::build_claims`). Dadurch erscheint jede
+momentan auslösbare Nav/Fold-Action automatisch in der Leiste.
+
+- [ ] **Tasks (A) / Trackings (A) Tree**: die Status-Bar zeigt
+      `[zm] collapse all`, `[zr] expand all` und `[⌫] collapse` — auf
+      jeder Cursor-Tiefe, solange die Ansicht im Tree-Modus ist (war
+      vorher nicht sichtbar).
+- [ ] Auf einem gruppierten Flat-View erscheint zusätzlich
+      `cycle group`; auf einem Tree-View mit `tree_aggregate`-Spalte
+      `aggregate`.
+- [ ] **Paging**: `prev page`/`next page` erscheinen nur, wenn es in die
+      jeweilige Richtung tatsächlich eine Seite gibt (Gate jetzt direkt
+      im Claim, nicht mehr in der Bar).
+- [ ] `open` erscheint nur, wenn die Cursor-Zeile aufklappbar/drillbar
+      ist; `back` nur nach einem Drilldown.
+
 ### Aktiv-Markierung der Action-Bar-Hints
 
 Die obere Action-Bar markiert jeden Shortcut, der gerade _aktiv_
