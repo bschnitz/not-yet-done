@@ -123,11 +123,16 @@ impl ContentAdapter for ConfluenceAdapter {
         let client = self.auth.get_client().await.map_err(other_err)?;
         match classify_id(id) {
             IdKind::Page { head, composite } => {
-                let page = ConfluencePageNode::new(
+                let mut page = ConfluencePageNode::new(
                     Arc::clone(&client),
                     &self.base_url,
                     crate::client::PageMeta {
                         id: head.to_string(),
+                        // Stub title = the page id; `hydrate_from_detail`
+                        // below swaps in the real title so re-resolved nodes
+                        // (notably the post-edit row patch) don't display the
+                        // id. Skipped for composite ids — the child node it
+                        // resolves to carries its own label.
                         title: head.to_string(),
                         page_type: "page".into(),
                         webui: String::new(),
@@ -137,6 +142,7 @@ impl ContentAdapter for ConfluenceAdapter {
                 if composite {
                     page.get_child(id).await
                 } else {
+                    page.hydrate_from_detail().await;
                     Ok(Box::new(page))
                 }
             }

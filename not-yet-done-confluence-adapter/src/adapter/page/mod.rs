@@ -184,6 +184,48 @@ impl ConfluencePageNode {
             .await
     }
 
+    /// Overwrite the bare-id title (and web URL) a [`get_by_id`] stub carries
+    /// with the values just fetched from the server. Split out of
+    /// [`hydrate_from_detail`] so the field-rewrite is unit-testable without
+    /// a live host. A blank `webui` is ignored — the existing URL (or the
+    /// "no link" empty string) stands rather than being clobbered.
+    ///
+    /// [`get_by_id`]: crate::adapter::ConfluenceAdapter::get_by_id
+    fn apply_hydrated_title(&mut self, title: String, webui: &str) {
+        self.page.title = title.clone();
+        if !webui.is_empty() {
+            self.web_url = format!("{}{}", self.base_url.trim_end_matches('/'), webui);
+        }
+        if let Some(field) = self
+            .cached_metadata
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "title")
+        {
+            field.value = title;
+        }
+    }
+
+    /// Replace the bare-id title of a [`get_by_id`]-built stub with the real
+    /// page title fetched from the server. `get_by_id` is the TUI's
+    /// action-target re-resolver, and the post-edit row patch
+    /// (`patch_content_row` → `ContentView::patch_row`) re-fetches the node
+    /// through it and copies `label()` onto the row. Without hydration that
+    /// label is the page **id** — so after editing a page the tree row showed
+    /// the id until a full reload (the listing's title is discarded on the id
+    /// round-trip). Reuses the `detail` `OnceCell`, so a follow-up
+    /// `prepare_edit`/`read` on the same node does not fetch again. A failed
+    /// fetch leaves the stub untouched (degrades to the id, never panics).
+    ///
+    /// [`get_by_id`]: crate::adapter::ConfluenceAdapter::get_by_id
+    pub(super) async fn hydrate_from_detail(&mut self) {
+        let (title, webui) = match self.detail().await {
+            Ok(detail) => (detail.title.clone(), detail.webui.clone()),
+            Err(_) => return,
+        };
+        self.apply_hydrated_title(title, &webui);
+    }
+
     /// Inner page-listing path — split out of `Node::list` so the
     /// node-type-routing in `list()` stays readable. Always queries
     /// `/content/{id}/child/page` for the direct children of this page.
@@ -745,6 +787,59 @@ mod tests {
             page,
         );
         assert!(node.web_url.is_empty());
+    }
+
+    #[test]
+    fn apply_hydrated_title_replaces_stub_id_in_label_and_metadata() {
+        // The stub a `get_by_id` page resolution builds: title == id, no link.
+        // `hydrate_from_detail` feeds the server's real title through
+        // `apply_hydrated_title`; the row patch reads `label()`, so the fix is
+        // that label/metadata/web_url all reflect the real page, not the id.
+        let stub = PageMeta {
+            id: "12345".into(),
+            title: "12345".into(),
+            page_type: "page".into(),
+            webui: String::new(),
+            has_children: None,
+        };
+        let mut node = ConfluencePageNode::new(
+            synthetic_client(),
+            "https://wiki.example.invalid/confluence",
+            stub,
+        );
+        assert_eq!(node.label(), "12345", "starts as the bare-id stub");
+
+        node.apply_hydrated_title(
+            "Real Page Title".into(),
+            "/spaces/DEMO/pages/12345/Real",
+        );
+
+        assert_eq!(node.label(), "Real Page Title");
+        let title_field = node
+            .metadata()
+            .fields
+            .iter()
+            .find(|f| f.key == "title")
+            .expect("title field");
+        assert_eq!(title_field.value, "Real Page Title");
+        assert_eq!(
+            node.web_url,
+            "https://wiki.example.invalid/confluence/spaces/DEMO/pages/12345/Real"
+        );
+    }
+
+    #[test]
+    fn apply_hydrated_title_keeps_existing_url_when_webui_blank() {
+        // A blank webui (server omitted the link) must not wipe a web_url.
+        let mut node = ConfluencePageNode::new(
+            synthetic_client(),
+            "https://wiki.example.invalid/confluence",
+            sample_page(),
+        );
+        let original_url = node.web_url.clone();
+        node.apply_hydrated_title("Renamed".into(), "");
+        assert_eq!(node.label(), "Renamed");
+        assert_eq!(node.web_url, original_url, "blank webui leaves URL intact");
     }
 
     #[test]
