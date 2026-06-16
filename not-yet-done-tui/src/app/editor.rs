@@ -767,6 +767,12 @@ impl App {
                 self.notify(message);
                 self.reload_content_pane_current_level(view_index, pane_id);
             }
+            FollowUp::ReloadContentPaneForTag { view_index, pane_id, message } => {
+                // A tag create/edit committed from a content tab (`type: tag`);
+                // reload the originating pane so its tag columns re-render.
+                self.notify(message);
+                self.reload_content_pane_current_level(view_index, pane_id);
+            }
             FollowUp::ApplyTaskFilter { content } => {
                 self.apply_query_filter(&content);
             }

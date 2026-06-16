@@ -715,6 +715,12 @@ pub struct App {
     /// opens; the inner `popup` toggles per session.
     pub tag_menu: crate::components::tag_menu::TagMenuComponent,
 
+    /// When the tag menu was opened from a content/adapter tab (a
+    /// `type: tag` action), the task + pane it operates on. `None` on the
+    /// native Tasks tab, where assignment falls back to `tasks_view`. Set
+    /// by [`App::open_tag_menu_for_content`].
+    pub content_tag_target: Option<crate::app::tag_menu::ContentTagTarget>,
+
     /// App-level script management menu (`:script`, also bound to `x`
     /// in the Trackings tab and to per-view `type: script` actions in
     /// content tabs). One menu, multiple contexts — the per-context
@@ -985,6 +991,7 @@ impl App {
                 "Tags",
             )
             .with_popup_kb(popup_kb.clone(), popup_icons.clone()),
+            content_tag_target: None,
             script_menu: crate::components::script_menu::ScriptMenuComponent::new(
                 Arc::clone(&shared_theme),
                 "Scripts",
@@ -7050,6 +7057,13 @@ impl App {
             }
             ViewRequest::OpenScriptMenuForTasks => {
                 self.open_script_menu_for_tasks();
+                EditorRequest::None
+            }
+            ViewRequest::OpenTagMenuForNode {
+                view_index,
+                pane_id,
+            } => {
+                self.open_tag_menu_for_content(view_index, pane_id);
                 EditorRequest::None
             }
             _ => EditorRequest::None,

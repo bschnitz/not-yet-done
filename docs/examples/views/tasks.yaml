@@ -278,6 +278,17 @@ views:
         id: add-sibling
         under_selection: true
         inherit: true
+      # Open the global tag-management menu pinned to the selected task
+      # (`type: tag` → the App's `:tag` menu). Enter toggles a tag on/off,
+      # typing a name + Enter creates and assigns it, ctrl+e edits a tag's
+      # YAML form (symbol/name/color), ctrl+d deletes one. The task's
+      # `tag_symbols` / `tag_names` columns refresh after every change.
+      # `T` (shift+t) — `t` is the tree-view subtab key. `inherit: true`
+      # so it works at every subtask depth.
+      - name: tags
+        key: T
+        type: tag
+        inherit: true
       # Local filter-while-typing over the loaded rows. NOT inheritable —
       # the validator restricts fuzzy_filter to the tree root.
       - name: fuzzy filter
@@ -438,6 +449,11 @@ views:
         type: create
         id: add-sibling
         under_selection: true
+      # Tag-management menu for the selected task (see the tree view's
+      # `tags` action). `T` (shift+t).
+      - name: tags
+        key: T
+        type: tag
       - name: script
         key: x
         type: script

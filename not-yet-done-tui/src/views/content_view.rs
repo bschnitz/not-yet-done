@@ -5920,6 +5920,12 @@ impl ContentPane {
                     ),
                 });
             }
+            "tag" => {
+                return SubViewMessage::Request(ViewRequest::OpenTagMenuForNode {
+                    view_index,
+                    pane_id,
+                });
+            }
             "invalidate_session" => {
                 return SubViewMessage::Request(ViewRequest::InvalidateContentSession {
                     view_index,
