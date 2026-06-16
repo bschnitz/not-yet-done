@@ -259,6 +259,16 @@ pub enum ViewRequest {
         view_index: usize,
         pane_id: PaneId,
     },
+    /// Drive the pane's one-shot auto-expand cascade now. Raised by
+    /// `content.tree_expand_all` (`zr`) after it arms the pane's
+    /// unbounded-depth override: the App calls [`App::drive_tree_auto_expand`]
+    /// (the same entry point a fresh tree load uses), which pumps
+    /// `pending_auto_expand_requests` and dispatches the resulting
+    /// `ExpandTreeNode` loads.
+    DriveTreeAutoExpand {
+        view_index: usize,
+        pane_id: PaneId,
+    },
     /// Open editor for the content view's query (JQL etc.).
     /// If `save_name` is set, the query will be saved to DB under that name after editing.
     /// `is_new` triggers the shortcut prompt after save (only on creation, not edit).

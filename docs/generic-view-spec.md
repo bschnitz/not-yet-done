@@ -742,6 +742,32 @@ den zugeklappten Elternknoten.
 - **Nur im Tree.** In Flat-Listen gibt es keinen Einklapp-Zustand; dort ist
   `collapsed_source` inert und die Spalte zeigt immer ihr `source:`/`key:`-Feld.
 
+#### `hidden:` — Spalte per default ausgeblendet, aber konfigurierbar
+
+```yaml
+columns:
+  - { key: description, source: label, sizing: fit }
+  - { key: tag_names, label: Tags, hidden: true } # da, aber nicht gezeigt
+```
+
+Eine Spalte mit `hidden: true` ist Teil der Spaltenliste des Levels, wird aber
+im **Default-Layout nicht gerendert**. Sie taucht im `c`-Spalten-Konfig-Popup
+als verfügbare, **nicht angehakte** Zeile auf — der User kann sie dort
+einblenden. Genau dafür gibt es das Flag: gelegentlich nützliche, aber das
+Standard-Layout zumüllende Spalten (z. B. `tag_names` im Tasks-Tree, das die
+ausgeschriebenen Tag-Namen neben der kompakten Symbol-Spalte zeigt) sollen
+abrufbar sein, ohne immer Platz zu kosten.
+
+- **Default vs. Override.** `hidden:` wirkt nur, solange für das Level **kein**
+  Spalten-Override gesetzt ist. Sobald der User im Popup etwas an-/abwählt,
+  zählt ausschließlich seine Auswahl (ein eingeblendetes `hidden`-Feld bleibt
+  dann sichtbar). Wählt er exakt den Default-Sichtbar-Satz wieder an (versteckte
+  Spalten aus), wird der Override **gelöscht** — sauberer Reset.
+- **Die `tree_label`-Spalte ignoriert `hidden:`** — sie trägt den Baum und ist
+  nie ausblendbar.
+- **Rein additiv.** Default `false`; bestehende Views ohne `hidden:` sind
+  unverändert.
+
 #### `tree_connector_style:` — Farbe der Connector-Glyphen pro Tree
 
 Im Tree-Mode malt die `tree_label`-Spalte vor das Label einen **Connector-Lauf**:
@@ -887,6 +913,17 @@ Zeilen mit Tiefe `< expand_depth` automatisch auf — `2` zeigt also drei Ebenen
   ist, deaktiviert sich die Kaskade — manuelles Auf-/Zuklappen wird danach
   nie überschrieben. Eine neue Saved-Query startet die Kaskade auf dem
   gefilterten Tree erneut.
+- **Laufzeit-Chords `zm` / `zr`:** In einem Tree-Pane klappt
+  `tree_collapse_all` (Default `zm`) auf genau diese konfigurierte
+  Initialtiefe zurück — ein aufgeklappter Pfad bleibt nur, solange seine
+  Tiefe `< expand_depth` ist; tiefere manuelle Expansionen fallen weg
+  (`expand_depth: 0`/weggelassen → zurück auf die Wurzeln, bisheriges
+  Verhalten). `tree_expand_all` (Default `zr`) ist der Gegenpart: es schärft
+  dieselbe Kaskade mit unbegrenzter Zieltiefe und klappt den ganzen Baum
+  auf, lazy nachladend wie bei `expand_depth: all`. Geladene Children bleiben
+  in beiden Fällen im Cache, ein erneutes Auf-/Zuklappen ist also billig.
+  Beide Chords sind nur auf Tree-Panes registriert (Wurzel-`ViewDef` mit
+  `tree_label`).
 - **`expand_depth: all`:** keine Tiefen-Obergrenze — die Kaskade läuft, bis
   eine Runde nichts Aufklappbares mehr findet. Für kleine In-Memory-Trees
   gedacht, die immer komplett offen sein sollen (z. B. der Trackings-Tree,

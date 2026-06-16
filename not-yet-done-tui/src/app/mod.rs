@@ -6661,6 +6661,15 @@ impl App {
                 self.spawn_subtree_load(view_index, pane_id, u32::MAX);
                 EditorRequest::None
             }
+            ViewRequest::DriveTreeAutoExpand {
+                view_index,
+                pane_id,
+            } => {
+                // `zr` armed the pane's unbounded-depth override; pump the
+                // same cascade a fresh load uses so every node unfolds.
+                self.drive_tree_auto_expand(view_index, pane_id);
+                EditorRequest::None
+            }
             ViewRequest::ExpandTreeNodeMulti {
                 view_index,
                 pane_id,
