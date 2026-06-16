@@ -1694,6 +1694,7 @@ Die View-YAML kennt folgende generische Action-Typen:
 | `navigate`     | In Kind-Node-Ebene wechseln                      | ❌         |
 | `open_url`     | URL aus Metadata im Browser öffnen               | ❌         |
 | `download`     | `node.content().read()` → in Datei speichern     | ❌         |
+| `script`       | Externes Script mit Node-JSON auf stdin starten  | ❌         |
 | `custom`       | Adapter-spezifische Aktion (via `custom_action`) | ❌         |
 | `delete`       | Node löschen (mit Bestätigung)                   | ❌         |
 
@@ -1814,6 +1815,52 @@ wird einzeln gematcht; die getroffenen Zeichen-Indizes werden vereinigt und
 zu zusammenhängenden Bereichen verschmolzen. Matcht ein Token nicht im
 Label/in der Spalte (die Zeile überlebte den Filter über ein anderes Feld),
 bleibt dort nichts markiert.
+
+### Script Actions (`type: script`)
+
+```yaml
+actions:
+  - name: script
+    key: x
+    type: script # öffnet das Script-Menü; Scripts liegen unter
+    #   <data>/not_yet_done/scripts/<tab>/<view-node-type…>/
+```
+
+Eine `script`-Action sammelt die Scripts aus dem für Tab + View-Ebene
+konventionellen Verzeichnis und übergibt sie als Auswahlmenü. Das gewählte
+Script wird als Fremdprozess gestartet und bekommt ein **JSON auf stdin**.
+Mutierende Scripts (non-interactive) lösen danach einen Pane-Reload aus.
+
+**`scope:` — was das Script auf stdin bekommt.** Default ist `node`:
+
+```yaml
+- { name: script, key: x, type: script } # scope: node (default)
+```
+
+| `scope`        | stdin-JSON                                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — der **eine** selektierte Knoten                                                               |
+| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **alle** aktuell gefilterten Zeilen-IDs + die Datumsgrenzen der aktiven Query |
+
+```yaml
+- { name: script, key: x, type: script, scope: filtered_set }
+```
+
+`scope: filtered_set` ist für **Batch-/Aggregat-Scripts** gedacht, die über
+die ganze sichtbare Liste laufen (z. B. ein Stundenreport über den gefilterten
+Zeitraum). Die Engine sammelt:
+
+- **`tracking_ids`** — alle IDs, die der User gerade sieht: bei aktivem
+  Fuzzy-Filter exakt die Treffermenge, sonst die komplette query-gefilterte
+  Liste der Pane.
+- **`filter_min_date` / `filter_max_date`** — die Datums-Untergrenze/-Obergrenze
+  der aktiven gespeicherten Query (relative Angaben wie `last month` sind zum
+  Lauf-Zeitpunkt aufgelöst, RFC3339; ohne Grenze `null`).
+
+Der stdin-Schlüssel heißt aus Backcompat-Gründen `tracking_ids` — der
+Engine-Pfad selbst ist generisch, sodass die historischen Trackings-Scripts
+(`daily_report.py`, `hours_report.py`, …) unverändert über den
+Adapter-Tab laufen.
 
 ### Custom Actions
 

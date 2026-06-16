@@ -6997,8 +6997,13 @@ impl App {
             ViewRequest::OpenScriptMenuForNode {
                 view_index,
                 pane_id,
+                batch,
             } => {
-                self.open_script_menu_for_content(view_index, pane_id);
+                if batch {
+                    self.open_script_menu_for_content_batch(view_index, pane_id);
+                } else {
+                    self.open_script_menu_for_content(view_index, pane_id);
+                }
                 EditorRequest::None
             }
             ViewRequest::OpenScriptMenuForTasks => {
@@ -7044,8 +7049,13 @@ impl App {
             ViewRequest::OpenScriptMenuForNode {
                 view_index,
                 pane_id,
+                batch,
             } => {
-                self.open_script_menu_for_content(view_index, pane_id);
+                if batch {
+                    self.open_script_menu_for_content_batch(view_index, pane_id);
+                } else {
+                    self.open_script_menu_for_content(view_index, pane_id);
+                }
                 EditorRequest::None
             }
             ViewRequest::OpenTrackingGroupPopup => {

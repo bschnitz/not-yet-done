@@ -120,6 +120,10 @@ pub enum ViewRequest {
     OpenScriptMenuForNode {
         view_index: usize,
         pane_id: PaneId,
+        /// `true` when the triggering action declared `scope: filtered_set`:
+        /// hand the whole filtered row set + date bounds to the script
+        /// (batch payload) instead of the single selected node.
+        batch: bool,
     },
     /// Open the `:script` fuzzy menu seeded with the selected task.
     /// App reads the selection from `tasks_view.selected_id()` and
