@@ -3577,6 +3577,27 @@ impl ContentPane {
         self.items.get(item_idx).map(|item| item.id.as_str())
     }
 
+    /// Ids of every currently-visible (filtered) row, in display order.
+    /// Drives `scope: filtered_set` batch scripts. When a fuzzy filter is
+    /// active the set follows `filtered_indices`; otherwise it's the whole
+    /// loaded list. Flat-list oriented — batch scope is only configured on
+    /// flat views, so the depth-0 `items` set is exactly the right one.
+    pub fn filtered_item_ids(&self) -> Vec<String> {
+        if self.table.fuzzy_active {
+            // Fuzzy filter narrows the visible set — follow it exactly (an
+            // empty match set yields an empty id list, as the user sees).
+            self.filtered_indices
+                .iter()
+                .filter_map(|&i| self.items.get(i))
+                .map(|item| item.id.clone())
+                .collect()
+        } else {
+            // No local filter: the whole loaded list is the query-filtered
+            // (e.g. date-bounded) set.
+            self.items.iter().map(|item| item.id.clone()).collect()
+        }
+    }
+
     /// CF-11: companion of [`Self::selected_item_id`] returning the row's
     /// human-readable label (the `NodeSummary.label` set by the adapter).
     /// Used by generic confirm popups where the id alone (e.g. a numeric
@@ -5824,6 +5845,10 @@ impl ContentPane {
                 return SubViewMessage::Request(ViewRequest::OpenScriptMenuForNode {
                     view_index,
                     pane_id,
+                    batch: matches!(
+                        action.script_scope,
+                        crate::config::view_config::ScriptScope::FilteredSet
+                    ),
                 });
             }
             "invalidate_session" => {
@@ -10730,6 +10755,7 @@ mod tests {
                     under_selection: false,
                     commit_on_save: false,
                     inherit: false,
+                    script_scope: Default::default(),
                 }],
                 children: vec![ChildDef {
                     row_layout: None,
@@ -10900,6 +10926,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         // `a` begins the `al` chord → detected as a prefix …
         assert!(view.yaml_action_chord_prefix("a"));
@@ -12223,6 +12250,39 @@ mod tests {
     }
 
     #[test]
+    fn filtered_item_ids_follows_fuzzy_filter() {
+        // `scope: filtered_set` batch scripts hand over exactly what the user
+        // sees: the whole loaded (query-filtered) list when no fuzzy filter is
+        // active, the matched subset when it is — empty matches yield no ids.
+        let config = uniform_recursive_config();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        pane.items = vec![
+            tnode_val("a", "Alpha", "1"),
+            tnode_val("b", "Beta", "2"),
+            tnode_val("c", "Gamma", "3"),
+        ];
+
+        pane.table.fuzzy_active = false;
+        assert_eq!(
+            pane.filtered_item_ids(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+
+        pane.table.fuzzy_active = true;
+        pane.filtered_indices = vec![0, 2];
+        assert_eq!(
+            pane.filtered_item_ids(),
+            vec!["a".to_string(), "c".to_string()],
+        );
+
+        pane.filtered_indices = vec![];
+        assert!(pane.filtered_item_ids().is_empty());
+    }
+
+    #[test]
     fn tree_label_cell_carries_connector_style_span() {
         // The connector run (box glyphs + expand arrow) of a tree-label cell
         // is tagged with `TREE_CONNECTOR_STYLE_ID` via a `StyledSpan`, so the
@@ -13232,6 +13292,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -13791,6 +13852,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
@@ -13810,6 +13872,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
@@ -13828,6 +13891,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         config
     }
@@ -13913,6 +13977,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
@@ -13937,6 +14002,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
@@ -13954,6 +14020,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -14666,6 +14733,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -14698,6 +14766,7 @@ mod tests {
             under_selection: true,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let issues = mock_issues();
@@ -14736,6 +14805,7 @@ mod tests {
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -14936,6 +15006,7 @@ mod tests {
                 under_selection: false,
                 commit_on_save: false,
                 inherit: false,
+                script_scope: Default::default(),
             });
         }
         config
@@ -17453,6 +17524,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     under_selection: false,
                     commit_on_save: false,
                     inherit: false,
+                    script_scope: Default::default(),
                 },
                 ActionDef {
                     name: "refresh".to_string(),
@@ -17470,6 +17542,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     under_selection: false,
                     commit_on_save: false,
                     inherit: false,
+                    script_scope: Default::default(),
                 },
             ],
             children: vec![],

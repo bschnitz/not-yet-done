@@ -1391,6 +1391,24 @@ fn default_ratio() -> u16 {
 // Actions
 // ---------------------------------------------------------------------------
 
+/// What a `type: script` action hands to the chosen script.
+///
+/// The default ([`ScriptScope::Node`]) passes the single selected row as the
+/// uniform `{"node": …}` payload. [`ScriptScope::FilteredSet`] instead passes
+/// the **whole currently-filtered row set plus the active query's date bounds**
+/// as the legacy batch payload `{"tracking_ids": […], "filter_min_date": …,
+/// "filter_max_date": …}` — for aggregate scripts (daily reports, period
+/// equalizers) that operate over the entire filtered list, not one row. The
+/// `tracking_ids` key is retained verbatim so the historical scripts run
+/// unchanged; the mechanism itself is adapter-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptScope {
+    #[default]
+    Node,
+    FilteredSet,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionDef {
@@ -1477,6 +1495,12 @@ pub struct ActionDef {
     /// at the tree root and already apply tree-wide. Default `false`.
     #[serde(default)]
     pub inherit: bool,
+    /// For `type: script` actions: which payload the script receives.
+    /// `node` (default) hands over the single selected row; `filtered_set`
+    /// hands over the whole filtered row set + the active query's date
+    /// bounds (see [`ScriptScope`]). Ignored by non-script actions.
+    #[serde(default, rename = "scope")]
+    pub script_scope: ScriptScope,
 }
 
 impl ActionDef {
@@ -2020,6 +2044,7 @@ views:
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         };
         // Modal/persistent state actions → action bar
         assert!(make("edit").shows_in_action_bar());
@@ -2056,6 +2081,7 @@ views:
             under_selection: false,
             commit_on_save: false,
             inherit: false,
+            script_scope: Default::default(),
         };
         assert!(!action.shows_in_action_bar());
     }

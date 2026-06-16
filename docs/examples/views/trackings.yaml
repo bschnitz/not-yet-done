@@ -174,11 +174,18 @@ views:
         type: fuzzy_filter
         fuzzy_filter:
           fields: [task, taskpath]
-      # Run a script against the selected tracking (generic `:script` menu;
-      # scripts live under `<data>/not_yet_done/scripts/trackings/tracking_entry/`).
+      # Run a script over the whole filtered tracking set (generic `:script`
+      # menu). `scope: filtered_set` hands the script the legacy batch payload
+      # `{"tracking_ids": [<all filtered rows>], "filter_min_date": …,
+      # "filter_max_date": …}` (date bounds taken from the active query, with
+      # relative dates like `last month` already resolved) instead of the
+      # single selected row — so the aggregate Trackings scripts (daily report,
+      # period equalizer) run unchanged. Scripts live under
+      # `<data>/not_yet_done/scripts/trackings/tracking_entry/`.
       - name: script
         key: x
         type: script
+        scope: filtered_set
       - name: refresh
         key: r
         type: reload

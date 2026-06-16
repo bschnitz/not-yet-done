@@ -242,6 +242,20 @@ fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
       einer View-YAML → drücken von `x` triggert das Menü; ohne
       diesen Eintrag passiert auf `x` nichts (kein globaler Default
       auf Content-Tabs)
+- [ ] **Batch-Scope (`scope: filtered_set`)** — Trackings (A), flache
+      `trackings`-View (`x` mit `scope: filtered_set`): Run eines Scripts
+      liefert JSON `{"tracking_ids": […], "filter_min_date": …,
+"filter_max_date": …}` (NICHT `{"node": …}`) — exakt die Legacy-Form, die
+      `daily_report.py` / `hours_report.py` / `equalize_trackings.py`
+      erwarten; die migrierten Scripts unter
+      `<data>/not_yet_done/scripts/trackings/tracking_entry/` laufen
+      unverändert.
+- [ ] Batch-Scope, `tracking_ids` folgt dem Sichtbaren: ohne Fuzzy-Filter
+      = alle Zeilen der aktiven Query; mit aktivem Fuzzy-Filter (`f`) =
+      exakt die Treffermenge.
+- [ ] Batch-Scope, Datumsgrenzen: aktive Query `started_at gt last month`
+      → `filter_min_date` ist der aufgelöste Monatsanfang (RFC3339),
+      `filter_max_date` ist `null` (keine Obergrenze).
 - [ ] Interactive-Skript mit `{json_file}` Placeholder im
       `interactive_command` → wird von beiden Pfaden (Trackings +
       Content) bedient (alter `{tracking_json_file}` ist
