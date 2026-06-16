@@ -3466,8 +3466,13 @@ impl ContentPane {
         }
         // Pull globally-scoped action types from other chain levels.
         // Validator already warns about multi-level definition, so a
-        // first-seen wins approach is enough.
-        const GLOBAL: &[&str] = &["fuzzy_filter", "search", "text_search"];
+        // first-seen wins approach is enough. `tree_find` belongs here
+        // with the rest of the search family: the user expects `/` to
+        // open the tree search from any cursor depth (the search already
+        // spans the whole forest, not the cursor subtree), but tasks.yaml
+        // declares it only on the root ViewDef — without this it would
+        // dispatch only while the cursor sits on a top-level node.
+        const GLOBAL: &[&str] = &["fuzzy_filter", "search", "text_search", "tree_find"];
         for depth in 0..32 {
             if depth == active_depth {
                 continue;
@@ -13993,6 +13998,26 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
         });
+        // Root view: tree_find (`/`). Like fuzzy_filter it is declared only
+        // here yet must reach every cursor depth (it is in the GLOBAL set).
+        config.views[0].actions.push(ActionDef {
+            name: "treefind".into(),
+            key: "/".into(),
+            action_type: "tree_find".into(),
+            id: None,
+            node_id_from: None,
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            tree_find: Some(crate::config::view_config::TreeFindActionConfig { prompt: None }),
+            hide_from_bar: false,
+            editor: None,
+            under_selection: false,
+            commit_on_save: false,
+            inherit: false,
+            script_scope: Default::default(),
+        });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
             name: "inspect".into(),
@@ -14038,7 +14063,7 @@ mod tests {
         // Cursor on db1 (depth 0).
         let actions = view.active_pane().current_actions(&view.view_defs);
         let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["edit", "filter"]);
+        assert_eq!(names, vec!["edit", "filter", "treefind"]);
     }
 
     #[test]
@@ -14056,7 +14081,7 @@ mod tests {
         let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["edit", "filter"],
+            vec!["edit", "filter", "treefind"],
             "empty tree must still expose the root level's actions"
         );
     }
@@ -14070,9 +14095,11 @@ mod tests {
 
         let actions = view.active_pane().current_actions(&view.view_defs);
         let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
-        // depth-1 own action first, root global fuzzy_filter appended.
-        // root `edit` is not global → stays hidden at depth 1.
-        assert_eq!(names, vec!["inspect", "filter"]);
+        // depth-1 own action first, then the root globals (fuzzy_filter +
+        // tree_find) appended. root `edit` is not global → stays hidden at
+        // depth 1. The `treefind` entry is the regression guard: before the
+        // fix `/` dispatched only on a top-level node.
+        assert_eq!(names, vec!["inspect", "filter", "treefind"]);
     }
 
     #[test]
