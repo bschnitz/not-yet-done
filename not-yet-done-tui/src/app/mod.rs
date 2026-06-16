@@ -1476,7 +1476,19 @@ impl App {
                 .map(|cv| cv.all_pane_ids())
                 .unwrap_or_default();
             for pid in panes {
-                self.spawn_now_bucket_reload(view_index, pid);
+                if self.pane_is_grouped_eager_tree(view_index, pid) {
+                    self.spawn_now_bucket_reload(view_index, pid);
+                } else {
+                    // Flat / grouped-but-not-tree / condensed pane: a
+                    // now-anchored shift can *add or drop a row* (a freshly
+                    // started tracking appears, a deleted one vanishes) and
+                    // move group totals — none of which a row patch or a
+                    // localized bucket reload can express. Reload the pane
+                    // at its current level so the new row shows up (the bug
+                    // where a tracking started elsewhere was missing from
+                    // the flat Trackings tab until a manual `r`).
+                    self.reload_content_pane_current_level(view_index, pid);
+                }
             }
             return;
         }
@@ -1723,6 +1735,27 @@ impl App {
     /// re-folded subtree, and lands them via [`LoadMsg::NowBucketReload`] →
     /// [`ContentView::reload_now_bucket`]. Folds ONE bucket instead of the
     /// per-bucket fold a whole-forest reload would run for every group.
+    /// Whether `pane` is a *grouped eager tree* — the only pane shape
+    /// [`spawn_now_bucket_reload`] can localize (it needs both an active
+    /// `group_by` and an eager subtree depth). Mirrors the early-return
+    /// guards there so [`handle_adapter_invalidation`] can pick the
+    /// localized bucket reload for trees and a full reload for every other
+    /// shape on [`Invalidation::NowAnchored`].
+    fn pane_is_grouped_eager_tree(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) -> bool {
+        let Some(cv) = self.content_view(view_index) else {
+            return false;
+        };
+        let Some(pane) = cv.find_pane(pane_id) else {
+            return false;
+        };
+        pane.adapter_group_spec(&cv.view_defs).is_some()
+            && pane.eager_subtree_depth(&cv.view_defs).is_some()
+    }
+
     pub fn spawn_now_bucket_reload(
         &self,
         view_index: usize,

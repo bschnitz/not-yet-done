@@ -346,6 +346,30 @@ impl ForestSnapshot {
         out
     }
 
+    /// The task's own refreshed summary plus one for **every ancestor**.
+    ///
+    /// A tracking start/stop flips not only the task's own `⏱` marker but
+    /// the `tracking_rollup` of each ancestor (a *collapsed* ancestor shows
+    /// the rollup via `collapsed_source`). Patching only the toggled row
+    /// leaves a collapsed parent of a now-stopped task wearing a stale
+    /// marker — exactly the bug seen when starting a task elsewhere stops a
+    /// tracking buried in a collapsed subtree. Patching the whole chain
+    /// refreshes each ancestor's marker; rows not currently visible are
+    /// ignored by `patch_row`, so over-reporting is harmless.
+    fn summary_with_ancestors(&self, id: Uuid) -> Vec<NodeSummary> {
+        let mut out = Vec::new();
+        if let Some(row) = self.by_id.get(&id) {
+            out.push(self.summary(id, row, None));
+        }
+        let mut cur = self.by_id.get(&id).and_then(|r| r.parent);
+        while let Some(pid) = cur {
+            let Some(row) = self.by_id.get(&pid) else { break };
+            out.push(self.summary(pid, row, None));
+            cur = row.parent;
+        }
+        out
+    }
+
     /// Root→parent ancestor chain (exclusive of the task itself) as a
     /// JSON array string of `{"id", "description"}` objects — the
     /// `ancestors` metadata field. Scripts parse it to reconstruct the
@@ -1509,13 +1533,16 @@ fn leaf_subtree(items: Vec<NodeSummary>) -> Subtree {
 ///   1 Hz heartbeat (that repaint belongs to the TrackingAdapter, A2).
 /// - `TaskChanged { id }` → clear + [`Invalidation::Node`] (refetch that
 ///   subtree).
-/// - `TrackingStarted`/`Stopped` → only the task's `⏱` tracking marker
-///   flips; the forest shape is unchanged. Reload the snapshot (so the
-///   `tracked` set is fresh) and **patch that one task row in place** (M9,
-///   [`publish_row_patches`]) instead of [`Invalidation::All`], so a deep,
-///   fully-expanded task tree never rebuilds on a `t` toggle. (Under an
-///   active saved-query filter the patched `has_children` is recomputed
-///   unfiltered — a harmless edge until the next `r`.)
+/// - `TrackingStarted`/`Stopped` → the task's `⏱` tracking marker (and the
+///   subtree-rollup marker of each ancestor) flips; the forest shape is
+///   unchanged. Reload the snapshot (so the `tracked`/`tracked_subtree`
+///   sets are fresh) and **patch that task row plus its ancestor chain in
+///   place** (M9, [`publish_row_patches`], [`summary_with_ancestors`])
+///   instead of [`Invalidation::All`], so a deep, fully-expanded task tree
+///   never rebuilds on a `t` toggle — yet a collapsed ancestor's rollup
+///   marker still clears when the tracking under it stops. (Under an active
+///   saved-query filter the patched `has_children` is recomputed unfiltered
+///   — a harmless edge until the next `r`.)
 /// - `TrackingChanged` → a tracking was deleted/restored; keep the coarse
 ///   clear + `All`.
 fn spawn_task_bridge(
@@ -1538,9 +1565,11 @@ fn spawn_task_bridge(
                     match ForestSnapshot::load(&handle).await {
                         Ok(snap) => {
                             *snapshot.write().await = Some(snap.clone());
-                            if let Some(row) = snap.by_id.get(&task_id) {
-                                publish_row_patches(&inv_tx, [snap.summary(task_id, row, None)]);
-                            }
+                            // Patch the toggled task *and its ancestors* — a
+                            // collapsed parent shows the subtree rollup
+                            // marker, which also flips when a descendant's
+                            // tracking starts/stops.
+                            publish_row_patches(&inv_tx, snap.summary_with_ancestors(task_id));
                         }
                         // Couldn't refresh in place — fall back to a full reload.
                         Err(_) => {
@@ -1822,6 +1851,58 @@ mod tests {
         // … but an untracked sibling branch is not.
         assert!(!subtree.contains(&sibling));
         assert_eq!(subtree.len(), 3);
+    }
+
+    #[test]
+    fn summary_with_ancestors_patches_self_and_chain_not_siblings() {
+        let root = Uuid::from_u128(1);
+        let mid = Uuid::from_u128(2);
+        let leaf = Uuid::from_u128(3);
+        let sibling = Uuid::from_u128(4); // untracked branch off root
+        let mut by_id = HashMap::new();
+        let mut children: HashMap<Option<Uuid>, Vec<Uuid>> = HashMap::new();
+        for (id, r) in [
+            row(root, "Root", None),
+            row(mid, "Mid", Some(root)),
+            row(leaf, "Leaf", Some(mid)),
+            row(sibling, "Sibling", Some(root)),
+        ] {
+            children.entry(r.parent).or_default().push(id);
+            by_id.insert(id, r);
+        }
+        let tracked: HashSet<Uuid> = [leaf].into_iter().collect();
+        let tracked_subtree = fold_tracked_subtree(&tracked, &by_id);
+        let snap = ForestSnapshot {
+            by_id,
+            children,
+            tracked,
+            tracked_subtree,
+        };
+
+        let rollup = |s: &NodeSummary| {
+            s.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == "tracking_rollup")
+                .map(|f| f.value.clone())
+                .unwrap_or_default()
+        };
+
+        // The toggled leaf and every ancestor are returned, root→… order
+        // unimportant — what matters is the set and that each carries the
+        // roll-up marker so a collapsed ancestor repaints.
+        let patches = snap.summary_with_ancestors(leaf);
+        let ids: HashSet<String> = patches.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&leaf.to_string()));
+        assert!(ids.contains(&mid.to_string()));
+        assert!(ids.contains(&root.to_string()));
+        // The untracked sibling branch is never patched.
+        assert!(!ids.contains(&sibling.to_string()));
+        // Every patched row in the tracked chain lights the roll-up marker.
+        for s in &patches {
+            assert_eq!(rollup(s), "⏱", "row {} should carry the rollup", s.id);
+        }
     }
 
     #[test]
