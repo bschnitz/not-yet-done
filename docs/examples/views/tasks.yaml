@@ -180,11 +180,19 @@ views:
         # collapsed parent still surfaces. Inert on expanded nodes, leaves,
         # and the flat list (they show their own `tracking`).
         collapsed_source: tracking_rollup
-      # Tag symbols (icons only); `tag_names` ships hidden in native, omitted.
+      # Tag symbols (icons only).
       - key: tag_symbols
         label: T
         style: accent
         sizing: max
+      # Full tag names; `hidden: true` keeps them out of the default layout
+      # (native parity — symbols only), but the `c` column-config popup can
+      # turn the column on per pane. See `hidden:` in generic-view-spec.md.
+      - key: tag_names
+        label: Tags
+        style: text_med
+        sizing: max
+        hidden: true
       - key: description
         label: Task
         source: label
@@ -371,6 +379,12 @@ views:
         label: T
         style: accent
         sizing: max
+      # Hidden by default (native parity); enable per pane via the `c` popup.
+      - key: tag_names
+        label: Tags
+        style: text_med
+        sizing: max
+        hidden: true
       - key: description
         label: Task
         source: label

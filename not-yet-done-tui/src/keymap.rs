@@ -620,6 +620,13 @@ fn push_leaf_content_keys(
                 KeySource::Content(ContentAction::TreeCollapseAll),
             ));
         }
+        if let Some(b) = kb.content.get(&ContentAction::TreeExpandAll) {
+            km.push(KeyClaim::handler(
+                b.clone(),
+                KeyScope::Pane(tab.clone(), profile.clone()),
+                KeySource::Content(ContentAction::TreeExpandAll),
+            ));
+        }
     }
     for action in [
         ContentAction::Back,

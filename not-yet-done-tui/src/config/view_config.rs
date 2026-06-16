@@ -1140,6 +1140,14 @@ pub struct ColumnDef {
     /// memory); the adapter must supply both values as metadata fields.
     #[serde(default)]
     pub tree_aggregate: Option<TreeAggregate>,
+    /// When `true`, this column is omitted from the default rendered set —
+    /// it exists in the view's column list (so the `c` column-config popup
+    /// can offer it) but is not shown until the user explicitly enables it
+    /// there. Use for columns that are occasionally useful but clutter the
+    /// default layout (e.g. the Tasks tree's `tag_names`). The tree-label
+    /// column is never hidden by this flag. Default `false` (shown).
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Tree-fold aggregation for a [`ColumnDef`] (M4). The column reads one of two
@@ -2246,8 +2254,11 @@ views:
         // Column parity with the native tab: the default visible set + order
         // (St / Pri / Tr / T / Task / Created / Updated / Tracked / N). The
         // `🔗` links column is intentionally absent (app-level link store not
-        // wired to the in-process adapter yet). `tag_names` ships hidden in
-        // native, so it is omitted here too.
+        // wired to the in-process adapter yet). `tag_names` is declared but
+        // ships `hidden: true` — like the native tab it is offered in the `c`
+        // column-config popup rather than shown by default, so it sits in the
+        // column list (between `tag_symbols` and `description`) without
+        // appearing in the rendered default set.
         let col_keys: Vec<&str> = root.columns.iter().map(|c| c.key.as_str()).collect();
         assert_eq!(
             col_keys,
@@ -2256,6 +2267,7 @@ views:
                 "priority",
                 "tracking",
                 "tag_symbols",
+                "tag_names",
                 "description",
                 "created",
                 "updated",
@@ -2264,6 +2276,18 @@ views:
             ],
             "tasks columns must mirror the native default order"
         );
+        // `tag_names` is the only hidden column; everything else renders by
+        // default. This guards the new `hidden:` flag against silently
+        // flipping on the wrong column.
+        for col in &root.columns {
+            assert_eq!(
+                col.hidden,
+                col.key == "tag_names",
+                "only tag_names ships hidden by default (got hidden={} for {})",
+                col.hidden,
+                col.key
+            );
+        }
         // The date columns render date-only (`%Y-%m-%d`) like the native tab.
         for key in ["created", "updated", "last_tracked"] {
             let col = root.columns.iter().find(|c| c.key == key).unwrap();

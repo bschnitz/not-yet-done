@@ -100,6 +100,14 @@ pub struct TreeState {
     /// once a pass finds nothing left to expand, so later loads landing in
     /// this pane never override the user's manual expand/collapse state.
     pub auto_expand_pending: bool,
+    /// One-shot override raised by `content.tree_expand_all` (`zr`): while
+    /// set, the auto-expand cascade uses an unbounded depth target so the
+    /// whole tree unfolds instead of stopping at `expand_depth`. Cleared by
+    /// the cascade once it fully drains, and by `tree_collapse_all` (`zm`)
+    /// so a half-finished expand-all can't re-expand what was just folded.
+    /// Default `false`; never re-armed by a fresh query (that path uses the
+    /// configured `expand_depth`, not expand-all).
+    pub expand_all_armed: bool,
 }
 
 impl TreeState {
@@ -122,8 +130,9 @@ impl TreeState {
         self.cache.clear();
         self.entries.clear();
         // The filtered tree starts from scratch — give it the same
-        // `expand_depth` head start as the initial load.
+        // `expand_depth` head start as the initial load (not expand-all).
         self.auto_expand_pending = true;
+        self.expand_all_armed = false;
     }
 
     /// Replace the cached children for a parent path. Used by the
@@ -708,6 +717,7 @@ mod tests {
             separator: None,
             elapsed_from: None,
             tree_aggregate: None,
+            hidden: false,
         }
     }
 

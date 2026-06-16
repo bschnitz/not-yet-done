@@ -570,6 +570,13 @@ pub enum ContentAction {
     /// remain cached, so a subsequent re-expand reuses them without
     /// a refetch.
     TreeCollapseAll,
+    /// Fully expand every node in a tree-mode pane, the mirror of
+    /// [`Self::TreeCollapseAll`]. Mirrors the Tasks tab's `zr` chord.
+    /// Reuses the per-node auto-expand cascade with an unbounded target
+    /// depth, lazily loading unloaded children via `ExpandTreeNode` and
+    /// re-pumping as they arrive. Only registered on tree-mode panes
+    /// (`tree_label` set on the root view); ignored elsewhere.
+    TreeExpandAll,
     /// Rotate the runtime grouping granularity (M3) on a grouped flat view:
     /// `ungrouped → Day → Week → Month → Year → ungrouped`, bucketing the
     /// level's configured `group_by` column. A no-op on a level that
@@ -609,6 +616,7 @@ impl ContentAction {
             Self::OpenScriptsMenu => "open_scripts_menu",
             Self::TreeCollapse => "tree_collapse",
             Self::TreeCollapseAll => "tree_collapse_all",
+            Self::TreeExpandAll => "tree_expand_all",
             Self::CycleGrouping => "cycle_grouping",
             Self::GroupMenu => "group_menu",
             Self::ToggleTreeAggregate => "toggle_tree_aggregate",
@@ -635,6 +643,7 @@ impl FromStr for ContentAction {
             "open_scripts_menu" => Ok(Self::OpenScriptsMenu),
             "tree_collapse" => Ok(Self::TreeCollapse),
             "tree_collapse_all" => Ok(Self::TreeCollapseAll),
+            "tree_expand_all" => Ok(Self::TreeExpandAll),
             "cycle_grouping" => Ok(Self::CycleGrouping),
             "group_menu" => Ok(Self::GroupMenu),
             "toggle_tree_aggregate" => Ok(Self::ToggleTreeAggregate),
@@ -1148,6 +1157,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::OpenScriptsMenu, KeyBinding::new("q"));
         m.insert(ContentAction::TreeCollapse, KeyBinding::new("backspace"));
         m.insert(ContentAction::TreeCollapseAll, KeyBinding::new("zm"));
+        m.insert(ContentAction::TreeExpandAll, KeyBinding::new("zr"));
         m.insert(ContentAction::CycleGrouping, KeyBinding::new("zg"));
         m.insert(ContentAction::GroupMenu, KeyBinding::new("u"));
         m.insert(ContentAction::ToggleTreeAggregate, KeyBinding::new("zt"));

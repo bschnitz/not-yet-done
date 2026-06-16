@@ -1760,6 +1760,10 @@ impl ContentPane {
                 // The tree-label column carries the tree itself and is
                 // never hideable; keep it even against a stale override.
                 cols = apply_column_override(cols, visible, tree_label.as_deref());
+            } else {
+                // No explicit override → drop columns flagged `hidden` from
+                // the default layout (keeping the tree-label column).
+                cols.retain(|c| column_shown_by_default(c, tree_label.as_deref()));
             }
             return cols;
         }
@@ -1777,6 +1781,10 @@ impl ContentPane {
                 .and_then(|k| self.column_overrides.get(&k))
             {
                 cols = apply_column_override(cols, visible, None);
+            } else {
+                // No explicit override → drop columns flagged `hidden` from
+                // the default layout.
+                cols.retain(|c| column_shown_by_default(c, None));
             }
             // An aggregate's `total_column` only carries per-group totals;
             // with grouping cycled off the column would be permanently
@@ -1816,6 +1824,7 @@ impl ContentPane {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
             })
             .collect()
     }
@@ -2667,10 +2676,22 @@ impl ContentPane {
         let Some(view_def) = self.view_def(view_defs).cloned() else {
             return Vec::new();
         };
-        let target = match view_def.expand_depth {
-            Some(ExpandDepth::All) => usize::MAX,
-            Some(ExpandDepth::Levels(n)) => n as usize,
-            None => 0,
+        // `zr` (TreeExpandAll) arms an unbounded target so the same cascade
+        // unfolds every level instead of stopping at the configured
+        // `expand_depth`. Otherwise the target is the view's initial depth.
+        let expand_all = self
+            .tree
+            .as_ref()
+            .map(|t| t.expand_all_armed)
+            .unwrap_or(false);
+        let target = if expand_all {
+            usize::MAX
+        } else {
+            match view_def.expand_depth {
+                Some(ExpandDepth::All) => usize::MAX,
+                Some(ExpandDepth::Levels(n)) => n as usize,
+                None => 0,
+            }
         };
         if target == 0 {
             if let Some(tree) = self.tree.as_mut() {
@@ -2813,6 +2834,10 @@ impl ContentPane {
             if !in_flight {
                 if let Some(tree) = self.tree.as_mut() {
                     tree.auto_expand_pending = false;
+                    // The expand-all cascade has fully drained; drop the
+                    // one-shot override so the next fresh load/query falls
+                    // back to the configured `expand_depth`.
+                    tree.expand_all_armed = false;
                 }
             }
         }
@@ -2933,26 +2958,67 @@ impl ContentPane {
     }
 
     /// Tree-mode handler for `content.tree_collapse_all` (default `zm`).
-    /// Drops every expanded path so the listing snaps back to the root
-    /// rows. Loaded children stay in `tree.cache`, so reopening a node
-    /// reuses the cached children instead of refetching. Cursor moves
-    /// to the first visible row. Returns `None` on non-tree panes.
+    /// Collapses the tree back to its configured initial depth
+    /// (`expand_depth`) rather than all the way to the root: an expanded
+    /// path is kept only while it sits within that depth. With
+    /// `expand_depth` unset (or `0`) this is the old "snap back to the
+    /// root rows" behaviour. Loaded children stay in `tree.cache`, so
+    /// reopening a node reuses the cached children instead of refetching.
+    /// Also disarms any pending expand-all so a half-finished `zr` cascade
+    /// can't re-expand what we just folded. Cursor moves to the first
+    /// visible row. Returns `None` on non-tree panes.
     pub(crate) fn try_tree_collapse_all(
         &mut self,
         view_defs: &[ViewDef],
     ) -> Option<SubViewMessage> {
         let view_def_owned = self.view_def(view_defs)?.clone();
+        // An `own_path` of length `n` denotes a node at depth `n - 1`, so a
+        // node at depth `d` stays expanded when `d < target`, i.e. when
+        // `own_path.len() <= target`. `target == 0` keeps nothing (full
+        // collapse), matching the previous behaviour.
+        let target = match view_def_owned.expand_depth {
+            Some(ExpandDepth::All) => usize::MAX,
+            Some(ExpandDepth::Levels(n)) => n as usize,
+            None => 0,
+        };
         {
             let tree = self.tree.as_mut()?;
-            if tree.expanded.is_empty() {
+            tree.auto_expand_pending = false;
+            tree.expand_all_armed = false;
+            let before = tree.expanded.len();
+            tree.expanded.retain(|p| p.len() <= target);
+            if tree.expanded.len() == before {
                 return Some(SubViewMessage::SelectionChanged(None));
             }
-            tree.expanded.clear();
             tree.rebuild_entries(&view_def_owned);
         }
         self.rebuild_table(view_defs);
         self.table.set_selected(0);
         Some(SubViewMessage::SelectionChanged(None))
+    }
+
+    /// Tree-mode handler for `content.tree_expand_all` (default `zr`),
+    /// the mirror of [`Self::try_tree_collapse_all`]. Arms the one-shot
+    /// auto-expand cascade with an unbounded depth target (see
+    /// [`Self::pending_auto_expand_requests`]) so every node unfolds,
+    /// lazily loading any unloaded children. Returns a request asking the
+    /// App to drive the cascade now (the same entry point a fresh load
+    /// uses); `None` on non-tree panes.
+    pub(crate) fn try_tree_expand_all(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        _view_defs: &[ViewDef],
+    ) -> Option<SubViewMessage> {
+        {
+            let tree = self.tree.as_mut()?;
+            tree.expand_all_armed = true;
+            tree.auto_expand_pending = true;
+        }
+        Some(SubViewMessage::Request(ViewRequest::DriveTreeAutoExpand {
+            view_index,
+            pane_id,
+        }))
     }
 
     /// Tree-mode handler for `content.back`. Collapses the cursor's
@@ -5448,6 +5514,9 @@ impl ContentPane {
             KeySource::Content(ContentAction::TreeCollapseAll) => {
                 self.try_tree_collapse_all(view_defs)
             }
+            KeySource::Content(ContentAction::TreeExpandAll) => {
+                self.try_tree_expand_all(view_index, pane_id, view_defs)
+            }
             KeySource::Content(ContentAction::CycleGrouping) => {
                 Some(self.try_cycle_grouping(view_defs, view_index, pane_id))
             }
@@ -6456,6 +6525,10 @@ impl ContentView {
             ContentAction::TreeCollapseAll => self
                 .active_pane_mut()
                 .try_tree_collapse_all(&view_defs)
+                .unwrap_or(SubViewMessage::Unhandled),
+            ContentAction::TreeExpandAll => self
+                .active_pane_mut()
+                .try_tree_expand_all(view_index, pane_id, &view_defs)
                 .unwrap_or(SubViewMessage::Unhandled),
             ContentAction::CycleGrouping => self
                 .active_pane_mut()
@@ -8083,11 +8156,13 @@ impl ContentView {
                 }
             })
             .collect();
-        let raw_keys: Vec<String> = raw.iter().map(|c| c.key.clone()).collect();
+        // No override → pre-check the default visible set (non-`hidden`
+        // columns plus the tree label), so a `hidden` column appears in the
+        // popup as an available, unchecked row the user can enable.
         let current = pane
             .column_level_key(&self.view_defs)
             .and_then(|k| self.column_overrides.get(&k).cloned())
-            .unwrap_or(raw_keys);
+            .unwrap_or_else(|| default_visible_keys(&raw, tree_label.as_deref()));
         Some((current, entries))
     }
 
@@ -8097,14 +8172,17 @@ impl ContentView {
     /// default). Distributes to all panes and rebuilds. Returns `false`
     /// when the level isn't configurable (no level key).
     pub fn apply_column_config(&mut self, visible: Vec<String>) -> bool {
-        let Some((raw, _)) = self.active_pane().column_config_source(&self.view_defs) else {
+        let Some((raw, tree_label)) = self.active_pane().column_config_source(&self.view_defs)
+        else {
             return false;
         };
         let Some(key) = self.active_pane().column_level_key(&self.view_defs) else {
             return false;
         };
-        let raw_keys: Vec<String> = raw.iter().map(|c| c.key.clone()).collect();
-        if visible == raw_keys {
+        // A selection identical to the default visible set (non-`hidden`
+        // columns plus the tree label) removes the override — the clean
+        // reset, so re-hiding an enabled column restores YAML defaults.
+        if visible == default_visible_keys(&raw, tree_label.as_deref()) {
             self.column_overrides.remove(&key);
         } else {
             self.column_overrides.insert(key, visible);
@@ -9975,6 +10053,25 @@ fn column_owner_chain_len(vd: &ViewDef, chain: &[String], cursor_cols: &[ColumnD
     owner_len
 }
 
+/// Whether a column is part of the *default* visible set: shown unless it
+/// declares `hidden: true`, with the exception of `keep` (the tree-label
+/// column) which is never hideable.
+fn column_shown_by_default(col: &ColumnDef, keep: Option<&str>) -> bool {
+    !col.hidden || keep == Some(col.key.as_str())
+}
+
+/// Keys of the columns shown by default — every non-`hidden` column plus the
+/// (never-hideable) tree-label `keep`, in configured order. This is the
+/// baseline the column-config popup pre-checks and the layout
+/// `apply_column_config` treats as "no override" (so toggling a column back
+/// to exactly this set clears the override cleanly).
+fn default_visible_keys(cols: &[ColumnDef], keep: Option<&str>) -> Vec<String> {
+    cols.iter()
+        .filter(|c| column_shown_by_default(c, keep))
+        .map(|c| c.key.clone())
+        .collect()
+}
+
 /// Project a configured column set through a user override (column-config
 /// popup): keep only the keys in `visible`, in `visible`'s order. Keys the
 /// config no longer knows (stale persisted override after a YAML edit) are
@@ -10345,6 +10442,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
             ColumnDef {
@@ -10359,6 +10457,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
             ColumnDef {
@@ -10373,6 +10472,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
         ];
@@ -10451,6 +10551,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
             ColumnDef {
@@ -10465,6 +10566,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
         ];
@@ -10712,6 +10814,7 @@ mod tests {
                         separator: None,
                         elapsed_from: None,
                         tree_aggregate: None,
+                        hidden: false,
                         collapsed_source: None,
                     },
                     ColumnDef {
@@ -10726,6 +10829,7 @@ mod tests {
                         separator: None,
                         elapsed_from: None,
                         tree_aggregate: None,
+                        hidden: false,
                         collapsed_source: None,
                     },
                 ],
@@ -10774,6 +10878,7 @@ mod tests {
                         separator: None,
                         elapsed_from: None,
                         tree_aggregate: None,
+                        hidden: false,
                         collapsed_source: None,
                     }],
                     preview: None,
@@ -11006,6 +11111,7 @@ mod tests {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 }],
                 preview: None,
@@ -11198,6 +11304,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             }],
             preview: None,
@@ -11484,6 +11591,7 @@ mod tests {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 }],
                 preview: None,
@@ -11505,6 +11613,7 @@ mod tests {
                         separator: None,
                         elapsed_from: None,
                         tree_aggregate: None,
+                        hidden: false,
                         collapsed_source: None,
                     }],
                     preview: None,
@@ -11628,6 +11737,7 @@ mod tests {
             separator: None,
             elapsed_from: None,
             tree_aggregate: None,
+            hidden: false,
         }
     }
 
@@ -12492,6 +12602,7 @@ mod tests {
                 cumulated_field: "dur_cum".into(),
                 default,
             }),
+            hidden: false,
         };
         ViewFileConfig {
             tab: TabConfig {
@@ -13639,6 +13750,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
             }],
             preview: None,
             actions: Vec::new(),
@@ -13740,6 +13852,7 @@ mod tests {
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
             }],
             preview: None,
             actions: Vec::new(),
@@ -14141,6 +14254,7 @@ mod tests {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 }],
                 preview: None,
@@ -15094,6 +15208,7 @@ mod tests {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 }],
                 preview: None,
@@ -15115,6 +15230,7 @@ mod tests {
                         separator: None,
                         elapsed_from: None,
                         tree_aggregate: None,
+                        hidden: false,
                         collapsed_source: None,
                     }],
                     preview: None,
@@ -15521,6 +15637,49 @@ mod tests {
         let cols = view.active_pane().current_columns(&view_defs);
         let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
         assert_eq!(keys, ["key", "summary"]);
+    }
+
+    #[test]
+    fn hidden_column_excluded_by_default_but_offered_in_config() {
+        let mut config = test_config_with_children();
+        // Flag `summary` hidden: it must drop from the default layout but
+        // still be offered (unchecked) in the `c` column-config popup.
+        config.views[0].columns[1].hidden = true;
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+
+        // Default layout omits the hidden column.
+        let cols = view.active_pane().current_columns(&view_defs);
+        let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["key"], "hidden column not shown by default");
+
+        // The popup still lists it; `current` pre-checks only the default set.
+        let (current, entries) = view.column_config_entries().unwrap();
+        assert_eq!(
+            current,
+            vec!["key".to_string()],
+            "hidden column starts unchecked"
+        );
+        assert_eq!(entries.len(), 2, "hidden column still configurable");
+
+        // Enabling it stores an override and shows it.
+        assert!(view.apply_column_config(vec!["key".into(), "summary".into()]));
+        assert_eq!(
+            view.column_overrides().get("view:issues"),
+            Some(&vec!["key".to_string(), "summary".to_string()]),
+        );
+        let cols = view.active_pane().current_columns(&view_defs);
+        let keys: Vec<&str> = cols.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["key", "summary"]);
+
+        // Re-hiding it (back to the default visible set) clears the override
+        // entirely rather than persisting an explicit "key only" override.
+        assert!(view.apply_column_config(vec!["key".into()]));
+        assert!(
+            view.column_overrides().is_empty(),
+            "default visible set removes the override"
+        );
     }
 
     #[test]
@@ -16165,6 +16324,156 @@ views:
         assert!(depths.contains(&("leaf".to_string(), 3)), "{depths:?}");
     }
 
+    #[test]
+    fn tree_collapse_all_retains_paths_up_to_expand_depth() {
+        // `zm` on a view with `expand_depth: 2` must fold back to the
+        // initial depth (depth-0 + depth-1 expanded → three visible
+        // levels), NOT all the way to the root. Deeper manual expansions
+        // are dropped; `own_path.len() <= 2` survives.
+        let mut config = uniform_recursive_config();
+        config.views[0].expand_depth = Some(ExpandDepth::Levels(2));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+
+        // Hand-build a four-level tree fully expanded down to `leaf`
+        // (deeper than `expand_depth`).
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(vec!["work".into()], vec![tnode_val("h", "h", "V")], None);
+            tree.set_cached_children(
+                vec!["work".into(), "h".into()],
+                vec![tnode_val("g", "g", "V")],
+                None,
+            );
+            tree.set_cached_children(
+                vec!["work".into(), "h".into(), "g".into()],
+                vec![tnode_val("leaf", "leaf", "V")],
+                None,
+            );
+            tree.expanded.insert(vec!["work".into()]);
+            tree.expanded.insert(vec!["work".into(), "h".into()]);
+            tree.expanded.insert(vec!["work".into(), "h".into(), "g".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        match view.active_pane_mut().try_tree_collapse_all(&view_defs) {
+            Some(SubViewMessage::SelectionChanged(_)) => {}
+            other => panic!("expected SelectionChanged, got {other:?}"),
+        }
+        let tree = view.active_pane().tree.as_ref().unwrap();
+        assert!(
+            tree.expanded.contains(&vec!["work".to_string()]),
+            "depth-0 stays expanded: {:?}",
+            tree.expanded
+        );
+        assert!(
+            tree.expanded
+                .contains(&vec!["work".to_string(), "h".to_string()]),
+            "depth-1 stays expanded: {:?}",
+            tree.expanded
+        );
+        assert!(
+            !tree
+                .expanded
+                .contains(&vec!["work".to_string(), "h".to_string(), "g".to_string()]),
+            "depth-2 folded away: {:?}",
+            tree.expanded
+        );
+        assert!(
+            tree.cache
+                .contains_key(&vec!["work".to_string(), "h".to_string(), "g".to_string()]),
+            "cached children kept for a cheap re-expand",
+        );
+    }
+
+    #[test]
+    fn tree_expand_all_arms_unbounded_cascade_past_expand_depth() {
+        // `zr` on a view with `expand_depth: 2` must blow past the initial
+        // ceiling: after the natural cascade settles at depth 2, expand-all
+        // re-arms with an unbounded target and the node sitting AT the old
+        // ceiling (`g`, depth 2) now gets an expand request.
+        let mut config = uniform_recursive_config();
+        config.views[0].expand_depth = Some(ExpandDepth::Levels(2));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("work", "Work", "W")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+        let view_defs = view.view_defs.clone();
+
+        // Drive the natural `expand_depth: 2` cascade to its ceiling.
+        for (parent, child) in [("work", "h"), ("h", "g")] {
+            let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+            let ViewRequest::ExpandTreeNode {
+                parent_path,
+                parent_node_id,
+                ..
+            } = &reqs[0]
+            else {
+                panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+            };
+            assert_eq!(parent_node_id, parent);
+            view.apply_tree_children(
+                pane_id,
+                parent_path.clone(),
+                vec![tnode_val(child, child, "V")],
+                None,
+                false,
+                "mock:task".into(),
+            );
+        }
+        // Ceiling reached: `g` (depth 2) is NOT expanded and the cascade is disarmed.
+        assert!(view.pending_auto_expand_requests(view_index, pane_id).is_empty());
+        assert!(!view.active_pane().tree.as_ref().unwrap().auto_expand_pending);
+
+        // `zr`: arm expand-all and ask the App to drive the cascade.
+        match view
+            .active_pane_mut()
+            .try_tree_expand_all(view_index, pane_id, &view_defs)
+        {
+            Some(SubViewMessage::Request(ViewRequest::DriveTreeAutoExpand {
+                view_index: vi,
+                pane_id: pid,
+            })) => {
+                assert_eq!(vi, view_index);
+                assert_eq!(pid, pane_id);
+            }
+            other => panic!("expected DriveTreeAutoExpand request, got {other:?}"),
+        }
+        {
+            let tree = view.active_pane().tree.as_ref().unwrap();
+            assert!(tree.expand_all_armed, "expand-all override raised");
+            assert!(tree.auto_expand_pending, "cascade re-armed");
+        }
+
+        // Pump: `g`, which sat at the old depth-2 ceiling, now expands.
+        let reqs = view.pending_auto_expand_requests(view_index, pane_id);
+        let ViewRequest::ExpandTreeNode {
+            parent_node_id, ..
+        } = &reqs[0]
+        else {
+            panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
+        };
+        assert_eq!(
+            parent_node_id, "g",
+            "expand-all blew past the configured expand_depth"
+        );
+    }
+
     /// Mirror trackings.yaml `tree`: a heterogeneous group-bucket root
     /// (`tracking:tree-group`) over a recursive task forest
     /// (`tracking:tree-item`/`tracking:tree-item`), with `group_headers`
@@ -16407,6 +16716,7 @@ views:
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             }],
             preview: None,
@@ -16428,6 +16738,7 @@ views:
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 }],
                 preview: None,
@@ -16649,6 +16960,7 @@ views:
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
             ColumnDef {
@@ -16663,6 +16975,7 @@ views:
                 separator: None,
                 elapsed_from: None,
                 tree_aggregate: None,
+                hidden: false,
                 collapsed_source: None,
             },
         ]
@@ -16934,6 +17247,7 @@ views:
             separator: None,
             elapsed_from: None,
             tree_aggregate: None,
+            hidden: false,
             collapsed_source: None,
         });
         let items = vec![
@@ -17438,6 +17752,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 },
                 ColumnDef {
@@ -17452,6 +17767,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 },
                 ColumnDef {
@@ -17466,6 +17782,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 },
                 ColumnDef {
@@ -17480,6 +17797,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 },
                 ColumnDef {
@@ -17494,6 +17812,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     separator: None,
                     elapsed_from: None,
                     tree_aggregate: None,
+                    hidden: false,
                     collapsed_source: None,
                 },
             ],
