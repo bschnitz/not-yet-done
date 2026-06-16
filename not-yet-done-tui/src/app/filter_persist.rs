@@ -71,12 +71,11 @@ impl App {
             let scope = self.content_view(view_index)
                 .map(|cv| cv.query_scope.clone())
                 .unwrap_or_default();
-            let repo = Arc::clone(&self.saved_query_repo);
-            let _ = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    repo.upsert(&scope, &name, &query, None).await
-                })
-            });
+            // Persist to the adapter's filesystem SavedQueryStore — the same
+            // store `reload_content_saved_queries` reads from and the `:query`
+            // save path writes to. (Writing to the DB `saved_query_repo` here
+            // is the wrong store: the edit would be lost on the next reload.)
+            self.save_content_query_body(view_index, &name, &query);
             self.reload_content_saved_queries(view_index);
             if is_new {
                 self.modal_message = Some(format!(
