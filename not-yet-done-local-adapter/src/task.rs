@@ -751,6 +751,13 @@ fn task_item_actions() -> Vec<NodeAction> {
         // `tasks.yaml` (mirrors the native tab's "edit node" key); no
         // `default_key` here because a ctrl-combo isn't a single `char`.
         NodeAction::new("edit-tree", "edit node", InputSpec::Editor),
+        // Free-form per-task notes: edit the task's standalone notes
+        // markdown file (no frontmatter/description — the buffer *is* the
+        // raw file). Bound to `o` in `tasks.yaml`, mirroring the native
+        // tab's notes key. Saving an empty buffer deletes the file.
+        NodeAction::new("edit-notes", "notes", InputSpec::Editor)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('o'),
         NodeAction::new("delete", "Delete", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
@@ -1118,6 +1125,65 @@ async fn execute_edit_tree(
     }
 }
 
+/// `prepare` for the `edit-notes` action: open the task's standalone notes
+/// file as a raw markdown buffer. Unlike `edit`, there is no frontmatter or
+/// description — the buffer is exactly the file's content (empty when no
+/// notes file exists yet). No version token: notes carry no edit timestamp,
+/// and the unchanged-buffer guard in [`execute_edit_notes`] handles the
+/// "opened, saved nothing" case so a stray empty file is never created.
+fn prepare_edit_notes(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep> {
+    let task = snapshot
+        .by_id
+        .get(&id)
+        .map(|r| r.task.clone())
+        .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+    let notes_str = notes::read_notes(&task, &all_tasks(snapshot));
+    Ok(EditorPrep {
+        template: notes_str,
+        version: String::new(),
+        suffix: ".md".into(),
+    })
+}
+
+/// `execute` for the `edit-notes` action: write the buffer to the task's
+/// notes file, or delete the file when the buffer is blank — the same
+/// rule the native notes editor uses. An unchanged buffer is a no-op
+/// (returns `NoChanges`); this is what stops an "open notes on a task with
+/// no file, save without typing" round-trip from creating an empty file,
+/// since the generic edit session always calls `execute` with the opening
+/// template as `original` rather than short-circuiting first.
+async fn execute_edit_notes(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    id: Uuid,
+    text: &str,
+    original: &str,
+) -> Result<ActionOutcome> {
+    let task = snapshot
+        .by_id
+        .get(&id)
+        .map(|r| r.task.clone())
+        .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+    if text == original {
+        return Ok(ActionOutcome::NoChanges);
+    }
+    let all = all_tasks(snapshot);
+    let message = if text.trim().is_empty() {
+        notes::delete_notes(&task, &all);
+        "Notes deleted"
+    } else {
+        notes::write_notes(&task, &all, text);
+        "Notes saved"
+    };
+    // The `notes` 📝 marker is precomputed at snapshot-build time, so a
+    // create/delete only shows once the snapshot rebuilds: `TaskChanged`
+    // drops the cached snapshot and refetches this subtree.
+    emit_task_changed(handle, id);
+    Ok(ActionOutcome::Done {
+        message: Some(message.to_string()),
+    })
+}
+
 /// `execute("delete")` — recursive subtree delete + soft-delete the notes
 /// of every task in the subtree (so an `undelete` can bring them back).
 async fn execute_delete(
@@ -1476,6 +1542,7 @@ impl Node for TaskItemNode {
             )),
             "edit" => prepare_edit(&self.handle, &self.snapshot, self.id).await,
             "edit-tree" => prepare_edit_tree(&self.snapshot, self.id),
+            "edit-notes" => prepare_edit_notes(&self.snapshot, self.id),
             other => Err(ContentError::NotSupported(format!(
                 "action `{other}` has no editor buffer"
             ))),
@@ -1491,6 +1558,9 @@ impl Node for TaskItemNode {
             }
             ("edit-tree", ActionInput::Edited { text, .. }) => {
                 execute_edit_tree(&self.handle, &self.snapshot, self.id, &text).await
+            }
+            ("edit-notes", ActionInput::Edited { text, original, .. }) => {
+                execute_edit_notes(&self.handle, &self.snapshot, self.id, &text, &original).await
             }
             // Reached via the generic `DeleteSelf` confirm flow, which calls
             // `execute("delete", None)` after the user confirms.
