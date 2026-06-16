@@ -1255,9 +1255,28 @@ async fn invoke_unnest(handle: &CoreHandle, snapshot: &ForestSnapshot, task_id: 
 // Nodes
 // ---------------------------------------------------------------------------
 
+/// The adapter's shared snapshot cache cell: `None` until the first load,
+/// then the eager forest. Held by nodes so a mutation can drop it
+/// synchronously (see [`invalidate_cache`]).
+type SnapshotCell = Arc<RwLock<Option<Arc<ForestSnapshot>>>>;
+
+/// Drop the cached forest snapshot so the *next* read reloads it from the
+/// DB. Called synchronously at the end of every mutation, before the action
+/// returns: a post-mutation reload can arrive via `get_by_id`
+/// (`spawn_content_drill_down` — the cached path) before the async event
+/// bridge has had a chance to clear the cache, so without this the reload
+/// would re-read the pre-mutation forest and the change wouldn't show until
+/// a second refresh. Clearing it here closes that race regardless of which
+/// reload path fires.
+async fn invalidate_cache(cache: &SnapshotCell) {
+    *cache.write().await = None;
+}
+
 /// Synthetic forest root. Lists the top-level tasks (`parent_id == None`).
 struct TaskRootNode {
     snapshot: Arc<ForestSnapshot>,
+    /// Shared cache cell, so a mutation here can invalidate it synchronously.
+    cache: SnapshotCell,
     handle: CoreHandle,
     node_type: NodeType,
     metadata: Metadata,
@@ -1319,7 +1338,7 @@ impl Node for TaskRootNode {
         Ok(self.snapshot.subtree(None, filter.as_ref(), depth))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        TaskItemNode::fetch(&self.snapshot, &self.handle, id)
+        TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
     }
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         match action_id {
@@ -1332,14 +1351,20 @@ impl Node for TaskRootNode {
         }
     }
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
-        match (action_id, input) {
+        let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the task root"
             ))),
+        };
+        // A successful add changed the forest — drop the cache so the
+        // reload that follows reads the new task (race-free with the bridge).
+        if matches!(outcome, Ok(ActionOutcome::Done { .. })) {
+            invalidate_cache(&self.cache).await;
         }
+        outcome
     }
 }
 
@@ -1347,6 +1372,8 @@ impl Node for TaskRootNode {
 /// borrows) and a shared handle to the forest snapshot for drilling.
 struct TaskItemNode {
     snapshot: Arc<ForestSnapshot>,
+    /// Shared cache cell, so a mutation here can invalidate it synchronously.
+    cache: SnapshotCell,
     handle: CoreHandle,
     id: Uuid,
     id_str: String,
@@ -1371,6 +1398,7 @@ impl TaskItemNode {
     /// Look `id` up in `snapshot` and build the node, or `NotFound`.
     fn fetch(
         snapshot: &Arc<ForestSnapshot>,
+        cache: &SnapshotCell,
         handle: &CoreHandle,
         id: &str,
     ) -> Result<Box<dyn Node>> {
@@ -1378,6 +1406,7 @@ impl TaskItemNode {
         let row = &snapshot.by_id[&uuid];
         Ok(Box::new(TaskItemNode {
             snapshot: snapshot.clone(),
+            cache: cache.clone(),
             handle: handle.clone(),
             id: uuid,
             id_str: id.to_string(),
@@ -1434,7 +1463,7 @@ impl Node for TaskItemNode {
         Ok(self.snapshot.subtree(Some(self.id), filter.as_ref(), depth))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        TaskItemNode::fetch(&self.snapshot, &self.handle, id)
+        TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
     }
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         match action_id {
@@ -1453,7 +1482,7 @@ impl Node for TaskItemNode {
         }
     }
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
-        match (action_id, input) {
+        let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
             }
@@ -1469,10 +1498,18 @@ impl Node for TaskItemNode {
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on a task"
             ))),
+        };
+        // Any successful add/edit/delete changed the forest — drop the cache
+        // so the follow-up reload reads fresh, even on the cached drill path
+        // (race-free with the async event bridge). A validation `Reopen`
+        // made no DB change, so leave the cache intact.
+        if matches!(outcome, Ok(ActionOutcome::Done { .. })) {
+            invalidate_cache(&self.cache).await;
         }
+        outcome
     }
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
-        Ok(match name {
+        let dispatch = match name {
             // Routed to the generic delete-confirm flow; the actual delete
             // happens in `execute("delete")` after confirmation.
             "delete" => ActionDispatch::DeleteSelf,
@@ -1488,7 +1525,16 @@ impl Node for TaskItemNode {
             },
             "unnest" => invoke_unnest(&self.handle, &self.snapshot, self.id).await,
             _ => ActionDispatch::Noop,
-        })
+        };
+        // The structural mutations here (reparent via paste-move / unnest,
+        // and undelete) all signal success by asking for a `Reload`; drop the
+        // cache first so that reload reads the post-mutation forest. The
+        // tracking toggle deliberately returns `Noop` (the bridge patches the
+        // affected rows in place), so it never reaches this branch.
+        if matches!(dispatch, ActionDispatch::Reload) {
+            invalidate_cache(&self.cache).await;
+        }
+        Ok(dispatch)
     }
 }
 
@@ -1727,6 +1773,7 @@ impl ContentAdapter for TaskAdapter {
         let snapshot = self.reload_snapshot().await?;
         Ok(Box::new(TaskRootNode {
             snapshot,
+            cache: self.snapshot.clone(),
             handle: self.handle.clone(),
             node_type: task_root_type(),
             metadata: Metadata::default(),
@@ -1738,12 +1785,13 @@ impl ContentAdapter for TaskAdapter {
         if id == ROOT_ID {
             return Ok(Box::new(TaskRootNode {
                 snapshot,
+                cache: self.snapshot.clone(),
                 handle: self.handle.clone(),
                 node_type: task_root_type(),
                 metadata: Metadata::default(),
             }));
         }
-        TaskItemNode::fetch(&snapshot, &self.handle, id)
+        TaskItemNode::fetch(&snapshot, &self.snapshot, &self.handle, id)
     }
 
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
@@ -2325,5 +2373,20 @@ mod tests {
         let id_set: HashSet<Uuid> = [orphan].into_iter().collect();
         let effective = Some(missing_parent).filter(|p| id_set.contains(p));
         assert_eq!(effective, None);
+    }
+
+    #[tokio::test]
+    async fn invalidate_cache_drops_the_loaded_snapshot() {
+        // The mutation paths call this synchronously so a post-mutation
+        // reload (even the cached `get_by_id` drill path) can't re-read the
+        // stale forest. Populated cell → `None` after invalidation.
+        let snap = snapshot_from(vec![row(Uuid::from_u128(1), "Root", None)]);
+        let cell: SnapshotCell = Arc::new(RwLock::new(Some(snap)));
+        assert!(cell.read().await.is_some());
+        invalidate_cache(&cell).await;
+        assert!(
+            cell.read().await.is_none(),
+            "cache must be cleared so the next read reloads fresh"
+        );
     }
 }
