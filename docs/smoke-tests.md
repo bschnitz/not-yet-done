@@ -2540,6 +2540,11 @@ Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
       pretty-printed `body.storage` (xmllint).
 - [ ] Body trivial ändern (z.B. neuen Absatz einfügen), speichern,
       Editor schließen → `Updated page <Title> (v <n+1>)` Banner.
+- [ ] **Tree-Zeile nach Save** zeigt weiterhin den **echten Titel**,
+      nicht die Page-Id (Regression-Guard: der Post-Edit-Row-Patch
+      re-resolved die Zeile via `get_by_id`, dessen Stub den Titel auf
+      die Id setzte → Zeile zeigte die Id bis zum nächsten vollen
+      Tree-Reload; `get_by_id` hydriert den Titel jetzt vom Server).
 - [ ] Confluence-Web: neue Version erscheint, Body korrekt, **Titel
       unverändert** (Regression-Guard: früher schrieb ein body-only
       Edit die Page-Id als neuen Titel zurück).
