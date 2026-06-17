@@ -100,6 +100,18 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         result: Result<String, String>,
     },
+    /// Result of a generic content delete (`Node::execute("delete")`).
+    /// On success the App removes the row from the pane's tree *in place*
+    /// ([`ContentView::remove_tree_node`]) rather than full-reloading —
+    /// reload stays reserved for external changes. Falls back to a reload
+    /// for non-tree panes or rows the tree can't locate. `node_id` is the
+    /// deleted node so the local removal can find it.
+    ContentNodeDeleted {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        result: Result<String, String>,
+    },
     /// Result of an async per-node shortcut invocation (Phase CP-1c).
     /// Carries the `ActionDispatch` returned by `Node::invoke_action`
     /// (or a load/invoke error) so the main loop can translate it via
@@ -716,9 +728,12 @@ pub struct App {
     pub tag_menu: crate::components::tag_menu::TagMenuComponent,
 
     /// When the tag menu was opened from a content/adapter tab (a
-    /// `type: tag` action), the task + pane it operates on. `None` on the
-    /// native Tasks tab, where assignment falls back to `tasks_view`. Set
-    /// by [`App::open_tag_menu_for_content`].
+    /// `type: tag` action, e.g. the Tasks-(A) `T` key) rather than the
+    /// native Tasks tab, this carries the task to assign tags to and the
+    /// originating pane to refresh afterwards. `open_tag_menu` (the native
+    /// `:tag` path) resets it to `None`, so it always reflects the most
+    /// recent opening at the time a tag operation runs. See
+    /// [`App::open_tag_menu_for_content`].
     pub content_tag_target: Option<crate::app::tag_menu::ContentTagTarget>,
 
     /// App-level script management menu (`:script`, also bound to `x`
@@ -2722,9 +2737,10 @@ impl App {
                 Ok(_) => Ok("Deleted".to_string()),
                 Err(e) => Err(format!("Delete failed: {e}")),
             };
-            let _ = tx.send(LoadMsg::ContentActionDone {
+            let _ = tx.send(LoadMsg::ContentNodeDeleted {
                 view_index,
                 pane_id,
+                node_id,
                 result,
             });
         });
@@ -3159,6 +3175,122 @@ impl App {
         });
     }
 
+    /// A child-create action (`add`/`A`) succeeded; splice the new child into
+    /// the pane *locally*, never via a full reload (reload is reserved for
+    /// external changes — the user's `r`).
+    ///
+    /// **Tree pane:** resolve the parent's tree path, arm its expansion, and
+    /// re-fetch ONLY that parent's children ([`Self::spawn_tree_expand`],
+    /// `append=false`). The single `cache[parent_path]` slot is replaced;
+    /// `expanded` and every sibling/descendant cache stay untouched, so the
+    /// tree does not collapse and the cursor — selection is by row index —
+    /// stays on the parent (children render below it). A parent that isn't a
+    /// visible row is the adapter's synthetic root container (e.g.
+    /// `task:root`), whose children are the root level → re-fetch under the
+    /// empty path.
+    ///
+    /// **Flat/drill pane:** re-run the drill-down at the parent level — the
+    /// historical create-refresh behaviour.
+    pub fn insert_content_child(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        parent_node_id: String,
+        child_node_type: String,
+    ) {
+        // Arm the parent's expansion and resolve its cache path while we hold
+        // the mutable borrow; drop it before spawning the async load. `None`
+        // marks a non-tree pane → drill-down fallback below.
+        let parent_path: Option<Vec<String>> = {
+            let Some(cv) = self.content_view_mut(view_index) else {
+                return;
+            };
+            let Some(pane) = cv.find_pane_mut(pane_id) else {
+                return;
+            };
+            match pane.tree.as_mut() {
+                Some(tree) => {
+                    let path = tree
+                        .entries
+                        .iter()
+                        .find(|e| e.node.id == parent_node_id)
+                        .map(|e| {
+                            let mut p = e.parent_path.clone();
+                            p.push(parent_node_id.clone());
+                            p
+                        })
+                        // Parent isn't a rendered row → synthetic root
+                        // container; its children are the root level.
+                        .unwrap_or_default();
+                    tree.expanded.insert(path.clone());
+                    Some(path)
+                }
+                None => None,
+            }
+        };
+        match parent_path {
+            Some(parent_path) => self.spawn_tree_expand(
+                view_index,
+                pane_id,
+                parent_path,
+                parent_node_id,
+                child_node_type,
+                50,
+                None,
+                false,
+            ),
+            None => {
+                self.spawn_content_drill_down(view_index, pane_id, parent_node_id, child_node_type)
+            }
+        }
+    }
+
+    /// Patch the edited node's row in place ([`ContentView::patch_row`])
+    /// instead of full-reloading after an `edit`/notes save — reload stays
+    /// reserved for external changes.
+    ///
+    /// Re-fetches the node's fresh `label`/`metadata`/`node_type` but keeps
+    /// the currently-displayed row's `has_children`: an edit changes content,
+    /// not structure, and a bare `Node` can't report its child count. Falls
+    /// back to a pane reload when the row isn't visible (non-tree pane,
+    /// scrolled-away) or the fetch fails — so non-tree adapters behave as
+    /// before.
+    pub async fn patch_content_row(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+    ) {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            self.reload_content_pane_current_level(view_index, pane_id);
+            return;
+        };
+        // Base on the visible row so structural fields (has_children) survive;
+        // overlay fresh content from the re-fetched node.
+        let base = self
+            .content_view(view_index)
+            .and_then(|cv| cv.visible_summary(pane_id, &node_id));
+        let fetched = adapter.get_by_id(&node_id).await;
+        let (Some(mut summary), Ok(node)) = (base, fetched) else {
+            self.reload_content_pane_current_level(view_index, pane_id);
+            return;
+        };
+        summary.label = node.label().to_string();
+        summary.metadata = node.metadata().clone();
+        summary.node_type = node.node_type().clone();
+        let patched = self
+            .content_view_mut(view_index)
+            .map(|cv| cv.patch_row(&summary))
+            .unwrap_or(false);
+        if !patched {
+            self.reload_content_pane_current_level(view_index, pane_id);
+        }
+    }
+
     /// CT-6: default per-call cap on tree-find hits. Picked low
     /// enough that a single popup doesn't drown the user (refining
     /// the query is cheaper than scrolling 500 hits), high enough to
@@ -3580,6 +3712,35 @@ impl App {
                         }
                     }
                     self.reload_content_pane_current_level(view_index, pane_id);
+                }
+                LoadMsg::ContentNodeDeleted {
+                    view_index,
+                    pane_id,
+                    node_id,
+                    result,
+                } => {
+                    match result {
+                        Ok(msg) => {
+                            self.notify(msg);
+                            // Remove the row locally; only full-reload when
+                            // the pane has no tree (flat/drill) or can't
+                            // locate the row — never for a successful tree
+                            // delete (reload is for external changes).
+                            let removed = self
+                                .content_view_mut(view_index)
+                                .map(|cv| cv.remove_tree_node(pane_id, &node_id))
+                                .unwrap_or(false);
+                            if !removed {
+                                self.reload_content_pane_current_level(view_index, pane_id);
+                            }
+                        }
+                        Err(msg) => {
+                            // Delete failed → nothing changed; surface the
+                            // error but leave the tree (and selection) as-is.
+                            self.set_query_error(Some(msg.clone()));
+                            self.notification_bar.push(msg);
+                        }
+                    }
                 }
                 LoadMsg::NodeActionDispatched {
                     view_index,

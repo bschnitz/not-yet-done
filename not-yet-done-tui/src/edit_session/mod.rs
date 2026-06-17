@@ -182,19 +182,31 @@ pub enum FollowUp {
         tracking_changed: bool,
         message: String,
     },
-    /// Re-trigger a content drill-down so the parent's child list refreshes.
-    ReloadContentDrillDown {
-        view_index: usize,
-        parent_node_id: String,
-        child_node_type: String,
-        message: String,
-    },
-    /// Reload the active content pane at its current drill level after an
-    /// editor-driven action mutated state. Mirrors the popup-action reload
-    /// path so edited rows refresh in place instead of showing stale data.
-    ReloadContentPane {
+    /// An in-place edit (`edit`/notes) succeeded; patch only the edited
+    /// row in the originating pane ([`crate::views::content_view::ContentView::patch_row`])
+    /// instead of full-reloading — reload is reserved for external changes.
+    /// The App re-fetches the node's fresh content and keeps the visible
+    /// row's structural fields; it falls back to a pane reload when the row
+    /// isn't visible or the fetch fails.
+    PatchContentRow {
         view_index: usize,
         pane_id: PaneId,
+        node_id: String,
+        message: String,
+    },
+    /// A child-create action (`add`/`A`) succeeded; splice the new child
+    /// into the originating pane *locally* — never a full reload (reload is
+    /// reserved for external changes, `r`). For a tree pane the App arms the
+    /// parent's expansion and re-fetches only that parent's children
+    /// (`spawn_tree_expand`), so `expanded` and every sibling subtree cache
+    /// stay intact (no collapse) and the cursor stays on the parent. For a
+    /// flat/drill pane it re-runs the drill-down at the parent level — the
+    /// historical create behaviour.
+    InsertContentChild {
+        view_index: usize,
+        pane_id: PaneId,
+        parent_node_id: String,
+        child_node_type: String,
         message: String,
     },
     /// A tag create/edit committed from a content/adapter tab (`type: tag`)

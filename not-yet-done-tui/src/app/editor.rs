@@ -755,19 +755,30 @@ impl App {
                     self.refresh_tracked_ids();
                 }
             }
-            FollowUp::ReloadContentDrillDown { view_index, parent_node_id, child_node_type, message } => {
+            FollowUp::InsertContentChild {
+                view_index,
+                pane_id,
+                parent_node_id,
+                child_node_type,
+                message,
+            } => {
                 self.notify(message);
-                let pane_id = self
-                    .content_view(view_index)
-                    .map(|cv| cv.active_pane_id())
-                    .unwrap_or_default();
-                self.spawn_content_drill_down(view_index, pane_id, parent_node_id, child_node_type);
+                self.insert_content_child(view_index, pane_id, parent_node_id, child_node_type);
             }
-            FollowUp::ReloadContentPane { view_index, pane_id, message } => {
+            FollowUp::PatchContentRow {
+                view_index,
+                pane_id,
+                node_id,
+                message,
+            } => {
                 self.notify(message);
-                self.reload_content_pane_current_level(view_index, pane_id);
+                self.patch_content_row(view_index, pane_id, node_id).await;
             }
-            FollowUp::ReloadContentPaneForTag { view_index, pane_id, message } => {
+            FollowUp::ReloadContentPaneForTag {
+                view_index,
+                pane_id,
+                message,
+            } => {
                 // A tag create/edit committed from a content tab (`type: tag`);
                 // reload the originating pane so its tag columns re-render.
                 self.notify(message);

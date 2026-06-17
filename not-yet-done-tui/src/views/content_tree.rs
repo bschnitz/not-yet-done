@@ -170,6 +170,58 @@ impl TreeState {
         entry.loaded = true;
     }
 
+    /// Remove `node_id` (and its whole cached subtree) from the tree in
+    /// place — the local counterpart of a delete, so a removed row vanishes
+    /// without a full reload (reload stays reserved for external changes).
+    /// Returns `false` when `node_id` isn't a current entry, so the caller
+    /// can fall back to a reload; on `true` the caller rebuilds entries.
+    ///
+    /// Drops the node from its parent's cached children, prunes every
+    /// `expanded`/`cache` path under the deleted node, and — when it was the
+    /// parent's last child — flips the *parent's* own `has_children` to
+    /// `Some(false)` (it lives in the grandparent's cache) so the parent's
+    /// expand glyph disappears. This mirrors the reload path's
+    /// leaf-vs-frontier handling without a round-trip.
+    pub fn remove_node(&mut self, node_id: &str) -> bool {
+        let Some(parent_path) = self
+            .entries
+            .iter()
+            .find(|e| e.node.id == node_id)
+            .map(|e| e.parent_path.clone())
+        else {
+            return false;
+        };
+        let mut own_path = parent_path.clone();
+        own_path.push(node_id.to_string());
+
+        // 1. Drop the node from its parent's cached children.
+        if let Some(state) = self.cache.get_mut(&parent_path) {
+            state.children.retain(|c| c.id != node_id);
+        }
+        // 2. Prune the deleted subtree's expansion + cache (its own path and
+        //    everything beneath it). A recursive delete removes descendants
+        //    in the backend too, so their cache is now stale.
+        self.expanded.retain(|p| !p.starts_with(own_path.as_slice()));
+        self.cache.retain(|p, _| !p.starts_with(own_path.as_slice()));
+        // 3. Last child gone → the parent is now a leaf; clear its glyph in
+        //    the grandparent's cache so the `▶` disappears.
+        let parent_now_empty = self
+            .cache
+            .get(&parent_path)
+            .map(|s| s.children.is_empty())
+            .unwrap_or(false);
+        if parent_now_empty {
+            if let Some((parent_id, grandparent_path)) = parent_path.split_last() {
+                if let Some(gp) = self.cache.get_mut(grandparent_path) {
+                    if let Some(p) = gp.children.iter_mut().find(|c| &c.id == parent_id) {
+                        p.has_children = Some(false);
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Initialise the cache entry for a parent that expects multiple
     /// per-type loads (heterogeneous tree fan-out). Called once at
     /// expand-start. Subsequent per-type completions go through
@@ -891,6 +943,119 @@ mod tests {
             vec!["mock:schema".to_string(), "mock:table".to_string()]
         );
         assert_eq!(t.entries[2].node.id, "db2");
+    }
+
+    /// A two-level tree where `db1` is expanded with two children;
+    /// removing one drops only that row and keeps the sibling, the
+    /// parent's expansion, and the parent's glyph.
+    #[test]
+    fn remove_node_drops_row_and_keeps_siblings() {
+        let table = child("table", Some("name"), vec![col("name")], Vec::new());
+        let schema = child("schema", Some("name"), vec![col("name")], vec![table]);
+        let v = view(Some("name"), vec![col("name")], vec![schema]);
+        let mut t = TreeState::new();
+        t.set_cached_children(
+            Vec::new(),
+            vec![typed_node("db1", "db1", "mock:schema")],
+            None,
+        );
+        t.set_cached_children(
+            vec!["db1".into()],
+            vec![
+                typed_node("public", "public", "mock:table"),
+                typed_node("private", "private", "mock:table"),
+            ],
+            None,
+        );
+        t.expanded.insert(vec!["db1".into()]);
+        t.rebuild_entries(&v);
+
+        assert!(t.remove_node("public"));
+        t.rebuild_entries(&v);
+
+        let ids: Vec<&str> = t.entries.iter().map(|e| e.node.id.as_str()).collect();
+        assert_eq!(ids, vec!["db1", "private"]);
+        // Parent stays expanded; its glyph (has_children) stays on.
+        assert!(t.expanded.contains(&vec!["db1".to_string()]));
+        assert!(t.entries[0].has_children);
+    }
+
+    /// Removing the parent's *last* child flips the parent's own
+    /// `has_children` to `false` so the expand glyph disappears — the
+    /// local counterpart of the reload path's leaf-vs-frontier fix.
+    #[test]
+    fn remove_last_child_clears_parent_glyph() {
+        let table = child("table", Some("name"), vec![col("name")], Vec::new());
+        let schema = child("schema", Some("name"), vec![col("name")], vec![table]);
+        let v = view(Some("name"), vec![col("name")], vec![schema]);
+        let mut t = TreeState::new();
+        let mut db1 = typed_node("db1", "db1", "mock:schema");
+        db1.has_children = Some(true);
+        t.set_cached_children(Vec::new(), vec![db1], None);
+        t.set_cached_children(
+            vec!["db1".into()],
+            vec![typed_node("public", "public", "mock:table")],
+            None,
+        );
+        t.expanded.insert(vec!["db1".into()]);
+        t.rebuild_entries(&v);
+
+        assert!(t.remove_node("public"));
+        t.rebuild_entries(&v);
+
+        let ids: Vec<&str> = t.entries.iter().map(|e| e.node.id.as_str()).collect();
+        assert_eq!(ids, vec!["db1"]);
+        // db1 is now a leaf: glyph cleared.
+        assert!(!t.entries[0].has_children);
+    }
+
+    /// Removing a node prunes its whole cached subtree (deeper
+    /// `expanded` paths + `cache` entries beneath it).
+    #[test]
+    fn remove_node_prunes_subtree() {
+        let table = child("table", Some("name"), vec![col("name")], Vec::new());
+        let schema = child("schema", Some("name"), vec![col("name")], vec![table]);
+        let v = view(Some("name"), vec![col("name")], vec![schema]);
+        let mut t = TreeState::new();
+        t.set_cached_children(
+            Vec::new(),
+            vec![typed_node("db1", "db1", "mock:schema")],
+            None,
+        );
+        t.set_cached_children(
+            vec!["db1".into()],
+            vec![typed_node("public", "public", "mock:table")],
+            None,
+        );
+        // A deeper level cached + expanded under db1/public.
+        t.set_cached_children(
+            vec!["db1".into(), "public".into()],
+            vec![typed_node("t1", "t1", "mock:leaf")],
+            None,
+        );
+        t.expanded.insert(vec!["db1".into()]);
+        t.expanded.insert(vec!["db1".into(), "public".into()]);
+        t.rebuild_entries(&v);
+
+        assert!(t.remove_node("public"));
+
+        assert!(!t.cache.contains_key(&vec!["db1".to_string(), "public".to_string()]));
+        assert!(!t
+            .expanded
+            .contains(&vec!["db1".to_string(), "public".to_string()]));
+    }
+
+    #[test]
+    fn remove_node_returns_false_for_unknown() {
+        let v = view(Some("name"), vec![col("name")], Vec::new());
+        let mut t = TreeState::new();
+        t.set_cached_children(
+            Vec::new(),
+            vec![typed_node("db1", "db1", "mock:schema")],
+            None,
+        );
+        t.rebuild_entries(&v);
+        assert!(!t.remove_node("ghost"));
     }
 
     #[test]
