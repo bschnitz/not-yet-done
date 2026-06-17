@@ -145,7 +145,7 @@ impl EditSession for NodeActionEditSession {
             Ok(ActionOutcome::Done { message }) => {
                 self.mark_applied(text);
                 let msg = message.unwrap_or_else(|| format!("{} updated", self.node_id));
-                self.done_with_reload(msg)
+                self.done_with_row_patch(msg)
             }
             Ok(ActionOutcome::Reopen { content, new_version }) => {
                 if let Some(v) = new_version {
@@ -168,14 +168,24 @@ impl EditSession for NodeActionEditSession {
                 if self.commit_on_save {
                     self.retarget_to_created(new_id.clone()).await;
                 }
-                match self.nav.as_ref() {
-                    Some(ctx) => CommitOutcome::FollowUp(FollowUp::ReloadContentDrillDown {
-                        view_index: ctx.view_index,
-                        parent_node_id: ctx.parent_node_id.clone(),
-                        child_node_type: ctx.child_node_type.clone(),
-                        message: format!("Created {} on {}", node_type.display_name, ctx.parent_node_id),
-                    }),
-                    None => self.done_with_reload(format!("Created {new_id}")),
+                // A create always carries both `nav` (parent + child type)
+                // and `reload` (origin pane). Splice the new child in place
+                // rather than full-reloading: the App decides tree-local
+                // insert vs. drill-refresh per pane kind.
+                match (self.nav.as_ref(), self.reload) {
+                    (Some(ctx), Some(target)) => {
+                        CommitOutcome::FollowUp(FollowUp::InsertContentChild {
+                            view_index: ctx.view_index,
+                            pane_id: target.pane_id,
+                            parent_node_id: ctx.parent_node_id.clone(),
+                            child_node_type: ctx.child_node_type.clone(),
+                            message: format!(
+                                "Created {} on {}",
+                                node_type.display_name, ctx.parent_node_id
+                            ),
+                        })
+                    }
+                    _ => self.done_with_row_patch(format!("Created {new_id}")),
                 }
             }
             Err(e) => CommitOutcome::Cancelled {
@@ -235,15 +245,18 @@ impl NodeActionEditSession {
         }
     }
 
-    /// Turn a successful `Done`/`Navigate(no nav)` into a pane-reload
-    /// follow-up when the session knows its originating pane; otherwise
-    /// fall back to a plain `Done` so callers without a pane (tests,
-    /// future non-pane invocations) still terminate cleanly.
-    fn done_with_reload(&self, message: String) -> CommitOutcome {
+    /// Turn a successful `Done` (an in-place edit) into a single-row patch
+    /// follow-up when the session knows its originating pane — the editor
+    /// changed one node's content, so only that row needs refreshing (no
+    /// full reload, which is reserved for external changes). Falls back to a
+    /// plain `Done` for callers without a pane (tests, future non-pane
+    /// invocations) so they still terminate cleanly.
+    fn done_with_row_patch(&self, message: String) -> CommitOutcome {
         match self.reload {
-            Some(target) => CommitOutcome::FollowUp(FollowUp::ReloadContentPane {
+            Some(target) => CommitOutcome::FollowUp(FollowUp::PatchContentRow {
                 view_index: target.view_index,
                 pane_id: target.pane_id,
+                node_id: self.node_id.clone(),
                 message,
             }),
             None => CommitOutcome::Done { message: Some(message) },
@@ -429,6 +442,52 @@ mod tests {
         let b = backend.lock().unwrap();
         assert_eq!(b.sends.len(), 1);
         assert_eq!(b.edits.len(), 1);
+    }
+
+    /// A create (`ActionOutcome::Navigate`) carrying both `nav` and `reload`
+    /// asks the App to splice the new child in place (no full reload), with
+    /// the parent id + child type + origin pane threaded through. This is the
+    /// `add`/`A` path; the App then chooses tree-local insert vs. drill-refresh.
+    #[tokio::test]
+    async fn create_with_nav_and_reload_yields_insert_content_child() {
+        let backend = Arc::new(Mutex::new(Backend::default()));
+        let adapter = Arc::new(MockAdapter {
+            backend: Arc::clone(&backend),
+            meta: Metadata::default(),
+        });
+        let mut s = NodeActionEditSession::new(
+            adapter,
+            "channel".into(),
+            "send_message".into(),
+            "add".into(),
+            Some(NavContext {
+                view_index: 2,
+                parent_node_id: "channel".into(),
+                child_node_type: "mock:message".into(),
+            }),
+            Some(ReloadTarget { view_index: 2, pane_id: 7 }),
+            None,
+            false,
+        )
+        .await
+        .expect("session builds");
+
+        match s.commit("hello").await {
+            CommitOutcome::FollowUp(FollowUp::InsertContentChild {
+                view_index,
+                pane_id,
+                parent_node_id,
+                child_node_type,
+                ..
+            }) => {
+                assert_eq!(view_index, 2);
+                assert_eq!(pane_id, 7);
+                assert_eq!(parent_node_id, "channel");
+                assert_eq!(child_node_type, "mock:message");
+            }
+            _ => panic!("expected InsertContentChild follow-up"),
+        }
+        assert_eq!(backend.lock().unwrap().sends, vec!["hello".to_string()]);
     }
 
     /// Without `commit_on_save`, intermediate saves stay no-ops (the legacy

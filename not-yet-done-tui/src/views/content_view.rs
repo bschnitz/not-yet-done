@@ -7800,6 +7800,38 @@ impl ContentView {
     /// and rebuilds the visible table so the new rows show up. Dropped
     /// silently if the pane has been closed or is no longer in tree
     /// mode.
+    /// Remove `node_id` from `pane_id`'s tree in place (local delete) and
+    /// rebuild. Returns `false` when the pane has no tree or the node isn't a
+    /// current row, so the caller can fall back to a full reload. See
+    /// [`TreeState::remove_node`] for the cache/expansion bookkeeping.
+    pub fn remove_tree_node(&mut self, pane_id: PaneId, node_id: &str) -> bool {
+        let Some(tree_idx) = self
+            .pane_trees
+            .iter()
+            .position(|tree| tree.root.find_leaf(pane_id).is_some())
+        else {
+            return false;
+        };
+        let view_defs = self.view_defs.clone();
+        let tree = &mut self.pane_trees[tree_idx];
+        let mut removed = false;
+        if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            if let Some(state) = leaf.pane.tree.as_mut() {
+                removed = state.remove_node(node_id);
+                if removed {
+                    if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
+                        state.rebuild_entries(vd);
+                    }
+                    leaf.pane.rebuild_table(&view_defs);
+                }
+            }
+        }
+        if removed {
+            self.sync_action_bar_hints();
+        }
+        removed
+    }
+
     pub fn apply_tree_children(
         &mut self,
         pane_id: PaneId,
@@ -8323,6 +8355,26 @@ impl ContentView {
     /// Mirrors [`repaint_live_columns`](Self::repaint_live_columns)'s
     /// disjoint borrow (`&self.view_defs` + `&mut self.pane_trees`) so the
     /// view defs aren't cloned per patch.
+    /// The currently-displayed [`NodeSummary`] for `node_id` in `pane_id`,
+    /// if the row is visible — its flat-list item or a tree-cache child at
+    /// any depth. Used to carry forward fields a bare re-fetched `Node`
+    /// can't reconstruct (notably `has_children`) when patching a row after
+    /// an in-place edit.
+    pub fn visible_summary(
+        &self,
+        pane_id: PaneId,
+        node_id: &str,
+    ) -> Option<not_yet_done_content::NodeSummary> {
+        let pane = self.find_pane(pane_id)?;
+        if let Some(it) = pane.items.iter().find(|it| it.id == node_id) {
+            return Some(it.clone());
+        }
+        let tree = pane.tree.as_ref()?;
+        tree.cache
+            .values()
+            .find_map(|state| state.children.iter().find(|c| c.id == node_id).cloned())
+    }
+
     pub fn patch_row(&mut self, summary: &not_yet_done_content::NodeSummary) -> bool {
         let view_defs = &self.view_defs;
         let overlay = self.header_overlay.clone();
@@ -10285,11 +10337,24 @@ fn ingest_subtree_level(state: &mut TreeState, parent_path: Vec<String>, subtree
     let summaries: Vec<NodeSummary> = subtree.items.iter().map(|n| n.summary.clone()).collect();
     state.set_cached_children(parent_path.clone(), summaries, next_page);
     for node in subtree.items {
-        if node.children.items.is_empty() {
-            continue;
-        }
         let mut own_path = parent_path.clone();
         own_path.push(node.summary.id.clone());
+        if node.children.items.is_empty() {
+            // Empty `children` is ambiguous (see `SubtreeNode` docs): a real
+            // leaf vs. a depth-limited frontier. For a *genuine* leaf
+            // (`has_children == Some(false)`) we must positively clear any
+            // children this node still has cached — otherwise a reload that
+            // emptied the node (e.g. its last child was deleted) leaves the
+            // stale rows rendering under it, since `rebuild_entries` still
+            // walks the old cache while the node sits in `expanded`. A
+            // frontier (`has_children != Some(false)`) is left untouched so a
+            // later lazy expand can still fill it.
+            if node.summary.has_children == Some(false) {
+                state.set_cached_children(own_path.clone(), Vec::new(), None);
+                state.expanded.remove(&own_path);
+            }
+            continue;
+        }
         state.expanded.insert(own_path.clone());
         ingest_subtree_level(state, own_path, node.children);
     }
@@ -13374,6 +13439,112 @@ mod tests {
             assert_eq!(ec.loaded, cc.loaded, "loaded mismatch at {key:?}");
             assert_eq!(ec.next_page, cc.next_page, "next_page mismatch at {key:?}");
         }
+    }
+
+    /// Build a `SubtreeNode` carrying an explicit `has_children` so the
+    /// genuine-leaf (`Some(false)`) vs. depth-frontier (`Some(true)`)
+    /// distinction can be exercised — `sub_node` leaves it `None`.
+    fn sub_node_hc(
+        id: &str,
+        has_children: Option<bool>,
+        children: Vec<not_yet_done_content::SubtreeNode>,
+    ) -> not_yet_done_content::SubtreeNode {
+        let mut summary = sub_summary(id);
+        summary.has_children = has_children;
+        not_yet_done_content::SubtreeNode {
+            summary,
+            children: Subtree {
+                items: children,
+                page: None,
+            },
+        }
+    }
+
+    /// Regression (Tasks-(A) delete-last-child): a reload whose fresh subtree
+    /// reports a node as a genuine leaf (`has_children == Some(false)`, empty
+    /// `children`) must positively clear that node's previously-cached
+    /// children and drop it from `expanded`. Otherwise the stale rows keep
+    /// rendering under it (the deleted task lingers even though its parent's
+    /// expand marker is already gone). A depth-frontier node
+    /// (`has_children == Some(true)`, empty `children`) must be left intact
+    /// so a later lazy expand can still fill it.
+    #[test]
+    fn ingest_subtree_clears_children_of_emptied_leaf() {
+        // First load: P (root) → C (which itself had a child GC).
+        let first = Subtree {
+            items: vec![sub_node_hc(
+                "P",
+                Some(true),
+                vec![sub_node_hc("C", Some(true), vec![sub_node_hc("GC", Some(false), vec![])])],
+            )],
+            page: None,
+        };
+        let mut state = TreeState::new();
+        ingest_subtree_level(&mut state, Vec::new(), first);
+        // Pre-condition: C's children are cached and C is expanded.
+        assert_eq!(
+            state.cache[&vec!["P".to_string(), "C".to_string()]]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["GC".to_string()],
+        );
+        assert!(state.expanded.contains(&vec!["P".to_string(), "C".to_string()]));
+
+        // Reload after GC was deleted: C is now a genuine leaf.
+        let reloaded = Subtree {
+            items: vec![sub_node_hc(
+                "P",
+                Some(true),
+                vec![sub_node_hc("C", Some(false), vec![])],
+            )],
+            page: None,
+        };
+        ingest_subtree_level(&mut state, Vec::new(), reloaded);
+
+        // The stale GC row is gone: C's cache slot is now empty, and C is no
+        // longer treated as expanded.
+        assert!(
+            state.cache[&vec!["P".to_string(), "C".to_string()]]
+                .children
+                .is_empty(),
+            "emptied leaf must have its cached children cleared",
+        );
+        assert!(
+            !state.expanded.contains(&vec!["P".to_string(), "C".to_string()]),
+            "emptied leaf must be dropped from `expanded`",
+        );
+    }
+
+    /// Counterpart to the above: an empty `children` at the *depth frontier*
+    /// (`has_children == Some(true)`) must NOT wipe whatever the node already
+    /// has cached — that cache is its lazily-loaded deeper level.
+    #[test]
+    fn ingest_subtree_keeps_frontier_children() {
+        // Frontier node F already has a cached child (lazy-loaded earlier).
+        let mut state = TreeState::new();
+        state.set_cached_children(vec!["F".to_string()], vec![sub_summary("deep")], None);
+        state.expanded.insert(vec!["F".to_string()]);
+
+        // A shallow reload that stops at F (frontier: has_children true but
+        // no `children` in the payload) must leave F's cache untouched.
+        let shallow = Subtree {
+            items: vec![sub_node_hc("F", Some(true), vec![])],
+            page: None,
+        };
+        ingest_subtree_level(&mut state, Vec::new(), shallow);
+
+        assert_eq!(
+            state.cache[&vec!["F".to_string()]]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["deep".to_string()],
+            "frontier node's lazily-loaded children must survive a shallow reload",
+        );
+        assert!(state.expanded.contains(&vec!["F".to_string()]));
     }
 
     /// M9 now-bucket refresh: `reload_now_bucket` swaps one bucket's header
