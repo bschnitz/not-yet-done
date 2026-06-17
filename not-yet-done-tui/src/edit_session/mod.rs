@@ -12,7 +12,6 @@
 
 use async_trait::async_trait;
 use not_yet_done_content::{NodeSummary, PageInfo};
-use uuid::Uuid;
 
 use crate::views::content_view::{CustomQueryRunState, PaneId};
 
@@ -22,12 +21,8 @@ mod file_edit;
 mod node_action;
 mod postgres_db_script;
 mod postgres_query;
-mod restructure;
 mod saved_query;
 mod tag_form;
-mod task_edit;
-mod task_notes;
-mod task_query_filter;
 mod tracking_query_filter;
 mod tracking_script;
 mod tracking_script_output;
@@ -41,12 +36,8 @@ pub use postgres_query::{
     parse_query_area as postgres_parse_query_area, PostgresQuerySession,
     DEFAULT_PAGE_SIZE as POSTGRES_QUERY_DEFAULT_PAGE_SIZE,
 };
-pub use restructure::RestructureSession;
 pub use saved_query::SavedQueryEditSession;
 pub use tag_form::TagFormSession;
-pub use task_edit::TaskEditSession;
-pub use task_notes::TaskNotesSession;
-pub use task_query_filter::TaskQueryFilterSession;
 pub use tracking_query_filter::TrackingQueryFilterSession;
 pub use tracking_script::ScriptSession;
 pub use tracking_script_output::ScriptOutputSession;
@@ -176,12 +167,6 @@ pub enum CommitOutcome {
 
 /// Side-effects that only the App can perform after a session finishes.
 pub enum FollowUp {
-    /// Refresh the tasks view after a task add/update.
-    ReloadTasks {
-        focus_id: Option<Uuid>,
-        tracking_changed: bool,
-        message: String,
-    },
     /// An in-place edit (`edit`/notes) succeeded; patch only the edited
     /// row in the originating pane ([`crate::views::content_view::ContentView::patch_row`])
     /// instead of full-reloading — reload is reserved for external changes.
@@ -218,8 +203,6 @@ pub enum FollowUp {
         pane_id: PaneId,
         message: String,
     },
-    /// Live-apply a YAML task filter without persisting.
-    ApplyTaskFilter { content: String },
     /// Live-apply a YAML tracking filter without persisting.
     ApplyTrackingFilter { content: String },
     /// Live-apply a content view query without persisting.
@@ -227,12 +210,6 @@ pub enum FollowUp {
         view_index: usize,
         content: String,
         save_name: Option<String>,
-    },
-    /// Final close: apply + persist task filter; optional shortcut prompt.
-    CloseTaskFilter {
-        content: String,
-        name: String,
-        is_new: bool,
     },
     /// Final close: apply + persist tracking filter; optional shortcut prompt.
     CloseTrackingFilter {

@@ -191,20 +191,3 @@ impl TransformableForest<TaskQuery> for TaskForest {
 pub fn build_forest(tasks: Vec<Task>) -> TaskForest {
     TaskForest::new(tasks)
 }
-
-pub fn find_task_in_forest(forest: &TaskForest, id: Uuid) -> Option<&TaskItem> {
-    forest
-        .inner()
-        .roots()
-        .iter()
-        .find_map(|root| find_task_in_node(root, id))
-}
-
-fn find_task_in_node<'a>(node: &'a TreeNode<TaskItem>, id: Uuid) -> Option<&'a TaskItem> {
-    if node.element.0.id == id {
-        return Some(&node.element);
-    }
-    node.children
-        .iter()
-        .find_map(|child| find_task_in_node(child, id))
-}

@@ -2,11 +2,8 @@
 
 use std::sync::Arc;
 
-use not_yet_done_core::entity::task::Model as Task;
-
 use crate::edit_session::{CommitOutcome, EditSession, EditorSpawnContext, FollowUp};
 use crate::query_filter;
-use crate::tabs::TasksSubView;
 
 /// Result of an asynchronously running commit. Sent from the spawned task
 /// back to the main loop via `commit_tx`. `Reopen` carries the session back
@@ -40,7 +37,7 @@ pub(crate) fn tracking_scripts_dir() -> std::path::PathBuf {
         .join("scripts")
 }
 
-use super::{App, is_in_subtree};
+use super::App;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -208,63 +205,6 @@ impl App {
         }
     }
 
-    pub fn open_editor_for_add(&mut self) -> EditorRequest {
-        let parent_id = if self.tasks_view.sub_view() == TasksSubView::Tree {
-            self.selected_task_id()
-        } else {
-            None
-        };
-        let session = crate::edit_session::TaskEditSession::create(
-            Arc::clone(&self.task_service),
-            Arc::clone(&self.tracking_repo),
-            self.config.tracking.allow_parallel,
-            self.tasks_view.state.task_rows.clone(),
-            parent_id,
-        );
-        self.open_session(Box::new(session))
-    }
-
-    pub fn open_editor_for_edit(&mut self) -> EditorRequest {
-        let Some(task) = self.selected_task() else {
-            self.notify("No task selected".to_string());
-            return EditorRequest::None;
-        };
-        let tracked_ids = self.get_tracked_task_ids();
-        let is_tracked = tracked_ids.contains(&task.id);
-        let session = crate::edit_session::TaskEditSession::edit(
-            Arc::clone(&self.task_service),
-            Arc::clone(&self.tracking_repo),
-            self.config.tracking.allow_parallel,
-            self.tasks_view.state.task_rows.clone(),
-            task,
-            is_tracked,
-        );
-        self.open_session(Box::new(session))
-    }
-
-    pub fn open_editor_for_restructure(&mut self) -> EditorRequest {
-        let Some(task) = self.selected_task() else {
-            self.notify("No task selected".to_string());
-            return EditorRequest::None;
-        };
-        let subtree: Vec<Task> = self.tasks_view.state.task_rows.iter()
-            .filter(|t| is_in_subtree(t, task.id, &self.tasks_view.state.task_rows))
-            .cloned()
-            .collect();
-        let indent = self.config.editors.default.indent;
-        let tracked_ids = self.get_tracked_task_ids();
-        let content = crate::tree_edit::serialize_with_indent(&task, &subtree, indent, &tracked_ids);
-        let session = crate::edit_session::RestructureSession::new(
-            Arc::clone(&self.task_service),
-            Arc::clone(&self.tracking_repo),
-            self.config.tracking.allow_parallel,
-            subtree,
-            task.id,
-            content,
-        );
-        self.open_session(Box::new(session))
-    }
-
     /// Open the YAML query editor with a specific starting content. Used by the
     /// new query menu when editing an existing entry or creating a new one.
     /// For new entries the editor always starts from the empty template,
@@ -288,16 +228,9 @@ impl App {
                 let session = crate::edit_session::TrackingQueryFilterSession::new(name, is_new, content);
                 self.open_session(Box::new(session))
             }
-            _ => {
-                let content = if is_new {
-                    query_filter::template()
-                } else {
-                    content
-                        .or_else(|| self.tasks_view.active_filter_json.clone())
-                        .unwrap_or_else(query_filter::template)
-                };
-                let session = crate::edit_session::TaskQueryFilterSession::new(name, is_new, content);
-                self.open_session(Box::new(session))
+            other => {
+                self.notify_error(format!("No saved-query editor for scope '{other}'"));
+                EditorRequest::None
             }
         }
     }
@@ -744,17 +677,6 @@ impl App {
 
     pub(crate) async fn handle_follow_up(&mut self, follow_up: FollowUp) {
         match follow_up {
-            FollowUp::ReloadTasks { focus_id, tracking_changed, message } => {
-                if let Some(id) = focus_id {
-                    self.tasks_view.set_pending_focus(id);
-                }
-                self.set_query_error(None);
-                self.notify(message);
-                self.spawn_load();
-                if tracking_changed {
-                    self.refresh_tracked_ids();
-                }
-            }
             FollowUp::InsertContentChild {
                 view_index,
                 pane_id,
@@ -784,18 +706,11 @@ impl App {
                 self.notify(message);
                 self.reload_content_pane_current_level(view_index, pane_id);
             }
-            FollowUp::ApplyTaskFilter { content } => {
-                self.apply_query_filter(&content);
-            }
             FollowUp::ApplyTrackingFilter { content } => {
                 self.apply_tracking_query_filter(&content);
             }
             FollowUp::ApplyContentFilter { view_index, content, save_name } => {
                 self.apply_content_query_live(&content, view_index, save_name.as_deref());
-            }
-            FollowUp::CloseTaskFilter { content, name, is_new } => {
-                self.apply_query_filter(&content);
-                self.process_query_filter_close(&name, is_new).await;
             }
             FollowUp::CloseTrackingFilter { content, name, is_new } => {
                 self.apply_tracking_query_filter(&content);

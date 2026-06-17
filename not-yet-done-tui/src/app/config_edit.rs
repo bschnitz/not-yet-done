@@ -259,12 +259,6 @@ impl App {
             Arc::clone(&shared_theme),
             &new_keybindings,
         );
-        let tasks_view = crate::views::tasks_view::TasksView::new(
-            Arc::clone(&shared_theme),
-            new_keybindings.clone(),
-            std::sync::Arc::clone(&self.task_service),
-            new_config.tasks.tree.default_expand_depth,
-        );
         let mut trackings_view = crate::views::trackings_view::TrackingsView::new(
             Arc::clone(&shared_theme),
             new_keybindings.clone(),
@@ -295,7 +289,6 @@ impl App {
         self.theme = new_theme;
         self.tab_bar = tab_bar;
         self.status_bar = status_bar;
-        self.tasks_view = tasks_view;
         self.trackings_view = trackings_view;
         self.notification_bar = notification_bar;
         self.content_views = new_content_views;
@@ -303,7 +296,6 @@ impl App {
         self.rebuild_tab_layout();
 
         // Refill data the rebuild dropped.
-        self.spawn_load();
         self.refresh_tracked_ids();
         self.reload_link_refs();
 
@@ -406,7 +398,7 @@ impl App {
     /// Rebuild every content view from scratch — used when an adapter
     /// config under `views/` changed (and we can't tell which slots
     /// referenced it from the path alone). Preserves tui.yaml-derived
-    /// theme + keybindings + tasks_view + trackings_view.
+    /// theme + keybindings + trackings_view.
     fn reload_all_content_views(&mut self) -> Result<String, String> {
         let factories = (self.adapter_factory_builder)();
         let new_content_views = super::load_content_views(

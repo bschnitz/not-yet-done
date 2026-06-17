@@ -9,14 +9,11 @@
 //! [`crate::edit_session::FollowUp`] variants here from
 //! `handle_follow_up`.
 
-use std::sync::Arc;
-
 use uuid::Uuid;
 
 use crate::query_filter;
-use crate::tabs::LoadState;
 
-use super::{App, LoadMsg};
+use super::App;
 
 impl App {
     // -----------------------------------------------------------------------
@@ -88,112 +85,6 @@ impl App {
             }
         } else {
             self.notify("Query applied".to_string());
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Task query filter — live apply, close, persistence, load-active
-    // -----------------------------------------------------------------------
-
-    pub fn apply_query_filter(&mut self, content: &str) {
-        match query_filter::parse(content) {
-            Ok(parsed) => {
-                let name = if parsed.name.is_empty() { None } else { Some(parsed.name.clone()) };
-                self.tasks_view.active_filter = Some(parsed.expr.clone());
-                self.tasks_view.active_filter_options = parsed.options.clone();
-                self.tasks_view.active_filter_json = Some(content.to_string());
-                self.tasks_view.active_filter_name = name.clone();
-                // Keep favorites in sync with the latest filter JSON.
-                if let Some(ref filter_name) = name {
-                    self.update_favorite_json("task", filter_name, content);
-                }
-
-                self.tasks_view.state.load_state = LoadState::Loading;
-                let service = Arc::clone(&self.task_service);
-                let tx = self.load_tx.clone();
-                let expr = parsed.expr;
-                let options = parsed.options;
-                tokio::spawn(async move {
-                    let msg = match service.list_filtered_with_options(&expr, &options).await {
-                        Ok(tasks) => LoadMsg::Tasks(tasks),
-                        Err(e) => LoadMsg::Error(e.to_string()),
-                    };
-                    let _ = tx.send(msg);
-                });
-                self.set_query_error(None);
-                self.notify(format!(
-                    "Filter applied{}",
-                    if parsed.name.is_empty() { String::new() } else { format!(": {}", parsed.name) }
-                ));
-            }
-            Err(e) => {
-                self.set_query_error(Some(e.to_string()));
-            }
-        }
-    }
-
-    pub(super) async fn process_query_filter_close(&mut self, name: &str, is_new: bool) {
-        self.save_active_filter(name).await;
-        self.set_query_error(None);
-        self.load_saved_queries();
-        if is_new && !name.is_empty() {
-            let query = self.tasks_view.active_filter_json.clone().unwrap_or_default();
-            self.modal_message = Some(format!(
-                "Query '{}' saved.\n\nPress a shortcut key or Esc to skip",
-                name
-            ));
-            self.awaiting_favorite_shortcut = Some(("task".to_string(), name.to_string(), query));
-        } else {
-            self.notify("Filter saved".to_string());
-        }
-    }
-
-    async fn save_active_filter(&self, name: &str) {
-        let Some(json) = &self.tasks_view.active_filter_json else { return };
-        let filter_name = if name.is_empty() { "last unnamed filter" } else { name };
-
-        match self.saved_query_repo.upsert("task", filter_name, json, None).await {
-            Ok(saved) => {
-                let _ = self.settings_repo
-                    .set("active_saved_filter_task", &saved.id.to_string())
-                    .await;
-            }
-            Err(e) => {
-                eprintln!("Failed to save filter: {e}");
-            }
-        }
-    }
-
-    pub async fn load_active_filter(&mut self) {
-        // An explicitly marked default query (★ in the query menu)
-        // beats the last-active filter restore.
-        if let Some(saved) = self.load_default_query("task").await {
-            if let Ok(parsed) = query_filter::parse(&saved.1) {
-                self.tasks_view.active_filter = Some(parsed.expr);
-                self.tasks_view.active_filter_options = parsed.options;
-                self.tasks_view.active_filter_json = Some(saved.1);
-                self.tasks_view.active_filter_name = Some(saved.0);
-                self.spawn_load();
-                return;
-            }
-        }
-
-        let Some(filter_id_str) = self.settings_repo
-            .get("active_saved_filter_task").await.ok().flatten()
-        else { return };
-
-        let Ok(filter_id) = filter_id_str.parse::<Uuid>() else { return };
-
-        let Some(saved) = self.saved_query_repo
-            .find_by_id(filter_id).await.ok().flatten()
-        else { return };
-
-        if let Ok(parsed) = query_filter::parse(&saved.query) {
-            self.tasks_view.active_filter = Some(parsed.expr);
-            self.tasks_view.active_filter_options = parsed.options;
-            self.tasks_view.active_filter_json = Some(saved.query);
-            self.tasks_view.active_filter_name = Some(saved.name);
-            self.spawn_load();
         }
     }
 

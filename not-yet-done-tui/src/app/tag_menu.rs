@@ -11,7 +11,6 @@ use crate::app::ContentSlot;
 use crate::app::EditorRequest;
 use crate::components::tag_menu::{TagMenuEntry, TagMenuMessage};
 use crate::edit_session::TagFormSession;
-use crate::tabs::Tab;
 use crate::views::content_view::PaneId;
 use not_yet_done_core::repository::ResolvedTag;
 use not_yet_done_core::service::TagItem;
@@ -32,8 +31,11 @@ pub struct ContentTagTarget {
 }
 
 impl App {
-    /// Open the tag menu from the native Tasks tab (`:tag`). Clears any
-    /// content-tab target so assignment falls back to `tasks_view`.
+    /// Open the tag menu from the cmdline (`:tag`). Clears any content-tab
+    /// target, so the menu manages tags globally (create / edit / delete)
+    /// without a node to assign against. Assignment needs a selected node
+    /// and is reached via a content tab's `T` key
+    /// ([`Self::open_tag_menu_for_content`]).
     pub fn open_tag_menu(&mut self) {
         self.content_tag_target = None;
         self.build_and_open_tag_menu();
@@ -155,17 +157,11 @@ impl App {
     }
 
     /// Return the task id eligible for tag assignment, or `None` when
-    /// there is no eligible target. A content-tab target (set by
-    /// [`Self::open_tag_menu_for_content`]) wins; otherwise the native
-    /// Tasks tab's selected task is used.
+    /// there is no eligible target. The target is set by
+    /// [`Self::open_tag_menu_for_content`] from the selected content node
+    /// (e.g. the Tasks-(A) `T` key).
     fn tag_assign_target(&self) -> Option<Uuid> {
-        if let Some(target) = &self.content_tag_target {
-            return Some(target.task_id);
-        }
-        if self.active_tab != Tab::Tasks {
-            return None;
-        }
-        self.tasks_view.selected_id()
+        self.content_tag_target.as_ref().map(|target| target.task_id)
     }
 
     /// The content pane to reload after a session-based tag commit
@@ -207,39 +203,27 @@ impl App {
     }
 
     /// Is `tag_id` (`global-tag:`/`project-tag:` form) currently on
-    /// `task_id`? On a content tab the `tasks_view` cache is stale/empty,
-    /// so fetch this one task's tags live; on the native tab reuse the
-    /// already-loaded relationship cache.
+    /// `task_id`? The content view holds no tag-relationship cache, so
+    /// fetch this one task's tags live.
     fn tag_currently_assigned(&self, task_id: Uuid, tag_id: &str) -> bool {
-        if self.content_tag_target.is_some() {
-            let svc = self.task_service.clone();
-            let map = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async move { svc.load_tags_for_tasks(&[task_id]).await })
-            });
-            return map
-                .ok()
-                .and_then(|m| m.get(&task_id).map(|tags| tags.to_vec()))
-                .map(|tags| tags.iter().any(|rt| tag_matches_id(rt, tag_id)))
-                .unwrap_or(false);
-        }
-        self.tasks_view
-            .state
-            .task_tags
-            .get(&task_id)
+        let svc = self.task_service.clone();
+        let map = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { svc.load_tags_for_tasks(&[task_id]).await })
+        });
+        map.ok()
+            .and_then(|m| m.get(&task_id).map(|tags| tags.to_vec()))
             .map(|tags| tags.iter().any(|rt| tag_matches_id(rt, tag_id)))
             .unwrap_or(false)
     }
 
-    /// Refresh whichever surface owns the assignment after a tag change.
-    /// Content tab: reload the originating pane so its tag columns
-    /// re-render. Native tab: re-fetch tags for the visible task rows.
+    /// Refresh the content pane that owns the assignment after a tag
+    /// change, so its `tag_symbols` / `tag_names` columns re-render. When
+    /// the menu was opened globally (`:tag`, no target) there is nothing
+    /// to refresh.
     fn refresh_after_tag_change(&mut self) {
         if let Some(target) = self.content_tag_target {
             self.reload_content_pane_current_level(target.view_index, target.pane_id);
-        } else {
-            let ids: Vec<Uuid> = self.tasks_view.state.task_rows.iter().map(|t| t.id).collect();
-            self.spawn_load_task_tags(ids);
         }
     }
 

@@ -1,14 +1,10 @@
 //! View and state type definitions.
 
 pub mod columns;
-mod filter_state;
-mod rendered_table;
-mod tasks_state;
+mod load_state;
 pub mod trackings_state;
 
-pub use filter_state::{FilterField, FilterState, StatusFilter};
-pub use rendered_table::build_rendered_table;
-pub use tasks_state::{LoadState, TasksForm, TasksState};
+pub use load_state::LoadState;
 pub use trackings_state::{TrackingRow, TrackingsState};
 
 /// Compose a tab-bar label as `icon key name`, placing the key/autonumber
@@ -26,7 +22,6 @@ pub fn tab_label(icon: &str, key: &str, name: &str) -> String {
 /// Main tab — the top-level navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Tasks,
     Trackings,
     /// Dynamic content tab backed by a ContentAdapter. Index into App::content_views.
     Content(usize),
@@ -36,20 +31,18 @@ impl Tab {
     pub fn next(&self, content_count: usize) -> Tab {
         let last_content = content_count.saturating_sub(1);
         match self {
-            Tab::Tasks => Tab::Trackings,
             Tab::Trackings if content_count > 0 => Tab::Content(0),
-            Tab::Trackings => Tab::Tasks,
+            Tab::Trackings => Tab::Trackings,
             Tab::Content(i) if *i < last_content => Tab::Content(i + 1),
-            Tab::Content(_) => Tab::Tasks,
+            Tab::Content(_) => Tab::Trackings,
         }
     }
 
     pub fn prev(&self, content_count: usize) -> Tab {
         let last_content = content_count.saturating_sub(1);
         match self {
-            Tab::Tasks if content_count > 0 => Tab::Content(last_content),
-            Tab::Tasks => Tab::Trackings,
-            Tab::Trackings => Tab::Tasks,
+            Tab::Trackings if content_count > 0 => Tab::Content(last_content),
+            Tab::Trackings => Tab::Trackings,
             Tab::Content(0) => Tab::Trackings,
             Tab::Content(i) => Tab::Content(i - 1),
         }
@@ -75,11 +68,11 @@ pub struct TabLayout {
 }
 
 impl TabLayout {
-    /// Legacy layout: Tasks, Trackings, then every content tab in slot
-    /// order. Autonumber off — the fixed `GlobalAction` tab keys (`1`..
-    /// `6`) stay in charge, preserving pre-constellation behaviour.
+    /// Legacy layout: Trackings, then every content tab in slot order.
+    /// Autonumber off — the fixed `GlobalAction` tab keys (`1`..`6`) stay
+    /// in charge, preserving pre-constellation behaviour.
     pub fn legacy(content_count: usize) -> Self {
-        let mut order = vec![Tab::Tasks, Tab::Trackings];
+        let mut order = vec![Tab::Trackings];
         order.extend((0..content_count).map(Tab::Content));
         Self {
             order,
@@ -109,9 +102,9 @@ impl TabLayout {
     }
 
     /// First visible tab — the startup / fallback selection. Defaults to
-    /// `Tasks` if the layout is somehow empty.
+    /// `Trackings` if the layout is somehow empty.
     pub fn first(&self) -> Tab {
-        self.order.first().copied().unwrap_or(Tab::Tasks)
+        self.order.first().copied().unwrap_or(Tab::Trackings)
     }
 
     /// Digit char that selects `tab`, when autonumber is active and the
@@ -199,7 +192,7 @@ pub fn resolve_tab_layout(
         if by_name.insert(name.as_str(), *tab).is_some() {
             return Err(format!(
                 "Two tabs share the name \"{name}\". Tab names must be unique \
-                 (built-in Tasks/Trackings plus each view's `tab.name`) so a \
+                 (built-in Trackings plus each view's `tab.name`) so a \
                  constellation can reference them unambiguously. Rename one."
             ));
         }
@@ -239,24 +232,6 @@ pub fn resolve_tab_layout(
     }
 
     Ok(TabLayout::constellation(order))
-}
-
-/// Sub-view within the Tasks tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TasksSubView {
-    List,
-    Tree,
-}
-
-impl TasksSubView {
-    pub const ALL: &'static [TasksSubView] = &[TasksSubView::List, TasksSubView::Tree];
-
-    pub fn title(&self) -> &'static str {
-        match self {
-            TasksSubView::List => "list",
-            TasksSubView::Tree => "tree",
-        }
-    }
 }
 
 /// Sub-view within the Trackings tab.
@@ -309,7 +284,6 @@ mod tab_layout_tests {
     /// 3 content tabs: Jira, Taiga, Analytics DB (slots 0,1,2).
     fn available() -> Vec<(String, Tab)> {
         vec![
-            ("Tasks".into(), Tab::Tasks),
             ("Trackings".into(), Tab::Trackings),
             ("Jira".into(), Tab::Content(0)),
             ("Taiga".into(), Tab::Content(1)),
@@ -347,7 +321,6 @@ mod tab_layout_tests {
         assert_eq!(
             layout.tabs(),
             &[
-                Tab::Tasks,
                 Tab::Trackings,
                 Tab::Content(0),
                 Tab::Content(1),
@@ -356,7 +329,7 @@ mod tab_layout_tests {
         );
         // Legacy mode: digits stay with the fixed GlobalAction keys.
         assert!(!layout.autonumber());
-        assert_eq!(layout.digit_for(Tab::Tasks), None);
+        assert_eq!(layout.digit_for(Tab::Trackings), None);
         assert_eq!(layout.tab_for_key("1"), None);
     }
 
@@ -364,26 +337,23 @@ mod tab_layout_tests {
     fn constellation_orders_and_numbers_named_tabs() {
         let cfg = cfg_with(
             "default",
-            &[(
-                "default",
-                &["Tasks", "Trackings", "Jira", "Analytics DB"],
-            )],
+            &[("default", &["Trackings", "Jira", "Analytics DB"])],
         );
         let layout = resolve_tab_layout(&cfg, &available(), 3, no_warn()).unwrap();
         assert_eq!(
             layout.tabs(),
-            &[Tab::Tasks, Tab::Trackings, Tab::Content(0), Tab::Content(2)]
+            &[Tab::Trackings, Tab::Content(0), Tab::Content(2)]
         );
         assert!(layout.autonumber());
         // Taiga (Content(1)) is hidden — not in the constellation.
         assert!(!layout.contains(Tab::Content(1)));
-        // Order → digits 1,2,3,4.
-        assert_eq!(layout.digit_for(Tab::Tasks), Some('1'));
-        assert_eq!(layout.digit_for(Tab::Content(2)), Some('4'));
-        assert_eq!(layout.tab_for_key("3"), Some(Tab::Content(0)));
-        assert_eq!(layout.tab_for_key("4"), Some(Tab::Content(2)));
-        // No fifth visible tab → key "5" maps nowhere.
-        assert_eq!(layout.tab_for_key("5"), None);
+        // Order → digits 1,2,3.
+        assert_eq!(layout.digit_for(Tab::Trackings), Some('1'));
+        assert_eq!(layout.digit_for(Tab::Content(2)), Some('3'));
+        assert_eq!(layout.tab_for_key("2"), Some(Tab::Content(0)));
+        assert_eq!(layout.tab_for_key("3"), Some(Tab::Content(2)));
+        // No fourth visible tab → key "4" maps nowhere.
+        assert_eq!(layout.tab_for_key("4"), None);
     }
 
     #[test]
@@ -397,11 +367,11 @@ mod tab_layout_tests {
 
     #[test]
     fn unknown_name_in_constellation_is_skipped_with_warning() {
-        let cfg = cfg_with("default", &[("default", &["Tasks", "Ghost", "Jira"])]);
+        let cfg = cfg_with("default", &[("default", &["Trackings", "Ghost", "Jira"])]);
         let mut warnings = Vec::new();
         let layout =
             resolve_tab_layout(&cfg, &available(), 3, |w| warnings.push(w)).unwrap();
-        assert_eq!(layout.tabs(), &[Tab::Tasks, Tab::Content(0)]);
+        assert_eq!(layout.tabs(), &[Tab::Trackings, Tab::Content(0)]);
         assert!(
             warnings.iter().any(|w| w.contains("Ghost")),
             "warned about the unknown tab: {warnings:?}"
@@ -410,24 +380,24 @@ mod tab_layout_tests {
 
     #[test]
     fn missing_active_set_falls_back_to_legacy_with_warning() {
-        let cfg = cfg_with("my-corp", &[("default", &["Tasks", "Jira"])]);
+        let cfg = cfg_with("my-corp", &[("default", &["Trackings", "Jira"])]);
         let mut warnings = Vec::new();
         let layout =
             resolve_tab_layout(&cfg, &available(), 3, |w| warnings.push(w)).unwrap();
         assert!(!layout.autonumber(), "fell back to legacy");
-        assert_eq!(layout.tabs().len(), 5);
+        assert_eq!(layout.tabs().len(), 4);
         assert!(warnings.iter().any(|w| w.contains("my-corp")));
     }
 
     #[test]
     fn next_prev_wrap_within_visible_order() {
-        let cfg = cfg_with("default", &[("default", &["Tasks", "Jira", "Taiga"])]);
+        let cfg = cfg_with("default", &[("default", &["Trackings", "Jira", "Taiga"])]);
         let layout = resolve_tab_layout(&cfg, &available(), 3, no_warn()).unwrap();
-        assert_eq!(layout.next(Tab::Tasks), Tab::Content(0));
-        assert_eq!(layout.next(Tab::Content(1)), Tab::Tasks); // wrap
-        assert_eq!(layout.prev(Tab::Tasks), Tab::Content(1)); // wrap back
+        assert_eq!(layout.next(Tab::Trackings), Tab::Content(0));
+        assert_eq!(layout.next(Tab::Content(1)), Tab::Trackings); // wrap
+        assert_eq!(layout.prev(Tab::Trackings), Tab::Content(1)); // wrap back
         // A tab outside the layout snaps to first.
-        assert_eq!(layout.next(Tab::Trackings), Tab::Tasks);
+        assert_eq!(layout.next(Tab::Content(2)), Tab::Trackings);
     }
 
     #[test]

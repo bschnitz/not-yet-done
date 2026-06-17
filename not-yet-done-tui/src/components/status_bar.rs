@@ -11,17 +11,13 @@ use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::config::{GlobalAction, CommonAction, KeyBindingConfig, TasksAction, TrackingsAction};
+use crate::config::{GlobalAction, CommonAction, KeyBindingConfig, TrackingsAction};
 use std::sync::Arc;
 use crate::ui::theme::Theme;
 
 /// Display mode for the status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusMode {
-    /// Tasks tab with no form open — show all task actions.
-    TasksNormal,
-    /// Tasks tab with a form open — show close hint.
-    TasksFormOpen,
     /// Trackings tab — show tracking-specific actions.
     Trackings,
     /// Non-tasks tab — show tab cycling hints only.
@@ -41,7 +37,7 @@ impl StatusBarComponent {
     pub fn new(theme: Arc<Theme>, keybindings: &KeyBindingConfig) -> Self {
         let mut comp = Self {
             theme,
-            mode: StatusMode::TasksNormal,
+            mode: StatusMode::Other,
             hints: Vec::new(),
             link_marker: None,
         };
@@ -94,25 +90,6 @@ impl StatusBarComponent {
         ];
 
         match self.mode {
-            StatusMode::TasksFormOpen => {
-                hints.push((kb.common.label(&CommonAction::FormClose), "close form".to_string()));
-            }
-            StatusMode::TasksNormal => {
-                hints.push((kb.common.label(&CommonAction::SavedFilterSelect), "queries".to_string()));
-                hints.push((kb.tasks.label(&TasksAction::FormAdd), "add".to_string()));
-                hints.push((kb.tasks.label(&TasksAction::FormEdit), "edit".to_string()));
-                hints.push((kb.tasks.label(&TasksAction::FormEditNode), "edit node".to_string()));
-                hints.push((kb.tasks.label(&TasksAction::Delete), "delete".to_string()));
-                hints.push((kb.common.label(&CommonAction::TrackingToggle), "track".to_string()));
-                hints.push((kb.common.label(&CommonAction::JumpMode), "jump".to_string()));
-                hints.push((kb.common.label(&CommonAction::SortMode), "sort".to_string()));
-                hints.push((kb.common.label(&CommonAction::ColumnConfig), "columns".to_string()));
-                hints.push((
-                    format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
-                    "cycle tabs".to_string(),
-                ));
-                hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
-            }
             StatusMode::Trackings => {
                 hints.push((kb.common.label(&CommonAction::SavedFilterSelect), "queries".to_string()));
                 hints.push((kb.trackings.label(&TrackingsAction::TrackingGroup), "group".to_string()));

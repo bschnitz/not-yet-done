@@ -9,8 +9,8 @@ use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::config::{GlobalAction, TasksAction, TrackingsAction};
-use crate::tabs::{Tab, TasksSubView, TrackingsSubView};
+use crate::config::{GlobalAction, TrackingsAction};
+use crate::tabs::{Tab, TrackingsSubView};
 use std::sync::Arc;
 use crate::ui::theme::Theme;
 
@@ -22,12 +22,10 @@ struct BarItem {
 
 pub struct TabBarComponent {
     active_tab: Tab,
-    tasks_sub_view: TasksSubView,
     trackings_sub_view: TrackingsSubView,
     content_count: usize,
     theme: Arc<Theme>,
     main_tab_labels: Vec<(Tab, String)>,
-    tasks_sub_labels: Vec<(TasksSubView, String)>,
     trackings_sub_labels: Vec<(TrackingsSubView, String)>,
     /// Per content-tab subtab labels with their active flag. Outer index
     /// is the Content tab index; inner is (label, is_active). Pushed in
@@ -51,7 +49,6 @@ impl TabBarComponent {
 
         use crate::tabs::tab_label;
         let mut main_tab_labels = vec![
-            (Tab::Tasks, tab_label("✅", &gkb.label(&GlobalAction::TabTasks), "Tasks")),
             (Tab::Trackings, tab_label("⏱️", &gkb.label(&GlobalAction::TabTrackings), "Trackings")),
         ];
         for (i, info) in content_tabs.iter().enumerate() {
@@ -68,11 +65,6 @@ impl TabBarComponent {
             ));
         }
 
-        let tasks_sub_labels = vec![
-            (TasksSubView::List, format!("{} {}", TasksSubView::List.title(), keybindings.tasks.label(&TasksAction::ViewList))),
-            (TasksSubView::Tree, format!("{} {}", TasksSubView::Tree.title(), keybindings.tasks.label(&TasksAction::ViewTree))),
-        ];
-
         let trackings_sub_labels = vec![
             (TrackingsSubView::Normal, format!("{} {}", TrackingsSubView::Normal.title(), keybindings.trackings.label(&TrackingsAction::TrackingNormalToggle))),
             (TrackingsSubView::Condensed, format!("{} {}", TrackingsSubView::Condensed.title(), keybindings.trackings.label(&TrackingsAction::TrackingCondensedToggle))),
@@ -80,13 +72,11 @@ impl TabBarComponent {
         ];
 
         Self {
-            active_tab: Tab::Tasks,
-            tasks_sub_view: TasksSubView::Tree,
+            active_tab: Tab::Trackings,
             trackings_sub_view: TrackingsSubView::Normal,
             content_count: content_tabs.len(),
             theme,
             main_tab_labels,
-            tasks_sub_labels,
             trackings_sub_labels,
             content_sub_tabs: vec![Vec::new(); content_tabs.len()],
         }
@@ -112,10 +102,6 @@ impl TabBarComponent {
         self.main_tab_labels = labels;
     }
 
-    pub fn set_tasks_sub_view(&mut self, sv: TasksSubView) {
-        self.tasks_sub_view = sv;
-    }
-
     pub fn set_trackings_sub_view(&mut self, sv: TrackingsSubView) {
         self.trackings_sub_view = sv;
     }
@@ -139,10 +125,6 @@ impl TabBarComponent {
 
     fn sub_items(&self) -> Vec<BarItem> {
         match self.active_tab {
-            Tab::Tasks => self.tasks_sub_labels.iter().map(|(sv, label)| BarItem {
-                label: label.clone(),
-                active: *sv == self.tasks_sub_view,
-            }).collect(),
             Tab::Trackings => self.trackings_sub_labels.iter().map(|(sv, label)| BarItem {
                 label: label.clone(),
                 active: *sv == self.trackings_sub_view,

@@ -313,11 +313,8 @@ Async-Ergebnisse treffen über zwei `tokio::mpsc::Unbounded`-Channels ein:
 
 ### Views-Schicht
 
-Drei View-Familien, jede besitzt ihren State selbst:
+Zwei View-Familien, jede besitzt ihren State selbst:
 
-- **TasksView** (`tasks_view.rs`) — lokaler Task-Baum aus der Core-DB, mit
-  List- und Tree-Sub-View; routet Tasten an den aktiven Sub-View.
-  Tree-Expand/Collapse-State liegt isoliert in `TasksTreeState`.
 - **TrackingsView** (`trackings_view.rs`) — Zeiterfassung; aktive Trackings
   mit live aktualisierter Dauer-Spalte (adaptives Tick-Intervall).
 - **ContentView** (`content_view.rs`) — generischer, adapter-getriebener

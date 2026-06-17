@@ -8,10 +8,6 @@ pub mod content_view;
 pub mod focus_node;
 pub mod group_aggregate;
 pub mod markdown;
-pub mod tasks_list_view;
-pub mod tasks_tree_state;
-pub mod tasks_tree_view;
-pub mod tasks_view;
 pub mod trackings_view;
 
 use ratatui::Frame;
@@ -77,10 +73,6 @@ pub enum SubViewMessage {
         child_def: Box<ChildDef>,
     },
 
-    /// View-local state changed (e.g. tasks-tree expand/collapse) and
-    /// the table needs to be rebuilt from cached state. No DB reload.
-    RefreshRequested,
-
     /// Key was not handled — parent should try.
     Unhandled,
 }
@@ -89,12 +81,6 @@ pub enum SubViewMessage {
 #[derive(Debug)]
 pub enum ViewRequest {
     // Editor
-    OpenEditorForAdd {
-        parent_id: Option<Uuid>,
-    },
-    OpenEditorForEdit(Uuid),
-    OpenEditorForEditNode(Uuid),
-    OpenEditorForNotes(Uuid),
     OpenEditorForSearch {
         entity: String,
         name: String,
@@ -104,9 +90,6 @@ pub enum ViewRequest {
     },
 
     // Service calls
-    DeleteTask(Uuid),
-    DeleteTaskRecursive(Uuid),
-    Undelete,
     ToggleTracking(Uuid),
 
     // Popups (App manages these as overlays)
@@ -136,12 +119,6 @@ pub enum ViewRequest {
         view_index: usize,
         pane_id: PaneId,
     },
-    /// Open the `:script` fuzzy menu seeded with the selected task.
-    /// App reads the selection from `tasks_view.selected_id()` and
-    /// walks `parent_id` for the ancestor chain. Scripts directory is
-    /// `<data_dir>/not_yet_done/scripts/tasks/` (shared list+tree).
-    OpenScriptMenuForTasks,
-
     // Tracking-specific
     DeleteTracking,
     OpenTrackingGroupPopup,
