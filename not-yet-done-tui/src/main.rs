@@ -4,19 +4,9 @@ mod components;
 mod config;
 mod edit_session;
 mod events;
-mod filter_builder;
 mod keymap;
 mod query_filter;
 
-// The task editor-buffer format, notes I/O, and the subtree-restructure
-// tree-editor moved into the `not-yet-done-local-adapter` crate (the
-// `TaskAdapter` owns them, plan phase A1b). `tree_edit` joined them because
-// its `apply_changes` needs the adapter's `notes::move_notes` — keeping it in
-// the TUI would force a `core → local-adapter` cycle. Re-export them here so
-// the transitional native task views / edit sessions keep referring to
-// `crate::editor_templates` / `crate::notes` / `crate::tree_edit` until the
-// C1 cutover removes the native path.
-pub(crate) use not_yet_done_local_adapter::{editor_templates, notes, tree_edit};
 mod render;
 mod tabs;
 mod ui;
@@ -114,12 +104,10 @@ async fn main() -> Result<()> {
     let mut app    = App::new(tui_config, theme, task_service, tag_service, saved_query_repo, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder);
 
     // Load active filter, tracking state, and column config from DB.
-    app.load_active_filter().await;
     app.load_active_tracking_filter().await;
     app.refresh_tracked_ids();
     app.load_column_config();
     app.load_tracking_grouping();
-    app.load_tasks_sort();
     app.load_saved_queries();
     app.load_content_saved_queries();
     app.apply_default_content_queries();

@@ -189,7 +189,6 @@ macro_rules! impl_string_serde {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GlobalAction {
     Quit,
-    TabTasks,
     TabTrackings,
     TabJira,
     TabTaiga,
@@ -229,7 +228,6 @@ impl GlobalAction {
     fn as_str(&self) -> &'static str {
         match self {
             GlobalAction::Quit => "quit",
-            GlobalAction::TabTasks => "tab_tasks",
             GlobalAction::TabTrackings => "tab_trackings",
             GlobalAction::TabJira => "tab_jira",
             GlobalAction::TabTaiga => "tab_taiga",
@@ -260,7 +258,6 @@ impl FromStr for GlobalAction {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "quit" => Ok(GlobalAction::Quit),
-            "tab_tasks" | "tab_list" | "tab_tree" => Ok(GlobalAction::TabTasks),
             "tab_trackings" => Ok(GlobalAction::TabTrackings),
             "tab_jira" => Ok(GlobalAction::TabJira),
             "tab_taiga" => Ok(GlobalAction::TabTaiga),
@@ -395,84 +392,6 @@ impl FromStr for CommonAction {
 }
 
 impl_string_serde!(CommonAction);
-
-// ---------------------------------------------------------------------------
-// TasksAction — Tasks tab only
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TasksAction {
-    ViewList,
-    ViewTree,
-    FormAdd,
-    FormEdit,
-    FormEditNode,
-    Delete,
-    Undelete,
-    OpenNotes,
-    /// Open the fuzzy `:script` menu (run / edit / delete / create-new)
-    /// for the selected task. Same `:script` flow as Trackings + Content,
-    /// but with the Tasks-specific JSON shape (`{task: {id, description,
-    /// parent_id, ancestors}}`) and a flat `<data_dir>/not_yet_done/
-    /// scripts/tasks/` directory shared by list + tree sub-views.
-    OpenScriptMenu,
-    /// Tree mode only: toggle expand/collapse of the focused node.
-    TreeToggle,
-    /// Tree mode only: expand every node (vim-style `zr`).
-    TreeExpandAll,
-    /// Tree mode only: collapse back to the configured
-    /// `default_expand_depth`, dropping per-node toggles (`zm`). Not a
-    /// full collapse-to-roots — set `default_expand_depth: 0` for that.
-    TreeCollapseAll,
-}
-
-impl TasksAction {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::ViewList => "view_list",
-            Self::ViewTree => "view_tree",
-            Self::FormAdd => "form_add",
-            Self::FormEdit => "form_edit",
-            Self::FormEditNode => "form_edit_node",
-            Self::Delete => "delete",
-            Self::Undelete => "undelete",
-            Self::OpenNotes => "open_notes",
-            Self::OpenScriptMenu => "open_script_menu",
-            Self::TreeToggle => "tree_toggle",
-            Self::TreeExpandAll => "tree_expand_all",
-            Self::TreeCollapseAll => "tree_collapse_all",
-        }
-    }
-}
-
-impl fmt::Display for TasksAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for TasksAction {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "view_list" => Ok(Self::ViewList),
-            "view_tree" => Ok(Self::ViewTree),
-            "form_add" => Ok(Self::FormAdd),
-            "form_edit" => Ok(Self::FormEdit),
-            "form_edit_node" => Ok(Self::FormEditNode),
-            "delete" => Ok(Self::Delete),
-            "undelete" => Ok(Self::Undelete),
-            "open_notes" => Ok(Self::OpenNotes),
-            "open_script_menu" => Ok(Self::OpenScriptMenu),
-            "tree_toggle" => Ok(Self::TreeToggle),
-            "tree_expand_all" => Ok(Self::TreeExpandAll),
-            "tree_collapse_all" => Ok(Self::TreeCollapseAll),
-            other => Err(format!("unknown tasks action: {}", other)),
-        }
-    }
-}
-
-impl_string_serde!(TasksAction);
 
 // ---------------------------------------------------------------------------
 // TrackingsAction — Trackings tab only
@@ -1058,7 +977,6 @@ impl Default for KeyBindingSection<GlobalAction> {
     fn default() -> Self {
         let mut m = HashMap::new();
         m.insert(GlobalAction::Quit, KeyBinding::new("ctrl+c"));
-        m.insert(GlobalAction::TabTasks, KeyBinding::new("1"));
         m.insert(GlobalAction::TabTrackings, KeyBinding::new("2"));
         m.insert(GlobalAction::TabJira, KeyBinding::new("3"));
         m.insert(GlobalAction::TabTaiga, KeyBinding::new("4"));
@@ -1111,28 +1029,6 @@ impl Default for KeyBindingSection<CommonAction> {
         // ColumnLeft / ColumnRight have no default: they are auto-claimed
         // as `h`/`l` only at leaves with `column_cursor: true` and are
         // suppressed everywhere else. See keymap.rs / content_view.rs.
-        Self { bindings: m }
-    }
-}
-
-impl Default for KeyBindingSection<TasksAction> {
-    fn default() -> Self {
-        let mut m = HashMap::new();
-        // Sub-view switches are vim-style chords (`vt` / `vl`) so the
-        // bare keys `t` / `l` stay free for list-navigation chords and
-        // for `<space>` (which only fires inside tree mode anyway).
-        m.insert(TasksAction::ViewList, KeyBinding::new("vl"));
-        m.insert(TasksAction::ViewTree, KeyBinding::new("vt"));
-        m.insert(TasksAction::FormAdd, KeyBinding::new("a"));
-        m.insert(TasksAction::FormEdit, KeyBinding::new("e"));
-        m.insert(TasksAction::FormEditNode, KeyBinding::new("ctrl+n"));
-        m.insert(TasksAction::Delete, KeyBinding::new("D"));
-        m.insert(TasksAction::Undelete, KeyBinding::new("u"));
-        m.insert(TasksAction::OpenNotes, KeyBinding::new("o"));
-        m.insert(TasksAction::OpenScriptMenu, KeyBinding::new("x"));
-        m.insert(TasksAction::TreeToggle, KeyBinding::new("enter"));
-        m.insert(TasksAction::TreeExpandAll, KeyBinding::new("zr"));
-        m.insert(TasksAction::TreeCollapseAll, KeyBinding::new("zm"));
         Self { bindings: m }
     }
 }
@@ -1348,8 +1244,6 @@ pub struct KeyBindingConfig {
     pub global: KeyBindingSection<GlobalAction>,
     #[serde(default)]
     pub common: KeyBindingSection<CommonAction>,
-    #[serde(default)]
-    pub tasks: KeyBindingSection<TasksAction>,
     #[serde(default)]
     pub trackings: KeyBindingSection<TrackingsAction>,
     #[serde(default)]

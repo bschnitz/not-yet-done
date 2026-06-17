@@ -101,28 +101,6 @@ pub enum ScriptContext {
         /// Scaffold for create-new, pre-resolved at menu-open time.
         new_script_template: String,
     },
-    /// Tasks tab (list or tree). JSON shape:
-    /// `{"task": {"id": .., "description": .., "parent_id": ..|null,
-    /// "ancestors": [{"id": .., "description": ..}, …]}}`.
-    /// `ancestors` walks root→parent (exclusive of the task itself).
-    ///
-    /// Unlike Trackings, no `focus_id` is restored after the script
-    /// run: Tasks scripts in `# mode: commands` often navigate via
-    /// `:focus-task` / `:focus-node` / `:jump`, and unconditionally
-    /// restoring the previous selection would clobber those commands.
-    /// Scripts that mutate the task without navigating can request a
-    /// reload explicitly via `{"commands": [":reload-tasks"]}`.
-    Task {
-        task_id: Uuid,
-        description: String,
-        parent_id: Option<Uuid>,
-        /// Root→parent chain (exclusive of self).
-        ancestors: Vec<(Uuid, String)>,
-        /// Scaffold for create-new, pre-resolved at menu-open time
-        /// (global `script.template` fallback — Tasks has no per-tab
-        /// override today).
-        new_script_template: String,
-    },
 }
 
 impl ScriptContext {
@@ -134,8 +112,7 @@ impl ScriptContext {
         match self {
             ScriptContext::Trackings { new_script_template, .. }
             | ScriptContext::ContentNode { new_script_template, .. }
-            | ScriptContext::ContentBatch { new_script_template, .. }
-            | ScriptContext::Task { new_script_template, .. } => new_script_template,
+            | ScriptContext::ContentBatch { new_script_template, .. } => new_script_template,
         }
     }
 }
@@ -162,11 +139,6 @@ impl ScriptContext {
                 }
                 p
             }
-            ScriptContext::Task { .. } => dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("not_yet_done")
-                .join("scripts")
-                .join("tasks"),
         }
     }
 
@@ -233,35 +205,6 @@ impl ScriptContext {
                     fields = fields_inner,
                 )
             }
-            ScriptContext::Task { task_id, description, parent_id, ancestors, .. } => {
-                let pid = parent_id
-                    .as_ref()
-                    .map(|p| json_string(&p.to_string()))
-                    .unwrap_or_else(|| "null".to_string());
-                let ancestors_inner = ancestors
-                    .iter()
-                    .map(|(id, desc)| {
-                        format!(
-                            "      {{\"id\": {}, \"description\": {}}}",
-                            json_string(&id.to_string()),
-                            json_string(desc),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",\n");
-                let ancestors_block = if ancestors.is_empty() {
-                    "[]".to_string()
-                } else {
-                    format!("[\n{}\n    ]", ancestors_inner)
-                };
-                format!(
-                    "{{\n  \"task\": {{\n    \"id\": {id},\n    \"description\": {desc},\n    \"parent_id\": {pid},\n    \"ancestors\": {ancestors}\n  }}\n}}",
-                    id = json_string(&task_id.to_string()),
-                    desc = json_string(description),
-                    pid = pid,
-                    ancestors = ancestors_block,
-                )
-            }
         }
     }
 
@@ -273,7 +216,6 @@ impl ScriptContext {
             ScriptContext::ContentNode { .. } | ScriptContext::ContentBatch { .. } => {
                 SessionScope::Content
             }
-            ScriptContext::Task { .. } => SessionScope::Tasks,
         }
     }
 }
@@ -311,7 +253,6 @@ impl App {
                     .unwrap_or(0);
                 self.open_script_menu_for_content(idx, pane_id);
             }
-            Tab::Tasks => self.open_script_menu_for_tasks(),
         }
     }
 
@@ -467,50 +408,6 @@ impl App {
         self.open_script_menu(ctx);
     }
 
-    /// Open the `:script` menu for the selected task (list or tree
-    /// sub-view). Notifies + bails out when nothing is selected.
-    pub fn open_script_menu_for_tasks(&mut self) {
-        let Some(task_id) = self.tasks_view.selected_id() else {
-            self.notify("No task selected".to_string());
-            return;
-        };
-        let task_rows = &self.tasks_view.state.task_rows;
-        let Some(task) = task_rows.iter().find(|t| t.id == task_id).cloned() else {
-            self.notify("Selected task not in current row set".to_string());
-            return;
-        };
-
-        // Walk parent_id up to the root, building a root→parent chain
-        // (exclusive of the task itself). Bail out of any pathological
-        // cycle by capping the walk at `task_rows.len()`.
-        let mut chain: Vec<(Uuid, String)> = Vec::new();
-        let mut cursor = task.parent_id;
-        let limit = task_rows.len();
-        let mut steps = 0;
-        while let Some(pid) = cursor {
-            if steps >= limit {
-                break;
-            }
-            let Some(parent) = task_rows.iter().find(|t| t.id == pid) else {
-                break;
-            };
-            chain.push((parent.id, parent.description.clone()));
-            cursor = parent.parent_id;
-            steps += 1;
-        }
-        chain.reverse();
-
-        let new_script_template = self.config.script.template.clone();
-        let ctx = ScriptContext::Task {
-            task_id: task.id,
-            description: task.description.clone(),
-            parent_id: task.parent_id,
-            ancestors: chain,
-            new_script_template,
-        };
-        self.open_script_menu(ctx);
-    }
-
     /// Internal: enumerate the context's scripts dir, populate the
     /// fuzzy menu and stash the context for the dispatch path.
     ///
@@ -552,7 +449,6 @@ impl App {
                     format!("Scripts · {tab} · {}", view_path.join(" · "))
                 }
             }
-            ScriptContext::Task { .. } => "Scripts · Tasks".to_string(),
         };
         let theme = Arc::clone(&self.shared_theme);
         self.script_menu = crate::components::script_menu::ScriptMenuComponent::new(theme, title)

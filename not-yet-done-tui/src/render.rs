@@ -9,17 +9,13 @@ use tuirealm::component::Component;
 
 use crate::app::App;
 use crate::tabs::Tab;
-use crate::ui::{
-    tasks,
-    trackings,
-};
+use crate::ui::trackings;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Each view owns its own action bar; ask the active view for its height.
     let action_bar_height = match app.active_tab {
-        Tab::Tasks => app.tasks_view.action_bar_height(area.width),
         Tab::Trackings => app.trackings_view.action_bar_height(area.width),
         Tab::Content(i) => app
             .content_view(i)
@@ -53,7 +49,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if action_bar_height > 0 {
         let bar_area = chunks[idx];
         match app.active_tab {
-            Tab::Tasks => app.tasks_view.render_action_bar(frame, bar_area),
             Tab::Trackings => app.trackings_view.render_action_bar(frame, bar_area),
             Tab::Content(i) => {
                 if let Some(cv) = app.content_view_mut(i) {
@@ -68,7 +63,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     idx += 1;
 
     match app.active_tab {
-        Tab::Tasks => tasks::render(frame, content_area, app),
         Tab::Trackings => trackings::render(frame, content_area, app),
         Tab::Content(idx) => {
             // Inline error bar above the content view, mirroring the
@@ -160,10 +154,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.script_menu.render(frame, area);
     }
 
-    // Overlay: tasks/trackings query menu (q).
-    if app.active_tab == Tab::Tasks && app.tasks_view.has_query_menu() {
-        app.tasks_view.render_query_menu(frame, area);
-    }
+    // Overlay: trackings query menu (q).
     if app.active_tab == Tab::Trackings && app.trackings_view.has_query_menu() {
         app.trackings_view.render_query_menu(frame, area);
     }

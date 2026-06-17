@@ -50,17 +50,6 @@ pub struct TagFormSession {
 }
 
 impl TagFormSession {
-    pub fn create(tag_service: Arc<dyn TagService>) -> Self {
-        Self {
-            tag_service,
-            mode: TagFormMode::Create,
-            template: new_tag_template(),
-            label: "new tag".to_string(),
-            assign_after_create: None,
-            content_reload: None,
-        }
-    }
-
     pub async fn edit(
         tag_service: Arc<dyn TagService>,
         id: String,
@@ -218,38 +207,26 @@ impl EditSession for TagFormSession {
             Ok((msg, new_tag_id)) => {
                 // Auto-assign on Create when the menu passed a target task.
                 let mut message = msg;
-                let mut focus_id = None;
-                let mut assign_attempted = false;
                 if let (Some(tag_id), Some((task_id, task_svc))) =
                     (new_tag_id, self.assign_after_create.take())
                 {
-                    assign_attempted = true;
                     match task_svc
                         .edit_task(task_id, None, None, None, Some(tag_id), None)
                         .await
                     {
-                        Ok(_) => {
-                            message = format!("{message} (assigned)");
-                            focus_id = Some(task_id);
-                        }
+                        Ok(_) => message = format!("{message} (assigned)"),
                         // Tag was created, assign failed — report both; the
                         // reload below still surfaces the new tag.
                         Err(e) => message = format!("{message} (assign failed: {e})"),
                     }
                 }
                 // Content tab: reload the originating pane so its tag
-                // columns re-render. Native tab: reload the tasks view when
-                // an assignment was attempted, else just report.
+                // columns re-render. Tag menus only open from content tabs
+                // now, so `content_reload` is always set on an assign.
                 if let Some((view_index, pane_id)) = self.content_reload {
                     CommitOutcome::FollowUp(FollowUp::ReloadContentPaneForTag {
                         view_index,
                         pane_id,
-                        message,
-                    })
-                } else if assign_attempted {
-                    CommitOutcome::FollowUp(FollowUp::ReloadTasks {
-                        focus_id,
-                        tracking_changed: false,
                         message,
                     })
                 } else {

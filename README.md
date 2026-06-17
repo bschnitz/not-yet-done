@@ -46,14 +46,20 @@ not-yet-done-tui
 
 ### Tabs and Views
 
-The TUI has two main tabs, each with sub-views:
+The TUI's only built-in tab is **Trackings**. Everything else — task
+management included — is an adapter-backed _content tab_, configured under
+`~/.config/not_yet_done/views/*.yaml` and shown according to the active
+[tab constellation](#tab-constellations).
 
-**Tasks** — manage your task tree
+**Tasks** — manage your task tree. Task management lives in the
+adapter-backed **`Tasks (A)`** content tab (`views/tasks.yaml`); see
+[`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml) for a
+fully-commented reference. It has two sub-views:
 
-| Sub-view | Key  | Description                                            |
-| -------- | ---- | ------------------------------------------------------ |
-| List     | `vl` | Flat list of all tasks matching the active filter      |
-| Tree     | `vt` | Hierarchical tree view with indentation and connectors |
+| Sub-view | Key | Description                                            |
+| -------- | --- | ------------------------------------------------------ |
+| Tree     | `t` | Hierarchical tree view with indentation and connectors |
+| List     | `v` | Flat list of all tasks matching the active filter      |
 
 <!-- screenshot: tasks tab in tree view showing nested tasks with priority, status, notes indicator -->
 
@@ -63,21 +69,20 @@ The TUI has two main tabs, each with sub-views:
 
 In tree view, branches can be folded individually:
 
-| Key     | Action                                        |
-| ------- | --------------------------------------------- |
-| `enter` | Toggle expand/collapse on cursor              |
-| `zr`    | Expand all branches                           |
-| `zm`    | Collapse to configured `default_expand_depth` |
+| Key     | Action                                           |
+| ------- | ------------------------------------------------ |
+| `enter` | Toggle expand/collapse on cursor                 |
+| `zr`    | Expand all branches                              |
+| `zm`    | Collapse to the view's configured `expand_depth` |
 
 Collapsed parents render with a `▶` glyph and a trailing `(N)` count
 showing how many direct children are hidden. Expanded parents render
-with `▼`. The default number of visible levels is configured in
-`tui.yaml`:
+with `▼`. The default number of visible levels is the `expand_depth` of
+the tree view in `views/tasks.yaml`:
 
 ```yaml
-tasks:
-  tree:
-    default_expand_depth: 2 # 0 = only roots, 1 = roots + their children, ...
+# views/tasks.yaml — on the tree view
+expand_depth: 2 # 0 = only roots, 1 = roots + their children, ...
 ```
 
 The expand state is per-session — it is not persisted across
@@ -111,7 +116,7 @@ tabs:
   sets:
     # Shorthand — a bare list of tab names (no icon, no popup shortcut):
     default:
-      - Tasks
+      - Tasks (A)
       - Trackings
       - Jira
       - Taiga
@@ -126,7 +131,7 @@ tabs:
       label: My Corp
       shortcut: m
       tabs:
-        - Tasks
+        - Tasks (A)
         - Trackings
         - Stoat
 ```
@@ -137,8 +142,9 @@ and `shortcut:`. Both forms can be mixed freely under `sets:`. The popup
 shows `icon label` (the `label` falls back to the set's key when
 omitted), so a slug-style key like `work` can present as `Work`.
 
-Tabs are referenced by display name: the built-in `Tasks` / `Trackings`
-plus each view's `tab.name`. The list order assigns the **autonumber**
+Tabs are referenced by display name: the built-in `Trackings` plus each
+view's `tab.name` (e.g. the adapter-backed `Tasks (A)`). The list order
+assigns the **autonumber**
 keys — `1`..`9`, then `0` for a tenth tab; an eleventh and beyond get no
 digit and are reachable only via `Tab` / `Shift+Tab`. While a
 constellation is active the visible tabs own every digit key, so the
@@ -249,31 +255,12 @@ In-process commands (executed by the TUI itself, not via subprocess):
   cases the tree is left untouched and the cut stays armed so the
   user can pick a different target.
 - `:jump <Tab>[:<sub>]` — programmatic tab + sub-tab switch.
-  Recognises `Tasks` (sub: `list` / `tree`), `Trackings` (sub:
-  `normal` / `condensed` / `tree`), and any content tab by its
-  configured name (case-insensitive). Used by user scripts to drive
-  the TUI from outside; also typeable directly. Modal error on
-  unknown tab or sub-view.
-- `:focus-task [-i] /seg/seg/...` — in the Tasks:tree sub-view, walk
-  the task hierarchy from the roots down, matching each
-  `/`-separated segment against task descriptions. Default is
-  **case-sensitive substring** matching; pass `-i` before the path
-  to fold case across all segments. Each segment may opt into regex
-  matching with the `re:` prefix — e.g.
-  `/work/clients/acme/tickets/re:\b42\b` to match ticket 42
-  but not 420/421. Patterns use the Rust `regex` crate; with `-i`
-  the inline flag `(?i)` is auto-prepended (override per-segment
-  with `re:(?-i)...` if needed). Auto-expands the ancestor path and
-  parks the cursor on the matched node. Modal error (tree
-  unchanged) on unknown flag, malformed regex, path not found,
-  ambiguous segment, or when the active sub-view isn't Tasks:tree.
-- `:reload-tasks` — synchronously refetch the task rows from the
-  database. Use this after an external mutation (e.g. a script that
-  ran `nyd task add`) so a following `:focus-task` in the same
-  command chain sees the new row. Works from any tab; silent on
-  success, modal-error on DB failure.
-- `:focus-node [-i] <Tab>[:<view>] /<col>|<pattern>` — the
-  content-view counterpart to `:focus-task`. Switches to the named
+  Recognises `Trackings` (sub: `normal` / `condensed` / `tree`) and
+  any content tab by its configured name (case-insensitive; e.g.
+  `Tasks (A)`). Used by user scripts to drive the TUI from outside;
+  also typeable directly. Modal error on unknown tab or sub-view.
+- `:focus-node [-i] <Tab>[:<view>] /<col>|<pattern>` — parks the
+  cursor on a matching row of a content tab. Switches to the named
   content tab (and optional sub-view), then parks the cursor on the
   first row whose `<col>` matches `<pattern>`. Without an explicit
   column hint (`/<pattern>`), the pattern is matched against
@@ -690,16 +677,15 @@ notes/
 
 ## Scripts
 
-The `:script` fuzzy menu (also bound to `x` in the Trackings + Tasks
-tabs and to per-view `type: script` actions in content tabs) lists,
-runs, edits, creates and deletes user scripts for the current context.
-One menu, three contexts:
+The `:script` fuzzy menu (also bound to `x` in the Trackings tab and to
+per-view `type: script` actions in content tabs — including the
+adapter-backed `Tasks (A)` tab) lists, runs, edits, creates and deletes
+user scripts for the current context. One menu, two contexts:
 
-| Trigger                                    | Context               | JSON argument                                                                                                             | Script directory                                         |
-| ------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Trackings tab `x` (or `:script`)           | Filtered tracking ids | `{"tracking_ids": [..], "filter_min_date": .., "filter_max_date": ..}`                                                    | `~/.local/share/not_yet_done/tracking/scripts/`          |
-| Tasks tab `x` (or `:script`)               | Selected task         | `{"task": {"id": "..", "description": "..", "parent_id": ".."\|null, "ancestors": [{"id":"..", "description":".."}, …]}}` | `~/.local/share/not_yet_done/scripts/tasks/`             |
-| Content view `type: script` (or `:script`) | Selected node         | `{"node": {"ref": "..", "id": "..", "node_type": "..", "tab": "..", "instance": "..", "fields": {..}}}`                   | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
+| Trigger                                    | Context               | JSON argument                                                                                           | Script directory                                         |
+| ------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Trackings tab `x` (or `:script`)           | Filtered tracking ids | `{"tracking_ids": [..], "filter_min_date": .., "filter_max_date": ..}`                                  | `~/.local/share/not_yet_done/tracking/scripts/`          |
+| Content view `type: script` (or `:script`) | Selected node         | `{"node": {"ref": "..", "id": "..", "node_type": "..", "tab": "..", "instance": "..", "fields": {..}}}` | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
 
 The `<view-path>` is the **pane's** view hierarchy — the root
 `ViewDef.node_type`, followed by each drilled-into `ChildDef.node_type`
@@ -768,14 +754,16 @@ the TUI parses that file as JSON of the form:
 
 ```json
 {
-  "commands": ["jump Tasks:tree", "focus-task /work/clients/acme"]
+  "commands": [
+    "tree-find \"Tasks (A)\" id:550e8400-e29b-41d4-a716-446655440000"
+  ]
 }
 ```
 
 Each entry is fed to the same dispatcher as the `:` cmdline, so any
-in-process command works (e.g. `jump`, `focus-task`, `tag`,
-`cut-node` / `paste-node`, `dismiss-notifications`, …). Entries may
-have an optional leading `:` — both forms are accepted.
+in-process command works (e.g. `jump`, `tree-find`, `focus-node`,
+`tag`, `cut-node` / `paste-node`, `dismiss-notifications`, …). Entries
+may have an optional leading `:` — both forms are accepted.
 
 The schema is intentionally open: unknown top-level keys are
 tolerated for forward-compatibility, so future versions can add
@@ -827,29 +815,30 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
 ```
 
 `:tree-find` switches to the adapter Tasks tab, reloads it (so the
-just-created task is in the adapter snapshot — the parity replacement
-for the legacy `:reload-tasks` + `:focus-task` pair), and lazily
+just-created task is in the adapter snapshot — the reload and the jump
+happen in one command, no separate refetch step), and lazily
 expands to the node. Passing the resolved task **id** via the
 `id:<uuid>` escape keeps the jump exact even when the Taiga subject
 and the local description have drifted apart.
 
 The mirror-image flow — selected local task → matching Taiga item —
 uses `:focus-node`. The script lives under
-`<data_dir>/not_yet_done/scripts/tasks/` (the flat Tasks-tab script
-directory shared by list + tree) and emits one command that switches
-to the Taiga tab and parks the cursor on the row whose `ref` column
-matches:
+`<data_dir>/not_yet_done/scripts/tasks/task_item/` (the `Tasks (A)`
+tab's script directory, shared by its list + tree views) and emits one
+command that switches to the Taiga tab and parks the cursor on the row
+whose `ref` column matches:
 
 ```python
 #!/usr/bin/env python3
 # mode: commands
 import json, os, re, sys
-task = json.load(open(sys.argv[1]))["task"]
+node = json.load(open(sys.argv[1]))["node"]
 # Convention: task description starts with "#<num> - <subject>";
 # the ancestor directly above the "tickets" folder is the Taiga
 # project slug.
-m = re.match(r"#(\d+)\b", task["description"])
-ancestors = task["ancestors"]
+m = re.match(r"#(\d+)\b", node["label"])
+# `fields.ancestors` is a JSON-array *string* of {"id", "description"}.
+ancestors = json.loads(node["fields"]["ancestors"])
 i = next(
     j for j, a in enumerate(ancestors)
     if a["description"].lower() == "tickets" and j > 0

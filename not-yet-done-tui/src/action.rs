@@ -8,8 +8,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{
-    CommonAction, ContentAction, FormAction, GlobalAction, QueryMenuAction, TasksAction,
-    TrackingsAction, WindowAction,
+    CommonAction, ContentAction, FormAction, GlobalAction, QueryMenuAction, TrackingsAction,
+    WindowAction,
 };
 
 /// The input mode the app is currently in — determines how keys are resolved.
@@ -32,8 +32,6 @@ pub enum Action {
     Global(GlobalAction),
     /// A common action (shared between tabs: nav, scroll, fuzzy, search, etc.).
     Common(CommonAction),
-    /// A tasks-tab-only action (add, edit, delete, notes, view switch).
-    Tasks(TasksAction),
     /// A trackings-tab-only action (group, order, condensed, tree, scripts).
     Trackings(TrackingsAction),
     /// A ContentView action (drill open / back / pagination / edit query).
@@ -101,7 +99,6 @@ impl fmt::Display for Action {
         match self {
             Action::Global(a) => write!(f, "global.{a}"),
             Action::Common(a) => write!(f, "common.{a}"),
-            Action::Tasks(a) => write!(f, "tasks.{a}"),
             Action::Trackings(a) => write!(f, "trackings.{a}"),
             Action::Content(a) => write!(f, "content.{a}"),
             Action::Window(a) => write!(f, "window.{a}"),
@@ -127,7 +124,6 @@ impl FromStr for Action {
         match section {
             "global" => GlobalAction::from_str(name).map(Action::Global),
             "common" => CommonAction::from_str(name).map(Action::Common),
-            "tasks" => TasksAction::from_str(name).map(Action::Tasks),
             "trackings" => TrackingsAction::from_str(name).map(Action::Trackings),
             "content" => ContentAction::from_str(name).map(Action::Content),
             "window" => WindowAction::from_str(name).map(Action::Window),
@@ -286,7 +282,6 @@ pub fn resolve_key(
     key: &str,
     mode: InputMode,
     keybindings: &crate::config::KeyBindingConfig,
-    is_tasks_tab: bool,
     is_trackings_tab: bool,
     form_visible: bool,
 ) -> Action {
@@ -294,13 +289,7 @@ pub fn resolve_key(
         InputMode::Popup => resolve_popup_key(key, keybindings),
         InputMode::Fuzzy => resolve_fuzzy_key(key, keybindings),
         InputMode::FilterForm => resolve_filter_form_key(key, keybindings),
-        InputMode::Normal => resolve_normal_key(
-            key,
-            keybindings,
-            is_tasks_tab,
-            is_trackings_tab,
-            form_visible,
-        ),
+        InputMode::Normal => resolve_normal_key(key, keybindings, is_trackings_tab, form_visible),
     }
 }
 
@@ -375,18 +364,11 @@ fn resolve_filter_form_key(key: &str, kb: &crate::config::KeyBindingConfig) -> A
 fn resolve_normal_key(
     key: &str,
     kb: &crate::config::KeyBindingConfig,
-    is_tasks_tab: bool,
     is_trackings_tab: bool,
     form_visible: bool,
 ) -> Action {
     // Tab-specific keybindings first (no collisions possible).
-    if is_tasks_tab {
-        for (action, binding) in &kb.tasks.bindings {
-            if binding.matches(key) {
-                return Action::Tasks(action.clone());
-            }
-        }
-    } else if is_trackings_tab {
+    if is_trackings_tab {
         for (action, binding) in &kb.trackings.bindings {
             if binding.matches(key) {
                 return Action::Trackings(action.clone());
@@ -407,8 +389,7 @@ fn resolve_normal_key(
             // Block tab switching while a form is open.
             if form_visible {
                 match action {
-                    GlobalAction::TabTasks
-                    | GlobalAction::TabTrackings
+                    GlobalAction::TabTrackings
                     | GlobalAction::TabJira
                     | GlobalAction::TabTaiga
                     | GlobalAction::TabPostgres
@@ -437,31 +418,15 @@ mod tests {
     #[test]
     fn normal_mode_quit() {
         let kb = default_kb();
-        let action = resolve_key("ctrl+c", InputMode::Normal, &kb, false, false, false);
+        let action = resolve_key("ctrl+c", InputMode::Normal, &kb, false, false);
         assert_eq!(action, Action::Global(GlobalAction::Quit));
-    }
-
-    #[test]
-    fn normal_mode_tasks_action() {
-        let kb = default_kb();
-        // 'e' = FormEdit (unchanged default)
-        let action = resolve_key("e", InputMode::Normal, &kb, true, false, false);
-        assert_eq!(action, Action::Tasks(TasksAction::FormEdit));
-    }
-
-    #[test]
-    fn normal_mode_tasks_action_blocked_on_other_tab() {
-        let kb = default_kb();
-        let action = resolve_key("e", InputMode::Normal, &kb, false, false, false);
-        // 'e' is a tasks-only binding, should be Noop outside tasks tab.
-        assert_eq!(action, Action::Noop);
     }
 
     #[test]
     fn normal_mode_trackings_action_on_trackings_tab() {
         let kb = default_kb();
         // Default `x` → TrackingScriptRun, only when active tab is Trackings.
-        let action = resolve_key("x", InputMode::Normal, &kb, false, true, false);
+        let action = resolve_key("x", InputMode::Normal, &kb, true, false);
         assert_eq!(action, Action::Trackings(TrackingsAction::TrackingScriptRun));
     }
 
@@ -471,15 +436,15 @@ mod tests {
         // non-Tasks tab — including Taiga/Jira/Postgres — because the
         // dispatcher treated `!is_tasks_tab` as "must be Trackings".
         let kb = default_kb();
-        let action = resolve_key("x", InputMode::Normal, &kb, false, false, false);
+        let action = resolve_key("x", InputMode::Normal, &kb, false, false);
         assert_eq!(action, Action::Noop);
         // Same for the destructive ones (D, R).
         assert_eq!(
-            resolve_key("D", InputMode::Normal, &kb, false, false, false),
+            resolve_key("D", InputMode::Normal, &kb, false, false),
             Action::Noop
         );
         assert_eq!(
-            resolve_key("R", InputMode::Normal, &kb, false, false, false),
+            resolve_key("R", InputMode::Normal, &kb, false, false),
             Action::Noop
         );
     }
@@ -487,24 +452,22 @@ mod tests {
     #[test]
     fn normal_mode_tab_switch_blocked_while_form_open() {
         let kb = default_kb();
-        // "tab" matches FuzzyFilterExit (tasks binding) before global TabNext,
-        // so it's a tasks action, not blocked.
-        // Use a key that only has a global binding (e.g. "2" for TabTrackings).
-        let action = resolve_key("2", InputMode::Normal, &kb, true, false, true);
+        // A tab-switch global key (e.g. "2") is blocked while a form is open.
+        let action = resolve_key("2", InputMode::Normal, &kb, false, true);
         assert_eq!(action, Action::Blocked);
     }
 
     #[test]
     fn popup_mode_enter_submits() {
         let kb = default_kb();
-        let action = resolve_key("enter", InputMode::Popup, &kb, true, false, false);
+        let action = resolve_key("enter", InputMode::Popup, &kb, false, false);
         assert_eq!(action, Action::Submit);
     }
 
     #[test]
     fn popup_mode_char_inserts() {
         let kb = default_kb();
-        let action = resolve_key("x", InputMode::Popup, &kb, true, false, false);
+        let action = resolve_key("x", InputMode::Popup, &kb, false, false);
         assert_eq!(action, Action::InsertChar('x'));
     }
 
@@ -512,21 +475,21 @@ mod tests {
     fn popup_mode_ctrl_j_navigates_down() {
         let kb = default_kb();
         // Default form next is ctrl+j.
-        let action = resolve_key("ctrl+j", InputMode::Popup, &kb, true, false, false);
+        let action = resolve_key("ctrl+j", InputMode::Popup, &kb, false, false);
         assert_eq!(action, Action::Form(FormAction::Next));
     }
 
     #[test]
     fn popup_mode_ctrl_k_navigates_up() {
         let kb = default_kb();
-        let action = resolve_key("ctrl+k", InputMode::Popup, &kb, true, false, false);
+        let action = resolve_key("ctrl+k", InputMode::Popup, &kb, false, false);
         assert_eq!(action, Action::Form(FormAction::Prev));
     }
 
     #[test]
     fn popup_mode_j_inserts_char() {
         let kb = default_kb();
-        let action = resolve_key("j", InputMode::Popup, &kb, true, false, false);
+        let action = resolve_key("j", InputMode::Popup, &kb, false, false);
         assert_eq!(action, Action::InsertChar('j'));
     }
 
@@ -534,7 +497,7 @@ mod tests {
     fn fuzzy_mode_accept_key() {
         let kb = default_kb();
         // Default fuzzy accept is "enter".
-        let action = resolve_key("enter", InputMode::Fuzzy, &kb, true, false, false);
+        let action = resolve_key("enter", InputMode::Fuzzy, &kb, false, false);
         assert_eq!(action, Action::Common(CommonAction::FuzzyFilterAccept));
     }
 
@@ -542,14 +505,14 @@ mod tests {
     fn fuzzy_mode_cancel_key() {
         let kb = default_kb();
         // Default fuzzy cancel is "esc".
-        let action = resolve_key("esc", InputMode::Fuzzy, &kb, true, false, false);
+        let action = resolve_key("esc", InputMode::Fuzzy, &kb, false, false);
         assert_eq!(action, Action::Common(CommonAction::FuzzyFilterCancel));
     }
 
     #[test]
     fn fuzzy_mode_char_inserts() {
         let kb = default_kb();
-        let action = resolve_key("a", InputMode::Fuzzy, &kb, true, false, false);
+        let action = resolve_key("a", InputMode::Fuzzy, &kb, false, false);
         assert_eq!(action, Action::InsertChar('a'));
     }
 
@@ -557,21 +520,21 @@ mod tests {
     fn filter_form_next_field() {
         let kb = default_kb();
         // Default form next is "ctrl+j".
-        let action = resolve_key("ctrl+j", InputMode::FilterForm, &kb, true, false, true);
+        let action = resolve_key("ctrl+j", InputMode::FilterForm, &kb, false, true);
         assert_eq!(action, Action::Form(FormAction::Next));
     }
 
     #[test]
     fn filter_form_close() {
         let kb = default_kb();
-        let action = resolve_key("esc", InputMode::FilterForm, &kb, true, false, true);
+        let action = resolve_key("esc", InputMode::FilterForm, &kb, false, true);
         assert_eq!(action, Action::Common(CommonAction::FormClose));
     }
 
     #[test]
     fn unknown_key_is_noop() {
         let kb = default_kb();
-        let action = resolve_key("f24", InputMode::Normal, &kb, true, false, false);
+        let action = resolve_key("f24", InputMode::Normal, &kb, false, false);
         assert_eq!(action, Action::Noop);
     }
 
@@ -693,7 +656,7 @@ mod tests {
         assert!(!Action::Content(ContentAction::EditQuery).is_chainable());
         assert!(!Action::Common(CommonAction::ColumnConfig).is_chainable());
         assert!(!Action::Global(GlobalAction::Quit).is_chainable());
-        assert!(!Action::Tasks(TasksAction::FormAdd).is_chainable());
+        assert!(!Action::Trackings(TrackingsAction::TrackingScriptRun).is_chainable());
     }
 }
 

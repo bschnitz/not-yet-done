@@ -7,10 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::editor::EditorsConfig;
 use super::keybindings::KeyBindingConfig;
-use super::layout::LayoutConfig;
 use super::script::ScriptConfig;
 use super::tabs::TabsConfig;
-use super::tasks::TasksConfig;
 use super::theme_config::ThemeConfig;
 use super::tracking::TrackingConfig;
 
@@ -35,14 +33,6 @@ use super::tracking::TrackingConfig;
 ///   name: Teal Dark
 ///   bg: "#121212"
 ///   ...
-///
-/// layout:
-///   tasks:
-///     split:
-///       type: vertical
-///       horizontal-threshold: 120
-///       vertical-threshold: 80
-///       order: [view, form]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
@@ -55,11 +45,7 @@ pub struct TuiConfig {
     #[serde(default)]
     pub tracking: TrackingConfig,
     #[serde(default)]
-    pub tasks: TasksConfig,
-    #[serde(default)]
     pub script: ScriptConfig,
-    #[serde(default)]
-    pub layout: LayoutConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
     #[serde(default)]
@@ -117,9 +103,7 @@ impl Default for TuiConfig {
             theme: Default::default(),
             editors: Default::default(),
             tracking: Default::default(),
-            tasks: Default::default(),
             script: Default::default(),
-            layout: Default::default(),
             notifications: Default::default(),
             navigation: Default::default(),
             tabs: Default::default(),

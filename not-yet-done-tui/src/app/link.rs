@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::App;
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
-use crate::tabs::{LoadState, Tab};
+use crate::tabs::Tab;
 
 /// Snapshot of "what addresses currently resolve" used by
 /// [`classify_link_ref`] for bulk staleness scanning. Computed once
@@ -183,10 +183,6 @@ impl App {
     /// can't survive a refresh, let alone a process restart.
     pub fn current_node_ref(&self) -> Option<NodeRef> {
         match self.active_tab {
-            Tab::Tasks => {
-                let id = self.tasks_view.selected_id()?;
-                NodeRef::parse(&format!("tasks/{id}")).ok()
-            }
             Tab::Trackings => {
                 let id = self.trackings_view.table.selected_id()?;
                 NodeRef::parse(&format!("tracking/{id}")).ok()
@@ -698,19 +694,18 @@ impl App {
 
     fn open_link_tasks(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
         let id_str = tail.ok_or_else(|| LinkRouteError::Stale("missing task id".into()))?;
-        let id = Uuid::parse_str(id_str)
+        // Validate the id still parses, then report that the legacy
+        // `tasks/<uuid>` navigation target no longer exists. The native
+        // Tasks tab was retired in favour of the generic ContentAdapter
+        // "Tasks" tab; jumping a bare task uuid into that adapter tab is
+        // not wired yet (it would need the adapter's goto-by-id path), so
+        // such links degrade to a clear NotSupported instead of opening
+        // the wrong tab. The link rows themselves remain in the store.
+        Uuid::parse_str(id_str)
             .map_err(|_| LinkRouteError::Stale(format!("invalid task uuid: {id_str}")))?;
-        // pending_focus must be set BEFORE set_active_tab so a load
-        // triggered by the tab switch picks it up on its set_data call.
-        self.tasks_view.set_pending_focus(id);
-        let was_loaded = self.tasks_view.state.load_state == LoadState::Loaded;
-        self.set_active_tab(Tab::Tasks);
-        // When data was already in memory, set_active_tab doesn't trigger
-        // a reload — re-render manually so pending_focus lands now.
-        if was_loaded {
-            self.refresh_task_table();
-        }
-        Ok(())
+        Err(LinkRouteError::NotSupported(
+            "task links open in the legacy Tasks tab, which has been removed".into(),
+        ))
     }
 
     fn open_link_tracking(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
