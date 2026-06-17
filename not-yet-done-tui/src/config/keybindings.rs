@@ -603,6 +603,20 @@ pub enum ContentAction {
     /// [`CommonAction::JumpMode`] (`p`) so the adapter tab can keep `p` free
     /// for a `paste`/`paste-move` shortcut; defaults to `J`.
     JumpMode,
+    /// Toggle the record-detail split (`o`): split the focused pane and
+    /// open a coupled follower to the right that transposes the
+    /// *selected* row into a field-name | field-value table, kept live
+    /// as the cursor moves. Pressing it again closes the follower. Only
+    /// registered on panes whose level sets `record_detail: true`
+    /// (wide, schema-rich rows — e.g. Postgres table rows / script
+    /// results); a no-op elsewhere. Defaults to `o`.
+    ToggleRecordDetail,
+    /// Toggle line-wrapping of long values inside the record-detail
+    /// follower (`X`): off by default (values clip to the value
+    /// column), on splits long values onto continuation rows.
+    /// Registered only while a record-detail follower exists; a no-op
+    /// otherwise. Defaults to `X`.
+    ToggleDetailWrap,
 }
 
 impl ContentAction {
@@ -621,6 +635,8 @@ impl ContentAction {
             Self::GroupMenu => "group_menu",
             Self::ToggleTreeAggregate => "toggle_tree_aggregate",
             Self::JumpMode => "jump_mode",
+            Self::ToggleRecordDetail => "toggle_record_detail",
+            Self::ToggleDetailWrap => "toggle_detail_wrap",
         }
     }
 }
@@ -648,6 +664,8 @@ impl FromStr for ContentAction {
             "group_menu" => Ok(Self::GroupMenu),
             "toggle_tree_aggregate" => Ok(Self::ToggleTreeAggregate),
             "jump_mode" => Ok(Self::JumpMode),
+            "toggle_record_detail" => Ok(Self::ToggleRecordDetail),
+            "toggle_detail_wrap" => Ok(Self::ToggleDetailWrap),
             other => Err(format!("unknown content action: {}", other)),
         }
     }
@@ -1162,6 +1180,8 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::GroupMenu, KeyBinding::new("u"));
         m.insert(ContentAction::ToggleTreeAggregate, KeyBinding::new("zt"));
         m.insert(ContentAction::JumpMode, KeyBinding::new("J"));
+        m.insert(ContentAction::ToggleRecordDetail, KeyBinding::new("o"));
+        m.insert(ContentAction::ToggleDetailWrap, KeyBinding::new("X"));
         Self { bindings: m }
     }
 }

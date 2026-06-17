@@ -728,6 +728,16 @@ pub struct ViewDef {
     /// `column_left`/`column_right` move it. Default: false.
     #[serde(default)]
     pub column_cursor: bool,
+    /// Opt-in for the record-detail split (`o`). When `true`, a pane
+    /// showing this level lets the user split off a coupled detail pane
+    /// to the right that transposes the *selected* row into a
+    /// field-name | field-value table, kept live as the cursor moves.
+    /// Off by default because it only makes sense for wide,
+    /// schema-rich rows (e.g. Postgres table rows or script-result
+    /// rows) where reading one record across many columns is awkward
+    /// in the list. See docs/generic-view-spec.md `record_detail:`.
+    #[serde(default)]
+    pub record_detail: bool,
     /// When set, this view renders as a tree: rows of this level expand
     /// into rows of the first ChildDef that itself sets `tree_label`,
     /// and so on down the chain. The referenced key must exist in
@@ -1650,6 +1660,12 @@ pub struct ChildDef {
     /// that displays this child's items.
     #[serde(default)]
     pub column_cursor: bool,
+    /// Opt-in for the record-detail split (`o`) when drilling into this
+    /// child. Same semantics as [`ViewDef::record_detail`] — applied to
+    /// the pane that displays this child's items (e.g. the Postgres
+    /// `Rows` / `DB Script Result` levels, which are reached via drill).
+    #[serde(default)]
+    pub record_detail: bool,
     /// Continue the parent's tree chain into this child level. When set
     /// AND the parent (ViewDef or another ChildDef) also has
     /// `tree_label`, drilling into a row of the parent expands its

@@ -59,6 +59,7 @@ use crate::views::column_format::{format_elapsed_since, format_typed_value};
 use crate::views::content_action_hints::{
     ActionBarHint, ActiveSource, HintBar, ShortcutHint, nav_hint_for_source,
 };
+use crate::views::content_detail;
 use crate::views::content_tree::{
     TreeLevel, TreeState, child_def_for_type_chain, effective_child_children,
     leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
@@ -399,6 +400,33 @@ pub struct ContentPane {
     /// here. Treated as lazy/optimistic: a stale `PaneId` (no longer
     /// present in the tree) is silently ignored and overwritten.
     linked_child: Option<(String, PaneId)>,
+
+    /// Record-detail split: when this (source) pane has opened a
+    /// coupled record-detail pane via `ToggleRecordDetail`, this holds
+    /// the [`PaneId`] of that detail pane. Kept separate from
+    /// [`Self::linked_child`] so it never interferes with coupled
+    /// split-drill. Closing this pane cascades to the detail pane;
+    /// closing the detail pane clears this backlink. Optimistic: a
+    /// stale id (gone from the tree) is silently ignored/overwritten.
+    detail_child: Option<PaneId>,
+    /// Record-detail split: when this pane *is* a detail follower, this
+    /// holds the [`PaneId`] of its source table pane. The per-frame
+    /// `refresh_detail_panes` reads the source's `selected_item()` and
+    /// transposes it into this pane's field/value rows. `None` for
+    /// ordinary panes.
+    detail_source: Option<PaneId>,
+    /// Record-detail split: the source row currently transposed into
+    /// this detail pane, set by the per-frame sync. Compared (via
+    /// `NodeSummary: Eq`) against the source's live selection so the
+    /// detail table only rebuilds when the selected record actually
+    /// changes (preserving scroll otherwise). `None` for ordinary panes
+    /// and for a detail pane whose source has no selection.
+    detail_summary: Option<NodeSummary>,
+    /// Record-detail split: whether long field values wrap onto
+    /// continuation rows (`X` toggles it). Default `false` — long
+    /// values are clipped to the value column. Meaningful only on a
+    /// detail pane (`detail_source.is_some()`).
+    detail_wrap: bool,
 
     /// Snapshot of [`App::link_refs`] for rendering the `has_links`
     /// YAML column source. Synced by [`ContentView::set_link_refs`].
@@ -1138,6 +1166,10 @@ impl ContentPane {
             last_column_keys: Vec::new(),
             loaded: false,
             linked_child: None,
+            detail_child: None,
+            detail_source: None,
+            detail_summary: None,
+            detail_wrap: false,
             link_refs: std::collections::HashSet::new(),
             link_node_ref_prefix: None,
             retry_state: None,
@@ -1675,6 +1707,33 @@ impl ContentPane {
         view_defs.get(self.view_def_index)
     }
 
+    /// Whether the level this pane currently shows opts into the
+    /// record-detail split (`record_detail: true`). Resolved like
+    /// [`Self::current_columns`]'s flat path: a drilled child reads its
+    /// `ChildDef.record_detail`, otherwise the view root's
+    /// `ViewDef.record_detail`. Tree levels are intentionally excluded —
+    /// the record-detail split targets wide *flat* rows (Postgres rows /
+    /// script results), and a tree already expands records inline. A
+    /// pane that is itself a detail follower never re-offers the toggle.
+    fn record_detail_enabled(&self, view_defs: &[ViewDef]) -> bool {
+        if self.detail_source.is_some() || self.tree.is_some() {
+            return false;
+        }
+        if let Some(ref child) = self.active_child {
+            return child.record_detail;
+        }
+        self.view_def(view_defs)
+            .map(|vd| vd.record_detail)
+            .unwrap_or(false)
+    }
+
+    /// `true` when this pane is the detail-follower half of a
+    /// record-detail split (its rows are the transposed fields of the
+    /// source pane's selected record).
+    fn is_detail_pane(&self) -> bool {
+        self.detail_source.is_some()
+    }
+
     /// Resolve this tree's connector color: the active view's per-view
     /// `tree_connector_style` (a theme color name) if set, else the global
     /// theme `tree_connector`. Used to fill [`TREE_CONNECTOR_STYLE_ID`].
@@ -1740,6 +1799,25 @@ impl ContentPane {
     }
 
     fn current_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
+        // Record-detail follower: always the synthetic field|value pair,
+        // regardless of what the source level configures. The width of
+        // the field column is clamped to the longest field label so the
+        // value column gets the rest of the pane.
+        if self.is_detail_pane() {
+            let field_width = self
+                .items
+                .iter()
+                .filter_map(|it| {
+                    it.metadata
+                        .fields
+                        .iter()
+                        .find(|f| f.key == content_detail::FIELD_KEY)
+                        .map(|f| f.value.chars().count())
+                })
+                .max()
+                .unwrap_or(content_detail::FIELD_COL_MIN);
+            return content_detail::detail_columns(field_width);
+        }
         if self.tree.is_some() {
             // Chain-based: the cursor row's own branch decides the column
             // set, so a multi-branch tree shows the right columns at a
@@ -1904,7 +1982,7 @@ impl ContentPane {
     /// uses it (multi-line rendering targets flat drill lists for now, e.g.
     /// the Stoat message list), so it returns `None` there.
     fn current_row_layout(&self, view_defs: &[ViewDef]) -> Option<Vec<LineLayout>> {
-        if self.tree.is_some() {
+        if self.is_detail_pane() || self.tree.is_some() {
             return None;
         }
         if let Some(ref child) = self.active_child {
@@ -2032,7 +2110,7 @@ impl ContentPane {
     /// there, but those groups arrive as tree *nodes*, not as engine-built
     /// group headers).
     fn current_levels(&self, view_defs: &[ViewDef]) -> Vec<GroupBy> {
-        if self.tree.is_some() {
+        if self.is_detail_pane() || self.tree.is_some() {
             return Vec::new();
         }
         if !self.level_has_group_by(view_defs) {
@@ -6573,6 +6651,8 @@ impl ContentView {
                 pane.table.jump_mode_open();
                 SubViewMessage::SelectionChanged(None)
             }
+            ContentAction::ToggleRecordDetail => self.toggle_record_detail(),
+            ContentAction::ToggleDetailWrap => self.toggle_detail_wrap(),
         };
         if let SubViewMessage::ContentDrill {
             item_id,
@@ -6980,24 +7060,30 @@ impl ContentView {
         let active_subtab = self.active_subtab;
         let focus_id = self.pane_trees[active_subtab].focus;
 
-        // Build the cascade chain in parent → child order. Stop on a
-        // dead/cyclic backlink so a stale reference can never trap us.
+        // Build the cascade set in parent → child order, following BOTH the
+        // coupled-drill `linked_child` and the record-detail `detail_child`
+        // backlinks so closing a source also closes whatever it spawned.
+        // The visited check stops dead/cyclic references from trapping us;
+        // `focus_id` stays first so the close-children-first pass (rev) still
+        // tears followers down before their parent.
         let mut chain: Vec<PaneId> = Vec::new();
-        let mut cur = focus_id;
-        loop {
+        let mut frontier: Vec<PaneId> = vec![focus_id];
+        while let Some(cur) = frontier.pop() {
             if chain.contains(&cur) {
-                break;
+                continue;
             }
             chain.push(cur);
-            let next = self.find_pane(cur).and_then(|p| {
-                p.linked_child
-                    .as_ref()
-                    .map(|(_, child)| *child)
-                    .filter(|child| self.find_pane(*child).is_some())
-            });
-            match next {
-                Some(c) => cur = c,
-                None => break,
+            if let Some(p) = self.find_pane(cur) {
+                if let Some((_, child)) = p.linked_child.as_ref() {
+                    if self.find_pane(*child).is_some() {
+                        frontier.push(*child);
+                    }
+                }
+                if let Some(child) = p.detail_child {
+                    if self.find_pane(child).is_some() {
+                        frontier.push(child);
+                    }
+                }
             }
         }
 
@@ -7046,11 +7132,196 @@ impl ContentView {
                 if stale {
                     leaf.pane.linked_child = None;
                 }
+                // Same for the record-detail backlinks: a survivor that
+                // pointed at (or followed) a just-closed pane must drop the
+                // reference so a later toggle doesn't chase a dead pane.
+                if leaf
+                    .pane
+                    .detail_child
+                    .is_some_and(|c| closed.contains(&c))
+                {
+                    leaf.pane.detail_child = None;
+                }
+                if leaf
+                    .pane
+                    .detail_source
+                    .is_some_and(|s| closed.contains(&s))
+                {
+                    leaf.pane.detail_source = None;
+                }
             }
         }
 
         self.sync_action_bar_hints();
         SubViewMessage::SelectionChanged(None)
+    }
+
+    /// Toggle the record-detail follower for the focused pane (`o`).
+    ///
+    /// Opening: the focused pane must be a `record_detail`-enabled flat
+    /// table. A follower is split off to its right (`Horizontal` /
+    /// `SplitSide::Second`) and linked back through the dedicated
+    /// `detail_child` / `detail_source` backlinks — kept entirely separate
+    /// from the coupled-drill `linked_child` link so the two never
+    /// interfere. Focus stays on the *source* so the user keeps navigating
+    /// the table; the follower re-syncs every frame in [`sync_detail_panes`]
+    /// and so never needs its own fetch (it is purely synthetic).
+    ///
+    /// Closing: pressed on the source (its `detail_child` is live) or from
+    /// inside the follower (its `detail_source` is set), the follower leaf
+    /// is torn down and the source's backlink cleared. Closing is scoped to
+    /// the follower only — unlike [`Self::close_focused`], the source pane
+    /// survives.
+    fn toggle_record_detail(&mut self) -> SubViewMessage {
+        let active_subtab = self.active_subtab;
+        let focus_id = self.pane_trees[active_subtab].focus;
+
+        // Already split? Resolve (source, follower) from either side and
+        // close. A stale `detail_child` (child already gone) is ignored so
+        // it falls through to a fresh open instead of a dead close.
+        let existing = match self.find_pane(focus_id) {
+            Some(p) if p.detail_child.is_some_and(|c| self.find_pane(c).is_some()) => {
+                Some((focus_id, p.detail_child.unwrap()))
+            }
+            Some(p) => p.detail_source.map(|src| (src, focus_id)),
+            None => None,
+        };
+        if let Some((source_id, follower_id)) = existing {
+            return self.close_detail_follower(source_id, follower_id);
+        }
+
+        // Open — only from a record_detail-enabled flat source.
+        if !self.active_pane().record_detail_enabled(&self.view_defs) {
+            return SubViewMessage::Unhandled;
+        }
+        let new_pane_id = self.alloc_pane_id();
+        let view_def_index = self.active_subtab;
+        let follower = {
+            let theme = Arc::clone(&self.theme);
+            let source = self.active_pane();
+            let mut p =
+                ContentPane::new(theme, view_def_index, false, source.capabilities.clone());
+            p.detail_source = Some(focus_id);
+            p.detail_wrap = false;
+            // Synthetic content: never fetched, so mark it loaded up front
+            // (an unloaded pane renders a "loading…" placeholder).
+            p.loaded = true;
+            p
+        };
+        let tree = &mut self.pane_trees[active_subtab];
+        tree.split_focus(
+            SplitOrientation::Horizontal,
+            0.5,
+            SplitSide::Second,
+            new_pane_id,
+            follower,
+        );
+        tree.assign_tag(new_pane_id, &self.pane_tag_alphabet);
+        if let Some(source) = self.find_pane_mut(focus_id) {
+            source.detail_child = Some(new_pane_id);
+        }
+        // `split_focus` moves focus to the new pane; keep it on the source
+        // so the cursor the follower tracks stays under the user's hands.
+        self.pane_trees[active_subtab].focus = focus_id;
+        self.sync_action_bar_hints();
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    /// Tear down a record-detail follower leaf and clear the source's
+    /// `detail_child` backlink, focusing the surviving source. Refuses if it
+    /// would empty the tree. The follower carries no custom-query cursor
+    /// (its rows are synthetic), so nothing needs harvesting.
+    fn close_detail_follower(&mut self, source_id: PaneId, follower_id: PaneId) -> SubViewMessage {
+        let active_subtab = self.active_subtab;
+        if self.pane_trees[active_subtab].leaf_count() <= 1 {
+            return SubViewMessage::SelectionChanged(None);
+        }
+        let tree = &mut self.pane_trees[active_subtab];
+        if tree.close_specific(follower_id) {
+            tree.release_tag(follower_id);
+        }
+        if let Some(src) = self.find_pane_mut(source_id) {
+            src.detail_child = None;
+        }
+        if self.find_pane(source_id).is_some() {
+            self.pane_trees[active_subtab].focus = source_id;
+        }
+        self.sync_action_bar_hints();
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    /// Toggle value wrapping in the focused record-detail follower (`X`).
+    /// Resolves the follower from the focused pane (the follower itself, or
+    /// the focused source's live `detail_child`), flips its `detail_wrap`,
+    /// and clears its cached `detail_summary` so the next
+    /// [`sync_detail_panes`] re-transposes the record at the new wrap mode.
+    fn toggle_detail_wrap(&mut self) -> SubViewMessage {
+        let active_subtab = self.active_subtab;
+        let focus_id = self.pane_trees[active_subtab].focus;
+        let follower_id = match self.find_pane(focus_id) {
+            Some(p) if p.is_detail_pane() => Some(focus_id),
+            Some(p) => p.detail_child.filter(|c| self.find_pane(*c).is_some()),
+            None => None,
+        };
+        let Some(follower_id) = follower_id else {
+            return SubViewMessage::Unhandled;
+        };
+        if let Some(f) = self.find_pane_mut(follower_id) {
+            f.detail_wrap = !f.detail_wrap;
+            f.detail_summary = None;
+        }
+        SubViewMessage::SelectionChanged(None)
+    }
+
+    /// Re-seed every record-detail follower in the active subtab from its
+    /// source pane's current selection, then rebuild it. This is the live
+    /// coupling: moving the source cursor changes its selected record, the
+    /// diff below fires, and the follower repaints — no explicit wiring on
+    /// the navigation path. Cheap on the common frame: with wrap off and an
+    /// unchanged selection the follower is skipped entirely. With wrap on it
+    /// always rebuilds so the value re-wraps once the post-draw pass learns
+    /// the true render width. Called from [`Self::rebuild_table`], i.e. once
+    /// per `sync_components`.
+    fn sync_detail_panes(&mut self) {
+        let active_subtab = self.active_subtab;
+        let mut ids = Vec::new();
+        self.pane_trees[active_subtab].root.collect_leaf_ids(&mut ids);
+        let pairs: Vec<(PaneId, PaneId)> = ids
+            .into_iter()
+            .filter_map(|id| self.find_pane(id).and_then(|p| p.detail_source).map(|s| (id, s)))
+            .collect();
+        if pairs.is_empty() {
+            return;
+        }
+        let view_defs = self.view_defs.clone();
+        let overlay = self.header_overlay.clone();
+        for (follower_id, source_id) in pairs {
+            let current = self
+                .find_pane(source_id)
+                .and_then(|p| p.selected_item().cloned());
+            let Some(follower) = self.find_pane_mut(follower_id) else {
+                continue;
+            };
+            let unchanged = current == follower.detail_summary;
+            if unchanged && !follower.detail_wrap {
+                continue;
+            }
+            follower.detail_summary = current.clone();
+            let wrap = follower.detail_wrap;
+            follower.items = match current {
+                Some(ref s) => {
+                    let width = follower.table.last_render_width() as usize;
+                    let value_width = content_detail::value_width(width, s);
+                    content_detail::detail_items(s, wrap, value_width)
+                }
+                None => Vec::new(),
+            };
+            // The record under the cursor swapped wholesale; reset the
+            // follower's own selection so it never points past the new rows.
+            follower.table.set_selected(0);
+            follower.loaded = true;
+            follower.rebuild_table_with(&view_defs, &overlay);
+        }
     }
 
     pub fn selected_item_id(&self) -> Option<&str> {
@@ -7980,6 +8251,10 @@ impl ContentView {
     }
 
     pub fn rebuild_table(&mut self) {
+        // Live record-detail coupling: refresh any follower from its
+        // source's current selection before the focused pane redraws, so a
+        // cursor move in the source is reflected in the same frame.
+        self.sync_detail_panes();
         // Forward the live header overlay (column / direction picker)
         // so the active pane's table reflects it.
         let view_defs = &self.view_defs;
@@ -8485,6 +8760,37 @@ impl ContentView {
             }
         }
 
+        // Record-detail split toggle (`o`) + value-wrap toggle (`X`).
+        // Claimed at view level — not in the pane's `build_claims` — because
+        // (un)splitting touches `pane_trees`, which only the ContentView
+        // owns. `o` is offered when the focused pane is a record_detail flat
+        // table (to open) or already owns / embodies a follower (to close);
+        // `X` only while a follower is in play. Gates mirror the dispatch
+        // resolution and the status-bar hints exactly.
+        {
+            let pane = self.active_pane();
+            let can_open = pane.record_detail_enabled(&self.view_defs);
+            let detail_in_play = pane.detail_child.is_some() || pane.is_detail_pane();
+            if can_open || detail_in_play {
+                if let Some(b) = self.content_kb.get(&ContentAction::ToggleRecordDetail) {
+                    km.push(KeyClaim::handler(
+                        b.clone(),
+                        scope.clone(),
+                        KeySource::Content(ContentAction::ToggleRecordDetail),
+                    ));
+                }
+            }
+            if detail_in_play {
+                if let Some(b) = self.content_kb.get(&ContentAction::ToggleDetailWrap) {
+                    km.push(KeyClaim::handler(
+                        b.clone(),
+                        scope.clone(),
+                        KeySource::Content(ContentAction::ToggleDetailWrap),
+                    ));
+                }
+            }
+        }
+
         km
     }
 
@@ -8579,6 +8885,10 @@ impl ContentView {
                 let (db, schema, table) = parse_postgres_table_node_id(table_node_id)?;
                 Some(self.dispatch_postgres_script_apply(db, schema, table, script.clone()))
             }
+            KeySource::Content(ContentAction::ToggleRecordDetail) => {
+                Some(self.toggle_record_detail())
+            }
+            KeySource::Content(ContentAction::ToggleDetailWrap) => Some(self.toggle_detail_wrap()),
             _ => None,
         }
     }
@@ -8739,13 +9049,35 @@ impl ContentView {
     }
 
     pub fn status_bar_hints(&self) -> Vec<BarHint> {
-        self.active_pane().status_bar_hints(
+        let mut hints = self.active_pane().status_bar_hints(
             &self.view_defs,
             &self.common_kb,
             &self.content_kb,
             &self.key_icons,
             self.adapter.as_deref(),
-        )
+        );
+        // Record-detail toggle / wrap hints. These derive from the view-level
+        // claim (`build_view_claims`), so the pane's nav-hint loop — which
+        // only sees the pane's own `build_claims` — can't surface them; we
+        // add them here under the very same gate as the claim. The label
+        // flips to reflect the live toggle state (open vs close, wrap vs
+        // no-wrap) so the bar reads as the action the key performs next.
+        let pane = self.active_pane();
+        let can_open = pane.record_detail_enabled(&self.view_defs);
+        let detail_in_play = pane.detail_child.is_some() || pane.is_detail_pane();
+        if can_open || detail_in_play {
+            if let Some(b) = self.content_kb.get(&ContentAction::ToggleRecordDetail) {
+                let label = if detail_in_play { "close detail" } else { "detail" };
+                hints.push((b.hint_label(&self.key_icons), label.to_string()));
+            }
+        }
+        if detail_in_play {
+            if let Some(b) = self.content_kb.get(&ContentAction::ToggleDetailWrap) {
+                let label = if pane.detail_wrap { "no-wrap" } else { "wrap" };
+                hints.push((b.hint_label(&self.key_icons), label.to_string()));
+            }
+        }
+        hints
     }
 }
 
@@ -10912,6 +11244,7 @@ mod tests {
                     keybindings: HashMap::new(),
                     action_chains: Default::default(),
                     column_cursor: false,
+                    record_detail: false,
                     tree_label: None,
                     shortcuts: HashMap::new(),
                     enter_action: None,
@@ -10927,6 +11260,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
@@ -11143,6 +11477,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
@@ -11342,6 +11677,7 @@ mod tests {
             keybindings: HashMap::new(),
             action_chains: Default::default(),
             column_cursor: false,
+            record_detail: false,
             tree_label: None,
             shortcuts: HashMap::new(),
             enter_action: None,
@@ -11647,6 +11983,7 @@ mod tests {
                     keybindings: HashMap::new(),
                     action_chains: Default::default(),
                     column_cursor: false,
+                    record_detail: false,
                     tree_label: Some("name".into()),
                     shortcuts: HashMap::new(),
                     enter_action: None,
@@ -11662,6 +11999,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
@@ -11785,6 +12123,7 @@ mod tests {
             keybindings: HashMap::new(),
             action_chains: Default::default(),
             column_cursor: false,
+            record_detail: false,
             tree_label: tree_label.map(String::from),
             shortcuts: HashMap::new(),
             enter_action: None,
@@ -11869,6 +12208,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
@@ -12031,6 +12371,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
@@ -12655,6 +12996,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
@@ -13787,6 +14129,7 @@ mod tests {
             keybindings: HashMap::new(),
             action_chains: Default::default(),
             column_cursor: false,
+            record_detail: false,
             tree_label: None,
             shortcuts: HashMap::new(),
             enter_action: None,
@@ -13885,6 +14228,7 @@ mod tests {
             keybindings: HashMap::new(),
             action_chains: Default::default(),
             column_cursor: false,
+            record_detail: false,
             tree_label: None,
             shortcuts: HashMap::new(),
             enter_action: None,
@@ -14308,6 +14652,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
@@ -14667,6 +15012,152 @@ mod tests {
             .as_ref()
             .expect("pane still alive");
         assert_eq!(cq.cursor_id.as_deref(), Some("c-keep"));
+    }
+
+    // ── Record-detail split (`record_detail: true`) ──────────────────
+
+    /// `test_config_with_query` with the root view opted into the
+    /// record-detail split.
+    fn record_detail_config() -> ViewFileConfig {
+        let mut config = test_config_with_query();
+        config.views[0].record_detail = true;
+        config
+    }
+
+    /// A flat record carrying two metadata fields — the source row a
+    /// follower transposes.
+    fn record_item(id: &str) -> NodeSummary {
+        use not_yet_done_content::{Metadata, MetadataField};
+        let mut n = tnode(id, id, "mock:issue");
+        n.metadata = Metadata {
+            fields: vec![
+                MetadataField {
+                    key: "name".into(),
+                    value: format!("{id}-name"),
+                    display_label: "Name".into(),
+                    editable: false,
+                    allowed_values: None,
+                },
+                MetadataField {
+                    key: "status".into(),
+                    value: format!("{id}-status"),
+                    display_label: "Status".into(),
+                    editable: false,
+                    allowed_values: None,
+                },
+            ],
+        };
+        n
+    }
+
+    /// Value of `key` in the follower's `row`-th synthetic item.
+    fn follower_cell(view: &ContentView, follower_id: PaneId, row: usize, key: &str) -> String {
+        let pane = view.find_pane(follower_id).expect("follower alive");
+        pane.items[row]
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn toggle_record_detail_opens_follower_split() {
+        let config = record_detail_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+
+        let msg = view.toggle_record_detail();
+        assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
+        // A second leaf now exists and focus stays on the source.
+        assert_eq!(view.pane_trees[view.active_subtab].leaf_count(), 2);
+        assert_eq!(view.active_pane_id(), source_id);
+        // Backlinks wired both ways.
+        let follower_id = view.find_pane(source_id).unwrap().detail_child.unwrap();
+        assert_ne!(follower_id, source_id);
+        assert_eq!(
+            view.find_pane(follower_id).unwrap().detail_source,
+            Some(source_id)
+        );
+        assert!(view.find_pane(follower_id).unwrap().is_detail_pane());
+    }
+
+    #[test]
+    fn toggle_record_detail_refused_without_opt_in() {
+        // Plain config (record_detail = false) → toggle is a no-op.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+
+        let msg = view.toggle_record_detail();
+        assert!(matches!(msg, SubViewMessage::Unhandled));
+        assert_eq!(view.pane_trees[view.active_subtab].leaf_count(), 1);
+    }
+
+    #[test]
+    fn toggle_record_detail_again_closes_follower() {
+        let config = record_detail_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+
+        view.toggle_record_detail();
+        assert_eq!(view.pane_trees[view.active_subtab].leaf_count(), 2);
+
+        // Pressed again from the source — the follower closes, source stays.
+        view.toggle_record_detail();
+        assert_eq!(view.pane_trees[view.active_subtab].leaf_count(), 1);
+        assert_eq!(view.active_pane_id(), source_id);
+        assert!(view.find_pane(source_id).unwrap().detail_child.is_none());
+    }
+
+    #[test]
+    fn sync_detail_panes_transposes_selected_record() {
+        let config = record_detail_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+        view.toggle_record_detail();
+        let follower_id = view.find_pane(source_id).unwrap().detail_child.unwrap();
+
+        // rebuild_table runs sync_detail_panes; the follower now holds one
+        // synthetic row per source field, in source order.
+        view.rebuild_table();
+        let follower = view.find_pane(follower_id).unwrap();
+        assert_eq!(follower.items.len(), 2);
+        assert_eq!(follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY), "Name");
+        assert_eq!(follower_cell(&view, follower_id, 0, content_detail::VALUE_KEY), "a-name");
+        assert_eq!(follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY), "Status");
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::VALUE_KEY),
+            "a-status"
+        );
+    }
+
+    #[test]
+    fn closing_source_cascades_the_detail_follower() {
+        // A coupled-drill sibling keeps the tree non-empty so close_focused
+        // doesn't refuse; closing the source must still take its detail
+        // follower with it.
+        let config = record_detail_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+        // A plain split gives us a 2nd unrelated leaf; then open the detail
+        // follower off the (still-focused) source → 3 leaves.
+        view.split_focused(SplitOrientation::Horizontal);
+        // split_focused focuses the new pane; refocus the source.
+        view.pane_trees[view.active_subtab].focus = source_id;
+        view.toggle_record_detail();
+        assert_eq!(view.pane_trees[view.active_subtab].leaf_count(), 3);
+
+        // Close the source → cascade removes its detail follower too,
+        // leaving only the unrelated split pane.
+        view.pane_trees[view.active_subtab].focus = source_id;
+        view.close_focused();
+        assert_eq!(view.pane_trees[view.active_subtab].leaf_count(), 1);
     }
 
     #[test]
@@ -15319,6 +15810,7 @@ mod tests {
                     keybindings: HashMap::new(),
                     action_chains: Default::default(),
                     column_cursor: false,
+                    record_detail: false,
                     tree_label: None,
                     shortcuts: child_shortcuts,
                     enter_action: None,
@@ -15334,6 +15826,7 @@ mod tests {
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
@@ -16827,6 +17320,7 @@ views:
                 keybindings: HashMap::new(),
                 action_chains: Default::default(),
                 column_cursor: false,
+                record_detail: false,
                 tree_label: Some("label".into()),
                 shortcuts: HashMap::new(),
                 enter_action: None,
@@ -16842,6 +17336,7 @@ views:
             pagination: None,
             action_chains: Default::default(),
             column_cursor: false,
+            record_detail: false,
             tree_label: Some("label".into()),
             retries: 0,
             script_template: None,
@@ -17946,6 +18441,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             pagination: None,
             action_chains: Default::default(),
             column_cursor: false,
+            record_detail: false,
             tree_label: None,
             retries: 0,
             script_template: None,
