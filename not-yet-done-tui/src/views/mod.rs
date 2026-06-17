@@ -2,6 +2,7 @@
 
 pub mod column_format;
 pub mod content_action_hints;
+pub mod content_detail;
 pub mod content_tree;
 pub mod content_view;
 pub mod focus_node;

@@ -450,6 +450,43 @@ Verhalten:
   einzeilige Tabellen (dort = zeilenweises Scrollen), entfaltet seinen Nutzen
   aber bei mehrzeiligen Rows.
 
+#### `record_detail:` — Datensatz-Detailansicht im Split (`o`)
+
+Steht auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `column_cursor`),
+default `false`. Auf einer so markierten **flachen Tabellen-Ebene** öffnet die
+Taste `o` rechts einen gekoppelten Split, der den **aktuell selektierten
+Datensatz transponiert** zeigt: eine Zeile pro Feld, Spalte 1 = Feldname,
+Spalte 2 = Feldwert. Bewegt sich der Cursor in der Quelltabelle, aktualisiert
+sich die Detailansicht automatisch (sie folgt der Auswahl Frame für Frame).
+`o` erneut schließt den Follower wieder; `X` schaltet im Follower den
+Wert-Umbruch um (default aus → Werte einzeilig geclippt; an → lange
+Werte/harte Zeilenumbrüche werden auf Fortsetzungszeilen umbrochen).
+
+```yaml
+- name: Rows
+  node_type: "postgres:row"
+  column_cursor: true
+  record_detail: true
+```
+
+**Warum es das gibt:** Postgres-Zeilen (und Skript-Ergebnisse) haben oft sehr
+viele, breite Spalten — einen einzelnen Datensatz über all diese Spalten hinweg
+zu lesen ist in der Zeilenansicht mühsam (man scrollt horizontal). Die
+transponierte Detailansicht stellt _einen_ Record vollständig untereinander dar,
+ohne dass die Tabellenansicht ihr Layout verliert.
+
+Verhalten / Grenzen:
+
+- **Nur flache Ebenen.** Tree-Ebenen sind ausgeschlossen — ein Tree klappt
+  Records ohnehin inline auf, und der Detail-Split zielt auf breite _flache_
+  Zeilen (Postgres-Rows, Skript-Ergebnisse). Ein Follower bietet `o` selbst
+  nicht erneut an.
+- **Read-only (v1).** Die Detailansicht zeigt Werte, editiert sie nicht.
+- **Kein eigener Fetch.** Der Follower ist rein synthetisch aus dem bereits
+  geladenen Quell-Record gebaut; er löst keine zusätzliche Abfrage aus.
+- **Kaskadiert beim Schließen.** Wird die Quell-Pane geschlossen, verschwindet
+  ihr Detail-Follower mit (eigener Backlink, getrennt von gekoppelten Drills).
+
 #### `group_by:` / `then_by:` / `aggregates:` / `summary_only:` — Gruppierung & Summen (M3)
 
 Stehen auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout` /
