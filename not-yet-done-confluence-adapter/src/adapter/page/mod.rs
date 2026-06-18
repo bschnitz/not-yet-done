@@ -526,6 +526,14 @@ impl Node for ConfluencePageNode {
         &self.cached_metadata
     }
 
+    async fn hydrate(&mut self) {
+        // A `get_by_id` stub carries the page id as its title; swap in the
+        // real title (and web URL) fetched from the server. Reuses the
+        // `detail` `OnceCell`, so a follow-up read on the same node does not
+        // refetch; a failed fetch leaves the stub (degrades to the id).
+        self.hydrate_from_detail().await;
+    }
+
     fn actions(&self) -> Vec<NodeAction> {
         page_actions()
     }

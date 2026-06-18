@@ -3169,10 +3169,14 @@ impl App {
             .content_view(view_index)
             .and_then(|cv| cv.visible_summary(pane_id, &node_id));
         let fetched = adapter.get_by_id(&node_id).await;
-        let (Some(mut summary), Ok(node)) = (base, fetched) else {
+        let (Some(mut summary), Ok(mut node)) = (base, fetched) else {
             self.reload_content_pane_current_level(view_index, pane_id);
             return;
         };
+        // Lazy adapters (e.g. Jira) re-resolve to a stub whose label is the id
+        // and whose metadata is sparse; fill in the real display fields before
+        // copying them onto the row. No-op for eager adapters (Taiga, local).
+        node.hydrate().await;
         summary.label = node.label().to_string();
         summary.metadata = node.metadata().clone();
         summary.node_type = node.node_type().clone();

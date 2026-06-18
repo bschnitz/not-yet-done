@@ -1304,6 +1304,31 @@ pub trait Node: Send + Sync {
     fn node_type(&self) -> &NodeType;
     fn metadata(&self) -> &Metadata;
 
+    /// Populate the display fields (`label`, `metadata`) that a lazily
+    /// constructed node leaves as placeholders.
+    ///
+    /// Several adapters build a node from just an id/key without a network
+    /// round-trip — [`ContentAdapter::get_by_id`] does this so child-only
+    /// operations (`list`, `invoke_action`) don't pay for a detail fetch they
+    /// don't need, and so a user who can see an issue in search but lacks
+    /// read permission on it still gets a usable node. Such a stub reports its
+    /// **id** as `label()` and a sparse `metadata()` until its detail is first
+    /// awaited.
+    ///
+    /// Consumers that read those display fields *directly* off a re-resolved
+    /// node — the post-edit row patch (`patch_content_row`) is the only one —
+    /// must call `hydrate` first. Without it the patched row shows the id
+    /// instead of the title and drops every other column until a full reload.
+    /// Centralising the call here (rather than eagerly hydrating inside each
+    /// adapter's `get_by_id`) keeps `get_by_id` uniformly cheap and stops the
+    /// fix from being re-derived per adapter.
+    ///
+    /// Default = no-op: adapters whose nodes are display-ready on construction
+    /// (eager fetchers like Taiga, in-memory local Tasks/Trackings, the mock)
+    /// need not override it. A failed hydration must degrade gracefully —
+    /// leave the stub, never panic.
+    async fn hydrate(&mut self) {}
+
     /// Which child node types can be listed under this node.
     fn children_types(&self) -> Vec<NodeType> {
         Vec::new()
