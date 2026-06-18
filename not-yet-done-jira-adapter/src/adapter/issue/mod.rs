@@ -242,6 +242,19 @@ impl Node for JiraIssueNode {
         &self.cached_metadata
     }
 
+    async fn hydrate(&mut self) {
+        // A `from_key` stub carries a sparse label/metadata (just the key and
+        // an empty summary). Fetch the full detail once and rebuild both
+        // display fields in lockstep via `replace_detail`. Skip when detail is
+        // already loaded; a failed fetch leaves the stub (degrades to the key).
+        if self.detail.get().is_some() {
+            return;
+        }
+        if let Ok(detail) = fetch_issue(&self.client, &self.cache, &self.key).await {
+            self.replace_detail(detail);
+        }
+    }
+
     fn children_types(&self) -> Vec<NodeType> {
         vec![comment_node_type(), attachment_node_type()]
     }
@@ -636,6 +649,44 @@ mod tests {
             labels: Vec::new(),
             updated: "2025-01-01T00:00:00.000+0000".into(),
         }
+    }
+
+    /// A `from_key` stub shows the key as its label and carries only a
+    /// key+summary metadata pair (summary blank). `replace_detail` — the
+    /// synchronous field-rewrite at the core of `Node::hydrate` — must swap in
+    /// the real summary and the full field set. This is exactly what the
+    /// post-edit row patch relies on: without it the patched row keeps the key
+    /// in the Summary column and drops the rest until a full reload.
+    #[test]
+    fn replace_detail_rewrites_stub_label_and_metadata() {
+        let client = test_client();
+        let scope_id = cache_store::scope_id_for_url("http://localhost:0");
+        let cache = Arc::new(Mutex::new(CacheAlias::new(None, scope_id)));
+        let mut node =
+            JiraIssueNode::from_key(client, cache, "PROJ-42".into(), String::new());
+
+        // Sparse stub: label falls back to the key; metadata is key + summary.
+        assert_eq!(node.label(), "PROJ-42");
+        assert_eq!(node.metadata().fields.len(), 2);
+        let summary_before = node
+            .metadata()
+            .fields
+            .iter()
+            .find(|f| f.key == "summary")
+            .map(|f| f.value.as_str());
+        assert_eq!(summary_before, Some(""));
+
+        // Hydration's field-rewrite: real summary as label + full metadata.
+        node.replace_detail(sample_detail());
+        assert_eq!(node.label(), "Fix login bug");
+        assert!(node.metadata().fields.len() > 2);
+        let summary_after = node
+            .metadata()
+            .fields
+            .iter()
+            .find(|f| f.key == "summary")
+            .map(|f| f.value.as_str());
+        assert_eq!(summary_after, Some("Fix login bug"));
     }
 
     fn sample_comment() -> JiraComment {
