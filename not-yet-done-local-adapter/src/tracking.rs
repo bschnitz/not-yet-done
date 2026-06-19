@@ -72,11 +72,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
-    AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore, GroupBucket, GroupSpec,
-    HintPlacement, InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortableColumn, Subtree,
-    SubtreeNode,
+    apply_sort, grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome,
+    AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore,
+    GroupBucket, GroupSpec, HintPlacement, InputSpec, Invalidation, Metadata, MetadataField, Node,
+    NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKind,
+    SortableColumn, Subtree, SubtreeNode,
 };
 use not_yet_done_core::entity::tracking;
 use not_yet_done_core::error::AppError;
@@ -1074,18 +1074,25 @@ fn entry_summary(
     }
 }
 
-/// Columns a list of trackings can be sorted on (engine sorts in memory).
+/// Columns a list of trackings can be sorted on. The adapter applies the sort
+/// itself in [`Tracking::list`] (before any grouping, so the within-group item
+/// order follows the requested sort) via the generic
+/// [`not_yet_done_content::apply_sort`]; each column declares the [`SortKind`]
+/// that helper needs to compare its cells correctly.
 fn tracking_sortable_columns() -> Vec<SortableColumn> {
     [
-        ("task", "Task"),
-        ("started", "Started"),
-        ("ended", "Ended"),
-        ("duration", "Duration"),
+        ("marker", "Active", SortKind::Text),
+        ("task", "Task", SortKind::Text),
+        ("taskpath", "Task path", SortKind::Text),
+        ("started", "Started", SortKind::DateTime),
+        ("ended", "Ended", SortKind::DateTime),
+        ("duration", "Duration", SortKind::Number),
     ]
     .into_iter()
-    .map(|(key, label)| SortableColumn {
+    .map(|(key, label, kind)| SortableColumn {
         key: key.to_string(),
         label: label.to_string(),
+        kind,
     })
     .collect()
 }
@@ -1363,7 +1370,12 @@ impl Node for TrackingRootNode {
         }
         let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
         let now = chrono::Utc::now();
-        Ok(list_result(self.snapshot.entries(filter.as_deref(), now)))
+        // Flat list: apply the requested item sort here (before any
+        // engine-side grouping, whose group bucketing is stable, so the
+        // within-group order follows this sort). `S` drives `params.sort`.
+        let mut items = self.snapshot.entries(filter.as_deref(), now);
+        let applied = apply_sort(&mut items, &params.sort, &tracking_sortable_columns());
+        Ok(list_result_with_sort(items, applied))
     }
     async fn list_subtree(
         &self,
@@ -1742,12 +1754,21 @@ impl Node for TrackingTreeNode {
     }
 }
 
-/// Wrap a summary list into a `ListResult`. No server-side sort or
-/// pagination — the list is in-memory; the engine sorts/slices locally.
+/// Wrap a summary list into a `ListResult` with no applied sort (tree/grouped
+/// paths, whose order is structural).
 fn list_result(items: Vec<NodeSummary>) -> not_yet_done_content::ListResult {
+    list_result_with_sort(items, Vec::new())
+}
+
+/// Wrap a summary list into a `ListResult`, reporting which sort keys the
+/// adapter applied (so the footer can surface the active sort).
+fn list_result_with_sort(
+    items: Vec<NodeSummary>,
+    applied_sort: Vec<not_yet_done_content::SortKey>,
+) -> not_yet_done_content::ListResult {
     not_yet_done_content::ListResult {
         items,
-        applied_sort: Vec::new(),
+        applied_sort,
         page: None,
         batch_download_available: false,
         downloaded: Vec::new(),
@@ -2358,6 +2379,49 @@ mod tests {
         assert_eq!(rows[0].id, b.to_string());
         // No filter → both, in insertion (newest-first) order.
         assert_eq!(snap.entries(None, now).len(), 2);
+    }
+
+    #[test]
+    fn flat_list_sort_uses_adapter_column_kinds() {
+        // The flat `list()` path sorts entries via the generic
+        // `apply_sort` helper using the kinds declared in
+        // `tracking_sortable_columns()`. This exercises that integration:
+        // `started` must compare as a DateTime and `task` lexically.
+        let a = Uuid::from_u128(1); // started 60 min ago, "Banana"
+        let b = Uuid::from_u128(2); // started  5 min ago, "apple"
+        let snap = snapshot_from(vec![
+            (a, row(tracking(a, Uuid::from_u128(9), 60, true), "Banana", vec![])),
+            (b, row(tracking(b, Uuid::from_u128(9), 5, true), "apple", vec![])),
+        ]);
+        let now = chrono::Utc::now();
+        let cols = tracking_sortable_columns();
+
+        // started ascending → oldest (a, 60 min ago) before youngest (b).
+        let mut items = snap.entries(None, now);
+        let applied = apply_sort(
+            &mut items,
+            &[not_yet_done_content::SortKey {
+                column: "started".into(),
+                direction: SortDirection::Asc,
+            }],
+            &cols,
+        );
+        assert_eq!(items[0].id, a.to_string());
+        assert_eq!(items[1].id, b.to_string());
+        assert_eq!(applied.len(), 1);
+
+        // task ascending → case-insensitive "apple" (b) before "Banana" (a).
+        let mut items = snap.entries(None, now);
+        apply_sort(
+            &mut items,
+            &[not_yet_done_content::SortKey {
+                column: "task".into(),
+                direction: SortDirection::Asc,
+            }],
+            &cols,
+        );
+        assert_eq!(items[0].id, b.to_string());
+        assert_eq!(items[1].id, a.to_string());
     }
 
     #[test]

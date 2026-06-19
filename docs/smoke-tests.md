@@ -602,8 +602,34 @@ bleiben über alle Phasen hinweg stabil.
 - [ ] `Esc` in beiden Phasen schließt den Mode ohne Änderung; Header
       kehren in Originaldarstellung zurück.
 - [ ] Tab-Wechsel während Sort-Mode aktiv → Mode schließt automatisch.
-- [ ] Trackings: `S` zeigt **keinen** Sort-Hint in der Status-Bar
-      (Trackings ist bewusst ausgenommen).
+- [ ] Trackings (nativer Tab): `S` zeigt **keinen** Sort-Hint in der
+      Status-Bar (der native Trackings-Tab ist bewusst ausgenommen).
+
+## Trackings (A) — Gruppen-Order (`o`) + Item-Sort (`S`)
+
+Adapter-Tab „Trackings (A)" auf der gruppierten Flat-View (`key: a`,
+Default `group_by: started/day/desc`).
+
+- [ ] Status-Bar zeigt `o order ↓` (absteigend = neueste Tage zuerst).
+      `o` drücken → die Tagesgruppen kippen auf älteste-zuerst, Indikator
+      wird `o order ↑`. Erneut `o` → zurück. Die **Reihenfolge der
+      Einträge innerhalb** eines Tages ändert sich dabei **nicht**.
+- [ ] `o` lässt die Bucket-Granularität unberührt: vorher `zg` auf Week
+      schalten, dann `o` → es kippt die Wochen-Reihenfolge, bleibt aber
+      `week` (nicht zurück auf Day).
+- [ ] Grouping per `zg`/`u`-Menü auf „No grouping" → `o` ist ein No-op
+      (kein `order`-Hint in der Bar, nichts passiert).
+- [ ] `S` öffnet den Sort-Picker; **alle** Datenspalten sind wählbar
+      (Active/Task/Task path/Started/Ended/Duration), nicht nur eine
+      Teilmenge. Spalte `Duration` + `asc` → Einträge **innerhalb jeder
+      Tagesgruppe** stehen kürzeste-zuerst, numerisch korrekt (90 s vor
+      600 s, nicht lexikografisch „600" vor „90"). Fußzeile zeigt den
+      aktiven Sort.
+- [ ] `S` → `Started` + `desc` → Einträge je Gruppe chronologisch
+      (Datums-Sortierung, nicht String). Laufende Einträge (`ended` =
+      „running") sortieren bei Sort nach `Ended` ans Ende.
+- [ ] `o` und `S` sind orthogonal: erst `S` Duration asc, dann `o` →
+      Tagesgruppen kippen, die Duration-Sortierung **innerhalb** bleibt.
 
 ## Auth — Explicit invalidation (Phase 5)
 

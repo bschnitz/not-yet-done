@@ -2,7 +2,7 @@
 //! sort, ORDER-BY rewriting on top of the user-supplied JQL, and the
 //! `SortableColumn` advertisement returned by [`crate::adapter::JiraRoot`].
 
-use not_yet_done_content::{SortDirection, SortKey, SortableColumn};
+use not_yet_done_content::{SortDirection, SortKey, SortKind, SortableColumn};
 
 /// Map a public column key (as exposed by [`sortable_columns`]) onto the
 /// JQL field name. Returns `None` for columns we cannot sort on
@@ -32,7 +32,12 @@ pub(super) fn issue_sortable_columns() -> Vec<SortableColumn> {
         ("updated", "Updated"),
     ]
     .into_iter()
-    .map(|(key, label)| SortableColumn { key: key.into(), label: label.into() })
+    .map(|(key, label)| SortableColumn {
+        key: key.into(),
+        label: label.into(),
+        // Jira sorts server-side via JQL ORDER BY, so the kind is unused here.
+        kind: SortKind::Text,
+    })
     .collect()
 }
 

@@ -56,7 +56,8 @@ use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
     ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement, InputSpec,
     Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
-    SavedQueryStore, SortableColumn, Subtree, SubtreeNode, TreeFindHit, TreeSearchResults,
+    SavedQueryStore, SortKind, SortableColumn, Subtree, SubtreeNode, TreeFindHit,
+    TreeSearchResults,
 };
 use not_yet_done_core::entity::task;
 use not_yet_done_core::error::AppError;
@@ -668,16 +669,17 @@ fn task_metadata(
 /// empty `applied_sort`); this just marks the headers sort-eligible.
 fn task_sortable_columns() -> Vec<SortableColumn> {
     [
-        ("description", "Description"),
-        ("status", "Status"),
-        ("priority", "Priority"),
-        ("created", "Created"),
-        ("updated", "Updated"),
+        ("description", "Description", SortKind::Text),
+        ("status", "Status", SortKind::Text),
+        ("priority", "Priority", SortKind::Text),
+        ("created", "Created", SortKind::DateTime),
+        ("updated", "Updated", SortKind::DateTime),
     ]
     .into_iter()
-    .map(|(key, label)| SortableColumn {
+    .map(|(key, label, kind)| SortableColumn {
         key: key.to_string(),
         label: label.to_string(),
+        kind,
     })
     .collect()
 }

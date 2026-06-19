@@ -510,6 +510,14 @@ pub enum ContentAction {
     /// declare a `group_by`), so the default `u` stays free elsewhere
     /// (e.g. for a YAML `u: undelete` shortcut on the Tasks tab).
     GroupMenu,
+    /// Toggle the **group ordering** on a grouped flat view (`o`): flip the
+    /// bucket order between ascending and descending (e.g. day buckets
+    /// newest-first ⟷ oldest-first) while preserving the bucket granularity
+    /// and the item order *within* each group (that is `S`'s job). Registered
+    /// under the same gate as `cycle_grouping` (the level must declare a
+    /// `group_by`) and only when no record-detail split is offered, so the
+    /// default `o` stays free for [`ToggleRecordDetail`] on wide-row views.
+    ToggleGroupOrder,
     /// Toggle `tree_aggregate` columns (M4) between a node's own value and
     /// the adapter's subtree-cumulated value, in tree mode. A no-op on a
     /// level whose columns declare no `tree_aggregate` (and in flat mode).
@@ -552,6 +560,7 @@ impl ContentAction {
             Self::TreeExpandAll => "tree_expand_all",
             Self::CycleGrouping => "cycle_grouping",
             Self::GroupMenu => "group_menu",
+            Self::ToggleGroupOrder => "toggle_group_order",
             Self::ToggleTreeAggregate => "toggle_tree_aggregate",
             Self::JumpMode => "jump_mode",
             Self::ToggleRecordDetail => "toggle_record_detail",
@@ -581,6 +590,7 @@ impl FromStr for ContentAction {
             "tree_expand_all" => Ok(Self::TreeExpandAll),
             "cycle_grouping" => Ok(Self::CycleGrouping),
             "group_menu" => Ok(Self::GroupMenu),
+            "toggle_group_order" => Ok(Self::ToggleGroupOrder),
             "toggle_tree_aggregate" => Ok(Self::ToggleTreeAggregate),
             "jump_mode" => Ok(Self::JumpMode),
             "toggle_record_detail" => Ok(Self::ToggleRecordDetail),
@@ -1076,6 +1086,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::GroupMenu, KeyBinding::new("u"));
         m.insert(ContentAction::ToggleTreeAggregate, KeyBinding::new("zt"));
         m.insert(ContentAction::JumpMode, KeyBinding::new("J"));
+        m.insert(ContentAction::ToggleGroupOrder, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleRecordDetail, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleDetailWrap, KeyBinding::new("X"));
         Self { bindings: m }

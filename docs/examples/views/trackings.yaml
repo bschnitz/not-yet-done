@@ -106,6 +106,17 @@ views:
     # `zg` re-buckets at runtime (Day → Week → Month → Year → None). The
     # day headers render with ISO week + weekday (`W24 2026-06-08 Mon`).
     #
+    # Two runtime ordering keys (both view-state, not persisted):
+    #   - `o` flips only the **group order** between this default (`desc`,
+    #     newest day first) and `asc`, keeping the bucket granularity and
+    #     the item order within each group untouched.
+    #   - `S` sorts the **items within** the groups: it opens a column/
+    #     direction picker over the adapter's sortable columns (marker,
+    #     task, task path, started, ended, duration) and the adapter applies
+    #     the sort with the right comparison per column (datetime for
+    #     started/ended, numeric for duration, lexical for the rest) before
+    #     grouping, so the chosen order shows inside each day bucket.
+    #
     # `total_column: total` routes each day's summed duration into the
     # dedicated `total` column on the day's *last* row instead of onto the
     # `──` header — the classic time-sheet layout where a Total column

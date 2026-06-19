@@ -356,6 +356,8 @@ impl Node for TaigaRoot {
                     .map(|k| SortableColumn {
                         key: (*k).into(),
                         label: column_label(k).into(),
+                        // Taiga sorts server-side; the kind is unused here.
+                        kind: SortKind::Text,
                     })
                     .collect()
             }

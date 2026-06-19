@@ -66,11 +66,12 @@ fn content_nav_hint(action: &ContentAction) -> Option<NavHint> {
         TreeExpandAll => ("expand all", HintBar::Status),
         CycleGrouping => ("cycle group", HintBar::Status),
         ToggleTreeAggregate => ("aggregate", HintBar::Status),
-        // Record-detail split (toggle / value-wrap): claimed at the view
-        // level (`build_view_claims`), so this pane-claim-driven resolver
-        // never sees them — their status-bar hints are emitted directly by
-        // `ContentView::status_bar_hints` under the same gate.
-        ToggleRecordDetail | ToggleDetailWrap => return None,
+        // Record-detail split (toggle / value-wrap) and group-order toggle:
+        // claimed at the view level (`build_view_claims`), so this
+        // pane-claim-driven resolver never sees them — their status-bar
+        // hints are emitted directly by `ContentView::status_bar_hints`
+        // under the same gate.
+        ToggleRecordDetail | ToggleDetailWrap | ToggleGroupOrder => return None,
         // Activatable / richer-path sources: surfaced (with their
         // ActiveSource) by the action-bar builder, not here.
         EditQuery | OpenScriptsMenu | GroupMenu | JumpMode => return None,

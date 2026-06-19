@@ -153,6 +153,147 @@ mod metadata_tests {
     }
 }
 
+#[cfg(test)]
+mod apply_sort_tests {
+    use super::*;
+
+    fn col(key: &str, kind: SortKind) -> SortableColumn {
+        SortableColumn {
+            key: key.into(),
+            label: key.into(),
+            kind,
+        }
+    }
+
+    fn key(column: &str, direction: SortDirection) -> SortKey {
+        SortKey {
+            column: column.into(),
+            direction,
+        }
+    }
+
+    /// Build a summary whose `label` is the id and which carries the given
+    /// `(key, value)` metadata fields.
+    fn summary(id: &str, fields: &[(&str, &str)]) -> NodeSummary {
+        NodeSummary {
+            id: id.into(),
+            label: id.into(),
+            node_type: NodeType {
+                type_id: "test".into(),
+                mime_type: "text/plain".into(),
+                syntax: None,
+                file_extension: String::new(),
+                display_name: "Test".into(),
+            },
+            metadata: Metadata {
+                fields: fields
+                    .iter()
+                    .map(|(k, v)| MetadataField {
+                        key: (*k).into(),
+                        value: (*v).into(),
+                        display_label: (*k).into(),
+                        editable: false,
+                        allowed_values: None,
+                    })
+                    .collect(),
+            },
+            has_children: None,
+        }
+    }
+
+    fn ids(items: &[NodeSummary]) -> Vec<&str> {
+        items.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn datetime_sort_orders_chronologically_both_directions() {
+        let cols = [col("started", SortKind::DateTime)];
+        let mut items = vec![
+            summary("b", &[("started", "2026-06-02T10:00:00Z")]),
+            summary("a", &[("started", "2026-06-01T10:00:00Z")]),
+            summary("c", &[("started", "2026-06-03T10:00:00Z")]),
+        ];
+        let applied = apply_sort(&mut items, &[key("started", SortDirection::Asc)], &cols);
+        assert_eq!(ids(&items), ["a", "b", "c"]);
+        assert_eq!(applied, vec![key("started", SortDirection::Asc)]);
+
+        apply_sort(&mut items, &[key("started", SortDirection::Desc)], &cols);
+        assert_eq!(ids(&items), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn number_sort_is_numeric_not_lexical() {
+        let cols = [col("duration", SortKind::Number)];
+        let mut items = vec![
+            summary("x", &[("duration", "100")]),
+            summary("y", &[("duration", "9")]),
+            summary("z", &[("duration", "60")]),
+        ];
+        apply_sort(&mut items, &[key("duration", SortDirection::Asc)], &cols);
+        // 9 < 60 < 100 numerically (lexically "100" would sort before "60").
+        assert_eq!(ids(&items), ["y", "z", "x"]);
+    }
+
+    #[test]
+    fn unparseable_typed_cells_sort_to_the_end_ascending() {
+        let cols = [col("ended", SortKind::DateTime)];
+        let mut items = vec![
+            summary("running", &[("ended", "running")]),
+            summary("late", &[("ended", "2026-06-02T10:00:00Z")]),
+            summary("early", &[("ended", "2026-06-01T10:00:00Z")]),
+        ];
+        apply_sort(&mut items, &[key("ended", SortDirection::Asc)], &cols);
+        assert_eq!(ids(&items), ["early", "late", "running"]);
+    }
+
+    #[test]
+    fn falls_back_to_label_when_column_has_no_metadata_field() {
+        // `description`/`task`-style columns whose value lives in the label.
+        let cols = [col("description", SortKind::Text)];
+        let mut items = vec![summary("Banana", &[]), summary("apple", &[])];
+        apply_sort(&mut items, &[key("description", SortDirection::Asc)], &cols);
+        // Case-insensitive: "apple" before "Banana".
+        assert_eq!(ids(&items), ["apple", "Banana"]);
+    }
+
+    #[test]
+    fn multi_key_sort_breaks_ties_with_later_keys_and_is_stable() {
+        let cols = [col("status", SortKind::Text), col("priority", SortKind::Number)];
+        let mut items = vec![
+            summary("a", &[("status", "open"), ("priority", "2")]),
+            summary("b", &[("status", "open"), ("priority", "1")]),
+            summary("c", &[("status", "done"), ("priority", "1")]),
+        ];
+        let applied = apply_sort(
+            &mut items,
+            &[
+                key("status", SortDirection::Asc),
+                key("priority", SortDirection::Asc),
+            ],
+            &cols,
+        );
+        // Primary key status asc (done < open), secondary priority asc.
+        assert_eq!(ids(&items), ["c", "b", "a"]);
+        assert_eq!(applied.len(), 2);
+    }
+
+    #[test]
+    fn unknown_columns_are_dropped_from_applied() {
+        let cols = [col("started", SortKind::DateTime)];
+        let mut items = vec![summary("a", &[("started", "2026-06-01T10:00:00Z")])];
+        let applied = apply_sort(
+            &mut items,
+            &[
+                key("nonsense", SortDirection::Asc),
+                key("started", SortDirection::Desc),
+            ],
+            &cols,
+        );
+        // Only the recognised key is reported as applied.
+        assert_eq!(applied, vec![key("started", SortDirection::Desc)]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ListParams / ListResult / NodeSummary
 // ---------------------------------------------------------------------------
@@ -215,6 +356,25 @@ pub struct PageInfo {
     pub has_prev: bool,
 }
 
+/// How a column's values compare. The adapter declares this per
+/// [`SortableColumn`] so the generic [`apply_sort`] helper knows whether to
+/// compare cells lexically, numerically, or as timestamps — only the adapter
+/// knows what a given column actually holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortKind {
+    /// Lexicographic (case-insensitive) string compare. The fallback for any
+    /// free-text column.
+    #[default]
+    Text,
+    /// Parse cells as `f64` and compare numerically. Unparseable cells
+    /// (empty, non-numeric) sort to the end of an ascending run.
+    Number,
+    /// Parse cells as RFC 3339 timestamps and compare chronologically.
+    /// Unparseable cells (empty, sentinels like `"running"`) sort to the
+    /// end of an ascending run.
+    DateTime,
+}
+
 /// A column that the adapter can sort on. Returned by
 /// [`Node::sortable_columns`] so the UI knows which table headers to mark
 /// sort-eligible and what label to render in hint mode.
@@ -225,6 +385,97 @@ pub struct SortableColumn {
     pub key: String,
     /// Display label for sort hints / debug surfaces.
     pub label: String,
+    /// How values in this column compare. See [`SortKind`].
+    pub kind: SortKind,
+}
+
+/// Sort `items` in place by a multi-column `sort` spec, using `columns` to
+/// resolve each requested key to a [`SortKind`].
+///
+/// This is the generic engine that powers the `S` (sort) action across every
+/// adapter: an adapter advertises its sortable columns (with kinds) via
+/// [`Node::sortable_columns`] and calls this from its `list()` before any
+/// grouping, so the within-group order follows the requested item sort. The
+/// frontend stays adapter-agnostic — it just forwards [`SortKey`]s and renders
+/// whatever the adapter reports as applied.
+///
+/// A cell's value is the matching [`MetadataField`] by key, falling back to
+/// the summary's `label` when the column carries no metadata field (e.g. a
+/// `description` column rendered straight from the label). Keys not present in
+/// `columns` are skipped. The sort is **stable** and applied
+/// least-significant-key-first, so a multi-key spec orders by the first key
+/// with later keys breaking ties. Returns the subset of `sort` keys that were
+/// recognised (suitable for [`ListResult::applied_sort`]).
+pub fn apply_sort(
+    items: &mut [NodeSummary],
+    sort: &[SortKey],
+    columns: &[SortableColumn],
+) -> Vec<SortKey> {
+    let resolved: Vec<(&SortKey, SortKind)> = sort
+        .iter()
+        .filter_map(|k| {
+            columns
+                .iter()
+                .find(|c| c.key == k.column)
+                .map(|c| (k, c.kind))
+        })
+        .collect();
+
+    let cell = |s: &NodeSummary, key: &str| -> String {
+        s.metadata
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.clone())
+            .unwrap_or_else(|| s.label.clone())
+    };
+
+    // Apply keys least-significant first; a stable sort preserves the order
+    // established by earlier (more significant) passes for equal elements.
+    for (key, kind) in resolved.iter().rev() {
+        items.sort_by(|a, b| {
+            let va = cell(a, &key.column);
+            let vb = cell(b, &key.column);
+            let ord = compare_cells(&va, &vb, *kind);
+            match key.direction {
+                SortDirection::Asc => ord,
+                SortDirection::Desc => ord.reverse(),
+            }
+        });
+    }
+
+    resolved.into_iter().map(|(k, _)| k.clone()).collect()
+}
+
+/// Compare two cell strings under a [`SortKind`]. Unparseable values under a
+/// typed kind (Number/DateTime) sort *after* parseable ones in ascending
+/// order, so sentinels like an empty `ended` or a literal `"running"` land at
+/// the end rather than at an arbitrary position.
+fn compare_cells(a: &str, b: &str, kind: SortKind) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match kind {
+        SortKind::Text => a.to_lowercase().cmp(&b.to_lowercase()),
+        SortKind::Number => {
+            let pa = a.trim().parse::<f64>().ok();
+            let pb = b.trim().parse::<f64>().ok();
+            match (pa, pb) {
+                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        }
+        SortKind::DateTime => {
+            let pa = chrono::DateTime::parse_from_rfc3339(a.trim()).ok();
+            let pb = chrono::DateTime::parse_from_rfc3339(b.trim()).ok();
+            match (pa, pb) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

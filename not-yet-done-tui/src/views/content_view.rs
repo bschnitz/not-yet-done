@@ -2277,6 +2277,53 @@ impl ContentPane {
         }
     }
 
+    /// Flip the **group ordering** (asc ⟷ desc) of the active grouped level,
+    /// preserving the bucket granularity and leaving item order within groups
+    /// untouched. Records the flipped [`GroupBy`] in
+    /// [`group_by_override`](Self::group_by_override). A no-op when the level
+    /// declares no `group_by` or when grouping is currently cycled off
+    /// (`Some(None)` override — there is no bucket order to flip). Returns
+    /// `true` when the state changed (the caller rebuilds / reloads).
+    fn toggle_group_order(&mut self, view_defs: &[ViewDef]) -> bool {
+        // Effective grouping (override → child → view). `None` = level isn't
+        // groupable; nothing to flip.
+        let Some(gb) = self.current_group_by(view_defs) else {
+            return false;
+        };
+        let flipped = match gb.order {
+            GroupOrder::Asc => GroupOrder::Desc,
+            GroupOrder::Desc => GroupOrder::Asc,
+        };
+        self.group_by_override = Some(Some(GroupBy {
+            column: gb.column,
+            bucket: gb.bucket,
+            order: flipped,
+        }));
+        true
+    }
+
+    /// Dispatch wrapper for `content.toggle_group_order`: flip the bucket
+    /// order and, when it changed, rebuild the table — or, when the adapter
+    /// owns the grouping (adapter-grouped tree), reload the current level so
+    /// the adapter re-buckets in the new order. Returns `SelectionChanged`
+    /// so the bars refresh, or `Unhandled` when there is no grouping to flip.
+    pub(crate) fn try_toggle_group_order(
+        &mut self,
+        view_defs: &[ViewDef],
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> SubViewMessage {
+        if self.toggle_group_order(view_defs) {
+            if self.tree_groups_via_adapter() {
+                return self.reload_current_level(view_index, pane_id);
+            }
+            self.rebuild_table(view_defs);
+            SubViewMessage::SelectionChanged(None)
+        } else {
+            SubViewMessage::Unhandled
+        }
+    }
+
     // ── Tree-fold aggregation (M4) ───────────────────────────────────
 
     /// Whether the active (cursor-depth) tree level declares any
@@ -6671,6 +6718,9 @@ impl ContentView {
             ContentAction::CycleGrouping => self
                 .active_pane_mut()
                 .try_cycle_grouping(&view_defs, view_index, pane_id),
+            ContentAction::ToggleGroupOrder => self
+                .active_pane_mut()
+                .try_toggle_group_order(&view_defs, view_index, pane_id),
             ContentAction::GroupMenu => {
                 if self.active_pane().level_has_group_by(&self.view_defs) {
                     self.open_group_menu();
@@ -8824,6 +8874,27 @@ impl ContentView {
             }
         }
 
+        // Group-order toggle (`o`) — flip the bucket order asc/desc on a
+        // grouped flat view. Shares the `o` key with `ToggleRecordDetail`,
+        // but the gates are disjoint: this claims `o` only when the level
+        // groups *and* no record-detail split is offered or already open
+        // (so on wide-row record_detail views `o` still means the split).
+        {
+            let pane = self.active_pane();
+            let detail_owns_o = pane.record_detail_enabled(&self.view_defs)
+                || pane.detail_child.is_some()
+                || pane.is_detail_pane();
+            if pane.level_has_group_by(&self.view_defs) && !detail_owns_o {
+                if let Some(b) = self.content_kb.get(&ContentAction::ToggleGroupOrder) {
+                    km.push(KeyClaim::handler(
+                        b.clone(),
+                        scope.clone(),
+                        KeySource::Content(ContentAction::ToggleGroupOrder),
+                    ));
+                }
+            }
+        }
+
         if let Some(table_node_id) = self.target_postgres_table_node_id() {
             if let Some(b) = self.content_kb.get(&ContentAction::OpenScriptsMenu) {
                 km.push(KeyClaim::handler(
@@ -9165,6 +9236,23 @@ impl ContentView {
             if let Some(b) = self.content_kb.get(&ContentAction::ToggleDetailWrap) {
                 let label = if pane.detail_wrap { "no-wrap" } else { "wrap" };
                 hints.push((b.hint_label(&self.key_icons), label.to_string()));
+            }
+        }
+        // Group-order toggle (`o`) — same view-level claim/gate as
+        // `build_view_claims` (groupable level, and `o` not owned by a
+        // record-detail split). The label carries the *current* group order
+        // direction so the bar reflects state at a glance (↓ newest-first /
+        // ↑ oldest-first); pressing `o` flips it.
+        let detail_owns_o = can_open || detail_in_play;
+        if pane.level_has_group_by(&self.view_defs) && !detail_owns_o {
+            if let Some(gb) = pane.current_group_by(&self.view_defs) {
+                if let Some(b) = self.content_kb.get(&ContentAction::ToggleGroupOrder) {
+                    let arrow = match gb.order {
+                        GroupOrder::Desc => "↓",
+                        GroupOrder::Asc => "↑",
+                    };
+                    hints.push((b.hint_label(&self.key_icons), format!("order {arrow}")));
+                }
             }
         }
         hints
@@ -18211,6 +18299,57 @@ views:
                 .current_group_by(&view.view_defs)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn toggle_group_order_requires_group_by_level() {
+        // No `group_by` on the level → nothing to flip (same gate as the
+        // view-level claim; this covers the action-chain dispatch path).
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let msg = view.dispatch_content_action(ContentAction::ToggleGroupOrder);
+        assert!(matches!(msg, SubViewMessage::Unhandled));
+    }
+
+    #[test]
+    fn toggle_group_order_flips_order_preserving_bucket() {
+        // Configured grouping is `key`/Day/Asc. `o` flips only the order,
+        // keeping the column and bucket; pressing it again flips back.
+        let config = test_config_with_group_by();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        let msg = view.dispatch_content_action(ContentAction::ToggleGroupOrder);
+        assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
+        let gb = view
+            .active_pane()
+            .current_group_by(&view.view_defs)
+            .expect("override grouping");
+        assert_eq!(gb.order, GroupOrder::Desc); // flipped from Asc
+        assert_eq!(gb.bucket, Some(DateBucket::Day)); // preserved
+        assert_eq!(gb.column, "key"); // preserved
+
+        // Second toggle returns to ascending.
+        view.dispatch_content_action(ContentAction::ToggleGroupOrder);
+        let gb = view
+            .active_pane()
+            .current_group_by(&view.view_defs)
+            .expect("override grouping");
+        assert_eq!(gb.order, GroupOrder::Asc);
+        assert_eq!(gb.bucket, Some(DateBucket::Day));
+    }
+
+    #[test]
+    fn toggle_group_order_no_op_when_grouping_cycled_off() {
+        // Grouping turned off at runtime (Some(None) override) → `o` has no
+        // bucket order to flip and reports Unhandled.
+        let config = test_config_with_group_by();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.dispatch_content_action(ContentAction::GroupMenu);
+        view.handle_key("n"); // No grouping
+        assert!(view.active_pane().current_group_by(&view.view_defs).is_none());
+
+        let msg = view.dispatch_content_action(ContentAction::ToggleGroupOrder);
+        assert!(matches!(msg, SubViewMessage::Unhandled));
     }
 
     // ── Adapter-grouped tree (group_by_via_adapter) ──────────────────
