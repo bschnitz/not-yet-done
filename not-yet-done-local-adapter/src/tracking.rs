@@ -405,9 +405,17 @@ struct TrackingSnapshot {
 }
 
 impl TrackingSnapshot {
-    /// Build a snapshot from the live services: load every non-deleted
-    /// tracking, resolve each task's description + ancestor path from a
-    /// single `list_tasks` pass, and record running state.
+    /// Build a snapshot from the live services: load *every* tracking
+    /// (deleted included), resolve each task's description + ancestor path
+    /// from a single `list_tasks` pass, and record running state.
+    ///
+    /// The universe is unfiltered on purpose (adapter contract): the saved
+    /// query is the single, replaceable filter. The shipped default query
+    /// `[deleted, =, false]` hides deleted rows; a query that drops or
+    /// flips that clause surfaces them so `restore` has a target. Deleted
+    /// trackings still never count as *running* and never contribute to
+    /// tracked-time roll-ups — that's a fact about their state, not a view
+    /// filter, so it stays hard-coded here.
     async fn load(handle: &CoreHandle) -> Result<Arc<Self>> {
         let tasks = handle
             .task_service
@@ -422,7 +430,7 @@ impl TrackingSnapshot {
 
         let trackings = handle
             .tracking_repo
-            .find_all()
+            .find_all_including_deleted()
             .await
             .map_err(to_content_err)?;
 
@@ -433,7 +441,9 @@ impl TrackingSnapshot {
         let mut by_id = HashMap::with_capacity(trackings.len());
         let mut order = Vec::with_capacity(trackings.len());
         // Per-task own seconds + the set of tasks with a running tracking,
-        // accumulated in the same pass that builds the flat rows.
+        // accumulated in the same pass that builds the flat rows. Both are
+        // computed over the *live* set only — a deleted tracking is neither
+        // running nor tracked time, regardless of any query.
         let mut own_secs: HashMap<Uuid, i64> = HashMap::new();
         let mut active_tasks: HashSet<Uuid> = HashSet::new();
         for t in trackings {
@@ -442,8 +452,10 @@ impl TrackingSnapshot {
                 .map(|(desc, _)| desc.clone())
                 .unwrap_or_else(|| "(unknown task)".to_string());
             let task_path = path_for(&task_map, t.task_id);
-            let active = t.ended_at.is_none();
-            *own_secs.entry(t.task_id).or_default() += model_duration_seconds(&t, now);
+            let active = t.ended_at.is_none() && !t.deleted;
+            if !t.deleted {
+                *own_secs.entry(t.task_id).or_default() += model_duration_seconds(&t, now);
+            }
             if active {
                 active_tasks.insert(t.task_id);
             }
@@ -689,6 +701,7 @@ impl TrackingSnapshot {
         let row = self
             .by_id
             .values()
+            .filter(|r| !r.tracking.deleted)
             .max_by_key(|r| r.tracking.started_at)?;
         Some(BucketScope {
             column: spec.column.clone(),
@@ -2127,8 +2140,18 @@ mod tests {
         }
     }
 
+    /// A soft-deleted clone of [`tracking`] — its row stays in the snapshot
+    /// universe but must never count as running (adapter contract).
+    fn deleted_tracking(id: Uuid, task_id: Uuid, started_min_ago: i64, ended: bool) -> tracking::Model {
+        tracking::Model {
+            deleted: true,
+            ..tracking(id, task_id, started_min_ago, ended)
+        }
+    }
+
     fn row(model: tracking::Model, desc: &str, path: Vec<&str>) -> TrackingRow {
-        let active = model.ended_at.is_none();
+        // Mirror `TrackingSnapshot::load`: a deleted tracking is never active.
+        let active = model.ended_at.is_none() && !model.deleted;
         TrackingRow {
             tracking: model,
             task_description: desc.to_string(),
@@ -2416,6 +2439,76 @@ mod tests {
         )]);
         let now = chrono::Utc::now();
         assert_eq!(snap.entries(None, now)[0].has_children, Some(false));
+    }
+
+    // ── Adapter contract: query is the single, replaceable filter ─────────
+
+    /// The snapshot universe carries deleted rows (`find_all_including_deleted`),
+    /// and `entries` surfaces a row purely on the query-resolved id set — so a
+    /// query that selects a deleted tracking shows it (what makes `restore`
+    /// reachable). The default `[deleted, =, false]` query, resolved to the
+    /// live ids only, hides it. Nothing is pre-dropped before the query runs.
+    #[test]
+    fn query_set_is_the_only_thing_that_hides_deleted() {
+        let live = Uuid::from_u128(1);
+        let gone = Uuid::from_u128(2);
+        let task = Uuid::from_u128(9);
+        let snap = snapshot_from(vec![
+            (live, row(tracking(live, task, 60, true), "live", vec![])),
+            (gone, row(deleted_tracking(gone, task, 30, true), "gone", vec![])),
+        ]);
+        let now = chrono::Utc::now();
+
+        // No query → the whole universe, deleted included (no baked filter).
+        let all: HashSet<_> = snap.entries(None, now).into_iter().map(|s| s.id).collect();
+        assert!(all.contains(&live.to_string()));
+        assert!(all.contains(&gone.to_string()));
+
+        // A `deleted = false`-style set hides the deleted row…
+        let live_only = HashSet::from([live]);
+        let shown: Vec<_> = snap.entries(Some(&live_only), now);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, live.to_string());
+
+        // …and a set that selects the deleted row surfaces it, so `restore`
+        // has a target. (Before the contract change the snapshot dropped it.)
+        let deleted_only = HashSet::from([gone]);
+        let restorable: Vec<_> = snap.entries(Some(&deleted_only), now);
+        assert_eq!(restorable.len(), 1);
+        assert_eq!(restorable[0].id, gone.to_string());
+    }
+
+    /// A deleted tracking, even with no `ended_at`, must never count as
+    /// running: not in `active_ids` (cross-tab ⏱ marker / revalidate) and not
+    /// in `now_scope` (the live-tick bucket anchor).
+    #[test]
+    fn deleted_tracking_is_never_running() {
+        let live = Uuid::from_u128(1);
+        let gone = Uuid::from_u128(2);
+        let task = Uuid::from_u128(9);
+        // Both un-ended; the deleted one is also the youngest (started later).
+        let snap = snapshot_from(vec![
+            (live, row(tracking(live, task, 60, false), "live", vec![])),
+            (gone, row(deleted_tracking(gone, task, 10, false), "gone", vec![])),
+        ]);
+
+        let active = snap.active_ids();
+        assert!(active.contains(&live));
+        assert!(!active.contains(&gone));
+
+        // now_scope picks the youngest *live* tracking, skipping the deleted
+        // (younger) one — otherwise the live tick would anchor on a hidden row.
+        let spec = GroupSpec {
+            column: "started".to_string(),
+            bucket: Some(GroupBucket::Day),
+            order: SortDirection::Desc,
+        };
+        let scope = snap.now_scope(&spec).expect("a live tracking exists");
+        let expected = grouping::group_key(
+            &bucket_raw_value(&snap.by_id[&live], "started"),
+            Some(GroupBucket::Day),
+        );
+        assert_eq!(scope.key, expected);
     }
 
     // ── A2c Tree projection ──────────────────────────────────────────────

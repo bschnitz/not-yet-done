@@ -70,6 +70,13 @@ pub trait TrackingRepository: shaku::Interface {
     /// Find all non-deleted trackings, newest first.
     async fn find_all(&self) -> Result<Vec<tracking::Model>, AppError>;
 
+    /// Find *every* tracking, deleted or not, newest first. This is the
+    /// unfiltered universe — callers that want only the live set apply a
+    /// `deleted = false` query filter on top. Adapters load this so the
+    /// query is the single, replaceable filter rather than stacking on a
+    /// baked-in `deleted = false`.
+    async fn find_all_including_deleted(&self) -> Result<Vec<tracking::Model>, AppError>;
+
     /// Set deleted = false on a tracking.
     async fn undelete(&self, id: Uuid) -> Result<(), AppError>;
 
@@ -259,6 +266,15 @@ impl TrackingRepository for TrackingRepositoryImpl {
         let db = self.db.as_ref().expect("DB not initialized");
         Ok(tracking::Entity::find()
             .filter(tracking::Column::Deleted.eq(false))
+            .order_by_desc(tracking::Column::StartedAt)
+            .all(db)
+            .await?)
+    }
+
+    async fn find_all_including_deleted(&self) -> Result<Vec<tracking::Model>, AppError> {
+        use sea_orm::QueryOrder;
+        let db = self.db.as_ref().expect("DB not initialized");
+        Ok(tracking::Entity::find()
             .order_by_desc(tracking::Column::StartedAt)
             .all(db)
             .await?)
