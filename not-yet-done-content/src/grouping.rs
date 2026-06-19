@@ -15,6 +15,8 @@
 //! grouping delegates to them so a day reads identically in a flat grouped
 //! list and an adapter-grouped tree.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 
 use crate::SortDirection;
@@ -113,6 +115,69 @@ pub fn bucket_display_label(key: &str, bucket: Option<GroupBucket>) -> String {
     }
 }
 
+/// One condensed cell: every row index that shares an `(outer bucket, inner
+/// key)` pair, in first-appearance order. The reusable kernel of *adapter-side
+/// condensing* — collapsing a flat list into one representative row per cell
+/// (e.g. one row per task per day).
+///
+/// Why this lives here and not in the engine: condensing is *interpretation of
+/// the data*, not rendering. A flat list groups engine-side, but collapsing
+/// rows into per-cell aggregates (and the domain-correct sort/aggregate
+/// semantics that implies) belongs to whoever owns the data — the adapter,
+/// which can often do it natively (e.g. a `GROUP BY` against a SQL store).
+/// This helper carries the part that is genuinely generic (bucket-key identity
+/// + stable partitioning, shared with [`group_key`]); the domain aggregation
+/// (which numeric column to sum, which label/marker to carry onto the
+/// representative) stays with the caller. No adapter is *required* to condense
+/// — those that do call this; those that don't simply expose no condensed view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CondensedCell {
+    /// The outer bucket key ([`group_key`]), e.g. `2026-06-09`.
+    pub bucket_key: String,
+    /// The inner group key, verbatim as the caller supplied it.
+    pub inner_key: String,
+    /// Indices into the caller's row slice that fall into this cell, in the
+    /// order they first appeared.
+    pub members: Vec<usize>,
+}
+
+/// Partition rows into `(outer bucket, inner key)` cells. `rows` yields, per
+/// row, `(outer_raw, inner_key)`: `outer_raw` is date-bucketed via
+/// [`group_key`] (so a [`GroupBucket::Day`] bucket coalesces a day's rows) and
+/// `inner_key` groups verbatim within that bucket.
+///
+/// Cells come back in first-appearance order and each cell's `members` keep
+/// input order. The partition is stable, so a caller that pre-sorts its rows
+/// gets cells whose members follow that sort — which is how an adapter makes
+/// the requested item sort (`S`) order the rows *within* each group: pre-sort,
+/// condense, and let the engine's single-level day grouping (stable) preserve
+/// the within-day order.
+pub fn condense_cells<'a, I>(rows: I, bucket: Option<GroupBucket>) -> Vec<CondensedCell>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut members: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (idx, (outer_raw, inner_key)) in rows.into_iter().enumerate() {
+        let key = (group_key(outer_raw, bucket), inner_key.to_string());
+        members
+            .entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key.clone());
+                Vec::new()
+            })
+            .push(idx);
+    }
+    order
+        .into_iter()
+        .map(|key| CondensedCell {
+            members: members.remove(&key).unwrap_or_default(),
+            bucket_key: key.0,
+            inner_key: key.1,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +235,53 @@ mod tests {
         );
         assert_eq!(bucket_display_label("2026", Some(GroupBucket::Year)), "2026");
         assert_eq!(bucket_display_label("alpha", None), "alpha");
+    }
+
+    #[test]
+    fn condense_collapses_same_day_same_inner_into_one_cell() {
+        let d1a = local_noon("2026-06-09");
+        let d1b = format!("{}", local_noon("2026-06-09")); // same day, later row
+        let d2 = local_noon("2026-06-10");
+        let rows = vec![
+            (d1a.as_str(), "task-a"),
+            (d1b.as_str(), "task-a"), // coalesces with row 0 (same day, same task)
+            (d2.as_str(), "task-a"),  // different day → its own cell
+            (d1a.as_str(), "task-b"), // same day, different task → its own cell
+        ];
+        let cells = condense_cells(rows, Some(GroupBucket::Day));
+        assert_eq!(cells.len(), 3);
+        // First-appearance order: (09, a), (10, a), (09, b).
+        assert_eq!(cells[0].bucket_key, "2026-06-09");
+        assert_eq!(cells[0].inner_key, "task-a");
+        assert_eq!(cells[0].members, vec![0, 1]);
+        assert_eq!(cells[1].bucket_key, "2026-06-10");
+        assert_eq!(cells[1].members, vec![2]);
+        assert_eq!(cells[2].bucket_key, "2026-06-09");
+        assert_eq!(cells[2].inner_key, "task-b");
+        assert_eq!(cells[2].members, vec![3]);
+    }
+
+    #[test]
+    fn condense_members_follow_input_order_for_within_group_sort() {
+        // A caller that pre-sorts its rows must see that order reflected in
+        // each cell's members — this is how `S` orders rows within a group.
+        let day = local_noon("2026-06-09");
+        let rows = vec![(day.as_str(), "z"), (day.as_str(), "a"), (day.as_str(), "z")];
+        let cells = condense_cells(rows, Some(GroupBucket::Day));
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].inner_key, "z");
+        assert_eq!(cells[0].members, vec![0, 2]);
+        assert_eq!(cells[1].inner_key, "a");
+        assert_eq!(cells[1].members, vec![1]);
+    }
+
+    #[test]
+    fn condense_without_bucket_groups_outer_verbatim() {
+        let rows = vec![("alpha", "x"), ("alpha", "x"), ("beta", "x")];
+        let cells = condense_cells(rows, None);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].bucket_key, "alpha");
+        assert_eq!(cells[0].members, vec![0, 1]);
+        assert_eq!(cells[1].bucket_key, "beta");
     }
 }

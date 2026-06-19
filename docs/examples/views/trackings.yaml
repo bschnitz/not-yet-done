@@ -43,10 +43,13 @@
 #
 # ## A2c scope (Condensed + Tree)
 #
-# The native "Condensed" mode is rebuilt as a second view (`key: v`) on the
-# generic **nested grouping** (M3 `then_by`): the list groups by day
-# (`group_by`) and then by task (`then_by`), with `summary_only` collapsing
-# each (day, task) cell to one summed row.
+# The native "Condensed" mode is a second view (`key: v`) built on
+# **adapter-side condensing**: the adapter collapses each day's intervals of a
+# task into one `tracking:condensed-row` (summed duration) and sorts those
+# rows itself, so the engine only single-level-groups them by day. This is why
+# the `S` item sort works here — condensing is interpretation of the data and
+# belongs to the adapter (a SQL store could push it to a `GROUP BY`), not to
+# the engine's render-time grouping.
 #
 # The native "Tree" mode is a third view (`key: t`): day buckets
 # (`tracking:tree-group`, adapter-side grouping — `group_by_via_adapter`),
@@ -230,26 +233,30 @@ views:
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #
-  # The native Trackings "Condensed" mode, rebuilt on the generic nested
-  # grouping (M3 `then_by`). Switched to with `v` (mirrors the native
-  # condensed key); `a` switches back to the flat list above.
+  # The native Trackings "Condensed" mode. Switched to with `v` (mirrors the
+  # native condensed key); `a` switches back to the flat list above.
   #
-  # Two grouping levels: the **outer** `group_by` buckets by calendar day,
-  # the **inner** `then_by` groups by task. `summary_only: true` collapses
-  # each (day, task) cell to a single representative row showing the task's
-  # path + name and the summed duration for that task *on that day*. So a
-  # task worked on across two days appears once per day, each with that
-  # day's total — exactly the native two-level Condensed layout.
+  # Condensing is **adapter-side**: the `trackings` adapter collapses each
+  # day's intervals of a task into one `tracking:condensed-row` carrying the
+  # summed duration for that task *on that day*, and sorts those rows itself
+  # (the `S` item sort). Condensing is interpretation of the data, not a
+  # rendering concern, so it belongs to the data owner — a SQL-backed adapter
+  # could push it down to a `GROUP BY`. The engine then only does a *single*
+  # `group_by` (day) over the pre-condensed rows to draw the `── day ──`
+  # headers and close each day with its total — exactly as the flat list
+  # above does. Because the rows arrive pre-sorted and the engine's day
+  # grouping is stable, `S` orders the task rows **within** each day.
   #
-  # `zg` cycles only the outer (day) level (Day → Week → Month → Year →
-  # None); the inner per-task grouping always stays. With the outer level
-  # cycled off you get one row per task over the whole filtered range.
+  # Contrast with the engine-side nested grouping (`then_by` + `summary_only`)
+  # this view used to use: there the adapter's item sort was invisible (the
+  # engine ordered cells by group key only). Moving the collapse into the
+  # adapter is what makes `S` work here.
   #
-  # The inner level keys on the hidden `task_id` field, never the visible
-  # `task` label, so two distinct tasks that happen to share a description
-  # do not merge.
+  # `zg` cycles the day bucket (Day → Week → Month → Year → None) like the
+  # flat list. The condensing keys on the task **id**, never the visible
+  # label, so two distinct tasks sharing a description never merge.
   - name: condensed
-    node_type: "tracking:entry"
+    node_type: "tracking:condensed-row"
     key: v
 
     # Same saved-query filter + startup default as the flat list.
@@ -272,9 +279,6 @@ views:
       column: started
       bucket: day
       order: desc
-    then_by:
-      - column: task_id
-    summary_only: true
     aggregates:
       - column: duration
         op: sum
@@ -310,13 +314,21 @@ views:
         style: accent
         sizing: max
 
-    # Same per-row shortcuts as the flat list (delete/restore/toggle act on
-    # the representative tracking of the selected condensed row).
+    actions:
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [task, taskpath]
+      - name: refresh
+        key: r
+        type: reload
+
+    # A condensed cell aggregates many intervals, so per-interval delete/
+    # restore are gone (deleting "one" interval of a summed cell is
+    # meaningless); toggle-tracking acts on the cell's task.
     shortcuts:
-      d: delete
-      R: restore
       s: toggle-tracking
-      A: parent:restore-all
 
   # ── Tree (A2c) ───────────────────────────────────────────────────────
   #
