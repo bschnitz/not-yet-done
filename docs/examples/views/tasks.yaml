@@ -141,17 +141,24 @@ views:
     # quiet depends on the view's palette, so each tree tunes it independently.
     tree_connector_style: text_dim
 
-    # Saved-query filter. No `default` body is set, so — like the native tab
-    # — the whole (non-deleted) forest is shown, including done tasks. Add a
-    # `default:` block (a `name` + a `query` FilterExpr whose leaves are
-    # `[lhs, op, rhs]`, plus optional `options`) to filter to a subset; the
-    # tree then keeps each match's ancestors so nested hits stay visible.
+    # Saved-query filter. The snapshot loads the *whole* task universe —
+    # deleted tasks included — so the query is the single, replaceable filter
+    # (no baked-in `deleted = false`). The `default:` body below does the
+    # hiding: by default the non-deleted forest is shown (incl. done tasks),
+    # as before. Replace or drop the clause (e.g. `[deleted, =, true]`) to
+    # surface deleted tasks — they render greyed out. A deleted *parent* of a
+    # matching child stays visible as context (the tree keeps each match's
+    # ancestors); a deleted leaf with no matching descendant is hidden.
     # `editable` lets `:query edit` rewrite a body; `menu_key: q` opens the
     # menu listing every saved query for this view (bodies under scope
     # `tasks/<id>/<view>`, shortcuts in the `query_shortcut` table).
     query:
       editable: true
       menu_key: q
+      default: |
+        query:
+          and:
+            - [deleted, =, false]
 
     # Native column parity (see header). `status` is the status glyph,
     # `priority` a right-aligned number, the date columns render date-only,
@@ -380,6 +387,12 @@ views:
     query:
       editable: true
       menu_key: q
+      # Same default as the tree view. The flat list has no ancestor fill-in,
+      # so a deleted parent never shows here as context — only matching tasks.
+      default: |
+        query:
+          and:
+            - [deleted, =, false]
 
     columns:
       - key: status

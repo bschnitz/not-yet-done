@@ -4766,6 +4766,32 @@ impl ContentPane {
                 .collect(),
             None => Vec::new(),
         };
+        // Per-visible-row deleted flag: a node whose adapter marks it with a
+        // `deleted` metadata field of `"true"` (a soft-deleted record kept in
+        // the universe — e.g. a deleted task parent surfaced as context for a
+        // matching child) renders every cell dimmed. Parallel to the row order
+        // the widget loop walks: tree rows index `tree_visible_indices`, flat
+        // rows index `filtered_indices`.
+        let deleted_rows: Vec<bool> = match self.tree.as_ref() {
+            Some(tree) => self
+                .tree_visible_indices
+                .iter()
+                .map(|&eidx| {
+                    tree.entries
+                        .get(eidx)
+                        .is_some_and(|e| metadata_field_value(&e.node, "deleted") == "true")
+                })
+                .collect(),
+            None => self
+                .filtered_indices
+                .iter()
+                .map(|&i| {
+                    self.items
+                        .get(i)
+                        .is_some_and(|it| metadata_field_value(it, "deleted") == "true")
+                })
+                .collect(),
+        };
         // `group_headers:` rows: map each depth-0 (bucket) row to its label
         // so the loop below can swap in a `── label` summary row — same
         // chrome (`summary_row`, group-header style, non-selectable) as the
@@ -4858,6 +4884,18 @@ impl ContentPane {
                         }
                     })
                     .collect();
+                // Deleted rows: override every cell's foreground with the
+                // dim slot. On segmented cells (tree label, path) this dims
+                // the label/value text while the structural glyphs keep their
+                // own slot color — the row reads as present-but-greyed.
+                let cells = if deleted_rows.get(ri).copied().unwrap_or(false) {
+                    cells
+                        .into_iter()
+                        .map(|c| c.with_style(DELETED_STYLE_ID))
+                        .collect()
+                } else {
+                    cells
+                };
                 TableWidgetRow::new(cells)
             })
             .collect();
@@ -9459,6 +9497,15 @@ const FUZZY_MATCH_STYLE_ID: usize = 4;
 /// there.
 const UNREAD_STYLE_ID: usize = 5;
 
+/// StyleMap slot for *deleted* rows. An adapter that keeps soft-deleted
+/// records in its universe (e.g. the Tasks adapter, so a deleted parent
+/// stays on screen as context for a matching child) marks them with a
+/// `deleted` metadata field set to `"true"`; every cell of such a row is
+/// painted in this slot — a dimmed (`text_dim`) foreground — so the row
+/// reads as struck-through-without-the-line, present but greyed. Kept in
+/// sync with the `StyleMap::new(...)` in `content_style_map`.
+const DELETED_STYLE_ID: usize = 6;
+
 /// Default leading marker glyph for unread chat items when a view sets no
 /// `unread_marker`. `💬` (speech balloon) — a colorful, at-a-glance "new
 /// message" cue. Emoji are two terminal cells wide; the tree-label builder
@@ -10605,13 +10652,15 @@ fn content_col_styles(columns: &[ColumnDef], t: &Theme) -> Vec<Style> {
 /// - slot 4 ([`FUZZY_MATCH_STYLE_ID`]) — fuzzy-match runs in the tree label.
 /// - slot 5 ([`UNREAD_STYLE_ID`]) — unread chat items (channel/category label
 ///   + leading marker; unread message header line).
+/// - slot 6 ([`DELETED_STYLE_ID`]) — soft-deleted rows kept on screen as
+///   context, painted dimmed (`text_dim`).
 ///
-/// The group-header, tree-connector, fuzzy-match, and unread slots are always
-/// present (harmless when nothing is grouped / the view isn't a tree / no
-/// filter is active / no node is unread) so the same map serves every render
-/// path. `tree_connector` and `unread` are resolved per view (the caller
-/// passes the view's `tree_connector_style` / `unread_style` colors, or the
-/// theme defaults).
+/// The group-header, tree-connector, fuzzy-match, unread, and deleted slots
+/// are always present (harmless when nothing is grouped / the view isn't a
+/// tree / no filter is active / no node is unread / no node is deleted) so the
+/// same map serves every render path. `tree_connector` and `unread` are
+/// resolved per view (the caller passes the view's `tree_connector_style` /
+/// `unread_style` colors, or the theme defaults).
 fn content_style_map(
     t: &Theme,
     tree_connector: ratatui::style::Color,
@@ -10628,6 +10677,7 @@ fn content_style_map(
         Style::default().fg(tree_connector),
         Style::default().fg(t.accent()).add_modifier(Modifier::BOLD),
         Style::default().fg(unread).add_modifier(Modifier::BOLD),
+        Style::default().fg(t.text_dim()),
     ])
 }
 
