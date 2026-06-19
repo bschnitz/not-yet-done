@@ -53,10 +53,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterFactory,
-    ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement, InputSpec,
-    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
-    SavedQueryStore, SortKind, SortableColumn, Subtree, SubtreeNode, TreeFindHit,
+    apply_sort, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
+    AdapterFactory, ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement,
+    InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
+    Result, SavedQueryStore, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode, TreeFindHit,
     TreeSearchResults,
 };
 use not_yet_done_core::entity::task;
@@ -275,12 +275,19 @@ impl ForestSnapshot {
     /// returned (a saved-query filter is active — the set is matches plus
     /// their ancestors, see [`resolve_visible_set`]); `None` lists the
     /// full forest.
+    ///
+    /// Siblings come back in the snapshot's stored order (by `created_at`)
+    /// unless `sort` is non-empty, in which case [`apply_sort`] reorders
+    /// this level by the requested column(s) — so the tree's `S` sort acts
+    /// per subtree, sorting each parent's children among themselves.
     fn child_summaries(
         &self,
         parent: Option<Uuid>,
         filter: Option<&HashSet<Uuid>>,
+        sort: &[SortKey],
     ) -> Vec<NodeSummary> {
-        self.children
+        let mut items: Vec<NodeSummary> = self
+            .children
             .get(&parent)
             .map(|ids| {
                 ids.iter()
@@ -288,7 +295,9 @@ impl ForestSnapshot {
                     .filter_map(|id| self.by_id.get(id).map(|row| self.summary(*id, row, filter)))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        apply_sort(&mut items, sort, &task_sortable_columns());
+        items
     }
 
     /// Walk the forest from `parent` (`None` = roots) down `depth` additional
@@ -299,26 +308,30 @@ impl ForestSnapshot {
     /// visible children. `depth == u32::MAX` expands to every visible leaf.
     /// Pure in-memory — replaces the per-node TUI expand cascade with a single
     /// pass.
-    fn subtree(&self, parent: Option<Uuid>, filter: Option<&HashSet<Uuid>>, depth: u32) -> Subtree {
+    fn subtree(
+        &self,
+        parent: Option<Uuid>,
+        filter: Option<&HashSet<Uuid>>,
+        depth: u32,
+        sort: &[SortKey],
+    ) -> Subtree {
+        // Sort each level via `child_summaries` so the requested `sort`
+        // reorders every parent's children independently — the recursion
+        // re-applies it per subtree (the user's "Knoten jedes Teilbaums
+        // untereinander sortieren"). Empty `sort` keeps the stored order.
         let items = self
-            .children
-            .get(&parent)
-            .map(|ids| {
-                ids.iter()
-                    .filter(|id| filter.map_or(true, |f| f.contains(id)))
-                    .filter_map(|id| {
-                        let row = self.by_id.get(id)?;
-                        let summary = self.summary(*id, row, filter);
-                        let children = if depth > 0 && summary.has_children == Some(true) {
-                            self.subtree(Some(*id), filter, depth - 1)
-                        } else {
-                            Subtree::default()
-                        };
-                        Some(SubtreeNode { summary, children })
-                    })
-                    .collect()
+            .child_summaries(parent, filter, sort)
+            .into_iter()
+            .map(|summary| {
+                let child_id = Uuid::parse_str(&summary.id).ok();
+                let children = if depth > 0 && summary.has_children == Some(true) {
+                    self.subtree(child_id, filter, depth - 1, sort)
+                } else {
+                    Subtree::default()
+                };
+                SubtreeNode { summary, children }
             })
-            .unwrap_or_default();
+            .collect();
         Subtree { items, page: None }
     }
 
@@ -353,7 +366,11 @@ impl ForestSnapshot {
     /// walk still descends through non-matching parents so nested
     /// matches surface. Rows never expand or drill (`has_children:
     /// Some(false)`).
-    fn flat_summaries(&self, filter: Option<&HashSet<Uuid>>) -> Vec<NodeSummary> {
+    fn flat_summaries(
+        &self,
+        filter: Option<&HashSet<Uuid>>,
+        sort: &[SortKey],
+    ) -> (Vec<NodeSummary>, Vec<SortKey>) {
         let mut out = Vec::new();
         let mut stack: Vec<Uuid> = self
             .children
@@ -372,7 +389,11 @@ impl ForestSnapshot {
                 }
             }
         }
-        out
+        // The flat list view is the one projection that reports its sort
+        // back to the engine (the tree's `applied_sort` rides each level's
+        // order instead). Empty `sort` = depth-first forest order.
+        let applied = apply_sort(&mut out, sort, &task_sortable_columns());
+        (out, applied)
     }
 
     /// The task's own refreshed summary plus one for **every ancestor**.
@@ -664,9 +685,11 @@ fn task_metadata(
     }
 }
 
-/// Columns a list of tasks can be sorted on. Sorting itself is in-memory
-/// in the engine (the adapter applies no server-side sort and reports an
-/// empty `applied_sort`); this just marks the headers sort-eligible.
+/// Columns a list of tasks can be sorted on, each tagged with the
+/// [`SortKind`] that tells the generic [`apply_sort`] how to compare its
+/// cells (lexical / chronological). The adapter sorts in-memory itself —
+/// the flat list reports the applied keys, the tree sorts each level's
+/// siblings (see [`ForestSnapshot::child_summaries`] / [`ForestSnapshot::subtree`]).
 fn task_sortable_columns() -> Vec<SortableColumn> {
     [
         ("description", "Description", SortKind::Text),
@@ -1449,11 +1472,12 @@ impl Node for TaskRootNode {
         // forest flat, filter = matches only (no ancestor fill-in).
         if params.node_type.type_id == task_flat_type().type_id {
             let filter = resolve_match_set(&self.handle, &params.query).await?;
-            return Ok(list_result(self.snapshot.flat_summaries(filter.as_ref())));
+            let (items, applied) = self.snapshot.flat_summaries(filter.as_ref(), &params.sort);
+            return Ok(list_result_with_sort(items, applied));
         }
         let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
         Ok(list_result(
-            self.snapshot.child_summaries(None, filter.as_ref()),
+            self.snapshot.child_summaries(None, filter.as_ref(), &params.sort),
         ))
     }
     async fn list_subtree(
@@ -1465,13 +1489,17 @@ impl Node for TaskRootNode {
         // no expansion, so depth is irrelevant.
         if params.node_type.type_id == task_flat_type().type_id {
             let filter = resolve_match_set(&self.handle, &params.query).await?;
-            return Ok(leaf_subtree(self.snapshot.flat_summaries(filter.as_ref())));
+            let (items, _) = self.snapshot.flat_summaries(filter.as_ref(), &params.sort);
+            return Ok(leaf_subtree(items));
         }
         // Tree view: same visible-set semantics as `list`, expanded in one
         // pass instead of a per-node cascade (capability
-        // `supports_eager_subtree`).
+        // `supports_eager_subtree`). `params.sort` reorders each subtree's
+        // siblings (applied per level inside `subtree`).
         let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(self.snapshot.subtree(None, filter.as_ref(), depth))
+        Ok(self
+            .snapshot
+            .subtree(None, filter.as_ref(), depth, &params.sort))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
@@ -1586,9 +1614,11 @@ impl Node for TaskItemNode {
         params: not_yet_done_content::ListParams,
     ) -> Result<not_yet_done_content::ListResult> {
         let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(list_result(
-            self.snapshot.child_summaries(Some(self.id), filter.as_ref()),
-        ))
+        Ok(list_result(self.snapshot.child_summaries(
+            Some(self.id),
+            filter.as_ref(),
+            &params.sort,
+        )))
     }
     async fn list_subtree(
         &self,
@@ -1596,7 +1626,9 @@ impl Node for TaskItemNode {
         depth: u32,
     ) -> Result<Subtree> {
         let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(self.snapshot.subtree(Some(self.id), filter.as_ref(), depth))
+        Ok(self
+            .snapshot
+            .subtree(Some(self.id), filter.as_ref(), depth, &params.sort))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
@@ -1709,13 +1741,24 @@ impl Node for TaskItemNode {
     }
 }
 
-/// Wrap a summary list into a `ListResult`. The adapter does no
-/// server-side sort or pagination (the forest is in-memory), so it echoes
-/// an empty `applied_sort` and leaves the engine to sort/slice locally.
+/// Wrap a summary list into a `ListResult` with an empty `applied_sort`
+/// (the forest is in-memory; no server-side pagination). Used by the tree
+/// level lists, whose ordering is carried by [`ForestSnapshot::child_summaries`]
+/// per level rather than reported as a flat `applied_sort`.
 fn list_result(items: Vec<NodeSummary>) -> not_yet_done_content::ListResult {
+    list_result_with_sort(items, Vec::new())
+}
+
+/// Like [`list_result`] but echoes the sort keys the adapter actually
+/// applied — used by the flat list view (`task:flat`), where the engine's
+/// page footer reflects the active sort.
+fn list_result_with_sort(
+    items: Vec<NodeSummary>,
+    applied_sort: Vec<SortKey>,
+) -> not_yet_done_content::ListResult {
     not_yet_done_content::ListResult {
         items,
-        applied_sort: Vec::new(),
+        applied_sort,
         page: None,
         batch_download_available: false,
         downloaded: Vec::new(),
@@ -2174,12 +2217,12 @@ mod tests {
             row(child, "Child task", Some(root)),
         ]);
 
-        let roots = snap.child_summaries(None, None);
+        let roots = snap.child_summaries(None, None, &[]);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].label, "Root task");
         assert_eq!(roots[0].has_children, Some(true));
 
-        let kids = snap.child_summaries(Some(root), None);
+        let kids = snap.child_summaries(Some(root), None, &[]);
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].label, "Child task");
         assert_eq!(kids[0].has_children, Some(false));
@@ -2197,20 +2240,20 @@ mod tests {
         ]);
 
         // depth 0 ⇔ child_summaries: roots only, nothing expanded.
-        let d0 = snap.subtree(None, None, 0);
+        let d0 = snap.subtree(None, None, 0, &[]);
         assert_eq!(d0.items.len(), 1);
         assert_eq!(d0.items[0].summary.label, "Root");
         assert!(d0.items[0].children.items.is_empty());
 
         // depth 1: Root → Mid, Mid not expanded further.
-        let d1 = snap.subtree(None, None, 1);
+        let d1 = snap.subtree(None, None, 1, &[]);
         let m = &d1.items[0].children.items;
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].summary.label, "Mid");
         assert!(m[0].children.items.is_empty());
 
         // depth all: full chain, leaf stops naturally.
-        let dall = snap.subtree(None, None, u32::MAX);
+        let dall = snap.subtree(None, None, u32::MAX, &[]);
         let m = &dall.items[0].children.items[0];
         assert_eq!(m.summary.label, "Mid");
         let l = &m.children.items[0];
@@ -2231,7 +2274,7 @@ mod tests {
             row(b, "B", Some(root)),
         ]);
         let visible: HashSet<Uuid> = [root, a].into_iter().collect();
-        let st = snap.subtree(None, Some(&visible), u32::MAX);
+        let st = snap.subtree(None, Some(&visible), u32::MAX, &[]);
         let kids: Vec<_> = st.items[0]
             .children
             .items
@@ -2259,19 +2302,19 @@ mod tests {
         // (child, root). The sibling is filtered out.
         let visible: HashSet<Uuid> = [root, child, grandchild].into_iter().collect();
 
-        let roots = snap.child_summaries(None, Some(&visible));
+        let roots = snap.child_summaries(None, Some(&visible), &[]);
         assert_eq!(roots.len(), 1, "only the root on the path stays");
         assert_eq!(roots[0].label, "Root");
         // Root still has a visible child (the ancestor chain continues).
         assert_eq!(roots[0].has_children, Some(true));
 
-        let root_kids = snap.child_summaries(Some(root), Some(&visible));
+        let root_kids = snap.child_summaries(Some(root), Some(&visible), &[]);
         assert_eq!(root_kids.len(), 1, "sibling is filtered out");
         assert_eq!(root_kids[0].label, "Child");
 
         // The grandchild is a leaf match: no visible children, so the tree
         // must not draw an expand glyph for it.
-        let grandchild_kids = snap.child_summaries(Some(child), Some(&visible));
+        let grandchild_kids = snap.child_summaries(Some(child), Some(&visible), &[]);
         assert_eq!(grandchild_kids.len(), 1);
         assert_eq!(grandchild_kids[0].label, "Grandchild");
         assert_eq!(grandchild_kids[0].has_children, Some(false));
@@ -2291,7 +2334,7 @@ mod tests {
             row(c, "C", Some(b)),
             row(d, "D", None),
         ]);
-        let flat = snap.flat_summaries(None);
+        let (flat, _) = snap.flat_summaries(None, &[]);
         let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
         assert_eq!(labels, vec!["A", "B", "C", "D"]);
         assert!(
@@ -2355,9 +2398,88 @@ mod tests {
             row(d, "D", None),
         ]);
         let matches: HashSet<Uuid> = [c, d].into_iter().collect();
-        let flat = snap.flat_summaries(Some(&matches));
+        let (flat, _) = snap.flat_summaries(Some(&matches), &[]);
         let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
         assert_eq!(labels, vec!["C", "D"], "nested match surfaces, no ancestors");
+    }
+
+    /// Helper: a single-key sort on `column` in `direction`.
+    fn sort_by(column: &str, direction: not_yet_done_content::SortDirection) -> Vec<SortKey> {
+        vec![SortKey {
+            column: column.to_string(),
+            direction,
+        }]
+    }
+
+    #[test]
+    fn flat_summaries_sorts_by_requested_column_and_reports_applied() {
+        use not_yet_done_content::SortDirection;
+        // Forest order would be Charlie, Alpha, Bravo (DFS / insertion);
+        // sorting by `description` (no metadata field → falls back to the
+        // label) must reorder the flat list and echo the applied key so the
+        // engine's footer reflects it.
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            row(a, "Charlie", None),
+            row(b, "Alpha", None),
+            row(c, "Bravo", None),
+        ]);
+
+        let (flat, applied) = snap.flat_summaries(None, &sort_by("description", SortDirection::Asc));
+        let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["Alpha", "Bravo", "Charlie"]);
+        assert_eq!(applied.len(), 1, "the recognised sort key is reported back");
+        assert_eq!(applied[0].column, "description");
+
+        let (flat_desc, _) =
+            snap.flat_summaries(None, &sort_by("description", SortDirection::Desc));
+        let labels: Vec<&str> = flat_desc.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["Charlie", "Bravo", "Alpha"]);
+
+        // Empty sort preserves the depth-first forest order.
+        let (flat_none, applied_none) = snap.flat_summaries(None, &[]);
+        let labels: Vec<&str> = flat_none.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["Charlie", "Alpha", "Bravo"]);
+        assert!(applied_none.is_empty());
+    }
+
+    #[test]
+    fn subtree_sorts_each_subtree_siblings_independently() {
+        use not_yet_done_content::SortDirection;
+        // Two parents, each with children inserted out of order. A `S` sort
+        // must order the siblings *within* each parent — never globally
+        // interleaving children of different parents.
+        let p1 = Uuid::from_u128(1);
+        let p1_banana = Uuid::from_u128(11);
+        let p1_apple = Uuid::from_u128(12);
+        let p2 = Uuid::from_u128(2);
+        let p2_cherry = Uuid::from_u128(21);
+        let p2_apricot = Uuid::from_u128(22);
+        let snap = snapshot_from(vec![
+            row(p1, "Parent 1", None),
+            row(p1_banana, "Banana", Some(p1)),
+            row(p1_apple, "Apple", Some(p1)),
+            row(p2, "Parent 2", None),
+            row(p2_cherry, "Cherry", Some(p2)),
+            row(p2_apricot, "Apricot", Some(p2)),
+        ]);
+
+        let st = snap.subtree(None, None, u32::MAX, &sort_by("description", SortDirection::Asc));
+        let kids = |node: &SubtreeNode| -> Vec<String> {
+            node.children
+                .items
+                .iter()
+                .map(|n| n.summary.label.clone())
+                .collect()
+        };
+        // Roots themselves sorted by description.
+        let roots: Vec<&str> = st.items.iter().map(|n| n.summary.label.as_str()).collect();
+        assert_eq!(roots, vec!["Parent 1", "Parent 2"]);
+        // Each subtree's siblings sorted among themselves.
+        assert_eq!(kids(&st.items[0]), vec!["Apple", "Banana"]);
+        assert_eq!(kids(&st.items[1]), vec!["Apricot", "Cherry"]);
     }
 
     #[test]
@@ -2646,20 +2768,20 @@ mod tests {
 
         // The deleted parent survives as the only visible root, dimmed, and
         // still advertises a visible child (so the tree draws its expander).
-        let roots = snap.child_summaries(None, Some(&visible));
+        let roots = snap.child_summaries(None, Some(&visible), &[]);
         assert_eq!(roots.len(), 1, "stray deleted leaf is filtered out");
         assert_eq!(roots[0].label, "Deleted parent");
         assert_eq!(field_value(&roots[0], "deleted"), "true");
         assert_eq!(roots[0].has_children, Some(true));
 
         // Its child is the live match: shown normally, no deleted signal.
-        let kids = snap.child_summaries(Some(parent), Some(&visible));
+        let kids = snap.child_summaries(Some(parent), Some(&visible), &[]);
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].label, "Live child");
         assert_eq!(field_value(&kids[0], "deleted"), "");
 
         // Same picture through the eager `subtree` projection the tree uses.
-        let st = snap.subtree(None, Some(&visible), u32::MAX);
+        let st = snap.subtree(None, Some(&visible), u32::MAX, &[]);
         assert_eq!(st.items.len(), 1);
         assert_eq!(st.items[0].summary.label, "Deleted parent");
         assert_eq!(field_value(&st.items[0].summary, "deleted"), "true");
