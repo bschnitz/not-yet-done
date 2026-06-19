@@ -55,9 +55,15 @@
 //!
 //! Two further views over the same data, declared in `views/trackings.yaml`:
 //!
-//! - **Condensed** — pure engine feature (nested grouping `then_by`, M3): the
-//!   flat `tracking:entry` rows grouped day→task with per-cell duration sums.
-//!   The adapter only adds a hidden `task_id` field for the inner group key.
+//! - **Condensed** (`tracking:condensed-row`) — *adapter-side* condensing: the
+//!   adapter collapses each day's intervals of a task into one row carrying the
+//!   per-cell duration sum ([`TrackingSnapshot::condensed_summaries`], built on
+//!   the generic [`grouping::condense_cells`] kernel). Condensing is
+//!   interpretation of the data, not rendering, so it belongs to the data
+//!   owner — the engine then only single-level-groups the rows into `── day ──`
+//!   headers, which lets the requested item sort (`S`) order the task rows
+//!   within each day. No adapter is forced to condense; one that can't simply
+//!   exposes no condensed view.
 //! - **Tree** — a second projection of the same loads: the **task forest**
 //!   (`tracking:tree-item`) where each node carries its own tracked seconds
 //!   plus the subtree-cumulated total ([`TreeProjection`], folded bottom-up).
@@ -75,7 +81,7 @@ use not_yet_done_content::{
     apply_sort, grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome,
     AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore,
     GroupBucket, GroupSpec, HintPlacement, InputSpec, Invalidation, Metadata, MetadataField, Node,
-    NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKind,
+    NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKey, SortKind,
     SortableColumn, Subtree, SubtreeNode,
 };
 use not_yet_done_core::entity::tracking;
@@ -121,6 +127,25 @@ fn tracking_entry_type() -> NodeType {
         syntax: None,
         file_extension: ".txt".to_string(),
         display_name: "Tracking".to_string(),
+    }
+}
+
+/// The node type for a **condensed row** (A2c Condensed view): one
+/// representative row per `(day, task)` cell, carrying that task's *summed*
+/// tracked seconds for the day. Distinct from `tracking:entry` (a single
+/// interval) because the condensing — collapsing a day's many intervals of one
+/// task into a single aggregate row — is the adapter's job (interpretation of
+/// the data, not rendering). The Condensed view in `views/trackings.yaml` binds
+/// its columns to this type; the engine then only single-level-groups the rows
+/// into `── day ──` headers, so the requested item sort (`S`) orders the task
+/// rows *within* each day. See [`TrackingSnapshot::condensed_summaries`].
+fn tracking_condensed_type() -> NodeType {
+    NodeType {
+        type_id: "tracking:condensed-row".to_string(),
+        mime_type: "text/plain".to_string(),
+        syntax: None,
+        file_extension: ".txt".to_string(),
+        display_name: "Tracking (condensed)".to_string(),
     }
 }
 
@@ -178,6 +203,12 @@ const TREE_ID_PREFIX: &str = "tree:";
 
 /// Prefix on a `tracking:tree-group` node id: `treegrp:<column>:<gran>:<key>`.
 const GROUP_ID_PREFIX: &str = "treegrp:";
+
+/// Prefix on a `tracking:condensed-row` node id: `cond:<day-key>:<task-uuid>`.
+/// The day key is the ISO bucket key (`2026-06-09`, no `:`), so a single
+/// `rsplit_once(':')` recovers the task uuid from the day. Routes in
+/// [`TrackingAdapter::get_by_id`] / [`TrackingRootNode::get_child`].
+const CONDENSED_ID_PREFIX: &str = "cond:";
 
 // ---------------------------------------------------------------------------
 // Bucket scope (grouped tree)
@@ -803,6 +834,72 @@ impl TrackingSnapshot {
             .filter_map(|id| self.by_id.get(id).map(|row| entry_summary(*id, row, now)))
             .collect()
     }
+
+    /// Condensed rows (A2c Condensed view): one representative row per
+    /// `(day, task)` cell, the task's summed tracked seconds for that day.
+    ///
+    /// The condensing lives here — in the adapter — because it is an
+    /// *interpretation* of the data, not a rendering concern: collapsing a
+    /// day's many intervals of one task into one aggregate is the kind of
+    /// `GROUP BY` the data owner does best (a SQL-backed adapter could push it
+    /// to the store). The generic, domain-free part (bucket identity + stable
+    /// partitioning) is [`grouping::condense_cells`]; the per-cell aggregation
+    /// (sum the duration, carry the label/marker/taskpath of a representative)
+    /// is the trackings-specific part done here.
+    ///
+    /// The requested item sort (`S`) is applied to the condensed rows before
+    /// they leave the adapter. The engine then only single-level-groups them
+    /// into `── day ──` headers (`group_by: [started/day]`, stable), so the
+    /// sort orders the task rows *within* each day — the agreed semantics.
+    fn condensed_summaries(
+        &self,
+        filter: Option<&HashSet<Uuid>>,
+        now: chrono::DateTime<chrono::Utc>,
+        sort: &[SortKey],
+    ) -> (Vec<NodeSummary>, Vec<SortKey>) {
+        // Visible rows in display order (newest first); each cell's
+        // representative is therefore its newest interval.
+        let ids: Vec<Uuid> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|id| filter.map_or(true, |f| f.contains(id)))
+            .filter(|id| self.by_id.contains_key(id))
+            .collect();
+        // The condensing keys: outer = the interval's start (day-bucketed),
+        // inner = the task id (not its label, so identically-named tasks stay
+        // distinct — the same reason the engine `then_by` used `task_id`).
+        let started: Vec<String> = ids
+            .iter()
+            .map(|id| self.by_id[id].tracking.started_at.to_rfc3339())
+            .collect();
+        let task_ids: Vec<String> = ids
+            .iter()
+            .map(|id| self.by_id[id].tracking.task_id.to_string())
+            .collect();
+        let cells = grouping::condense_cells(
+            started
+                .iter()
+                .zip(task_ids.iter())
+                .map(|(s, t)| (s.as_str(), t.as_str())),
+            Some(GroupBucket::Day),
+        );
+        let mut items: Vec<NodeSummary> = cells
+            .into_iter()
+            .map(|cell| {
+                let rep = &self.by_id[&ids[cell.members[0]]];
+                let total_secs: i64 = cell
+                    .members
+                    .iter()
+                    .map(|&m| duration_seconds(&self.by_id[&ids[m]], now))
+                    .sum();
+                let active = cell.members.iter().any(|&m| self.by_id[&ids[m]].active);
+                condensed_summary(&cell.bucket_key, rep, total_secs, active)
+            })
+            .collect();
+        let applied = apply_sort(&mut items, sort, &tracking_sortable_columns());
+        (items, applied)
+    }
 }
 
 /// Walk `task_id`'s ancestor chain, root-first, excluding the task itself.
@@ -1049,10 +1146,11 @@ fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Meta
             ),
             field("duration", duration_seconds(row, now).to_string(), "Duration"),
             field("id", row.tracking.id.to_string(), "ID"),
-            // Stable per-task key for the Condensed view's inner grouping
-            // level (`then_by: [{ column: task_id }]`). Never shown as a
-            // column — distinct tasks with the same description must not
-            // coalesce, so the inner group keys on the id, not the label.
+            // Stable per-task key on the entry row. The Condensed view's
+            // per-task condensing now happens adapter-side
+            // ([`TrackingSnapshot::condensed_summaries`]) keyed on this id (so
+            // identically-named tasks stay distinct), no longer via an
+            // engine-side `then_by` over these flat rows.
             field("task_id", row.tracking.task_id.to_string(), "Task ID"),
         ],
     }
@@ -1070,6 +1168,58 @@ fn entry_summary(
         label: row.task_description.clone(),
         node_type: tracking_entry_type(),
         metadata: entry_metadata(row, now),
+        has_children: Some(false),
+    }
+}
+
+/// Column-backing metadata for a condensed row. `duration` is the **summed**
+/// seconds of the `(day, task)` cell (not a single interval). `started` is a
+/// representative instant in the day — the engine single-level-groups the rows
+/// by it (`group_by: [started/day]`) to render the `── day ──` headers and the
+/// per-day `total`. `task`/`taskpath`/`marker` come from the representative.
+fn condensed_metadata(
+    day_key: &str,
+    rep: &TrackingRow,
+    total_secs: i64,
+    active: bool,
+) -> Metadata {
+    Metadata {
+        fields: vec![
+            field(
+                "marker",
+                if active { "⏱".to_string() } else { String::new() },
+                "Active",
+            ),
+            field("taskpath", canonical_path(&rep.task_path), "Task Path"),
+            field("task", rep.task_description.clone(), "Task"),
+            // Drives the engine's single-level day grouping; any member's
+            // instant works (all fall in the same day as `day_key`).
+            field("started", rep.tracking.started_at.to_rfc3339(), "Started"),
+            field("duration", total_secs.to_string(), "Duration"),
+            field("task_id", rep.tracking.task_id.to_string(), "Task ID"),
+            field(
+                "id",
+                format!("{day_key}:{}", rep.tracking.task_id),
+                "ID",
+            ),
+        ],
+    }
+}
+
+/// Build a condensed row's [`NodeSummary`]. A leaf (`has_children: false`):
+/// the cell is an aggregate, not a drill target. Its id encodes the day +
+/// task so [`TrackingCondensedNode::fetch`] can rebuild it for an action.
+fn condensed_summary(
+    day_key: &str,
+    rep: &TrackingRow,
+    total_secs: i64,
+    active: bool,
+) -> NodeSummary {
+    NodeSummary {
+        id: format!("{CONDENSED_ID_PREFIX}{day_key}:{}", rep.tracking.task_id),
+        label: rep.task_description.clone(),
+        node_type: tracking_condensed_type(),
+        metadata: condensed_metadata(day_key, rep, total_secs, active),
         has_children: Some(false),
     }
 }
@@ -1153,6 +1303,20 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
 /// [`crate::task::apply_tracking`] policy as the other views. (Reload /
 /// fuzzy-filter are generic frontend actions in `views/trackings.yaml`.)
 fn tracking_tree_actions() -> Vec<NodeAction> {
+    vec![
+        NodeAction::new("toggle-tracking", "track", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar)
+            .with_default_key('s'),
+    ]
+}
+
+/// Actions a condensed row (`tracking:condensed-row`) exposes. A cell
+/// aggregates many intervals of one task, so per-interval `delete`/`restore`
+/// make no sense here; the one meaningful mutation is `toggle-tracking` —
+/// start/stop tracking on the cell's task, reusing the same policy as the
+/// other views. (Reload / fuzzy-filter are generic frontend actions in
+/// `views/trackings.yaml`.)
+fn tracking_condensed_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
@@ -1323,6 +1487,7 @@ impl Node for TrackingRootNode {
         // and `list` dispatches on it.
         vec![
             tracking_entry_type(),
+            tracking_condensed_type(),
             tracking_tree_item_type(),
             tracking_tree_group_type(),
         ]
@@ -1370,6 +1535,15 @@ impl Node for TrackingRootNode {
         }
         let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
         let now = chrono::Utc::now();
+        // Condensed view: the adapter collapses the day's intervals of each
+        // task into one summed row and sorts those rows (`S`); the engine then
+        // single-level-groups them into day headers.
+        if params.node_type.type_id == tracking_condensed_type().type_id {
+            let (items, applied) =
+                self.snapshot
+                    .condensed_summaries(filter.as_deref(), now, &params.sort);
+            return Ok(list_result_with_sort(items, applied));
+        }
         // Flat list: apply the requested item sort here (before any
         // engine-side grouping, whose group bucketing is stable, so the
         // within-group order follows this sort). `S` drives `params.sort`.
@@ -1427,6 +1601,9 @@ impl Node for TrackingRootNode {
         }
         if id.starts_with(TREE_ID_PREFIX) {
             return TrackingTreeNode::fetch(&self.snapshot, &self.handle, id);
+        }
+        if id.starts_with(CONDENSED_ID_PREFIX) {
+            return TrackingCondensedNode::fetch(&self.snapshot, &self.handle, id);
         }
         TrackingEntryNode::fetch(&self.snapshot, &self.handle, id)
     }
@@ -1521,6 +1698,98 @@ impl Node for TrackingEntryNode {
                 Ok(id) => invoke_restore(&self.handle, id).await,
                 Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
             },
+            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            _ => ActionDispatch::Noop,
+        })
+    }
+}
+
+/// A condensed row (A2c Condensed view): the `(day, task)` aggregate the
+/// cursor sits on. A leaf — no children. Carries the `task_id` so
+/// `toggle-tracking` can start/stop tracking on the cell's task. Rebuilt from
+/// its `cond:<day>:<task>` id by re-summing that day's intervals of the task.
+struct TrackingCondensedNode {
+    id_str: String,
+    label: String,
+    node_type: NodeType,
+    metadata: Metadata,
+    handle: CoreHandle,
+    task_id: Uuid,
+}
+
+impl TrackingCondensedNode {
+    /// Rebuild a condensed node from its `cond:<day-key>:<task-uuid>` id by
+    /// re-summing the snapshot's intervals of that task on that day. The day
+    /// key has no `:`, so a single `rsplit_once` recovers the task uuid.
+    fn fetch(
+        snapshot: &Arc<TrackingSnapshot>,
+        handle: &CoreHandle,
+        id: &str,
+    ) -> Result<Box<dyn Node>> {
+        let not_found = || ContentError::NotFound(id.to_string());
+        let rest = id.strip_prefix(CONDENSED_ID_PREFIX).ok_or_else(not_found)?;
+        let (day_key, task_str) = rest.rsplit_once(':').ok_or_else(not_found)?;
+        let task_id = Uuid::parse_str(task_str).map_err(|_| not_found())?;
+        let now = chrono::Utc::now();
+        let mut total_secs = 0i64;
+        let mut active = false;
+        let mut rep: Option<&TrackingRow> = None;
+        for tid in &snapshot.order {
+            let Some(row) = snapshot.by_id.get(tid) else {
+                continue;
+            };
+            if row.tracking.task_id != task_id {
+                continue;
+            }
+            if grouping::group_key(
+                &row.tracking.started_at.to_rfc3339(),
+                Some(GroupBucket::Day),
+            ) != day_key
+            {
+                continue;
+            }
+            total_secs += duration_seconds(row, now);
+            active |= row.active;
+            // `order` is newest-first, so the first match is the newest
+            // interval — the same representative `condensed_summaries` picks.
+            if rep.is_none() {
+                rep = Some(row);
+            }
+        }
+        let rep = rep.ok_or_else(not_found)?;
+        Ok(Box::new(TrackingCondensedNode {
+            id_str: id.to_string(),
+            label: rep.task_description.clone(),
+            node_type: tracking_condensed_type(),
+            metadata: condensed_metadata(day_key, rep, total_secs, active),
+            handle: handle.clone(),
+            task_id,
+        }))
+    }
+}
+
+#[async_trait]
+impl Node for TrackingCondensedNode {
+    fn id(&self) -> &str {
+        &self.id_str
+    }
+    fn label(&self) -> &str {
+        &self.label
+    }
+    fn node_type(&self) -> &NodeType {
+        &self.node_type
+    }
+    fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+    fn children_types(&self) -> Vec<NodeType> {
+        Vec::new()
+    }
+    fn actions(&self) -> Vec<NodeAction> {
+        tracking_condensed_actions()
+    }
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
             _ => ActionDispatch::Noop,
         })
@@ -2024,6 +2293,7 @@ impl ContentAdapter for TrackingAdapter {
         match node_type.type_id.as_str() {
             "tracking:root" => tracking_root_actions(),
             "tracking:entry" => tracking_entry_actions(),
+            "tracking:condensed-row" => tracking_condensed_actions(),
             "tracking:tree-item" => tracking_tree_actions(),
             // A group bucket is a read-only aggregate — nothing to act on.
             "tracking:tree-group" => Vec::new(),
@@ -2313,6 +2583,97 @@ mod tests {
             canonical_path(&["a".to_string(), "b".to_string()]),
             "/a/b"
         );
+    }
+
+    /// A completed tracking starting at local noon on `date` (timezone-stable
+    /// day bucketing) and running `dur_min` minutes.
+    fn model_on(id: Uuid, task_id: Uuid, date: (i32, u32, u32), dur_min: i64) -> tracking::Model {
+        use chrono::TimeZone;
+        let started = chrono::Local
+            .with_ymd_and_hms(date.0, date.1, date.2, 12, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        tracking::Model {
+            id,
+            task_id,
+            predecessor_id: None,
+            started_at: started,
+            ended_at: Some(started + chrono::Duration::minutes(dur_min)),
+            deleted: false,
+            created_at: started,
+        }
+    }
+
+    #[test]
+    fn condensed_collapses_day_task_cells_summing_duration() {
+        // Task A worked twice on day 1 (30 + 30 min) and once on day 2
+        // (10 min); task B once on day 1 (90 min). The two A-on-day-1
+        // intervals must collapse into one row of 3600 s; the other cells
+        // stay distinct (different day or different task).
+        let a = Uuid::from_u128(10);
+        let b = Uuid::from_u128(20);
+        let snapshot = snapshot_from(vec![
+            (Uuid::from_u128(1), row(model_on(Uuid::from_u128(1), a, (2026, 6, 9), 30), "A", vec![])),
+            (Uuid::from_u128(2), row(model_on(Uuid::from_u128(2), a, (2026, 6, 9), 30), "A", vec![])),
+            (Uuid::from_u128(3), row(model_on(Uuid::from_u128(3), b, (2026, 6, 9), 90), "B", vec![])),
+            (Uuid::from_u128(4), row(model_on(Uuid::from_u128(4), a, (2026, 6, 10), 10), "A", vec![])),
+        ]);
+        let now = chrono::Utc::now();
+
+        let (items, _) = snapshot.condensed_summaries(None, now, &[]);
+        // 4 intervals → 3 (day, task) cells.
+        assert_eq!(items.len(), 3, "{items:?}");
+        let dur = |s: &NodeSummary| {
+            s.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == "duration")
+                .unwrap()
+                .value
+                .clone()
+        };
+        // Find the day-1 task-A cell: its duration is the sum 30+30 min.
+        let day1_a = items
+            .iter()
+            .find(|s| s.id == format!("{CONDENSED_ID_PREFIX}2026-06-09:{a}"))
+            .expect("day-1 task-A cell");
+        assert_eq!(dur(day1_a), "3600");
+        assert_eq!(day1_a.label, "A");
+        assert!(day1_a.has_children == Some(false));
+        // Day-2 task-A is a separate cell (10 min), not merged with day 1.
+        let day2_a = items
+            .iter()
+            .find(|s| s.id == format!("{CONDENSED_ID_PREFIX}2026-06-10:{a}"))
+            .expect("day-2 task-A cell");
+        assert_eq!(dur(day2_a), "600");
+    }
+
+    #[test]
+    fn condensed_applies_requested_sort_to_the_rows() {
+        // With `S duration desc` the adapter returns the condensed rows
+        // ordered by their summed duration — this is what the engine's stable
+        // single-level day grouping then turns into within-day ordering.
+        let a = Uuid::from_u128(10);
+        let b = Uuid::from_u128(20);
+        let snapshot = snapshot_from(vec![
+            (Uuid::from_u128(1), row(model_on(Uuid::from_u128(1), a, (2026, 6, 9), 30), "A", vec![])),
+            (Uuid::from_u128(2), row(model_on(Uuid::from_u128(2), b, (2026, 6, 9), 90), "B", vec![])),
+        ]);
+        let now = chrono::Utc::now();
+        let sort = sort_by("duration", SortDirection::Desc);
+
+        let (items, applied) = snapshot.condensed_summaries(None, now, &sort);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "B", "longest first under duration desc");
+        assert_eq!(items[1].label, "A");
+        assert_eq!(applied, sort, "the adapter reports the sort it applied");
+    }
+
+    fn sort_by(column: &str, direction: SortDirection) -> Vec<SortKey> {
+        vec![SortKey {
+            column: column.to_string(),
+            direction,
+        }]
     }
 
     #[test]
