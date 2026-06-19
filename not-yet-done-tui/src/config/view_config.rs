@@ -2255,18 +2255,26 @@ views:
         // The subtask branch ships no `columns:` of its own — it inherits the
         // root's set (incl. the tracking marker) via `inherit_tree_columns`.
         assert!(child.columns.iter().any(|c| c.key == "tracking"));
-        // A1c-2: the root view declares a saved-query block — editable, with
-        // a `q` menu key. No `default` body ships: like the native tab, the
-        // whole (non-deleted) forest is shown including done tasks (parity).
+        // A1c-2 / #34: the root view declares a saved-query block — editable,
+        // with a `q` menu key. Since the snapshot now loads the *full* task
+        // universe (deleted included), the query is the single replaceable
+        // filter, so the view ships a `default` body of `[deleted, =, false]`
+        // — that clause, not a baked-in snapshot filter, is what hides deleted
+        // tasks by default (full non-deleted forest, including done = parity).
         let query = root
             .query
             .as_ref()
             .expect("root view should declare a query block");
         assert!(query.editable, "tasks query should be editable");
         assert_eq!(query.menu_key.as_deref(), Some("q"));
+        let default = query
+            .default
+            .as_deref()
+            .expect("tasks view ships a default query that hides deleted tasks");
         assert!(
-            query.default.is_none(),
-            "tasks view ships no default query — full forest, native parity"
+            default.contains("deleted"),
+            "the default query must filter on `deleted` (the sole filter that \
+             hides deleted tasks now the universe is loaded whole): {default:?}"
         );
         // Column parity with the native tab: the default visible set + order
         // (St / Pri / Tr / T / Task / Created / Updated / Tracked / N). The

@@ -83,6 +83,15 @@ pub trait TaskRepository: shaku::Interface {
         priority: Option<i32>,
     ) -> Result<task::Model, AppError>;
     async fn find_all(&self, project_id: Option<Uuid>) -> Result<Vec<task::Model>, AppError>;
+    /// Find *every* task, deleted or not. This is the unfiltered universe —
+    /// callers that want only the live set apply a `deleted = false` query
+    /// filter on top. Eager adapters load this so the query is the single,
+    /// replaceable filter rather than stacking on a baked-in `deleted = false`
+    /// (see also [`TrackingRepository::find_all_including_deleted`]).
+    async fn find_all_including_deleted(
+        &self,
+        project_id: Option<Uuid>,
+    ) -> Result<Vec<task::Model>, AppError>;
     async fn find_by_id(&self, id: Uuid) -> Result<task::Model, AppError>;
     async fn soft_delete(&self, id: Uuid) -> Result<(), AppError>;
     /// Soft-delete a task and all its descendants. All affected tasks get the
@@ -199,6 +208,37 @@ impl TaskRepository for TaskRepositoryImpl {
 
         let query = task::Entity::find()
             .filter(Column::Deleted.eq(false));
+
+        if let Some(pid) = project_id {
+            use crate::entity::task_project::Column as TpCol;
+            use sea_orm::JoinType;
+            return Ok(query
+                .join(
+                    JoinType::InnerJoin,
+                    task::Entity::belongs_to(crate::entity::task_project::Entity)
+                        .from(Column::Id)
+                        .to(TpCol::TaskId)
+                        .into(),
+                )
+                .filter(TpCol::ProjectId.eq(pid))
+                .all(db)
+                .await?);
+        }
+
+        Ok(query.all(db).await?)
+    }
+
+    async fn find_all_including_deleted(
+        &self,
+        project_id: Option<Uuid>,
+    ) -> Result<Vec<task::Model>, AppError> {
+        use crate::entity::task::Column;
+        use sea_orm::QuerySelect;
+        let db = self.db.as_ref().expect("DB nicht initialisiert");
+
+        // Same as `find_all` but without the implicit `deleted = false` —
+        // the full task universe, deleted rows included.
+        let query = task::Entity::find();
 
         if let Some(pid) = project_id {
             use crate::entity::task_project::Column as TpCol;

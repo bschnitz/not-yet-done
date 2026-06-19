@@ -20,6 +20,15 @@ pub trait TaskService: shaku::Interface {
         priority: Option<i32>,
     ) -> Result<task::Model, AppError>;
     async fn list_tasks(&self, project: Option<String>) -> Result<Vec<task::Model>, AppError>;
+    /// Like [`list_tasks`](Self::list_tasks) but returns the full universe
+    /// including soft-deleted tasks. Eager adapters load this so a saved
+    /// query is the single, replaceable filter (the shipped default
+    /// `deleted = false` hides deleted rows; a query that drops it surfaces
+    /// them).
+    async fn list_tasks_including_deleted(
+        &self,
+        project: Option<String>,
+    ) -> Result<Vec<task::Model>, AppError>;
     async fn list_filtered(&self, expr: &FilterExpr) -> Result<Vec<task::Model>, AppError>;
     async fn list_filtered_with_options(
         &self,
@@ -117,6 +126,19 @@ impl TaskService for TaskServiceImpl {
             None
         };
         self.task_repository.find_all(project_id).await
+    }
+
+    async fn list_tasks_including_deleted(
+        &self,
+        project: Option<String>,
+    ) -> Result<Vec<task::Model>, AppError> {
+        let project_id = if let Some(proj_ref) = project {
+            let p = self.resolve_project(&proj_ref).await?;
+            Some(p.id)
+        } else {
+            None
+        };
+        self.task_repository.find_all_including_deleted(project_id).await
     }
 
     /// Return all tasks matching the given filter expression.

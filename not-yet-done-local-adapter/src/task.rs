@@ -163,13 +163,21 @@ struct ForestSnapshot {
 }
 
 impl ForestSnapshot {
-    /// Build a snapshot from the live service: load every non-deleted task,
-    /// batch-resolve tags, re-root orphans, and order siblings by creation
-    /// time for a stable render.
+    /// Build a snapshot from the live service: load the *whole* task universe
+    /// (deleted tasks included), batch-resolve tags, re-root dangling orphans,
+    /// and order siblings by creation time for a stable render.
+    ///
+    /// The universe is unfiltered on purpose (adapter contract): the saved
+    /// query is the single, replaceable filter. The shipped default query
+    /// `[deleted, =, false]` hides deleted rows; a query that drops or flips
+    /// that clause surfaces them. A deleted task stays in the forest structure
+    /// so a *non*-deleted child still hangs under its (now deleted) parent —
+    /// the parent renders dimmed as context whenever a child matches, rather
+    /// than the child silently re-rooting to the top level.
     async fn load(handle: &CoreHandle) -> Result<Arc<Self>> {
         let tasks = handle
             .task_service
-            .list_tasks(None)
+            .list_tasks_including_deleted(None)
             .await
             .map_err(to_content_err)?;
         let ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
@@ -183,7 +191,10 @@ impl ForestSnapshot {
         let mut by_id: HashMap<Uuid, TaskRow> = HashMap::with_capacity(tasks.len());
         let mut children: HashMap<Option<Uuid>, Vec<Uuid>> = HashMap::new();
         for t in tasks {
-            // Re-root tasks whose parent was filtered out (e.g. deleted).
+            // Re-root only tasks whose parent is genuinely absent from the
+            // universe (a dangling `parent_id` — referential integrity guard).
+            // Deleted parents ARE loaded now, so they stay in the structure;
+            // hiding them is the query's job, not the loader's.
             let parent = t.parent_id.filter(|p| id_set.contains(p));
             let resolved = tag_map.get(&t.id).map(|v| v.as_slice()).unwrap_or(&[]);
             let tag_names = fmt_tag_names(resolved);
@@ -634,6 +645,16 @@ fn task_metadata(
                 "Last Tracked",
             ),
             field("id", t.id.to_string(), "ID"),
+            // Deleted flag (`"true"`/`""`) — not a visible column, a styling
+            // signal: the TUI renders rows whose `deleted` field is `"true"`
+            // dimmed (a deleted parent kept on screen as context for a
+            // matching child). Now that the snapshot loads the full universe
+            // this can actually be `true`.
+            field(
+                "deleted",
+                if t.deleted { "true".to_string() } else { String::new() },
+                "Deleted",
+            ),
             // Root→parent chain as a JSON array string (see
             // [`ForestSnapshot::ancestors_json`]). Consumed by `:script`
             // payloads, not meant as a visible column.
@@ -2007,6 +2028,27 @@ mod tests {
         )
     }
 
+    /// A soft-deleted variant of [`row`]. Its model stays in the snapshot
+    /// universe (the adapter now loads `list_tasks_including_deleted`) — it is
+    /// only ever hidden by the query, and when kept on screen as a matching
+    /// child's ancestor it renders dimmed via the `deleted` styling signal.
+    fn deleted_row(id: Uuid, desc: &str, parent: Option<Uuid>) -> (Uuid, TaskRow) {
+        let (id, mut r) = row(id, desc, parent);
+        r.task.deleted = true;
+        r.task.deleted_at = Some(chrono::Utc::now());
+        (id, r)
+    }
+
+    /// Read a NodeSummary metadata field by key (`""` if absent).
+    fn field_value(s: &NodeSummary, key: &str) -> String {
+        s.metadata
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.clone())
+            .unwrap_or_default()
+    }
+
     /// Build a snapshot from rows directly (no DB) for pure-logic tests.
     fn snapshot_from(rows: Vec<(Uuid, TaskRow)>) -> Arc<ForestSnapshot> {
         let mut by_id = HashMap::new();
@@ -2556,5 +2598,75 @@ mod tests {
             cell.read().await.is_none(),
             "cache must be cleared so the next read reloads fresh"
         );
+    }
+
+    // ── Adapter contract: query is the single filter, deleted-as-context ──
+
+    /// `task_metadata` carries a hidden `deleted` field — the TUI's styling
+    /// signal (`"true"` → dim the row). It is `"true"` only for a deleted
+    /// model and blank otherwise, so a deleted parent left on screen as a
+    /// matching child's context renders greyed while live rows stay normal.
+    #[test]
+    fn task_metadata_emits_deleted_signal() {
+        let live = Uuid::from_u128(1);
+        let gone = Uuid::from_u128(2);
+        let snap = snapshot_from(vec![
+            row(live, "Live", None),
+            deleted_row(gone, "Gone", None),
+        ]);
+
+        let live_summary = snap.summary(live, &snap.by_id[&live], None);
+        let gone_summary = snap.summary(gone, &snap.by_id[&gone], None);
+        assert_eq!(field_value(&live_summary, "deleted"), "");
+        assert_eq!(field_value(&gone_summary, "deleted"), "true");
+    }
+
+    /// The decided #34 semantics: a deleted parent of a *matching* child is
+    /// kept visible as context (unchanged ancestor fill-in), just dimmed.
+    /// The visible set passed here is exactly what `resolve_visible_set`
+    /// produces for a query matching only the live child — the child plus
+    /// its (deleted) ancestor chain. The parent must still render, carry the
+    /// `deleted` signal, and report a visible child; the matching child shows
+    /// normally. A deleted *sibling* with no matching descendant stays out.
+    #[test]
+    fn deleted_parent_kept_as_dimmed_context_for_matching_child() {
+        let parent = Uuid::from_u128(1); // deleted, but on the path to a hit
+        let child = Uuid::from_u128(2); // the live match
+        let stray = Uuid::from_u128(3); // deleted leaf, no matching descendant
+        let snap = snapshot_from(vec![
+            deleted_row(parent, "Deleted parent", None),
+            row(child, "Live child", Some(parent)),
+            deleted_row(stray, "Deleted stray", None),
+        ]);
+
+        // resolve_visible_set(query = the live child) = {child} ∪ ancestors.
+        let visible: HashSet<Uuid> = [child, parent].into_iter().collect();
+
+        // The deleted parent survives as the only visible root, dimmed, and
+        // still advertises a visible child (so the tree draws its expander).
+        let roots = snap.child_summaries(None, Some(&visible));
+        assert_eq!(roots.len(), 1, "stray deleted leaf is filtered out");
+        assert_eq!(roots[0].label, "Deleted parent");
+        assert_eq!(field_value(&roots[0], "deleted"), "true");
+        assert_eq!(roots[0].has_children, Some(true));
+
+        // Its child is the live match: shown normally, no deleted signal.
+        let kids = snap.child_summaries(Some(parent), Some(&visible));
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].label, "Live child");
+        assert_eq!(field_value(&kids[0], "deleted"), "");
+
+        // Same picture through the eager `subtree` projection the tree uses.
+        let st = snap.subtree(None, Some(&visible), u32::MAX);
+        assert_eq!(st.items.len(), 1);
+        assert_eq!(st.items[0].summary.label, "Deleted parent");
+        assert_eq!(field_value(&st.items[0].summary, "deleted"), "true");
+        let nested: Vec<&str> = st.items[0]
+            .children
+            .items
+            .iter()
+            .map(|n| n.summary.label.as_str())
+            .collect();
+        assert_eq!(nested, vec!["Live child"]);
     }
 }
