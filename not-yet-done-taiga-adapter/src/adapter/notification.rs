@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use not_yet_done_content::{
     ActionInput, ActionOutcome, ContentError, InputSpec, Metadata, MetadataField, Node,
-    NodeAction, NodeSummary, NodeType, Result, SortDirection, SortKey, SortableColumn,
+    NodeAction, NodeSummary, NodeType, Result, SortDirection, SortKey, SortKind, SortableColumn,
 };
 
 use super::types::notification_type;
@@ -117,6 +117,8 @@ pub(super) fn sortable_columns() -> Vec<SortableColumn> {
     .map(|(k, l)| SortableColumn {
         key: (*k).into(),
         label: (*l).into(),
+        // Taiga sorts server-side; the kind is unused here.
+        kind: SortKind::Text,
     })
     .collect()
 }

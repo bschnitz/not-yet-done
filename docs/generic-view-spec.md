@@ -593,6 +593,31 @@ nicht persistiert) — es ist die Parität zum `u`-Menü des nativen
 Trackings-Tabs. Auf Ebenen ohne `group_by:` bleibt `u` frei für
 YAML-`shortcuts:`.
 
+**Gruppen-Reihenfolge kippen (`toggle_group_order`, Default `o`):** Auf einer
+gruppierten Flat-View kippt `o` ausschließlich die **Reihenfolge der Gruppen**
+(z. B. Tages-Buckets neueste-zuerst ⟷ älteste-zuerst) — Granularität
+(`bucket:`) und die Item-Reihenfolge _innerhalb_ der Gruppen bleiben unberührt
+(letztere steuert `S`, siehe unten). Gleiche Gate-Bedingung wie `zg` (die Ebene
+muss ein `group_by:` haben); View-State, nicht persistiert. `o` wird nur
+beansprucht, solange die View keine `record_detail:`-Split anbietet — dort
+behält `o` die Detail-Split-Bedeutung (siehe oben). Die Status-Leiste zeigt die
+aktuelle Richtung an (`order ↓` = absteigend / `order ↑` = aufsteigend).
+
+**Item-Sortierung innerhalb der Gruppen (`sort`, Default `S`):** `S` öffnet
+einen zweistufigen Picker (Spalte → Richtung) über die vom Adapter via
+`sortable_columns()` gemeldeten Spalten und sortiert die **einzelnen Items**.
+Die Sortierung ist **adapter-getrieben**: jede sortierbare Spalte deklariert
+eine `SortKind` (`Text` lexikografisch / `Number` numerisch / `DateTime`
+chronologisch), und der Adapter wendet sie über den generischen Helper
+`apply_sort` an — _vor_ einer etwaigen Gruppierung, deren Bucket-Sortierung
+stabil ist, sodass die gewählte Item-Reihenfolge innerhalb jeder Gruppe
+erhalten bleibt. Nicht parsebare Zellen einer typisierten Spalte (leeres
+`ended`, das Literal `running`) sortieren ans Ende. Welche Sortierung
+tatsächlich angewandt wurde, meldet der Adapter über `ListResult::applied_sort`
+zurück (Fußzeilen-Indikator). Adapter, die server-seitig sortieren (Jira via
+JQL `ORDER BY`, Taiga), ignorieren `SortKind` und übersetzen die `SortKey`s in
+ihre Backend-Sprache.
+
 > **Einschränkungen.** Der gruppierte Pfad gilt nur für **einzeilige**
 > Tabellen — `group_by:` zusammen mit `row_layout:` (mehrzeilig/Chat) wird
 > ignoriert. Engine-seitige Gruppierung ist außerdem ein Flat-List-Feature;
