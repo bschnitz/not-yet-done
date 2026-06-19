@@ -409,6 +409,14 @@ pub enum ViewRequest {
         view_index: usize,
         pane_id: PaneId,
         node_id: String,
+        /// The action that produced this `DeleteSelf` — re-run verbatim on
+        /// confirm via `Node::execute`. Lets one adapter expose several
+        /// delete flavours on the same node type (e.g. the tasks tree's
+        /// recursive `delete` vs the flat list's single `delete-single`).
+        action_name: String,
+        /// Adapter-supplied confirmation prompt (e.g. a recursive-delete
+        /// warning). `None` → the App builds the generic `Delete '<label>'?`.
+        confirm: Option<String>,
     },
     /// DSF-4: open a rename prompt for an existing script or dir.
     /// `is_dir` lets the App pick the right storage call

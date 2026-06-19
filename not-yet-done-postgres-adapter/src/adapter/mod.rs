@@ -1485,7 +1485,7 @@ impl Node for DbScriptDirNode {
             // Notify in DSF-4. Returning DeleteSelf keeps the same shape
             // as the script-leaf delete; the TUI tells them apart by the
             // node_type before picking which confirm popup to show.
-            "delete-dir" => Ok(ActionDispatch::DeleteSelf),
+            "delete-dir" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             // rename / mark-move / paste-move are pure TUI flows: the
             // adapter has no work to do until the user supplies the new
             // name (rename) or pastes (paste-move). DSF-4 wires the
@@ -1586,7 +1586,7 @@ impl Node for DbScriptNode {
                     ("script".into(), self.rel_path.clone()),
                 ]),
             }),
-            "delete" => Ok(ActionDispatch::DeleteSelf),
+            "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             // TUI-owned flows; DSF-4 inspects action name + node_type and
             // emits the right ViewRequest. Adapter has no work here.
             "rename" | "mark-move" => Ok(ActionDispatch::Noop),
@@ -2255,7 +2255,7 @@ mod db_script_tree_tests {
         // TUI tells them apart via node_type.
         assert!(matches!(
             dir.invoke_action("delete-dir", &ctx).await.unwrap(),
-            ActionDispatch::DeleteSelf
+            ActionDispatch::DeleteSelf { .. }
         ));
         let _ = std::fs::remove_dir_all(&dir.instance_data_dir);
     }

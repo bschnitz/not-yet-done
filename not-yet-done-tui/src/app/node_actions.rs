@@ -429,7 +429,7 @@ pub fn dispatch_to_view_request(
         // no adapter-specific App handler is needed. Confluence pages
         // use this; future Jira/Taiga deletes can opt in by returning
         // `DeleteSelf` from `invoke_action` without TUI changes.
-        ActionDispatch::DeleteSelf => match parse_db_script_node_id(&node_id) {
+        ActionDispatch::DeleteSelf { confirm } => match parse_db_script_node_id(&node_id) {
             Some((database, segments)) => {
                 let rel_path = db_script_rel_path_str(&segments);
                 if action_name == "delete-dir" {
@@ -452,6 +452,8 @@ pub fn dispatch_to_view_request(
                 view_index,
                 pane_id,
                 node_id,
+                action_name,
+                confirm,
             }),
         },
         ActionDispatch::Reload => Some(ViewRequest::SpawnContentLoad {
@@ -976,7 +978,7 @@ mod tests {
         // (database, script) from the node-id shape and routes to the
         // confirm-then-unlink flow.
         let req = dispatch_to_view_request(
-            ActionDispatch::DeleteSelf,
+            ActionDispatch::DeleteSelf { confirm: None },
             4,
             8,
             "live/db_scripts/report".into(),
@@ -1004,7 +1006,7 @@ mod tests {
     #[test]
     fn dispatch_delete_self_db_script_preserves_nested_rel_path() {
         let req = dispatch_to_view_request(
-            ActionDispatch::DeleteSelf,
+            ActionDispatch::DeleteSelf { confirm: None },
             0,
             0,
             "live/db_scripts/maint/vacuum/full".into(),
@@ -1023,7 +1025,7 @@ mod tests {
     #[test]
     fn dispatch_delete_self_db_script_dir_yields_dir_confirm() {
         let req = dispatch_to_view_request(
-            ActionDispatch::DeleteSelf,
+            ActionDispatch::DeleteSelf { confirm: None },
             0,
             0,
             "live/db_scripts/maint/vacuum".into(),
@@ -1137,7 +1139,7 @@ mod tests {
     #[test]
     fn dispatch_delete_self_non_db_script_yields_generic_confirm() {
         let req = dispatch_to_view_request(
-            ActionDispatch::DeleteSelf,
+            ActionDispatch::DeleteSelf { confirm: None },
             0,
             1,
             "live/schemas/public/tables/users".into(),
@@ -1149,10 +1151,14 @@ mod tests {
                 view_index,
                 pane_id,
                 node_id,
+                action_name,
+                confirm,
             }) => {
                 assert_eq!(view_index, 0);
                 assert_eq!(pane_id, 1);
                 assert_eq!(node_id, "live/schemas/public/tables/users");
+                assert_eq!(action_name, "delete");
+                assert_eq!(confirm, None);
             }
             other => panic!("expected ConfirmDeleteContentNode, got {other:?}"),
         }

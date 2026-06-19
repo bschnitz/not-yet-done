@@ -14,7 +14,10 @@ use sea_orm::{
 use shaku::HasComponent;
 use uuid::Uuid;
 
-use not_yet_done_core::entity::{task::{self, TaskStatus}, tracking};
+use not_yet_done_core::entity::{
+    global_tag, project, project_tag, task::{self, TaskStatus}, task_global_tag,
+    task_project_tag, tracking,
+};
 use not_yet_done_core::module::AppModule;
 use not_yet_done_core::repository::{
     TaskRepositoryImpl, TaskRepositoryImplParameters,
@@ -42,6 +45,14 @@ async fn setup() -> (Arc<dyn TaskService>, Arc<dyn TrackingRepository>, sea_orm:
     for stmt in [
         schema.create_table_from_entity(task::Entity),
         schema.create_table_from_entity(tracking::Entity),
+        // Tag tables: the `tasks` adapter's snapshot load batch-resolves
+        // tags for every task, so the join + tag tables must exist even
+        // when a test creates no tags.
+        schema.create_table_from_entity(global_tag::Entity),
+        schema.create_table_from_entity(project::Entity),
+        schema.create_table_from_entity(project_tag::Entity),
+        schema.create_table_from_entity(task_global_tag::Entity),
+        schema.create_table_from_entity(task_project_tag::Entity),
     ] {
         db.execute(&stmt).await.expect("schema creation failed");
     }
@@ -521,4 +532,84 @@ async fn serialize_edit_delete_round_trip() {
     let msg = result.unwrap();
     eprintln!("=== RESULT: {msg}");
     assert!(msg.contains("deleted"), "expected deletions, got: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// Adapter-level delete: recursive (tree view) vs single (flat list view)
+// ---------------------------------------------------------------------------
+
+/// Build a `tasks` adapter over the test DB so we can drive `invoke_action`
+/// / `execute` exactly as the TUI does.
+fn build_task_adapter(
+    service: Arc<dyn TaskService>,
+    tracking: Arc<dyn TrackingRepository>,
+) -> Box<dyn not_yet_done_content::ContentAdapter> {
+    use not_yet_done_content::AdapterFactory;
+    use not_yet_done_core::events::new_bus;
+    let handle = crate::CoreHandle::new(service, tracking, new_bus(64), false);
+    crate::task::TaskAdapterFactory::new(handle)
+        .create("test", "{}")
+        .expect("adapter create")
+}
+
+/// Flat list `delete-single`: only the invoking task is deleted; its child
+/// survives (and re-roots to the forest top on the next load). The confirm
+/// prompt is the generic one (`None` from the adapter).
+#[tokio::test]
+async fn adapter_delete_single_leaves_children() {
+    use not_yet_done_content::{ActionContext, ActionDispatch, ActionInput};
+    let (service, tracking, db) = setup().await;
+    let parent = insert_task(&db, "Parent", None, TaskStatus::Todo, 0).await;
+    let _child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
+
+    let adapter = build_task_adapter(service, tracking);
+    let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
+
+    // No recursive warning for the single-delete action.
+    let dispatch = node
+        .invoke_action("delete-single", &ActionContext::default())
+        .await
+        .unwrap();
+    assert!(matches!(dispatch, ActionDispatch::DeleteSelf { confirm: None }));
+
+    node.execute("delete-single", ActionInput::None).await.unwrap();
+
+    let tasks = all_tasks(&db).await;
+    assert!(find_by_desc(&tasks, "Parent").deleted, "parent deleted");
+    assert!(
+        !find_by_desc(&tasks, "Child").deleted,
+        "child must survive a single (non-recursive) delete"
+    );
+}
+
+/// Tree `delete`: recursive — the whole subtree is soft-deleted, and the
+/// confirm prompt spells out the cascade with the descendant count.
+#[tokio::test]
+async fn adapter_delete_recursive_warns_and_cascades() {
+    use not_yet_done_content::{ActionContext, ActionDispatch, ActionInput};
+    let (service, tracking, db) = setup().await;
+    let parent = insert_task(&db, "Parent", None, TaskStatus::Todo, 0).await;
+    let child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
+    let _grandchild = insert_task(&db, "Grandchild", Some(child.id), TaskStatus::Todo, 0).await;
+
+    let adapter = build_task_adapter(service, tracking);
+    let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
+
+    // The prompt names the cascade and the subtask count (2 descendants).
+    let dispatch = node
+        .invoke_action("delete", &ActionContext::default())
+        .await
+        .unwrap();
+    let ActionDispatch::DeleteSelf { confirm: Some(msg) } = dispatch else {
+        panic!("expected a recursive-delete confirmation prompt");
+    };
+    assert!(msg.contains("2 subtasks"), "prompt names the count: {msg}");
+    assert!(msg.contains("recursive"), "prompt flags the cascade: {msg}");
+
+    node.execute("delete", ActionInput::None).await.unwrap();
+
+    let tasks = all_tasks(&db).await;
+    assert!(find_by_desc(&tasks, "Parent").deleted, "parent deleted");
+    assert!(find_by_desc(&tasks, "Child").deleted, "child cascaded");
+    assert!(find_by_desc(&tasks, "Grandchild").deleted, "grandchild cascaded");
 }

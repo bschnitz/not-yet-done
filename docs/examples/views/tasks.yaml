@@ -367,10 +367,12 @@ views:
   # flat table, depth-first order — no hierarchy, no expand glyphs. `v`
   # switches here, `t` back to the tree. The adapter routes the synthetic
   # `task:flat` node_type to the flat projection; the rows themselves are
-  # ordinary tasks, so edit/add/delete/track/move behave exactly like in
-  # the tree view. A query filter shows only the matching tasks (no
-  # ancestor fill-in like the tree view) — matching the native flat list's
-  # filter semantics.
+  # ordinary tasks, so edit/add/track/move behave exactly like in the tree
+  # view. The one difference is delete: the flat list has no hierarchy on
+  # screen, so `d` binds to the non-recursive `delete-single` (one task
+  # only) rather than the tree's recursive `delete`. A query filter shows
+  # only the matching tasks (no ancestor fill-in like the tree view) —
+  # matching the native flat list's filter semantics.
   - name: list
     node_type: "task:flat"
     key: v
@@ -490,7 +492,9 @@ views:
         type: reload
 
     shortcuts:
-      d: delete
+      # Flat list: single-task delete (no subtree cascade) — see the
+      # view comment above. The tree view's `d` stays recursive `delete`.
+      d: delete-single
       u: undelete
       s: toggle-tracking
       m: mark-move
