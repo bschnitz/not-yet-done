@@ -3031,6 +3031,15 @@ impl App {
         let subtree_query = cv
             .find_pane(pane_id)
             .and_then(|p| Self::subtree_query_for_pane(cv, p, &adapter));
+        // Carry the pane's active sort so a per-node (lazy / paginated)
+        // expansion orders the freshly-fetched children the same way the
+        // eager subtree does — each subtree's siblings sorted among
+        // themselves. Empty = the adapter's stored order.
+        let sort = cv
+            .find_pane(pane_id)
+            .and_then(|p| p.root_load_request(&cv.view_defs))
+            .map(|r| r.sort)
+            .unwrap_or_default();
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             let payload =
@@ -3039,6 +3048,7 @@ impl App {
                     let parent_node_id = parent_node_id.clone();
                     let child_node_type = child_node_type.clone();
                     let subtree_query = subtree_query.clone();
+                    let sort = sort.clone();
                     async move {
                         let parent = adapter
                             .get_by_id(&parent_node_id)
@@ -3057,7 +3067,7 @@ impl App {
                         let params = not_yet_done_content::ListParams {
                             node_type,
                             query: subtree_query,
-                            sort: Vec::new(),
+                            sort,
                             page: Some(page_request),
                             download: false,
                             group_by: None,
