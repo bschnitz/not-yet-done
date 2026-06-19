@@ -783,7 +783,13 @@ pub enum ActionDispatch {
     /// (e.g. `"script_name"` → cmdline prompt).
     CreateChild { hint: String },
     /// Delete the invoking node. TUI confirms before the actual delete.
-    DeleteSelf,
+    ///
+    /// `confirm` lets the adapter override the confirmation prompt — e.g.
+    /// a node that deletes its whole subtree should say so ("Delete 'X'
+    /// and its 3 subtasks (recursive)? (y/n)"). `None` falls back to the
+    /// TUI's generic `Delete '<label>'? (y/n)`. The adapter is the only
+    /// authority on whether its delete cascades, so it owns the wording.
+    DeleteSelf { confirm: Option<String> },
     /// Reload the current pane.
     Reload,
     /// No-op — useful as a default for adapters that haven't migrated.

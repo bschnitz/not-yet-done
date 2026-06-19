@@ -652,7 +652,7 @@ impl Node for ConfluencePageNode {
         _ctx: &ActionContext,
     ) -> Result<ActionDispatch> {
         match name {
-            "delete" => Ok(ActionDispatch::DeleteSelf),
+            "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             _ => Ok(ActionDispatch::Noop),
         }
     }
@@ -1019,7 +1019,7 @@ mod tests {
         );
         let ctx = not_yet_done_content::ActionContext::default();
         match node.invoke_action("delete", &ctx).await {
-            Ok(ActionDispatch::DeleteSelf) => {}
+            Ok(ActionDispatch::DeleteSelf { .. }) => {}
             other => panic!("expected DeleteSelf for delete, got {other:?}"),
         }
         match node.invoke_action("edit", &ctx).await {

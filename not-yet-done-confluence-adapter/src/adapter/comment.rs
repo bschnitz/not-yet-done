@@ -308,7 +308,7 @@ impl Node for ConfluenceCommentNode {
         _ctx: &ActionContext,
     ) -> Result<ActionDispatch> {
         match name {
-            "delete" => Ok(ActionDispatch::DeleteSelf),
+            "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             _ => Ok(ActionDispatch::Noop),
         }
     }
@@ -453,7 +453,7 @@ mod tests {
         let node = ConfluenceCommentNode::new(synthetic_client(), sample_comment(), "12345");
         let ctx = ActionContext::default();
         match node.invoke_action("delete", &ctx).await {
-            Ok(ActionDispatch::DeleteSelf) => {}
+            Ok(ActionDispatch::DeleteSelf { .. }) => {}
             other => panic!("expected DeleteSelf, got {other:?}"),
         }
         match node.invoke_action("edit", &ctx).await {

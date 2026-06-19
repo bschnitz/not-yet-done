@@ -363,6 +363,9 @@ pub enum PendingConfirmation {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         node_id: String,
+        /// The confirmed delete action, re-run verbatim via `Node::execute`
+        /// (e.g. `delete` vs the flat list's non-recursive `delete-single`).
+        action_name: String,
     },
 }
 
@@ -2574,18 +2577,23 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         node_id: String,
+        action_name: String,
+        confirm: Option<String>,
     ) {
-        // Pull a user-friendly label from the selected row when we can
-        // — falls back to the raw id if the pane / cursor moved. The
-        // pane label is set from the adapter's `NodeSummary.label`, so
-        // confluence pages show as the page title; postgres rows show
-        // their last segment; etc.
-        let label = self
-            .content_view(view_index)
-            .and_then(|cv| cv.find_pane(pane_id))
-            .and_then(|pane| pane.selected_item_label().map(str::to_string))
-            .unwrap_or_else(|| node_id.clone());
-        let msg = format!("Delete '{label}'? (y/n)");
+        // The adapter may supply its own prompt (e.g. a recursive-delete
+        // warning when the node has children). Otherwise pull a
+        // user-friendly label from the selected row — falls back to the
+        // raw id if the pane / cursor moved. The pane label is set from
+        // the adapter's `NodeSummary.label`, so confluence pages show as
+        // the page title; postgres rows show their last segment; etc.
+        let msg = confirm.unwrap_or_else(|| {
+            let label = self
+                .content_view(view_index)
+                .and_then(|cv| cv.find_pane(pane_id))
+                .and_then(|pane| pane.selected_item_label().map(str::to_string))
+                .unwrap_or_else(|| node_id.clone());
+            format!("Delete '{label}'? (y/n)")
+        });
         self.modal_message = Some(msg.clone());
         self.pending_confirmation = Some((
             msg,
@@ -2593,19 +2601,23 @@ impl App {
                 view_index,
                 pane_id,
                 node_id,
+                action_name,
             },
         ));
     }
 
-    /// CF-11: spawn the actual `Node::execute("delete", ActionInput::None)`
-    /// roundtrip on the current pane's adapter. On `ActionOutcome::Done`
-    /// the result lands in `ContentActionDone`, which already notifies
-    /// + reloads the pane.
+    /// CF-11: spawn the actual `Node::execute(<action>, ActionInput::None)`
+    /// roundtrip on the current pane's adapter. `action_name` is the delete
+    /// action the user confirmed — usually `delete`, but the tasks flat list
+    /// sends `delete-single` so it deletes one task non-recursively. On
+    /// `ActionOutcome::Done` the result lands in `ContentActionDone`, which
+    /// already notifies + reloads the pane.
     fn delete_content_node_now(
         &mut self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         node_id: String,
+        action_name: String,
     ) {
         let Some(adapter) = self
             .content_view(view_index)
@@ -2616,7 +2628,7 @@ impl App {
             return;
         };
         let tx = self.load_tx.clone();
-        let action_id = "delete".to_string();
+        let action_id = action_name;
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
@@ -6316,8 +6328,16 @@ impl App {
                 view_index,
                 pane_id,
                 node_id,
+                action_name,
+                confirm,
             } => {
-                self.confirm_delete_content_node(view_index, pane_id, node_id);
+                self.confirm_delete_content_node(
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_name,
+                    confirm,
+                );
                 EditorRequest::None
             }
             ViewRequest::OpenDbScriptRenamePrompt {
@@ -8796,8 +8816,9 @@ impl App {
                 view_index,
                 pane_id,
                 node_id,
+                action_name,
             } => {
-                self.delete_content_node_now(view_index, pane_id, node_id);
+                self.delete_content_node_now(view_index, pane_id, node_id, action_name);
             }
             PendingConfirmation::BulkDeleteStaleLinks(link_ids) => {
                 let repo = Arc::clone(&self.link_repo);

@@ -1491,7 +1491,7 @@ impl Node for TrackingEntryNode {
         Ok(match name {
             // Routed to the generic delete-confirm flow; the actual delete
             // happens in `execute("delete")` after confirmation.
-            "delete" => ActionDispatch::DeleteSelf,
+            "delete" => ActionDispatch::DeleteSelf { confirm: None },
             "restore" => match self.tracking_id() {
                 Ok(id) => invoke_restore(&self.handle, id).await,
                 Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),

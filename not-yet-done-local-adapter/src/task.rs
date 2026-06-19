@@ -241,6 +241,23 @@ impl ForestSnapshot {
         }))
     }
 
+    /// Number of tasks strictly below `id` in the forest (its whole
+    /// subtree, excluding `id` itself). Used to warn that a `delete`
+    /// cascades — `delete_task_recursive` soft-deletes the subtree, so the
+    /// confirm prompt must say how many tasks go with it. Counts the full
+    /// (unfiltered) subtree, matching what the recursive delete touches.
+    fn descendant_count(&self, id: Uuid) -> usize {
+        let mut stack = vec![id];
+        let mut count = 0;
+        while let Some(cur) = stack.pop() {
+            if let Some(kids) = self.children.get(&Some(cur)) {
+                count += kids.len();
+                stack.extend(kids.iter().copied());
+            }
+        }
+        count
+    }
+
     /// Ordered child summaries of `parent` (`None` = forest roots).
     /// When `filter` is `Some`, only children in the visible set are
     /// returned (a saved-query filter is active — the set is matches plus
@@ -761,6 +778,11 @@ fn task_item_actions() -> Vec<NodeAction> {
         NodeAction::new("delete", "Delete", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('d'),
+        // Non-recursive single-task delete for the flat list view, which
+        // has no hierarchy on screen. No default key — the flat list's
+        // `tasks.yaml` binds `d` to it explicitly; the tree view's `d`
+        // stays the recursive `delete`. See [`execute_delete_single`].
+        NodeAction::new("delete-single", "Delete", InputSpec::None),
         NodeAction::new("undelete", "Undelete", InputSpec::None).with_default_key('u'),
         NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
@@ -1214,6 +1236,31 @@ async fn execute_delete(
     })
 }
 
+/// `execute("delete-single")` — delete only the invoking task, NOT its
+/// subtree. The flat list view uses this: there is no hierarchy on screen,
+/// so a recursive cascade would silently delete tasks the user can't see
+/// they're affecting. Any children re-root to the forest top on the next
+/// load (their parent is now deleted, hence filtered out at snapshot build).
+/// The tree view keeps the recursive [`execute_delete`].
+async fn execute_delete_single(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    id: Uuid,
+) -> Result<ActionOutcome> {
+    if let Some(row) = snapshot.by_id.get(&id) {
+        notes::mark_notes_deleted(&row.task, &all_tasks(snapshot));
+    }
+    handle
+        .task_service
+        .delete_task(id)
+        .await
+        .map_err(to_content_err)?;
+    emit_task_changed(handle, id);
+    Ok(ActionOutcome::Done {
+        message: Some("Task deleted".to_string()),
+    })
+}
+
 /// `invoke_action("undelete")` — restore the most recently deleted task(s).
 /// Needs no target node, so it ignores the invoking node's identity.
 async fn invoke_undelete(handle: &CoreHandle) -> ActionDispatch {
@@ -1563,8 +1610,13 @@ impl Node for TaskItemNode {
                 execute_edit_notes(&self.handle, &self.snapshot, self.id, &text, &original).await
             }
             // Reached via the generic `DeleteSelf` confirm flow, which calls
-            // `execute("delete", None)` after the user confirms.
+            // `execute(<delete action>, None)` after the user confirms.
+            // `delete` cascades (tree view); `delete-single` removes only
+            // this task (flat list view) — see the two `invoke_action` arms.
             ("delete", _) => execute_delete(&self.handle, &self.snapshot, self.id).await,
+            ("delete-single", _) => {
+                execute_delete_single(&self.handle, &self.snapshot, self.id).await
+            }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on a task"
             ))),
@@ -1581,8 +1633,34 @@ impl Node for TaskItemNode {
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         let dispatch = match name {
             // Routed to the generic delete-confirm flow; the actual delete
-            // happens in `execute("delete")` after confirmation.
-            "delete" => ActionDispatch::DeleteSelf,
+            // happens in `execute("delete")` after confirmation. A task
+            // delete recursively soft-deletes its whole subtree, so when
+            // the task has descendants we spell that out in the prompt;
+            // a leaf falls back to the TUI's generic `Delete '<label>'?`.
+            "delete" => {
+                let descendants = self.snapshot.descendant_count(self.id);
+                let confirm = (descendants > 0).then(|| {
+                    let label = self
+                        .snapshot
+                        .by_id
+                        .get(&self.id)
+                        .map(|r| r.task.description.as_str())
+                        .unwrap_or("this task");
+                    let subtasks = if descendants == 1 {
+                        "1 subtask".to_string()
+                    } else {
+                        format!("{descendants} subtasks")
+                    };
+                    format!(
+                        "Delete '{label}' and its {subtasks} (recursive — they are deleted too)? (y/n)"
+                    )
+                });
+                ActionDispatch::DeleteSelf { confirm }
+            }
+            // Flat list view: delete just this task, no subtree cascade and
+            // no recursive warning (the generic `Delete '<label>'?` prompt
+            // applies). See [`execute_delete_single`].
+            "delete-single" => ActionDispatch::DeleteSelf { confirm: None },
             "undelete" => invoke_undelete(&self.handle).await,
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.id).await,
             // The frontend records the mark; the adapter does nothing here.
@@ -1943,6 +2021,26 @@ mod tests {
             tracked: HashSet::new(),
             tracked_subtree: HashSet::new(),
         })
+    }
+
+    #[test]
+    fn descendant_count_walks_whole_subtree() {
+        // root → mid → leaf, plus root → sibling. Counts are the full
+        // subtree below a node (what a recursive delete soft-deletes).
+        let root = Uuid::from_u128(1);
+        let mid = Uuid::from_u128(2);
+        let leaf = Uuid::from_u128(3);
+        let sibling = Uuid::from_u128(4);
+        let snap = snapshot_from(vec![
+            row(root, "Root", None),
+            row(mid, "Mid", Some(root)),
+            row(leaf, "Leaf", Some(mid)),
+            row(sibling, "Sibling", Some(root)),
+        ]);
+        assert_eq!(snap.descendant_count(root), 3); // mid + leaf + sibling
+        assert_eq!(snap.descendant_count(mid), 1); // leaf
+        assert_eq!(snap.descendant_count(leaf), 0); // genuine leaf
+        assert_eq!(snap.descendant_count(sibling), 0);
     }
 
     #[test]
