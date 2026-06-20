@@ -13,6 +13,7 @@ members = [
   "not-yet-done-table",
   "not-yet-done-waybar",
   "not-yet-done-content",
+  "not-yet-done-filter",
   "not-yet-done-jira-adapter",
   "not-yet-done-taiga-adapter",
   "not-yet-done-transport",

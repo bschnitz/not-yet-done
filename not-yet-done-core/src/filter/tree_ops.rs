@@ -10,7 +10,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use crate::entity::task;
 use crate::error::AppError;
 use crate::repository::task_short_id;
-use super::expr::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
 
 /// Resolve all `has_ancestor` and `in_tree` operators in a FilterExpr.
 ///

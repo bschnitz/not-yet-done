@@ -4,7 +4,7 @@ use sea_orm::{
 };
 
 use crate::error::AppError;
-use crate::filter::expr::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
 
 // ---------------------------------------------------------------------------
 // ColumnRegistry trait
