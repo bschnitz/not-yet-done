@@ -1,4 +1,4 @@
-// not-yet-done-core/src/filter/mod.rs
+// not-yet-done-task-core/src/filter/mod.rs
 
 //! Generic filter DSL for building `WHERE` clauses from YAML/JSON.
 //!

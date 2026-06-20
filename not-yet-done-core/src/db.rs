@@ -6,7 +6,14 @@ pub async fn connect(db_url: &str, sync_schema: bool) -> Result<DatabaseConnecti
     let db = Database::connect(db_url).await?;
 
     if sync_schema {
+        // App-shell entities (link / saved_query / settings / query_shortcut)
+        // still live in not-yet-done-core; the task domain moved to
+        // not-yet-done-task-core (C2). Both currently share one database, so
+        // sync both registries into this connection. C6 splits the storage.
         db.get_schema_registry("not_yet_done_core::entity::*")
+            .sync(&db)
+            .await?;
+        db.get_schema_registry("not_yet_done_task_core::entity::*")
             .sync(&db)
             .await?;
     }

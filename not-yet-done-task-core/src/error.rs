@@ -1,4 +1,4 @@
-// not-yet-done-core/src/error.rs
+// not-yet-done-task-core/src/error.rs
 
 use thiserror::Error;
 use uuid::Uuid;

@@ -1,4 +1,4 @@
-// not-yet-done-core/src/repository/task_repository.rs
+// not-yet-done-task-core/src/repository/task_repository.rs
 
 use sea_orm::prelude::Expr;
 use async_trait::async_trait;

@@ -1,0 +1,23 @@
+[package]
+name = "not-yet-done-task-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sea-orm     = { workspace = true }
+shaku       = { workspace = true }
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+async-trait = { workspace = true }
+chrono         = { workspace = true }
+regex          = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
+not-yet-done-macros = { workspace = true }
+not-yet-done-filter = { path = "../not-yet-done-filter" }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
