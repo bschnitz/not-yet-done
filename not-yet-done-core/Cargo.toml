@@ -24,6 +24,11 @@ slug        = { workspace = true }
 not-yet-done-macros = { workspace = true }
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-filter = { path = "../not-yet-done-filter" }
+# C2 bridge: the task/tracking/project/tag domain moved into
+# not-yet-done-task-core. core re-exports it under the historic
+# `not_yet_done_core::…` paths so consumers don't churn yet; C3 severs
+# this dependency and re-points consumers at task-core directly.
+not-yet-done-task-core = { path = "../not-yet-done-task-core" }
 diffy = "0.5.0"
 
 [dev-dependencies]

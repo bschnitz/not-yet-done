@@ -3552,6 +3552,7 @@ dependencies = [
  "not-yet-done-content",
  "not-yet-done-filter",
  "not-yet-done-macros",
+ "not-yet-done-task-core",
  "regex",
  "reqwest",
  "sea-orm",
@@ -3709,6 +3710,24 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "not-yet-done-task-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "not-yet-done-filter",
+ "not-yet-done-macros",
+ "regex",
+ "sea-orm",
+ "serde",
+ "serde_yaml",
+ "shaku",
+ "thiserror 2.0.18",
  "tokio",
  "uuid",
 ]
