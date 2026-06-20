@@ -401,9 +401,28 @@ timestamp of the whole node is sufficient.
    ```rust
    pub trait AdapterFactory: Send + Sync {
        fn adapter_type(&self) -> &str;
-       fn create(&self, config: &str) -> Result<Box<dyn ContentAdapter>>;
+       fn create(
+           &self,
+           instance_id: &str,
+           config: &str,
+           ctx: &HostContext,
+       ) -> Result<Box<dyn ContentAdapter>>;
    }
    ```
+
+   - `instance_id` — stable per-tab id, used to scope adapter-side
+     filesystem state (e.g. saved queries).
+   - `config` — the opaque adapter-specific string (YAML/JSON) from the
+     tab's `config_inline` / `config:` path.
+   - `ctx` — the **`HostContext`** the host owns and passes to every
+     adapter. It carries a `HostEventBus` (`publish(channel, event)` /
+     `subscribe(channel) -> Receiver<HostEvent>`) for cross-adapter
+     coordination: the host is a dumb broker, the payload is an opaque
+     `Arc<dyn Any + Send + Sync>`, and adapters that share a channel
+     privately agree on the concrete payload type and downcast it. The
+     in-process Tasks/Trackings adapters use this — keyed by their database
+     DSN — so a tracking toggle in one tab repaints the other; remote
+     adapters that need no coordination simply ignore `ctx`.
 
 ---
 

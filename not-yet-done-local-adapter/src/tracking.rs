@@ -80,17 +80,17 @@ use async_trait::async_trait;
 use not_yet_done_content::{
     apply_sort, grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome,
     AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore,
-    GroupBucket, GroupSpec, HintPlacement, InputSpec, Invalidation, Metadata, MetadataField, Node,
-    NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKey, SortKind,
-    SortableColumn, Subtree, SubtreeNode,
+    GroupBucket, GroupSpec, HintPlacement, HostContext, HostEvent, InputSpec, Invalidation,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
+    SortDirection, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode,
 };
 use not_yet_done_task_core::entity::tracking;
 use not_yet_done_task_core::error::AppError;
-use not_yet_done_task_core::events::{DomainEvent, DomainEventReceiver};
+use not_yet_done_task_core::events::DomainEvent;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
-use crate::{publish_row_patches, CoreHandle};
+use crate::{as_domain_event, publish_row_patches, CoreHandle};
 
 /// Stable id of the synthetic list-root node.
 const ROOT_ID: &str = "tracking:root";
@@ -1343,9 +1343,7 @@ fn tracking_condensed_actions() -> Vec<NodeAction> {
 /// drops the snapshot and every view (this tab + the task tracking marker)
 /// refetches. See [`DomainEvent::TrackingChanged`].
 fn emit_tracking_changed(handle: &CoreHandle, tracking_id: Uuid) {
-    let _ = handle
-        .events
-        .send(DomainEvent::TrackingChanged { tracking_id });
+    handle.publish(DomainEvent::TrackingChanged { tracking_id });
 }
 
 /// `execute("delete")` — soft-delete a tracking, keeping its start/end times
@@ -2204,7 +2202,7 @@ fn announce_live_interval(
 ///   the M9 live-row pull, not this global heartbeat (the heartbeat still
 ///   serves the native tab until the C1 cutover).
 fn spawn_tracking_bridge(
-    mut events: DomainEventReceiver,
+    mut events: broadcast::Receiver<HostEvent>,
     inv_tx: broadcast::Sender<Invalidation>,
     snapshot: Arc<RwLock<Option<Arc<TrackingSnapshot>>>>,
     handle: CoreHandle,
@@ -2213,10 +2211,24 @@ fn spawn_tracking_bridge(
     tokio::spawn(async move {
         use broadcast::error::RecvError;
         loop {
-            match events.recv().await {
-                Ok(DomainEvent::TrackingTick) => {}
-                Ok(DomainEvent::TrackingStarted { tracking_id, .. })
-                | Ok(DomainEvent::TrackingStopped { tracking_id, .. }) => {
+            let ev = match events.recv().await {
+                // Opaque host payload → the DomainEvent the local adapters
+                // privately exchange on this channel; foreign payloads skipped.
+                Ok(payload) => match as_domain_event(&payload) {
+                    Some(ev) => ev,
+                    None => continue,
+                },
+                Err(RecvError::Lagged(_)) => {
+                    *snapshot.write().await = None;
+                    let _ = inv_tx.send(Invalidation::All);
+                    continue;
+                }
+                Err(RecvError::Closed) => break,
+            };
+            match ev {
+                DomainEvent::TrackingTick => {}
+                DomainEvent::TrackingStarted { tracking_id, .. }
+                | DomainEvent::TrackingStopped { tracking_id, .. } => {
                     match TrackingSnapshot::load(&handle).await {
                         Ok(snap) => {
                             *snapshot.write().await = Some(snap.clone());
@@ -2244,16 +2256,10 @@ fn spawn_tracking_bridge(
                         }
                     }
                 }
-                Ok(DomainEvent::TaskChanged { .. })
-                | Ok(DomainEvent::TrackingChanged { .. }) => {
+                DomainEvent::TaskChanged { .. } | DomainEvent::TrackingChanged { .. } => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }
-                Err(RecvError::Lagged(_)) => {
-                    *snapshot.write().await = None;
-                    let _ = inv_tx.send(Invalidation::All);
-                }
-                Err(RecvError::Closed) => break,
             }
         }
     });
@@ -2263,14 +2269,16 @@ fn spawn_tracking_bridge(
 // Adapter + factory
 // ---------------------------------------------------------------------------
 
-/// Builds [`TrackingAdapter`] instances bound to a captured [`CoreHandle`].
-pub struct TrackingAdapterFactory {
-    handle: CoreHandle,
-}
+/// Builds self-contained [`TrackingAdapter`] instances. Stateless: each
+/// `create` opens its own database from the tab's `config`
+/// (see [`crate::open_core_handle`] / [`crate::LocalAdapterConfig`]) and wires
+/// the resulting [`CoreHandle`] to the host bus from [`HostContext`].
+#[derive(Default)]
+pub struct TrackingAdapterFactory;
 
 impl TrackingAdapterFactory {
-    pub fn new(handle: CoreHandle) -> Self {
-        Self { handle }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -2279,31 +2287,14 @@ impl AdapterFactory for TrackingAdapterFactory {
         "trackings"
     }
 
-    fn create(&self, instance_id: &str, _config: &str) -> Result<Box<dyn ContentAdapter>> {
-        let (inv_tx, _) = broadcast::channel(64);
-        let snapshot: Arc<RwLock<Option<Arc<TrackingSnapshot>>>> = Arc::new(RwLock::new(None));
-        let last_live_secs = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        spawn_tracking_bridge(
-            self.handle.events.subscribe(),
-            inv_tx.clone(),
-            snapshot.clone(),
-            self.handle.clone(),
-            last_live_secs.clone(),
-        );
-        let queries_root = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("not_yet_done")
-            .join("trackings")
-            .join(instance_id)
-            .join("queries");
-        Ok(Box::new(TrackingAdapter {
-            instance_id: instance_id.to_string(),
-            handle: self.handle.clone(),
-            inv_tx,
-            snapshot,
-            saved_queries: FsSavedQueryStore::new(queries_root),
-            last_live_secs,
-        }))
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        ctx: &HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
+        let handle = crate::open_core_handle(config, ctx)?;
+        Ok(Box::new(TrackingAdapter::new(instance_id, handle)))
     }
 }
 
@@ -2329,6 +2320,38 @@ pub struct TrackingAdapter {
 }
 
 impl TrackingAdapter {
+    /// Build an adapter over an already-opened [`CoreHandle`]: set up the
+    /// invalidation broadcast, the live-cadence atomic, spawn the
+    /// domain-event → invalidation bridge, and resolve the per-instance
+    /// saved-query root. The factory uses this after [`crate::open_core_handle`];
+    /// tests use it over a handle built on their own in-memory database.
+    pub(crate) fn new(instance_id: &str, handle: CoreHandle) -> Self {
+        let (inv_tx, _) = broadcast::channel(64);
+        let snapshot: Arc<RwLock<Option<Arc<TrackingSnapshot>>>> = Arc::new(RwLock::new(None));
+        let last_live_secs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        spawn_tracking_bridge(
+            handle.subscribe(),
+            inv_tx.clone(),
+            snapshot.clone(),
+            handle.clone(),
+            last_live_secs.clone(),
+        );
+        let queries_root = dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("not_yet_done")
+            .join("trackings")
+            .join(instance_id)
+            .join("queries");
+        Self {
+            instance_id: instance_id.to_string(),
+            handle,
+            inv_tx,
+            snapshot,
+            saved_queries: FsSavedQueryStore::new(queries_root),
+            last_live_secs,
+        }
+    }
+
     /// Return the cached snapshot, loading it from the services if absent.
     async fn snapshot(&self) -> Result<Arc<TrackingSnapshot>> {
         if let Some(snap) = self.snapshot.read().await.as_ref() {
@@ -3713,7 +3736,7 @@ mod restore_scope_tests {
         task::{self, TaskStatus},
         tracking as tracking_entity,
     };
-    use not_yet_done_task_core::events::new_bus;
+    use not_yet_done_content::InMemoryHostBus;
     use not_yet_done_task_core::module::TaskDomainModule;
     use not_yet_done_task_core::repository::{
         ProjectRepositoryImpl, ProjectRepositoryImplParameters, TagRepositoryImpl,
@@ -3755,8 +3778,9 @@ mod restore_scope_tests {
 
         let task_service: Arc<dyn TaskService> = module.resolve();
         let tracking_repo: Arc<dyn TrackingRepository> = module.resolve();
+        let bus = Arc::new(InMemoryHostBus::default());
         (
-            CoreHandle::new(task_service, tracking_repo, new_bus(16), false),
+            CoreHandle::new(task_service, tracking_repo, bus, "test".to_string(), false),
             db,
         )
     }

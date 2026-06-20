@@ -2064,6 +2064,105 @@ pub trait ScriptStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Host event bus (cross-adapter coordination)
+// ---------------------------------------------------------------------------
+
+/// An opaque cross-adapter event. The host delivers it verbatim to every
+/// subscriber of the same channel **without inspecting it** — the payload's
+/// meaning is a private contract between the adapters that share a channel.
+///
+/// The type erasure is what keeps the host (and this contract crate) free of
+/// any adapter's domain types: the host is a dumb broker. Adapters that agree
+/// on a channel downcast the `Arc<dyn Any>` back to their shared concrete
+/// event type (e.g. the local Tasks/Trackings adapters exchange a task-domain
+/// event); an adapter that doesn't recognise a payload simply ignores it.
+/// Essential for out-of-process plugins, which cannot share a global
+/// singleton and must receive their coordination channel from the host.
+pub type HostEvent = std::sync::Arc<dyn std::any::Any + Send + Sync>;
+
+/// A host-provided publish/subscribe bus, keyed by an opaque channel string.
+///
+/// The **host** (the App that composes the adapters) owns one implementation
+/// and hands it to every adapter via [`HostContext`] at construction.
+/// Adapters use it to coordinate across instances the host wired into the
+/// same session — e.g. a tracking toggle in the Tasks view repainting the
+/// Trackings view — without any adapter referencing another, and without this
+/// contract crate knowing the payload type.
+///
+/// Channels scope delivery: a `publish` reaches only the `subscribe`rs of the
+/// same channel string. Adapters backed by the same data source pick a
+/// shared, stable channel (the local adapters use their database DSN) so two
+/// instances over one store coordinate while unrelated adapters stay silent.
+pub trait HostEventBus: Send + Sync {
+    /// Publish `event` to `channel`; delivered to all current subscribers of
+    /// that channel. Lossy by design: with no subscriber it is dropped.
+    fn publish(&self, channel: &str, event: HostEvent);
+
+    /// Subscribe to `channel`, receiving every event published to it from now
+    /// on. A `broadcast` receiver because events are discrete and one channel
+    /// may have several independent subscribers.
+    fn subscribe(&self, channel: &str) -> tokio::sync::broadcast::Receiver<HostEvent>;
+}
+
+/// Capabilities the host injects into every adapter at construction
+/// ([`AdapterFactory::create`]). A struct (not a bare bus) so future
+/// host-provided handles can be added without churning every factory
+/// signature again.
+#[derive(Clone)]
+pub struct HostContext {
+    /// The cross-adapter coordination bus (see [`HostEventBus`]).
+    pub event_bus: std::sync::Arc<dyn HostEventBus>,
+}
+
+/// A ready-made in-process [`HostEventBus`] the host can instantiate directly
+/// (`Arc::new(InMemoryHostBus::default())`) instead of writing its own broker.
+/// Lazily creates one `broadcast` sender per channel on first use and keeps it
+/// alive for the process, so a late subscriber to an already-used channel
+/// still works.
+pub struct InMemoryHostBus {
+    channels:
+        std::sync::Mutex<std::collections::HashMap<String, tokio::sync::broadcast::Sender<HostEvent>>>,
+    capacity: usize,
+}
+
+impl InMemoryHostBus {
+    /// Create a bus whose per-channel broadcast buffers hold `capacity`
+    /// events. A subscriber that lags past `capacity` observes a
+    /// `RecvError::Lagged`; adapters resync conservatively on it.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            channels: std::sync::Mutex::new(std::collections::HashMap::new()),
+            capacity,
+        }
+    }
+
+    fn sender(&self, channel: &str) -> tokio::sync::broadcast::Sender<HostEvent> {
+        self.channels
+            .lock()
+            .unwrap()
+            .entry(channel.to_string())
+            .or_insert_with(|| tokio::sync::broadcast::channel(self.capacity).0)
+            .clone()
+    }
+}
+
+impl Default for InMemoryHostBus {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+impl HostEventBus for InMemoryHostBus {
+    fn publish(&self, channel: &str, event: HostEvent) {
+        let _ = self.sender(channel).send(event);
+    }
+
+    fn subscribe(&self, channel: &str) -> tokio::sync::broadcast::Receiver<HostEvent> {
+        self.sender(channel).subscribe()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AdapterFactory (registry pattern)
 // ---------------------------------------------------------------------------
 
@@ -2077,7 +2176,18 @@ pub trait AdapterFactory: Send + Sync {
     /// adapter type as fallback default. The factory must thread it
     /// into the produced adapter so [`ContentAdapter::instance_id`]
     /// returns it.
-    fn create(&self, instance_id: &str, config: &str) -> Result<Box<dyn ContentAdapter>>;
+    ///
+    /// `ctx` carries the host-provided capabilities (currently the
+    /// cross-adapter [`HostEventBus`]). Remote adapters ignore it; the local
+    /// in-process adapters use the bus to coordinate (see the local-adapter
+    /// crate). Passing it here — rather than capturing it in the factory —
+    /// keeps factories stateless and is the seam a plugin host injects through.
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        ctx: &HostContext,
+    ) -> Result<Box<dyn ContentAdapter>>;
 }
 
 // ---------------------------------------------------------------------------
