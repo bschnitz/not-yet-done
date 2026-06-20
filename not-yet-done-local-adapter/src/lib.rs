@@ -31,6 +31,7 @@ use std::sync::Arc;
 use not_yet_done_content::{HostEvent, HostEventBus, Invalidation};
 use not_yet_done_task_core::events::DomainEvent;
 use not_yet_done_task_core::repository::TrackingRepository;
+use not_yet_done_task_core::service::TagService;
 use not_yet_done_task_core::service::TaskService;
 use tokio::sync::broadcast;
 
@@ -70,6 +71,9 @@ pub use tracking::{TrackingAdapter, TrackingAdapterFactory};
 pub struct CoreHandle {
     pub task_service: Arc<dyn TaskService>,
     pub tracking_repo: Arc<dyn TrackingRepository>,
+    /// Tag listing/management service — backs the task adapter's
+    /// `list_values("tags")` (the `option_menu` source) and tag mutations.
+    pub tag_service: Arc<dyn TagService>,
     /// Host-owned cross-adapter event bus (see the struct docs).
     bus: Arc<dyn HostEventBus>,
     /// Bus channel key for this handle — the database DSN. Local adapters on
@@ -89,6 +93,7 @@ impl CoreHandle {
     pub fn new(
         task_service: Arc<dyn TaskService>,
         tracking_repo: Arc<dyn TrackingRepository>,
+        tag_service: Arc<dyn TagService>,
         bus: Arc<dyn HostEventBus>,
         channel: String,
         allow_parallel_tracking: bool,
@@ -96,6 +101,7 @@ impl CoreHandle {
         Self {
             task_service,
             tracking_repo,
+            tag_service,
             bus,
             channel,
             allow_parallel_tracking,
@@ -193,6 +199,7 @@ pub fn open_core_handle(
     Ok(CoreHandle::new(
         domain.task_service,
         domain.tracking_repo,
+        domain.tag_service,
         ctx.event_bus.clone(),
         dsn,
         cfg.allow_parallel.unwrap_or(false),

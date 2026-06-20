@@ -1513,6 +1513,13 @@ pub struct ActionDef {
     /// Today only `type: custom` honours this flag. Default `false`.
     #[serde(default)]
     pub on_container: bool,
+    /// For `type: option_menu` actions — the menu definition (options
+    /// source, the node's selection-marker field, and the adapter action
+    /// invoked on toggle). The whole menu is host-side and config-driven;
+    /// the adapter only sees `list_values(source)` and an `invoke_action`
+    /// with the chosen value. Required for `option_menu`, ignored otherwise.
+    #[serde(default)]
+    pub option_menu: Option<OptionMenuConfig>,
 }
 
 impl ActionDef {
@@ -1548,6 +1555,7 @@ impl ActionDef {
                 | "tree_find"
                 | "script"
                 | "tag"
+                | "option_menu"
         )
     }
 }
@@ -1557,6 +1565,34 @@ pub struct FuzzyFilterConfig {
     /// Which metadata fields to search. If empty or absent, searches all fields + label.
     #[serde(default)]
     pub fields: Vec<String>,
+}
+
+/// Config for a `type: option_menu` action — a host-side, adapter-agnostic
+/// popup that toggles values on the selected node (e.g. tags).
+///
+/// Why it exists: an action coupled to a GUI shape (a picker, a form) forces
+/// the adapter to know about the host. Instead the adapter exposes a flat list
+/// of selectable values via `list_values(source)` and accepts a chosen value
+/// through a normal `invoke_action` (`ActionContext.value`). This config is the
+/// host's recipe for wiring those two adapter calls into one searchable menu —
+/// the adapter knows nothing about it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OptionMenuConfig {
+    /// Source key passed to [`not_yet_done_content::ContentAdapter::list_values`]
+    /// to fetch the selectable options (e.g. `"tags"`). The adapter maps it to
+    /// a `Vec<ValueOption>` (stable value id + display label).
+    pub source: String,
+    /// Hidden node metadata field holding the currently-selected option values
+    /// (comma-separated stable ids, e.g. `tag_ids`). Read to pre-mark the
+    /// assigned options when the menu opens.
+    pub marker: String,
+    /// Adapter action id invoked on toggle (e.g. `"toggle-tag"`). The chosen
+    /// option's value is handed over in `ActionContext.value`; the adapter
+    /// decides assign-vs-unassign from the node's current membership.
+    pub toggle: String,
+    /// Popup title. Falls back to the action's name when absent.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2056,6 +2092,7 @@ views:
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         };
         // Modal/persistent state actions → action bar
         assert!(make("edit").shows_in_action_bar());
@@ -2094,6 +2131,7 @@ views:
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         };
         assert!(!action.shows_in_action_bar());
     }

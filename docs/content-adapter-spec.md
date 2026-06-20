@@ -51,11 +51,36 @@ pub trait ContentAdapter: Send + Sync {
     ) -> String {
         query.to_string()
     }
+
+    /// List the selectable values for a named `source` (e.g. `"tags"`).
+    /// Backs a host-side `option_menu` action: the frontend fetches the
+    /// options here, lets the user pick one, and hands the chosen value back
+    /// through `invoke_action` (`ActionContext.value`). Default impl returns
+    /// an empty vec, so an adapter without selectable value sets needs no
+    /// boilerplate.
+    async fn list_values(&self, _source: &str) -> Result<Vec<ValueOption>> {
+        Ok(Vec::new())
+    }
 }
 ```
 
 **Construction**: `fn from_config(config: &str) -> Result<Box<dyn ContentAdapter>>`
 — the config is an opaque string (YAML/JSON), adapter-specific.
+
+**Value sources & `option_menu`.** `list_values(source)` returns
+`Vec<ValueOption>` (`{ value, label }` — `value` is a stable, opaque id; `label`
+is shown to the user). It is the read half of a deliberately GUI-decoupled
+action model: rather than the adapter declaring "show a picker" (which couples
+it to the host UI), the adapter exposes a flat list of values and accepts a
+chosen one via the normal action path. The host's `type: option_menu` action
+(see `generic-view-spec.md`) wires the two together — it reads the node's
+current selection from a hidden marker metadata field, opens a searchable popup
+of `list_values` results with the assigned ones marked, and on Enter calls
+`invoke_action(toggle, ctx)` with the picked id in `ActionContext.value`. The
+adapter decides assign-vs-unassign from the node's own membership and reports
+nonsense values as `ActionDispatch::Error`. The task adapter implements
+`list_values("tags")` and a `toggle-tag` action; this is how tags move out of
+the host's tag service into the adapter (DB-split step C5).
 
 **Query variables.** Saved queries on a view can carry inline
 placeholders. The TUI calls `query_variables(raw)` at apply time,
@@ -398,6 +423,7 @@ timestamp of the whole node is sufficient.
 
 6. **Adapter registration** — A registry pattern allows dynamic adapter
    discovery:
+
    ```rust
    pub trait AdapterFactory: Send + Sync {
        fn adapter_type(&self) -> &str;

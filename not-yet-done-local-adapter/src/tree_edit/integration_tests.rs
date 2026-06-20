@@ -34,7 +34,12 @@ use super::diff::apply_changes;
 // Test helpers
 // ---------------------------------------------------------------------------
 
-async fn setup() -> (Arc<dyn TaskService>, Arc<dyn TrackingRepository>, sea_orm::DatabaseConnection) {
+async fn setup() -> (
+    Arc<dyn TaskService>,
+    Arc<dyn TrackingRepository>,
+    Arc<dyn not_yet_done_task_core::service::TagService>,
+    sea_orm::DatabaseConnection,
+) {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to open in-memory SQLite");
@@ -72,7 +77,8 @@ async fn setup() -> (Arc<dyn TaskService>, Arc<dyn TrackingRepository>, sea_orm:
 
     let service: Arc<dyn TaskService> = module.resolve();
     let tracking: Arc<dyn TrackingRepository> = module.resolve();
-    (service, tracking, db)
+    let tag_service: Arc<dyn not_yet_done_task_core::service::TagService> = module.resolve();
+    (service, tracking, tag_service, db)
 }
 
 async fn insert_task(
@@ -115,7 +121,7 @@ fn find_by_desc<'a>(tasks: &'a [task::Model], desc: &str) -> &'a task::Model {
 
 #[tokio::test]
 async fn round_trip_no_changes() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let child = insert_task(&db, "Child", Some(root.id), TaskStatus::Done, 3).await;
 
@@ -128,7 +134,7 @@ async fn round_trip_no_changes() {
 
 #[tokio::test]
 async fn rename_task() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Old Name", None, TaskStatus::Todo, 0).await;
 
     let subtree = vec![root.clone()];
@@ -144,7 +150,7 @@ async fn rename_task() {
 
 #[tokio::test]
 async fn toggle_status() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Task", None, TaskStatus::Todo, 5).await;
 
     let subtree = vec![root.clone()];
@@ -160,7 +166,7 @@ async fn toggle_status() {
 
 #[tokio::test]
 async fn create_new_child() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
 
     let subtree = vec![root.clone()];
@@ -178,7 +184,7 @@ async fn create_new_child() {
 
 #[tokio::test]
 async fn create_nested_new_items() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
 
     let subtree = vec![root.clone()];
@@ -206,7 +212,7 @@ async fn create_nested_new_items() {
 
 #[tokio::test]
 async fn soft_delete_missing_item() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let child = insert_task(&db, "Will be deleted", Some(root.id), TaskStatus::Todo, 0).await;
 
@@ -225,7 +231,7 @@ async fn soft_delete_missing_item() {
 
 #[tokio::test]
 async fn reparent_task() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let child_a = insert_task(&db, "A", Some(root.id), TaskStatus::Todo, 0).await;
     let child_b = insert_task(&db, "B", Some(root.id), TaskStatus::Todo, 0).await;
@@ -252,7 +258,7 @@ async fn reparent_task() {
 
 #[tokio::test]
 async fn change_priority() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Task", None, TaskStatus::Todo, 0).await;
 
     let subtree = vec![root.clone()];
@@ -268,7 +274,7 @@ async fn change_priority() {
 
 #[tokio::test]
 async fn multiple_changes_at_once() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let keep = insert_task(&db, "Keep", Some(root.id), TaskStatus::Todo, 0).await;
     let remove = insert_task(&db, "Remove", Some(root.id), TaskStatus::Todo, 0).await;
@@ -307,7 +313,7 @@ async fn multiple_changes_at_once() {
 
 #[tokio::test]
 async fn delete_subtree_by_removing_from_editor() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let child_a = insert_task(&db, "Child A", Some(root.id), TaskStatus::Todo, 0).await;
     let grandchild_a = insert_task(&db, "Grandchild A", Some(child_a.id), TaskStatus::Todo, 0).await;
@@ -346,7 +352,7 @@ async fn delete_subtree_by_removing_from_editor() {
 /// but apply_changes returned "No changes".
 #[tokio::test]
 async fn delete_items_exact_user_scenario() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     // Build exact tree from bug report.
     let root = insert_task(&db, "Build compost bin system", None, TaskStatus::Todo, 0).await;
     let item_a = insert_task(&db, "A new Item", Some(root.id), TaskStatus::Todo, 0).await;
@@ -394,7 +400,7 @@ async fn delete_items_exact_user_scenario() {
 /// Test with duplicate names — the diff should use IDs, not descriptions.
 #[tokio::test]
 async fn delete_with_duplicate_names() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let dup_a = insert_task(&db, "A new Item", Some(root.id), TaskStatus::Todo, 0).await;
     let child_of_a = insert_task(&db, "A new Subitem", Some(dup_a.id), TaskStatus::Todo, 0).await;
@@ -432,7 +438,7 @@ async fn delete_with_duplicate_names() {
 /// Restore a deleted task by changing [D] to [ ].
 #[tokio::test]
 async fn restore_deleted_task_via_marker() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     // Manually soft-delete a child.
     let child = insert_task(&db, "Deleted child", Some(root.id), TaskStatus::Todo, 0).await;
@@ -463,7 +469,7 @@ async fn restore_deleted_task_via_marker() {
 /// Delete a task by changing [ ] to [D].
 #[tokio::test]
 async fn delete_task_via_d_marker() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let child = insert_task(&db, "Active child", Some(root.id), TaskStatus::Todo, 0).await;
 
@@ -491,7 +497,7 @@ async fn delete_task_via_d_marker() {
 /// The serialize→edit→apply round trip must detect the deletion.
 #[tokio::test]
 async fn serialize_edit_delete_round_trip() {
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Build compost bin system", None, TaskStatus::Todo, 0).await;
     let dup_a = insert_task(&db, "A new Item", Some(root.id), TaskStatus::Todo, 0).await;
     let child_a = insert_task(&db, "A new Subitem", Some(dup_a.id), TaskStatus::Todo, 0).await;
@@ -535,13 +541,14 @@ async fn serialize_edit_delete_round_trip() {
 fn build_task_adapter(
     service: Arc<dyn TaskService>,
     tracking: Arc<dyn TrackingRepository>,
+    tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
 ) -> Box<dyn not_yet_done_content::ContentAdapter> {
     use not_yet_done_content::InMemoryHostBus;
     // The self-contained factory would open its *own* database; the test
     // needs the adapter over the very `service`/`tracking` of its in-memory
     // DB, so build the handle and adapter directly.
     let bus = std::sync::Arc::new(InMemoryHostBus::default());
-    let handle = crate::CoreHandle::new(service, tracking, bus, "test".to_string(), false);
+    let handle = crate::CoreHandle::new(service, tracking, tag_service, bus, "test".to_string(), false);
     Box::new(crate::task::TaskAdapter::new("test", handle))
 }
 
@@ -551,11 +558,11 @@ fn build_task_adapter(
 #[tokio::test]
 async fn adapter_delete_single_leaves_children() {
     use not_yet_done_content::{ActionContext, ActionDispatch, ActionInput};
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let parent = insert_task(&db, "Parent", None, TaskStatus::Todo, 0).await;
     let _child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
 
-    let adapter = build_task_adapter(service, tracking);
+    let adapter = build_task_adapter(service, tracking, _tag_service);
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
     // No recursive warning for the single-delete action.
@@ -580,12 +587,12 @@ async fn adapter_delete_single_leaves_children() {
 #[tokio::test]
 async fn adapter_delete_recursive_warns_and_cascades() {
     use not_yet_done_content::{ActionContext, ActionDispatch, ActionInput};
-    let (service, tracking, db) = setup().await;
+    let (service, tracking, _tag_service, db) = setup().await;
     let parent = insert_task(&db, "Parent", None, TaskStatus::Todo, 0).await;
     let child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
     let _grandchild = insert_task(&db, "Grandchild", Some(child.id), TaskStatus::Todo, 0).await;
 
-    let adapter = build_task_adapter(service, tracking);
+    let adapter = build_task_adapter(service, tracking, _tag_service);
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
     // The prompt names the cascade and the subtask count (2 descendants).

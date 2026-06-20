@@ -7,6 +7,7 @@ pub mod column_config_popup;
 pub mod content_form_popup;
 pub mod data_table;
 pub mod notification_bar;
+pub mod option_menu;
 pub mod query_error_bar;
 pub mod query_menu;
 pub mod query_var_popup;

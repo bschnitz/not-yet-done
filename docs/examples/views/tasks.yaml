@@ -295,16 +295,30 @@ views:
         id: add-sibling
         under_selection: true
         inherit: true
-      # Open the global tag-management menu pinned to the selected task
-      # (`type: tag` → the App's `:tag` menu). Enter toggles a tag on/off,
-      # typing a name + Enter creates and assigns it, ctrl+e edits a tag's
-      # YAML form (symbol/name/color), ctrl+d deletes one. The task's
-      # `tag_symbols` / `tag_names` columns refresh after every change.
-      # `T` (shift+t) — `t` is the tree-view subtab key. `inherit: true`
-      # so it works at every subtask depth.
+      # Adapter-driven tag toggle menu for the selected task
+      # (`type: option_menu`). The options come from the adapter's
+      # `list_values("tags")`, the chosen tag is toggled through its
+      # `toggle-tag` action, and the assigned set is read from the hidden
+      # `tag_ids` marker field — so the menu needs no host-side tag service.
+      # Enter toggles a tag on/off (★ marks assigned tags; the popup stays
+      # open for multi-toggle and the `tag_symbols` / `tag_names` columns
+      # refresh after each change). Creating / renaming / deleting a tag is
+      # done from the `:tag` cmdline menu. `T` (shift+t) — `t` is the
+      # tree-view subtab key. `inherit: true` so it works at every subtask
+      # depth.
       - name: tags
         key: T
-        type: tag
+        type: option_menu
+        option_menu:
+          # Key handed to `list_values` on the adapter to fetch the options.
+          source: tags
+          # Hidden node field holding the currently-assigned option values
+          # (comma-separated stable ids) — used to pre-mark assigned tags.
+          marker: tag_ids
+          # Adapter action invoked on Enter; the chosen value rides along in
+          # `ActionContext.value`.
+          toggle: toggle-tag
+          title: Tags
         inherit: true
       # Local filter-while-typing over the loaded rows. NOT inheritable —
       # the validator restricts fuzzy_filter to the tree root.
@@ -480,11 +494,16 @@ views:
         type: create
         id: add-sibling
         under_selection: true
-      # Tag-management menu for the selected task (see the tree view's
-      # `tags` action). `T` (shift+t).
+      # Adapter-driven tag toggle menu for the selected task (see the tree
+      # view's `tags` action). `T` (shift+t).
       - name: tags
         key: T
-        type: tag
+        type: option_menu
+        option_menu:
+          source: tags
+          marker: tag_ids
+          toggle: toggle-tag
+          title: Tags
       - name: script
         key: x
         type: script

@@ -149,6 +149,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.tag_menu.render(frame, area);
     }
 
+    // Overlay: generic option menu (a `type: option_menu` action).
+    if app.option_menu.is_open() {
+        app.option_menu.render(frame, area);
+    }
+
     // Overlay: tab-set switch popup (ctrl+x).
     if app.tab_set_popup.is_open() {
         app.tab_set_popup.render(frame, area);

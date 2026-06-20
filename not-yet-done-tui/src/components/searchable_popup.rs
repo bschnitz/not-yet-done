@@ -143,6 +143,18 @@ impl SearchablePopup {
         self.items.get(idx)
     }
 
+    /// Flip the `★` marker on the currently selected item. Used by the
+    /// option menu for live multi-toggle: the embedder dispatches the
+    /// toggle action async and reflects the new state in the open popup
+    /// immediately, without rebuilding it.
+    pub fn toggle_selected_marked(&mut self) {
+        if let Some(&idx) = self.filtered.get(self.selected) {
+            if let Some(item) = self.items.get_mut(idx) {
+                item.marked = !item.marked;
+            }
+        }
+    }
+
     /// The current search query text.
     pub fn query_text(&self) -> &str {
         &self.query

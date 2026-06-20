@@ -81,6 +81,18 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         result: Result<String, String>,
     },
+    /// Async-loaded options for a `type: option_menu` popup. `items` are the
+    /// adapter's selectable values (`list_values(source)`); `selected_values`
+    /// are the stable ids currently set on the node (parsed from its marker
+    /// metadata field) so the menu can pre-mark them. `error` short-circuits
+    /// the open with a notification.
+    OptionMenuItems {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        items: Vec<not_yet_done_content::ValueOption>,
+        selected_values: Vec<String>,
+        error: Option<String>,
+    },
     /// Result of a generic content delete (`Node::execute("delete")`).
     /// On success the App removes the row from the pane's tree *in place*
     /// ([`ContentView::remove_tree_node`]) rather than full-reloading —
@@ -293,6 +305,7 @@ pub mod editor;
 mod filter_persist;
 mod link;
 pub mod node_actions;
+pub mod option_menu;
 pub mod script;
 mod tag_menu;
 
@@ -676,6 +689,18 @@ pub struct App {
     /// [`App::open_tag_menu_for_content`].
     pub content_tag_target: Option<crate::app::tag_menu::ContentTagTarget>,
 
+    /// Generic, adapter-driven option menu (a `type: option_menu` action).
+    /// Stays alive across opens; the inner popup toggles per session. Unlike
+    /// the tag menu it knows nothing about tags — it lists whatever values the
+    /// adapter exposes via `list_values(source)` and toggles them through a
+    /// configured adapter action. See [`crate::app::option_menu`].
+    pub option_menu: crate::components::option_menu::OptionMenuComponent,
+
+    /// Dispatch context for the currently open [`Self::option_menu`]: which
+    /// node the toggle acts on, the adapter action to invoke, and the pane to
+    /// refresh afterwards. Set when the menu opens, consulted on each toggle.
+    pub option_menu_target: Option<crate::app::option_menu::OptionMenuTarget>,
+
     /// App-level script management menu (`:script`, also bound to `x`
     /// in the Trackings tab and to per-view `type: script` actions in
     /// content tabs). One menu, multiple contexts — the per-context
@@ -924,6 +949,11 @@ impl App {
             )
             .with_popup_kb(popup_kb.clone(), popup_icons.clone()),
             content_tag_target: None,
+            option_menu: crate::components::option_menu::OptionMenuComponent::new(Arc::clone(
+                &shared_theme,
+            ))
+            .with_popup_kb(popup_kb.clone(), popup_icons.clone()),
+            option_menu_target: None,
             script_menu: crate::components::script_menu::ScriptMenuComponent::new(
                 Arc::clone(&shared_theme),
                 "Scripts",
@@ -3441,6 +3471,21 @@ impl App {
                     }
                     self.reload_content_pane_current_level(view_index, pane_id);
                 }
+                LoadMsg::OptionMenuItems {
+                    view_index,
+                    pane_id,
+                    items,
+                    selected_values,
+                    error,
+                } => {
+                    self.open_option_menu_popup(
+                        view_index,
+                        pane_id,
+                        items,
+                        selected_values,
+                        error,
+                    );
+                }
                 LoadMsg::ContentNodeDeleted {
                     view_index,
                     pane_id,
@@ -3921,6 +3966,14 @@ impl App {
             let req = self.handle_tag_menu_key(key);
             self.sync_components();
             return req;
+        }
+
+        // Generic option menu (a `type: option_menu` action) intercepts keys
+        // while open.
+        if self.option_menu.is_open() {
+            self.handle_option_menu_key(key);
+            self.sync_components();
+            return EditorRequest::None;
         }
 
         // Script management menu (:script / `x` / per-view) intercepts
@@ -6010,7 +6063,7 @@ impl App {
                 node_id,
                 action_name,
             } => {
-                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, false);
+                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, false, None);
                 EditorRequest::None
             }
             ViewRequest::InvalidateContentSession { view_index } => {
@@ -6152,6 +6205,14 @@ impl App {
                 self.open_tag_menu_for_content(view_index, pane_id);
                 EditorRequest::None
             }
+            ViewRequest::OpenOptionMenuForNode {
+                view_index,
+                pane_id,
+                config,
+            } => {
+                self.open_option_menu_for_content(view_index, pane_id, config);
+                EditorRequest::None
+            }
             _ => EditorRequest::None,
         }
     }
@@ -6196,6 +6257,7 @@ impl App {
         node_id: String,
         action_name: String,
         confirmed: bool,
+        value: Option<String>,
     ) {
         let adapter = self
             .content_view(view_index)
@@ -6221,6 +6283,9 @@ impl App {
                 marked,
                 confirmed,
                 query,
+                // Frontend-sourced value for value-accepting actions (e.g.
+                // an `option_menu` toggle hands over the chosen option id).
+                value,
             };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.
@@ -7937,7 +8002,7 @@ impl App {
                 // Re-invoke the same action on the same node, now with
                 // `confirmed: true`, so the adapter does the work instead of
                 // returning another `Confirm`.
-                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, true);
+                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, true, None);
             }
             PendingConfirmation::BulkDeleteStaleLinks(link_ids) => {
                 let repo = Arc::clone(&self.link_repo);
