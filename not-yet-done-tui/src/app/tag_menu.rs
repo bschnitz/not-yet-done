@@ -42,7 +42,7 @@ impl App {
     }
 
     /// Open the tag menu from a content/adapter tab (a `type: tag` action,
-    /// e.g. the Tasks-(A) `T` key). Resolves the focused pane's selected
+    /// e.g. the Tasks `T` key). Resolves the focused pane's selected
     /// node to a task id and pins the menu to it; the menu then assigns,
     /// creates and deletes tags exactly as on the native tab, refreshing
     /// this pane afterwards. Tags are a task concept, so a non-task node
@@ -159,7 +159,7 @@ impl App {
     /// Return the task id eligible for tag assignment, or `None` when
     /// there is no eligible target. The target is set by
     /// [`Self::open_tag_menu_for_content`] from the selected content node
-    /// (e.g. the Tasks-(A) `T` key).
+    /// (e.g. the Tasks `T` key).
     fn tag_assign_target(&self) -> Option<Uuid> {
         self.content_tag_target.as_ref().map(|target| target.task_id)
     }

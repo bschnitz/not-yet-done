@@ -313,14 +313,15 @@ Async-Ergebnisse treffen über zwei `tokio::mpsc::Unbounded`-Channels ein:
 
 ### Views-Schicht
 
-Zwei View-Familien, jede besitzt ihren State selbst:
+Eine einzige View-Familie, die ihren State selbst besitzt:
 
-- **TrackingsView** (`trackings_view.rs`) — Zeiterfassung; aktive Trackings
-  mit live aktualisierter Dauer-Spalte (adaptives Tick-Intervall).
 - **ContentView** (`content_view.rs`) — generischer, adapter-getriebener
   Baum-View, einer pro konfiguriertem Adapter. Pro Drill-Down-Kontext ein
   **ContentPane** mit eigenem `nav_stack`, `items`, Such-, Sort- und
-  Pagination-State; Split-Panes verschalten mehrere Panes.
+  Pagination-State; Split-Panes verschalten mehrere Panes. Auch Tasks und
+  Zeiterfassung (Trackings) laufen über ContentView — als adapter-getriebene
+  Tabs mit live aktualisierter Dauer-Spalte (adaptives Tick-Intervall),
+  nicht mehr als eigene View-Familie.
 
 Tree-Darstellung läuft über `not-yet-done-forest` (verschachtelte Knoten →
 flache Zeilenliste) auf Basis von `not-yet-done-table` (Spalten-Layout).

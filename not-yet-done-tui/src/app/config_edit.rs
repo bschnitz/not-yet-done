@@ -259,15 +259,6 @@ impl App {
             Arc::clone(&shared_theme),
             &new_keybindings,
         );
-        let mut trackings_view = crate::views::trackings_view::TrackingsView::new(
-            Arc::clone(&shared_theme),
-            new_keybindings.clone(),
-            std::sync::Arc::clone(&self.tracking_repo),
-            std::sync::Arc::clone(&self.saved_query_repo),
-            std::sync::Arc::clone(&self.settings_repo),
-        );
-        trackings_view.set_taskpath_separator(new_config.tracking.taskpath_separator.clone());
-
         let mut notification_bar =
             crate::components::notification_bar::NotificationBarComponent::new(Arc::clone(
                 &shared_theme,
@@ -289,7 +280,6 @@ impl App {
         self.theme = new_theme;
         self.tab_bar = tab_bar;
         self.status_bar = status_bar;
-        self.trackings_view = trackings_view;
         self.notification_bar = notification_bar;
         self.content_views = new_content_views;
         // The `tabs:` section and/or the view set may have changed.

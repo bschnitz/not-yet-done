@@ -9,19 +9,16 @@ use tuirealm::component::Component;
 
 use crate::app::App;
 use crate::tabs::Tab;
-use crate::ui::trackings;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Each view owns its own action bar; ask the active view for its height.
-    let action_bar_height = match app.active_tab {
-        Tab::Trackings => app.trackings_view.action_bar_height(area.width),
-        Tab::Content(i) => app
-            .content_view(i)
-            .map(|cv| cv.action_bar_height(area.width))
-            .unwrap_or(0),
-    };
+    let Tab::Content(active_idx) = app.active_tab;
+    let action_bar_height = app
+        .content_view(active_idx)
+        .map(|cv| cv.action_bar_height(area.width))
+        .unwrap_or(0);
 
     let notification_height = app.notification_bar.required_height(area.width);
     let status_bar_height = app.status_bar.required_height(area.width);
@@ -48,13 +45,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     if action_bar_height > 0 {
         let bar_area = chunks[idx];
-        match app.active_tab {
-            Tab::Trackings => app.trackings_view.render_action_bar(frame, bar_area),
-            Tab::Content(i) => {
-                if let Some(cv) = app.content_view_mut(i) {
-                    cv.render_action_bar(frame, bar_area);
-                }
-            }
+        if let Some(cv) = app.content_view_mut(active_idx) {
+            cv.render_action_bar(frame, bar_area);
         }
         idx += 1;
     }
@@ -62,35 +54,33 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let content_area = chunks[idx];
     idx += 1;
 
-    match app.active_tab {
-        Tab::Trackings => trackings::render(frame, content_area, app),
-        Tab::Content(idx) => {
-            // Inline error bar above the content view, mirroring the
-            // tasks/trackings render path so adapter-action errors
-            // (`set_query_error(Some(_))`) are visible on Content tabs too.
-            let error_height = app.query_error_bar.required_height(content_area.width);
-            let mut constraints: Vec<Constraint> = Vec::new();
-            if error_height > 0 {
-                constraints.push(Constraint::Length(error_height));
-            }
-            constraints.push(Constraint::Fill(1));
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(content_area);
-            let mut row_idx = 0;
-            if error_height > 0 {
-                app.query_error_bar.view(frame, rows[row_idx]);
-                row_idx += 1;
-            }
-            if let Some(cv) = app.content_view_mut(idx) {
-                cv.view(frame, rows[row_idx]);
-            } else {
-                // Broken content slot: show the configuration error
-                // panel in the content area (Phase 3 placeholder; final
-                // theming lives in `ui::content_error`).
-                crate::ui::content_error::render(frame, rows[row_idx], app, idx);
-            }
+    {
+        let content_idx = active_idx;
+        // Inline error bar above the content view, mirroring the
+        // tasks render path so adapter-action errors
+        // (`set_query_error(Some(_))`) are visible on Content tabs too.
+        let error_height = app.query_error_bar.required_height(content_area.width);
+        let mut constraints: Vec<Constraint> = Vec::new();
+        if error_height > 0 {
+            constraints.push(Constraint::Length(error_height));
+        }
+        constraints.push(Constraint::Fill(1));
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(content_area);
+        let mut row_idx = 0;
+        if error_height > 0 {
+            app.query_error_bar.view(frame, rows[row_idx]);
+            row_idx += 1;
+        }
+        if let Some(cv) = app.content_view_mut(content_idx) {
+            cv.view(frame, rows[row_idx]);
+        } else {
+            // Broken content slot: show the configuration error
+            // panel in the content area (Phase 3 placeholder; final
+            // theming lives in `ui::content_error`).
+            crate::ui::content_error::render(frame, rows[row_idx], app, content_idx);
         }
     }
 
@@ -149,14 +139,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         popup.view(frame, area);
     }
 
-    // Overlay: :script fuzzy menu (also bound to `x` in Trackings).
+    // Overlay: :script fuzzy menu.
     if app.script_menu.is_open() {
         app.script_menu.render(frame, area);
-    }
-
-    // Overlay: trackings query menu (q).
-    if app.active_tab == Tab::Trackings && app.trackings_view.has_query_menu() {
-        app.trackings_view.render_query_menu(frame, area);
     }
 
     // Overlay: :tag tag-management menu.

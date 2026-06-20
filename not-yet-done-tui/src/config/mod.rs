@@ -13,8 +13,8 @@ pub mod view_config;
 
 pub use keybindings::{
     CommonAction, ContentAction, FormAction, GlobalAction, KeyBindingConfig, QueryMenuAction,
-    TrackingsAction, WindowAction,
+    WindowAction,
 };
-pub use tabs::{TabSet, TabsConfig};
+pub use tabs::TabsConfig;
 pub use theme_config::ThemeConfig;
 pub use tui_config::{TuiConfig, TuiConfigService};

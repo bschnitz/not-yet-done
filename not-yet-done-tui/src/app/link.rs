@@ -182,28 +182,21 @@ impl App {
     /// intentionally excluded — its `qrow:N` IDs are per-query and
     /// can't survive a refresh, let alone a process restart.
     pub fn current_node_ref(&self) -> Option<NodeRef> {
-        match self.active_tab {
-            Tab::Trackings => {
-                let id = self.trackings_view.table.selected_id()?;
-                NodeRef::parse(&format!("tracking/{id}")).ok()
-            }
-            Tab::Content(idx) => {
-                let cv = self.content_view(idx)?;
-                let adapter = cv.adapter.as_ref()?;
-                let kind = adapter.adapter_type();
-                if kind == "postgres" {
-                    return None;
-                }
-                let node_id = cv.active_pane().selected_item_id()?;
-                NodeRef::parse(&format!(
-                    "{}/{}/{}",
-                    kind,
-                    adapter.instance_id(),
-                    node_id
-                ))
-                .ok()
-            }
+        let Tab::Content(idx) = self.active_tab;
+        let cv = self.content_view(idx)?;
+        let adapter = cv.adapter.as_ref()?;
+        let kind = adapter.adapter_type();
+        if kind == "postgres" {
+            return None;
         }
+        let node_id = cv.active_pane().selected_item_id()?;
+        NodeRef::parse(&format!(
+            "{}/{}/{}",
+            kind,
+            adapter.instance_id(),
+            node_id
+        ))
+        .ok()
     }
 
     /// Capture the current selection into [`App::marked_link`]. Notifies
@@ -710,13 +703,18 @@ impl App {
 
     fn open_link_tracking(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
         let id_str = tail.ok_or_else(|| LinkRouteError::Stale("missing tracking id".into()))?;
-        let id = Uuid::parse_str(id_str)
+        // Validate the id still parses, then report that the legacy
+        // `tracking/<uuid>` navigation target no longer exists. The native
+        // Trackings tab was retired in favour of the generic ContentAdapter
+        // "Trackings" tab; jumping a bare tracking uuid into that adapter
+        // tab is not wired yet (it would need the adapter's goto-by-id
+        // path), so such links degrade to a clear NotSupported instead of
+        // opening the wrong tab. The link rows themselves remain in the store.
+        Uuid::parse_str(id_str)
             .map_err(|_| LinkRouteError::Stale(format!("invalid tracking uuid: {id_str}")))?;
-        self.trackings_view.table.set_pending_focus(id);
-        // set_active_tab(Trackings) always spawns load_trackings — the
-        // pending_focus will be applied on the resulting set_data.
-        self.set_active_tab(Tab::Trackings);
-        Ok(())
+        Err(LinkRouteError::NotSupported(
+            "tracking links open in the legacy Trackings tab, which has been removed".into(),
+        ))
     }
 
     fn open_link_content(

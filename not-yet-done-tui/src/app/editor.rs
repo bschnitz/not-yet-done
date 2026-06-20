@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use crate::edit_session::{CommitOutcome, EditSession, EditorSpawnContext, FollowUp};
-use crate::query_filter;
 
 /// Result of an asynchronously running commit. Sent from the spawned task
 /// back to the main loop via `commit_tx`. `Reopen` carries the session back
@@ -26,15 +25,6 @@ fn parse_postgres_table_path(id: &str) -> Option<(String, String, String)> {
     } else {
         None
     }
-}
-
-/// Directory for tracking scripts: <data_dir>/not_yet_done/tracking/scripts/
-pub(crate) fn tracking_scripts_dir() -> std::path::PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("not_yet_done")
-        .join("tracking")
-        .join("scripts")
 }
 
 use super::App;
@@ -204,37 +194,6 @@ impl App {
             EditorRequest::None
         }
     }
-
-    /// Open the YAML query editor with a specific starting content. Used by the
-    /// new query menu when editing an existing entry or creating a new one.
-    /// For new entries the editor always starts from the empty template,
-    /// never from the currently applied filter.
-    pub fn open_editor_for_saved_query(
-        &mut self,
-        scope: &str,
-        name: String,
-        content: Option<String>,
-        is_new: bool,
-    ) -> EditorRequest {
-        match scope {
-            "tracking" => {
-                let content = if is_new {
-                    query_filter::tracking_template()
-                } else {
-                    content
-                        .or_else(|| self.trackings_view.active_filter_json.clone())
-                        .unwrap_or_else(query_filter::tracking_template)
-                };
-                let session = crate::edit_session::TrackingQueryFilterSession::new(name, is_new, content);
-                self.open_session(Box::new(session))
-            }
-            other => {
-                self.notify_error(format!("No saved-query editor for scope '{other}'"));
-                EditorRequest::None
-            }
-        }
-    }
-
 
     /// Open the Postgres scripts menu (the new `q` keybind on the
     /// `tables` subtab). Parses the selected table-node id, lists
@@ -706,15 +665,8 @@ impl App {
                 self.notify(message);
                 self.reload_content_pane_current_level(view_index, pane_id);
             }
-            FollowUp::ApplyTrackingFilter { content } => {
-                self.apply_tracking_query_filter(&content);
-            }
             FollowUp::ApplyContentFilter { view_index, content, save_name } => {
                 self.apply_content_query_live(&content, view_index, save_name.as_deref());
-            }
-            FollowUp::CloseTrackingFilter { content, name, is_new } => {
-                self.apply_tracking_query_filter(&content);
-                self.process_tracking_query_filter_close(&name, is_new).await;
             }
             FollowUp::CloseContentQuery { view_index, content, save_name, is_new } => {
                 self.process_content_query_edit(&content, view_index, save_name.as_deref(), is_new);

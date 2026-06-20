@@ -13482,7 +13482,7 @@ mod tests {
         }
     }
 
-    /// Regression (Tasks-(A) delete-last-child): a reload whose fresh subtree
+    /// Regression (Tasks delete-last-child): a reload whose fresh subtree
     /// reports a node as a genuine leaf (`has_children == Some(false)`, empty
     /// `children`) must positively clear that node's previously-cached
     /// children and drop it from `expanded`. Otherwise the stale rows keep
@@ -17273,7 +17273,7 @@ views:
 
     #[test]
     fn grouped_recursive_tree_cascade_expands_below_depth_two() {
-        // Repro for "Trackings (A) tree only opens the top two levels":
+        // Repro for "Trackings tree only opens the top two levels":
         // bucket(0) → t1(1) → t2(2) → t3(3, leaf). The cascade must keep
         // descending past depth 2 exactly like the uniform tree does.
         let config = grouped_recursive_tree_config();
@@ -17356,7 +17356,7 @@ views:
 
     #[test]
     fn cascade_stays_armed_while_a_sibling_branch_is_still_in_flight() {
-        // Live repro for "Trackings (A) tree only opens the top two levels":
+        // Live repro for "Trackings tree only opens the top two levels":
         // the `expand_depth: all` cascade is pumped once per async
         // `TreeChildren` arrival (drive_tree_auto_expand). With two sibling
         // branches expanding concurrently, one branch can bottom out (a leaf
@@ -18245,7 +18245,7 @@ views:
     }
 
     fn group_headers_tree_config() -> ViewFileConfig {
-        // Trackings-(A)-tree shape: bucket root level + recursive item level.
+        // Trackings-tree shape: bucket root level + recursive item level.
         let mut config = uniform_recursive_config();
         config.views[0].node_type = "mock:bucket".into();
         config.views[0].group_by = Some(GroupBy {
