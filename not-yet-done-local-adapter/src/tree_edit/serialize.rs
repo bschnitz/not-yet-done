@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use not_yet_done_core::entity::task::{Model as Task, TaskStatus};
+use not_yet_done_task_core::entity::task::{Model as Task, TaskStatus};
 use uuid::Uuid;
 
 /// Serialize the subtree rooted at `root` into markdown.

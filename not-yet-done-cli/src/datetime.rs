@@ -1,5 +1,5 @@
 use chrono::{DateTime, FixedOffset, Local, NaiveTime, Utc};
-use not_yet_done_core::local_context::LocalContext;
+use not_yet_done_task_core::local_context::LocalContext;
 
 /// A parsed datetime, always stored as UTC internally.
 /// User input without explicit timezone is interpreted as local time.

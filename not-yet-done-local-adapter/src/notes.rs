@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use uuid::Uuid;
-use not_yet_done_core::entity::task::Model as Task;
+use not_yet_done_task_core::entity::task::Model as Task;
 
 /// Base directory for task notes.
 pub fn notes_dir() -> PathBuf {

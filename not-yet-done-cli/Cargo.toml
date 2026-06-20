@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 not-yet-done-core    = { path = "../not-yet-done-core" }
+not-yet-done-task-core = { path = "../not-yet-done-task-core" }
+not-yet-done-filter  = { path = "../not-yet-done-filter" }
 sea-orm              = { workspace = true }
 shaku                = { workspace = true }
 tokio                = { workspace = true }

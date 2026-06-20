@@ -13,6 +13,8 @@ dirs        = { workspace = true }
 slug        = "0.1"
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-core    = { path = "../not-yet-done-core" }
+not-yet-done-task-core = { path = "../not-yet-done-task-core" }
+not-yet-done-filter  = { path = "../not-yet-done-filter" }
 
 [dev-dependencies]
 tokio = { workspace = true }

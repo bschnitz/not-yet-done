@@ -13,11 +13,11 @@ pub mod cli {
         #[arg(long, help = "Symbol/label prefix (free-form text)")] symbol: Option<String>,
         #[arg(long, help = "Create as project-specific tag (name or ID)")] project: Option<String>,
     ) -> u8 {
-        let result: Result<String, not_yet_done_core::error::AppError> =
+        let result: Result<String, not_yet_done_task_core::error::AppError> =
             crate::run_async(|module| async move {
                 use shaku::HasComponent;
-                use not_yet_done_core::repository::TagStyle;
-                use not_yet_done_core::service::TagService;
+                use not_yet_done_task_core::repository::TagStyle;
+                use not_yet_done_task_core::service::TagService;
                 let service: &dyn TagService = module.resolve_ref();
                 let style = TagStyle { fg_color: fg, bg_color: bg, symbol };
                 if let Some(proj) = project {
@@ -39,10 +39,10 @@ pub mod cli {
         #[arg(long, help = "Show only tags for this project (name or ID)")] project: Option<String>,
         #[arg(long, help = "Show only global tags")] global: bool,
     ) -> u8 {
-        let result: Result<Vec<String>, not_yet_done_core::error::AppError> =
+        let result: Result<Vec<String>, not_yet_done_task_core::error::AppError> =
             crate::run_async(|module| async move {
                 use shaku::HasComponent;
-                use not_yet_done_core::service::{TagItem, TagService};
+                use not_yet_done_task_core::service::{TagItem, TagService};
                 let service: &dyn TagService = module.resolve_ref();
 
                 if let Some(proj) = project {
@@ -94,11 +94,11 @@ pub mod cli {
         #[arg(long, help = "New background color (empty string clears)")] bg: Option<String>,
         #[arg(long, help = "New symbol (empty string clears)")] symbol: Option<String>,
     ) -> u8 {
-        let result: Result<String, not_yet_done_core::error::AppError> =
+        let result: Result<String, not_yet_done_task_core::error::AppError> =
             crate::run_async(|module| async move {
                 use shaku::HasComponent;
-                use not_yet_done_core::repository::TagStylePatch;
-                use not_yet_done_core::service::{TagItem, TagService};
+                use not_yet_done_task_core::repository::TagStylePatch;
+                use not_yet_done_task_core::service::{TagItem, TagService};
                 let service: &dyn TagService = module.resolve_ref();
                 let patch = TagStylePatch {
                     fg_color: fg.map(empty_to_none),
@@ -127,7 +127,7 @@ pub mod cli {
     /// color, unknown project, malformed YAML) re-open the editor with
     /// a `# ERROR:` header so the user can correct the input.
     pub fn new() -> u8 {
-        use not_yet_done_core::service::{
+        use not_yet_done_task_core::service::{
             annotate_error, new_tag_template, normalize, parse_draft,
         };
         let mut content = new_tag_template();
@@ -175,7 +175,7 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::TagService;
+            use not_yet_done_task_core::service::TagService;
             let service: &dyn TagService = module.resolve_ref();
             service.delete(id).await
         });
@@ -248,11 +248,11 @@ pub mod cli {
         name: String,
         style: TagStyleArgs,
         project: Option<String>,
-    ) -> Result<String, not_yet_done_core::error::AppError> {
+    ) -> Result<String, not_yet_done_task_core::error::AppError> {
         crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::repository::TagStyle;
-            use not_yet_done_core::service::TagService;
+            use not_yet_done_task_core::repository::TagStyle;
+            use not_yet_done_task_core::service::TagService;
             let service: &dyn TagService = module.resolve_ref();
             let s = TagStyle {
                 fg_color: style.fg,

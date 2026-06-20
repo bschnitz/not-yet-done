@@ -20,11 +20,11 @@ pub mod cli {
         parallel: bool,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use sea_orm::prelude::Uuid;
             use shaku::HasComponent;
             let task_id = Uuid::parse_str(&task_id)
-                .map_err(|_| not_yet_done_core::error::AppError::InvalidId(task_id))?;
+                .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(task_id))?;
             let service: &dyn TrackingService = module.resolve_ref();
             service.start(task_id, parallel).await
         });
@@ -53,14 +53,14 @@ pub mod cli {
         task_id: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use sea_orm::prelude::Uuid;
             use shaku::HasComponent;
 
             let task_id = match task_id {
                 Some(id) => Some(
                     Uuid::parse_str(&id)
-                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?,
+                        .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?,
                 ),
                 None => None,
             };
@@ -128,7 +128,7 @@ pub mod cli {
                 .single()
                 .unwrap()
                 .to_utc();
-            not_yet_done_core::local_context::LocalContext::new(utc, tz)
+            not_yet_done_task_core::local_context::LocalContext::new(utc, tz)
         });
 
         let to_ctx = to.map(|d| d.into()).unwrap_or_else(|| {
@@ -139,7 +139,7 @@ pub mod cli {
                 .single()
                 .unwrap()
                 .to_utc();
-            not_yet_done_core::local_context::LocalContext::new(utc, tz)
+            not_yet_done_task_core::local_context::LocalContext::new(utc, tz)
         });
 
         if from_ctx.utc > to_ctx.utc {
@@ -148,14 +148,14 @@ pub mod cli {
         }
 
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use sea_orm::prelude::Uuid;
             use shaku::HasComponent;
 
             let task_id = match task_id {
                 Some(id) => Some(
                     Uuid::parse_str(&id)
-                        .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?,
+                        .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?,
                 ),
                 None => None,
             };
@@ -253,7 +253,7 @@ pub mod cli {
         };
 
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use shaku::HasComponent;
             let service: &dyn TrackingService = module.resolve_ref();
             service.restore_tracking(entry_id).await
@@ -318,10 +318,10 @@ pub mod cli {
             None => None,
         };
 
-        let at_ctx: not_yet_done_core::local_context::LocalContext = at.into();
+        let at_ctx: not_yet_done_task_core::local_context::LocalContext = at.into();
 
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use shaku::HasComponent;
             let service: &dyn TrackingService = module.resolve_ref();
             service.split_tracking(entry_id, at_ctx, second_task_id).await
@@ -395,8 +395,8 @@ pub mod cli {
         #[arg(long, help = "Output result as JSON (for scripting)")]
         json: bool,
     ) -> u8 {
-        use not_yet_done_core::entity::granularity::Granularity;
-        use not_yet_done_core::service::{GravityDirection, MoveOptions};
+        use not_yet_done_task_core::entity::granularity::Granularity;
+        use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
         use sea_orm::prelude::Uuid;
 
         let entry_id = match Uuid::parse_str(&entry_id) {
@@ -426,10 +426,10 @@ pub mod cli {
             offset: offset.map(|o| o.duration),
         };
 
-        let start_ctx: not_yet_done_core::local_context::LocalContext = start.into();
+        let start_ctx: not_yet_done_task_core::local_context::LocalContext = start.into();
 
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use shaku::HasComponent;
             let service: &dyn TrackingService = module.resolve_ref();
             service.move_tracking(entry_id, start_ctx, options).await
@@ -508,7 +508,7 @@ pub mod cli {
         #[arg(long, help = "Pretty-print the JSON output")]
         pretty: bool,
     ) -> u8 {
-        use not_yet_done_core::service::{ExportOptions, SortDirection};
+        use not_yet_done_task_core::service::{ExportOptions, SortDirection};
         use sea_orm::prelude::Uuid;
         use serde::Serialize;
 
@@ -551,7 +551,7 @@ pub mod cli {
         };
 
         let result = crate::run_async(|module| async move {
-            use not_yet_done_core::service::TrackingService;
+            use not_yet_done_task_core::service::TrackingService;
             use shaku::HasComponent;
             let service: &dyn TrackingService = module.resolve_ref();
             service.export_trackings(options).await

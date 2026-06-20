@@ -14,7 +14,7 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::TaskService;
+            use not_yet_done_task_core::service::TaskService;
             let service: &dyn TaskService = module.resolve_ref();
             service.add_task(description, project, parent, tag, None, None).await
         });
@@ -30,7 +30,7 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::TaskService;
+            use not_yet_done_task_core::service::TaskService;
             let service: &dyn TaskService = module.resolve_ref();
             service.list_tasks(project).await
         });
@@ -52,10 +52,10 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::TaskService;
+            use not_yet_done_task_core::service::TaskService;
             use sea_orm::prelude::Uuid;
             let id = Uuid::parse_str(&id)
-                .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?;
+                .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn TaskService = module.resolve_ref();
             service.delete_task(id).await
         });
@@ -81,7 +81,7 @@ pub mod cli {
         #[arg(long, help = "Pretty-print the JSON output")]
         pretty: bool,
     ) -> u8 {
-        use not_yet_done_core::service::TaskService;
+        use not_yet_done_task_core::service::TaskService;
         use sea_orm::prelude::Uuid;
         use serde::Serialize;
         use shaku::HasComponent;
@@ -138,7 +138,7 @@ pub mod cli {
 
                 // Build a nested tree from the flat list.
                 let id_set: HashSet<Uuid> = tasks.iter().map(|t| t.id).collect();
-                let mut children_map: HashMap<Option<Uuid>, Vec<&not_yet_done_core::entity::task::Model>> = HashMap::new();
+                let mut children_map: HashMap<Option<Uuid>, Vec<&not_yet_done_task_core::entity::task::Model>> = HashMap::new();
                 for t in &tasks {
                     // Group by parent, but if parent is not in our set, treat as top-level.
                     let key = if t.parent_id.map(|p| id_set.contains(&p)).unwrap_or(false) {
@@ -151,7 +151,7 @@ pub mod cli {
 
                 fn build_tree(
                     parent: Option<Uuid>,
-                    children_map: &HashMap<Option<Uuid>, Vec<&not_yet_done_core::entity::task::Model>>,
+                    children_map: &HashMap<Option<Uuid>, Vec<&not_yet_done_task_core::entity::task::Model>>,
                 ) -> Vec<TreeNode> {
                     let Some(children) = children_map.get(&parent) else {
                         return vec![];
@@ -205,8 +205,8 @@ pub mod cli {
         #[arg(short = 'i', long, help = "Case-insensitive matching")]
         case_insensitive: bool,
     ) -> u8 {
-        use not_yet_done_core::service::TaskService;
-        use not_yet_done_core::task_path::{walk_task_path, WalkOutcome};
+        use not_yet_done_task_core::service::TaskService;
+        use not_yet_done_task_core::task_path::{walk_task_path, WalkOutcome};
         use serde::Serialize;
         use shaku::HasComponent;
 
@@ -296,10 +296,10 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::TaskService;
+            use not_yet_done_task_core::service::TaskService;
             use sea_orm::prelude::Uuid;
             let id = Uuid::parse_str(&id)
-                .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?;
+                .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn TaskService = module.resolve_ref();
             service.edit_task(id, description, add_project, remove_project, add_tag, remove_tag).await
         });

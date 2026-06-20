@@ -9,6 +9,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 not-yet-done-core = { path = "../not-yet-done-core" }
+not-yet-done-task-core = { path = "../not-yet-done-task-core" }
+not-yet-done-filter = { path = "../not-yet-done-filter" }
 waybar-cffi       = "0.1.1"
 serde             = { workspace = true }
 chrono            = { workspace = true }

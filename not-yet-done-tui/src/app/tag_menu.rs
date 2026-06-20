@@ -12,8 +12,8 @@ use crate::app::EditorRequest;
 use crate::components::tag_menu::{TagMenuEntry, TagMenuMessage};
 use crate::edit_session::TagFormSession;
 use crate::views::content_view::PaneId;
-use not_yet_done_core::repository::ResolvedTag;
-use not_yet_done_core::service::TagItem;
+use not_yet_done_task_core::repository::ResolvedTag;
+use not_yet_done_task_core::service::TagItem;
 
 /// Where a tag-menu opened from a content/adapter tab assigns tags and
 /// which pane to refresh once an assignment changes. Set by

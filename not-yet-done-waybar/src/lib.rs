@@ -14,8 +14,8 @@ use waybar_cffi::{
 
 use not_yet_done_core::config::ConfigServiceImpl;
 use not_yet_done_core::db;
-use not_yet_done_core::module::AppModule;
-use not_yet_done_core::repository::{
+use not_yet_done_task_core::module::TaskDomainModule;
+use not_yet_done_task_core::repository::{
     TaskRepositoryImpl, TaskRepositoryImplParameters,
     TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
@@ -82,14 +82,14 @@ fn truncate(s: &str, max: usize) -> String {
 // DB access
 // ---------------------------------------------------------------------------
 
-fn connect_db() -> Option<Arc<AppModule>> {
+fn connect_db() -> Option<Arc<TaskDomainModule>> {
     let config_service = ConfigServiceImpl::new();
     let rt = tokio::runtime::Runtime::new().ok()?;
     let db_url = rt.block_on(config_service.get_database_url()).ok()?;
     let db = rt.block_on(db::connect(&db_url, false)).ok()?;
 
     Some(Arc::new(
-        AppModule::builder()
+        TaskDomainModule::builder()
             .with_component_parameters::<TaskRepositoryImpl>(
                 TaskRepositoryImplParameters { db: Some(db.clone()) },
             )
@@ -101,9 +101,9 @@ fn connect_db() -> Option<Arc<AppModule>> {
 }
 
 /// Query active trackings and return (task_description, started_at).
-fn get_active_tracking(module: &AppModule) -> Option<(String, chrono::DateTime<Utc>)> {
-    use not_yet_done_core::repository::TrackingRepository;
-    use not_yet_done_core::service::TaskService;
+fn get_active_tracking(module: &TaskDomainModule) -> Option<(String, chrono::DateTime<Utc>)> {
+    use not_yet_done_task_core::repository::TrackingRepository;
+    use not_yet_done_task_core::service::TaskService;
     use shaku::HasComponent;
 
     let rt = tokio::runtime::Runtime::new().ok()?;
@@ -127,7 +127,7 @@ fn get_active_tracking(module: &AppModule) -> Option<(String, chrono::DateTime<U
 fn update_label(
     label: &Label,
     inner: &GtkBox,
-    module: &Option<Arc<AppModule>>,
+    module: &Option<Arc<TaskDomainModule>>,
     icon: &str,
     max_chars: usize,
 ) {

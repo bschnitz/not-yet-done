@@ -21,7 +21,7 @@ use sea_orm::{
 use shaku::Component;
 
 use crate::entity::query_shortcut::{self, ActiveModel};
-use crate::error::AppError;
+use crate::error::CoreError;
 
 #[async_trait]
 pub trait QueryShortcutRepository: shaku::Interface {
@@ -30,7 +30,7 @@ pub trait QueryShortcutRepository: shaku::Interface {
     async fn list_by_scope(
         &self,
         scope: &str,
-    ) -> Result<Vec<query_shortcut::Model>, AppError>;
+    ) -> Result<Vec<query_shortcut::Model>, CoreError>;
 
     /// Set or replace the shortcut for `(scope, name)`. Upsert — no
     /// distinction between "create" and "update".
@@ -39,11 +39,11 @@ pub trait QueryShortcutRepository: shaku::Interface {
         scope: &str,
         name: &str,
         shortcut: &str,
-    ) -> Result<query_shortcut::Model, AppError>;
+    ) -> Result<query_shortcut::Model, CoreError>;
 
     /// Remove the shortcut for `(scope, name)`. Missing rows are not an
     /// error (idempotent).
-    async fn unset(&self, scope: &str, name: &str) -> Result<(), AppError>;
+    async fn unset(&self, scope: &str, name: &str) -> Result<(), CoreError>;
 
     /// Rename the query referenced by all shortcuts under `scope`. Used
     /// when the user renames a saved query via the menu — the body
@@ -53,7 +53,7 @@ pub trait QueryShortcutRepository: shaku::Interface {
         scope: &str,
         old_name: &str,
         new_name: &str,
-    ) -> Result<(), AppError>;
+    ) -> Result<(), CoreError>;
 }
 
 #[derive(Component)]
@@ -68,7 +68,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
     async fn list_by_scope(
         &self,
         scope: &str,
-    ) -> Result<Vec<query_shortcut::Model>, AppError> {
+    ) -> Result<Vec<query_shortcut::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))
@@ -81,7 +81,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         scope: &str,
         name: &str,
         shortcut: &str,
-    ) -> Result<query_shortcut::Model, AppError> {
+    ) -> Result<query_shortcut::Model, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let existing = query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))
@@ -102,7 +102,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         Ok(model.insert(db).await?)
     }
 
-    async fn unset(&self, scope: &str, name: &str) -> Result<(), AppError> {
+    async fn unset(&self, scope: &str, name: &str) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         query_shortcut::Entity::delete_many()
             .filter(query_shortcut::Column::Scope.eq(scope))
@@ -117,7 +117,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         scope: &str,
         old_name: &str,
         new_name: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let row = query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))

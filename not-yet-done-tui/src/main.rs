@@ -29,9 +29,10 @@ use tabs::Tab;
 use not_yet_done_core::{
     config::{Config, ConfigServiceImpl, ConfigErrorKind},
     db,
-    module::AppModule,
-    service::{TagService, TaskService},
+    module::CoreModule,
 };
+use not_yet_done_task_core::module::TaskDomainModule;
+use not_yet_done_task_core::service::{TagService, TaskService};
 use ui::theme::Theme;
 
 #[tokio::main]
@@ -41,21 +42,28 @@ async fn main() -> Result<()> {
 
     let db_conn = db::connect(&db_url, true).await?;
 
-    let module = AppModule::builder()
-        .with_component_parameters::<not_yet_done_core::repository::TaskRepositoryImpl>(
-            not_yet_done_core::repository::TaskRepositoryImplParameters { db: Some(db_conn.clone()) },
+    // Two independent Shaku modules (C3 of the DB-split): the task domain
+    // and the app shell. They share no component, so each owns its own
+    // repositories and we resolve every service from the module that
+    // declares it.
+    let task_module = TaskDomainModule::builder()
+        .with_component_parameters::<not_yet_done_task_core::repository::TaskRepositoryImpl>(
+            not_yet_done_task_core::repository::TaskRepositoryImplParameters { db: Some(db_conn.clone()) },
         )
-        .with_component_parameters::<not_yet_done_core::repository::ProjectRepositoryImpl>(
-            not_yet_done_core::repository::ProjectRepositoryImplParameters { db: Some(db_conn.clone()) },
+        .with_component_parameters::<not_yet_done_task_core::repository::ProjectRepositoryImpl>(
+            not_yet_done_task_core::repository::ProjectRepositoryImplParameters { db: Some(db_conn.clone()) },
         )
-        .with_component_parameters::<not_yet_done_core::repository::TagRepositoryImpl>(
-            not_yet_done_core::repository::TagRepositoryImplParameters { db: Some(db_conn.clone()) },
+        .with_component_parameters::<not_yet_done_task_core::repository::TagRepositoryImpl>(
+            not_yet_done_task_core::repository::TagRepositoryImplParameters { db: Some(db_conn.clone()) },
         )
+        .with_component_parameters::<not_yet_done_task_core::repository::TrackingRepositoryImpl>(
+            not_yet_done_task_core::repository::TrackingRepositoryImplParameters { db: Some(db_conn.clone()) },
+        )
+        .build();
+
+    let core_module = CoreModule::builder()
         .with_component_parameters::<not_yet_done_core::repository::SettingsRepositoryImpl>(
             not_yet_done_core::repository::SettingsRepositoryImplParameters { db: Some(db_conn.clone()) },
-        )
-        .with_component_parameters::<not_yet_done_core::repository::TrackingRepositoryImpl>(
-            not_yet_done_core::repository::TrackingRepositoryImplParameters { db: Some(db_conn.clone()) },
         )
         .with_component_parameters::<not_yet_done_core::repository::SavedQueryRepositoryImpl>(
             not_yet_done_core::repository::SavedQueryRepositoryImplParameters { db: Some(db_conn.clone()) },
@@ -68,12 +76,12 @@ async fn main() -> Result<()> {
         )
         .build();
 
-    let task_service: Arc<dyn TaskService> = module.resolve();
-    let tag_service: Arc<dyn TagService> = module.resolve();
-    let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> = module.resolve();
-    let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> = module.resolve();
-    let tracking_repo: Arc<dyn not_yet_done_core::repository::TrackingRepository> = module.resolve();
-    let link_repo: Arc<dyn not_yet_done_core::repository::LinkRepository> = module.resolve();
+    let task_service: Arc<dyn TaskService> = task_module.resolve();
+    let tag_service: Arc<dyn TagService> = task_module.resolve();
+    let tracking_repo: Arc<dyn not_yet_done_task_core::repository::TrackingRepository> = task_module.resolve();
+    let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> = core_module.resolve();
+    let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> = core_module.resolve();
+    let link_repo: Arc<dyn not_yet_done_core::repository::LinkRepository> = core_module.resolve();
     let tui_config = TuiConfigService::load()?;
     let theme      = Theme::new(tui_config.theme.clone());
 
@@ -81,7 +89,7 @@ async fn main() -> Result<()> {
     // bridge them into their invalidation streams. One sender lives in
     // the CoreHandle for the whole process, so subscribers never see a
     // spurious "closed".
-    let domain_events = not_yet_done_core::events::new_bus(256);
+    let domain_events = not_yet_done_task_core::events::new_bus(256);
 
     // In-process handle into the host's own core services, threaded into
     // the local adapters (Tasks/Trackings). Captured by the factory

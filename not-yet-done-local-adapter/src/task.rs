@@ -1,5 +1,5 @@
 //! `TaskAdapter` — an in-process [`ContentAdapter`] over the host's own
-//! [`TaskService`](not_yet_done_core::service::TaskService).
+//! [`TaskService`](not_yet_done_task_core::service::TaskService).
 //!
 //! Unlike the remote adapters this one has no network and no opaque YAML
 //! config: its backing store is the [`CoreHandle`] threaded in from the
@@ -35,7 +35,7 @@
 //!   [`apply_tracking`], so it respects the host's exclusivity policy.
 //! - **delete** (`DeleteSelf`) — recursive delete of the task subtree.
 //! - **undelete** — restores the most recently deleted task(s) via
-//!   [`TaskService::undelete_last`](not_yet_done_core::service::TaskService::undelete_last);
+//!   [`TaskService::undelete_last`](not_yet_done_task_core::service::TaskService::undelete_last);
 //!   exposed on the task node (the selected row) since it needs no target.
 //! - **reparent** (mark-move / paste-move, M7) — the adapter performs the
 //!   move inside [`Node::invoke_action`] from [`ActionContext::marked`],
@@ -59,9 +59,9 @@ use not_yet_done_content::{
     Result, SavedQueryStore, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode, TreeFindHit,
     TreeSearchResults,
 };
-use not_yet_done_core::entity::task;
-use not_yet_done_core::error::AppError;
-use not_yet_done_core::events::{DomainEvent, DomainEventReceiver};
+use not_yet_done_task_core::entity::task;
+use not_yet_done_task_core::error::AppError;
+use not_yet_done_task_core::events::{DomainEvent, DomainEventReceiver};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
@@ -533,8 +533,8 @@ fn status_icon(status: &task::TaskStatus) -> &'static str {
     }
 }
 
-fn tag_name(tag: &not_yet_done_core::repository::ResolvedTag) -> String {
-    use not_yet_done_core::repository::ResolvedTag;
+fn tag_name(tag: &not_yet_done_task_core::repository::ResolvedTag) -> String {
+    use not_yet_done_task_core::repository::ResolvedTag;
     match tag {
         ResolvedTag::Global(t) => t.name.clone(),
         ResolvedTag::Project(t) => t.name.clone(),
@@ -542,8 +542,8 @@ fn tag_name(tag: &not_yet_done_core::repository::ResolvedTag) -> String {
 }
 
 /// A tag's display symbol, if it has one.
-fn tag_symbol(tag: &not_yet_done_core::repository::ResolvedTag) -> Option<String> {
-    use not_yet_done_core::repository::ResolvedTag;
+fn tag_symbol(tag: &not_yet_done_task_core::repository::ResolvedTag) -> Option<String> {
+    use not_yet_done_task_core::repository::ResolvedTag;
     match tag {
         ResolvedTag::Global(t) => t.symbol.clone(),
         ResolvedTag::Project(t) => t.symbol.clone(),
@@ -554,7 +554,7 @@ fn tag_symbol(tag: &not_yet_done_core::repository::ResolvedTag) -> Option<String
 /// `tag_names` column. Mirrors the native `fmt_tag_symbols`/`fmt_tag_names`
 /// pair (in the TUI crate, which depends on this one, so the logic is
 /// duplicated here rather than shared).
-fn fmt_tag_names(tags: &[not_yet_done_core::repository::ResolvedTag]) -> String {
+fn fmt_tag_names(tags: &[not_yet_done_task_core::repository::ResolvedTag]) -> String {
     let mut names: Vec<String> = tags.iter().map(tag_name).collect();
     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
     names.join(", ")
@@ -562,7 +562,7 @@ fn fmt_tag_names(tags: &[not_yet_done_core::repository::ResolvedTag]) -> String 
 
 /// Concatenated tag symbols, ordered alphabetically by tag name; tags without
 /// a symbol are skipped — the `tag_symbols` column.
-fn fmt_tag_symbols(tags: &[not_yet_done_core::repository::ResolvedTag]) -> String {
+fn fmt_tag_symbols(tags: &[not_yet_done_task_core::repository::ResolvedTag]) -> String {
     let mut pairs: Vec<(String, String)> = tags
         .iter()
         .filter_map(|t| tag_symbol(t).map(|s| (tag_name(t), s)))
@@ -754,7 +754,7 @@ async fn resolve_match_set(
         Some(q) if !q.is_empty() => q,
         _ => return Ok(None),
     };
-    let parsed = not_yet_done_core::filter::query_filter::parse(raw)
+    let parsed = not_yet_done_task_core::filter::query_filter::parse(raw)
         .map_err(|e| ContentError::Other(Box::new(e)))?;
     let matches = handle
         .task_service
@@ -2579,8 +2579,8 @@ mod tests {
 
     #[test]
     fn tag_formatting_matches_native_sort_and_join() {
-        use not_yet_done_core::entity::global_tag;
-        use not_yet_done_core::repository::ResolvedTag;
+        use not_yet_done_task_core::entity::global_tag;
+        use not_yet_done_task_core::repository::ResolvedTag;
         let mk = |name: &str, symbol: Option<&str>| {
             ResolvedTag::Global(global_tag::Model {
                 id: Uuid::new_v4(),

@@ -24,14 +24,15 @@ slug        = { workspace = true }
 not-yet-done-macros = { workspace = true }
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-filter = { path = "../not-yet-done-filter" }
-# C2 bridge: the task/tracking/project/tag domain moved into
-# not-yet-done-task-core. core re-exports it under the historic
-# `not_yet_done_core::…` paths so consumers don't churn yet; C3 severs
-# this dependency and re-points consumers at task-core directly.
-not-yet-done-task-core = { path = "../not-yet-done-task-core" }
 diffy = "0.5.0"
 
 [dev-dependencies]
 tokio       = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
+# Dev-only: the dual-registry guard test (tests/c2_dual_registry_sync.rs)
+# needs task-core's entities linked so they self-register at runtime.
+# task-core does not depend on core, so this introduces no cycle and no
+# production dependency — db::connect() syncs the task registry purely by
+# the module-path glob string (C3 of the DB-split).
+not-yet-done-task-core = { path = "../not-yet-done-task-core" }

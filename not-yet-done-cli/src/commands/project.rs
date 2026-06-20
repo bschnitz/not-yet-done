@@ -12,7 +12,7 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::ProjectService;
+            use not_yet_done_task_core::service::ProjectService;
             let service: &dyn ProjectService = module.resolve_ref();
             service.add_project(name, description).await
         });
@@ -26,7 +26,7 @@ pub mod cli {
     pub fn list() -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::ProjectService;
+            use not_yet_done_task_core::service::ProjectService;
             let service: &dyn ProjectService = module.resolve_ref();
             service.list_projects().await
         });
@@ -51,10 +51,10 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::ProjectService;
+            use not_yet_done_task_core::service::ProjectService;
             use sea_orm::prelude::Uuid;
             let id = Uuid::parse_str(&id)
-                .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?;
+                .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn ProjectService = module.resolve_ref();
             service.edit_project(id, name, description).await
         });
@@ -71,10 +71,10 @@ pub mod cli {
     ) -> u8 {
         let result = crate::run_async(|module| async move {
             use shaku::HasComponent;
-            use not_yet_done_core::service::ProjectService;
+            use not_yet_done_task_core::service::ProjectService;
             use sea_orm::prelude::Uuid;
             let id = Uuid::parse_str(&id)
-                .map_err(|_| not_yet_done_core::error::AppError::InvalidId(id))?;
+                .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn ProjectService = module.resolve_ref();
             service.delete_project(id, cascade).await
         });

@@ -1,6 +1,6 @@
 //! Edit session for the YAML-based tag-form (create + edit).
 //!
-//! Wraps the host-agnostic helpers in [`not_yet_done_core::service`]
+//! Wraps the host-agnostic helpers in [`not_yet_done_task_core::service`]
 //! (template, parse, normalize, error annotation) and dispatches to
 //! [`TagService`] on commit. On validation/service failure we render
 //! the error as a `# ERROR:` block at the top of the buffer and ask
@@ -17,8 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use not_yet_done_core::repository::{TagStyle, TagStylePatch};
-use not_yet_done_core::service::{
+use not_yet_done_task_core::repository::{TagStyle, TagStylePatch};
+use not_yet_done_task_core::service::{
     annotate_error, edit_global_template, edit_project_template, new_tag_template,
     normalize, parse_draft, strip_error_block, TagService, TaskService,
 };
@@ -81,7 +81,7 @@ impl TagFormSession {
             // have to add.
             let items = tag_service.list_all().await.map_err(|e| e.to_string())?;
             for item in items {
-                if let not_yet_done_core::service::TagItem::Project { tag, project_name } = item {
+                if let not_yet_done_task_core::service::TagItem::Project { tag, project_name } = item {
                     if format!("project-tag:{}", tag.id) == id {
                         let template = edit_project_template(&tag, &project_name);
                         let label = format!("edit tag {}", tag.name);
