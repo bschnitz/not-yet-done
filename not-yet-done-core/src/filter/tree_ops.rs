@@ -6,7 +6,6 @@
 //! Must be called **before** passing the FilterExpr to the FilterBuilder.
 
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
-use uuid::Uuid;
 
 use crate::entity::task;
 use crate::error::AppError;
