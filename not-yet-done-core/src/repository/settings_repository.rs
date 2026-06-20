@@ -6,13 +6,13 @@ use sea_orm::{
 use shaku::Component;
 
 use crate::entity::settings::{self, ActiveModel};
-use crate::error::AppError;
+use crate::error::CoreError;
 
 #[async_trait]
 pub trait SettingsRepository: shaku::Interface {
-    async fn get(&self, key: &str) -> Result<Option<String>, AppError>;
-    async fn set(&self, key: &str, value: &str) -> Result<(), AppError>;
-    async fn delete(&self, key: &str) -> Result<(), AppError>;
+    async fn get(&self, key: &str) -> Result<Option<String>, CoreError>;
+    async fn set(&self, key: &str, value: &str) -> Result<(), CoreError>;
+    async fn delete(&self, key: &str) -> Result<(), CoreError>;
 }
 
 #[derive(Component)]
@@ -24,7 +24,7 @@ pub struct SettingsRepositoryImpl {
 
 #[async_trait]
 impl SettingsRepository for SettingsRepositoryImpl {
-    async fn get(&self, key: &str) -> Result<Option<String>, AppError> {
+    async fn get(&self, key: &str) -> Result<Option<String>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let row = settings::Entity::find()
             .filter(settings::Column::Key.eq(key))
@@ -33,7 +33,7 @@ impl SettingsRepository for SettingsRepositoryImpl {
         Ok(row.map(|r| r.value))
     }
 
-    async fn set(&self, key: &str, value: &str) -> Result<(), AppError> {
+    async fn set(&self, key: &str, value: &str) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
 
         // Try to find existing.
@@ -56,7 +56,7 @@ impl SettingsRepository for SettingsRepositoryImpl {
         Ok(())
     }
 
-    async fn delete(&self, key: &str) -> Result<(), AppError> {
+    async fn delete(&self, key: &str) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         settings::Entity::delete_many()
             .filter(settings::Column::Key.eq(key))

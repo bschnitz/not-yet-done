@@ -1,36 +1,23 @@
 use shaku::module;
 
-// App-shell components live in core; task-domain components moved to
-// not-yet-done-task-core (C2). The combined AppModule still wires both so
-// consumers keep resolving every service from one module. C3 splits this
-// into CoreModule + TaskDomainModule once the bridge is removed.
 use crate::repository::{
     LinkRepositoryImpl, QueryShortcutRepositoryImpl, SavedQueryRepositoryImpl,
     SettingsRepositoryImpl,
 };
 use crate::service::BackupServiceImpl;
-use not_yet_done_task_core::repository::{
-    ProjectRepositoryImpl, TagRepositoryImpl, TaskRepositoryImpl, TrackingRepositoryImpl,
-};
-use not_yet_done_task_core::service::{
-    ProjectServiceImpl, TagServiceImpl, TaskServiceImpl, TrackingServiceImpl,
-};
 
+// The app-shell domain (link / saved_query / settings / query_shortcut +
+// backup) wired as a Shaku module. The task domain lives in its own
+// `not_yet_done_task_core::module::TaskDomainModule` (C3 of the DB-split).
+// A host that needs both — the TUI — builds both modules and resolves each
+// service from the module that owns it.
 module! {
-    pub AppModule {
+    pub CoreModule {
         components = [
-            TaskRepositoryImpl,
-            ProjectRepositoryImpl,
-            TagRepositoryImpl,
-            TrackingRepositoryImpl,
             SavedQueryRepositoryImpl,
             QueryShortcutRepositoryImpl,
             SettingsRepositoryImpl,
             LinkRepositoryImpl,
-            TaskServiceImpl,
-            ProjectServiceImpl,
-            TagServiceImpl,
-            TrackingServiceImpl,
             BackupServiceImpl,
         ],
         providers = []

@@ -21,9 +21,9 @@
 use std::sync::Arc;
 
 use not_yet_done_content::Invalidation;
-use not_yet_done_core::events::{DomainEvent, DomainEventReceiver, DomainEventSender};
-use not_yet_done_core::repository::TrackingRepository;
-use not_yet_done_core::service::TaskService;
+use not_yet_done_task_core::events::{DomainEvent, DomainEventReceiver, DomainEventSender};
+use not_yet_done_task_core::repository::TrackingRepository;
+use not_yet_done_task_core::service::TaskService;
 use tokio::sync::broadcast;
 
 pub mod editor_templates;
@@ -53,7 +53,7 @@ pub use tracking::{TrackingAdapter, TrackingAdapterFactory};
 /// already encapsulate it, and re-exposing the ORM connection would leak
 /// a dependency the trait abstractions exist to hide.
 ///
-/// The `events` sender is the [domain-event bus](not_yet_done_core::events):
+/// The `events` sender is the [domain-event bus](not_yet_done_task_core::events):
 /// the host wires it once, the local adapters bridge the events they care
 /// about into their own invalidation stream (see [`spawn_event_bridge`]),
 /// and — once A1/A2 land — the services emit onto it so a tracking toggle
@@ -166,7 +166,7 @@ pub fn spawn_event_bridge(mut events: DomainEventReceiver, inv_tx: broadcast::Se
 mod tests {
     use super::*;
 
-    use not_yet_done_core::events::new_bus;
+    use not_yet_done_task_core::events::new_bus;
     use uuid::Uuid;
 
     #[test]

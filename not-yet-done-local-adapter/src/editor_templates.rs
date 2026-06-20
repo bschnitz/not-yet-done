@@ -17,7 +17,7 @@
 //! hoisting into `not-yet-done-content` as a shared frontmatter helper —
 //! see the A2 follow-up note in `docs/plan-adapterize-tasks-trackings.md`.
 
-use not_yet_done_core::entity::task::{Model as Task, TaskStatus};
+use not_yet_done_task_core::entity::task::{Model as Task, TaskStatus};
 use uuid::Uuid;
 
 /// Generate the markdown template for creating a new task.

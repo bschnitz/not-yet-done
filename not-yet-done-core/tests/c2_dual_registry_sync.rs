@@ -1,6 +1,16 @@
 //! C2 guard: db::connect with sync_schema must create BOTH the task-domain
 //! tables (registered under not_yet_done_task_core::entity::*) and the
 //! app-shell tables (not_yet_done_core::entity::*) into the one database.
+//!
+//! `not-yet-done-core` does NOT depend on `not-yet-done-task-core` (C3 of
+//! the DB-split): `db::connect` syncs the task registry purely by the
+//! module-path glob string, relying on the *calling binary* to have linked
+//! task-core so its entities self-register. The `extern crate` below makes
+//! this test binary link task-core exactly as the real hosts (TUI/CLI/
+//! Waybar) do — without it the linker drops the unreferenced crate and the
+//! task entities never register, so the glob would find nothing.
+extern crate not_yet_done_task_core;
+
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 #[tokio::test]

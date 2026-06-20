@@ -16,7 +16,7 @@ use uuid::Uuid;
 use not_yet_done_content::NodeRef;
 
 use crate::entity::link::{self, ActiveModel};
-use crate::error::AppError;
+use crate::error::CoreError;
 
 #[async_trait]
 pub trait LinkRepository: shaku::Interface {
@@ -27,25 +27,25 @@ pub trait LinkRepository: shaku::Interface {
         &self,
         source: &NodeRef,
         target: &NodeRef,
-    ) -> Result<link::Model, AppError>;
+    ) -> Result<link::Model, CoreError>;
 
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<link::Model>, AppError>;
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<link::Model>, CoreError>;
 
     /// Links pointing *out of* `source`. Newest first.
-    async fn outgoing(&self, source: &NodeRef) -> Result<Vec<link::Model>, AppError>;
+    async fn outgoing(&self, source: &NodeRef) -> Result<Vec<link::Model>, CoreError>;
 
     /// Links pointing *to* `target`. Newest first.
-    async fn incoming(&self, target: &NodeRef) -> Result<Vec<link::Model>, AppError>;
+    async fn incoming(&self, target: &NodeRef) -> Result<Vec<link::Model>, CoreError>;
 
     /// Count of outgoing + incoming for `node`. Used by the "has
     /// links" indicator column to avoid loading the rows themselves.
-    async fn count_for(&self, node: &NodeRef) -> Result<u64, AppError>;
+    async fn count_for(&self, node: &NodeRef) -> Result<u64, CoreError>;
 
-    async fn delete(&self, id: Uuid) -> Result<(), AppError>;
+    async fn delete(&self, id: Uuid) -> Result<(), CoreError>;
 
     /// Every link row. Used by the bulk-prune command to walk every
     /// ref and test it against the routing chain.
-    async fn list_all(&self) -> Result<Vec<link::Model>, AppError>;
+    async fn list_all(&self) -> Result<Vec<link::Model>, CoreError>;
 }
 
 #[derive(Component)]
@@ -61,7 +61,7 @@ impl LinkRepository for LinkRepositoryImpl {
         &self,
         source: &NodeRef,
         target: &NodeRef,
-    ) -> Result<link::Model, AppError> {
+    ) -> Result<link::Model, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let source_s = source.as_str().to_string();
         let target_s = target.as_str().to_string();
@@ -83,12 +83,12 @@ impl LinkRepository for LinkRepositoryImpl {
         Ok(model.insert(db).await?)
     }
 
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<link::Model>, AppError> {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<link::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(link::Entity::find_by_id(id).one(db).await?)
     }
 
-    async fn outgoing(&self, source: &NodeRef) -> Result<Vec<link::Model>, AppError> {
+    async fn outgoing(&self, source: &NodeRef) -> Result<Vec<link::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(link::Entity::find()
             .filter(link::Column::SourceRef.eq(source.as_str()))
@@ -97,7 +97,7 @@ impl LinkRepository for LinkRepositoryImpl {
             .await?)
     }
 
-    async fn incoming(&self, target: &NodeRef) -> Result<Vec<link::Model>, AppError> {
+    async fn incoming(&self, target: &NodeRef) -> Result<Vec<link::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(link::Entity::find()
             .filter(link::Column::TargetRef.eq(target.as_str()))
@@ -106,7 +106,7 @@ impl LinkRepository for LinkRepositoryImpl {
             .await?)
     }
 
-    async fn count_for(&self, node: &NodeRef) -> Result<u64, AppError> {
+    async fn count_for(&self, node: &NodeRef) -> Result<u64, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let s = node.as_str();
         Ok(link::Entity::find()
@@ -119,13 +119,13 @@ impl LinkRepository for LinkRepositoryImpl {
             .await?)
     }
 
-    async fn delete(&self, id: Uuid) -> Result<(), AppError> {
+    async fn delete(&self, id: Uuid) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         link::Entity::delete_by_id(id).exec(db).await?;
         Ok(())
     }
 
-    async fn list_all(&self) -> Result<Vec<link::Model>, AppError> {
+    async fn list_all(&self) -> Result<Vec<link::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(link::Entity::find()
             .order_by_desc(link::Column::CreatedAt)

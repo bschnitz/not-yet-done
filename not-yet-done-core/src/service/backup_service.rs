@@ -5,13 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::ConfigServiceImpl;
-use crate::error::AppError;
+use crate::error::CoreError;
 
 #[async_trait]
 pub trait BackupService: shaku::Interface {
-    async fn create_backup(&self) -> Result<String, AppError>;
-    async fn list_backups(&self) -> Result<Vec<String>, AppError>;
-    async fn restore_backup(&self, filename: &str) -> Result<String, AppError>;
+    async fn create_backup(&self) -> Result<String, CoreError>;
+    async fn list_backups(&self) -> Result<Vec<String>, CoreError>;
+    async fn restore_backup(&self, filename: &str) -> Result<String, CoreError>;
 }
 
 #[derive(Component)]
@@ -19,27 +19,27 @@ pub trait BackupService: shaku::Interface {
 pub struct BackupServiceImpl;
 
 impl BackupServiceImpl {
-    fn extract_db_path(db_url: &str) -> Result<PathBuf, AppError> {
+    fn extract_db_path(db_url: &str) -> Result<PathBuf, CoreError> {
         if db_url.starts_with("sqlite://") {
             let path_str = db_url.strip_prefix("sqlite://")
-                .ok_or_else(|| AppError::NotFileBasedDatabase)?;
+                .ok_or_else(|| CoreError::NotFileBasedDatabase)?;
             
             let path_str = path_str.split('?').next()
-                .ok_or_else(|| AppError::NotFileBasedDatabase)?;
+                .ok_or_else(|| CoreError::NotFileBasedDatabase)?;
             
             let path = Path::new(path_str);
             
             if !path.exists() {
-                return Err(AppError::DatabaseFileNotFound(path.to_path_buf()));
+                return Err(CoreError::DatabaseFileNotFound(path.to_path_buf()));
             }
             
             if !path.is_file() {
-                return Err(AppError::NotFileBasedDatabase);
+                return Err(CoreError::NotFileBasedDatabase);
             }
             
             Ok(path.to_path_buf())
         } else {
-            Err(AppError::NotFileBasedDatabase)
+            Err(CoreError::NotFileBasedDatabase)
         }
     }
 
@@ -50,7 +50,7 @@ impl BackupServiceImpl {
 
     /// Create a backup if none exists for today. Returns the path if a new
     /// backup was created, or None if one already existed.
-    pub async fn ensure_daily_backup(&self) -> Result<Option<String>, AppError> {
+    pub async fn ensure_daily_backup(&self) -> Result<Option<String>, CoreError> {
         let today_prefix = Utc::now().format("%Y%m%d").to_string();
         let backups = self.list_backups().await?;
         if backups.iter().any(|b| b.starts_with(&today_prefix)) {
@@ -59,13 +59,13 @@ impl BackupServiceImpl {
         self.create_backup().await.map(Some)
     }
 
-    fn cleanup_old_backups(backup_dir: &Path, max_count: usize) -> Result<(), AppError> {
+    fn cleanup_old_backups(backup_dir: &Path, max_count: usize) -> Result<(), CoreError> {
         if max_count == 0 {
             return Ok(());
         }
 
         let mut entries: Vec<_> = fs::read_dir(backup_dir)
-            .map_err(|e| AppError::BackupFailed(format!("Failed to read backup directory: {}", e)))?
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to read backup directory: {}", e)))?
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().is_file())
             .collect();
@@ -79,7 +79,7 @@ impl BackupServiceImpl {
         while entries.len() > max_count {
             if let Some(oldest) = entries.first() {
                 fs::remove_file(oldest.path())
-                    .map_err(|e| AppError::BackupFailed(format!("Failed to remove old backup: {}", e)))?;
+                    .map_err(|e| CoreError::BackupFailed(format!("Failed to remove old backup: {}", e)))?;
                 entries.remove(0);
             } else {
                 break;
@@ -92,39 +92,39 @@ impl BackupServiceImpl {
 
 #[async_trait]
 impl BackupService for BackupServiceImpl {
-    async fn create_backup(&self) -> Result<String, AppError> {
+    async fn create_backup(&self) -> Result<String, CoreError> {
         let config_service = ConfigServiceImpl::new();
 
         let db_url = config_service.get_database_url().await
-            .map_err(|e| AppError::BackupFailed(format!("Failed to get database URL: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get database URL: {}", e)))?;
 
         let db_path = Self::extract_db_path(&db_url)?;
 
         let config = config_service.get_config().await
-            .map_err(|e| AppError::BackupFailed(format!("Failed to get config: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
 
         let original_filename = db_path.file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| AppError::BackupFailed("Invalid database filename".to_string()))?;
+            .ok_or_else(|| CoreError::BackupFailed("Invalid database filename".to_string()))?;
 
         let backup_filename = Self::generate_backup_filename(original_filename);
         let backup_path = config.backup.directory.join(&backup_filename);
 
         fs::copy(&db_path, &backup_path)
-            .map_err(|e| AppError::BackupFailed(format!("Failed to copy database file: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to copy database file: {}", e)))?;
 
         Self::cleanup_old_backups(&config.backup.directory, config.backup.max_count)?;
 
         Ok(backup_path.to_string_lossy().to_string())
     }
 
-    async fn list_backups(&self) -> Result<Vec<String>, AppError> {
+    async fn list_backups(&self) -> Result<Vec<String>, CoreError> {
         let config_service = ConfigServiceImpl::new();
         let config = config_service.get_config().await
-            .map_err(|e| AppError::BackupFailed(format!("Failed to get config: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
 
         let mut backups: Vec<_> = fs::read_dir(&config.backup.directory)
-            .map_err(|e| AppError::BackupFailed(format!("Failed to read backup directory: {}", e)))?
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to read backup directory: {}", e)))?
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().is_file())
             .map(|entry| entry.file_name().to_string_lossy().to_string())
@@ -134,29 +134,29 @@ impl BackupService for BackupServiceImpl {
         Ok(backups)
     }
 
-    async fn restore_backup(&self, filename: &str) -> Result<String, AppError> {
+    async fn restore_backup(&self, filename: &str) -> Result<String, CoreError> {
         let config_service = ConfigServiceImpl::new();
 
         let db_url = config_service.get_database_url().await
-            .map_err(|e| AppError::BackupFailed(format!("Failed to get database URL: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get database URL: {}", e)))?;
 
         let db_path = Self::extract_db_path(&db_url)?;
 
         let config = config_service.get_config().await
-            .map_err(|e| AppError::BackupFailed(format!("Failed to get config: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
 
         let backup_path = config.backup.directory.join(filename);
 
         if !backup_path.exists() {
-            return Err(AppError::BackupFailed(format!("Backup file not found: {}", filename)));
+            return Err(CoreError::BackupFailed(format!("Backup file not found: {}", filename)));
         }
 
         if !backup_path.is_file() {
-            return Err(AppError::BackupFailed(format!("Backup is not a file: {}", filename)));
+            return Err(CoreError::BackupFailed(format!("Backup is not a file: {}", filename)));
         }
 
         fs::copy(&backup_path, &db_path)
-            .map_err(|e| AppError::BackupFailed(format!("Failed to restore database file: {}", e)))?;
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to restore database file: {}", e)))?;
 
         Ok(db_path.to_string_lossy().to_string())
     }

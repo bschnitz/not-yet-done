@@ -3,7 +3,7 @@
 //! Handles inconsistent indentation robustly by tracking the indent
 //! width per depth level top-down.
 
-use not_yet_done_core::entity::task::TaskStatus;
+use not_yet_done_task_core::entity::task::TaskStatus;
 
 /// A single parsed item from the markdown tree.
 /// Known flags that can appear between the marker and description.

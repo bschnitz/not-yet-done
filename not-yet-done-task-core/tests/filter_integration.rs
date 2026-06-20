@@ -21,9 +21,9 @@ use sea_orm::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use not_yet_done_core::entity::task::{self, ActiveModel, TaskStatus};
-use not_yet_done_core::filter::FilterExpr;
-use not_yet_done_core::repository::{TaskRepository, TaskRepositoryImpl, TaskRepositoryImplParameters};
+use not_yet_done_task_core::entity::task::{self, ActiveModel, TaskStatus};
+use not_yet_done_task_core::filter::FilterExpr;
+use not_yet_done_task_core::repository::{TaskRepository, TaskRepositoryImpl, TaskRepositoryImplParameters};
 
 // ---------------------------------------------------------------------------
 // Fixture types
@@ -197,17 +197,17 @@ async fn run_fixture(repo: &dyn TaskRepository, fixture_name: &str) {
 /// Sets up a fresh DB, seeds it, builds a repo, and returns it as a
 /// `Box<dyn TaskRepository>` together with the module that owns it.
 ///
-/// We use `AppModule` so the repo is properly wired; we extract it via
+/// We use `TaskDomainModule` so the repo is properly wired; we extract it via
 /// `HasComponent::resolve`.
 macro_rules! fresh_repo {
     () => {{
         use shaku::HasComponent;
-        use not_yet_done_core::module::AppModule;
+        use not_yet_done_task_core::module::TaskDomainModule;
 
         let db = setup_db().await;
         seed_tasks(&db).await;
 
-        let module = AppModule::builder()
+        let module = TaskDomainModule::builder()
             .with_component_parameters::<TaskRepositoryImpl>(
                 TaskRepositoryImplParameters { db: Some(db) }
             )

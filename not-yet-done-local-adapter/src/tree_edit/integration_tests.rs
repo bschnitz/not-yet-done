@@ -14,20 +14,18 @@ use sea_orm::{
 use shaku::HasComponent;
 use uuid::Uuid;
 
-use not_yet_done_core::entity::{
+use not_yet_done_task_core::entity::{
     global_tag, project, project_tag, task::{self, TaskStatus}, task_global_tag,
     task_project_tag, tracking,
 };
-use not_yet_done_core::module::AppModule;
-use not_yet_done_core::repository::{
+use not_yet_done_task_core::module::TaskDomainModule;
+use not_yet_done_task_core::repository::{
     TaskRepositoryImpl, TaskRepositoryImplParameters,
     ProjectRepositoryImpl, ProjectRepositoryImplParameters,
     TagRepositoryImpl, TagRepositoryImplParameters,
-    SavedQueryRepositoryImpl, SavedQueryRepositoryImplParameters,
-    SettingsRepositoryImpl, SettingsRepositoryImplParameters,
     TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
-use not_yet_done_core::service::TaskService;
+use not_yet_done_task_core::service::TaskService;
 
 use super::serialize::{serialize, short_id};
 use super::diff::apply_changes;
@@ -57,7 +55,7 @@ async fn setup() -> (Arc<dyn TaskService>, Arc<dyn TrackingRepository>, sea_orm:
         db.execute(&stmt).await.expect("schema creation failed");
     }
 
-    let module = AppModule::builder()
+    let module = TaskDomainModule::builder()
         .with_component_parameters::<TaskRepositoryImpl>(
             TaskRepositoryImplParameters { db: Some(db.clone()) },
         )
@@ -66,12 +64,6 @@ async fn setup() -> (Arc<dyn TaskService>, Arc<dyn TrackingRepository>, sea_orm:
         )
         .with_component_parameters::<TagRepositoryImpl>(
             TagRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<SavedQueryRepositoryImpl>(
-            SavedQueryRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<SettingsRepositoryImpl>(
-            SettingsRepositoryImplParameters { db: Some(db.clone()) },
         )
         .with_component_parameters::<TrackingRepositoryImpl>(
             TrackingRepositoryImplParameters { db: Some(db.clone()) },
@@ -545,7 +537,7 @@ fn build_task_adapter(
     tracking: Arc<dyn TrackingRepository>,
 ) -> Box<dyn not_yet_done_content::ContentAdapter> {
     use not_yet_done_content::AdapterFactory;
-    use not_yet_done_core::events::new_bus;
+    use not_yet_done_task_core::events::new_bus;
     let handle = crate::CoreHandle::new(service, tracking, new_bus(64), false);
     crate::task::TaskAdapterFactory::new(handle)
         .create("test", "{}")

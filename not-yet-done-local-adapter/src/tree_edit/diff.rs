@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use not_yet_done_core::entity::task::Model as Task;
-use not_yet_done_core::repository::TrackingRepository;
-use not_yet_done_core::service::TaskService;
+use not_yet_done_task_core::entity::task::Model as Task;
+use not_yet_done_task_core::repository::TrackingRepository;
+use not_yet_done_task_core::service::TaskService;
 
 use super::parse::{self, ParsedItem};
 use super::serialize::short_id;
@@ -232,7 +232,7 @@ fn ensure_depth(id_at_depth: &mut Vec<Option<Uuid>>, depth: usize) {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use not_yet_done_core::entity::task::TaskStatus;
+    use not_yet_done_task_core::entity::task::TaskStatus;
 
     fn task(id_prefix: &str, desc: &str, parent_prefix: Option<&str>, status: TaskStatus, priority: i32) -> Task {
         Task {

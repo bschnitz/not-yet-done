@@ -41,7 +41,7 @@ pub mod cli {
             }
         };
 
-        let parsed = match not_yet_done_core::filter::query_filter::parse(&content) {
+        let parsed = match not_yet_done_task_core::filter::query_filter::parse(&content) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Filter parse error: {e}");
@@ -50,7 +50,7 @@ pub mod cli {
         };
 
         if debug {
-            match not_yet_done_core::filter::query_filter::resolve_and_dump(&content) {
+            match not_yet_done_task_core::filter::query_filter::resolve_and_dump(&content) {
                 Ok(resolved) => eprintln!("--- Resolved filter ---\n{resolved}---"),
                 Err(e) => eprintln!("--- Could not dump resolved filter: {e} ---"),
             }
@@ -69,12 +69,12 @@ pub mod cli {
 }
 
 fn run_task_query(
-    expr: not_yet_done_core::filter::FilterExpr,
-    options: not_yet_done_core::filter::query_filter::QueryOptions,
+    expr: not_yet_done_task_core::filter::FilterExpr,
+    options: not_yet_done_task_core::filter::query_filter::QueryOptions,
     debug: bool,
 ) -> u8 {
     let result = crate::run_async(|module| async move {
-        use not_yet_done_core::service::TaskService;
+        use not_yet_done_task_core::service::TaskService;
         use shaku::HasComponent;
         let service: &dyn TaskService = module.resolve_ref();
         service.list_filtered_with_options(&expr, &options).await
@@ -109,9 +109,9 @@ fn run_task_query(
     }
 }
 
-fn run_tracking_query(expr: not_yet_done_core::filter::FilterExpr, debug: bool) -> u8 {
+fn run_tracking_query(expr: not_yet_done_task_core::filter::FilterExpr, debug: bool) -> u8 {
     let result = crate::run_async(|module| async move {
-        use not_yet_done_core::repository::TrackingRepository;
+        use not_yet_done_task_core::repository::TrackingRepository;
         use shaku::HasComponent;
         let repo: &dyn TrackingRepository = module.resolve_ref();
         repo.find_filtered(&expr).await

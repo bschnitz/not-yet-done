@@ -6,11 +6,9 @@ pub mod cli {
 
     #[command(about = "Create a backup of the database")]
     pub fn create() -> u8 {
-        let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
-            use not_yet_done_core::service::BackupService;
-            let service: &dyn BackupService = module.resolve_ref();
-            service.create_backup().await
+        let result = crate::run_async(|_module| async move {
+            use not_yet_done_core::service::{BackupService, BackupServiceImpl};
+            BackupServiceImpl.create_backup().await
         });
         match result {
             Ok(path) => { println!("✓ Backup erstellt: {}", path); 0 }
@@ -21,11 +19,9 @@ pub mod cli {
     /// List all available backups
     #[command(about = "List all available backups")]
     pub fn list() -> u8 {
-        let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
-            use not_yet_done_core::service::BackupService;
-            let service: &dyn BackupService = module.resolve_ref();
-            service.list_backups().await
+        let result = crate::run_async(|_module| async move {
+            use not_yet_done_core::service::{BackupService, BackupServiceImpl};
+            BackupServiceImpl.list_backups().await
         });
         match result {
             Ok(backups) if backups.is_empty() => {
@@ -47,11 +43,9 @@ pub mod cli {
     pub fn restore(
         #[arg(help = "Backup filename (e.g., 20260323-185627-nyd.db)")] filename: String,
     ) -> u8 {
-        let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
-            use not_yet_done_core::service::BackupService;
-            let service: &dyn BackupService = module.resolve_ref();
-            service.restore_backup(&filename).await
+        let result = crate::run_async(|_module| async move {
+            use not_yet_done_core::service::{BackupService, BackupServiceImpl};
+            BackupServiceImpl.restore_backup(&filename).await
         });
         match result {
             Ok(path) => {

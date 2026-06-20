@@ -4,9 +4,10 @@ use std::time::Instant;
 use std::collections::HashSet;
 
 use not_yet_done_core::repository::{
-    LinkRepository, QueryShortcutRepository, SettingsRepository, TrackingRepository,
+    LinkRepository, QueryShortcutRepository, SettingsRepository,
 };
-use not_yet_done_core::service::TaskService;
+use not_yet_done_task_core::repository::TrackingRepository;
+use not_yet_done_task_core::service::TaskService;
 use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
 
 use uuid::Uuid;
@@ -573,7 +574,7 @@ pub struct App {
     pub should_quit: bool,
 
     task_service: Arc<dyn TaskService>,
-    pub tag_service: Arc<dyn not_yet_done_core::service::TagService>,
+    pub tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
     pub query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
     settings_repo: Arc<dyn SettingsRepository>,
     tracking_repo: Arc<dyn TrackingRepository>,
@@ -833,7 +834,7 @@ impl App {
         config: TuiConfig,
         theme: Theme,
         task_service: Arc<dyn TaskService>,
-        tag_service: Arc<dyn not_yet_done_core::service::TagService>,
+        tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
         query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
         settings_repo: Arc<dyn SettingsRepository>,
         tracking_repo: Arc<dyn TrackingRepository>,

@@ -7,7 +7,7 @@ use shaku::Component;
 use uuid::Uuid;
 
 use crate::entity::saved_query::{self, ActiveModel};
-use crate::error::AppError;
+use crate::error::CoreError;
 
 #[async_trait]
 pub trait SavedQueryRepository: shaku::Interface {
@@ -21,16 +21,16 @@ pub trait SavedQueryRepository: shaku::Interface {
         name: &str,
         query: &str,
         shortcut: Option<&str>,
-    ) -> Result<saved_query::Model, AppError>;
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<saved_query::Model>, AppError>;
+    ) -> Result<saved_query::Model, CoreError>;
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<saved_query::Model>, CoreError>;
     async fn find_by_scope_and_name(
         &self,
         scope: &str,
         name: &str,
-    ) -> Result<Option<saved_query::Model>, AppError>;
-    async fn list_by_scope(&self, scope: &str) -> Result<Vec<saved_query::Model>, AppError>;
-    async fn update_shortcut(&self, id: Uuid, shortcut: Option<&str>) -> Result<(), AppError>;
-    async fn delete(&self, id: Uuid) -> Result<(), AppError>;
+    ) -> Result<Option<saved_query::Model>, CoreError>;
+    async fn list_by_scope(&self, scope: &str) -> Result<Vec<saved_query::Model>, CoreError>;
+    async fn update_shortcut(&self, id: Uuid, shortcut: Option<&str>) -> Result<(), CoreError>;
+    async fn delete(&self, id: Uuid) -> Result<(), CoreError>;
 }
 
 #[derive(Component)]
@@ -48,7 +48,7 @@ impl SavedQueryRepository for SavedQueryRepositoryImpl {
         name: &str,
         query: &str,
         shortcut: Option<&str>,
-    ) -> Result<saved_query::Model, AppError> {
+    ) -> Result<saved_query::Model, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
 
         if let Some(existing) = self.find_by_scope_and_name(scope, name).await? {
@@ -70,7 +70,7 @@ impl SavedQueryRepository for SavedQueryRepositoryImpl {
         Ok(model.insert(db).await?)
     }
 
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<saved_query::Model>, AppError> {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<saved_query::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(saved_query::Entity::find_by_id(id).one(db).await?)
     }
@@ -79,7 +79,7 @@ impl SavedQueryRepository for SavedQueryRepositoryImpl {
         &self,
         scope: &str,
         name: &str,
-    ) -> Result<Option<saved_query::Model>, AppError> {
+    ) -> Result<Option<saved_query::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(saved_query::Entity::find()
             .filter(saved_query::Column::Scope.eq(scope))
@@ -88,7 +88,7 @@ impl SavedQueryRepository for SavedQueryRepositoryImpl {
             .await?)
     }
 
-    async fn list_by_scope(&self, scope: &str) -> Result<Vec<saved_query::Model>, AppError> {
+    async fn list_by_scope(&self, scope: &str) -> Result<Vec<saved_query::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(saved_query::Entity::find()
             .filter(saved_query::Column::Scope.eq(scope))
@@ -96,7 +96,7 @@ impl SavedQueryRepository for SavedQueryRepositoryImpl {
             .await?)
     }
 
-    async fn update_shortcut(&self, id: Uuid, shortcut: Option<&str>) -> Result<(), AppError> {
+    async fn update_shortcut(&self, id: Uuid, shortcut: Option<&str>) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         if let Some(existing) = saved_query::Entity::find_by_id(id).one(db).await? {
             let mut model: ActiveModel = existing.into();
@@ -106,7 +106,7 @@ impl SavedQueryRepository for SavedQueryRepositoryImpl {
         Ok(())
     }
 
-    async fn delete(&self, id: Uuid) -> Result<(), AppError> {
+    async fn delete(&self, id: Uuid) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         saved_query::Entity::delete_by_id(id).exec(db).await?;
         Ok(())

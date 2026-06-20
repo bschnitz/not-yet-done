@@ -12,15 +12,13 @@ use sea_orm::{
 use shaku::HasComponent;
 use uuid::Uuid;
 
-use not_yet_done_core::entity::task::{self, TaskStatus};
-use not_yet_done_core::module::AppModule;
-use not_yet_done_core::repository::{
+use not_yet_done_task_core::entity::task::{self, TaskStatus};
+use not_yet_done_task_core::module::TaskDomainModule;
+use not_yet_done_task_core::repository::{
     TaskOp, TaskRepository, TaskRepositoryImpl, TaskRepositoryImplParameters,
     ProjectRepositoryImpl, ProjectRepositoryImplParameters,
     TagRepositoryImpl, TagRepositoryImplParameters,
     TrackingRepositoryImpl, TrackingRepositoryImplParameters,
-    SavedQueryRepositoryImpl, SavedQueryRepositoryImplParameters,
-    SettingsRepositoryImpl, SettingsRepositoryImplParameters,
     compute_path, task_short_id,
 };
 
@@ -38,7 +36,7 @@ async fn setup() -> (Arc<dyn TaskRepository>, sea_orm::DatabaseConnection) {
         .await
         .expect("create table");
 
-    let module = AppModule::builder()
+    let module = TaskDomainModule::builder()
         .with_component_parameters::<TaskRepositoryImpl>(
             TaskRepositoryImplParameters { db: Some(db.clone()) },
         )
@@ -47,12 +45,6 @@ async fn setup() -> (Arc<dyn TaskRepository>, sea_orm::DatabaseConnection) {
         )
         .with_component_parameters::<TagRepositoryImpl>(
             TagRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<SavedQueryRepositoryImpl>(
-            SavedQueryRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<SettingsRepositoryImpl>(
-            SettingsRepositoryImplParameters { db: Some(db.clone()) },
         )
         .with_component_parameters::<TrackingRepositoryImpl>(
             TrackingRepositoryImplParameters { db: Some(db.clone()) },
@@ -505,12 +497,12 @@ async fn include_ancestors_adds_parent_chain() {
     let root = repo.insert("Root".into(), None, None, None).await.unwrap();
     let a = repo.insert("A".into(), Some(root.id), None, None).await.unwrap();
     let b = repo.insert("B".into(), Some(a.id), None, None).await.unwrap();
-    let c = repo.insert("C".into(), Some(b.id), None, None).await.unwrap();
+    let _c = repo.insert("C".into(), Some(b.id), None, None).await.unwrap();
     let _d = repo.insert("D".into(), Some(root.id), None, None).await.unwrap();
 
     // Filter: only C matches (by description).
-    use not_yet_done_core::filter::{FilterExpr, FilterLeaf, ColRef, Operator, Rhs, Literal};
-    use not_yet_done_core::filter::query_filter::QueryOptions;
+    use not_yet_done_task_core::filter::{FilterExpr, FilterLeaf, ColRef, Operator, Rhs, Literal};
+    use not_yet_done_task_core::filter::query_filter::QueryOptions;
 
     let expr = FilterExpr::Leaf(FilterLeaf {
         lhs: ColRef::unqualified("description"),
@@ -547,8 +539,8 @@ async fn include_ancestors_no_duplicates() {
     let _c = repo.insert("C".into(), Some(a.id), None, None).await.unwrap();
 
     // Filter matches B and C (both children of A).
-    use not_yet_done_core::filter::{FilterExpr, FilterLeaf, ColRef, Operator, Rhs, Literal};
-    use not_yet_done_core::filter::query_filter::QueryOptions;
+    use not_yet_done_task_core::filter::{FilterExpr, FilterLeaf, ColRef, Operator, Rhs, Literal};
+    use not_yet_done_task_core::filter::query_filter::QueryOptions;
 
     let expr = FilterExpr::Or(vec![
         FilterExpr::Leaf(FilterLeaf {
@@ -581,8 +573,8 @@ async fn include_ancestors_with_already_matching_parent() {
     let _b = repo.insert("B".into(), Some(_a.id), None, None).await.unwrap();
 
     // Filter matches A and B (A is already in results, should not duplicate).
-    use not_yet_done_core::filter::{FilterExpr, FilterLeaf, ColRef, Operator, Rhs, Literal};
-    use not_yet_done_core::filter::query_filter::QueryOptions;
+    use not_yet_done_task_core::filter::{FilterExpr, FilterLeaf, ColRef, Operator, Rhs, Literal};
+    use not_yet_done_task_core::filter::query_filter::QueryOptions;
 
     let expr = FilterExpr::Or(vec![
         FilterExpr::Leaf(FilterLeaf {

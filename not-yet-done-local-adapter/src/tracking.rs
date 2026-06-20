@@ -1,5 +1,5 @@
 //! `TrackingAdapter` — an in-process [`ContentAdapter`] over the host's own
-//! [`TrackingRepository`](not_yet_done_core::repository::TrackingRepository).
+//! [`TrackingRepository`](not_yet_done_task_core::repository::TrackingRepository).
 //!
 //! Sibling to [`crate::task`]: where the `TaskAdapter` presents the task
 //! *forest*, this one presents the flat list of time **trackings** (one row
@@ -84,9 +84,9 @@ use not_yet_done_content::{
     NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKey, SortKind,
     SortableColumn, Subtree, SubtreeNode,
 };
-use not_yet_done_core::entity::tracking;
-use not_yet_done_core::error::AppError;
-use not_yet_done_core::events::{DomainEvent, DomainEventReceiver};
+use not_yet_done_task_core::entity::tracking;
+use not_yet_done_task_core::error::AppError;
+use not_yet_done_task_core::events::{DomainEvent, DomainEventReceiver};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
@@ -1275,7 +1275,7 @@ async fn resolve_visible_set(
         Some(q) if !q.is_empty() => q,
         _ => return Ok(None),
     };
-    let parsed = not_yet_done_core::filter::query_filter::parse(raw)
+    let parsed = not_yet_done_task_core::filter::query_filter::parse(raw)
         .map_err(|e| ContentError::Other(Box::new(e)))?;
     let matches = handle
         .tracking_repo
@@ -3709,20 +3709,18 @@ mod restore_scope_tests {
     };
     use shaku::HasComponent;
 
-    use not_yet_done_core::entity::{
+    use not_yet_done_task_core::entity::{
         task::{self, TaskStatus},
         tracking as tracking_entity,
     };
-    use not_yet_done_core::events::new_bus;
-    use not_yet_done_core::module::AppModule;
-    use not_yet_done_core::repository::{
-        ProjectRepositoryImpl, ProjectRepositoryImplParameters, SavedQueryRepositoryImpl,
-        SavedQueryRepositoryImplParameters, SettingsRepositoryImpl,
-        SettingsRepositoryImplParameters, TagRepositoryImpl, TagRepositoryImplParameters,
-        TaskRepositoryImpl, TaskRepositoryImplParameters, TrackingRepository,
-        TrackingRepositoryImpl, TrackingRepositoryImplParameters,
+    use not_yet_done_task_core::events::new_bus;
+    use not_yet_done_task_core::module::TaskDomainModule;
+    use not_yet_done_task_core::repository::{
+        ProjectRepositoryImpl, ProjectRepositoryImplParameters, TagRepositoryImpl,
+        TagRepositoryImplParameters, TaskRepositoryImpl, TaskRepositoryImplParameters,
+        TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
     };
-    use not_yet_done_core::service::TaskService;
+    use not_yet_done_task_core::service::TaskService;
 
     /// In-memory SQLite + a [`CoreHandle`], plus the raw connection (to insert
     /// task rows directly — the handle has no task-insert). Only the `task`
@@ -3740,7 +3738,7 @@ mod restore_scope_tests {
             db.execute(&stmt).await.expect("schema creation");
         }
 
-        let module = AppModule::builder()
+        let module = TaskDomainModule::builder()
             .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
                 db: Some(db.clone()),
             })
@@ -3748,12 +3746,6 @@ mod restore_scope_tests {
                 db: Some(db.clone()),
             })
             .with_component_parameters::<TagRepositoryImpl>(TagRepositoryImplParameters {
-                db: Some(db.clone()),
-            })
-            .with_component_parameters::<SavedQueryRepositoryImpl>(
-                SavedQueryRepositoryImplParameters { db: Some(db.clone()) },
-            )
-            .with_component_parameters::<SettingsRepositoryImpl>(SettingsRepositoryImplParameters {
                 db: Some(db.clone()),
             })
             .with_component_parameters::<TrackingRepositoryImpl>(

@@ -5,8 +5,8 @@ use tusks::tusks;
 
 use not_yet_done_core::config::ConfigServiceImpl;
 use not_yet_done_core::db;
-use not_yet_done_core::module::AppModule;
-use not_yet_done_core::repository::{
+use not_yet_done_task_core::module::TaskDomainModule;
+use not_yet_done_task_core::repository::{
     ProjectRepositoryImpl, ProjectRepositoryImplParameters,
     TagRepositoryImpl, TagRepositoryImplParameters,
     TaskRepositoryImpl, TaskRepositoryImplParameters,
@@ -17,14 +17,14 @@ mod commands;
 mod datetime;
 mod offset;
 
-static MODULE: OnceLock<Arc<AppModule>> = OnceLock::new();
+static MODULE: OnceLock<Arc<TaskDomainModule>> = OnceLock::new();
 
 pub fn run_async<F, Fut, T>(f: F) -> T
 where
-    F: FnOnce(Arc<AppModule>) -> Fut,
+    F: FnOnce(Arc<TaskDomainModule>) -> Fut,
     Fut: Future<Output = T>,
 {
-    let module = MODULE.get().expect("AppModule nicht initialisiert").clone();
+    let module = MODULE.get().expect("TaskDomainModule nicht initialisiert").clone();
     tokio::runtime::Runtime::new()
         .expect("tokio Runtime konnte nicht erstellt werden")
         .block_on(f(module))
@@ -87,7 +87,7 @@ fn main() -> std::process::ExitCode {
     };
 
     let module = Arc::new(
-        AppModule::builder()
+        TaskDomainModule::builder()
             .with_component_parameters::<TaskRepositoryImpl>(
                 TaskRepositoryImplParameters { db: Some(db.clone()) },
             )
