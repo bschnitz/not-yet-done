@@ -796,6 +796,12 @@ pub struct App {
             + Sync,
     >,
 
+    /// Host-owned cross-adapter context (Phase C4): carries the
+    /// [`HostEventBus`](not_yet_done_content::HostEventBus) every adapter is
+    /// handed at construction. Held here so each `factory.create` call site
+    /// (startup load, per-view reload) can pass `&self.host_ctx`.
+    pub host_ctx: not_yet_done_content::HostContext,
+
     /// Active sort-hint mode (column-pick → direction-pick). `Off` when idle.
     pub sort_hint_phase: SortHintPhase,
 }
@@ -846,6 +852,7 @@ impl App {
                 > + Send
                 + Sync,
         >,
+        host_ctx: not_yet_done_content::HostContext,
     ) -> Self {
         let keybindings = config.keybindings.clone();
         let shared_theme = Arc::new(Theme::new(config.theme.clone()));
@@ -855,6 +862,7 @@ impl App {
             &config.keybindings,
             &config.editors,
             adapter_factory_builder(),
+            &host_ctx,
         );
         let content_tab_infos: Vec<crate::components::tab_bar::ContentTabInfo> = content_views
             .iter()
@@ -959,6 +967,7 @@ impl App {
             link_popup: None,
             jump_history: crate::app::link::JumpHistory::new(),
             adapter_factory_builder,
+            host_ctx,
         };
         // A duplicate tab name is a hard config error — show it up front
         // (the layout already fell back to legacy so the app still runs).
@@ -8181,6 +8190,7 @@ fn load_content_views(
     keybindings: &crate::config::keybindings::KeyBindingConfig,
     editors: &crate::config::editor::EditorsConfig,
     factories: std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>,
+    host_ctx: &not_yet_done_content::HostContext,
 ) -> Vec<ContentSlot> {
     use crate::config::view_config::ViewFileConfig;
 
@@ -8333,7 +8343,7 @@ fn load_content_views(
                                 None
                             }
                             Some(cfg) => {
-                                match factory.create(config.adapter.effective_instance_id(), &cfg) {
+                                match factory.create(config.adapter.effective_instance_id(), &cfg, host_ctx) {
                                     Ok(a) => Some(Arc::from(a)),
                                     Err(e) => {
                                         init_error = Some(e.to_string());

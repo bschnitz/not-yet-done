@@ -272,6 +272,7 @@ impl App {
             &new_keybindings,
             &new_config.editors,
             factories,
+            &self.host_ctx,
         );
 
         self.config = new_config;
@@ -346,7 +347,11 @@ impl App {
             })?;
 
         let adapter = factory
-            .create(config.adapter.effective_instance_id(), &adapter_config)
+            .create(
+                config.adapter.effective_instance_id(),
+                &adapter_config,
+                &self.host_ctx,
+            )
             .map_err(|e| format!("adapter init: {e}"))?;
         let adapter: std::sync::Arc<dyn not_yet_done_content::ContentAdapter> =
             std::sync::Arc::from(adapter);
@@ -396,6 +401,7 @@ impl App {
             &self.keybindings,
             &self.config.editors,
             factories,
+            &self.host_ctx,
         );
         self.content_views = new_content_views;
 

@@ -73,7 +73,12 @@ impl AdapterFactory for ConfluenceAdapterFactory {
         "confluence"
     }
 
-    fn create(&self, instance_id: &str, config: &str) -> Result<Box<dyn ContentAdapter>> {
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        _ctx: &not_yet_done_content::HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
         let cfg: ConfluenceConfig = serde_yaml::from_str(config)
             .map_err(|e| ContentError::Other(format!("Invalid Confluence config: {e}").into()))?;
 

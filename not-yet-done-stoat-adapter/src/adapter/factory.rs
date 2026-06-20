@@ -62,7 +62,12 @@ impl AdapterFactory for StoatAdapterFactory {
         "stoat"
     }
 
-    fn create(&self, instance_id: &str, config: &str) -> Result<Box<dyn ContentAdapter>> {
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        _ctx: &not_yet_done_content::HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
         let cfg: StoatConfig = serde_yaml::from_str(config)
             .map_err(|e| ContentError::Other(format!("Invalid Stoat config: {e}").into()))?;
 

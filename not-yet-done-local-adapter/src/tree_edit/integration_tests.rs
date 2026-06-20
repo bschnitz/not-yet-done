@@ -536,12 +536,13 @@ fn build_task_adapter(
     service: Arc<dyn TaskService>,
     tracking: Arc<dyn TrackingRepository>,
 ) -> Box<dyn not_yet_done_content::ContentAdapter> {
-    use not_yet_done_content::AdapterFactory;
-    use not_yet_done_task_core::events::new_bus;
-    let handle = crate::CoreHandle::new(service, tracking, new_bus(64), false);
-    crate::task::TaskAdapterFactory::new(handle)
-        .create("test", "{}")
-        .expect("adapter create")
+    use not_yet_done_content::InMemoryHostBus;
+    // The self-contained factory would open its *own* database; the test
+    // needs the adapter over the very `service`/`tracking` of its in-memory
+    // DB, so build the handle and adapter directly.
+    let bus = std::sync::Arc::new(InMemoryHostBus::default());
+    let handle = crate::CoreHandle::new(service, tracking, bus, "test".to_string(), false);
+    Box::new(crate::task::TaskAdapter::new("test", handle))
 }
 
 /// Flat list `delete-single`: only the invoking task is deleted; its child

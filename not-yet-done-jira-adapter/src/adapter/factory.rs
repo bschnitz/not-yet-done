@@ -63,7 +63,12 @@ impl AdapterFactory for JiraAdapterFactory {
         "jira"
     }
 
-    fn create(&self, instance_id: &str, config: &str) -> Result<Box<dyn ContentAdapter>> {
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        _ctx: &not_yet_done_content::HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
         let cfg: JiraConfig = serde_yaml::from_str(config)
             .map_err(|e| ContentError::Other(format!("Invalid Jira config: {e}").into()))?;
 

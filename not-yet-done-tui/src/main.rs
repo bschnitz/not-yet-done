@@ -85,31 +85,27 @@ async fn main() -> Result<()> {
     let tui_config = TuiConfigService::load()?;
     let theme      = Theme::new(tui_config.theme.clone());
 
-    // Core domain-event bus: services announce changes here, adapters
-    // bridge them into their invalidation streams. One sender lives in
-    // the CoreHandle for the whole process, so subscribers never see a
-    // spurious "closed".
-    let domain_events = not_yet_done_task_core::events::new_bus(256);
+    // Host-owned cross-adapter event bus (Phase C4): the App owns it and
+    // hands every adapter a `HostContext` at construction. The self-contained
+    // local Tasks/Trackings adapters coordinate over it — keyed by their DSN,
+    // so two tabs on the same database repaint each other — while remote
+    // adapters ignore it. Capacity mirrors the old domain bus.
+    let host_bus: Arc<dyn not_yet_done_content::HostEventBus> =
+        Arc::new(not_yet_done_content::InMemoryHostBus::new(256));
+    let host_ctx = not_yet_done_content::HostContext {
+        event_bus: host_bus,
+    };
 
-    // In-process handle into the host's own core services, threaded into
-    // the local adapters (Tasks/Trackings). Captured by the factory
-    // builder closure so config reloads rebuild the same factory set.
-    let core_handle = not_yet_done_local_adapter::CoreHandle::new(
-        Arc::clone(&task_service),
-        Arc::clone(&tracking_repo),
-        domain_events.clone(),
-        tui_config.tracking.allow_parallel,
-    );
+    // Adapter factories are now stateless (each local factory opens its own
+    // database in `create`), so this is just the bare builder fn — still a
+    // boxed closure so `App::reload_config` can rebuild the same set.
     let factory_builder: Box<
         dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>
             + Send
             + Sync,
-    > = {
-        let core = core_handle.clone();
-        Box::new(move || build_adapter_factories(&core))
-    };
+    > = Box::new(build_adapter_factories);
 
-    let mut app    = App::new(tui_config, theme, task_service, tag_service, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder);
+    let mut app    = App::new(tui_config, theme, task_service, tag_service, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder, host_ctx);
 
     // Load tracking state and column config from DB.
     app.refresh_tracked_ids();
@@ -137,17 +133,12 @@ async fn main() -> Result<()> {
 
 /// Wire up the adapter factories the App will use to construct content views.
 ///
-/// Remote adapters (Jira, Taiga, Postgres, Confluence, Stoat) manage their
-/// own backing store and are stateless to build. The **local** adapter is
-/// different: it wraps the host's own core services, so it needs the
-/// [`CoreHandle`](not_yet_done_local_adapter::CoreHandle) threaded in.
-///
-/// Wrapped in a capturing closure (rather than the bare `fn` pointer it
-/// used to be) precisely so it can hold that handle while still being
-/// re-invokable on every [`App::reload_config`] to rebuild the same
-/// factory set.
+/// Every adapter — remote (Jira, Taiga, Postgres, Confluence, Stoat) and the
+/// local Tasks/Trackings — is now stateless to build: each `create` receives
+/// its config string plus the host's `HostContext`, and the local factories
+/// open their own database from that config (Phase C4). So this is a bare
+/// `fn`, re-invokable on every [`App::reload_config`] to rebuild the set.
 pub(crate) fn build_adapter_factories(
-    core: &not_yet_done_local_adapter::CoreHandle,
 ) -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> {
     let mut factories: std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> = std::collections::HashMap::new();
     factories.insert(
@@ -172,15 +163,11 @@ pub(crate) fn build_adapter_factories(
     );
     factories.insert(
         "tasks".to_string(),
-        Box::new(not_yet_done_local_adapter::TaskAdapterFactory::new(
-            core.clone(),
-        )),
+        Box::new(not_yet_done_local_adapter::TaskAdapterFactory::new()),
     );
     factories.insert(
         "trackings".to_string(),
-        Box::new(not_yet_done_local_adapter::TrackingAdapterFactory::new(
-            core.clone(),
-        )),
+        Box::new(not_yet_done_local_adapter::TrackingAdapterFactory::new()),
     );
     factories
 }

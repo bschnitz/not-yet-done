@@ -55,18 +55,20 @@ use async_trait::async_trait;
 use not_yet_done_content::{
     apply_sort, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     AdapterFactory, ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement,
-    InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
+    HostContext, InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary,
+    NodeType,
     Result, SavedQueryStore, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode, TreeFindHit,
     TreeSearchResults,
 };
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
-use not_yet_done_task_core::events::{DomainEvent, DomainEventReceiver};
+use not_yet_done_content::HostEvent;
+use not_yet_done_task_core::events::DomainEvent;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use crate::editor_templates::{self, FieldError, ParseResult};
-use crate::{notes, publish_row_patches, tree_edit, CoreHandle};
+use crate::{as_domain_event, notes, publish_row_patches, tree_edit, CoreHandle};
 
 /// Indent width for the subtree-restructure outline buffer (`edit-tree`).
 /// The `tree_edit` parser infers depth from indentation per level, so any
@@ -889,7 +891,7 @@ fn would_create_cycle(snapshot: &ForestSnapshot, moving: Uuid, new_parent: Uuid)
 }
 
 fn emit_task_changed(handle: &CoreHandle, id: Uuid) {
-    let _ = handle.events.send(DomainEvent::TaskChanged { id });
+    handle.publish(DomainEvent::TaskChanged { id });
 }
 
 /// Wrap a service error as a buffer-reopen carrying the message, so the
@@ -916,7 +918,7 @@ pub(crate) async fn apply_tracking(handle: &CoreHandle, task_id: Uuid, wants_tra
             if let Ok(active) = handle.tracking_repo.find_all_active().await {
                 for t in active {
                     if handle.tracking_repo.stop(t.id, now).await.is_ok() {
-                        let _ = handle.events.send(DomainEvent::TrackingStopped {
+                        handle.publish(DomainEvent::TrackingStopped {
                             task_id: t.task_id,
                             tracking_id: t.id,
                         });
@@ -925,14 +927,14 @@ pub(crate) async fn apply_tracking(handle: &CoreHandle, task_id: Uuid, wants_tra
             }
         }
         if let Ok(started) = handle.tracking_repo.insert(task_id, now, None).await {
-            let _ = handle.events.send(DomainEvent::TrackingStarted {
+            handle.publish(DomainEvent::TrackingStarted {
                 task_id,
                 tracking_id: started.id,
             });
         }
     } else if let Ok(Some(t)) = handle.tracking_repo.find_active_for_task(task_id).await {
         if handle.tracking_repo.stop(t.id, now).await.is_ok() {
-            let _ = handle.events.send(DomainEvent::TrackingStopped {
+            handle.publish(DomainEvent::TrackingStopped {
                 task_id,
                 tracking_id: t.id,
             });
@@ -1806,7 +1808,7 @@ fn leaf_subtree(items: Vec<NodeSummary>) -> Subtree {
 /// - `TrackingChanged` → a tracking was deleted/restored; keep the coarse
 ///   clear + `All`.
 fn spawn_task_bridge(
-    mut events: DomainEventReceiver,
+    mut events: broadcast::Receiver<HostEvent>,
     inv_tx: broadcast::Sender<Invalidation>,
     snapshot: Arc<RwLock<Option<Arc<ForestSnapshot>>>>,
     handle: CoreHandle,
@@ -1814,14 +1816,29 @@ fn spawn_task_bridge(
     tokio::spawn(async move {
         use broadcast::error::RecvError;
         loop {
-            match events.recv().await {
-                Ok(DomainEvent::TrackingTick) => {}
-                Ok(DomainEvent::TaskChanged { id }) => {
+            let ev = match events.recv().await {
+                // Opaque host payload → the DomainEvent the local adapters
+                // privately exchange on this channel. A foreign payload (never
+                // happens with DSN-keyed channels) is simply skipped.
+                Ok(payload) => match as_domain_event(&payload) {
+                    Some(ev) => ev,
+                    None => continue,
+                },
+                Err(RecvError::Lagged(_)) => {
+                    *snapshot.write().await = None;
+                    let _ = inv_tx.send(Invalidation::All);
+                    continue;
+                }
+                Err(RecvError::Closed) => break,
+            };
+            match ev {
+                DomainEvent::TrackingTick => {}
+                DomainEvent::TaskChanged { id } => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::Node { id: id.to_string() });
                 }
-                Ok(DomainEvent::TrackingStarted { task_id, .. })
-                | Ok(DomainEvent::TrackingStopped { task_id, .. }) => {
+                DomainEvent::TrackingStarted { task_id, .. }
+                | DomainEvent::TrackingStopped { task_id, .. } => {
                     match ForestSnapshot::load(&handle).await {
                         Ok(snap) => {
                             *snapshot.write().await = Some(snap.clone());
@@ -1838,15 +1855,10 @@ fn spawn_task_bridge(
                         }
                     }
                 }
-                Ok(DomainEvent::TrackingChanged { .. }) => {
+                DomainEvent::TrackingChanged { .. } => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }
-                Err(RecvError::Lagged(_)) => {
-                    *snapshot.write().await = None;
-                    let _ = inv_tx.send(Invalidation::All);
-                }
-                Err(RecvError::Closed) => break,
             }
         }
     });
@@ -1856,16 +1868,16 @@ fn spawn_task_bridge(
 // Adapter + factory
 // ---------------------------------------------------------------------------
 
-/// Builds [`TaskAdapter`] instances bound to a captured [`CoreHandle`].
-/// Like the other local factories, `create`'s config string is unused —
-/// the backing store is the handle, not anything in YAML.
-pub struct TaskAdapterFactory {
-    handle: CoreHandle,
-}
+/// Builds self-contained [`TaskAdapter`] instances. Stateless: each
+/// `create` opens its own task database from the tab's `config`
+/// (see [`crate::open_core_handle`] / [`crate::LocalAdapterConfig`]) and
+/// wires the resulting [`CoreHandle`] to the host bus from [`HostContext`].
+#[derive(Default)]
+pub struct TaskAdapterFactory;
 
 impl TaskAdapterFactory {
-    pub fn new(handle: CoreHandle) -> Self {
-        Self { handle }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -1874,28 +1886,14 @@ impl AdapterFactory for TaskAdapterFactory {
         "tasks"
     }
 
-    fn create(&self, instance_id: &str, _config: &str) -> Result<Box<dyn ContentAdapter>> {
-        let (inv_tx, _) = broadcast::channel(64);
-        let snapshot: Arc<RwLock<Option<Arc<ForestSnapshot>>>> = Arc::new(RwLock::new(None));
-        spawn_task_bridge(
-            self.handle.events.subscribe(),
-            inv_tx.clone(),
-            snapshot.clone(),
-            self.handle.clone(),
-        );
-        let queries_root = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("not_yet_done")
-            .join("tasks")
-            .join(instance_id)
-            .join("queries");
-        Ok(Box::new(TaskAdapter {
-            instance_id: instance_id.to_string(),
-            handle: self.handle.clone(),
-            inv_tx,
-            snapshot,
-            saved_queries: FsSavedQueryStore::new(queries_root),
-        }))
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        ctx: &HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
+        let handle = crate::open_core_handle(config, ctx)?;
+        Ok(Box::new(TaskAdapter::new(instance_id, handle)))
     }
 }
 
@@ -1916,6 +1914,35 @@ pub struct TaskAdapter {
 }
 
 impl TaskAdapter {
+    /// Build an adapter over an already-opened [`CoreHandle`]: set up the
+    /// invalidation broadcast, spawn the domain-event → invalidation bridge,
+    /// and resolve the per-instance saved-query root. The factory uses this
+    /// after [`crate::open_core_handle`]; tests use it over a handle built on
+    /// their own in-memory database.
+    pub(crate) fn new(instance_id: &str, handle: CoreHandle) -> Self {
+        let (inv_tx, _) = broadcast::channel(64);
+        let snapshot: Arc<RwLock<Option<Arc<ForestSnapshot>>>> = Arc::new(RwLock::new(None));
+        spawn_task_bridge(
+            handle.subscribe(),
+            inv_tx.clone(),
+            snapshot.clone(),
+            handle.clone(),
+        );
+        let queries_root = dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("not_yet_done")
+            .join("tasks")
+            .join(instance_id)
+            .join("queries");
+        Self {
+            instance_id: instance_id.to_string(),
+            handle,
+            inv_tx,
+            snapshot,
+            saved_queries: FsSavedQueryStore::new(queries_root),
+        }
+    }
+
     /// Return the cached snapshot, loading it from the service if absent.
     async fn snapshot(&self) -> Result<Arc<ForestSnapshot>> {
         if let Some(snap) = self.snapshot.read().await.as_ref() {
