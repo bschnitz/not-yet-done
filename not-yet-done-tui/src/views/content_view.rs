@@ -16099,9 +16099,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl not_yet_done_content::ContentAdapter for ShortcutTestAdapter {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
         fn adapter_type(&self) -> &str {
             "mock"
         }

@@ -1260,12 +1260,6 @@ pub enum Invalidation {
 /// The entry point. One instance per configured connection.
 #[async_trait]
 pub trait ContentAdapter: Send + Sync {
-    /// Downcast hook so a caller with only `&dyn ContentAdapter` can
-    /// reach adapter-specific APIs (e.g. the Postgres script editor
-    /// needs the Postgres table list). Each impl returns `self` — the
-    /// trait stays object-safe because we don't add an `Any` bound.
-    fn as_any(&self) -> &dyn std::any::Any;
-
     /// Stable type identifier of this adapter (e.g. "jira", "postgres",
     /// "taiga"). Used as the first path component in
     /// [`ContentAdapter::instance_data_dir`] and as a prefix in
@@ -1340,6 +1334,35 @@ pub trait ContentAdapter: Send + Sync {
         _node: &NodeRef,
     ) -> std::collections::HashMap<String, String> {
         std::collections::HashMap::new()
+    }
+
+    /// Augment an editor buffer with adapter-specific, **editor-only**
+    /// completion hints before the external editor opens. `node` is the
+    /// canonical [`NodeRef`] of the item being edited; the adapter scopes
+    /// the hint from it. The returned string REPLACES the buffer: the
+    /// adapter must first strip any stale hint it previously added (so
+    /// repeated opens stay idempotent) and then append a fresh one.
+    ///
+    /// The hint is a convenience only and MUST be removed again on commit
+    /// via [`strip_editor_hints`](Self::strip_editor_hints) so the
+    /// persisted file never contains it. Default returns the buffer
+    /// unchanged — adapters with no editor hints don't override.
+    ///
+    /// Use case: the Postgres DB-script editor appends a trailing SQL
+    /// comment listing the database's tables as copy-paste tokens, which
+    /// previously required a concrete-type downcast from the TUI. Routing
+    /// it through the trait keeps the TUI free of any adapter-specific
+    /// type knowledge.
+    async fn augment_editor_buffer(&self, _node: &NodeRef, buffer: String) -> String {
+        buffer
+    }
+
+    /// Inverse of [`augment_editor_buffer`](Self::augment_editor_buffer):
+    /// strip any editor-only hint the adapter previously injected so the
+    /// committed/persisted text is clean user content. Called on save.
+    /// Default returns the text unchanged.
+    fn strip_editor_hints(&self, text: &str) -> String {
+        text.to_string()
     }
 
     /// Capabilities of this adapter (for UI feature gating). The default is

@@ -80,10 +80,6 @@ impl JiraAdapter {
 
 #[async_trait]
 impl ContentAdapter for JiraAdapter {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn adapter_type(&self) -> &str {
         "jira"
     }

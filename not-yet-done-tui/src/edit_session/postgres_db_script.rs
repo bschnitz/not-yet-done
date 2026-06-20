@@ -23,13 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use not_yet_done_content::{ContentAdapter, NodeRef};
-use not_yet_done_postgres_adapter::query::{
-    db_script_file_path, default_db_script_file, is_sql_extension,
-};
-use not_yet_done_postgres_adapter::script_completions::{
-    append_completions_line, build_completions_line, strip_completions_line,
-};
-use not_yet_done_postgres_adapter::PostgresAdapter;
+use not_yet_done_postgres_adapter::query::{db_script_file_path, default_db_script_file};
 
 use super::{CommitOutcome, EditSession, EditorSpawnContext, SessionScope};
 
@@ -63,13 +57,15 @@ impl PostgresDbScriptSession {
     /// files yield the default template (scratch area + marker +
     /// placeholder SELECT).
     ///
-    /// If the adapter is a `PostgresAdapter`, the buffer is augmented
-    /// with a trailing `-- table completions: tt_<schema>__<table>, …`
-    /// comment listing every base table in `database`. The line is
-    /// purely an editor convenience — it is stripped again on commit
-    /// so the on-disk file never grows it. Failure to enumerate the
-    /// tables is swallowed: the editor still opens, just without the
-    /// completion hint.
+    /// The adapter is then given a chance to augment the buffer with
+    /// editor-only completion hints (for Postgres: a trailing
+    /// `-- table completions: tt_<schema>__<table>, …` comment listing
+    /// every base table in `database`). Such hints are purely an editor
+    /// convenience — they are stripped again on commit so the on-disk
+    /// file never grows them — and adapters that have none return the
+    /// buffer unchanged. The augmentation goes through the
+    /// [`ContentAdapter`] trait, so this session holds no concrete-type
+    /// knowledge of the adapter.
     pub async fn open(
         adapter: Arc<dyn ContentAdapter>,
         database: String,
@@ -81,24 +77,19 @@ impl PostgresDbScriptSession {
             Ok(text) => text,
             Err(_) => default_db_script_file(&database, &script),
         };
-        // Strip defensively: a previous version of the editor might
-        // have persisted a completion line that we now want to refresh.
-        let stripped = strip_completions_line(&on_disk);
-        // The completions line is a SQL comment, so it only makes
-        // sense for SQL-flavored scripts. Other extensions (e.g. `.py`,
-        // `.md`) would treat `-- table completions: …` as syntax noise.
-        let template = if is_sql_extension(&script) {
-            if let Some(pg) = adapter.as_any().downcast_ref::<PostgresAdapter>() {
-                let tables = pg.list_completion_tables(&database).await;
-                match build_completions_line(&tables) {
-                    Some(line) => append_completions_line(&stripped, &line),
-                    None => stripped,
-                }
-            } else {
-                stripped
-            }
-        } else {
-            stripped
+        // Hand the raw buffer to the adapter for editor-only completion
+        // hints. The adapter strips any stale hint first, so this is
+        // idempotent across reopens; non-augmenting adapters return it
+        // unchanged. We pass the item's canonical NodeRef
+        // (`<type>/<db>/db_scripts/<script>`) — the same shape
+        // `spawn_context` builds — so the adapter can scope the hint to
+        // the right database/extension. If the ref can't be built, skip
+        // augmentation and open the raw buffer.
+        let nref_str =
+            format!("{}/{}/db_scripts/{}", adapter.adapter_type(), database, script);
+        let template = match NodeRef::parse(&nref_str) {
+            Ok(nref) => adapter.augment_editor_buffer(&nref, on_disk).await,
+            Err(_) => on_disk,
         };
         let label = format!("edit {script}");
         let suffix = std::path::Path::new(&script)
@@ -204,7 +195,7 @@ impl EditSession for PostgresDbScriptSession {
         // doesn't actually matter since the two markers can't overlap,
         // but doing completions first keeps the on-disk diff against
         // `disk_body` purely on user-authored content.
-        let without_completions = strip_completions_line(text);
+        let without_completions = self.adapter.strip_editor_hints(text);
         let stripped = strip_error_banner(&without_completions).to_string();
         match self.persist(&stripped).await {
             Ok(()) => CommitOutcome::Done {

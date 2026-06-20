@@ -72,10 +72,6 @@ impl TaigaAdapter {
 
 #[async_trait]
 impl ContentAdapter for TaigaAdapter {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn adapter_type(&self) -> &str {
         "taiga"
     }

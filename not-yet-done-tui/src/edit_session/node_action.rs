@@ -309,9 +309,6 @@ mod tests {
 
     #[async_trait]
     impl ContentAdapter for MockAdapter {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
         fn adapter_type(&self) -> &str {
             "mock"
         }
