@@ -1686,7 +1686,18 @@ impl Node for TrackingRootNode {
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             "restore-all" => {
-                let candidates: Vec<Uuid> = self.snapshot.order.clone();
+                // Scope to the pane's *active query* — the visible set — so
+                // restore-all never reaches beyond what the current filter
+                // shows. To restore deleted trackings, the query must select
+                // them (the query is the sole filter; `deleted=false` is not
+                // baked in). With no query, the whole list is in scope, which
+                // is exactly what the pane shows.
+                let candidates: Vec<Uuid> = match resolve_visible_set(&self.handle, &ctx.query).await
+                {
+                    Ok(Some(set)) => set.into_iter().collect(),
+                    Ok(None) => self.snapshot.order.clone(),
+                    Err(e) => return Ok(ActionDispatch::Error(format!("Restore-all failed: {e}"))),
+                };
                 invoke_restore_all(&self.handle, &candidates, ctx.confirmed).await
             }
             _ => ActionDispatch::Noop,
@@ -3633,6 +3644,159 @@ mod tests {
         assert_eq!(
             a.iter().find(|x| x.id == "toggle-tracking").and_then(|x| x.default_key),
             Some('s')
+        );
+    }
+}
+
+/// DB-backed regression tests for the query-scoping of `restore-all`: the
+/// list-wide restore must act **only** on the pane's active-query set, never
+/// on the whole include-deleted universe. Isolated in its own module so the
+/// `sea-orm` test harness imports stay out of the pure snapshot tests above.
+#[cfg(test)]
+mod restore_scope_tests {
+    use super::*;
+
+    use chrono::Utc;
+    use sea_orm::{
+        ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DbBackend, Schema,
+    };
+    use shaku::HasComponent;
+
+    use not_yet_done_core::entity::{
+        task::{self, TaskStatus},
+        tracking as tracking_entity,
+    };
+    use not_yet_done_core::events::new_bus;
+    use not_yet_done_core::module::AppModule;
+    use not_yet_done_core::repository::{
+        ProjectRepositoryImpl, ProjectRepositoryImplParameters, SavedQueryRepositoryImpl,
+        SavedQueryRepositoryImplParameters, SettingsRepositoryImpl,
+        SettingsRepositoryImplParameters, TagRepositoryImpl, TagRepositoryImplParameters,
+        TaskRepositoryImpl, TaskRepositoryImplParameters, TrackingRepository,
+        TrackingRepositoryImpl, TrackingRepositoryImplParameters,
+    };
+    use not_yet_done_core::service::TaskService;
+
+    /// In-memory SQLite + a [`CoreHandle`], plus the raw connection (to insert
+    /// task rows directly — the handle has no task-insert). Only the `task`
+    /// and `tracking` tables are created — that is all `find_filtered` (which
+    /// joins task) and the restore path touch.
+    async fn setup() -> (CoreHandle, sea_orm::DatabaseConnection) {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("open in-memory SQLite");
+        let schema = Schema::new(DbBackend::Sqlite);
+        for stmt in [
+            schema.create_table_from_entity(task::Entity),
+            schema.create_table_from_entity(tracking_entity::Entity),
+        ] {
+            db.execute(&stmt).await.expect("schema creation");
+        }
+
+        let module = AppModule::builder()
+            .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<ProjectRepositoryImpl>(ProjectRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<TagRepositoryImpl>(TagRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<SavedQueryRepositoryImpl>(
+                SavedQueryRepositoryImplParameters { db: Some(db.clone()) },
+            )
+            .with_component_parameters::<SettingsRepositoryImpl>(SettingsRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<TrackingRepositoryImpl>(
+                TrackingRepositoryImplParameters { db: Some(db.clone()) },
+            )
+            .build();
+
+        let task_service: Arc<dyn TaskService> = module.resolve();
+        let tracking_repo: Arc<dyn TrackingRepository> = module.resolve();
+        (
+            CoreHandle::new(task_service, tracking_repo, new_bus(16), false),
+            db,
+        )
+    }
+
+    async fn insert_task(db: &sea_orm::DatabaseConnection, desc: &str) -> Uuid {
+        let now = Utc::now();
+        let model = task::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            description: Set(desc.to_string()),
+            status: Set(TaskStatus::Todo),
+            deleted: Set(false),
+            deleted_at: Set(None),
+            priority: Set(0),
+            parent_id: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+            last_tracked_at: Set(None),
+            path: Set(None),
+        };
+        model.insert(db).await.expect("insert task").id
+    }
+
+    /// A deleted tracking for `task_id`, returning its id.
+    async fn insert_deleted_tracking(handle: &CoreHandle, task_id: Uuid) -> Uuid {
+        let t = handle
+            .tracking_repo
+            .insert(task_id, Utc::now(), None)
+            .await
+            .expect("insert tracking");
+        handle
+            .tracking_repo
+            .soft_delete_keeping_times(t.id)
+            .await
+            .expect("soft delete");
+        t.id
+    }
+
+    async fn is_deleted(handle: &CoreHandle, id: Uuid) -> bool {
+        handle
+            .tracking_repo
+            .find_by_id(id)
+            .await
+            .expect("find_by_id")
+            .expect("row exists")
+            .deleted
+    }
+
+    #[tokio::test]
+    async fn restore_all_acts_only_on_the_active_query_set() {
+        let (handle, db) = setup().await;
+        let alpha = insert_task(&db, "Alpha project").await;
+        let beta = insert_task(&db, "Beta project").await;
+        let alpha_tr = insert_deleted_tracking(&handle, alpha).await;
+        let beta_tr = insert_deleted_tracking(&handle, beta).await;
+
+        // The pane's active query selects only Alpha. (Body is the YAML
+        // query format the trackings view uses — the query is the sole
+        // filter, so it intentionally does *not* exclude deleted rows.)
+        let query = Some("query:\n  [description, like, '%Alpha%']\n".to_string());
+        let visible = resolve_visible_set(&handle, &query)
+            .await
+            .expect("resolve")
+            .expect("query present → Some");
+        assert!(visible.contains(&alpha_tr), "Alpha is in the visible set");
+        assert!(
+            !visible.contains(&beta_tr),
+            "Beta is filtered out by the query"
+        );
+
+        // restore-all over the visible set restores Alpha and leaves the
+        // out-of-query Beta untouched — the bug was that it spanned the whole
+        // include-deleted universe.
+        let candidates: Vec<Uuid> = visible.into_iter().collect();
+        let dispatch = invoke_restore_all(&handle, &candidates, true).await;
+        assert!(matches!(dispatch, ActionDispatch::Reload));
+        assert!(!is_deleted(&handle, alpha_tr).await, "Alpha restored");
+        assert!(
+            is_deleted(&handle, beta_tr).await,
+            "Beta stays deleted — outside the query"
         );
     }
 }

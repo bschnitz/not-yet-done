@@ -3618,12 +3618,18 @@ bespoke nativen Trackings-Tab (bis C1).
 - [ ] **`A` (restore all) ist im flachen Listen-View IMMER in der Action-Bar
       sichtbar** — auch direkt nach dem Tab-Wechsel, ohne irgendwohin zu
       drillen (statischer `on_container`-Hint, kein `parent:`-Shortcut mehr).
-- [ ] `A` ohne gelöschte erreichbare Zeilen → Notification „No deleted
-      trackings to restore" (kein Confirm-Popup, da nichts zu tun ist).
-- [ ] `A` mit gelöschten Zeilen → **Confirm-Popup** „Restore N deleted
-      tracking(s)? …" (nennt die Anzahl; bei vorhandenen Nachfolgern zusätzlich
-      „Purges M successor intervals — irreversible"). `n`/Esc bricht ab ohne
-      Änderung; `y` stellt wieder her und lädt die Liste neu.
+- [ ] **`A` ist auf den aktiven Query gescoped** (nicht die ganze DB): Mit dem
+      Default-Query (zeigt nur nicht-gelöschte) findet `A` nichts →
+      Notification „No deleted trackings to restore" (kein Confirm-Popup, da
+      nichts zu tun ist). Wichtig: ein an anderer Stelle gelöschtes Tracking,
+      das der aktive Query **nicht** sichtbar macht, wird von `A` **nicht**
+      angefasst.
+- [ ] Query so anpassen, dass gelöschte Trackings im sichtbaren Satz liegen
+      (z. B. `deleted`-Klausel entfernen oder `[deleted, =, true]`), dann `A`
+      → **Confirm-Popup** „Restore N deleted tracking(s)? …" (nennt die Anzahl;
+      bei vorhandenen Nachfolgern zusätzlich „Purges M successor intervals —
+      irreversible"). `n`/Esc bricht ab ohne Änderung; `y` stellt **nur die
+      vom Query erfassten** wieder her und lädt die Liste neu.
 - [ ] `R` auf einer (in einem künftigen Show-Deleted-View) gelöschten Zeile →
       **Confirm-Popup** mit derselben Purge-Warnung; `y` führt aus, `n` bricht
       ab.

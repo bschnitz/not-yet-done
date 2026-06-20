@@ -6737,6 +6737,27 @@ impl App {
     /// Spawn the async path for `ViewRequest::InvokeNodeAction`. Loads
     /// the node, calls `Node::invoke_action`, and routes the
     /// `ActionDispatch` (or error) back via `LoadMsg::NodeActionDispatched`.
+    /// The pane's currently-active query text — the active override, or the
+    /// view's default query if none — normalized to `None` when empty. This
+    /// is the same filter string `root_load_request` hands `list`; a
+    /// set-scoped adapter action receives it via [`ActionContext::query`] so
+    /// it can act on the visible set rather than the whole universe.
+    fn pane_active_query(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) -> Option<String> {
+        let cv = self.content_view(view_index)?;
+        let pane = cv.find_pane(pane_id)?;
+        let q = pane.current_query_text(&cv.view_defs);
+        let q = q.trim();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.to_string())
+        }
+    }
+
     fn spawn_invoke_node_action(
         &mut self,
         view_index: usize,
@@ -6760,8 +6781,16 @@ impl App {
         // `paste-move` invocation can read the marked node out of the
         // context and relocate it. Every other action ignores it.
         let marked = self.content_marked_node.clone();
+        // Pass the pane's active query so a set-scoped action (e.g.
+        // `restore-all`) acts only on the visible set, never the whole
+        // universe. Resolved here (needs `&self`) before the spawn.
+        let query = self.pane_active_query(view_index, pane_id);
         tokio::spawn(async move {
-            let ctx = not_yet_done_content::ActionContext { marked, confirmed };
+            let ctx = not_yet_done_content::ActionContext {
+                marked,
+                confirmed,
+                query,
+            };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.
             let outcome: not_yet_done_content::Result<(
@@ -6824,6 +6853,9 @@ impl App {
         };
         let tx = self.load_tx.clone();
         let action_name_for_task = action_name.clone();
+        // The container action scopes to the pane's active query (see
+        // `spawn_invoke_node_action`): resolve it before the spawn.
+        let query = self.pane_active_query(view_index, pane_id);
         tokio::spawn(async move {
             let outcome: not_yet_done_content::Result<(
                 String,
@@ -6835,7 +6867,10 @@ impl App {
                 let node_id = node.id().to_string();
                 let label = node.label().to_string();
                 let node_type = node.node_type().clone();
-                let ctx = not_yet_done_content::ActionContext::default();
+                let ctx = not_yet_done_content::ActionContext {
+                    query,
+                    ..Default::default()
+                };
                 let dispatch = node.invoke_action(&action_name_for_task, &ctx).await?;
                 Ok((node_id, dispatch, label, node_type))
             }

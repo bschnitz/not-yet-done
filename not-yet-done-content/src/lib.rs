@@ -1101,6 +1101,23 @@ pub struct ActionContext {
     /// re-invokes with `confirmed: true` on "y", and the adapter then does
     /// the work instead of asking again.
     pub confirmed: bool,
+    /// The pane's currently-active query text — the *same* filter string the
+    /// frontend already hands [`ContentAdapter::list`] via
+    /// [`LoadParams::query`] on every load. Carried here so a **set-scoped**
+    /// action (one that operates on more than the invoking node — e.g. a
+    /// container/list-wide `restore-all`, a bulk delete, an aggregate) can
+    /// re-resolve the *visible* set and act only on it, never on the whole
+    /// universe.
+    ///
+    /// This is the active query's *identity*, not a round-trip of rendered
+    /// content: the adapter produced the listing from this same query, so it
+    /// re-derives the set itself (just like `list`) rather than receiving a
+    /// list of ids back. `None`/empty = no active filter → the whole list is
+    /// in scope (which equals what the pane shows).
+    ///
+    /// Single-node actions (delete one row, restore one row, toggle) ignore
+    /// it — their target is already the invoking node.
+    pub query: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,6 +2180,7 @@ mod mark_move_contract_tests {
         let ctx = ActionContext {
             marked: Some(marked.clone()),
             confirmed: false,
+            query: None,
         };
 
         let dispatch = node.invoke_action("paste-move", &ctx).await.unwrap();
