@@ -1382,6 +1382,16 @@ pub trait ContentAdapter: Send + Sync {
         AdapterCapabilities::default()
     }
 
+    /// Whether this adapter currently has any *running* activity worth a
+    /// global action-bar highlight — the host ORs this across all open
+    /// adapters to light up the toggle-tracking hint while a tracking is
+    /// live. Default `false`; the task/tracking adapters override to report
+    /// their in-memory active set. Must be cheap and non-blocking (read a
+    /// snapshot best-effort) — it is polled on the render path.
+    fn has_active_tracking(&self) -> bool {
+        false
+    }
+
     /// Subscribe to live connection-status updates. Default returns a
     /// receiver that is permanently `Ready` — adapters that don't perform
     /// async auth (or that block synchronously inside `create`) don't
