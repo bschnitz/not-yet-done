@@ -136,6 +136,10 @@ struct TaskRow {
     /// skipped) — backs the `tag_symbols` column. Mirrors the native tab's
     /// `fmt_tag_symbols`.
     tag_symbols: String,
+    /// Comma-separated stable tag ids (`global-tag:`/`project-tag:`) assigned
+    /// to this task — backs the hidden `tag_ids` field the `option_menu` reads
+    /// to mark already-assigned options. Not a visible column.
+    tag_ids: String,
     /// Whether a notes file exists on disk for this task. Precomputed once at
     /// snapshot-build time (a single `find_notes_file` stat) so the `notes`
     /// marker column reads it for free — mirrors the native `📝` marker.
@@ -202,6 +206,7 @@ impl ForestSnapshot {
             let resolved = tag_map.get(&t.id).map(|v| v.as_slice()).unwrap_or(&[]);
             let tag_names = fmt_tag_names(resolved);
             let tag_symbols = fmt_tag_symbols(resolved);
+            let tag_ids = fmt_tag_ids(resolved);
             children.entry(parent).or_default().push(t.id);
             by_id.insert(
                 t.id,
@@ -209,6 +214,7 @@ impl ForestSnapshot {
                     task: t,
                     tag_names,
                     tag_symbols,
+                    tag_ids,
                     // Filled in the notes pass below, once the full task set
                     // is available for parent-path resolution.
                     has_notes: false,
@@ -562,6 +568,36 @@ fn fmt_tag_names(tags: &[not_yet_done_task_core::repository::ResolvedTag]) -> St
     names.join(", ")
 }
 
+/// A tag's stable id in the `global-tag:<uuid>` / `project-tag:<uuid>` form
+/// — the opaque value the `option_menu` round-trips: it is what
+/// [`Self::list_values`] hands out, what the hidden `tag_ids` node field
+/// carries, and what `toggle-tag` receives back in [`ActionContext::value`]
+/// (and forwards verbatim to `edit_task`).
+fn tag_stable_id(tag: &not_yet_done_task_core::repository::ResolvedTag) -> String {
+    use not_yet_done_task_core::repository::ResolvedTag;
+    match tag {
+        ResolvedTag::Global(t) => format!("global-tag:{}", t.id),
+        ResolvedTag::Project(t) => format!("project-tag:{}", t.id),
+    }
+}
+
+/// Comma-separated stable tag ids assigned to a task — backs the hidden
+/// `tag_ids` field the `option_menu` reads to mark already-assigned options.
+/// Order is irrelevant (membership-only), but we keep it stable (by name) for
+/// deterministic snapshots/tests.
+fn fmt_tag_ids(tags: &[not_yet_done_task_core::repository::ResolvedTag]) -> String {
+    let mut pairs: Vec<(String, String)> = tags
+        .iter()
+        .map(|t| (tag_name(t), tag_stable_id(t)))
+        .collect();
+    pairs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    pairs
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Concatenated tag symbols, ordered alphabetically by tag name; tags without
 /// a symbol are skipped — the `tag_symbols` column.
 fn fmt_tag_symbols(tags: &[not_yet_done_task_core::repository::ResolvedTag]) -> String {
@@ -648,6 +684,10 @@ fn task_metadata(
             // build so the cells read straight off the row.
             field("tag_symbols", row.tag_symbols.clone(), "Tag symbols"),
             field("tag_names", row.tag_names.clone(), "Tags"),
+            // Hidden membership field: the stable ids of the tags on this task,
+            // read by the `option_menu` to mark already-assigned options. Not a
+            // visible column.
+            field("tag_ids", row.tag_ids.clone(), "Tag ids"),
             // Notes marker: the native `📝` when a notes file exists, blank
             // otherwise.
             field(
@@ -835,6 +875,12 @@ fn task_item_actions() -> Vec<NodeAction> {
         NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('s'),
+        // Value-accepting action for the generic `option_menu`: assigns or
+        // unassigns the tag whose stable id arrives in `ctx.value`. Declares
+        // no widget (`InputSpec::None`) — the menu sources the value (from
+        // `list_values("tags")` + the focused option) and the adapter only
+        // consumes/validates it. Not bound as a shortcut; the menu invokes it.
+        NodeAction::new("toggle-tag", "toggle tag", InputSpec::None),
         NodeAction::new("mark-move", "Mark for move", InputSpec::None),
         NodeAction::new("paste-move", "Move here", InputSpec::None),
         NodeAction::new("unnest", "Move to top level", InputSpec::None),
@@ -1339,6 +1385,49 @@ async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDis
     ActionDispatch::Noop
 }
 
+/// `invoke_action("toggle-tag")` — assign or unassign the tag whose stable
+/// id arrives in `ctx.value` (the TUI `option_menu` sources it from the
+/// adapter's [`ContentAdapter::list_values`] list and hands back the focused
+/// option's value). The adapter prescribes no widget: the action just
+/// consumes a value and validates it. Current membership is read from the
+/// eager snapshot's hidden `tag_ids`; the add/remove goes through
+/// `edit_task`, which accepts the same `global-tag:`/`project-tag:` id form.
+/// Returns `Reload` so the snapshot refreshes and the tag columns re-render.
+async fn invoke_toggle_tag(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    task_id: Uuid,
+    tag_id: Option<&str>,
+) -> ActionDispatch {
+    let Some(tag_id) = tag_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ActionDispatch::Error("No tag selected".to_string());
+    };
+    let assigned = snapshot
+        .by_id
+        .get(&task_id)
+        .map(|row| row.tag_ids.split(',').any(|id| id == tag_id))
+        .unwrap_or(false);
+    let id_str = tag_id.to_string();
+    let result = if assigned {
+        handle
+            .task_service
+            .edit_task(task_id, None, None, None, None, Some(id_str))
+            .await
+    } else {
+        handle
+            .task_service
+            .edit_task(task_id, None, None, None, Some(id_str), None)
+            .await
+    };
+    match result {
+        Ok(_) => {
+            emit_task_changed(handle, task_id);
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Failed to toggle tag: {e}")),
+    }
+}
+
 /// `invoke_action("paste-move")` — reparent the previously-marked task
 /// (`ctx.marked`) under `target`. Validates the marked node is a task and
 /// the move forms no cycle, then persists + relocates its notes.
@@ -1720,6 +1809,10 @@ impl Node for TaskItemNode {
             "delete-single" => ActionDispatch::DeleteSelf { confirm: None },
             "undelete" => invoke_undelete(&self.handle).await,
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.id).await,
+            "toggle-tag" => {
+                invoke_toggle_tag(&self.handle, &self.snapshot, self.id, ctx.value.as_deref())
+                    .await
+            }
             // The frontend records the mark; the adapter does nothing here.
             "mark-move" => ActionDispatch::Noop,
             "paste-move" => match &ctx.marked {
@@ -2075,6 +2168,58 @@ impl ContentAdapter for TaskAdapter {
         let snapshot = self.snapshot().await?;
         Ok(Some(snapshot.tree_search(query, limit)))
     }
+
+    /// Serve the `"tags"` value list backing the TUI `option_menu`: every
+    /// tag in the database (global first, then project tags suffixed with
+    /// their project name), each as a [`ValueOption`] whose `value` is the
+    /// stable id (`global-tag:`/`project-tag:`) the `toggle-tag` action
+    /// expects back in [`ActionContext::value`]. An unknown source yields an
+    /// empty list (the default-trait behavior).
+    async fn list_values(&self, source: &str) -> Result<Vec<not_yet_done_content::ValueOption>> {
+        use not_yet_done_content::ValueOption;
+        use not_yet_done_task_core::service::TagItem;
+
+        if source != "tags" {
+            return Ok(Vec::new());
+        }
+        let items = self
+            .handle
+            .tag_service
+            .list_all()
+            .await
+            .map_err(to_content_err)?;
+        let mut options: Vec<ValueOption> = items
+            .into_iter()
+            .map(|item| match item {
+                TagItem::Global(t) => ValueOption {
+                    value: format!("global-tag:{}", t.id),
+                    label: tag_menu_label(&t.name, t.symbol.as_deref(), None),
+                },
+                TagItem::Project { tag, project_name } => ValueOption {
+                    value: format!("project-tag:{}", tag.id),
+                    label: tag_menu_label(&tag.name, tag.symbol.as_deref(), Some(&project_name)),
+                },
+            })
+            .collect();
+        options.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        Ok(options)
+    }
+}
+
+/// Format a tag's menu label: `symbol name (project: …)`. Mirrors the
+/// native tag menu's `format_menu_label` so the `option_menu` reads
+/// identically to the legacy `:tag` popup.
+fn tag_menu_label(name: &str, symbol: Option<&str>, project: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(s) = symbol {
+        out.push_str(s);
+        out.push(' ');
+    }
+    out.push_str(name);
+    if let Some(p) = project {
+        out.push_str(&format!(" (project: {p})"));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2101,6 +2246,7 @@ mod tests {
                 },
                 tag_names: String::new(),
                 tag_symbols: String::new(),
+                tag_ids: String::new(),
                 has_notes: false,
                 parent,
             },

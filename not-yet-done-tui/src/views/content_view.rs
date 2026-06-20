@@ -6079,6 +6079,19 @@ impl ContentPane {
                     pane_id,
                 });
             }
+            "option_menu" => {
+                let Some(config) = action.option_menu.clone() else {
+                    return SubViewMessage::Request(ViewRequest::Notify(format!(
+                        "option_menu action '{}' missing `option_menu` config",
+                        action.name
+                    )));
+                };
+                return SubViewMessage::Request(ViewRequest::OpenOptionMenuForNode {
+                    view_index,
+                    pane_id,
+                    config,
+                });
+            }
             "invalidate_session" => {
                 return SubViewMessage::Request(ViewRequest::InvalidateContentSession {
                     view_index,
@@ -11321,6 +11334,7 @@ mod tests {
                     inherit: false,
                     script_scope: Default::default(),
                     on_container: false,
+                    option_menu: None,
                 }],
                 children: vec![ChildDef {
                     row_layout: None,
@@ -11492,6 +11506,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         // `a` begins the `al` chord → detected as a prefix …
         assert!(view.yaml_action_chord_prefix("a"));
@@ -13963,6 +13978,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -14524,6 +14540,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
@@ -14545,6 +14562,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         // Root view: tree_find (`/`). Like fuzzy_filter it is declared only
         // here yet must reach every cursor depth (it is in the GLOBAL set).
@@ -14566,6 +14584,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
@@ -14586,6 +14605,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         config
     }
@@ -14675,6 +14695,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
@@ -14701,6 +14722,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
@@ -14720,6 +14742,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -15580,6 +15603,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -15614,6 +15638,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let issues = mock_issues();
@@ -15654,6 +15679,7 @@ mod tests {
             inherit: false,
             script_scope: Default::default(),
             on_container: false,
+            option_menu: None,
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -15889,6 +15915,7 @@ mod tests {
                 inherit: false,
                 script_scope: Default::default(),
                 on_container: false,
+                option_menu: None,
             });
         }
         config
@@ -18538,6 +18565,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     inherit: false,
                     script_scope: Default::default(),
                     on_container: false,
+                    option_menu: None,
                 },
                 ActionDef {
                     name: "refresh".to_string(),
@@ -18557,6 +18585,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     inherit: false,
                     script_scope: Default::default(),
                     on_container: false,
+                    option_menu: None,
                 },
             ],
             children: vec![],

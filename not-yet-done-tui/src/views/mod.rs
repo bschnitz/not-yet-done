@@ -118,6 +118,16 @@ pub enum ViewRequest {
         view_index: usize,
         pane_id: PaneId,
     },
+    /// Open the generic, adapter-driven option menu for the selected content
+    /// node. Raised by a `type: option_menu` action. `config` is the menu
+    /// recipe (options source, selection-marker field, toggle action) the App
+    /// uses to async-fetch `list_values(source)` + the node's marker and open
+    /// the popup. See [`crate::app::App::open_option_menu_for_content`].
+    OpenOptionMenuForNode {
+        view_index: usize,
+        pane_id: PaneId,
+        config: crate::config::view_config::OptionMenuConfig,
+    },
     // Tracking-specific
     DeleteTracking,
     OpenTrackingGroupPopup,

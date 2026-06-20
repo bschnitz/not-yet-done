@@ -2062,6 +2062,62 @@ Konvention: Shortcut **`T` (shift+t)**, weil `t` auf dem Tasks-Tab den
 Tree-/List-View-Wechsel belegt. Im Tree mit `inherit: true` deklarieren,
 damit die Action auf jeder Subtask-Ebene greift.
 
+> **Status:** `type: tag` hängt am host-seitigen `tag_service` und ist die
+> Altlast, die mit dem DB-Split abgebaut wird (C5). Das **Togglen** ist
+> bereits auf den adapter-getriebenen `type: option_menu` migriert (siehe
+> unten) — der Tasks-Tab nutzt dafür `option_menu`. `type: tag` bleibt
+> vorerst nur als Cmdline-`:tag` für Anlegen/Umbenennen/Löschen bestehen, bis
+> auch diese Verben adapter-seitig nachgezogen sind.
+
+### Option-Menü (`type: option_menu`)
+
+```yaml
+actions:
+  - name: tags
+    key: T
+    type: option_menu
+    option_menu:
+      source: tags # Schlüssel für `list_values` auf dem Adapter
+      marker: tag_ids # verstecktes Knoten-Feld mit den gesetzten Werten
+      toggle: toggle-tag # Adapter-Action, die auf Enter feuert
+      title: Tags # Popup-Titel (optional; Default = Action-Name)
+```
+
+Ein **host-seitiges, adapter-agnostisches** Auswahl-Menü, das Werte am
+selektierten Knoten togglet (z. B. Tags). **Warum es existiert:** Eine an eine
+GUI-Form (Picker, Formular) gekoppelte Action zwingt den Adapter, die
+Host-Oberfläche zu kennen. Statt dessen liefert der Adapter eine flache Liste
+wählbarer Werte über `list_values(source)` und nimmt den gewählten Wert über
+ein normales `invoke_action` (`ActionContext.value`) entgegen — das Menü selbst
+ist reine Host-Logik und steht in der Config. So weiß der Adapter nichts vom
+Menü, und derselbe Action-Typ bedient Tags, Status-Sets, Label u. Ä. ohne neue
+Vertrags-Form.
+
+Ablauf:
+
+- Beim Öffnen lädt der Host die Optionen via `list_values(source)` und liest
+  die aktuell gesetzten Werte aus dem `marker`-Metadatenfeld des Knotens
+  (kommaseparierte stabile IDs). Gesetzte Optionen werden mit **★** markiert.
+- **Enter** auf einer Option: feuert die `toggle`-Action mit dem gewählten Wert
+  in `ActionContext.value`. Der Adapter entscheidet selbst assign-vs-unassign
+  anhand der Ist-Zugehörigkeit und gibt einen `ActionDispatch` zurück (Unsinns-
+  Werte kommen als `ActionDispatch::Error` zurück).
+- Das Popup **bleibt offen** (Mehrfach-Toggle); der ★-Marker kippt sofort live,
+  während die Pane im Hintergrund neu lädt.
+- **Esc** schließt.
+
+Felder:
+
+| Feld     | Pflicht | Bedeutung                                                           |
+| -------- | ------- | ------------------------------------------------------------------- |
+| `source` | ja      | Schlüssel an `list_values(source)`; mappt auf `Vec<ValueOption>`.   |
+| `marker` | ja      | Verstecktes Knoten-Feld mit den gesetzten Werten (z. B. `tag_ids`). |
+| `toggle` | ja      | Adapter-Action-ID, die auf Enter mit dem Wert aufgerufen wird.      |
+| `title`  | nein    | Popup-Titel; Default = Name der Action.                             |
+
+Tastenbindungen teilt sich das Menü mit dem Tag-Menü (`tag_menu`-Section:
+Toggle / Next / Prev / Close), weil die Menü-Form identisch ist.
+
 ### Custom Actions
 
 Adapter registrieren eigene Aktionen:

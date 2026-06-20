@@ -986,6 +986,23 @@ pub struct ActionOption {
     pub value: String,
 }
 
+/// One option in a named value list served by
+/// [`ContentAdapter::list_values`].
+///
+/// Deliberately *not* tied to any action: it is a generic "here is a value
+/// the user may pick" pair. A frontend menu (e.g. the TUI's `option_menu`)
+/// fetches such a list, lets the user choose, and then feeds the chosen
+/// `value` back into a value-accepting action via [`ActionContext::value`].
+/// The adapter never learns which widget sourced the value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValueOption {
+    /// Stable value handed back to the adapter (e.g. a tag id like
+    /// `global-tag:<uuid>`). Opaque to the frontend.
+    pub value: String,
+    /// Human-readable label shown in the menu.
+    pub label: String,
+}
+
 /// Where a hint should render — drives the split between the highlighted
 /// action bar and the dimmer status bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1127,6 +1144,17 @@ pub struct ActionContext {
     /// Single-node actions (delete one row, restore one row, toggle) ignore
     /// it — their target is already the invoking node.
     pub query: Option<String>,
+    /// A frontend-sourced value for a *value-accepting* action — the core of
+    /// the decoupled-input design. Instead of the adapter prescribing a
+    /// widget (`InputSpec::Picker`), an action simply consumes a value here
+    /// and the frontend decides how to source it (free text, a node field,
+    /// or a list fetched via [`ContentAdapter::list_values`]). The adapter
+    /// accepts any value and rejects nonsense via [`ActionDispatch::Error`].
+    ///
+    /// `None` for actions that take no value (the common case). Example: the
+    /// TUI's `option_menu` sets this to the focused option's `value` (e.g. a
+    /// tag id) when invoking a `toggle`-style action.
+    pub value: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,6 +1418,20 @@ pub trait ContentAdapter: Send + Sync {
     /// snapshot best-effort) — it is polled on the render path.
     fn has_active_tracking(&self) -> bool {
         false
+    }
+
+    /// Serve a named, adapter-defined list of selectable values — the
+    /// generic backing for frontend menus that need "the set of things the
+    /// user may choose from" without the adapter knowing what widget renders
+    /// it. `source` is an opaque adapter-defined key (e.g. `"tags"`); an
+    /// unknown source returns an empty list. The chosen value travels back
+    /// into a value-accepting action via [`ActionContext::value`].
+    ///
+    /// Default returns no values, so adapters that expose no such lists need
+    /// not override it.
+    async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
+        let _ = source;
+        Ok(Vec::new())
     }
 
     /// Subscribe to live connection-status updates. Default returns a
@@ -2432,6 +2474,7 @@ mod mark_move_contract_tests {
             marked: Some(marked.clone()),
             confirmed: false,
             query: None,
+            value: None,
         };
 
         let dispatch = node.invoke_action("paste-move", &ctx).await.unwrap();
