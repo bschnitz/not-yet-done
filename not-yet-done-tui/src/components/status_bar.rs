@@ -11,22 +11,12 @@ use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::config::{GlobalAction, CommonAction, KeyBindingConfig, TrackingsAction};
+use crate::config::{GlobalAction, KeyBindingConfig};
 use std::sync::Arc;
 use crate::ui::theme::Theme;
 
-/// Display mode for the status bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatusMode {
-    /// Trackings tab — show tracking-specific actions.
-    Trackings,
-    /// Non-tasks tab — show tab cycling hints only.
-    Other,
-}
-
 pub struct StatusBarComponent {
     theme: Arc<Theme>,
-    mode: StatusMode,
     hints: Vec<(String, String)>, // [(key_label, description), ...]
     /// Active link-mark label rendered as a leading "📎 marked: <ref>"
     /// pill on the status bar. `None` hides the marker entirely.
@@ -37,7 +27,6 @@ impl StatusBarComponent {
     pub fn new(theme: Arc<Theme>, keybindings: &KeyBindingConfig) -> Self {
         let mut comp = Self {
             theme,
-            mode: StatusMode::Other,
             hints: Vec::new(),
             link_marker: None,
         };
@@ -50,17 +39,8 @@ impl StatusBarComponent {
         self.link_marker = marker;
     }
 
-    /// Update the display mode and rebuild hints.
-    pub fn set_mode(&mut self, mode: StatusMode, keybindings: &KeyBindingConfig) {
-        if self.mode != mode {
-            self.mode = mode;
-            self.rebuild_hints(keybindings);
-        }
-    }
-
     /// Set custom hints directly (for Content tabs with dynamic keybindings).
     pub fn set_custom_hints(&mut self, hints: Vec<(String, String)>) {
-        self.mode = StatusMode::Other;
         self.hints = hints;
     }
 
@@ -89,31 +69,11 @@ impl StatusBarComponent {
             (gkb.label(&GlobalAction::Quit), "quit".to_string()),
         ];
 
-        match self.mode {
-            StatusMode::Trackings => {
-                hints.push((kb.common.label(&CommonAction::SavedFilterSelect), "queries".to_string()));
-                hints.push((kb.trackings.label(&TrackingsAction::TrackingGroup), "group".to_string()));
-                hints.push((kb.common.label(&CommonAction::JumpMode), "jump".to_string()));
-                hints.push((kb.common.label(&CommonAction::ColumnConfig), "columns".to_string()));
-                hints.push((kb.trackings.label(&TrackingsAction::TrackingOrderToggle), "order".to_string()));
-                hints.push((kb.trackings.label(&TrackingsAction::TrackingCondensedToggle), "condensed".to_string()));
-                hints.push((kb.trackings.label(&TrackingsAction::TrackingTreeToggle), "tree".to_string()));
-                hints.push((kb.trackings.label(&TrackingsAction::TrackingRestore), "restore".to_string()));
-                hints.push((kb.trackings.label(&TrackingsAction::TrackingRestoreAll), "restore all".to_string()));
-                hints.push((
-                    format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
-                    "cycle tabs".to_string(),
-                ));
-                hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
-            }
-            StatusMode::Other => {
-                hints.push((
-                    format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
-                    "cycle tabs".to_string(),
-                ));
-                hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
-            }
-        }
+        hints.push((
+            format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
+            "cycle tabs".to_string(),
+        ));
+        hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
 
         self.hints = hints;
     }
@@ -204,7 +164,7 @@ impl Component for StatusBarComponent {
     fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
 
     fn state(&self) -> State {
-        State::Single(StateValue::String(format!("{:?}", self.mode)))
+        State::Single(StateValue::String("status".to_string()))
     }
 
     fn perform(&mut self, _cmd: Cmd) -> CmdResult {

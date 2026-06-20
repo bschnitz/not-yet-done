@@ -23,8 +23,7 @@
 //! confusing the user later at runtime.
 
 use crate::config::keybindings::{
-    CommonAction, ContentAction, GlobalAction, KeyBinding, KeyBindingConfig, TrackingsAction,
-    WindowAction,
+    CommonAction, ContentAction, GlobalAction, KeyBinding, KeyBindingConfig, WindowAction,
 };
 use crate::config::view_config::{ChildDef, ViewDef, ViewFileConfig};
 
@@ -118,7 +117,6 @@ pub enum KeySource {
     Common(CommonAction),
     Content(ContentAction),
     Window(WindowAction),
-    Trackings(TrackingsAction),
     /// `actions:` entry in a YAML view or child.
     YamlAction {
         view: String,
@@ -191,7 +189,6 @@ impl KeySource {
             Self::Common(a) => format!("common.{}", a),
             Self::Content(a) => format!("content.{}", a),
             Self::Window(a) => format!("window.{}", a),
-            Self::Trackings(a) => format!("trackings.{}", a),
             Self::YamlAction {
                 view,
                 child_path,

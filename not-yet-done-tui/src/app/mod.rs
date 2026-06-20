@@ -4,8 +4,7 @@ use std::time::Instant;
 use std::collections::HashSet;
 
 use not_yet_done_core::repository::{
-    LinkRepository, QueryShortcutRepository, SavedQueryRepository, SettingsRepository,
-    TrackingRepository,
+    LinkRepository, QueryShortcutRepository, SettingsRepository, TrackingRepository,
 };
 use not_yet_done_core::service::TaskService;
 use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
@@ -18,15 +17,12 @@ use crate::components::data_table::DataTable;
 use crate::components::notification_bar::NotificationBarComponent;
 use crate::components::query_error_bar::QueryErrorBarComponent;
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
-use crate::components::status_bar::{StatusBarComponent, StatusMode};
+use crate::components::status_bar::StatusBarComponent;
 use crate::components::tab_bar::TabBarComponent;
-use crate::config::{
-    CommonAction, GlobalAction, KeyBindingConfig, TrackingsAction, TuiConfig,
-};
-use crate::tabs::{Tab, TabLayout, TrackingsSubView};
+use crate::config::{CommonAction, GlobalAction, KeyBindingConfig, TuiConfig};
+use crate::tabs::{Tab, TabLayout};
 use crate::ui::theme::Theme;
 use crate::views::content_view::ContentView;
-use crate::views::trackings_view::TrackingsView;
 use crate::views::{SubViewMessage, ViewRequest};
 
 // ---------------------------------------------------------------------------
@@ -43,8 +39,6 @@ enum AuthInvalidate {
 }
 
 pub enum LoadMsg {
-    Trackings(Vec<crate::tabs::TrackingRow>),
-    TrackingError(String),
     /// Async-loaded items for a content view.
     ContentItems {
         view_index: usize,
@@ -327,7 +321,6 @@ fn generate_sort_labels(count: usize) -> Vec<String> {
 
 /// A pending confirmation dialog: shows a message, executes on y/Enter, cancels on n/Esc.
 pub enum PendingConfirmation {
-    DeleteTracking(Uuid),
     /// Drop a stale link row whose target ref can no longer be resolved
     /// (Stale / UnknownRoute / parse failure from [`crate::app::link`]).
     DeleteStaleLink(Uuid),
@@ -581,7 +574,6 @@ pub struct App {
 
     task_service: Arc<dyn TaskService>,
     pub tag_service: Arc<dyn not_yet_done_core::service::TagService>,
-    pub saved_query_repo: Arc<dyn SavedQueryRepository>,
     pub query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
     settings_repo: Arc<dyn SettingsRepository>,
     tracking_repo: Arc<dyn TrackingRepository>,
@@ -666,9 +658,6 @@ pub struct App {
     /// error of the session.
     pub last_error: Option<String>,
 
-    /// Last time active tracking durations were refreshed.
-    last_tracking_tick: Instant,
-
     /// Last time a live `Busy` banner was nudged to repaint (~1 Hz).
     last_anim_tick: Instant,
 
@@ -680,7 +669,7 @@ pub struct App {
     pub tag_menu: crate::components::tag_menu::TagMenuComponent,
 
     /// When the tag menu was opened from a content/adapter tab (a
-    /// `type: tag` action, e.g. the Tasks-(A) `T` key) rather than the
+    /// `type: tag` action, e.g. the Tasks `T` key) rather than the
     /// native Tasks tab, this carries the task to assign tags to and the
     /// originating pane to refresh afterwards. `open_tag_menu` (the native
     /// `:tag` path) resets it to `None`, so it always reflects the most
@@ -744,20 +733,11 @@ pub struct App {
     /// Pending confirmation dialog — blocks input until y/n.
     pub pending_confirmation: Option<(String, PendingConfirmation)>,
 
-    /// Trackings tab state.
-    // TrackingsState now lives in trackings_view.state
-
     /// tuirealm components.
     pub tab_bar: TabBarComponent,
     pub status_bar: StatusBarComponent,
     pub notification_bar: NotificationBarComponent,
     pub query_error_bar: QueryErrorBarComponent,
-    pub trackings_view: TrackingsView,
-    /// Lazily-built task forest backing the Trackings tab's tree mode.
-    /// The now-removed legacy Tasks tab used to own this; the Trackings
-    /// tree groups by task hierarchy, so it is kept as an on-demand cache
-    /// (see [`App::ensure_task_forest`]). Invalidated on Trackings reload.
-    task_forest: Option<crate::ui::tasks::forest::TaskForest>,
     pub content_views: Vec<ContentSlot>,
 
     /// Content action popup (e.g. Jira transitions).
@@ -854,7 +834,6 @@ impl App {
         theme: Theme,
         task_service: Arc<dyn TaskService>,
         tag_service: Arc<dyn not_yet_done_core::service::TagService>,
-        saved_query_repo: Arc<dyn SavedQueryRepository>,
         query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
         settings_repo: Arc<dyn SettingsRepository>,
         tracking_repo: Arc<dyn TrackingRepository>,
@@ -891,14 +870,6 @@ impl App {
             &content_tab_infos,
         );
         let status_bar = StatusBarComponent::new(Arc::clone(&shared_theme), &config.keybindings);
-        let mut trackings_view = TrackingsView::new(
-            Arc::clone(&shared_theme),
-            config.keybindings.clone(),
-            Arc::clone(&tracking_repo),
-            Arc::clone(&saved_query_repo),
-            Arc::clone(&settings_repo),
-        );
-        trackings_view.set_taskpath_separator(config.tracking.taskpath_separator.clone());
 
         let mut notification_bar = NotificationBarComponent::new(Arc::clone(&shared_theme));
         notification_bar.set_max_lines(config.notifications.max_lines);
@@ -922,7 +893,6 @@ impl App {
             should_quit: false,
             task_service,
             tag_service,
-            saved_query_repo,
             query_shortcut_repo,
             settings_repo,
             tracking_repo,
@@ -944,7 +914,6 @@ impl App {
             notification: None,
             query_error: None,
             last_error: None,
-            last_tracking_tick: Instant::now(),
             last_anim_tick: Instant::now(),
             column_config_popup: None,
             tag_menu: crate::components::tag_menu::TagMenuComponent::new(
@@ -973,8 +942,6 @@ impl App {
             awaiting_postgres_script_shortcut: None,
             modal_message: None,
             pending_confirmation: None,
-            trackings_view,
-            task_forest: None,
             content_views,
             content_form_popup: None,
             content_action_popup: None,
@@ -1000,7 +967,6 @@ impl App {
 
         // Configure nav chars on all tables.
         let nav_chars: Vec<char> = app.config.navigation.jump_chars.chars().collect();
-        app.trackings_view.table.set_nav_chars(&nav_chars);
         for cv in app.content_views_iter_mut() {
             cv.set_nav_chars(&nav_chars);
         }
@@ -1063,116 +1029,6 @@ impl App {
     // -----------------------------------------------------------------------
     // Async task loading
     // -----------------------------------------------------------------------
-
-    pub fn spawn_load_trackings(&mut self) {
-        self.trackings_view.state.load_state = crate::tabs::LoadState::Loading;
-        // Drop the cached task forest so the Trackings tree picks up any
-        // task-hierarchy changes on the next rebuild (see `ensure_task_forest`).
-        self.task_forest = None;
-        let tracking_repo = Arc::clone(&self.tracking_repo);
-        let task_service = Arc::clone(&self.task_service);
-        let tx = self.load_tx.clone();
-        let tracking_filter = self.trackings_view.active_filter.clone();
-
-        tokio::spawn(async move {
-            // Load all tasks for description + parent lookup.
-            let tasks = task_service.list_tasks(None).await.unwrap_or_default();
-            let task_map: std::collections::HashMap<Uuid, (String, Option<Uuid>)> = tasks
-                .into_iter()
-                .map(|t| (t.id, (t.description, t.parent_id)))
-                .collect();
-
-            // Build root → parent chain of task descriptions (excluding the
-            // task itself — that is rendered separately in the `task` column).
-            // The view prepends a leading separator and joins with a
-            // configurable separator at render time. Cycles are guarded
-            // against (defensive); a missing parent simply truncates the
-            // chain at the last known ancestor.
-            let path_for = |task_id: Uuid| -> Vec<String> {
-                let mut chain: Vec<String> = Vec::new();
-                let mut seen = std::collections::HashSet::new();
-                seen.insert(task_id);
-                let mut current = task_map.get(&task_id).and_then(|(_, p)| *p);
-                while let Some(id) = current {
-                    if !seen.insert(id) {
-                        break;
-                    }
-                    match task_map.get(&id) {
-                        Some((desc, parent)) => {
-                            chain.push(desc.clone());
-                            current = *parent;
-                        }
-                        None => break,
-                    }
-                }
-                chain.reverse();
-                chain
-            };
-
-            // Load trackings — filtered if a tracking query filter is active.
-            let trackings = if let Some(ref expr) = tracking_filter {
-                match tracking_repo.find_filtered(expr).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = tx.send(LoadMsg::TrackingError(e.to_string()));
-                        return;
-                    }
-                }
-            } else {
-                match tracking_repo.find_all().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = tx.send(LoadMsg::TrackingError(e.to_string()));
-                        return;
-                    }
-                }
-            };
-
-            let now = chrono::Utc::now();
-            let rows: Vec<crate::tabs::TrackingRow> = trackings
-                .into_iter()
-                .map(|t| {
-                    let desc = task_map
-                        .get(&t.task_id)
-                        .map(|(d, _)| d.clone())
-                        .unwrap_or_else(|| format!("(deleted {})", &t.task_id.to_string()[..8]));
-                    let path = path_for(t.task_id);
-                    let ended = t.ended_at;
-                    let duration = ended.unwrap_or(now) - t.started_at;
-                    crate::tabs::TrackingRow {
-                        id: t.id,
-                        task_id: t.task_id,
-                        task_description: desc,
-                        task_path: path,
-                        started_at: t.started_at,
-                        ended_at: ended,
-                        duration,
-                        active: ended.is_none(),
-                    }
-                })
-                .collect();
-
-            let _ = tx.send(LoadMsg::Trackings(rows));
-        });
-    }
-
-    /// Ensure [`Self::task_forest`] is populated, loading every task once
-    /// and building the forest on the current thread. The Trackings tree
-    /// view groups its rows by the task hierarchy; the forest used to be
-    /// supplied by the legacy Tasks tab's loaded state, so with that tab
-    /// gone we build it lazily here (and cache it until the next
-    /// `spawn_load_trackings` clears it).
-    fn ensure_task_forest(&mut self) {
-        if self.task_forest.is_some() {
-            return;
-        }
-        let service = Arc::clone(&self.task_service);
-        let tasks = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { service.list_tasks(None).await.unwrap_or_default() })
-        });
-        self.task_forest = Some(crate::ui::tasks::forest::build_forest(tasks));
-    }
 
     /// Spawn async item load for a content view (root level).
     /// Subscribe to the adapter's auth/connection status and forward each
@@ -3378,17 +3234,6 @@ impl App {
     pub fn handle_load_msg(&mut self, msg: LoadMsg) -> bool {
         {
             match msg {
-                LoadMsg::Trackings(rows) => {
-                    let focus_idx = self.trackings_view.state.set_rows(rows);
-                    self.rebuild_trackings_table();
-                    if let Some(idx) = focus_idx {
-                        self.trackings_view.table.set_selected(idx);
-                    }
-                }
-                LoadMsg::TrackingError(e) => {
-                    self.trackings_view.state.set_load_error(e.clone());
-                    self.notify_error(format!("Tracking filter error: {e}"));
-                }
                 LoadMsg::ContentItems {
                     view_index,
                     pane_id,
@@ -3949,7 +3794,6 @@ impl App {
         {
             use crate::views::{CmdlineKeyResult, HasCmdline};
             let cmdline_active = match self.active_tab {
-                Tab::Trackings => self.trackings_view.cmdline_active(),
                 Tab::Content(idx) => self
                     .content_view(idx)
                     .map(|cv| cv.cmdline_active())
@@ -3957,7 +3801,6 @@ impl App {
             };
             if cmdline_active {
                 let result = match self.active_tab {
-                    Tab::Trackings => self.trackings_view.cmdline_handle_key(key),
                     Tab::Content(idx) => self
                         .content_view_mut(idx)
                         .map(|cv| cv.cmdline_handle_key(key))
@@ -3976,14 +3819,11 @@ impl App {
 
         // Search input mode: delegate to active view's SearchComponent.
         {
-            use crate::views::{SearchKeyResult, Searchable};
-            let search_active = match self.active_tab {
-                Tab::Trackings => self.trackings_view.search_active(),
-                Tab::Content(_) => false,
-            };
+            use crate::views::SearchKeyResult;
+            let Tab::Content(_) = self.active_tab;
+            let search_active = false;
             if search_active {
                 let result = match self.active_tab {
-                    Tab::Trackings => self.trackings_view.search_handle_key(key),
                     Tab::Content(_) => SearchKeyResult::Cancelled,
                 };
                 match result {
@@ -4027,27 +3867,6 @@ impl App {
                 self.sync_components();
                 return EditorRequest::None;
             }
-            // Tab-specific chord sections are checked only on their own
-            // tab so a cross-tab name collision (e.g. `trackings.zm` ==
-            // `content.zm` for TreeCollapseAll) doesn't swallow the chord
-            // on the wrong tab. Each branch must guard its lookup with
-            // `active_tab == …` and is allowed to early-return only when
-            // we are on its tab — otherwise fall through to the next
-            // section so the right one can pick the chord up.
-            if self.active_tab == Tab::Trackings {
-                let trackings_chord = self
-                    .keybindings
-                    .trackings
-                    .bindings
-                    .iter()
-                    .find(|(_, b)| b.matches(&chord))
-                    .map(|(a, _)| a.clone());
-                if let Some(action) = trackings_chord {
-                    let _ = self.handle_trackings_action(action);
-                    self.sync_components();
-                    return EditorRequest::None;
-                }
-            }
             // Content-tab chords (e.g. `zm` → TreeCollapseAll). Route
             // through the active ContentView's central dispatcher so the
             // tree-mode guard + drill post-processing match the single-
@@ -4060,17 +3879,16 @@ impl App {
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
             if let Some(action) = content_chord {
-                if let Tab::Content(idx) = self.active_tab {
-                    if let Some(cv) = self.content_view_mut(idx) {
-                        let msg = cv.dispatch_content_action(action);
-                        match msg {
-                            SubViewMessage::Unhandled => {}
-                            other => {
-                                let _ = self.process_sub_view_message(other);
-                            }
+                let Tab::Content(idx) = self.active_tab;
+                if let Some(cv) = self.content_view_mut(idx) {
+                    let msg = cv.dispatch_content_action(action);
+                    match msg {
+                        SubViewMessage::Unhandled => {}
+                        other => {
+                            let _ = self.process_sub_view_message(other);
                         }
-                        self.drain_content_cursor_closes(idx);
                     }
+                    self.drain_content_cursor_closes(idx);
                 }
                 self.sync_components();
                 return EditorRequest::None;
@@ -4081,7 +3899,8 @@ impl App {
             // the assembled chord through the active ContentView. A clean
             // miss returns `Unhandled` and falls through to the remaining
             // chord resolution below.
-            if let Tab::Content(idx) = self.active_tab {
+            {
+                let Tab::Content(idx) = self.active_tab;
                 let msg = self
                     .content_view_mut(idx)
                     .map(|cv| cv.handle_key(&chord))
@@ -4114,12 +3933,6 @@ impl App {
                 || self
                     .keybindings
                     .common
-                    .bindings
-                    .values()
-                    .any(|b| b.is_prefix(&chord))
-                || self
-                    .keybindings
-                    .trackings
                     .bindings
                     .values()
                     .any(|b| b.is_prefix(&chord))
@@ -4226,57 +4039,6 @@ impl App {
             }
             self.sync_components();
             return EditorRequest::None;
-        }
-
-        // Trackings query menu — delegated to TrackingsView.
-        if self.active_tab == Tab::Trackings && self.trackings_view.has_query_menu() {
-            let result = self
-                .trackings_view
-                .handle_query_menu_key(key)
-                .map(|msg| self.process_trackings_message(msg))
-                .unwrap_or(EditorRequest::None);
-            self.sync_components();
-            return result;
-        }
-
-        // Tracking grouping popup — delegated to TrackingsView.
-        if self.trackings_view.has_group_popup() {
-            let msgs = self.trackings_view.handle_group_popup_key(key);
-            for msg in msgs {
-                self.process_trackings_message(msg);
-            }
-            self.sync_components();
-            return EditorRequest::None;
-        }
-
-        // Trackings tab: delegate to TrackingsView component.
-        let trackings_has_popup = self.script_menu.is_open() || self.column_config_popup.is_some();
-        if self.active_tab == Tab::Trackings && !trackings_has_popup {
-            if self.trackings_view.state.fuzzy_active {
-                let handled = self.handle_trackings_fuzzy_key(key);
-                if handled {
-                    self.sync_components();
-                    return EditorRequest::None;
-                }
-            }
-
-            // Normal mode: delegate to TrackingsView. Tree mode needs the
-            // task forest; take it out so the view can borrow `self.trackings_view`
-            // mutably, then put it back.
-            self.ensure_task_forest();
-            let forest = self.task_forest.take();
-            let msg = self.trackings_view.handle_key(key, forest.as_ref());
-            self.task_forest = forest;
-            match msg {
-                SubViewMessage::Unhandled => {
-                    // Fall through to global/favorites/chords.
-                }
-                other => {
-                    let result = self.process_trackings_message(other);
-                    self.sync_components();
-                    return result;
-                }
-            }
         }
 
         // Content file-picker popup (e.g. Taiga attachment upload) —
@@ -4394,7 +4156,8 @@ impl App {
         }
 
         // Content tab: delegate to ContentView.
-        if let Tab::Content(idx) = self.active_tab {
+        {
+            let Tab::Content(idx) = self.active_tab;
             // SQ-8d: pre-fill the Postgres-table shortcut cache for the
             // currently-focused table so `build_view_claims` can register
             // global apply-on-chord handlers for them. No-op when the
@@ -4458,12 +4221,6 @@ impl App {
                 .values()
                 .any(|b| b.is_prefix(key));
             let prefix_tab = match self.active_tab {
-                Tab::Trackings => self
-                    .keybindings
-                    .trackings
-                    .bindings
-                    .values()
-                    .any(|b| b.is_prefix(key)),
                 // Content chords (e.g. `zm` → TreeCollapseAll) live in
                 // `content.bindings`. Without this, `z` would never be
                 // stashed as a pending key on a Content tab and the chord
@@ -4506,22 +4263,11 @@ impl App {
             return EditorRequest::None;
         }
 
-        let action = action::resolve_key(
-            key,
-            mode,
-            &self.keybindings,
-            self.active_tab == Tab::Trackings,
-            false,
-        );
+        let action = action::resolve_key(key, mode, &self.keybindings, false);
 
         // If the action is Noop, try favorites then cmdline shortcuts.
         // Chord-prefix detection has already run above.
         if action == Action::Noop && mode == action::InputMode::Normal {
-            // Try activating a favorite shortcut.
-            if self.try_activate_favorite(key) {
-                self.sync_components();
-                return EditorRequest::None;
-            }
             // User-defined cmdline shortcut (`cmdline_shortcuts:` in
             // tui.yaml). Runs the bound command exactly as if the user
             // had typed it after `:` — useful for one-key access to
@@ -4542,7 +4288,6 @@ impl App {
         match action {
             Action::Global(g) => self.handle_global_action(g),
             Action::Common(c) => self.handle_common_action(c),
-            Action::Trackings(t) => self.handle_trackings_action(t),
             Action::Content(_) | Action::Window(_) | Action::QueryMenu(_) => {
                 // Not produced by `resolve_key` (these reach the App via the
                 // chain interceptor in Phase 2). Routed centrally through
@@ -4579,10 +4324,9 @@ impl App {
     /// through to ordinary key handling).
     fn resolve_action_chain(&self, key: &str) -> Option<Option<Vec<Action>>> {
         let mut scopes: Vec<&crate::action::ActionChains> = Vec::new();
-        if let Tab::Content(idx) = self.active_tab {
-            if let Some(cv) = self.content_view(idx) {
-                scopes.extend(cv.action_chain_scopes());
-            }
+        let Tab::Content(idx) = self.active_tab;
+        if let Some(cv) = self.content_view(idx) {
+            scopes.extend(cv.action_chain_scopes());
         }
         scopes.push(&self.keybindings.action_chains);
         crate::action::resolve_chain_in_scopes(&scopes, key).cloned()
@@ -4634,9 +4378,7 @@ impl App {
                 Ok(())
             }
             Action::Window(w) => {
-                let Tab::Content(idx) = self.active_tab else {
-                    return Err(format!("window.{w} requires a Content tab"));
-                };
+                let Tab::Content(idx) = self.active_tab;
                 let Some(cv) = self.content_view_mut(idx) else {
                     return Err(format!("window.{w} on broken content tab"));
                 };
@@ -4646,9 +4388,7 @@ impl App {
                 Ok(())
             }
             Action::Content(c) => {
-                let Tab::Content(idx) = self.active_tab else {
-                    return Err(format!("content.{c} requires a Content tab"));
-                };
+                let Tab::Content(idx) = self.active_tab;
                 let Some(cv) = self.content_view_mut(idx) else {
                     return Err(format!("content.{c} on broken content tab"));
                 };
@@ -4698,12 +4438,6 @@ impl App {
     fn handle_global_action(&mut self, action: GlobalAction) -> EditorRequest {
         match action {
             GlobalAction::Quit => self.should_quit = true,
-            GlobalAction::TabTrackings => {
-                self.set_active_tab(Tab::Trackings);
-                if self.trackings_view.state.load_state == crate::tabs::LoadState::Idle {
-                    self.spawn_load_trackings();
-                }
-            }
             GlobalAction::TabJira => {
                 self.set_active_tab(Tab::Content(0));
             }
@@ -4804,16 +4538,11 @@ impl App {
         self.set_query_error(None);
     }
 
-    /// `:jump <Tab>[:<sub>]` — programmatic tab + sub-tab switch.
+    /// `:jump <Tab>` — programmatic tab switch.
     ///
-    /// Recognised forms (case-insensitive head, sub-token compared
-    /// case-insensitively against `TrackingsSubView::title`):
-    ///   - `Trackings`, `Trackings:normal`, `Trackings:condensed`,
-    ///     `Trackings:tree`
-    ///   - any content tab — matched against `tab_name`
-    ///
-    /// Used by scripts (via the script-output relay) and by users from
-    /// the `:` cmdline. Unknown tab or sub-tab => modal error, no
+    /// The tab name is matched case-insensitively against each content
+    /// tab's `tab_name`. Used by scripts (via the script-output relay) and
+    /// by users from the `:` cmdline. Unknown tab => modal error, no
     /// state change.
     fn jump_command(&mut self, target: &str) {
         let (head, sub) = match target.split_once(':') {
@@ -4822,28 +4551,6 @@ impl App {
         };
         if head.is_empty() {
             self.modal_message = Some(":jump — empty tab name".to_string());
-            return;
-        }
-
-        if head.eq_ignore_ascii_case("trackings") {
-            self.set_active_tab(Tab::Trackings);
-            if let Some(s) = sub {
-                use crate::tabs::TrackingsSubView;
-                let sv = match s.to_ascii_lowercase().as_str() {
-                    "normal" => Some(TrackingsSubView::Normal),
-                    "condensed" => Some(TrackingsSubView::Condensed),
-                    "tree" => Some(TrackingsSubView::Tree),
-                    _ => None,
-                };
-                let Some(sv) = sv else {
-                    self.modal_message = Some(format!(
-                        ":jump — unknown Trackings sub-view '{s}' (normal|condensed|tree)"
-                    ));
-                    return;
-                };
-                self.trackings_view.state.sub_view = sv;
-                self.rebuild_trackings_table();
-            }
             return;
         }
 
@@ -4989,7 +4696,7 @@ impl App {
     /// tab, whose ticket nodes sit several levels deep.
     ///
     /// The tab name may be double-quoted to allow spaces, e.g.
-    /// `:tree-find "Tasks (A)" id:<uuid>`. The query is adapter-defined;
+    /// `:tree-find "Tasks" id:<uuid>`. The query is adapter-defined;
     /// the local task adapter additionally accepts an exact-id escape
     /// `id:<uuid>` (used by scripted jumps that already resolved the
     /// node id via the CLI).
@@ -5004,7 +4711,7 @@ impl App {
         if target.is_empty() || query.is_empty() {
             self.modal_message = Some(
                 ":tree-find expects <Tab>[:<view>] <query>, e.g. \
-                 :tree-find \"Tasks (A)\" id:<uuid>"
+                 :tree-find \"Tasks\" id:<uuid>"
                     .to_string(),
             );
             return;
@@ -5134,13 +4841,7 @@ impl App {
                 }
             }
         }
-        let Tab::Content(tab_idx) = self.active_tab else {
-            self.modal_message = Some(
-                ":query apply — not on a content tab (use -t <Tab>[:<view>] to target one)"
-                    .to_string(),
-            );
-            return;
-        };
+        let Tab::Content(tab_idx) = self.active_tab;
 
         // ── 3. Pull fresh DB saved queries before lookup ─────────────────
         self.reload_content_saved_queries(tab_idx);
@@ -5272,10 +4973,7 @@ impl App {
     /// `modal_message` and return `None` when the active tab isn't a
     /// content tab / is in an error state.
     fn current_content_view_index_or_modal(&mut self, sub: &str) -> Option<usize> {
-        let Tab::Content(tab_idx) = self.active_tab else {
-            self.modal_message = Some(format!(":query {sub} — not on a content tab"));
-            return None;
-        };
+        let Tab::Content(tab_idx) = self.active_tab;
         match &self.content_views[tab_idx] {
             ContentSlot::Working(_) => Some(tab_idx),
             ContentSlot::Broken { name, errors, .. } => {
@@ -5543,8 +5241,8 @@ fn parse_query_apply_args(
 }
 
 /// Split off a leading token from `s`, honouring double quotes so a
-/// token may itself contain spaces — e.g. `"Tasks (A)" id:42` →
-/// (`Tasks (A)`, `id:42`). Unquoted tokens split on the first
+/// token may itself contain spaces — e.g. `"Analytics DB" id:42` →
+/// (`Analytics DB`, `id:42`). Unquoted tokens split on the first
 /// whitespace run. Used by `:tree-find` to address a tab whose display
 /// name contains spaces. Returns (token, remainder).
 fn split_leading_token(s: &str) -> (String, &str) {
@@ -5598,86 +5296,10 @@ impl App {
             return EditorRequest::None;
         };
         let scope = match self.active_tab {
-            Tab::Trackings => crate::edit_session::SessionScope::Trackings,
             Tab::Content(_) => crate::edit_session::SessionScope::Content,
         };
         let session = crate::edit_session::ErrorViewSession::new(text, scope);
         self.open_session(Box::new(session))
-    }
-
-    // ── Trackings tab key handling ──────────────────────────────────
-
-    fn handle_trackings_fuzzy_key(&mut self, key: &str) -> bool {
-        let needs_rebuild;
-        if self
-            .keybindings
-            .common
-            .bindings
-            .get(&CommonAction::FuzzyFilterAccept)
-            .map_or(false, |b| b.matches(key))
-        {
-            self.trackings_view.state.fuzzy_close();
-            needs_rebuild = true;
-        } else if self
-            .keybindings
-            .common
-            .bindings
-            .get(&CommonAction::FuzzyFilterCancel)
-            .map_or(false, |b| b.matches(key))
-        {
-            if self.trackings_view.state.fuzzy_query.is_empty() {
-                self.trackings_view.state.fuzzy_close();
-            } else {
-                self.trackings_view.state.fuzzy_query.clear();
-                self.trackings_view.state.fuzzy_cursor = 0;
-                self.trackings_view.state.refilter();
-            }
-            needs_rebuild = true;
-        } else if self
-            .keybindings
-            .common
-            .bindings
-            .get(&CommonAction::FuzzyFilterClear)
-            .map_or(false, |b| b.matches(key))
-        {
-            self.trackings_view.state.fuzzy_query.clear();
-            self.trackings_view.state.fuzzy_cursor = 0;
-            self.trackings_view.state.refilter();
-            needs_rebuild = true;
-        } else {
-            needs_rebuild = match key {
-                "backspace" => {
-                    self.trackings_view.state.fuzzy_backspace();
-                    true
-                }
-                "left" => {
-                    self.trackings_view.state.fuzzy_cursor_left();
-                    false
-                }
-                "right" => {
-                    self.trackings_view.state.fuzzy_cursor_right();
-                    false
-                }
-                ch if ch.chars().count() == 1 && !ch.chars().next().unwrap().is_control() => {
-                    self.trackings_view
-                        .state
-                        .fuzzy_insert(ch.chars().next().unwrap());
-                    true
-                }
-                _ => return false,
-            };
-        }
-        if needs_rebuild {
-            if self.trackings_view.state.sub_view == crate::tabs::TrackingsSubView::Tree {
-                self.ensure_task_forest();
-                if let Some(forest) = self.task_forest.take() {
-                    self.trackings_view.state.rebuild_tree_rows(&forest);
-                    self.task_forest = Some(forest);
-                }
-            }
-            self.rebuild_trackings_table();
-        }
-        true
     }
 
     fn set_active_tab(&mut self, tab: Tab) {
@@ -5694,10 +5316,8 @@ impl App {
             self.notify("Cut cancelled".to_string());
         }
         self.active_tab = tab;
-        if tab == Tab::Trackings {
-            self.spawn_load_trackings();
-        }
-        if let Tab::Content(idx) = tab {
+        {
+            let Tab::Content(idx) = tab;
             if let Some(cv) = self.content_view(idx) {
                 // Cheap staleness probe: adapters over stores that change
                 // outside the process (local task/tracking DB written by
@@ -5757,7 +5377,6 @@ impl App {
                         .unwrap_or_default()
                 } else {
                     match tab {
-                        Tab::Trackings => gkb.label(&GlobalAction::TabTrackings),
                         Tab::Content(0) => gkb.label(&GlobalAction::TabJira),
                         Tab::Content(1) => gkb.label(&GlobalAction::TabTaiga),
                         Tab::Content(2) => gkb.label(&GlobalAction::TabPostgres),
@@ -5766,7 +5385,6 @@ impl App {
                     }
                 };
                 let label = match tab {
-                    Tab::Trackings => crate::tabs::tab_label("⏱️", &key, "Trackings"),
                     Tab::Content(idx) => {
                         let (name, icon) = self
                             .content_views
@@ -5793,9 +5411,7 @@ impl App {
         view_index: usize,
         status: &not_yet_done_content::AdapterStatus,
     ) {
-        let Tab::Content(active) = self.active_tab else {
-            return;
-        };
+        let Tab::Content(active) = self.active_tab;
         if active != view_index {
             return;
         }
@@ -5866,7 +5482,8 @@ impl App {
 
         // Content tabs need their table rebuilt so the header reflects
         // the current overlay.
-        if let Tab::Content(idx) = self.active_tab {
+        {
+            let Tab::Content(idx) = self.active_tab;
             if let Some(cv) = self.content_view_mut(idx) {
                 cv.rebuild_table();
             }
@@ -5875,8 +5492,6 @@ impl App {
         self.tab_bar.set_active_tab(self.active_tab);
         let main_tab_labels = self.build_main_tab_labels();
         self.tab_bar.set_main_tab_labels(main_tab_labels);
-        self.tab_bar
-            .set_trackings_sub_view(self.trackings_view.state.sub_view);
         let subtab_labels: Vec<(usize, Vec<(String, bool)>)> = self
             .content_views_indexed()
             .map(|(idx, cv)| (idx, cv.subtab_labels()))
@@ -5891,18 +5506,8 @@ impl App {
         let session_label = |scope: crate::edit_session::SessionScope| -> Option<&str> {
             session.filter(|s| s.scope() == scope).map(|s| s.label())
         };
-        let trackings_active_editor = session_label(crate::edit_session::SessionScope::Trackings)
-            .or_else(|| {
-                if self.detached_script.is_some() {
-                    Some("run")
-                } else {
-                    None
-                }
-            });
         let content_active_editor =
             session_label(crate::edit_session::SessionScope::Content).map(|s| s.to_string());
-        self.trackings_view
-            .sync_action_bar(trackings_active_editor, tracking_active);
         let cut_active = self.content_marked_node.is_some();
         // Active sources owned by the App (popups / detached scripts) — pushed
         // into the focused content view so its hint resolver can light up the
@@ -5917,7 +5522,8 @@ impl App {
         );
         let column_config_active = self.column_config_popup.is_some();
         let script_active = self.detached_script.is_some();
-        if let Tab::Content(idx) = self.active_tab {
+        {
+            let Tab::Content(idx) = self.active_tab;
             if let Some(cv) = self.content_view_mut(idx) {
                 cv.sync_action_bar(
                     content_active_editor.as_deref(),
@@ -5930,7 +5536,8 @@ impl App {
             }
         }
 
-        if let Tab::Content(idx) = self.active_tab {
+        {
+            let Tab::Content(idx) = self.active_tab;
             // Content tabs use dynamic hints from ContentView.
             let gkb = &self.keybindings.global;
             let mut hints: Vec<(String, String)> =
@@ -5953,13 +5560,6 @@ impl App {
                 "cycle tabs".to_string(),
             ));
             self.status_bar.set_custom_hints(hints);
-        } else {
-            let status_mode = if self.active_tab == Tab::Trackings {
-                StatusMode::Trackings
-            } else {
-                StatusMode::Other
-            };
-            self.status_bar.set_mode(status_mode, &self.keybindings);
         }
 
         // Marker pill: link-mark always wins (existing UX), then the
@@ -5979,18 +5579,13 @@ impl App {
         self.status_bar.set_link_marker(marker);
     }
 
-    /// Rebuild the trackings table widget — delegates to TrackingsView.
-    pub fn rebuild_trackings_table(&mut self) {
-        self.trackings_view.rebuild_table();
-    }
-
     fn process_sub_view_message(&mut self, msg: SubViewMessage) -> EditorRequest {
         match msg {
             SubViewMessage::Request(req) => self.process_view_request(req),
             SubViewMessage::SelectionChanged(_) => EditorRequest::None,
             SubViewMessage::FuzzyStateChanged { .. } => {
-                // Refresh after filter change (Trackings is the only emitter).
-                self.rebuild_trackings_table();
+                // No live emitter remains after the legacy Trackings tab
+                // removal; kept for SubViewMessage exhaustiveness.
                 EditorRequest::None
             }
             SubViewMessage::SearchStateChanged { .. } => {
@@ -6014,12 +5609,6 @@ impl App {
 
     fn process_view_request(&mut self, req: ViewRequest) -> EditorRequest {
         match req {
-            ViewRequest::ToggleTracking(id) => {
-                // Find if task has active tracking and toggle.
-                let tracked = self.tracked_ids.contains(&id);
-                self.toggle_tracking_for_task(id, tracked);
-                EditorRequest::None
-            }
             ViewRequest::OpenColumnConfig => {
                 self.open_column_config_popup();
                 EditorRequest::None
@@ -6596,27 +6185,6 @@ impl App {
                 self.reload_content_saved_queries(view_index);
                 EditorRequest::None
             }
-            ViewRequest::ApplySavedQuery { scope, content } => {
-                self.apply_saved_query(&scope, &content)
-            }
-            ViewRequest::OpenSavedQueryEditor {
-                scope,
-                name,
-                current_query,
-                is_new,
-            } => self.open_editor_for_saved_query(&scope, name, current_query, is_new),
-            ViewRequest::DeleteSavedQuery { scope, name } => {
-                self.delete_saved_query(&scope, &name);
-                EditorRequest::None
-            }
-            ViewRequest::PromptSavedQueryShortcut { scope, name, query } => {
-                self.prompt_saved_query_shortcut(scope, name, query);
-                EditorRequest::None
-            }
-            ViewRequest::SetDefaultSavedQuery { scope, name } => {
-                self.set_default_saved_query(&scope, &name);
-                EditorRequest::None
-            }
             ViewRequest::OpenScriptMenuForNode {
                 view_index,
                 pane_id,
@@ -6634,91 +6202,6 @@ impl App {
                 pane_id,
             } => {
                 self.open_tag_menu_for_content(view_index, pane_id);
-                EditorRequest::None
-            }
-            _ => EditorRequest::None,
-        }
-    }
-
-    fn process_trackings_message(&mut self, msg: SubViewMessage) -> EditorRequest {
-        match msg {
-            SubViewMessage::Request(req) => self.process_trackings_request(req),
-            SubViewMessage::SelectionChanged(_) => EditorRequest::None,
-            SubViewMessage::FuzzyStateChanged { .. } => EditorRequest::None,
-            SubViewMessage::SearchStateChanged { .. } => {
-                // Search state now lives on views; handled via Searchable trait.
-                EditorRequest::None
-            }
-            _ => EditorRequest::None,
-        }
-    }
-
-    fn process_trackings_request(&mut self, req: ViewRequest) -> EditorRequest {
-        match req {
-            ViewRequest::DeleteTracking => {
-                self.delete_selected_tracking();
-                EditorRequest::None
-            }
-            ViewRequest::ToggleTracking(id) => {
-                let active = self.tracked_ids.contains(&id);
-                self.toggle_tracking_for_task(id, active);
-                EditorRequest::None
-            }
-            ViewRequest::OpenColumnConfig => {
-                self.open_column_config_popup();
-                EditorRequest::None
-            }
-            ViewRequest::OpenScriptMenuForTrackings => {
-                self.open_script_menu_for_trackings();
-                EditorRequest::None
-            }
-            ViewRequest::OpenScriptMenuForNode {
-                view_index,
-                pane_id,
-                batch,
-            } => {
-                if batch {
-                    self.open_script_menu_for_content_batch(view_index, pane_id);
-                } else {
-                    self.open_script_menu_for_content(view_index, pane_id);
-                }
-                EditorRequest::None
-            }
-            ViewRequest::OpenTrackingGroupPopup => {
-                self.trackings_view.open_group_popup();
-                EditorRequest::None
-            }
-            ViewRequest::SaveTrackingGrouping(label) => {
-                self.save_tracking_grouping_by_label(&label);
-                EditorRequest::None
-            }
-            ViewRequest::RestoreTracking => {
-                self.restore_selected_tracking();
-                EditorRequest::None
-            }
-            ViewRequest::RestoreAllTrackings => {
-                self.restore_all_deleted_trackings();
-                EditorRequest::None
-            }
-            ViewRequest::ApplySavedQuery { scope, content } => {
-                self.apply_saved_query(&scope, &content)
-            }
-            ViewRequest::OpenSavedQueryEditor {
-                scope,
-                name,
-                current_query,
-                is_new,
-            } => self.open_editor_for_saved_query(&scope, name, current_query, is_new),
-            ViewRequest::DeleteSavedQuery { scope, name } => {
-                self.delete_saved_query(&scope, &name);
-                EditorRequest::None
-            }
-            ViewRequest::PromptSavedQueryShortcut { scope, name, query } => {
-                self.prompt_saved_query_shortcut(scope, name, query);
-                EditorRequest::None
-            }
-            ViewRequest::SetDefaultSavedQuery { scope, name } => {
-                self.set_default_saved_query(&scope, &name);
                 EditorRequest::None
             }
             _ => EditorRequest::None,
@@ -7511,64 +6994,14 @@ impl App {
                     table.scroll_by(n);
                 }
             }
-            CommonAction::FuzzyFilterOpen => {
-                if self.active_tab == Tab::Trackings {
-                    self.trackings_view.state.fuzzy_open();
-                }
-            }
-            CommonAction::FuzzyFilterAccept => {
-                if self.active_tab == Tab::Trackings {
-                    self.trackings_view.state.fuzzy_close();
-                    self.rebuild_trackings_table();
-                }
-            }
-            CommonAction::FuzzyFilterClear => {
-                if self.active_tab == Tab::Trackings {
-                    self.trackings_view.state.fuzzy_query.clear();
-                    self.trackings_view.state.fuzzy_cursor = 0;
-                    self.trackings_view.state.refilter();
-                    self.rebuild_trackings_table();
-                }
-            }
-            CommonAction::FuzzyFilterCancel => {
-                if self.active_tab == Tab::Trackings {
-                    if self.trackings_view.state.fuzzy_query.is_empty() {
-                        self.trackings_view.state.fuzzy_close();
-                    } else {
-                        self.trackings_view.state.fuzzy_query.clear();
-                        self.trackings_view.state.fuzzy_cursor = 0;
-                        self.trackings_view.state.refilter();
-                    }
-                    self.rebuild_trackings_table();
-                }
-            }
-            CommonAction::SearchOpen => {
-                use crate::views::Searchable;
-                match self.active_tab {
-                    Tab::Trackings => self.trackings_view.search_open(),
-                    Tab::Content(_) => {}
-                }
-            }
-            CommonAction::SearchNext => {
-                use crate::views::Searchable;
-                match self.active_tab {
-                    Tab::Trackings => self.trackings_view.search_jump(1),
-                    Tab::Content(_) => {}
-                }
-            }
-            CommonAction::SearchPrev => {
-                use crate::views::Searchable;
-                match self.active_tab {
-                    Tab::Trackings => self.trackings_view.search_jump(-1),
-                    Tab::Content(_) => {}
-                }
-            }
-            CommonAction::SavedFilterSelect => {
-                self.load_saved_queries();
-                if self.active_tab == Tab::Trackings {
-                    self.trackings_view.open_query_menu();
-                }
-            }
+            CommonAction::FuzzyFilterOpen => {}
+            CommonAction::FuzzyFilterAccept => {}
+            CommonAction::FuzzyFilterClear => {}
+            CommonAction::FuzzyFilterCancel => {}
+            CommonAction::SearchOpen => {}
+            CommonAction::SearchNext => {}
+            CommonAction::SearchPrev => {}
+            CommonAction::SavedFilterSelect => {}
             CommonAction::FormFilter => {
                 // Deprecated — was a separate edit/create popup; the unified
                 // query menu (q) now covers create/edit/delete/shortcut.
@@ -7576,23 +7009,16 @@ impl App {
             CommonAction::ColumnConfig => {
                 self.open_column_config_popup();
             }
-            CommonAction::TrackingToggle => match self.active_tab {
-                Tab::Trackings => self.toggle_tracking_from_trackings_view(),
-                Tab::Content(_) => {}
-            },
+            CommonAction::TrackingToggle => {}
             CommonAction::FormClose => {}
             CommonAction::FavoriteToggle => {
                 // Handled before action resolution when popup is open.
             }
             CommonAction::CommandLineOpen => {
                 use crate::views::HasCmdline;
-                match self.active_tab {
-                    Tab::Trackings => self.trackings_view.cmdline_open(),
-                    Tab::Content(idx) => {
-                        if let Some(cv) = self.content_view_mut(idx) {
-                            cv.cmdline_open();
-                        }
-                    }
+                let Tab::Content(idx) = self.active_tab;
+                if let Some(cv) = self.content_view_mut(idx) {
+                    cv.cmdline_open();
                 }
             }
             CommonAction::JumpMode => {
@@ -7617,95 +7043,24 @@ impl App {
         EditorRequest::None
     }
 
-    fn handle_trackings_action(&mut self, action: TrackingsAction) -> EditorRequest {
-        // Simulate the key event by converting the action to a synthetic key press
-        // through the view. For chord-resolved actions, we replicate the same logic
-        // the view uses internally.
-        match action {
-            TrackingsAction::TrackingGroup => {
-                self.trackings_view.open_group_popup();
-            }
-            TrackingsAction::TrackingOrderToggle => {
-                self.trackings_view.state.toggle_order();
-                self.trackings_view.rebuild_table();
-            }
-            TrackingsAction::TrackingCondensedToggle => {
-                let current = self.trackings_view.table.selected_row();
-                let new_idx = self.trackings_view.state.toggle_condensed(current);
-                self.trackings_view.rebuild_table();
-                self.trackings_view.table.set_selected(new_idx);
-            }
-            TrackingsAction::TrackingTreeToggle => {
-                self.ensure_task_forest();
-                if let Some(forest) = self.task_forest.take() {
-                    let current = self.trackings_view.table.selected_row();
-                    let new_idx = self.trackings_view.state.toggle_tree_mode(current, &forest);
-                    self.trackings_view.rebuild_table();
-                    self.trackings_view.table.set_selected(new_idx);
-                    self.task_forest = Some(forest);
-                }
-            }
-            TrackingsAction::TrackingNormalToggle => {
-                if self.trackings_view.state.sub_view != TrackingsSubView::Normal {
-                    self.trackings_view.state.sub_view = TrackingsSubView::Normal;
-                    self.trackings_view.rebuild_table();
-                }
-            }
-            TrackingsAction::TrackingScriptRun => {
-                self.open_script_menu_for_trackings();
-            }
-            TrackingsAction::TrackingDelete => {
-                self.delete_selected_tracking();
-            }
-            TrackingsAction::TrackingRestore => {
-                self.restore_selected_tracking();
-            }
-            TrackingsAction::TrackingRestoreAll => {
-                self.restore_all_deleted_trackings();
-            }
-        }
-        EditorRequest::None
-    }
-
     // -----------------------------------------------------------------------
     // Saved filter popup
     // -----------------------------------------------------------------------
 
     fn open_column_config_popup(&mut self) {
-        use crate::components::column_config_popup::{ColumnConfigPopup, ColumnEntry};
-        use crate::tabs::columns::{ALL_TRACKING_COLUMNS, ColumnMeta, resolve_color};
+        use crate::components::column_config_popup::ColumnConfigPopup;
 
-        // Native tabs read from the static column registry; content tabs
-        // ask their view for the active level's configured columns.
-        let native_entries = |metas: &'static [ColumnMeta], theme: &Theme| -> Vec<ColumnEntry> {
-            metas
-                .iter()
-                .map(|m| ColumnEntry {
-                    id: m.id.to_string(),
-                    header: m.header.to_string(),
-                    display_name: m.display_name.to_string(),
-                    color: resolve_color(m.color_key, theme),
-                    hideable: m.hideable,
-                })
-                .collect()
-        };
-
-        let (config, entries) = match self.active_tab {
-            Tab::Trackings => (
-                self.trackings_view.column_config.clone(),
-                native_entries(ALL_TRACKING_COLUMNS, &self.shared_theme),
-            ),
-            Tab::Content(idx) => {
-                match self
-                    .content_view(idx)
-                    .and_then(|cv| cv.column_config_entries())
-                {
-                    Some(pair) => pair,
-                    None => {
-                        self.notify("This level has no configurable columns".to_string());
-                        return;
-                    }
-                }
+        // All tabs are content tabs now; ask the view for the active level's
+        // configured columns.
+        let Tab::Content(idx) = self.active_tab;
+        let (config, entries) = match self
+            .content_view(idx)
+            .and_then(|cv| cv.column_config_entries())
+        {
+            Some(pair) => pair,
+            None => {
+                self.notify("This level has no configurable columns".to_string());
+                return;
             }
         };
         self.column_config_popup = Some(ColumnConfigPopup::new(
@@ -7718,98 +7073,38 @@ impl App {
 
     fn apply_column_config(&mut self, config: Vec<String>) {
         let settings = Arc::clone(&self.settings_repo);
-        match self.active_tab {
-            Tab::Trackings => {
-                self.trackings_view.column_config = config;
-                let value = self.trackings_view.column_config.join(",");
-                let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(async { settings.set("tracking_columns", &value).await })
-                });
-                self.rebuild_trackings_table();
-            }
-            Tab::Content(idx) => {
-                let Some(cv) = self.content_view_mut(idx) else {
-                    return;
-                };
-                if !cv.apply_column_config(config) {
-                    return;
-                }
-                // One JSON settings row per tab holds the whole override
-                // map (level key → visible column keys); an emptied map
-                // deletes the row so a full reset leaves no residue.
-                let key = format!("content_columns:{}", cv.tab_name);
-                let value = serde_json::to_string(cv.column_overrides()).unwrap_or_default();
-                let empty = cv.column_overrides().is_empty();
-                let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        if empty {
-                            settings.delete(&key).await
-                        } else {
-                            settings.set(&key, &value).await
-                        }
-                    })
-                });
-            }
+        let Tab::Content(idx) = self.active_tab;
+        let Some(cv) = self.content_view_mut(idx) else {
+            return;
+        };
+        if !cv.apply_column_config(config) {
+            return;
         }
-    }
-
-    fn save_tracking_grouping_by_label(&self, label: &str) {
-        let settings = Arc::clone(&self.settings_repo);
-        let value = label.to_string();
+        // One JSON settings row per tab holds the whole override
+        // map (level key → visible column keys); an emptied map
+        // deletes the row so a full reset leaves no residue.
+        let key = format!("content_columns:{}", cv.tab_name);
+        let value = serde_json::to_string(cv.column_overrides()).unwrap_or_default();
+        let empty = cv.column_overrides().is_empty();
         let _ = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { settings.set("tracking_grouping", &value).await })
+            tokio::runtime::Handle::current().block_on(async {
+                if empty {
+                    settings.delete(&key).await
+                } else {
+                    settings.set(&key, &value).await
+                }
+            })
         });
-    }
-
-    pub fn load_tracking_grouping(&mut self) {
-        use crate::tabs::trackings_state::TrackingGrouping;
-        let settings = Arc::clone(&self.settings_repo);
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { settings.get("tracking_grouping").await })
-        });
-        if let Ok(Some(value)) = result {
-            let grouping = TrackingGrouping::ALL
-                .iter()
-                .find(|g| g.label() == value)
-                .copied()
-                .unwrap_or(TrackingGrouping::None);
-            let cur = self.trackings_view.table.selected_row();
-            let new_idx = self.trackings_view.state.set_grouping(grouping, cur);
-            self.rebuild_trackings_table();
-            self.trackings_view.table.set_selected(new_idx);
-        }
     }
 
     fn active_table_mut(&mut self) -> Option<&mut DataTable> {
-        match self.active_tab {
-            Tab::Trackings => Some(&mut self.trackings_view.table),
-            Tab::Content(idx) => self
-                .content_view_mut(idx)
-                .map(|cv| &mut cv.active_pane_mut().table),
-        }
+        let Tab::Content(idx) = self.active_tab;
+        self.content_view_mut(idx)
+            .map(|cv| &mut cv.active_pane_mut().table)
     }
 
     /// Load column configuration from DB.
     pub fn load_column_config(&mut self) {
-        // Load tracking columns.
-        let settings = Arc::clone(&self.settings_repo);
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { settings.get("tracking_columns").await })
-        });
-        if let Ok(Some(value)) = result {
-            let cols: Vec<String> = value
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !cols.is_empty() {
-                self.trackings_view.column_config = cols;
-            }
-        }
         // Load per-content-tab column overrides (one JSON row per tab,
         // mapping level key → visible column keys in order). An unparsable
         // row is ignored — the views then just show their YAML defaults.
@@ -7952,16 +7247,13 @@ impl App {
 
     /// Enter sort-hint mode for the active tab. Builds the column → label
     /// map from the active view's [`SortableView::sortable_columns`].
-    /// No-op for tabs that don't support sort (Trackings) or views that
-    /// expose no sortable columns.
+    /// No-op for views that expose no sortable columns.
     pub fn enter_sort_hint_mode(&mut self) {
         use crate::views::SortableView;
-        let (target, columns) = match self.active_tab {
-            Tab::Content(idx) => match self.content_view(idx) {
-                Some(cv) => (SortTarget::Content(idx), SortableView::sortable_columns(cv)),
-                None => return,
-            },
-            Tab::Trackings => return,
+        let Tab::Content(idx) = self.active_tab;
+        let (target, columns) = match self.content_view(idx) {
+            Some(cv) => (SortTarget::Content(idx), SortableView::sortable_columns(cv)),
+            None => return,
         };
         if columns.is_empty() {
             self.notify("No sortable columns".to_string());
@@ -8118,23 +7410,6 @@ impl App {
 
     // ── Saved queries / favorites ──────────────────────────────────
 
-    pub fn load_saved_queries(&mut self) {
-        let repo = Arc::clone(&self.saved_query_repo);
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { repo.list_by_scope("tracking").await })
-        });
-        if let Ok(models) = result {
-            self.trackings_view.favorites = models.into_iter().map(SavedQuery::from_db).collect();
-        }
-        let settings = Arc::clone(&self.settings_repo);
-        let tracking_default = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { settings.get("default_query:tracking").await.ok().flatten() })
-        });
-        self.trackings_view.default_query_name = tracking_default;
-    }
-
     /// Write or delete the `default_query:{scope}` settings row. `None`
     /// clears the default.
     fn persist_default_query(&self, scope: &str, name: Option<&str>) {
@@ -8150,27 +7425,10 @@ impl App {
         });
     }
 
-    /// Toggle the default saved query for the native `task`/`tracking`
-    /// scopes. Selecting the current default clears it; the default is
-    /// applied automatically on app start (it beats the last-active
-    /// filter restore).
-    fn set_default_saved_query(&mut self, scope: &str, name: &str) {
-        let current = self.trackings_view.default_query_name.as_deref();
-        let new = if current == Some(name) {
-            None
-        } else {
-            Some(name.to_string())
-        };
-        self.persist_default_query(scope, new.as_deref());
-        self.trackings_view.default_query_name = new.clone();
-        match new {
-            Some(n) => self.notify(format!("Default query: {n}")),
-            None => self.notify("Default query cleared".to_string()),
-        }
-    }
-
-    /// Content-tab counterpart of [`Self::set_default_saved_query`] —
-    /// keyed on the view's `query_scope`.
+    /// Toggle the default saved query for a content view, keyed on the
+    /// view's `query_scope`. Selecting the current default clears it; the
+    /// default is applied automatically on app start (it beats the
+    /// last-active filter restore).
     fn set_default_content_query(&mut self, view_index: usize, name: &str) {
         let Some(cv) = self.content_view(view_index) else {
             return;
@@ -8190,58 +7448,6 @@ impl App {
             Some(n) => self.notify(format!("Default query: {n}")),
             None => self.notify("Default query cleared".to_string()),
         }
-    }
-
-    /// Apply a saved query (YAML content) to trackings_view based on
-    /// scope. Only the Trackings tab emits `ApplySavedQuery`; content
-    /// tabs run their own query path.
-    fn apply_saved_query(&mut self, scope: &str, content: &str) -> EditorRequest {
-        match scope {
-            "tracking" => self.apply_tracking_query_filter(content),
-            other => self.notify_error(format!("No saved-query target for scope '{other}'")),
-        }
-        EditorRequest::None
-    }
-
-    /// Delete a saved query from DB and refresh in-memory favorites for all scopes.
-    fn delete_saved_query(&mut self, scope: &str, name: &str) {
-        let repo = Arc::clone(&self.saved_query_repo);
-        let scope_owned = scope.to_string();
-        let name_owned = name.to_string();
-        let _ = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Ok(Some(model)) =
-                    repo.find_by_scope_and_name(&scope_owned, &name_owned).await
-                {
-                    repo.delete(model.id).await
-                } else {
-                    Ok(())
-                }
-            })
-        });
-        self.load_saved_queries();
-        self.notify(format!("Deleted query '{name}'"));
-    }
-
-    /// Save a saved query (without shortcut) and prompt the user to press a
-    /// shortcut key, which is then captured by `awaiting_favorite_shortcut`.
-    fn prompt_saved_query_shortcut(&mut self, scope: String, name: String, query: String) {
-        let repo = Arc::clone(&self.saved_query_repo);
-        let scope_for_save = scope.clone();
-        let name_for_save = name.clone();
-        let query_for_save = query.clone();
-        let _ = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                repo.upsert(&scope_for_save, &name_for_save, &query_for_save, None)
-                    .await
-            })
-        });
-        self.load_saved_queries();
-        self.modal_message = Some(format!(
-            "Press a shortcut key for '{}'\n\nEsc to cancel",
-            name
-        ));
-        self.awaiting_favorite_shortcut = Some((scope, name, query));
     }
 
     /// Load DB saved queries for all content views and merge with YAML defaults.
@@ -8397,97 +7603,50 @@ impl App {
         }
     }
 
-    fn active_favorites(&self) -> &[SavedQuery] {
-        if self.active_tab == Tab::Trackings {
-            &self.trackings_view.favorites
-        } else {
-            &[]
-        }
-    }
-
     /// Conflict description for binding `shortcut` to the saved query
-    /// `name` in `scope`, or `None` when the key is free. The native
-    /// scopes keep the legacy domain (global + tasks bindings + native
-    /// favorites); content-view scopes route through the keymap-based
-    /// check so a saved-query shortcut can never shadow any key active
-    /// in its tab (the `j`-shadows-list-navigation class of bug).
+    /// `name` in `scope`, or `None` when the key is free. Content-view
+    /// scopes route through the keymap-based check so a saved-query
+    /// shortcut can never shadow any key active in its tab (the
+    /// `j`-shadows-list-navigation class of bug).
     fn favorite_shortcut_conflict(
         &self,
         scope: &str,
         name: &str,
         shortcut: &str,
     ) -> Option<String> {
-        if scope == "tracking" || scope == "task" {
-            return self
-                .is_shortcut_taken(shortcut)
-                .then(|| "an existing key or favorite".to_string());
-        }
         self.content_views_indexed()
             .find(|(_, cv)| cv.query_scope == scope)
             .and_then(|(_, cv)| cv.saved_query_shortcut_conflict(&self.keybindings, name, shortcut))
     }
 
     fn is_shortcut_taken(&self, shortcut: &str) -> bool {
-        if self
-            .keybindings
+        self.keybindings
             .global
             .bindings
             .values()
             .any(|b| b.matches(shortcut))
-        {
-            return true;
-        }
-        if self
-            .trackings_view
-            .favorites
-            .iter()
-            .any(|f| f.shortcut.as_deref() == Some(shortcut))
-        {
-            return true;
-        }
-        false
     }
 
     fn add_favorite(&mut self, scope: &str, name: String, shortcut: String, query: String) {
-        if scope == "tracking" {
-            let repo = Arc::clone(&self.saved_query_repo);
+        // Content view scope — body in adapter store, shortcut in DB.
+        let target_idx = self
+            .content_views_indexed()
+            .find(|(_, cv)| cv.query_scope == scope)
+            .map(|(idx, _)| idx);
+        if let Some(idx) = target_idx {
+            self.save_content_query_body(idx, &name, &query);
+            let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
             let scope_owned = scope.to_string();
-            let result = tokio::task::block_in_place(|| {
+            let name_owned = name.clone();
+            let shortcut_owned = shortcut.clone();
+            let _ = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    repo.upsert(&scope_owned, &name, &query, Some(&shortcut))
+                    shortcut_repo
+                        .set(&scope_owned, &name_owned, &shortcut_owned)
                         .await
                 })
             });
-            if let Ok(model) = result {
-                let sq = SavedQuery::from_db(model);
-                let favs = &mut self.trackings_view.favorites;
-                if let Some(existing) = favs.iter_mut().find(|f| f.name == sq.name) {
-                    *existing = sq;
-                } else {
-                    favs.push(sq);
-                }
-            }
-        } else {
-            // Content view scope — body in adapter store, shortcut in DB.
-            let target_idx = self
-                .content_views_indexed()
-                .find(|(_, cv)| cv.query_scope == scope)
-                .map(|(idx, _)| idx);
-            if let Some(idx) = target_idx {
-                self.save_content_query_body(idx, &name, &query);
-                let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-                let scope_owned = scope.to_string();
-                let name_owned = name.clone();
-                let shortcut_owned = shortcut.clone();
-                let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        shortcut_repo
-                            .set(&scope_owned, &name_owned, &shortcut_owned)
-                            .await
-                    })
-                });
-                self.reload_content_saved_queries(idx);
-            }
+            self.reload_content_saved_queries(idx);
         }
     }
 
@@ -8559,138 +7718,6 @@ impl App {
                     .await;
             })
         });
-    }
-
-    /// Update the query of any saved query matching the given name.
-    pub fn update_favorite_json(&mut self, scope: &str, filter_name: &str, new_query: &str) {
-        let favs = &mut self.trackings_view.favorites;
-        let mut changed = false;
-        for fav in favs.iter_mut() {
-            if fav.name == filter_name && fav.query != new_query {
-                fav.query = new_query.to_string();
-                changed = true;
-                // Persist to DB.
-                if let Some(id) = fav.id {
-                    let repo = Arc::clone(&self.saved_query_repo);
-                    let name = fav.name.clone();
-                    let query = new_query.to_string();
-                    let shortcut = fav.shortcut.clone();
-                    let scope_owned = scope.to_string();
-                    let _ = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            repo.upsert(&scope_owned, &name, &query, shortcut.as_deref())
-                                .await
-                        })
-                    });
-                }
-            }
-        }
-        let _ = changed; // suppress unused warning
-    }
-
-    fn try_activate_favorite(&mut self, key: &str) -> bool {
-        let favs = self.active_favorites().to_vec();
-        for fav in &favs {
-            if fav.shortcut.as_deref() == Some(key) {
-                if self.active_tab == Tab::Trackings {
-                    self.apply_tracking_query_filter(&fav.query);
-                    self.trackings_view.active_filter_json = Some(fav.query.clone());
-                    self.trackings_view.active_filter_name = Some(fav.name.clone());
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    fn toggle_tracking_from_trackings_view(&mut self) {
-        let selected = self.trackings_view.table.selected_row();
-        let active = self.trackings_view.state.is_active_at(selected);
-
-        if self.trackings_view.state.sub_view != crate::tabs::TrackingsSubView::Normal {
-            // Condensed/Tree mode: toggle by task_id.
-            let Some(task_id) = self.trackings_view.state.task_id_at(selected) else {
-                self.notify("No task selected".to_string());
-                return;
-            };
-            self.toggle_tracking_for_task(task_id, active);
-            return;
-        }
-
-        // Normal mode: if active, stop the specific tracking; otherwise start new.
-        let Some(task_id) = self.trackings_view.state.task_id_at(selected) else {
-            self.notify("No tracking selected".to_string());
-            return;
-        };
-
-        if active {
-            // Stop this specific tracking.
-            let Some(tracking_id) = self.trackings_view.state.tracking_id_at(selected) else {
-                return;
-            };
-            let repo = Arc::clone(&self.tracking_repo);
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { repo.stop(tracking_id, chrono::Utc::now()).await })
-            });
-            match result {
-                Ok(_) => {
-                    self.notify("Tracking stopped".to_string());
-                    self.refresh_tracked_ids();
-                    self.spawn_load_trackings();
-                }
-                Err(e) => self.notify_error(format!("Tracking error: {e}")),
-            }
-        } else {
-            self.toggle_tracking_for_task(task_id, false);
-        }
-    }
-
-    /// Toggle tracking for a task by task_id. Used from condensed mode and as fallback.
-    fn toggle_tracking_for_task(&mut self, task_id: Uuid, currently_active: bool) {
-        let repo = Arc::clone(&self.tracking_repo);
-        let allow_parallel = self.config.tracking.allow_parallel;
-
-        if currently_active {
-            // Stop active tracking for this task.
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    if let Some(t) = repo.find_active_for_task(task_id).await? {
-                        repo.stop(t.id, chrono::Utc::now()).await?;
-                    }
-                    Ok::<_, anyhow::Error>(())
-                })
-            });
-            match result {
-                Ok(_) => {
-                    self.notify("Tracking stopped".to_string());
-                    self.refresh_tracked_ids();
-                    self.spawn_load_trackings();
-                }
-                Err(e) => self.notify_error(format!("Tracking error: {e}")),
-            }
-        } else {
-            // Start a new tracking for this task.
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    if !allow_parallel {
-                        let all_active = repo.find_all_active().await?;
-                        for t in all_active {
-                            repo.stop(t.id, chrono::Utc::now()).await?;
-                        }
-                    }
-                    repo.insert(task_id, chrono::Utc::now(), None).await
-                })
-            });
-            match result {
-                Ok(_) => {
-                    self.notify("Tracking started".to_string());
-                    self.refresh_tracked_ids();
-                    self.spawn_load_trackings();
-                }
-                Err(e) => self.notify_error(format!("Tracking error: {e}")),
-            }
-        }
     }
 
     // ── Command line (:) ──────────────────────────────────────────────
@@ -8881,14 +7908,8 @@ impl App {
                 self.modal_message = Some(format!(":{} takes no arguments", args[0]));
                 return;
             }
-            match self.active_tab {
-                Tab::Content(view_index) => {
-                    self.spawn_invalidate_auth(view_index, kind);
-                }
-                _ => {
-                    self.modal_message = Some(format!(":{} only works on a content tab", args[0]));
-                }
-            }
+            let Tab::Content(view_index) = self.active_tab;
+            self.spawn_invalidate_auth(view_index, kind);
             return;
         }
 
@@ -8919,40 +7940,8 @@ impl App {
         }
     }
 
-    fn delete_selected_tracking(&mut self) {
-        let selected = self.trackings_view.table.selected_row();
-        let Some(tracking_id) = self.trackings_view.state.tracking_id_at(selected) else {
-            self.notify("No tracking selected".to_string());
-            return;
-        };
-
-        let task_desc = self
-            .trackings_view
-            .state
-            .task_description_at(selected)
-            .unwrap_or_default();
-
-        let msg = format!("Delete tracking for '{}'? (y/n)", task_desc);
-        self.modal_message = Some(msg.clone());
-        self.pending_confirmation = Some((msg, PendingConfirmation::DeleteTracking(tracking_id)));
-    }
-
     fn execute_confirmation(&mut self, confirmation: PendingConfirmation) {
         match confirmation {
-            PendingConfirmation::DeleteTracking(tracking_id) => {
-                let repo = Arc::clone(&self.tracking_repo);
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(async { repo.soft_delete_keeping_times(tracking_id).await })
-                });
-                match result {
-                    Ok(_) => {
-                        self.notify("Tracking deleted".to_string());
-                        self.spawn_load_trackings();
-                    }
-                    Err(e) => self.notify_error(format!("Delete error: {e}")),
-                }
-            }
             PendingConfirmation::DeleteStaleLink(link_id) => {
                 let repo = Arc::clone(&self.link_repo);
                 let result = tokio::task::block_in_place(|| {
@@ -9056,7 +8045,6 @@ impl App {
         self.link_refs = set;
         // Push the fresh snapshot down to views that render the column
         // without going through App on every rebuild.
-        self.trackings_view.set_link_refs(&self.link_refs);
         for slot in self.content_views.iter_mut() {
             if let Some(cv) = slot.as_view_mut() {
                 cv.set_link_refs(&self.link_refs);
@@ -9136,197 +8124,15 @@ impl App {
     /// preview open/close uniformly. Native (non-adapter) tabs lay their
     /// columns out at render time already, so they need no re-fit here.
     pub fn refit_visible_tables(&mut self) -> bool {
-        if let Tab::Content(idx) = self.active_tab {
-            if let Some(cv) = self.content_view_mut(idx) {
-                return cv.refit_tables_if_needed();
-            }
+        let Tab::Content(idx) = self.active_tab;
+        if let Some(cv) = self.content_view_mut(idx) {
+            return cv.refit_tables_if_needed();
         }
         false
     }
 
     pub fn needs_periodic_tick(&self) -> bool {
-        self.has_live_banner()
-            || self.trackings_view.state.rows.iter().any(|r| r.active)
-            || self.detached_editor.is_some()
-            || self.detached_script.is_some()
-    }
-
-    /// Update durations of active trackings and rebuild the table if needed.
-    /// Uses adaptive intervals: <60s → 5s, <10min → 10s, <1h → 30s, else 60s.
-    /// Returns `true` when it actually rebuilt the table (i.e. the
-    /// adaptive interval elapsed and durations advanced), so the loop
-    /// repaints only on those ticks rather than every frame.
-    pub fn tick_active_trackings(&mut self) -> bool {
-        let has_active = self.trackings_view.state.rows.iter().any(|r| r.active);
-        if !has_active {
-            return false;
-        }
-
-        // Determine shortest active tracking duration for adaptive interval.
-        let now_utc = chrono::Utc::now();
-        let shortest = self
-            .trackings_view
-            .state
-            .rows
-            .iter()
-            .filter(|r| r.active)
-            .map(|r| (now_utc - r.started_at).num_seconds())
-            .min()
-            .unwrap_or(0);
-
-        let interval_secs = if shortest < 60 {
-            5
-        } else if shortest < 600 {
-            10
-        } else if shortest < 3600 {
-            30
-        } else {
-            60
-        };
-
-        let elapsed = self.last_tracking_tick.elapsed();
-        if elapsed < std::time::Duration::from_secs(interval_secs) {
-            return false;
-        }
-        self.last_tracking_tick = Instant::now();
-
-        // Update durations for active rows.
-        for row in &mut self.trackings_view.state.rows {
-            if row.active {
-                row.duration = now_utc - row.started_at;
-            }
-        }
-
-        // Rebuild display rows and table.
-        self.trackings_view.state.rebuild_display_rows();
-        if self.trackings_view.state.sub_view == crate::tabs::TrackingsSubView::Condensed {
-            self.trackings_view.state.rebuild_condensed_rows();
-        }
-        if self.trackings_view.state.sub_view == crate::tabs::TrackingsSubView::Tree {
-            self.ensure_task_forest();
-            if let Some(forest) = self.task_forest.take() {
-                self.trackings_view.state.rebuild_tree_rows(&forest);
-                self.task_forest = Some(forest);
-            }
-        }
-        self.rebuild_trackings_table();
-        true
-    }
-
-    fn restore_selected_tracking(&mut self) {
-        let Some(tracking_id) = self
-            .trackings_view
-            .state
-            .tracking_id_at(self.trackings_view.table.selected_row())
-        else {
-            self.notify("No tracking selected".to_string());
-            return;
-        };
-
-        let repo = Arc::clone(&self.tracking_repo);
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let tracking = repo.find_by_id(tracking_id).await?.ok_or(
-                    not_yet_done_core::error::AppError::TrackingNotFound(tracking_id),
-                )?;
-                if !tracking.deleted {
-                    return Err(not_yet_done_core::error::AppError::TrackingNotDeleted(
-                        tracking_id,
-                    ));
-                }
-
-                // BFS: find and hard-delete all successors.
-                let mut queue = vec![tracking_id];
-                let mut to_delete = Vec::new();
-                while let Some(id) = queue.pop() {
-                    let successors = repo.find_by_predecessor(id).await?;
-                    for s in successors {
-                        queue.push(s.id);
-                        to_delete.push(s.id);
-                    }
-                }
-                for id in to_delete.into_iter().rev() {
-                    repo.hard_delete(id).await?;
-                }
-
-                repo.undelete(tracking_id).await?;
-                Ok::<_, not_yet_done_core::error::AppError>(())
-            })
-        });
-
-        match result {
-            Ok(_) => {
-                self.notify("Tracking restored".to_string());
-                self.spawn_load_trackings();
-            }
-            Err(e) => self.notify_error(format!("Restore error: {e}")),
-        }
-    }
-
-    fn restore_all_deleted_trackings(&mut self) {
-        // Collect IDs of all deleted trackings currently visible.
-        let repo = Arc::clone(&self.tracking_repo);
-        let deleted_ids: Vec<Uuid> = self
-            .trackings_view
-            .state
-            .filtered_indices
-            .iter()
-            .filter_map(|&i| {
-                let row = &self.trackings_view.state.rows[i];
-                // We can't check `deleted` on TrackingRow since it's not stored there.
-                // Instead, we try to restore each one — the service will reject non-deleted.
-                Some(row.id)
-            })
-            .collect();
-
-        if deleted_ids.is_empty() {
-            self.notify("No trackings to restore".to_string());
-            return;
-        }
-
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut restored = 0u32;
-                let mut skipped = 0u32;
-                for id in &deleted_ids {
-                    let tracking = match repo.find_by_id(*id).await? {
-                        Some(t) => t,
-                        None => {
-                            skipped += 1;
-                            continue;
-                        }
-                    };
-                    if !tracking.deleted {
-                        skipped += 1;
-                        continue;
-                    }
-                    // BFS: hard-delete all successors.
-                    let mut queue = vec![*id];
-                    let mut to_delete = Vec::new();
-                    while let Some(qid) = queue.pop() {
-                        let successors = repo.find_by_predecessor(qid).await?;
-                        for s in successors {
-                            queue.push(s.id);
-                            to_delete.push(s.id);
-                        }
-                    }
-                    for did in to_delete.into_iter().rev() {
-                        repo.hard_delete(did).await?;
-                    }
-                    repo.undelete(*id).await?;
-                    restored += 1;
-                }
-                Ok::<_, not_yet_done_core::error::AppError>((restored, skipped))
-            })
-        });
-
-        match result {
-            Ok((restored, _skipped)) => {
-                self.notify(format!("{restored} tracking(s) restored"));
-                self.spawn_load_trackings();
-            }
-            Err(e) => self.notify_error(format!("Restore error: {e}")),
-        }
+        self.has_live_banner() || self.detached_editor.is_some() || self.detached_script.is_some()
     }
 
     // -----------------------------------------------------------------------
@@ -9335,10 +8141,7 @@ impl App {
 
     /// Poll the marker file written by the most recently launched
     /// detached script. When found, surface captured output (if any)
-    /// in a [`ScriptOutputSession`] and trigger a Trackings reload —
-    /// the latter is a no-op for content-tab scripts (the reload
-    /// just runs against the Trackings DB and doesn't disturb the
-    /// content view).
+    /// in a [`ScriptOutputSession`].
     /// Returns `true` when a detached script finished and its output was
     /// processed this tick; `false` while none is pending or still running.
     pub fn poll_detached_script(&mut self) -> bool {
@@ -9371,7 +8174,6 @@ impl App {
             }
         }
 
-        self.spawn_load_trackings();
         true
     }
 }
@@ -9416,9 +8218,8 @@ fn build_tab_layout(
     tabs_cfg: &crate::config::TabsConfig,
     content_views: &[ContentSlot],
 ) -> (TabLayout, Option<String>) {
-    // Built-in tabs first, then content tabs in slot order — this is
-    // also the legacy display/cycle order.
-    let mut available: Vec<(String, Tab)> = vec![("Trackings".to_string(), Tab::Trackings)];
+    // All tabs are content tabs, in slot order.
+    let mut available: Vec<(String, Tab)> = Vec::with_capacity(content_views.len());
     for (idx, slot) in content_views.iter().enumerate() {
         available.push((slot.tab_name().to_string(), Tab::Content(idx)));
     }
@@ -9651,10 +8452,10 @@ mod tests {
 
     #[test]
     fn split_leading_token_quoted_tab_name_with_spaces() {
-        // The `:tree-find "Tasks (A)" id:42` case: a quoted tab name
+        // The `:tree-find "Analytics DB" id:42` case: a quoted tab name
         // keeps its spaces, the rest is the query.
-        let (tok, rest) = split_leading_token(r#""Tasks (A)" id:42"#);
-        assert_eq!(tok, "Tasks (A)");
+        let (tok, rest) = split_leading_token(r#""Analytics DB" id:42"#);
+        assert_eq!(tok, "Analytics DB");
         assert_eq!(rest, "id:42");
     }
 

@@ -8,7 +8,6 @@ pub mod content_view;
 pub mod focus_node;
 pub mod group_aggregate;
 pub mod markdown;
-pub mod trackings_view;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -111,7 +110,7 @@ pub enum ViewRequest {
     },
     /// Open the App-level tag-management menu (`:tag`) seeded for the
     /// selected content node. Raised by a `type: tag` action (e.g. the
-    /// Tasks-(A) `T` key). The App reads the selected node from the
+    /// Tasks `T` key). The App reads the selected node from the
     /// focused pane, resolves it to a task id, and assigns/creates/deletes
     /// tags against it, refreshing this pane afterwards. See
     /// [`crate::app::App::open_tag_menu_for_content`].

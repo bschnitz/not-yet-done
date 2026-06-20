@@ -1157,7 +1157,7 @@ fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Meta
             // dimmed. The snapshot loads the full include-deleted universe
             // (#33), so a query that surfaces deleted rows (e.g. dropping
             // `[deleted, =, false]`) shows them greyed-out as context rather
-            // than as live entries. Mirrors the Tasks (A) `deleted` signal.
+            // than as live entries. Mirrors the Tasks `deleted` signal.
             field(
                 "deleted",
                 if row.tracking.deleted {
@@ -3597,7 +3597,7 @@ mod tests {
         // A → B → C, only C tracked (45 min on the 9th). The bucket's
         // folded subtree must report `has_children` correctly at every
         // level so the engine's `expand_depth: all` cascade keeps
-        // descending past the top two — the "Trackings (A) tree only
+        // descending past the top two — the "Trackings tree only
         // opens two levels" repro.
         let task_a = Uuid::from_u128(10);
         let task_b = Uuid::from_u128(20);

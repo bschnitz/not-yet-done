@@ -25,6 +25,7 @@ use std::io;
 
 use app::{App, EditorRequest};
 use config::TuiConfigService;
+use tabs::Tab;
 use not_yet_done_core::{
     config::{Config, ConfigServiceImpl, ConfigErrorKind},
     db,
@@ -69,7 +70,6 @@ async fn main() -> Result<()> {
 
     let task_service: Arc<dyn TaskService> = module.resolve();
     let tag_service: Arc<dyn TagService> = module.resolve();
-    let saved_query_repo: Arc<dyn not_yet_done_core::repository::SavedQueryRepository> = module.resolve();
     let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> = module.resolve();
     let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> = module.resolve();
     let tracking_repo: Arc<dyn not_yet_done_core::repository::TrackingRepository> = module.resolve();
@@ -101,14 +101,11 @@ async fn main() -> Result<()> {
         Box::new(move || build_adapter_factories(&core))
     };
 
-    let mut app    = App::new(tui_config, theme, task_service, tag_service, saved_query_repo, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder);
+    let mut app    = App::new(tui_config, theme, task_service, tag_service, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder);
 
-    // Load active filter, tracking state, and column config from DB.
-    app.load_active_tracking_filter().await;
+    // Load tracking state and column config from DB.
     app.refresh_tracked_ids();
     app.load_column_config();
-    app.load_tracking_grouping();
-    app.load_saved_queries();
     app.load_content_saved_queries();
     app.apply_default_content_queries();
     app.load_content_sort_states();
@@ -296,7 +293,6 @@ async fn run_loop(
             // pending. Each self-gates on its own interval/condition, so
             // running them all every tick is cheap.
             _ = ticker.tick(), if periodic => {
-                dirty |= app.tick_active_trackings();
                 dirty |= app.tick_animations();
                 dirty |= app.poll_live_editor().await;
                 dirty |= app.poll_editor_close();
@@ -585,8 +581,12 @@ fn run_interactive_script(
         }
     }
 
-    // Reload trackings (pending_focus_id was set before the script ran).
-    app.spawn_load_trackings();
+    // Reload the active content view's current level (the script may have
+    // mutated the underlying data).
+    let Tab::Content(idx) = app.active_tab;
+    if let Some(pane_id) = app.content_view(idx).map(|cv| cv.active_pane_id()) {
+        app.reload_content_pane_current_level(idx, pane_id);
+    }
 
     Ok(())
 }

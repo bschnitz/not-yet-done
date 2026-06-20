@@ -9,8 +9,8 @@ use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::config::{GlobalAction, TrackingsAction};
-use crate::tabs::{Tab, TrackingsSubView};
+use crate::config::GlobalAction;
+use crate::tabs::Tab;
 use std::sync::Arc;
 use crate::ui::theme::Theme;
 
@@ -22,11 +22,9 @@ struct BarItem {
 
 pub struct TabBarComponent {
     active_tab: Tab,
-    trackings_sub_view: TrackingsSubView,
     content_count: usize,
     theme: Arc<Theme>,
     main_tab_labels: Vec<(Tab, String)>,
-    trackings_sub_labels: Vec<(TrackingsSubView, String)>,
     /// Per content-tab subtab labels with their active flag. Outer index
     /// is the Content tab index; inner is (label, is_active). Pushed in
     /// each frame by App from the corresponding `ContentView`.
@@ -48,9 +46,7 @@ impl TabBarComponent {
         let gkb = &keybindings.global;
 
         use crate::tabs::tab_label;
-        let mut main_tab_labels = vec![
-            (Tab::Trackings, tab_label("⏱️", &gkb.label(&GlobalAction::TabTrackings), "Trackings")),
-        ];
+        let mut main_tab_labels: Vec<(Tab, String)> = Vec::new();
         for (i, info) in content_tabs.iter().enumerate() {
             let kb = match i {
                 0 => gkb.label(&GlobalAction::TabJira),
@@ -65,19 +61,11 @@ impl TabBarComponent {
             ));
         }
 
-        let trackings_sub_labels = vec![
-            (TrackingsSubView::Normal, format!("{} {}", TrackingsSubView::Normal.title(), keybindings.trackings.label(&TrackingsAction::TrackingNormalToggle))),
-            (TrackingsSubView::Condensed, format!("{} {}", TrackingsSubView::Condensed.title(), keybindings.trackings.label(&TrackingsAction::TrackingCondensedToggle))),
-            (TrackingsSubView::Tree, format!("{} {}", TrackingsSubView::Tree.title(), keybindings.trackings.label(&TrackingsAction::TrackingTreeToggle))),
-        ];
-
         Self {
-            active_tab: Tab::Trackings,
-            trackings_sub_view: TrackingsSubView::Normal,
+            active_tab: Tab::Content(0),
             content_count: content_tabs.len(),
             theme,
             main_tab_labels,
-            trackings_sub_labels,
             content_sub_tabs: vec![Vec::new(); content_tabs.len()],
         }
     }
@@ -102,10 +90,6 @@ impl TabBarComponent {
         self.main_tab_labels = labels;
     }
 
-    pub fn set_trackings_sub_view(&mut self, sv: TrackingsSubView) {
-        self.trackings_sub_view = sv;
-    }
-
     fn bar_width(items: &[BarItem]) -> usize {
         // Each item: border + "  label  " + border + 1 gap = label.chars() + 7
         // Inactive: "  label  " + 1 gap = label.chars() + 5
@@ -124,17 +108,12 @@ impl TabBarComponent {
     }
 
     fn sub_items(&self) -> Vec<BarItem> {
-        match self.active_tab {
-            Tab::Trackings => self.trackings_sub_labels.iter().map(|(sv, label)| BarItem {
-                label: label.clone(),
-                active: *sv == self.trackings_sub_view,
-            }).collect(),
-            Tab::Content(idx) => match self.content_sub_tabs.get(idx) {
-                Some(labels) if !labels.is_empty() => labels.iter()
-                    .map(|(lab, active)| BarItem { label: lab.clone(), active: *active })
-                    .collect(),
-                _ => vec![BarItem { label: "tickets".to_string(), active: true }],
-            },
+        let Tab::Content(idx) = self.active_tab;
+        match self.content_sub_tabs.get(idx) {
+            Some(labels) if !labels.is_empty() => labels.iter()
+                .map(|(lab, active)| BarItem { label: lab.clone(), active: *active })
+                .collect(),
+            _ => vec![BarItem { label: "tickets".to_string(), active: true }],
         }
     }
 

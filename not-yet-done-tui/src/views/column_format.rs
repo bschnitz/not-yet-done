@@ -38,7 +38,24 @@ use chrono::{DateTime, Duration, Local};
 use not_yet_done_table::CellAlignment;
 
 use crate::config::view_config::ColumnKind;
-use crate::tabs::trackings_state::format_duration;
+
+/// Render a [`Duration`] as `H:MM:SS` (hours dropped when zero, then
+/// `MM:SS`, then `SS`). Negative spans clamp to zero. Shared by the
+/// `Duration` column kind and the live-elapsed (M5) path so durations
+/// read identically everywhere.
+pub fn format_duration(d: Duration) -> String {
+    let total_secs = d.num_seconds().max(0);
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else if m > 0 {
+        format!("{m:02}:{s:02}")
+    } else {
+        format!("{s:02}")
+    }
+}
 
 /// Default display pattern for `datetime` columns without an explicit
 /// `format`.

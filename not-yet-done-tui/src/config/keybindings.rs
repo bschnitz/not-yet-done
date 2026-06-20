@@ -189,7 +189,6 @@ macro_rules! impl_string_serde {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GlobalAction {
     Quit,
-    TabTrackings,
     TabJira,
     TabTaiga,
     TabPostgres,
@@ -228,7 +227,6 @@ impl GlobalAction {
     fn as_str(&self) -> &'static str {
         match self {
             GlobalAction::Quit => "quit",
-            GlobalAction::TabTrackings => "tab_trackings",
             GlobalAction::TabJira => "tab_jira",
             GlobalAction::TabTaiga => "tab_taiga",
             GlobalAction::TabPostgres => "tab_postgres",
@@ -258,7 +256,6 @@ impl FromStr for GlobalAction {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "quit" => Ok(GlobalAction::Quit),
-            "tab_trackings" => Ok(GlobalAction::TabTrackings),
             "tab_jira" => Ok(GlobalAction::TabJira),
             "tab_taiga" => Ok(GlobalAction::TabTaiga),
             "tab_postgres" => Ok(GlobalAction::TabPostgres),
@@ -392,70 +389,6 @@ impl FromStr for CommonAction {
 }
 
 impl_string_serde!(CommonAction);
-
-// ---------------------------------------------------------------------------
-// TrackingsAction — Trackings tab only
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TrackingsAction {
-    TrackingGroup,
-    TrackingOrderToggle,
-    TrackingCondensedToggle,
-    TrackingTreeToggle,
-    TrackingNormalToggle,
-    /// Open the fuzzy script menu (run / edit / delete / create-new) for
-    /// the current Trackings filter context. Same `:script` flow as the
-    /// content-view binding, but with the Trackings-specific JSON shape
-    /// (`tracking_ids` + filter date bounds) and the legacy
-    /// `<data_dir>/not_yet_done/tracking/scripts/` directory.
-    TrackingScriptRun,
-    TrackingDelete,
-    TrackingRestore,
-    TrackingRestoreAll,
-}
-
-impl TrackingsAction {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::TrackingGroup => "tracking_group",
-            Self::TrackingOrderToggle => "tracking_order_toggle",
-            Self::TrackingCondensedToggle => "tracking_condensed_toggle",
-            Self::TrackingTreeToggle => "tracking_tree_toggle",
-            Self::TrackingNormalToggle => "tracking_normal_toggle",
-            Self::TrackingScriptRun => "tracking_script_run",
-            Self::TrackingDelete => "tracking_delete",
-            Self::TrackingRestore => "tracking_restore",
-            Self::TrackingRestoreAll => "tracking_restore_all",
-        }
-    }
-}
-
-impl fmt::Display for TrackingsAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for TrackingsAction {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "tracking_group" => Ok(Self::TrackingGroup),
-            "tracking_order_toggle" => Ok(Self::TrackingOrderToggle),
-            "tracking_condensed_toggle" => Ok(Self::TrackingCondensedToggle),
-            "tracking_tree_toggle" => Ok(Self::TrackingTreeToggle),
-            "tracking_normal_toggle" => Ok(Self::TrackingNormalToggle),
-            "tracking_script_run" => Ok(Self::TrackingScriptRun),
-            "tracking_delete" => Ok(Self::TrackingDelete),
-            "tracking_restore" => Ok(Self::TrackingRestore),
-            "tracking_restore_all" => Ok(Self::TrackingRestoreAll),
-            other => Err(format!("unknown trackings action: {}", other)),
-        }
-    }
-}
-
-impl_string_serde!(TrackingsAction);
 
 // ---------------------------------------------------------------------------
 // ContentAction — generic ContentView keybindings (Jira/Taiga/…)
@@ -987,7 +920,6 @@ impl Default for KeyBindingSection<GlobalAction> {
     fn default() -> Self {
         let mut m = HashMap::new();
         m.insert(GlobalAction::Quit, KeyBinding::new("ctrl+c"));
-        m.insert(GlobalAction::TabTrackings, KeyBinding::new("2"));
         m.insert(GlobalAction::TabJira, KeyBinding::new("3"));
         m.insert(GlobalAction::TabTaiga, KeyBinding::new("4"));
         m.insert(GlobalAction::TabPostgres, KeyBinding::new("5"));
@@ -1039,22 +971,6 @@ impl Default for KeyBindingSection<CommonAction> {
         // ColumnLeft / ColumnRight have no default: they are auto-claimed
         // as `h`/`l` only at leaves with `column_cursor: true` and are
         // suppressed everywhere else. See keymap.rs / content_view.rs.
-        Self { bindings: m }
-    }
-}
-
-impl Default for KeyBindingSection<TrackingsAction> {
-    fn default() -> Self {
-        let mut m = HashMap::new();
-        m.insert(TrackingsAction::TrackingGroup, KeyBinding::new("u"));
-        m.insert(TrackingsAction::TrackingOrderToggle, KeyBinding::new("o"));
-        m.insert(TrackingsAction::TrackingCondensedToggle, KeyBinding::new("v"));
-        m.insert(TrackingsAction::TrackingTreeToggle, KeyBinding::new("t"));
-        m.insert(TrackingsAction::TrackingNormalToggle, KeyBinding::new("a"));
-        m.insert(TrackingsAction::TrackingScriptRun, KeyBinding::new("x"));
-        m.insert(TrackingsAction::TrackingDelete, KeyBinding::new("D"));
-        m.insert(TrackingsAction::TrackingRestore, KeyBinding::new("r"));
-        m.insert(TrackingsAction::TrackingRestoreAll, KeyBinding::new("R"));
         Self { bindings: m }
     }
 }
@@ -1255,8 +1171,6 @@ pub struct KeyBindingConfig {
     pub global: KeyBindingSection<GlobalAction>,
     #[serde(default)]
     pub common: KeyBindingSection<CommonAction>,
-    #[serde(default)]
-    pub trackings: KeyBindingSection<TrackingsAction>,
     #[serde(default)]
     pub form: KeyBindingSection<FormAction>,
     #[serde(default)]

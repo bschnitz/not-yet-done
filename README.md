@@ -14,7 +14,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **CLI** — full command-line interface for scripting and automation
 - **Waybar module** — CFFI module showing the active tracking in your status bar
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
-- **Scripts** — run user scripts on the focused node or the filtered Trackings list via the `:script` fuzzy menu, with background, capture, and interactive modes
+- **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes
 - **Filter DSL** — YAML-based query language with natural-language date expressions
 - **Daily backups** — automatic daily database backup on startup
 
@@ -46,13 +46,13 @@ not-yet-done-tui
 
 ### Tabs and Views
 
-The TUI's only built-in tab is **Trackings**. Everything else — task
-management included — is an adapter-backed _content tab_, configured under
+Every tab is an adapter-backed _content tab_, configured under
 `~/.config/not_yet_done/views/*.yaml` and shown according to the active
-[tab constellation](#tab-constellations).
+[tab constellation](#tab-constellations). Task and time tracking are no
+exception — they are adapter-backed views like everything else.
 
 **Tasks** — manage your task tree. Task management lives in the
-adapter-backed **`Tasks (A)`** content tab (`views/tasks.yaml`); see
+adapter-backed **`Tasks`** content tab (`views/tasks.yaml`); see
 [`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml) for a
 fully-commented reference. It has two sub-views:
 
@@ -89,7 +89,10 @@ The expand state is per-session — it is not persisted across
 restarts. When a fuzzy filter is active, expand state is ignored
 and every matching node (plus its ancestors) is shown.
 
-**Trackings** — view and analyze time entries
+**Trackings** — view and analyze time entries. Like Tasks, this is an
+adapter-backed content tab (`views/trackings.yaml`); see
+[`docs/examples/views/trackings.yaml`](docs/examples/views/trackings.yaml)
+for a fully-commented reference.
 
 | Sub-view  | Key | Description                                      |
 | --------- | --- | ------------------------------------------------ |
@@ -116,7 +119,7 @@ tabs:
   sets:
     # Shorthand — a bare list of tab names (no icon, no popup shortcut):
     default:
-      - Tasks (A)
+      - Tasks
       - Trackings
       - Jira
       - Taiga
@@ -131,7 +134,7 @@ tabs:
       label: My Corp
       shortcut: m
       tabs:
-        - Tasks (A)
+        - Tasks
         - Trackings
         - Stoat
 ```
@@ -142,8 +145,8 @@ and `shortcut:`. Both forms can be mixed freely under `sets:`. The popup
 shows `icon label` (the `label` falls back to the set's key when
 omitted), so a slug-style key like `work` can present as `Work`.
 
-Tabs are referenced by display name: the built-in `Trackings` plus each
-view's `tab.name` (e.g. the adapter-backed `Tasks (A)`). The list order
+Tabs are referenced by display name — each view's `tab.name` (e.g. the
+adapter-backed `Tasks` and `Trackings`). The list order
 assigns the **autonumber**
 keys — `1`..`9`, then `0` for a tenth tab; an eleventh and beyond get no
 digit and are reachable only via `Tab` / `Shift+Tab`. While a
@@ -254,11 +257,12 @@ In-process commands (executed by the TUI itself, not via subprocess):
   inside the cut node's subtree) and shows a modal error; in those
   cases the tree is left untouched and the cut stays armed so the
   user can pick a different target.
-- `:jump <Tab>[:<sub>]` — programmatic tab + sub-tab switch.
-  Recognises `Trackings` (sub: `normal` / `condensed` / `tree`) and
-  any content tab by its configured name (case-insensitive; e.g.
-  `Tasks (A)`). Used by user scripts to drive the TUI from outside;
-  also typeable directly. Modal error on unknown tab or sub-view.
+- `:jump <Tab>` — programmatic tab switch. Matches any content tab by
+  its configured `tab.name` (case-insensitive; e.g. `Tasks`,
+  `Trackings`). Content tabs don't take a sub-view, so a trailing
+  `:<sub>` is reported as a modal error. Used by user scripts to drive
+  the TUI from outside; also typeable directly. Modal error on unknown
+  tab.
 - `:focus-node [-i] <Tab>[:<view>] /<col>|<pattern>` — parks the
   cursor on a matching row of a content tab. Switches to the named
   content tab (and optional sub-view), then parks the cursor on the
@@ -280,12 +284,12 @@ In-process commands (executed by the TUI itself, not via subprocess):
   target sits several levels deep (e.g. the adapterized Tasks tab,
   where ticket nodes live under `work → client → tickets`). The tab
   name may be double-quoted to allow spaces:
-  `:tree-find "Tasks (A)" <query>`. The `<query>` is adapter-defined;
+  `:tree-find "Tasks" <query>`. The `<query>` is adapter-defined;
   the local task adapter additionally accepts an exact-id escape
   `id:<uuid>` (used by scripted jumps that already resolved the node
   id via the CLI). Modal errors on unknown tab/view or when the
   active view isn't a tree.
-  Example: `:tree-find "Tasks (A)" id:550e8400-…`.
+  Example: `:tree-find "Tasks" id:550e8400-…`.
 - `:query <subcommand>` — namespace for saved-query operations:
   `apply` activates a saved query (read), `edit` / `new` / `delete`
   manage the saved-query bodies stored by the active content tab's
@@ -677,15 +681,15 @@ notes/
 
 ## Scripts
 
-The `:script` fuzzy menu (also bound to `x` in the Trackings tab and to
-per-view `type: script` actions in content tabs — including the
-adapter-backed `Tasks (A)` tab) lists, runs, edits, creates and deletes
-user scripts for the current context. One menu, two contexts:
+The `:script` fuzzy menu (also reachable via per-view `type: script` and
+`scope: filtered_set` actions in content tabs — including the
+adapter-backed `Tasks` and `Trackings` tabs) lists, runs, edits, creates
+and deletes user scripts for the current context. One menu, two contexts:
 
-| Trigger                                    | Context               | JSON argument                                                                                           | Script directory                                         |
-| ------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Trackings tab `x` (or `:script`)           | Filtered tracking ids | `{"tracking_ids": [..], "filter_min_date": .., "filter_max_date": ..}`                                  | `~/.local/share/not_yet_done/tracking/scripts/`          |
-| Content view `type: script` (or `:script`) | Selected node         | `{"node": {"ref": "..", "id": "..", "node_type": "..", "tab": "..", "instance": "..", "fields": {..}}}` | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
+| Trigger                                    | Context           | JSON argument                                                                                           | Script directory                                         |
+| ------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Content view `scope: filtered_set` batch   | Filtered node ids | `{"tracking_ids": [..], "filter_min_date": .., "filter_max_date": ..}`                                  | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
+| Content view `type: script` (or `:script`) | Selected node     | `{"node": {"ref": "..", "id": "..", "node_type": "..", "tab": "..", "instance": "..", "fields": {..}}}` | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
 
 The `<view-path>` is the **pane's** view hierarchy — the root
 `ViewDef.node_type`, followed by each drilled-into `ChildDef.node_type`
@@ -754,9 +758,7 @@ the TUI parses that file as JSON of the form:
 
 ```json
 {
-  "commands": [
-    "tree-find \"Tasks (A)\" id:550e8400-e29b-41d4-a716-446655440000"
-  ]
+  "commands": ["tree-find \"Tasks\" id:550e8400-e29b-41d4-a716-446655440000"]
 }
 ```
 
@@ -791,7 +793,7 @@ desc = f"#{number} - {subject}".rstrip(" -")
 ticket = f"/work/clients/{project}/tickets/re:\\b{re.escape(number)}\\b"
 parent = f"/work/clients/{project}/tickets"
 
-TAB = "Tasks (A)"   # display name of the adapter Tasks tab
+TAB = "Tasks"   # display name of the adapter Tasks tab
 
 def show(p):
     return subprocess.run([CLI, "task", "show", "--path", p, "-i"],
@@ -823,7 +825,7 @@ and the local description have drifted apart.
 
 The mirror-image flow — selected local task → matching Taiga item —
 uses `:focus-node`. The script lives under
-`<data_dir>/not_yet_done/scripts/tasks/task_item/` (the `Tasks (A)`
+`<data_dir>/not_yet_done/scripts/tasks/task_item/` (the `Tasks`
 tab's script directory, shared by its list + tree views) and emits one
 command that switches to the Taiga tab and parks the cursor on the row
 whose `ref` column matches:
@@ -887,30 +889,29 @@ into the new script is resolved in this order (first hit wins):
 
 1. **Per-view** — `script_template:` on the active `views[]` entry in
    `~/.config/not_yet_done/views/*.yaml` (content tabs only).
-2. **Trackings** — `tracking.script_template:` in `tui.yaml`
-   (Trackings tab only).
-3. **Global fallback** — `script.template:` in `tui.yaml`. Always
+2. **Global fallback** — `script.template:` in `tui.yaml`. Always
    present; ships with a generic `{"node": {...}}` scaffold.
 
-Layers 1 + 2 are optional. The Trackings layer exists because the JSON
-shape there (`{tracking_ids, filter_min_date, filter_max_date}`)
-differs from the generic node shape — without a tracking-specific
-default, new scripts would scaffold against the wrong schema. Per-view
-overrides are useful when a content tab's nodes have rich, named
-fields that a tailored starter can reference directly (e.g. Taiga
-items' `ref`/`assignee`/`status`).
+Layer 1 is optional. Per-view overrides are useful when a view's JSON
+shape or fields differ from the generic node scaffold — for example a
+`scope: filtered_set` batch view (JSON `{tracking_ids, filter_min_date,
+filter_max_date}`) on the Trackings tab, or a Taiga `items` view whose
+nodes carry rich, named fields (`ref`/`assignee`/`status`) a tailored
+starter can reference directly.
+
+```yaml
+# ~/.config/not_yet_done/views/trackings.yaml — on the batch view
+script_template: |
+  #!/usr/bin/env python3
+  # mode: background
+  import json, sys
+  with open(sys.argv[1]) as f:
+      data = json.load(f)
+  print(f"Got {len(data['tracking_ids'])} tracking(s)")
+```
 
 ```yaml
 # tui.yaml
-tracking:
-  script_template: |
-    #!/usr/bin/env python3
-    # mode: background
-    import json, sys
-    with open(sys.argv[1]) as f:
-        data = json.load(f)
-    print(f"Got {len(data['tracking_ids'])} tracking(s)")
-
 script:
   template: |
     #!/usr/bin/env python3
@@ -1260,13 +1261,13 @@ All TUI configuration lives in `~/.config/not_yet_done/tui.yaml`.
 
 ### File Locations
 
-| Purpose    | Path                                            |
-| ---------- | ----------------------------------------------- |
-| TUI config | `~/.config/not_yet_done/tui.yaml`               |
-| Database   | `~/.local/share/not_yet_done/nyd.db`            |
-| Backups    | `~/.local/share/not_yet_done/backups/`          |
-| Notes      | `~/.local/share/not_yet_done/notes/`            |
-| Scripts    | `~/.local/share/not_yet_done/tracking/scripts/` |
+| Purpose    | Path                                                     |
+| ---------- | -------------------------------------------------------- |
+| TUI config | `~/.config/not_yet_done/tui.yaml`                        |
+| Database   | `~/.local/share/not_yet_done/nyd.db`                     |
+| Backups    | `~/.local/share/not_yet_done/backups/`                   |
+| Notes      | `~/.local/share/not_yet_done/notes/`                     |
+| Scripts    | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
 
 The `DATABASE_URL` environment variable overrides the configured database path.
 
@@ -1391,9 +1392,9 @@ orchestration and the views layer — see
 [`docs/architecture.md`](docs/architecture.md). Architecture decision
 records live under [`docs/decisions/`](docs/decisions/).
 
-A design analysis on whether the native Tasks and Trackings tabs could
-move onto the `ContentAdapter` abstraction (difficulties and possible
-approaches) lives in
+The original design analysis on whether the (now-removed) native Tasks
+and Trackings tabs could move onto the `ContentAdapter` abstraction —
+since fully realized; both are adapter-backed tabs today — lives in
 [`docs/adapterize-tasks-trackings.md`](docs/adapterize-tasks-trackings.md);
 the phased implementation plan derived from it is in
 [`docs/plan-adapterize-tasks-trackings.md`](docs/plan-adapterize-tasks-trackings.md).

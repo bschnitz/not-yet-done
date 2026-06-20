@@ -920,7 +920,7 @@ Sichtbar wird eine gelöschte Zeile nur, wenn der Query sie **erfasst** — die
 Adapter laden das volle inkl.-gelöscht-Universum, und der Query ist der
 alleinige Filter (s. „Query = einziger Filter"). Mit dem Default-Query
 (`[deleted, =, false]`) bleibt alles Gelöschte unsichtbar; erst ein Query, der
-gelöschte einschließt, zeigt sie ausgegraut. Tasks (A) und Trackings (A) nutzen
+gelöschte einschließt, zeigt sie ausgegraut. Tasks und Trackings nutzen
 dasselbe Signal.
 
 #### `mark_read_on_reach_end:` — Aktion bei Cursor auf der letzten Zeile

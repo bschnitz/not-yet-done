@@ -23,7 +23,6 @@ mod postgres_db_script;
 mod postgres_query;
 mod saved_query;
 mod tag_form;
-mod tracking_query_filter;
 mod tracking_script;
 mod tracking_script_output;
 
@@ -38,7 +37,6 @@ pub use postgres_query::{
 };
 pub use saved_query::SavedQueryEditSession;
 pub use tag_form::TagFormSession;
-pub use tracking_query_filter::TrackingQueryFilterSession;
 pub use tracking_script::ScriptSession;
 pub use tracking_script_output::ScriptOutputSession;
 
@@ -203,19 +201,11 @@ pub enum FollowUp {
         pane_id: PaneId,
         message: String,
     },
-    /// Live-apply a YAML tracking filter without persisting.
-    ApplyTrackingFilter { content: String },
     /// Live-apply a content view query without persisting.
     ApplyContentFilter {
         view_index: usize,
         content: String,
         save_name: Option<String>,
-    },
-    /// Final close: apply + persist tracking filter; optional shortcut prompt.
-    CloseTrackingFilter {
-        content: String,
-        name: String,
-        is_new: bool,
     },
     /// Final close: apply + optionally save content query; optional shortcut prompt.
     CloseContentQuery {

@@ -20,7 +20,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 
 use not_yet_done_content::NodeRef;
 
@@ -37,20 +36,6 @@ use crate::views::content_view::PaneId;
 /// inserted when the user creates a new script via the menu.
 #[derive(Debug, Clone)]
 pub enum ScriptContext {
-    /// Trackings tab. Carries the currently filtered tracking ids and
-    /// the active filter's date bounds. JSON shape (legacy, unchanged
-    /// from the old `X`/`x` flow):
-    /// `{"tracking_ids": [..], "filter_min_date": .., "filter_max_date": ..}`.
-    Trackings {
-        tracking_ids: Vec<Uuid>,
-        min_date: Option<DateTime<Utc>>,
-        max_date: Option<DateTime<Utc>>,
-        /// Selection at menu-open time, restored after reload.
-        focus_id: Option<Uuid>,
-        /// Scaffold for create-new, pre-resolved at menu-open time
-        /// (tracking-specific override, else global fallback).
-        new_script_template: String,
-    },
     /// Content-view node. JSON shape (new generic schema):
     /// `{"node": {"ref": .., "id": .., "label": .., "node_type": ..,
     /// "tab": .., "instance": .., "fields": {<key>: <value>, …}}}`.
@@ -106,12 +91,11 @@ pub enum ScriptContext {
 impl ScriptContext {
     /// Template inserted when the user creates a new script through
     /// the menu. Resolved at menu-open time from
-    /// `views[].script_template` (content) / `tracking.script_template`
-    /// (trackings), with `script.template` as the global fallback.
+    /// `views[].script_template` (per-view), with `script.template` as
+    /// the global fallback.
     pub fn new_script_template(&self) -> &str {
         match self {
-            ScriptContext::Trackings { new_script_template, .. }
-            | ScriptContext::ContentNode { new_script_template, .. }
+            ScriptContext::ContentNode { new_script_template, .. }
             | ScriptContext::ContentBatch { new_script_template, .. } => new_script_template,
         }
     }
@@ -119,14 +103,12 @@ impl ScriptContext {
 
 impl ScriptContext {
     /// Where the menu reads / writes script files for this context.
-    /// Trackings keeps its historical directory (`<data>/not_yet_done/
-    /// tracking/scripts/`); content nodes use the **view path** (root
+    /// Both batch and content-node scripts use the **view path** (root
     /// ViewDef + drill-down ChildDefs, *not* the item-type) under
     /// `<data>/not_yet_done/scripts/<tab>/<view…>/`. `/` and `:` in
     /// node_types are replaced with `_` to keep path segments safe.
     pub fn scripts_dir(&self) -> std::path::PathBuf {
         match self {
-            ScriptContext::Trackings { .. } => super::editor::tracking_scripts_dir(),
             ScriptContext::ContentNode { tab, view_path, .. }
             | ScriptContext::ContentBatch { tab, view_path, .. } => {
                 let mut p = dirs::data_dir()
@@ -143,32 +125,14 @@ impl ScriptContext {
     }
 
     /// Build the JSON string handed to the script (either via temp
-    /// file or stdin). Format is context-specific by design — Trackings
-    /// stays on its legacy shape for backward compatibility with the
-    /// user's existing scripts.
+    /// file or stdin). Format is context-specific by design — the
+    /// `scope: filtered_set` batch stays on its legacy aggregate shape
+    /// for backward compatibility with the user's existing scripts.
     pub fn build_json(&self) -> String {
         match self {
-            ScriptContext::Trackings { tracking_ids, min_date, max_date, .. } => {
-                let ids = tracking_ids
-                    .iter()
-                    .map(|id| format!("\"{}\"", id))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let min = min_date
-                    .as_ref()
-                    .map(|dt| format!("\"{}\"", dt.to_rfc3339()))
-                    .unwrap_or_else(|| "null".to_string());
-                let max = max_date
-                    .as_ref()
-                    .map(|dt| format!("\"{}\"", dt.to_rfc3339()))
-                    .unwrap_or_else(|| "null".to_string());
-                format!(
-                    "{{\"tracking_ids\": [{ids}], \"filter_min_date\": {min}, \"filter_max_date\": {max}}}"
-                )
-            }
             ScriptContext::ContentBatch { node_ids, min_date, max_date, .. } => {
-                // Identical shape to `Trackings` so the migrated aggregate
-                // scripts run unchanged — the key stays `tracking_ids`.
+                // Legacy aggregate JSON shape (key stays `tracking_ids`) so the
+                // migrated aggregate scripts run unchanged.
                 let ids = node_ids
                     .iter()
                     .map(|id| json_string(id))
@@ -212,7 +176,6 @@ impl ScriptContext {
     /// owning tab).
     pub fn session_scope(&self) -> SessionScope {
         match self {
-            ScriptContext::Trackings { .. } => SessionScope::Trackings,
             ScriptContext::ContentNode { .. } | ScriptContext::ContentBatch { .. } => {
                 SessionScope::Content
             }
@@ -241,53 +204,14 @@ fn json_string(s: &str) -> String {
 }
 
 impl App {
-    /// Dispatch `:script` based on the active tab. Tasks tab is not yet
-    /// supported (per spec) — surface a notification there.
+    /// Dispatch `:script` based on the active tab.
     pub fn open_script_menu_from_current_tab(&mut self) {
-        match self.active_tab {
-            Tab::Trackings => self.open_script_menu_for_trackings(),
-            Tab::Content(idx) => {
-                let pane_id = self
-                    .content_view(idx)
-                    .map(|cv| cv.active_pane_id())
-                    .unwrap_or(0);
-                self.open_script_menu_for_content(idx, pane_id);
-            }
-        }
-    }
-
-    /// Open the `:script` menu seeded with the current Trackings filter.
-    pub fn open_script_menu_for_trackings(&mut self) {
-        let tracking_ids: Vec<Uuid> = self
-            .trackings_view
-            .state
-            .filtered_indices
-            .iter()
-            .map(|&i| self.trackings_view.state.rows[i].id)
-            .collect();
-        let bounds = self
-            .trackings_view
-            .active_filter
-            .as_ref()
-            .map(not_yet_done_core::filter::extract_date_bounds);
-        let focus_id = self
-            .trackings_view
-            .state
-            .tracking_id_at(self.trackings_view.table.selected_row());
-        let new_script_template = self
-            .config
-            .tracking
-            .script_template
-            .clone()
-            .unwrap_or_else(|| self.config.script.template.clone());
-        let ctx = ScriptContext::Trackings {
-            tracking_ids,
-            min_date: bounds.as_ref().and_then(|b| b.min),
-            max_date: bounds.as_ref().and_then(|b| b.max),
-            focus_id,
-            new_script_template,
-        };
-        self.open_script_menu(ctx);
+        let Tab::Content(idx) = self.active_tab;
+        let pane_id = self
+            .content_view(idx)
+            .map(|cv| cv.active_pane_id())
+            .unwrap_or(0);
+        self.open_script_menu_for_content(idx, pane_id);
     }
 
     /// Open the `:script` menu seeded with the focused row of the given
@@ -440,7 +364,6 @@ impl App {
         }
 
         let title = match &ctx {
-            ScriptContext::Trackings { .. } => "Scripts · Trackings".to_string(),
             ScriptContext::ContentNode { tab, view_path, .. }
             | ScriptContext::ContentBatch { tab, view_path, .. } => {
                 if view_path.is_empty() {
@@ -571,9 +494,6 @@ impl App {
 
         let child_env = self.child_env_for_script(ctx);
         if mode.is_interactive() {
-            if let ScriptContext::Trackings { focus_id, .. } = ctx {
-                self.trackings_view.state.pending_focus_id = *focus_id;
-            }
             let interactive_cmd = self.config.script.interactive_command.clone();
             if !interactive_cmd.is_empty() {
                 return self.launch_detached_script_ctx(
@@ -595,13 +515,8 @@ impl App {
         }
 
         let result = self.run_script_background(ctx, script_path, &stdin_json, mode, &child_env);
-        if let ScriptContext::Trackings { focus_id, .. } = ctx {
-            self.trackings_view.state.pending_focus_id = *focus_id;
-            self.spawn_load_trackings();
-        }
         // Batch scripts may mutate the underlying data (e.g. a period
-        // equalizer); reload the pane so the change is visible, mirroring the
-        // legacy Trackings auto-reload above.
+        // equalizer); reload the pane so the change is visible.
         if let ScriptContext::ContentBatch { view_index, pane_id, .. } = ctx {
             self.reload_content_pane_current_level(*view_index, *pane_id);
         }
@@ -871,7 +786,8 @@ mod tests {
     #[test]
     fn content_batch_json_matches_legacy_trackings_shape() {
         // The batch payload must be byte-identical to the legacy Trackings
-        // payload so the migrated aggregate scripts run unchanged.
+        // payload (`tracking_ids` array + RFC3339 date bounds) so the
+        // migrated aggregate scripts run unchanged.
         let batch = ScriptContext::ContentBatch {
             view_index: 0,
             pane_id: 0,
@@ -882,20 +798,10 @@ mod tests {
             max_date: Some(dt("2026-02-01T00:00:00Z")),
             new_script_template: String::new(),
         };
-        let legacy = ScriptContext::Trackings {
-            tracking_ids: vec![],
-            min_date: Some(dt("2026-01-01T00:00:00Z")),
-            max_date: Some(dt("2026-02-01T00:00:00Z")),
-            focus_id: None,
-            new_script_template: String::new(),
-        };
-        // Same keys, same date serialization (RFC3339), same `tracking_ids`
-        // array key — only the ids differ between these two fixtures.
         assert_eq!(
             batch.build_json(),
             "{\"tracking_ids\": [\"a\", \"b\"], \"filter_min_date\": \"2026-01-01T00:00:00+00:00\", \"filter_max_date\": \"2026-02-01T00:00:00+00:00\"}"
         );
-        assert!(legacy.build_json().contains("\"filter_min_date\": \"2026-01-01T00:00:00+00:00\""));
     }
 
     #[test]

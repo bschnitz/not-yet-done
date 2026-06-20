@@ -123,7 +123,7 @@ auf, sondern leitet sie aus demselben Claim-Satz ab, den auch der
 Dispatcher nutzt (`ContentPane::build_claims`). Dadurch erscheint jede
 momentan auslösbare Nav/Fold-Action automatisch in der Leiste.
 
-- [ ] **Tasks (A) / Trackings (A) Tree**: die Status-Bar zeigt
+- [ ] **Tasks / Trackings Tree**: die Status-Bar zeigt
       `[zm] collapse all`, `[zr] expand all` und `[⌫] collapse` — auf
       jeder Cursor-Tiefe, solange die Ansicht im Tree-Modus ist (war
       vorher nicht sichtbar).
@@ -146,9 +146,9 @@ keine Sonderfälle mehr.
 - [ ] **Jump**: `J` (bzw. konfigurierter `jump_mode`-Key) drücken →
       `jump`-Hint wird markiert, solange der Hop-Overlay offen ist;
       nach Auswahl/`Esc` erlischt die Markierung. Über alle
-      Content-Tabs (Tasks (A), Trackings (A), Jira, …) und in allen
+      Content-Tabs (Tasks, Trackings, Jira, …) und in allen
       Ansichten (Liste/Tree/Condensed).
-- [ ] **Track**: in Tasks (A) / Trackings (A) ein Tracking starten
+- [ ] **Track**: in Tasks / Trackings ein Tracking starten
       (`t`/`s`) → `track`-Hint bleibt markiert, solange ein Tracking
       läuft; Stop → Markierung weg.
 - [ ] **Cut**: einen Knoten mit `C` (mark-move) auf das Move-Clipboard
@@ -262,7 +262,7 @@ fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
       einer View-YAML → drücken von `x` triggert das Menü; ohne
       diesen Eintrag passiert auf `x` nichts (kein globaler Default
       auf Content-Tabs)
-- [ ] **Batch-Scope (`scope: filtered_set`)** — Trackings (A), flache
+- [ ] **Batch-Scope (`scope: filtered_set`)** — Trackings, flache
       `trackings`-View (`x` mit `scope: filtered_set`): Run eines Scripts
       liefert JSON `{"tracking_ids": […], "filter_min_date": …,
 "filter_max_date": …}` (NICHT `{"node": …}`) — exakt die Legacy-Form, die
@@ -282,10 +282,10 @@ fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
       umbenannt → tui.yaml einmal anpassen)
 - [ ] Taiga `items`-View, Cursor auf einem Ticket mit `ref` wie
       `acme#42`, `:script` → `goto_task.py` ausführen → TUI springt
-      auf den **Adapter**-Tab „Tasks (A)" (NICHT den Legacy-Tasks-Tab)
+      auf den **Adapter**-Tab „Tasks" (NICHT den Legacy-Tasks-Tab)
       und expandiert/parkt auf dem Task im Pfad
       `/work/.../<slug>/tickets/<…42…>`. Das Skript emittiert genau
-      ein `tree-find "Tasks (A)" id:<uuid>`.
+      ein `tree-find "Tasks" id:<uuid>`.
 - [ ] Taiga `items`-View, Auto-Create-Pfad: Cursor auf einem
       Ticket, dessen lokaler Task NOCH NICHT existiert (z.B. neue
       Ticket-Nummer). `:script` → `goto_task.py`:
@@ -298,9 +298,9 @@ fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
     schon → nur jump+focus). Tree zeigt KEINE Duplikate.
   - Wenn der Parent-Path (`/work/.../<slug>/tickets`) gar
     nicht existiert: Modal-Fehler aus dem Skript (stderr).
-- [ ] `:tree-find` direkt (ohne Skript): `:tree-find "Tasks (A)" <text>`
-      (Beschreibungs-Substring) springt auf Tasks (A) und parkt auf
-      dem ersten Treffer; `n`/`N` zykeln weitere. `:tree-find "Tasks (A)"
+- [ ] `:tree-find` direkt (ohne Skript): `:tree-find "Tasks" <text>`
+      (Beschreibungs-Substring) springt auf Tasks und parkt auf
+      dem ersten Treffer; `n`/`N` zykeln weitere. `:tree-find "Tasks"
 id:<uuid>` parkt exakt auf diesem Knoten. Modal-Fehler bei
       unbekanntem Tab/View oder wenn die aktive View kein Baum ist
       (Hinweis auf `:focus-node`).
@@ -605,9 +605,9 @@ bleiben über alle Phasen hinweg stabil.
 - [ ] Trackings (nativer Tab): `S` zeigt **keinen** Sort-Hint in der
       Status-Bar (der native Trackings-Tab ist bewusst ausgenommen).
 
-## Trackings (A) — Gruppen-Order (`o`) + Item-Sort (`S`)
+## Trackings — Gruppen-Order (`o`) + Item-Sort (`S`)
 
-Adapter-Tab „Trackings (A)" auf der gruppierten Flat-View (`key: a`,
+Adapter-Tab „Trackings" auf der gruppierten Flat-View (`key: a`,
 Default `group_by: started/day/desc`).
 
 - [ ] Status-Bar zeigt `o order ↓` (absteigend = neueste Tage zuerst).
@@ -1323,7 +1323,7 @@ Eine erreichbare Postgres-Instanz ist konfiguriert.
 ### Action-Bar Active-State + `c` = columns (Refactor 2026-06-15)
 
 - [ ] `c` öffnet das ColumnConfig-Popup **auf jedem Content-Tab** —
-      auch im Tree-Modus (Tasks-(A)/Trackings-(A)/Postgres-Tree). Der
+      auch im Tree-Modus (Tasks/Trackings/Postgres-Tree). Der
       Shortcut erscheint als `c columns` in der oberen Action-Bar.
 - [ ] Solange ein Popup/Modus offen ist, leuchtet der zugehörige
       Top-Bar-Hint auf (Akzent + fett + unterstrichen): `d delete`
@@ -3710,7 +3710,7 @@ Beide Prüfpfade testen:
 Tasks**-Spalten-Popup (und hätte beim Anwenden dessen Settings
 überschrieben). Jetzt generisch pro Level:
 
-- [x] Adapter-Tab (z. B. „Trackings (A)"): `c` zeigt die Spalten der
+- [x] Adapter-Tab (z. B. „Trackings"): `c` zeigt die Spalten der
       aktiven View (nicht die Tasks-Spalten); `Space` blendet eine
       Spalte aus (z. B. Taskpath) → Tabelle baut sofort ohne sie neu.
 - [x] Persistenz: App neu starten → die Spalte bleibt ausgeblendet
@@ -3719,7 +3719,7 @@ Tasks**-Spalten-Popup (und hätte beim Anwenden dessen Settings
       YAML-Position schieben → Override entfernt, Settings-Row gelöscht
       (`SELECT key FROM settings WHERE key LIKE 'content_columns%'`
       ist leer).
-- [x] Tree-Mode („Tasks (A)"): `c` zeigt die Spalten der Cursor-Ebene;
+- [x] Tree-Mode („Tasks"): `c` zeigt die Spalten der Cursor-Ebene;
       die `tree_label`-Spalte (Task) ist fix (`Space` ohne Wirkung);
       andere Spalte (Created) togglen wirkt sofort + Reset wie oben.
 - [x] Native Tabs (Tasks/Trackings): Popup unverändert (Display-Namen,
@@ -3739,7 +3739,7 @@ App-Start automatisch angewendet wird.
       das einheitliche Chrome (abgerundeter Rahmen, gewrappte
       Hint-Zeile, Cursor-Zeile hinterlegt statt Farbbalken);
       Saved-Query-Shortcuts erscheinen als `[key]`-Suffix.
-- [x] Content-Tab („Trackings (A)"): `ctrl+t` auf „2 months" →
+- [x] Content-Tab („Trackings"): `ctrl+t` auf „2 months" →
       Notification „Default query: 2 months", Settings-Row
       `default_query:<scope>` angelegt; App-Neustart → Query ist aktiv
       (Action-Bar zeigt sie), Menü zeigt `★ 2 months`.
@@ -3767,7 +3767,7 @@ Marker.
       vier Ebenen tief aufklappen → Schema/Tabellen-Ebenen sind nur
       eingerückt, ohne `├──`/`└──`-Linien; die `▶`/`▼`-Marker
       erscheinen weiterhin.
-- [x] Tab ohne Konfiguration („Tasks (A)"): unverändert Linien +
+- [x] Tab ohne Konfiguration („Tasks"): unverändert Linien +
       Marker wie bisher (Default-Verhalten).
 - [ ] `tree_markers.enabled: false` (temporär setzen): Linien bleiben,
       Marker verschwinden; Aufklappen per Enter funktioniert weiter
@@ -3784,7 +3784,7 @@ Wurzel-`ViewDef` klappt nach dem Laden Tiefe 0 und 1 automatisch auf
 (`node_type: task:flat`, Subtab-Key `v`, zurück `t`) zeigt den ganzen
 Forest als flache Tabelle in DFS-Reihenfolge.
 
-- [x] „Tasks (A)" öffnen: drei Ebenen sind direkt sichtbar (Wurzeln +
+- [x] „Tasks" öffnen: drei Ebenen sind direkt sichtbar (Wurzeln +
       Kinder + Enkel aufgeklappt), tiefere Ebenen bleiben zu.
 - [x] Einen Knoten manuell zuklappen, dann `r` (Reload): der Knoten
       bleibt zu — die Kaskade ist one-shot und klappt nach Abschluss
@@ -3812,7 +3812,7 @@ Trackings neu gefaltet, `propagates_query_to_subtree`).
       zeigen den Default-Query-Namen als aktive Query in der Action-Bar
       (Grenze unverändert: ein Default mit `{var}`-Variable wird roh,
       d. h. effektiv ungefiltert, angewendet — wie auf der Default-View).
-- [ ] Subtab ohne `inherit_default` (z. B. Tasks (A) Listenansicht):
+- [ ] Subtab ohne `inherit_default` (z. B. Tasks Listenansicht):
       Default-Query greift dort weiterhin NICHT (Opt-in-Verhalten;
       unit-getestet, live offen).
 - [x] Im Tree-Subtab `q` → Saved Query anwenden: Wurzel zeigt die
@@ -3830,7 +3830,7 @@ fünf `zg`-Zustände (No grouping/Day/Week/Month/Year). Nur aktiv, wenn die
 Ebene ein `group_by:` konfiguriert; Wahl ist View-State (nicht
 persistiert, wie `zg` — nativ persistierte via `SaveTrackingGrouping`).
 
-- [x] Trackings (A), Normal-Subtab: Action-Bar zeigt `u group`; `u`
+- [x] Trackings, Normal-Subtab: Action-Bar zeigt `u group`; `u`
       öffnet das Popup „Group by" in der nativen Optik (Standard-Chrome,
       `●` markiert den aktuellen Zustand (Day), Hotkey-Buchstabe im Label
       unterstrichen, Keybinding-Legende unten).
@@ -3842,17 +3842,17 @@ persistiert, wie `zg` — nativ persistierte via `SaveTrackingGrouping`).
 - [x] Condensed-Subtab: `u` → `m` rotiert nur die Tag-Bucket-Ebene auf
       Monat (`── 2026-06`), die adapter-seitige Pro-Task-Aufschlüsselung
       bleibt.
-- [x] Auf einer Ebene ohne `group_by` (z. B. Tasks (A)): kein
+- [x] Auf einer Ebene ohne `group_by` (z. B. Tasks): kein
       `u group`-Hint, `u` bleibt frei für YAML-`shortcuts:`.
 
 ## Trackings-Tree: immer ausgeklappt + ohne Marker (`expand_depth: all`)
 
-Native Parität für den Tree-Subtab von Trackings (A): der Legacy-Tree war
+Native Parität für den Tree-Subtab von Trackings: der Legacy-Tree war
 immer komplett offen und hatte keine Aufklappmarker. `expand_depth: all`
 (neuer Wert, Kaskade läuft bis nichts Aufklappbares übrig ist) +
 `tree_markers.enabled: false` in trackings.yaml.
 
-- [x] Trackings (A) → `t` (Tree): der gesamte Baum ist sofort komplett
+- [x] Trackings → `t` (Tree): der gesamte Baum ist sofort komplett
       ausgeklappt — alle Ebenen sichtbar, ohne manuelles Enter.
 - [x] Keine `▶`/`▼`-Marker vor den Zeilen; die Box-Connectors
       (`├──`/`└──`) bleiben.
@@ -3875,7 +3875,7 @@ ent-schärfte die Kaskade voreilig. Folge: nur die obersten ein/zwei Ebenen
 klappten auf, tiefere Äste blieben zu. Fix: die Kaskade ent­schärft erst,
 wenn keine bereits-expandierte Ebene mehr auf ihre Kinder wartet.
 
-- [ ] Trackings (A) → `t` (Tree) mit einem **mehrstufigen** Task-Baum
+- [ ] Trackings → `t` (Tree) mit einem **mehrstufigen** Task-Baum
       (≥3 Ebenen, mehrere Geschwister mit unterschiedlich tiefen Ästen):
       der Baum ist nach dem Laden **komplett** offen bis zum letzten
       getrackten Blatt — nicht nur die obersten beiden Ebenen. Gleichviel
@@ -3898,22 +3898,22 @@ auslöste (langsam, blockierte Eingabe).
 Fix: Mit der Eager-Subtree-Verbesserung (`supports_eager_subtree`) erneuert
 ein `Reload` den ganzen aufgeklappten Baum in **einem** `list_subtree`-Call.
 Der Toggle gibt deshalb in allen drei Views schlicht `Reload` zurück
-(identisch zur Tasks-(A)-Logik) — re-foldet Own/Cumulated, Vorfahren-Aggregate
+(identisch zur Tasks-Logik) — re-foldet Own/Cumulated, Vorfahren-Aggregate
 und Marker konsistent. Der `PatchRow`-Dispatch entfällt ganz.
 
 > Beim Smoke-Test **kein** echtes Tracking auf echten Zeilen togglen —
 > eine Wegwerf-Aufgabe anlegen und auf der tracken.
 
-- [ ] Trackings (A) → Tree, tiefer/voll aufgeklappter Baum: `s` auf einer
+- [ ] Trackings → Tree, tiefer/voll aufgeklappter Baum: `s` auf einer
       **verschachtelten** Zeile flippt deren `⏱`-Marker **sofort** (an beim
       Start, weg beim Stopp); der Baum bleibt voll aufgeklappt, der Reload
       ist flott (kein sekundenlanges Zusammenklappen/Eingabe-Freeze), die
       Selektion bleibt auf der Zeile stehen. Kumulierte Sekunden der
       Vorfahren stimmen ohne extra `r`.
-- [ ] Trackings (A) → flache Liste (`a`) und condensed (`v`): `s` auf einer
+- [ ] Trackings → flache Liste (`a`) und condensed (`v`): `s` auf einer
       laufenden Zeile stoppt sie (`⏱` weg, Dauer eingefroren); `s` auf einer
       gestoppten Zeile startet ein neues Intervall, das sofort sichtbar wird.
-- [ ] Tasks (A) → Tree: `t` (toggle-tracking) flippt den `⏱`-Marker der
+- [ ] Tasks → Tree: `t` (toggle-tracking) flippt den `⏱`-Marker der
       Zeile sofort (unverändert — nutzte schon `Reload`).
 
 ## Trackings-Tree: Gruppierung via Adapter (`group_by_via_adapter`)
@@ -3924,7 +3924,7 @@ Tages). Generischer Mechanismus: Engine reicht das aktive `group_by` im
 Root-`list()` durch, Adapter liefert `tracking:tree-group`-Bucket-Knoten
 mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
 
-- [ ] Trackings (A) → `t` (Tree): Tages-Gruppen als `── label`-Header-Zeilen
+- [ ] Trackings → `t` (Tree): Tages-Gruppen als `── label`-Header-Zeilen
       (nicht selektierbar, Header-Style, Label wie in der gruppierten
       Flat-List: `W24 2026-06-08 Mon`), neuester Tag zuerst. Die Task-Zeilen
       darunter starten bei Einrückung 0 (keine Extra-Ebene unter dem
@@ -3964,7 +3964,7 @@ zurück (damit der neue Bucket in Sortier-Position erscheint).
 
 > ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen, nie auf echten Zeilen.
 
-- [ ] Trackings (A) → `t` (Tree), nach Tag gruppiert, mehrere Tage
+- [ ] Trackings → `t` (Tree), nach Tag gruppiert, mehrere Tage
       aufgeklappt: `s` auf einer Task-Zeile im **heutigen** Bucket flippt
       deren `⏱`-Marker und aktualisiert das Tages-Total dieses Buckets
       **sofort** — die **anderen** Tages-Buckets flackern nicht, klappen
@@ -3998,7 +3998,7 @@ Faltung gegen den dann aktuellen Stand.
 
 > ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen, nie auf echten Zeilen.
 
-- [ ] Trackings (A) → `t` (Tree), nach Tag gruppiert: auf einem Wegwerf-Task
+- [ ] Trackings → `t` (Tree), nach Tag gruppiert: auf einem Wegwerf-Task
       `s` starten. Im **heutigen** Bucket zählen Task-Zeile, deren Vorfahren
       und das Tages-Total **sekündlich/live hoch** — die **anderen** Buckets
       stehen still, flackern nicht und klappen nicht zu. Selektion bleibt.
@@ -4010,7 +4010,7 @@ Faltung gegen den dann aktuellen Stand.
 - [ ] Idle (keine laufende Buchung): es passieren **keine** Live-Patches —
       der Tree bleibt ruhig, kein unnötiges Neuzeichnen.
 
-## Live-Frische Tasks/Trackings (A): Marker sofort, externe Starts, adaptives Ticken
+## Live-Frische Tasks/Trackings: Marker sofort, externe Starts, adaptives Ticken
 
 Drei Frische-Fixes für die Adapter-Tabs: (1) ein Root-Reload erneuert jetzt
 auch alle **aufgeklappten** Tree-Ebenen (vorher blieben deren gecachte
@@ -4020,38 +4020,38 @@ Tracking-Adapter die laufenden Trackings gegen die DB und laden bei Drift
 neu (externe Starts/Stops via CLI/waybar); (3) die Live-Dauer tickt
 adaptiv statt sekündlich (5 s → 10 s → 30 s → 60 s, native Parität).
 
-- [ ] Tasks (A), Baum aufgeklappt: `s` auf einem **verschachtelten** Task
+- [ ] Tasks, Baum aufgeklappt: `s` auf einem **verschachtelten** Task
       → `⏱` erscheint sofort auf der Zeile (kein Zuklappen/Neuladen
       nötig); nochmal `s` → Marker sofort weg.
       ⚠ nur auf einem Wegwerf-Task togglen.
-- [ ] Trackings (A) Flat-List: laufende Zeile tickt erst alle 5 s, nach
+- [ ] Trackings Flat-List: laufende Zeile tickt erst alle 5 s, nach
       einer Minute spürbar seltener (10 s-Sprünge); CPU bleibt ruhig.
       Nach Stop hört das Ticken auf.
 - [ ] Extern ein Tracking starten (z. B. CLI `task track …` / waybar),
-      während ein anderer Tab aktiv ist → auf Tasks (A) wechseln: `⏱`
-      ist da; auf Trackings (A) wechseln: neue laufende Zeile da und
+      während ein anderer Tab aktiv ist → auf Tasks wechseln: `⏱`
+      ist da; auf Trackings wechseln: neue laufende Zeile da und
       tickt. Extern stoppen → Tab-Wechsel zeigt den Stop.
-- [ ] `r` auf Tasks (A) bzw. Trackings (A) holt dieselbe externe Änderung
+- [ ] `r` auf Tasks bzw. Trackings holt dieselbe externe Änderung
       manuell — auch im **Tree** mit aufgeklappten Ebenen (vorher blieb
       dort alter Stand stehen).
-- [ ] Trackings (A) Tree/Condensed nach Toggle/Reload: Durations
+- [ ] Trackings Tree/Condensed nach Toggle/Reload: Durations
       konsistent frisch (auch unter Gruppen-Headern).
 
 ## Eager-Subtree (`supports_eager_subtree`, `list_subtree`)
 
-In-Memory-Adapter (Tasks (A), Trackings (A)) liefern bei `expand_depth: all`
+In-Memory-Adapter (Tasks, Trackings) liefern bei `expand_depth: all`
 bzw. `expand_depth: N` den ganzen erwarteten Teilbaum in **einem**
 `list_subtree`-Call statt der per-Knoten-Kaskade. Resultat muss optisch
 **identisch** zur Kaskade sein — gleiche Zeilen, gleiche Reihenfolge, gleiche
 Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
 
-- [ ] Tasks (A) Tree-View (`expand_depth: all`): nach dem Laden ist der
+- [ ] Tasks Tree-View (`expand_depth: all`): nach dem Laden ist der
       komplette Forest sofort offen — kein sichtbares Ebene-für-Ebene-
       Nachklappen. Tiefe ≥ 3 Ebenen testen (Task → Subtask → Sub-Subtask).
 - [ ] Selektion/Collapse: Cursor auf einen tiefen Knoten, `zc`/Collapse
       und wieder aufklappen → Zustand stimmt (Pfad-Schema == Kaskade).
-- [ ] Trackings (A) Tree-View: dito, voll aufgeklappt in einem Rutsch.
-- [ ] `:tree-find "Tasks (A)" id:<uuid>` (z. B. via `goto_task`) landet
+- [ ] Trackings Tree-View: dito, voll aufgeklappt in einem Rutsch.
+- [ ] `:tree-find "Tasks" id:<uuid>` (z. B. via `goto_task`) landet
       weiterhin auf dem richtigen Knoten — der eager geladene Baum ist
       vollständig durchsuchbar.
 - [ ] `r`-Reload auf dem eager Tree erneuert alle Ebenen (z. B. neu
@@ -4060,14 +4060,14 @@ Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
 false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
       friert nicht ein — der eager Pfad greift dort bewusst nicht.
 
-## Fuzzy-Filter — Teilstring-Highlight (Tasks/Trackings (A))
+## Fuzzy-Filter — Teilstring-Highlight (Tasks/Trackings)
 
 Parität zum nativen Tasks-Tab: der gematchte Teilstring wird hervorgehoben
 (Theme-`accent`, fett). Im Tree-Mode im **Label** der `tree_label`-Spalte (der
 Box-Connector behält seine `tree_connector`-Farbe), im Flat-Mode in den
 durchsuchten Spalten.
 
-- [ ] Tasks (A) Tree-View: `f` + Teil-Text eines Task-Titels tippen → in den
+- [ ] Tasks Tree-View: `f` + Teil-Text eines Task-Titels tippen → in den
       verbleibenden Zeilen ist genau der getroffene Teilstring farbig/fett
       hervorgehoben; die Box-Connectors (`├──`/`└──`/`▶`) behalten ihre
       eigene Farbe.
@@ -4087,7 +4087,7 @@ Parität zum nativen Tasks-Tab-Sprung (dort `p`), hier auf `Shift+J`.
 Default-Binding ist `J`; konfigurierbar über `keybindings.content.jump_mode`.
 Das Label-Alphabet kommt aus `navigation.jump_chars`.
 
-- [ ] Tasks (A): `Shift+J` drücken → Sprung-Overlay aktiv (Action-Bar zeigt
+- [ ] Tasks: `Shift+J` drücken → Sprung-Overlay aktiv (Action-Bar zeigt
       `J jump`). Ein Zeichen tippen, das in mehreren sichtbaren Zeilen
       vorkommt → jede Treffer-Zeile bekommt ein Label, Nicht-Treffer sind
       gedimmt.
@@ -4098,7 +4098,7 @@ Das Label-Alphabet kommt aus `navigation.jump_chars`.
 - [ ] `esc` während des Overlays → Abbruch, Cursor unverändert.
 - [ ] In einem Split: `Shift+J` wirkt nur auf das **fokussierte** Pane; nach
       Pane-Wechsel funktioniert der Sprung auch dort (neu erzeugtes Pane).
-- [ ] Trackings (A) (Liste/Condensed/Tree): `Shift+J` verhält sich gleich.
+- [ ] Trackings (Liste/Condensed/Tree): `Shift+J` verhält sich gleich.
 - [ ] Nativer Tasks-Tab unverändert: `p` öffnet dort weiterhin den Sprung.
 
 ## Stoat: Ungelesen-Hervorhebung (`unread_style` / `unread_marker`)
