@@ -9920,6 +9920,7 @@ fn summary_row(
 fn item_widget_row(
     cr: &not_yet_done_table::ComputedRow<u32>,
     columns: &[ColumnDef],
+    deleted: bool,
 ) -> TableWidgetRow {
     let cells: Vec<TableWidgetCell> = cr
         .cells
@@ -9930,6 +9931,16 @@ fn item_widget_row(
                 path_cell_segments(fitted, path_separator(col), PATH_SEPARATOR_STYLE_ID),
             ),
             _ => TableWidgetCell::plain(fitted.clone()),
+        })
+        // Deleted rows: override every cell's foreground with the dim slot,
+        // identical to the ungrouped/tree path — so a soft-deleted row that
+        // the query surfaces reads as present-but-greyed inside its group too.
+        .map(|c| {
+            if deleted {
+                c.with_style(DELETED_STYLE_ID)
+            } else {
+                c
+            }
         })
         .collect();
     TableWidgetRow::new(cells)
@@ -10167,7 +10178,10 @@ fn build_grouped_table(
             }
             PlanRow::Item { .. } => {
                 let cr = &computed.rows[next_data];
-                widget_rows.push(item_widget_row(cr, columns));
+                let deleted = items
+                    .get(data_filtered[next_data])
+                    .is_some_and(|it| metadata_field_value(it, "deleted") == "true");
+                widget_rows.push(item_widget_row(cr, columns, deleted));
                 filtered_indices.push(data_filtered[next_data]);
                 next_data += 1;
             }

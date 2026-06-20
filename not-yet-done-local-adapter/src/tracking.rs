@@ -1759,6 +1759,17 @@ impl TrackingEntryNode {
     fn tracking_id(&self) -> Result<Uuid> {
         Uuid::parse_str(&self.id_str).map_err(|_| ContentError::NotFound(self.id_str.clone()))
     }
+
+    /// Whether this row is already soft-deleted — read from the `deleted`
+    /// styling field the snapshot stamped (see [`entry_metadata`]). Lets the
+    /// `delete` action short-circuit with an "Already deleted" notice instead
+    /// of running the generic confirm flow for a no-op re-delete.
+    fn is_deleted(&self) -> bool {
+        self.metadata
+            .fields
+            .iter()
+            .any(|f| f.key == "deleted" && f.value == "true")
+    }
 }
 
 #[async_trait]
@@ -1794,7 +1805,11 @@ impl Node for TrackingEntryNode {
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             // Routed to the generic delete-confirm flow; the actual delete
-            // happens in `execute("delete")` after confirmation.
+            // happens in `execute("delete")` after confirmation. A row that
+            // the query already surfaces as deleted has nothing to delete —
+            // short-circuit with a neutral notice rather than asking the user
+            // to confirm a no-op re-delete.
+            "delete" if self.is_deleted() => ActionDispatch::Error("Already deleted".to_string()),
             "delete" => ActionDispatch::DeleteSelf { confirm: None },
             "restore" => match self.tracking_id() {
                 Ok(id) => invoke_restore(&self.handle, id, ctx.confirmed).await,
@@ -3834,5 +3849,44 @@ mod restore_scope_tests {
             is_deleted(&handle, beta_tr).await,
             "Beta stays deleted — outside the query"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_on_already_deleted_row_notifies_instead_of_reconfirming() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Gamma project").await;
+        let live = handle
+            .tracking_repo
+            .insert(task, Utc::now(), None)
+            .await
+            .expect("insert live tracking");
+        let gone = insert_deleted_tracking(&handle, task).await;
+
+        let snapshot = TrackingSnapshot::load(&handle).await.expect("load snapshot");
+        let ctx = ActionContext::default();
+
+        // A live row routes into the generic delete-confirm flow.
+        let live_node = TrackingEntryNode::fetch(&snapshot, &handle, &live.id.to_string())
+            .expect("fetch live node");
+        assert!(matches!(
+            live_node
+                .invoke_action("delete", &ctx)
+                .await
+                .expect("invoke"),
+            ActionDispatch::DeleteSelf { .. }
+        ));
+
+        // An already-deleted row short-circuits with a neutral notice — no
+        // confirm, no re-delete.
+        let gone_node = TrackingEntryNode::fetch(&snapshot, &handle, &gone.to_string())
+            .expect("fetch deleted node");
+        match gone_node
+            .invoke_action("delete", &ctx)
+            .await
+            .expect("invoke")
+        {
+            ActionDispatch::Error(msg) => assert_eq!(msg, "Already deleted"),
+            other => panic!("expected an Already-deleted notice, got {other:?}"),
+        }
     }
 }
