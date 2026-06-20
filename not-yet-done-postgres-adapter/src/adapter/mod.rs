@@ -1609,7 +1609,7 @@ impl Node for DbScriptNode {
                 })
             }
             "edit" => Ok(ActionDispatch::OpenEditor {
-                session_kind: "postgres_db_script".into(),
+                session_kind: "script_editor".into(),
                 // `script` carries the FULL rel_path (may contain `/`).
                 // `PostgresDbScriptSession` resolves the on-disk file via
                 // `db_script_file_path(..., &script)`, which already
@@ -1887,7 +1887,7 @@ impl Node for TableNode {
     ) -> Result<ActionDispatch> {
         match name {
             "edit_sql" => Ok(ActionDispatch::OpenEditor {
-                session_kind: "postgres_query".into(),
+                session_kind: "query_editor".into(),
                 // Params are informational — the TUI uses `node_id`
                 // (the TableNode's path id) to address the editor.
                 // We pass the parts back too so future session_kinds
@@ -2257,7 +2257,7 @@ mod db_script_tree_tests {
         let ctx = ActionContext::default();
         match leaf.invoke_action("edit", &ctx).await.unwrap() {
             ActionDispatch::OpenEditor { session_kind, params } => {
-                assert_eq!(session_kind, "postgres_db_script");
+                assert_eq!(session_kind, "script_editor");
                 assert_eq!(params.get("database").map(String::as_str), Some("mydb"));
                 // Full rel_path including slashes so the session opens
                 // the nested file, not a sibling at root.

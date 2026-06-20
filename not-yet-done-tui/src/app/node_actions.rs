@@ -311,20 +311,22 @@ pub fn dispatch_to_view_request(
             session_kind,
             params,
         } => match session_kind.as_str() {
-            // Postgres SQL editor — reuses the existing
-            // `OpenAdapterQueryEditor` request; the adapter has
-            // already validated `node_id` is a TableNode path.
-            "postgres_query" => Some(ViewRequest::OpenAdapterQueryEditor {
+            // Generic query editor — edits and (re)runs a query against a
+            // backend. Reuses the `OpenAdapterQueryEditor` request; the
+            // adapter has already validated `node_id` addresses the right
+            // node (for Postgres: a TableNode path). The session_kind is
+            // role-generic, not adapter-named.
+            "query_editor" => Some(ViewRequest::OpenAdapterQueryEditor {
                 view_index,
                 pane_id,
                 parent_node_id: node_id,
             }),
-            // DB-level Postgres script editor (CP-8). The adapter
-            // packs `(database, script)` into `params`; we re-derive
-            // `database` from the `node_id` first segment as a
-            // fallback so the dispatch survives an adapter that omits
-            // the params map.
-            "postgres_db_script" => {
+            // Generic named-script editor (CP-8): edits a persisted script
+            // the user re-executes separately. The adapter packs
+            // `(database, script)` into `params`; we re-derive `database`
+            // from the `node_id` first segment as a fallback so the
+            // dispatch survives an adapter that omits the params map.
+            "script_editor" => {
                 let database = params
                     .get("database")
                     .cloned()
@@ -782,7 +784,7 @@ mod tests {
         params.insert("script".to_string(), "report".to_string());
         let req = dispatch_to_view_request(
             ActionDispatch::OpenEditor {
-                session_kind: "postgres_db_script".into(),
+                session_kind: "script_editor".into(),
                 params,
             },
             2,
@@ -815,7 +817,7 @@ mod tests {
         // (database, script) from the node_id segments.
         let req = dispatch_to_view_request(
             ActionDispatch::OpenEditor {
-                session_kind: "postgres_db_script".into(),
+                session_kind: "script_editor".into(),
                 params: HashMap::new(),
             },
             0,

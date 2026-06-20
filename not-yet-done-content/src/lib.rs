@@ -1010,11 +1010,20 @@ pub enum HintPlacement {
 /// so we use `ActionDispatch` here. Semantics are identical.
 #[derive(Clone, Debug)]
 pub enum ActionDispatch {
-    /// Open an editor session. `session_kind` is the discriminator the
-    /// TUI uses to pick the right `EditSession` impl (e.g.
-    /// `"postgres_query"`, `"postgres_db_script"`). `params` carries the
-    /// session's setup data as opaque string key/value pairs (e.g.
-    /// `{"database": "live", "script": "report"}`).
+    /// Open an editor session. `session_kind` is a *generic* role
+    /// discriminator the TUI uses to pick the right `EditSession` impl —
+    /// it MUST NOT encode an adapter name. The TUI understands a small
+    /// fixed vocabulary; adapters reuse those role names rather than
+    /// inventing adapter-prefixed ones:
+    ///
+    /// - `"query_editor"` — an editor that edits and (re)runs a query
+    ///   against a backend (Postgres uses it for the per-table SQL editor).
+    /// - `"script_editor"` — an editor for a named, persisted script that
+    ///   the user re-executes separately (Postgres uses it for DB-level
+    ///   scripts).
+    ///
+    /// `params` carries the session's setup data as opaque string
+    /// key/value pairs (e.g. `{"database": "live", "script": "report"}`).
     OpenEditor {
         session_kind: String,
         params: std::collections::HashMap<String, String>,
@@ -1574,7 +1583,7 @@ pub trait ContentAdapter: Send + Sync {
     /// the user at a given drill level is decided by the YAML
     /// `shortcuts:` map binding a key to a [`NodeAction`] whose
     /// [`Node::invoke_action`] returns an
-    /// [`ActionDispatch::OpenEditor`] for `session_kind == "postgres_query"`.
+    /// [`ActionDispatch::OpenEditor`] for `session_kind == "query_editor"`.
     ///
     /// Default impl returns `NotSupported`.
     async fn execute_custom_query(

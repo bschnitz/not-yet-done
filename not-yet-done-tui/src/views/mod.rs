@@ -345,7 +345,7 @@ pub enum ViewRequest {
         sql: String,
     },
     /// Open the SQL editor for a DB-level script (CP-8). Emitted from
-    /// `ActionDispatch::OpenEditor { session_kind: "postgres_db_script" }`
+    /// `ActionDispatch::OpenEditor { session_kind: "script_editor" }`
     /// — the `e` shortcut on `postgres:db_script` rows. `:w` persists
     /// without re-executing; the user re-runs explicitly via `x` to
     /// avoid coupling the edit path to result-pane lifetime.
