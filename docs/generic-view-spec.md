@@ -900,6 +900,29 @@ views:
   Suche bleibt der getroffene Teilstring in der Treffer-Farbe, der Rest des
   Labels in der Ungelesen-Farbe.
 
+#### `deleted`-Metadatenfeld — soft-gelöschte Zeilen ausgegraut
+
+Ein Adapter, der gelöschte Datensätze als Kontext stehen lässt (statt sie hart
+zu entfernen), kann sie **dimmen**: Trägt ein Knoten ein `deleted`-Metadatenfeld
+mit Wert `"true"`, malt die Engine **jede Zelle** der Zeile in der Theme-Farbe
+`text_dim` — die Zeile liest sich als „da, aber inaktiv". Auf segmentierten
+Zellen (Tree-Label, Taskpath) dimmt das den Text, während die strukturellen
+Glyphen (Connector, Separator) ihre eigene Farbe behalten.
+
+Das ist ein **reines Styling-Signal ohne View-Konfiguration** (kein Key, keine
+Opt-in-Flag): der Adapter setzt das Feld, die Ansicht dimmt. Es greift in
+**allen** Render-Pfaden — der ungruppierten flachen Liste, dem **gruppierten**
+Flat-View (`── Tag ──`-Header) und dem Tree. Anders als `unread` ist die Farbe
+**nicht** pro View überschreibbar; gelöscht-vs-aktiv soll überall gleich
+aussehen.
+
+Sichtbar wird eine gelöschte Zeile nur, wenn der Query sie **erfasst** — die
+Adapter laden das volle inkl.-gelöscht-Universum, und der Query ist der
+alleinige Filter (s. „Query = einziger Filter"). Mit dem Default-Query
+(`[deleted, =, false]`) bleibt alles Gelöschte unsichtbar; erst ein Query, der
+gelöschte einschließt, zeigt sie ausgegraut. Tasks (A) und Trackings (A) nutzen
+dasselbe Signal.
+
 #### `mark_read_on_reach_end:` — Aktion bei Cursor auf der letzten Zeile
 
 Ein generischer Engine-Hook auf Drill-Ebene (`children:`): erreicht der Cursor

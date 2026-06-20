@@ -3609,12 +3609,19 @@ bespoke nativen Trackings-Tab (bis C1).
       Zeile verschwindet (Zeiten bleiben in der DB erhalten).
 - [ ] War die gelöschte Zeile **aktiv**, verschwindet auch der Tracking-Marker
       des zugehörigen Tasks auf dem Tasks-Tab (Cross-Tab via `TrackingChanged`).
+- [ ] **Gelöschte Zeilen ausgegraut:** Query so anpassen, dass gelöschte
+      Trackings im sichtbaren Satz liegen (z. B. `[deleted, =, true]` oder die
+      `deleted`-Klausel droppen) → die gelöschten Zeilen erscheinen **dimmed**
+      (Theme-`text_dim`). Greift auch in der **nach Tag gruppierten** flachen
+      Liste (`── Tag ──`-Header), nicht nur in der ungruppierten/Tree-Ansicht.
+- [ ] **`d` auf einer bereits gelöschten (ausgegrauten) Zeile** → **kein**
+      Confirm-Dialog, nur Notification „Already deleted" (kein Re-Delete).
 - [ ] `t` auf einer Zeile → startet/stoppt Tracking auf dem **Task** der Zeile;
       bei deaktiviertem `allow_parallel_tracking` wird ein anderes laufendes
       Tracking zuerst gestoppt (gleiche Politik wie Tasks-Tab).
-- [ ] `R` auf einer sichtbaren (nicht-gelöschten) Zeile → Notification
-      „Restore failed: … not deleted" (bekannte Grenze: die Liste zeigt keine
-      gelöschten Zeilen; Parität mit Native).
+- [ ] `R` auf einer sichtbaren **nicht-gelöschten** Zeile → Notification
+      „Restore failed: … not deleted" (nur gelöschte Zeilen lassen sich
+      restoren — und die macht erst ein Query sichtbar, s. o.).
 - [ ] **`A` (restore all) ist im flachen Listen-View IMMER in der Action-Bar
       sichtbar** — auch direkt nach dem Tab-Wechsel, ohne irgendwohin zu
       drillen (statischer `on_container`-Hint, kein `parent:`-Shortcut mehr).
@@ -3630,9 +3637,9 @@ bespoke nativen Trackings-Tab (bis C1).
       bei vorhandenen Nachfolgern zusätzlich „Purges M successor intervals —
       irreversible"). `n`/Esc bricht ab ohne Änderung; `y` stellt **nur die
       vom Query erfassten** wieder her und lädt die Liste neu.
-- [ ] `R` auf einer (in einem künftigen Show-Deleted-View) gelöschten Zeile →
-      **Confirm-Popup** mit derselben Purge-Warnung; `y` führt aus, `n` bricht
-      ab.
+- [ ] `R` auf einer **gelöschten (ausgegrauten) Zeile** (die der Query
+      sichtbar macht) → **Confirm-Popup** mit derselben Purge-Warnung; `y`
+      führt aus, `n` bricht ab.
 - [ ] `x` öffnet das `:script`-Menü; ein Script gegen die selektierte Zeile
       bekommt deren JSON (`{json_file}`) übergeben.
 
