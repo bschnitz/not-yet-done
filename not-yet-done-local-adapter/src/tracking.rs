@@ -1368,12 +1368,45 @@ async fn purge_successors(handle: &CoreHandle, tracking_id: Uuid) -> std::result
     Ok(())
 }
 
+/// Count the successors of `tracking_id` (the predecessor chain a split/edit
+/// produced) without deleting anything — used to tell the user, before they
+/// confirm, how many intervals a restore would irreversibly purge. Same BFS
+/// walk as [`purge_successors`].
+async fn count_successors(handle: &CoreHandle, tracking_id: Uuid) -> std::result::Result<u32, AppError> {
+    let mut queue = vec![tracking_id];
+    let mut count = 0u32;
+    while let Some(id) = queue.pop() {
+        for s in handle.tracking_repo.find_by_predecessor(id).await? {
+            queue.push(s.id);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Build the `(y/n)` confirm prompt for a restore that will purge `purged`
+/// successor intervals. `subject` is the leading clause (e.g.
+/// `"Restore this tracking"` or `"Restore 3 deleted trackings"`).
+fn restore_confirm_prompt(subject: &str, purged: u32) -> String {
+    if purged == 0 {
+        format!("{subject}? (y/n)")
+    } else {
+        let plural = if purged == 1 { "interval" } else { "intervals" };
+        format!("{subject}? Purges {purged} successor {plural} — irreversible. (y/n)")
+    }
+}
+
 /// `invoke_action("restore")` — undelete a previously soft-deleted tracking
 /// (and purge the successors that replaced it). Errors if the target is not
 /// deleted. Note: because the list shows only non-deleted rows, a *visible*
 /// row is never deletable here — restore is reachable from a future
 /// show-deleted sub-view; today it mirrors the native tab's behaviour.
-async fn invoke_restore(handle: &CoreHandle, tracking_id: Uuid) -> ActionDispatch {
+///
+/// Two-phase: on the first invocation (`confirmed == false`) it validates the
+/// target, counts the successors it would purge, and returns
+/// [`ActionDispatch::Confirm`]. The frontend re-invokes with `confirmed ==
+/// true`, at which point the purge + undelete actually run.
+async fn invoke_restore(handle: &CoreHandle, tracking_id: Uuid, confirmed: bool) -> ActionDispatch {
     let restore = async {
         let tracking = handle
             .tracking_repo
@@ -1383,12 +1416,17 @@ async fn invoke_restore(handle: &CoreHandle, tracking_id: Uuid) -> ActionDispatc
         if !tracking.deleted {
             return Err(AppError::TrackingNotDeleted(tracking_id));
         }
+        if !confirmed {
+            let purged = count_successors(handle, tracking_id).await?;
+            return Ok(Some(restore_confirm_prompt("Restore this tracking", purged)));
+        }
         purge_successors(handle, tracking_id).await?;
         handle.tracking_repo.undelete(tracking_id).await?;
-        Ok::<_, AppError>(())
+        Ok::<_, AppError>(None)
     };
     match restore.await {
-        Ok(()) => {
+        Ok(Some(prompt)) => ActionDispatch::Confirm { prompt },
+        Ok(None) => {
             emit_tracking_changed(handle, tracking_id);
             ActionDispatch::Reload
         }
@@ -1399,30 +1437,68 @@ async fn invoke_restore(handle: &CoreHandle, tracking_id: Uuid) -> ActionDispatc
 /// `invoke_action("restore-all")` on the root — best-effort restore of every
 /// deleted tracking among the candidate ids (non-deleted ones are skipped).
 /// Mirrors the native tab, which restores over the currently-loaded rows.
-async fn invoke_restore_all(handle: &CoreHandle, candidates: &[Uuid]) -> ActionDispatch {
+///
+/// Two-phase like [`invoke_restore`]: the first invocation counts the deleted
+/// candidates and the successor intervals they would purge and returns
+/// [`ActionDispatch::Confirm`] (or an error if nothing is deletable); the
+/// confirmed re-invocation does the work.
+async fn invoke_restore_all(
+    handle: &CoreHandle,
+    candidates: &[Uuid],
+    confirmed: bool,
+) -> ActionDispatch {
     let run = async {
-        let mut restored = 0u32;
+        // Phase 1: tally what a restore-all would touch.
+        let mut deleted_ids = Vec::new();
         for &id in candidates {
             let Some(tracking) = handle.tracking_repo.find_by_id(id).await? else {
                 continue;
             };
-            if !tracking.deleted {
-                continue;
+            if tracking.deleted {
+                deleted_ids.push(id);
             }
+        }
+        if deleted_ids.is_empty() {
+            return Ok(RestoreAll::Nothing);
+        }
+        if !confirmed {
+            let mut purged = 0u32;
+            for &id in &deleted_ids {
+                purged += count_successors(handle, id).await?;
+            }
+            let n = deleted_ids.len();
+            let subject = format!(
+                "Restore {n} deleted tracking{}",
+                if n == 1 { "" } else { "s" }
+            );
+            return Ok(RestoreAll::Confirm(restore_confirm_prompt(&subject, purged)));
+        }
+        // Phase 2: do the work.
+        for &id in &deleted_ids {
             purge_successors(handle, id).await?;
             handle.tracking_repo.undelete(id).await?;
-            restored += 1;
         }
-        Ok::<_, AppError>(restored)
+        Ok::<_, AppError>(RestoreAll::Done)
     };
     match run.await {
-        Ok(0) => ActionDispatch::Error("No deleted trackings to restore".to_string()),
-        Ok(_) => {
+        Ok(RestoreAll::Nothing) => {
+            ActionDispatch::Error("No deleted trackings to restore".to_string())
+        }
+        Ok(RestoreAll::Confirm(prompt)) => ActionDispatch::Confirm { prompt },
+        Ok(RestoreAll::Done) => {
             emit_tracking_changed(handle, Uuid::nil());
             ActionDispatch::Reload
         }
         Err(e) => ActionDispatch::Error(format!("Restore-all failed: {e}")),
     }
+}
+
+/// Phase outcome of [`invoke_restore_all`]'s inner async — keeps the
+/// match arms readable.
+enum RestoreAll {
+    Nothing,
+    Confirm(String),
+    Done,
 }
 
 /// Flip time tracking for `task_id` and return the **new** tracked state
@@ -1607,11 +1683,11 @@ impl Node for TrackingRootNode {
         }
         TrackingEntryNode::fetch(&self.snapshot, &self.handle, id)
     }
-    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             "restore-all" => {
                 let candidates: Vec<Uuid> = self.snapshot.order.clone();
-                invoke_restore_all(&self.handle, &candidates).await
+                invoke_restore_all(&self.handle, &candidates, ctx.confirmed).await
             }
             _ => ActionDispatch::Noop,
         })
@@ -1689,13 +1765,13 @@ impl Node for TrackingEntryNode {
             ))),
         }
     }
-    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             // Routed to the generic delete-confirm flow; the actual delete
             // happens in `execute("delete")` after confirmation.
             "delete" => ActionDispatch::DeleteSelf { confirm: None },
             "restore" => match self.tracking_id() {
-                Ok(id) => invoke_restore(&self.handle, id).await,
+                Ok(id) => invoke_restore(&self.handle, id, ctx.confirmed).await,
                 Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
             },
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
@@ -2723,6 +2799,25 @@ mod tests {
         // Literal "running" (native parity): the engine's datetime column
         // passes unparseable values through verbatim.
         assert_eq!(get("ended").as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn restore_confirm_prompt_names_the_purge_count() {
+        // No successors → plain prompt, no purge clause.
+        assert_eq!(
+            restore_confirm_prompt("Restore this tracking", 0),
+            "Restore this tracking? (y/n)"
+        );
+        // One successor → singular "interval".
+        assert_eq!(
+            restore_confirm_prompt("Restore this tracking", 1),
+            "Restore this tracking? Purges 1 successor interval — irreversible. (y/n)"
+        );
+        // Many successors → plural, and the leading subject is verbatim.
+        assert_eq!(
+            restore_confirm_prompt("Restore 3 deleted trackings", 5),
+            "Restore 3 deleted trackings? Purges 5 successor intervals — irreversible. (y/n)"
+        );
     }
 
     #[test]

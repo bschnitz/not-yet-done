@@ -1523,12 +1523,45 @@ Adapter-Root auf, sodass beide Fälle zu einem Top-Level-Create werden. So
 realisiert der Tasks-Tab `a` (Kind der Selektion / Top-Level via Adapter-ID
 `add`) und `A` (Sibling via Adapter-ID `add-sibling`).
 
+**`on_container` auf `type: custom`-Actions:** Eine Aktion, die auf der
+**ganzen Liste/Ebene** wirkt (statt auf einer Zeile), wird als `actions:`-
+Eintrag mit `on_container: true` deklariert — nicht als `parent:`-Shortcut.
+Der Unterschied ist Sichtbarkeit und Erreichbarkeit am flachen Wurzel-Level:
+ein `parent:`-Shortcut löst sein Ziel aus dem Nav-Stack auf, der am noch
+nicht hineingedrillten Root **leer** ist → der Hint verschwindet und die
+Taste tut nichts. Eine `on_container`-Action baut ihren Hint dagegen
+**statisch** aus der Config (ist also immer sichtbar) und dispatcht gegen
+`adapter.root()` über den `invoke_action`-Pfad (nicht die Popup-/`execute`-
+Schiene). So ist der zurückgegebene `ActionDispatch` — z. B. ein `Confirm`
+— wirksam. Heute nutzt nur `type: custom` dieses Flag; Beispiel: der
+Trackings-Tab `A restore all` (wirkt auf alle gelöschten Trackings, fragt
+vorher per `(y/n)` nach). Der Adapter-Action-Name kommt aus dem `id:`-Feld,
+das der Wurzel-Node in `invoke_action` behandelt.
+
+```yaml
+actions:
+  - name: restore all
+    key: A
+    type: custom
+    id: restore-all # Node::invoke_action("restore-all", …) auf adapter.root()
+    on_container: true
+```
+
 Was `Node::invoke_action(name, ctx)` zurückgibt, beschreibt das
 [`ActionDispatch`](../not-yet-done-content/src/lib.rs)-Enum
 (`OpenEditor`, `ExecuteQuery`, `CreateChild`, `DeleteSelf`, `Reload`,
-`Noop`, `Error`). Die TUI übersetzt das in den passenden View-Flow —
-ein Editor öffnet sich, eine Query landet in einem paginierten
-Result-Pane, ein Delete spawnt einen Confirm-Popup.
+`Confirm`, `Noop`, `Error`). Die TUI übersetzt das in den passenden
+View-Flow — ein Editor öffnet sich, eine Query landet in einem paginierten
+Result-Pane, ein Delete spawnt einen Confirm-Popup. `Confirm { prompt }` ist
+der **generische** Bestätigungs-Mechanismus: der Adapter gibt ihn beim
+ersten Aufruf zurück (wenn `ActionContext.confirmed == false`), die TUI
+zeigt den `(y/n)`-Prompt, und auf „y" wird dieselbe Aktion am selben Node
+mit `confirmed: true` erneut invoked — dann führt der Adapter die (oft
+irreversible) Arbeit aus. Anders als `DeleteSelf` (dessen Confirm-/Execute-
+Split im Delete-Plumbing der TUI lebt) kann sich so **jede** Aktion hinter
+einer Bestätigung absichern, und der Adapter formuliert den Text, weil nur
+er weiß, was die Aktion anrichtet (z. B. wie viele Nachfolge-Intervalle ein
+Restore purged).
 
 Validator (start-time): leere Action-IDs werden abgelehnt; ein
 `shortcuts:`-Key, der bereits von einem `actions:`-Eintrag der

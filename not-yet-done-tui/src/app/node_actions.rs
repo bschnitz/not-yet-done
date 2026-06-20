@@ -460,6 +460,18 @@ pub fn dispatch_to_view_request(
             view_index,
             pane_id,
         }),
+        // Generic confirm: the adapter wants a `(y/n)` prompt before doing
+        // the work. On "y" the App re-invokes the *same* action on the
+        // *same* node with `confirmed: true` (see
+        // `PendingConfirmation::InvokeNodeAction`), so the adapter then
+        // performs the work instead of asking again.
+        ActionDispatch::Confirm { prompt } => Some(ViewRequest::ConfirmInvokeNodeAction {
+            view_index,
+            pane_id,
+            node_id,
+            action_name,
+            prompt,
+        }),
         ActionDispatch::Noop => None,
         ActionDispatch::Error(msg) => Some(ViewRequest::Notify(msg)),
     }

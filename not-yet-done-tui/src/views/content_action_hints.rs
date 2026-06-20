@@ -163,6 +163,12 @@ pub fn source_for_action_type(action_type: &str, label: &str) -> ActiveSource {
         "fuzzy_filter" => ActiveSource::Fuzzy,
         "search" | "text_search" | "tree_find" => ActiveSource::Search,
         "script" => ActiveSource::Script,
+        // `custom` only reaches the action bar when flagged `on_container`
+        // (`shows_in_action_bar`); the only such action today is the
+        // trackings `restore all`, which confirms before purging. Map it to
+        // the Confirm source so the hint lights up while the `(y/n)` popup
+        // is open.
+        "custom" => ActiveSource::Confirm,
         other => {
             debug_assert!(
                 false,

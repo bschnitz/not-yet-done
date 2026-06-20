@@ -3615,8 +3615,18 @@ bespoke nativen Trackings-Tab (bis C1).
 - [ ] `R` auf einer sichtbaren (nicht-gelöschten) Zeile → Notification
       „Restore failed: … not deleted" (bekannte Grenze: die Liste zeigt keine
       gelöschten Zeilen; Parität mit Native).
-- [ ] `A` (restore-all) ohne gelöschte erreichbare Zeilen → Notification
-      „No deleted trackings to restore".
+- [ ] **`A` (restore all) ist im flachen Listen-View IMMER in der Action-Bar
+      sichtbar** — auch direkt nach dem Tab-Wechsel, ohne irgendwohin zu
+      drillen (statischer `on_container`-Hint, kein `parent:`-Shortcut mehr).
+- [ ] `A` ohne gelöschte erreichbare Zeilen → Notification „No deleted
+      trackings to restore" (kein Confirm-Popup, da nichts zu tun ist).
+- [ ] `A` mit gelöschten Zeilen → **Confirm-Popup** „Restore N deleted
+      tracking(s)? …" (nennt die Anzahl; bei vorhandenen Nachfolgern zusätzlich
+      „Purges M successor intervals — irreversible"). `n`/Esc bricht ab ohne
+      Änderung; `y` stellt wieder her und lädt die Liste neu.
+- [ ] `R` auf einer (in einem künftigen Show-Deleted-View) gelöschten Zeile →
+      **Confirm-Popup** mit derselben Purge-Warnung; `y` führt aus, `n` bricht
+      ab.
 - [ ] `x` öffnet das `:script`-Menü; ein Script gegen die selektierte Zeile
       bekommt deren JSON (`{json_file}`) übergeben.
 
