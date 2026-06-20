@@ -144,11 +144,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.script_menu.render(frame, area);
     }
 
-    // Overlay: :tag tag-management menu.
-    if app.tag_menu.is_open() {
-        app.tag_menu.render(frame, area);
-    }
-
     // Overlay: generic option menu (a `type: option_menu` action).
     if app.option_menu.is_open() {
         app.option_menu.render(frame, area);

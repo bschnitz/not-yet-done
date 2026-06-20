@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use not_yet_done_core::repository::{
     LinkRepository, QueryShortcutRepository, SettingsRepository,
 };
-use not_yet_done_task_core::service::TaskService;
 use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
 
 use uuid::Uuid;
@@ -314,7 +313,6 @@ mod link;
 pub mod node_actions;
 pub mod option_menu;
 pub mod script;
-mod tag_menu;
 
 pub use editor::EditorRequest;
 
@@ -592,8 +590,6 @@ pub struct App {
     pub config: TuiConfig,
     pub should_quit: bool,
 
-    task_service: Arc<dyn TaskService>,
-    pub tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
     pub query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
     settings_repo: Arc<dyn SettingsRepository>,
     pub link_repo: Arc<dyn LinkRepository>,
@@ -682,19 +678,6 @@ pub struct App {
 
     /// Column configuration popup.
     pub column_config_popup: Option<crate::components::column_config_popup::ColumnConfigPopup>,
-
-    /// App-level tag-management menu (`:tag`). Stays alive across
-    /// opens; the inner `popup` toggles per session.
-    pub tag_menu: crate::components::tag_menu::TagMenuComponent,
-
-    /// When the tag menu was opened from a content/adapter tab (a
-    /// `type: tag` action, e.g. the Tasks `T` key) rather than the
-    /// native Tasks tab, this carries the task to assign tags to and the
-    /// originating pane to refresh afterwards. `open_tag_menu` (the native
-    /// `:tag` path) resets it to `None`, so it always reflects the most
-    /// recent opening at the time a tag operation runs. See
-    /// [`App::open_tag_menu_for_content`].
-    pub content_tag_target: Option<crate::app::tag_menu::ContentTagTarget>,
 
     /// Generic, adapter-driven option menu (a `type: option_menu` action).
     /// Stays alive across opens; the inner popup toggles per session. Unlike
@@ -866,8 +849,6 @@ impl App {
     pub fn new(
         config: TuiConfig,
         theme: Theme,
-        task_service: Arc<dyn TaskService>,
-        tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
         query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
         settings_repo: Arc<dyn SettingsRepository>,
         link_repo: Arc<dyn LinkRepository>,
@@ -913,7 +894,7 @@ impl App {
         let (commit_tx, commit_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Pre-clone the popup-intrinsic kb + icons so they can be passed
-        // into TagMenu/ScriptMenu without colliding with the move of
+        // into the option/script menus without colliding with the move of
         // `keybindings` into the struct literal below.
         let popup_kb = keybindings.popup.clone();
         let popup_icons = keybindings.key_icons.clone();
@@ -926,8 +907,6 @@ impl App {
             shared_theme: Arc::clone(&shared_theme),
             config,
             should_quit: false,
-            task_service,
-            tag_service,
             query_shortcut_repo,
             settings_repo,
             link_repo,
@@ -950,12 +929,6 @@ impl App {
             last_error: None,
             last_anim_tick: Instant::now(),
             column_config_popup: None,
-            tag_menu: crate::components::tag_menu::TagMenuComponent::new(
-                Arc::clone(&shared_theme),
-                "Tags",
-            )
-            .with_popup_kb(popup_kb.clone(), popup_icons.clone()),
-            content_tag_target: None,
             option_menu: crate::components::option_menu::OptionMenuComponent::new(Arc::clone(
                 &shared_theme,
             ))
@@ -3972,13 +3945,6 @@ impl App {
             return EditorRequest::None;
         }
 
-        // Tag-management menu (:tag) intercepts keys while open.
-        if self.tag_menu.is_open() {
-            let req = self.handle_tag_menu_key(key);
-            self.sync_components();
-            return req;
-        }
-
         // Generic option menu (a `type: option_menu` action) intercepts keys
         // while open.
         if self.option_menu.is_open() {
@@ -6209,13 +6175,6 @@ impl App {
                 }
                 EditorRequest::None
             }
-            ViewRequest::OpenTagMenuForNode {
-                view_index,
-                pane_id,
-            } => {
-                self.open_tag_menu_for_content(view_index, pane_id);
-                EditorRequest::None
-            }
             ViewRequest::OpenOptionMenuForNode {
                 view_index,
                 pane_id,
@@ -7771,15 +7730,6 @@ impl App {
         if args[0] == "config" {
             let prefilter = args.get(1).map(|s| s.to_string());
             self.open_config_picker(prefilter.as_deref());
-            return;
-        }
-
-        if args[0] == "tag" {
-            if args.len() > 1 {
-                self.modal_message = Some(":tag takes no arguments".to_string());
-                return;
-            }
-            self.open_tag_menu();
             return;
         }
 

@@ -22,7 +22,6 @@ mod node_action;
 mod postgres_db_script;
 mod postgres_query;
 mod saved_query;
-mod tag_form;
 mod tracking_script;
 mod tracking_script_output;
 
@@ -36,7 +35,6 @@ pub use postgres_query::{
     DEFAULT_PAGE_SIZE as POSTGRES_QUERY_DEFAULT_PAGE_SIZE,
 };
 pub use saved_query::SavedQueryEditSession;
-pub use tag_form::TagFormSession;
 pub use tracking_script::ScriptSession;
 pub use tracking_script_output::ScriptOutputSession;
 
@@ -190,15 +188,6 @@ pub enum FollowUp {
         pane_id: PaneId,
         parent_node_id: String,
         child_node_type: String,
-        message: String,
-    },
-    /// A tag create/edit committed from a content/adapter tab (`type: tag`)
-    /// succeeded; reload the originating content pane so its `tag_symbols` /
-    /// `tag_names` columns re-render. Kept distinct from the in-place
-    /// content-row patch path so the tag flow stays self-contained.
-    ReloadContentPaneForTag {
-        view_index: usize,
-        pane_id: PaneId,
         message: String,
     },
     /// Live-apply a content view query without persisting.

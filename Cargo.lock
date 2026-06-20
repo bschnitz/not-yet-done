@@ -3775,7 +3775,6 @@ dependencies = [
  "not-yet-done-stoat-adapter",
  "not-yet-done-table",
  "not-yet-done-taiga-adapter",
- "not-yet-done-task-core",
  "ratatui",
  "ratatui-form-widgets",
  "ratatui-markdown",

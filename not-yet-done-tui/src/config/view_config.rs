@@ -1554,7 +1554,6 @@ impl ActionDef {
                 | "text_search"
                 | "tree_find"
                 | "script"
-                | "tag"
                 | "option_menu"
         )
     }

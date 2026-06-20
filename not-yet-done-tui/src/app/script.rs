@@ -311,7 +311,7 @@ impl App {
         let query_text = pane.current_query_text(&cv.view_defs);
         let bounds = crate::query_filter::parse(&query_text)
             .ok()
-            .map(|pq| not_yet_done_task_core::filter::extract_date_bounds(&pq.expr));
+            .map(|pq| not_yet_done_filter::extract_date_bounds(&pq.expr));
         let per_view_template = cv
             .view_defs
             .get(view_def_idx)

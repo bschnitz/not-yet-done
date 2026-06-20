@@ -6073,12 +6073,6 @@ impl ContentPane {
                     ),
                 });
             }
-            "tag" => {
-                return SubViewMessage::Request(ViewRequest::OpenTagMenuForNode {
-                    view_index,
-                    pane_id,
-                });
-            }
             "option_menu" => {
                 let Some(config) = action.option_menu.clone() else {
                     return SubViewMessage::Request(ViewRequest::Notify(format!(
