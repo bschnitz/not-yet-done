@@ -9,6 +9,7 @@ async-trait    = { workspace = true }
 serde          = { workspace = true }
 serde_yaml     = { workspace = true }
 thiserror      = { workspace = true }
+dirs           = { workspace = true }
 not-yet-done-content   = { path = "../not-yet-done-content" }
 not-yet-done-transport = { path = "../not-yet-done-transport" }
 tokio-postgres = "0.7"

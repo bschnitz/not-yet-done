@@ -36,6 +36,7 @@ pub struct PostgresAdapter {
     cursor_registry: Arc<CursorRegistry>,
     connection_name: String,
     instance_id: String,
+    script_store: crate::script_store::PostgresScriptStore,
 }
 
 impl PostgresAdapter {
@@ -45,11 +46,23 @@ impl PostgresAdapter {
         instance_id: String,
     ) -> Self {
         let cursor_registry = Arc::new(CursorRegistry::new(Arc::clone(&client)));
+        // Resolve the same per-instance data dir the trait's default
+        // `instance_data_dir()` produces, so the store and the adapter
+        // agree on where scripts live. We can't call the method before
+        // the struct exists, so mirror its layout here.
+        let instance_data_dir = dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("not_yet_done")
+            .join("postgres")
+            .join(&instance_id);
+        let script_store =
+            crate::script_store::PostgresScriptStore::new(instance_data_dir);
         Self {
             client,
             cursor_registry,
             connection_name,
             instance_id,
+            script_store,
         }
     }
 
@@ -440,6 +453,10 @@ impl ContentAdapter for PostgresAdapter {
 
     fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    fn script_store(&self) -> Option<&dyn not_yet_done_content::ScriptStore> {
+        Some(&self.script_store)
     }
 
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {

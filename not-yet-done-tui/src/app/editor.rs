@@ -213,7 +213,7 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return EditorRequest::None;
         };
-        if adapter.adapter_type() != "postgres" {
+        if adapter.script_store().is_none() {
             self.notify(format!(
                 "Scripts menu not implemented for adapter '{}'",
                 adapter.adapter_type()
@@ -226,7 +226,6 @@ impl App {
             ));
             return EditorRequest::None;
         };
-        let instance_dir = adapter.instance_data_dir();
         let scope = crate::app::node_actions::postgres_table_scope(
             adapter.instance_id(),
             &database,
@@ -236,13 +235,10 @@ impl App {
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let (scripts, shortcut_map) = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let scripts = not_yet_done_postgres_adapter::query::list_scripts_in_table(
-                    &instance_dir,
-                    &database,
-                    &schema,
-                    &table,
-                )
-                .await;
+                let scripts = match adapter.script_store() {
+                    Some(store) => store.list_node_scripts(&table_node_id).await,
+                    None => Ok(Vec::new()),
+                };
                 let shortcuts: std::collections::HashMap<String, String> = shortcut_repo
                     .list_by_scope(&scope)
                     .await
@@ -415,23 +411,18 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
         let scope = crate::app::node_actions::postgres_table_scope(
             adapter.instance_id(),
             &database,
             &schema,
             &table,
         );
+        let node_id = format!("{database}/schemas/{schema}/tables/{table}");
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let path = not_yet_done_postgres_adapter::query::query_file_path(
-                    &instance_dir, &database, &schema, &table, &script,
-                );
-                match tokio::fs::remove_file(&path).await {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
+                if let Some(store) = adapter.script_store() {
+                    store.delete_node_script(&node_id, &script).await?;
                 }
                 // Best-effort: missing/failed shortcut row is not a
                 // delete failure (idempotent unset already).
@@ -445,9 +436,8 @@ impl App {
         }
         // Drop the cached chord-claim entry so the next keypress on
         // this table refetches from `query_shortcut` (SQ-8d).
-        let table_node_id = format!("{database}/schemas/{schema}/tables/{table}");
         if let Some(cv) = self.content_view_mut(view_index) {
-            cv.postgres_table_shortcuts.remove(&table_node_id);
+            cv.postgres_table_shortcuts.remove(&node_id);
         }
     }
 
