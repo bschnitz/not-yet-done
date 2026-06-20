@@ -23,6 +23,7 @@ base64      = { workspace = true }
 slug        = { workspace = true }
 not-yet-done-macros = { workspace = true }
 not-yet-done-content = { path = "../not-yet-done-content" }
+not-yet-done-filter = { path = "../not-yet-done-filter" }
 diffy = "0.5.0"
 
 [dev-dependencies]

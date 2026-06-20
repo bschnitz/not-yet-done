@@ -3550,6 +3550,7 @@ dependencies = [
  "diffy",
  "dirs",
  "not-yet-done-content",
+ "not-yet-done-filter",
  "not-yet-done-macros",
  "regex",
  "reqwest",
@@ -3562,6 +3563,16 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "not-yet-done-filter"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-english",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]

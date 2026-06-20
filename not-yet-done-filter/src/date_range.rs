@@ -154,7 +154,7 @@ fn extract_leaf_bounds(leaf: &FilterLeaf) -> DateBounds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::expr::*;
+    use crate::expr::*;
 
     #[test]
     fn and_with_range() {

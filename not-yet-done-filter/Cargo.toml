@@ -1,0 +1,13 @@
+[package]
+name = "not-yet-done-filter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde          = { workspace = true }
+serde_yaml     = { workspace = true }
+chrono         = { workspace = true }
+chrono-english = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

@@ -22,11 +22,17 @@
 //! ```
 
 mod builder;
-mod date_range;
-mod expr;
-pub mod query_filter;
 pub mod tree_ops;
 
+// The filter *language* (expr / date_range / query_filter) now lives in
+// the host-agnostic `not-yet-done-filter` crate. These re-exports keep
+// the historic `crate::filter::…` and `not_yet_done_core::filter::…`
+// paths valid for every existing caller (C1 of the DB-split: move the
+// language out without churning consumers). The *binding* half
+// (FilterBuilder/ColumnRegistry, tree_ops) stays here because it is tied
+// to SeaORM and the task entity.
+pub use not_yet_done_filter::query_filter;
+pub use not_yet_done_filter::{extract_date_bounds, DateBounds};
+pub use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+
 pub use builder::{ColumnRegistry, FilterBuilder};
-pub use date_range::{extract_date_bounds, DateBounds};
-pub use expr::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
