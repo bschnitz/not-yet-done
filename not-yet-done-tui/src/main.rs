@@ -31,8 +31,6 @@ use not_yet_done_core::{
     db,
     module::CoreModule,
 };
-use not_yet_done_task_core::module::TaskDomainModule;
-use not_yet_done_task_core::service::{TagService, TaskService};
 use ui::theme::Theme;
 
 #[tokio::main]
@@ -42,25 +40,12 @@ async fn main() -> Result<()> {
 
     let db_conn = db::connect(&db_url, true).await?;
 
-    // Two independent Shaku modules (C3 of the DB-split): the task domain
-    // and the app shell. They share no component, so each owns its own
-    // repositories and we resolve every service from the module that
-    // declares it.
-    let task_module = TaskDomainModule::builder()
-        .with_component_parameters::<not_yet_done_task_core::repository::TaskRepositoryImpl>(
-            not_yet_done_task_core::repository::TaskRepositoryImplParameters { db: Some(db_conn.clone()) },
-        )
-        .with_component_parameters::<not_yet_done_task_core::repository::ProjectRepositoryImpl>(
-            not_yet_done_task_core::repository::ProjectRepositoryImplParameters { db: Some(db_conn.clone()) },
-        )
-        .with_component_parameters::<not_yet_done_task_core::repository::TagRepositoryImpl>(
-            not_yet_done_task_core::repository::TagRepositoryImplParameters { db: Some(db_conn.clone()) },
-        )
-        .with_component_parameters::<not_yet_done_task_core::repository::TrackingRepositoryImpl>(
-            not_yet_done_task_core::repository::TrackingRepositoryImplParameters { db: Some(db_conn.clone()) },
-        )
-        .build();
-
+    // The app shell's own Shaku module (C3/C5 of the DB-split). The task
+    // domain no longer lives here: Tasks/Trackings are self-contained content
+    // adapters that open their own database, and the tag feature is now fully
+    // adapter-driven (C5c), so the TUI binary no longer depends on
+    // `not-yet-done-task-core` at all. This DB (`config.database.url`) backs
+    // only the app shell's settings / saved queries / query shortcuts / links.
     let core_module = CoreModule::builder()
         .with_component_parameters::<not_yet_done_core::repository::SettingsRepositoryImpl>(
             not_yet_done_core::repository::SettingsRepositoryImplParameters { db: Some(db_conn.clone()) },
@@ -76,8 +61,6 @@ async fn main() -> Result<()> {
         )
         .build();
 
-    let task_service: Arc<dyn TaskService> = task_module.resolve();
-    let tag_service: Arc<dyn TagService> = task_module.resolve();
     let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> = core_module.resolve();
     let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> = core_module.resolve();
     let link_repo: Arc<dyn not_yet_done_core::repository::LinkRepository> = core_module.resolve();
@@ -104,7 +87,7 @@ async fn main() -> Result<()> {
             + Sync,
     > = Box::new(build_adapter_factories);
 
-    let mut app    = App::new(tui_config, theme, task_service, tag_service, query_shortcut_repo, settings_repo, link_repo, factory_builder, host_ctx);
+    let mut app    = App::new(tui_config, theme, query_shortcut_repo, settings_repo, link_repo, factory_builder, host_ctx);
 
     // Load column config from DB. (Tracking state is no longer cached at
     // App level — the action-bar highlight reads it live from each adapter.)

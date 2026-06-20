@@ -71,7 +71,6 @@ pub struct TuiConfig {
     /// so anything that works after typing `:` works here.
     ///
     /// Built-in defaults (used when the field is absent from tui.yaml):
-    ///   - `T` → `tag` (opens the tag-management menu)
     ///   - `mc` → `cut-node` (mark task for moving)
     ///   - `mp` → `paste-node` (move cut task under current selection)
     /// Defining the field overrides the defaults completely — copy
@@ -90,7 +89,6 @@ pub struct TuiConfig {
 /// [`TuiConfig::cmdline_shortcuts`] for the override contract.
 fn default_cmdline_shortcuts() -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
-    m.insert("T".to_string(), "tag".to_string());
     m.insert("mc".to_string(), "cut-node".to_string());
     m.insert("mp".to_string(), "paste-node".to_string());
     m

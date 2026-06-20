@@ -108,16 +108,6 @@ pub enum ViewRequest {
         /// (batch payload) instead of the single selected node.
         batch: bool,
     },
-    /// Open the App-level tag-management menu (`:tag`) seeded for the
-    /// selected content node. Raised by a `type: tag` action (e.g. the
-    /// Tasks `T` key). The App reads the selected node from the
-    /// focused pane, resolves it to a task id, and assigns/creates/deletes
-    /// tags against it, refreshing this pane afterwards. See
-    /// [`crate::app::App::open_tag_menu_for_content`].
-    OpenTagMenuForNode {
-        view_index: usize,
-        pane_id: PaneId,
-    },
     /// Open the generic, adapter-driven option menu for the selected content
     /// node. Raised by a `type: option_menu` action. `config` is the menu
     /// recipe (options source, selection-marker field, toggle action) the App

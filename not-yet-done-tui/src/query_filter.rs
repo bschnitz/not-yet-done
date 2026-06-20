@@ -1,3 +1,3 @@
-//! Re-export query filter parsing from core.
+//! Re-export query filter parsing from the filter crate.
 
-pub use not_yet_done_task_core::filter::query_filter::parse;
+pub use not_yet_done_filter::query_filter::parse;

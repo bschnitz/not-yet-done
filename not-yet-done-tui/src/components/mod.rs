@@ -17,5 +17,4 @@ pub mod sort_header;
 pub mod status_bar;
 pub mod script_menu;
 pub mod tab_set_popup;
-pub mod tag_menu;
 pub mod tab_bar;
