@@ -2062,12 +2062,13 @@ Konvention: Shortcut **`T` (shift+t)**, weil `t` auf dem Tasks-Tab den
 Tree-/List-View-Wechsel belegt. Im Tree mit `inherit: true` deklarieren,
 damit die Action auf jeder Subtask-Ebene greift.
 
-> **Status:** `type: tag` hängt am host-seitigen `tag_service` und ist die
-> Altlast, die mit dem DB-Split abgebaut wird (C5). Das **Togglen** ist
-> bereits auf den adapter-getriebenen `type: option_menu` migriert (siehe
-> unten) — der Tasks-Tab nutzt dafür `option_menu`. `type: tag` bleibt
-> vorerst nur als Cmdline-`:tag` für Anlegen/Umbenennen/Löschen bestehen, bis
-> auch diese Verben adapter-seitig nachgezogen sind.
+> **Status:** `type: tag` hing am host-seitigen `tag_service` und war die
+> Altlast, die mit dem DB-Split abgebaut wird (C5). **Togglen _und_
+> Anlegen/Umbenennen/Löschen** sind jetzt vollständig auf den
+> adapter-getriebenen `type: option_menu` migriert (siehe unten, Felder
+> `toggle`/`create`/`rename`/`delete`) — der Tasks-Tab nutzt ausschließlich
+> `option_menu`. `type: tag` und das Cmdline-`:tag`-Menü sind damit nur noch
+> für Hosts ohne migrierten Adapter relevant.
 
 ### Option-Menü (`type: option_menu`)
 
@@ -2080,6 +2081,9 @@ actions:
       source: tags # Schlüssel für `list_values` auf dem Adapter
       marker: tag_ids # verstecktes Knoten-Feld mit den gesetzten Werten
       toggle: toggle-tag # Adapter-Action, die auf Enter feuert
+      create: create-tag # optional: ctrl+n legt einen Eintrag an (fragt Text)
+      rename: rename-tag # optional: ctrl+e benennt den fokussierten um
+      delete: delete-tag # optional: ctrl+d löscht ihn (y/n-Confirm)
       title: Tags # Popup-Titel (optional; Default = Action-Name)
 ```
 
@@ -2104,19 +2108,40 @@ Ablauf:
   Werte kommen als `ActionDispatch::Error` zurück).
 - Das Popup **bleibt offen** (Mehrfach-Toggle); der ★-Marker kippt sofort live,
   während die Pane im Hintergrund neu lädt.
+- **Verwalten der Werteliste** (optional, je nach gesetztem Feld):
+  - **`create`** (Default `ctrl+n`): öffnet einen Inline-Text-Prompt. Enter
+    feuert die `create`-Action mit dem eingegebenen Namen in
+    `ActionContext.text` (kein `value`); leerer Text bricht ab.
+  - **`rename`** (Default `ctrl+e`): öffnet denselben Prompt, vorbefüllt mit dem
+    Label der fokussierten Option. Enter feuert die `rename`-Action mit der
+    stabilen ID der Option in `ActionContext.value` **und** dem neuen Namen in
+    `ActionContext.text`.
+  - **`delete`** (Default `ctrl+d`): zeigt einen Inline-`(y/n)`-Confirm. `y`
+    feuert die `delete`-Action mit der ID der fokussierten Option in
+    `ActionContext.value`; `n`/Esc bricht ab.
+  - Diese Verben sind **reine Daten-Operationen auf der Werteliste** (nicht am
+    Knoten) — der selektierte Knoten ist nur das Dispatch-Vehikel. Nach Erfolg
+    lädt das Menü die Optionsliste neu (Prompt schließt, Popup bleibt offen);
+    eine `ActionDispatch::Error`-Rückgabe wird als Hinweis angezeigt, ohne das
+    Menü zu schließen.
 - **Esc** schließt.
 
 Felder:
 
-| Feld     | Pflicht | Bedeutung                                                           |
-| -------- | ------- | ------------------------------------------------------------------- |
-| `source` | ja      | Schlüssel an `list_values(source)`; mappt auf `Vec<ValueOption>`.   |
-| `marker` | ja      | Verstecktes Knoten-Feld mit den gesetzten Werten (z. B. `tag_ids`). |
-| `toggle` | ja      | Adapter-Action-ID, die auf Enter mit dem Wert aufgerufen wird.      |
-| `title`  | nein    | Popup-Titel; Default = Name der Action.                             |
+| Feld     | Pflicht | Bedeutung                                                                 |
+| -------- | ------- | ------------------------------------------------------------------------- |
+| `source` | ja      | Schlüssel an `list_values(source)`; mappt auf `Vec<ValueOption>`.         |
+| `marker` | ja      | Verstecktes Knoten-Feld mit den gesetzten Werten (z. B. `tag_ids`).       |
+| `toggle` | ja      | Adapter-Action-ID, die auf Enter mit dem Wert aufgerufen wird.            |
+| `create` | nein    | Adapter-Action-ID für „anlegen" (ctrl+n; Name → `ActionContext.text`).    |
+| `rename` | nein    | Adapter-Action-ID für „umbenennen" (ctrl+e; id → `value`, Name → `text`). |
+| `delete` | nein    | Adapter-Action-ID für „löschen" (ctrl+d, y/n-Confirm; id → `value`).      |
+| `title`  | nein    | Popup-Titel; Default = Name der Action.                                   |
 
 Tastenbindungen teilt sich das Menü mit dem Tag-Menü (`tag_menu`-Section:
-Toggle / Next / Prev / Close), weil die Menü-Form identisch ist.
+Toggle / Create / Edit / Delete / Next / Prev / Close), weil die Menü-Form
+identisch ist. Ein `create`/`rename`/`delete`-Feld ohne gesetzte Action lässt
+die jeweilige Taste inaktiv.
 
 ### Custom Actions
 

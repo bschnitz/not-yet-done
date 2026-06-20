@@ -661,8 +661,10 @@ pub enum TagMenuAction {
     /// assigned); on typed-name with no match (or `+name` prefix):
     /// create a new tag and auto-assign it to the selected task.
     Toggle,
-    /// Edit the selected entry (open the YAML form). Default Ctrl+E.
+    /// Edit/rename the selected entry. Default Ctrl+E.
     Edit,
+    /// Create a new entry (prompts for a name). Default Ctrl+N.
+    Create,
     Next,
     Prev,
     /// Delete the selected entry from the persistent store.
@@ -675,6 +677,7 @@ impl TagMenuAction {
         match self {
             Self::Toggle => "toggle",
             Self::Edit => "edit",
+            Self::Create => "create",
             Self::Next => "next",
             Self::Prev => "prev",
             Self::Delete => "delete",
@@ -695,6 +698,7 @@ impl FromStr for TagMenuAction {
         match s {
             "toggle" => Ok(Self::Toggle),
             "edit" => Ok(Self::Edit),
+            "create" => Ok(Self::Create),
             "next" => Ok(Self::Next),
             "prev" => Ok(Self::Prev),
             "delete" => Ok(Self::Delete),
@@ -1044,6 +1048,7 @@ impl Default for KeyBindingSection<TagMenuAction> {
         let mut m = HashMap::new();
         m.insert(TagMenuAction::Toggle, KeyBinding::new("enter"));
         m.insert(TagMenuAction::Edit, KeyBinding::new("ctrl+e"));
+        m.insert(TagMenuAction::Create, KeyBinding::new("ctrl+n"));
         m.insert(TagMenuAction::Next, KeyBinding::new("ctrl+j"));
         m.insert(TagMenuAction::Prev, KeyBinding::new("ctrl+k"));
         m.insert(TagMenuAction::Delete, KeyBinding::new("ctrl+d"));

@@ -1590,6 +1590,23 @@ pub struct OptionMenuConfig {
     /// option's value is handed over in `ActionContext.value`; the adapter
     /// decides assign-vs-unassign from the node's current membership.
     pub toggle: String,
+    /// Adapter action id invoked to *create* a new option (e.g. `"create-tag"`).
+    /// The menu prompts for a line of text and hands it over in
+    /// `ActionContext.text`. Absent → the create binding (and its key) is
+    /// disabled. After a successful create the host re-fetches the option list.
+    #[serde(default)]
+    pub create: Option<String>,
+    /// Adapter action id invoked to *rename* the focused option (e.g.
+    /// `"rename-tag"`). The menu prompts for the new name (pre-filled with the
+    /// current label); the focused option's id goes in `ActionContext.value`
+    /// and the typed name in `ActionContext.text`. Absent → disabled.
+    #[serde(default)]
+    pub rename: Option<String>,
+    /// Adapter action id invoked to *delete* the focused option (e.g.
+    /// `"delete-tag"`). The menu confirms first, then hands the focused option's
+    /// id over in `ActionContext.value`. Absent → disabled.
+    #[serde(default)]
+    pub delete: Option<String>,
     /// Popup title. Falls back to the action's name when absent.
     #[serde(default)]
     pub title: Option<String>,

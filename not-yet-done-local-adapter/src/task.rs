@@ -881,6 +881,15 @@ fn task_item_actions() -> Vec<NodeAction> {
         // `list_values("tags")` + the focused option) and the adapter only
         // consumes/validates it. Not bound as a shortcut; the menu invokes it.
         NodeAction::new("toggle-tag", "toggle tag", InputSpec::None),
+        // Tag *store* mutations driven by the `option_menu` create/rename/delete
+        // bindings. Like `toggle-tag` these declare no widget: the menu sources
+        // the inputs (the focused option's id in `ctx.value`, the typed name in
+        // `ctx.text`) and the adapter consumes/validates them. They act on the
+        // global tag list, not the invoking task — the task is only the dispatch
+        // vehicle the menu happened to open over.
+        NodeAction::new("create-tag", "create tag", InputSpec::None),
+        NodeAction::new("rename-tag", "rename tag", InputSpec::None),
+        NodeAction::new("delete-tag", "delete tag", InputSpec::None),
         NodeAction::new("mark-move", "Mark for move", InputSpec::None),
         NodeAction::new("paste-move", "Move here", InputSpec::None),
         NodeAction::new("unnest", "Move to top level", InputSpec::None),
@@ -1428,6 +1437,71 @@ async fn invoke_toggle_tag(
     }
 }
 
+/// `invoke_action("create-tag")` — create a new *global* tag named `ctx.text`.
+///
+/// The `option_menu` create binding prompts the user for a name and hands it
+/// over in [`ActionContext::text`]; the adapter rejects an empty name and
+/// otherwise inserts a plain global tag (default style — colour/symbol are an
+/// edit-form concern, not part of the quick create). Returns `Reload` so the
+/// pane (and the menu's option list, which the host re-fetches) refresh.
+async fn invoke_create_tag(handle: &CoreHandle, name: Option<&str>) -> ActionDispatch {
+    use not_yet_done_task_core::repository::TagStyle;
+    let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ActionDispatch::Error("Tag name must not be empty".to_string());
+    };
+    match handle
+        .tag_service
+        .add_global(name.to_string(), TagStyle::default())
+        .await
+    {
+        Ok(_) => ActionDispatch::Reload,
+        Err(e) => ActionDispatch::Error(format!("Failed to create tag: {e}")),
+    }
+}
+
+/// `invoke_action("rename-tag")` — rename the tag whose stable id arrives in
+/// `ctx.value` to the new name in `ctx.text`.
+///
+/// Both inputs are required: the `option_menu` rename binding sets `value` to
+/// the focused option's stable id (`global-tag:`/`project-tag:`) and `text` to
+/// the typed name. Only the name changes (style stays put). Returns `Reload`
+/// so the renamed tag re-renders across the task rows and in the menu.
+async fn invoke_rename_tag(
+    handle: &CoreHandle,
+    tag_id: Option<&str>,
+    name: Option<&str>,
+) -> ActionDispatch {
+    use not_yet_done_task_core::repository::TagStylePatch;
+    let Some(tag_id) = tag_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ActionDispatch::Error("No tag selected".to_string());
+    };
+    let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ActionDispatch::Error("Tag name must not be empty".to_string());
+    };
+    match handle
+        .tag_service
+        .edit(tag_id.to_string(), Some(name.to_string()), TagStylePatch::default())
+        .await
+    {
+        Ok(_) => ActionDispatch::Reload,
+        Err(e) => ActionDispatch::Error(format!("Failed to rename tag: {e}")),
+    }
+}
+
+/// `invoke_action("delete-tag")` — delete the tag whose stable id arrives in
+/// `ctx.value` from the persistent store (it disappears from every task that
+/// carried it). The `option_menu` delete binding confirms before invoking, so
+/// the adapter performs the delete unconditionally here. Returns `Reload`.
+async fn invoke_delete_tag(handle: &CoreHandle, tag_id: Option<&str>) -> ActionDispatch {
+    let Some(tag_id) = tag_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ActionDispatch::Error("No tag selected".to_string());
+    };
+    match handle.tag_service.delete(tag_id.to_string()).await {
+        Ok(()) => ActionDispatch::Reload,
+        Err(e) => ActionDispatch::Error(format!("Failed to delete tag: {e}")),
+    }
+}
+
 /// `invoke_action("paste-move")` — reparent the previously-marked task
 /// (`ctx.marked`) under `target`. Validates the marked node is a task and
 /// the move forms no cycle, then persists + relocates its notes.
@@ -1813,6 +1887,11 @@ impl Node for TaskItemNode {
                 invoke_toggle_tag(&self.handle, &self.snapshot, self.id, ctx.value.as_deref())
                     .await
             }
+            "create-tag" => invoke_create_tag(&self.handle, ctx.text.as_deref()).await,
+            "rename-tag" => {
+                invoke_rename_tag(&self.handle, ctx.value.as_deref(), ctx.text.as_deref()).await
+            }
+            "delete-tag" => invoke_delete_tag(&self.handle, ctx.value.as_deref()).await,
             // The frontend records the mark; the adapter does nothing here.
             "mark-move" => ActionDispatch::Noop,
             "paste-move" => match &ctx.marked {

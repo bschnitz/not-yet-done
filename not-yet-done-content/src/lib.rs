@@ -1155,6 +1155,18 @@ pub struct ActionContext {
     /// TUI's `option_menu` sets this to the focused option's `value` (e.g. a
     /// tag id) when invoking a `toggle`-style action.
     pub value: Option<String>,
+    /// A frontend-sourced *free-text* input for a value-accepting action that
+    /// needs the user to type something — the text companion to [`Self::value`].
+    /// Where `value` carries a selected id (the focused option), `text` carries
+    /// a typed string. The two combine: a `rename` action reads the tag id from
+    /// `value` and the new name from `text`; a `create` action reads only `text`
+    /// (the new name). The adapter validates and rejects nonsense (e.g. empty
+    /// text) via [`ActionDispatch::Error`].
+    ///
+    /// `None` for actions that need no typed input (the common case). Example:
+    /// the TUI's `option_menu` prompts for a line of text on a create/rename
+    /// binding and sets this to what the user typed.
+    pub text: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2475,6 +2487,7 @@ mod mark_move_contract_tests {
             confirmed: false,
             query: None,
             value: None,
+            text: None,
         };
 
         let dispatch = node.invoke_action("paste-move", &ctx).await.unwrap();

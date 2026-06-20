@@ -82,6 +82,32 @@ nonsense values as `ActionDispatch::Error`. The task adapter implements
 `list_values("tags")` and a `toggle-tag` action; this is how tags move out of
 the host's tag service into the adapter (DB-split step C5).
 
+The same menu can also **manage the value list itself** (create / rename /
+delete), again without the adapter knowing the GUI. Three further actions wire
+to the menu's `create`/`rename`/`delete` keys, and a second `ActionContext`
+field carries free text alongside `value`:
+
+```rust
+pub struct ActionContext {
+    // …marked, confirmed, query…
+    /// The value chosen from an `option_menu` (a stable id). Empty for actions
+    /// that take no selected value.
+    pub value: String,
+    /// Free-text companion to `value`, sourced by the host (e.g. an
+    /// `option_menu` prompt). `create` reads only this (the new name);
+    /// `rename` reads the id from `value` and the new name from here. `None`
+    /// when the action takes no text.
+    pub text: Option<String>,
+}
+```
+
+So `create-tag` reads `ctx.text` (rejects empty via `ActionDispatch::Error`),
+`rename-tag` reads `ctx.value` (id) + `ctx.text` (new name), and `delete-tag`
+reads `ctx.value` (id). These are pure data operations on the global tag list —
+the invoking node is only the dispatch vehicle. With them in place the task
+adapter owns the full tag lifecycle and the host's `tag_service` (and the
+`:tag` cmdline) is no longer needed.
+
 **Query variables.** Saved queries on a view can carry inline
 placeholders. The TUI calls `query_variables(raw)` at apply time,
 asks the user to fill any missing required values via a popup, and
