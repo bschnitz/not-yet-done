@@ -2366,10 +2366,6 @@ impl TrackingAdapter {
 
 #[async_trait]
 impl ContentAdapter for TrackingAdapter {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn adapter_type(&self) -> &str {
         "trackings"
     }

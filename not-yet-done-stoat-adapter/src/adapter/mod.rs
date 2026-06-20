@@ -200,10 +200,6 @@ impl StoatAdapter {
 
 #[async_trait]
 impl ContentAdapter for StoatAdapter {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn adapter_type(&self) -> &str {
         "stoat"
     }

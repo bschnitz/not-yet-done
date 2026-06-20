@@ -434,10 +434,6 @@ fn table_actions() -> Vec<NodeAction> {
 
 #[async_trait]
 impl ContentAdapter for PostgresAdapter {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn adapter_type(&self) -> &str {
         "postgres"
     }
@@ -547,6 +543,43 @@ impl ContentAdapter for PostgresAdapter {
             ),
         );
         env
+    }
+
+    /// Append a trailing `-- table completions: tt_<schema>__<table>, …`
+    /// comment listing every base table in the script's database, so the
+    /// user can copy a `tt_*` token into their SQL (substituted to the
+    /// quoted identifier at execute time). Only for SQL-flavored scripts;
+    /// `.py`/`.md`/… scripts get the buffer back stripped but unaugmented.
+    ///
+    /// `node` carries the canonical id `postgres/<db>/db_scripts/<script>`;
+    /// the database is segment[1] and the SQL gate keys off the final
+    /// segment's extension. Enumeration failures yield no line (the editor
+    /// still opens). The append is idempotent: any stale completion line is
+    /// stripped first.
+    async fn augment_editor_buffer(
+        &self,
+        node: &NodeRef,
+        buffer: String,
+    ) -> String {
+        let stripped = crate::script_completions::strip_completions_line(&buffer);
+        let script = node.segments().last().unwrap_or("");
+        if !crate::query::is_sql_extension(script) {
+            return stripped;
+        }
+        let Some(db) = node.segments().nth(1).filter(|s| !s.is_empty()) else {
+            return stripped;
+        };
+        let tables = self.list_completion_tables(db).await;
+        match crate::script_completions::build_completions_line(&tables) {
+            Some(line) => {
+                crate::script_completions::append_completions_line(&stripped, &line)
+            }
+            None => stripped,
+        }
+    }
+
+    fn strip_editor_hints(&self, text: &str) -> String {
+        crate::script_completions::strip_completions_line(text)
     }
 
     /// Free-form SQL (potentially multi-statement). The
