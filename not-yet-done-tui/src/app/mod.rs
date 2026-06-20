@@ -91,7 +91,14 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         items: Vec<not_yet_done_content::ValueOption>,
         selected_values: Vec<String>,
+        /// Fatal load failure — surfaced and the menu stays closed.
         error: Option<String>,
+        /// Non-fatal note (e.g. an adapter-rejected create/rename/delete) —
+        /// surfaced while the menu stays open.
+        notice: Option<String>,
+        /// Set when a create/rename/delete changed the underlying data, so the
+        /// pane reloads alongside the menu rebuild.
+        reload_pane: bool,
     },
     /// Result of a generic content delete (`Node::execute("delete")`).
     /// On success the App removes the row from the pane's tree *in place*
@@ -3477,6 +3484,8 @@ impl App {
                     items,
                     selected_values,
                     error,
+                    notice,
+                    reload_pane,
                 } => {
                     self.open_option_menu_popup(
                         view_index,
@@ -3484,6 +3493,8 @@ impl App {
                         items,
                         selected_values,
                         error,
+                        notice,
+                        reload_pane,
                     );
                 }
                 LoadMsg::ContentNodeDeleted {
@@ -6286,6 +6297,10 @@ impl App {
                 // Frontend-sourced value for value-accepting actions (e.g.
                 // an `option_menu` toggle hands over the chosen option id).
                 value,
+                // Typed free-text is sourced only by the option-menu mutation
+                // path ([`App::spawn_option_menu_mutation`]); this generic
+                // per-node dispatch carries none.
+                text: None,
             };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.

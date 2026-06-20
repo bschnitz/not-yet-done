@@ -302,10 +302,14 @@ views:
       # `tag_ids` marker field — so the menu needs no host-side tag service.
       # Enter toggles a tag on/off (★ marks assigned tags; the popup stays
       # open for multi-toggle and the `tag_symbols` / `tag_names` columns
-      # refresh after each change). Creating / renaming / deleting a tag is
-      # done from the `:tag` cmdline menu. `T` (shift+t) — `t` is the
-      # tree-view subtab key. `inherit: true` so it works at every subtask
-      # depth.
+      # refresh after each change). The same menu also *manages* the global
+      # tag store: ctrl+n creates a tag (prompts for a name), ctrl+e renames
+      # the focused tag, ctrl+d deletes it (with a y/n confirm). Each maps to
+      # an adapter action below — create/rename/delete are pure data ops on
+      # the tag list; the selected task is only the dispatch vehicle, so the
+      # menu refreshes in place and the popup stays open. `T` (shift+t) — `t`
+      # is the tree-view subtab key. `inherit: true` so it works at every
+      # subtask depth.
       - name: tags
         key: T
         type: option_menu
@@ -318,6 +322,14 @@ views:
           # Adapter action invoked on Enter; the chosen value rides along in
           # `ActionContext.value`.
           toggle: toggle-tag
+          # Optional management actions. Each names an adapter action; omit a
+          # field to drop that key from the menu. `create` prompts for text →
+          # `ActionContext.text` (no value); `rename` sends the focused
+          # option's id in `value` + the new text in `text`; `delete` sends
+          # the focused id in `value` after a y/n confirm.
+          create: create-tag
+          rename: rename-tag
+          delete: delete-tag
           title: Tags
         inherit: true
       # Local filter-while-typing over the loaded rows. NOT inheritable —
@@ -495,7 +507,8 @@ views:
         id: add-sibling
         under_selection: true
       # Adapter-driven tag toggle menu for the selected task (see the tree
-      # view's `tags` action). `T` (shift+t).
+      # view's `tags` action; ctrl+n/ctrl+e/ctrl+d create/rename/delete a
+      # tag). `T` (shift+t).
       - name: tags
         key: T
         type: option_menu
@@ -503,6 +516,9 @@ views:
           source: tags
           marker: tag_ids
           toggle: toggle-tag
+          create: create-tag
+          rename: rename-tag
+          delete: delete-tag
           title: Tags
       - name: script
         key: x
