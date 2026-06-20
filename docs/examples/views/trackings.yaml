@@ -223,7 +223,8 @@ views:
     #
     #   * `d` delete — soft-delete the tracking, keeping its start/end times,
     #     through the generic confirm-then-delete flow. The row drops out of
-    #     the list (only non-deleted trackings are shown).
+    #     the list under the default query (which hides deleted rows); a query
+    #     that surfaces deleted rows keeps it on screen, greyed-out.
     #   * `R` restore — undelete a previously deleted tracking. Restoring
     #     **purges** the successor intervals a later split/edit produced
     #     (irreversible), so it confirms first with a `(y/n)` prompt that
@@ -238,9 +239,12 @@ views:
     #     created entry, the cumulated seconds of a tree's ancestors) appear
     #     on the next explicit reload — press `r`.
     #
-    # Note: the list shows only non-deleted rows, so `R`/`A` are recovery
-    # hooks with no visible target today — a "show deleted" sub-view is future
-    # work. This mirrors the bespoke native Trackings tab exactly.
+    # Note: the snapshot loads the full include-deleted universe (#33); the
+    # query is the sole filter. The shipped `default: [deleted, =, false]`
+    # hides deleted rows — drop or flip that clause (e.g. `[deleted, =, true]`)
+    # to surface them. Deleted rows then render **greyed-out** (a `deleted`
+    # styling signal on the row), and `R`/`A` act on the deleted rows the
+    # current query makes visible.
     shortcuts:
       d: delete
       R: restore
