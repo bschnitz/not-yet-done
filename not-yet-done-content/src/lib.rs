@@ -1608,6 +1608,19 @@ pub trait ContentAdapter: Send + Sync {
         None
     }
 
+    /// Adapter-managed persistence for editable *scripts* attached to
+    /// the content tree.
+    ///
+    /// `Some(store)` when the adapter lets the user author scripts that
+    /// it persists itself (Postgres: SQL scripts, both database-level
+    /// and per-table). `None` when the adapter has no such concept —
+    /// the default. See [`ScriptStore`] for the two coordinate spaces
+    /// (hierarchical database-level paths vs. flat node-scoped names)
+    /// and why the contract keeps them backend-opaque.
+    fn script_store(&self) -> Option<&dyn ScriptStore> {
+        None
+    }
+
     /// Adapter-side full-tree search.
     ///
     /// `Some(results)` when the adapter can return hits with full
@@ -1973,6 +1986,81 @@ impl SavedQueryStore for FsSavedQueryStore {
     fn path(&self, name: &str) -> Option<std::path::PathBuf> {
         Some(self.file_path(name))
     }
+}
+
+// ---------------------------------------------------------------------------
+// ScriptStore
+// ---------------------------------------------------------------------------
+
+/// Adapter-owned persistence for editable scripts attached to the
+/// content tree.
+///
+/// This decouples the frontend from any one adapter's storage: the TUI
+/// used to call `not_yet_done_postgres_adapter::query::*` directly for
+/// every script CRUD operation, which baked Postgres' on-disk layout
+/// into the host. The store hides that layout behind two coordinate
+/// spaces, both **backend-opaque** — the contract carries no notion of
+/// `schema`/`table`/file-extension, so a future non-SQL adapter can
+/// back the same operations with whatever storage it likes:
+///
+/// - **Database-level** scripts live in a *hierarchical* namespace
+///   keyed by `(database, rel_path)`. `rel_path` is a forward-slash
+///   relative path the adapter interprets — directories and nested
+///   scripts are allowed. These are the `db_scripts/<db>/…` entries.
+/// - **Node-scoped** scripts live in a *flat* per-node namespace keyed
+///   by `(node_id, name)`. `node_id` is the canonical node path string
+///   the adapter already understands; the adapter parses it back into
+///   whatever internal coordinates it needs. These are the per-table
+///   query scripts.
+///
+/// All methods return [`crate::Result`]; filesystem errors surface as
+/// [`ContentError::Other`] so their `Display` (e.g. "directory not
+/// empty (3 entries)") reaches the user unchanged.
+#[async_trait]
+pub trait ScriptStore: Send + Sync {
+    // --- Database-level (hierarchical) --------------------------------
+
+    /// Whether `rel_path` under `database` is a directory. A missing
+    /// entry (or any probe error) reports `false` — callers use this
+    /// only to choose between file- and directory-semantics.
+    async fn db_entry_is_dir(&self, database: &str, rel_path: &str) -> bool;
+
+    /// Create a script at `rel_path` under `database`, seeding it with
+    /// the adapter's default template and creating any parent
+    /// directories. Returns `Ok(true)` when created, `Ok(false)` when a
+    /// file already existed there (left untouched).
+    async fn create_db_script(&self, database: &str, rel_path: &str) -> Result<bool>;
+
+    /// Create an (empty) directory at `rel_path` under `database`,
+    /// including parents. Idempotent if it already exists.
+    async fn create_db_dir(&self, database: &str, rel_path: &str) -> Result<()>;
+
+    /// Rename the entry at `rel_path` (file or directory) to
+    /// `new_name`, keeping it in the same parent directory.
+    async fn rename_db_entry(&self, database: &str, rel_path: &str, new_name: &str) -> Result<()>;
+
+    /// Move the entry at `src` to `dst` (both `rel_path`s under
+    /// `database`). Parent directories of `dst` are created as needed.
+    async fn move_db_entry(&self, database: &str, src: &str, dst: &str) -> Result<()>;
+
+    /// Delete the script at `rel_path`. Missing files are not an error
+    /// (idempotent delete).
+    async fn delete_db_script(&self, database: &str, rel_path: &str) -> Result<()>;
+
+    /// Delete the directory at `rel_path`. Errors if it is non-empty —
+    /// the error `Display` names the entry count.
+    async fn delete_db_dir(&self, database: &str, rel_path: &str) -> Result<()>;
+
+    // --- Node-scoped (flat) -------------------------------------------
+
+    /// Names of all scripts attached to `node_id`, sorted for stable
+    /// listing. Empty when none exist (or the node has no script
+    /// namespace).
+    async fn list_node_scripts(&self, node_id: &str) -> Result<Vec<String>>;
+
+    /// Delete the script `name` attached to `node_id`. Missing entries
+    /// are not an error (idempotent delete).
+    async fn delete_node_script(&self, node_id: &str, name: &str) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------

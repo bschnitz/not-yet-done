@@ -15,5 +15,7 @@ pub mod client;
 pub mod config;
 pub mod query;
 pub mod script_completions;
+pub mod script_store;
 
 pub use adapter::{PostgresAdapter, PostgresAdapterFactory};
+pub use script_store::PostgresScriptStore;

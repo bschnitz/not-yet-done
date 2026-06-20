@@ -1912,16 +1912,14 @@ impl App {
             .content_view(view_index)
             .map(|cv| cv.active_pane_id())
             .unwrap_or(0);
-        let instance_dir = adapter.instance_data_dir();
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                not_yet_done_postgres_adapter::query::move_db_script_entry(
-                    &instance_dir,
-                    &src_db,
-                    std::path::Path::new(&src_rel),
-                    std::path::Path::new(&dst_rel),
-                )
-                .await
+                match adapter.script_store() {
+                    Some(store) => store.move_db_entry(&src_db, &src_rel, &dst_rel).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
+                }
             })
         });
         match result {
@@ -1976,16 +1974,14 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
-        let rel_path_pb = std::path::PathBuf::from(&rel_path);
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                not_yet_done_postgres_adapter::query::delete_db_script_dir(
-                    &instance_dir,
-                    &database,
-                    &rel_path_pb,
-                )
-                .await
+                match adapter.script_store() {
+                    Some(store) => store.delete_db_dir(&database, &rel_path).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
+                }
             })
         });
         match result {
@@ -2114,20 +2110,16 @@ impl App {
             .content_view(view_index)
             .and_then(|cv| cv.adapter.as_ref())
             .map(Arc::clone)?;
-        let instance_dir = adapter.instance_data_dir();
         let rel_path = crate::app::node_actions::db_script_rel_path_str(&segments);
         // Filesystem probe to disambiguate dir vs script.
-        let dir_path = not_yet_done_postgres_adapter::query::db_script_dir_path(
-            &instance_dir,
-            &database,
-            std::path::Path::new(&rel_path),
-        );
         let is_dir = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { tokio::fs::metadata(&dir_path).await })
-        })
-        .map(|m| m.is_dir())
-        .unwrap_or(false);
+            tokio::runtime::Handle::current().block_on(async {
+                match adapter.script_store() {
+                    Some(store) => store.db_entry_is_dir(&database, &rel_path).await,
+                    None => false,
+                }
+            })
+        });
         // current_dir_rel: if the selected row is a dir, the dir
         // itself; otherwise the script's parent.
         let current_dir_rel = if is_dir {
@@ -2170,7 +2162,6 @@ impl App {
         else {
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
         // Default extension: if the user did not include a dot in the
         // filename, append `.sql`. Anything containing a `.` is taken
         // as-is so `migrate.py`, `notes.md`, `helper.psql` etc. all work.
@@ -2186,35 +2177,14 @@ impl App {
         } else {
             format!("{current_dir_rel}/{file_name}")
         };
-        let database_for_write = database.clone();
-        let rel_for_write = rel_path.clone();
-        let file_name_for_template = file_name.clone();
-        let result: std::io::Result<bool> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<bool> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let path = not_yet_done_postgres_adapter::query::db_script_path(
-                    &instance_dir,
-                    &database_for_write,
-                    std::path::Path::new(&rel_for_write),
-                );
-                if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-                    return Ok(false);
+                match adapter.script_store() {
+                    Some(store) => store.create_db_script(&database, &rel_path).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
                 }
-                // Ensure parent dir exists for nested scripts. The
-                // storage `write_db_script` helper only handles flat
-                // root, so we call out to mkdir then write directly.
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                tokio::fs::write(
-                    &path,
-                    not_yet_done_postgres_adapter::query::default_db_script_file(
-                        &database_for_write,
-                        &file_name_for_template,
-                    )
-                    .as_bytes(),
-                )
-                .await?;
-                Ok(true)
             })
         });
         match result {
@@ -2239,22 +2209,19 @@ impl App {
         else {
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
         let rel_path = if current_dir_rel.is_empty() {
             name.to_string()
         } else {
             format!("{current_dir_rel}/{name}")
         };
-        let rel_for_write = rel_path.clone();
-        let database_for_write = database.clone();
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                not_yet_done_postgres_adapter::query::create_db_script_dir(
-                    &instance_dir,
-                    &database_for_write,
-                    std::path::Path::new(&rel_for_write),
-                )
-                .await
+                match adapter.script_store() {
+                    Some(store) => store.create_db_dir(&database, &rel_path).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
+                }
             })
         });
         match result {
@@ -2282,19 +2249,14 @@ impl App {
             );
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
-        let database_for_write = database.clone();
-        let rel_for_write = rel_path.clone();
-        let new_name_owned = new_name.to_string();
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                not_yet_done_postgres_adapter::query::rename_db_script_entry(
-                    &instance_dir,
-                    &database_for_write,
-                    std::path::Path::new(&rel_for_write),
-                    &new_name_owned,
-                )
-                .await
+                match adapter.script_store() {
+                    Some(store) => store.rename_db_entry(&database, &rel_path, new_name).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
+                }
             })
         });
         match result {
@@ -2367,19 +2329,14 @@ impl App {
         } else {
             format!("{dest_dir_rel}/{src_name}")
         };
-        let instance_dir = adapter.instance_data_dir();
-        let src_rel_clone = src_rel.clone();
-        let dst_rel_clone = dst_rel.clone();
-        let database_for_write = database.clone();
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                not_yet_done_postgres_adapter::query::move_db_script_entry(
-                    &instance_dir,
-                    &database_for_write,
-                    std::path::Path::new(&src_rel_clone),
-                    std::path::Path::new(&dst_rel_clone),
-                )
-                .await
+                match adapter.script_store() {
+                    Some(store) => store.move_db_entry(&database, &src_rel, &dst_rel).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
+                }
             })
         });
         match result {
@@ -2562,15 +2519,14 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
-        let result: std::io::Result<()> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                not_yet_done_postgres_adapter::query::delete_db_script(
-                    &instance_dir,
-                    &database,
-                    &script,
-                )
-                .await
+                match adapter.script_store() {
+                    Some(store) => store.delete_db_script(&database, &script).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
+                }
             })
         });
         match result {
@@ -2709,30 +2665,14 @@ impl App {
             self.modal_message = Some(":db-script-new — active tab has no adapter".to_string());
             return;
         };
-        let instance_dir = adapter.instance_data_dir();
-        let database_for_write = database.clone();
-        let script_for_write = script.clone();
-        let result: std::io::Result<bool> = tokio::task::block_in_place(|| {
+        let result: not_yet_done_content::Result<bool> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let path = not_yet_done_postgres_adapter::query::db_script_file_path(
-                    &instance_dir,
-                    &database_for_write,
-                    &script_for_write,
-                );
-                if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-                    return Ok(false);
+                match adapter.script_store() {
+                    Some(store) => store.create_db_script(&database, &script).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "adapter has no script store".into(),
+                    )),
                 }
-                not_yet_done_postgres_adapter::query::write_db_script(
-                    &instance_dir,
-                    &database_for_write,
-                    &script_for_write,
-                    &not_yet_done_postgres_adapter::query::default_db_script_file(
-                        &database_for_write,
-                        &script_for_write,
-                    ),
-                )
-                .await?;
-                Ok(true)
             })
         });
         match result {

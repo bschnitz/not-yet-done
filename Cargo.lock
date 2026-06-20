@@ -3632,6 +3632,7 @@ name = "not-yet-done-postgres-adapter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dirs",
  "not-yet-done-content",
  "not-yet-done-transport",
  "regex",
