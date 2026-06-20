@@ -418,6 +418,33 @@ pub enum ViewRequest {
         /// warning). `None` → the App builds the generic `Delete '<label>'?`.
         confirm: Option<String>,
     },
+    /// Generic confirm-then-invoke: emitted from `ActionDispatch::Confirm`
+    /// when an adapter wants a `(y/n)` prompt before doing (often
+    /// irreversible) work. On accept the App re-invokes the *same* action
+    /// on the *same* node with `ActionContext::confirmed = true`, so the
+    /// adapter then performs the work instead of asking again. Used by the
+    /// trackings adapter's `restore` / `restore-all` (which purge successor
+    /// intervals).
+    ConfirmInvokeNodeAction {
+        view_index: usize,
+        pane_id: PaneId,
+        node_id: String,
+        action_name: String,
+        /// Adapter-authored prompt; the adapter knows what the action will
+        /// do (e.g. how many successor intervals a restore purges).
+        prompt: String,
+    },
+    /// Invoke an adapter action on the pane's *container* (the adapter
+    /// root), not on the selected row. Emitted for `actions:` entries
+    /// flagged `on_container: true` (e.g. trackings `restore all`), which
+    /// must fire even at the un-drilled flat root where no row — and no
+    /// `parent:` target — is addressable. The App resolves `adapter.root()`
+    /// and dispatches through the normal `invoke_action` path.
+    InvokeContainerAction {
+        view_index: usize,
+        pane_id: PaneId,
+        action_name: String,
+    },
     /// DSF-4: open a rename prompt for an existing script or dir.
     /// `is_dir` lets the App pick the right storage call
     /// (`rename_db_script_entry` is shape-agnostic but the confirm

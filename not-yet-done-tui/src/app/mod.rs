@@ -367,6 +367,17 @@ pub enum PendingConfirmation {
         /// (e.g. `delete` vs the flat list's non-recursive `delete-single`).
         action_name: String,
     },
+    /// Generic confirm-then-invoke (from `ActionDispatch::Confirm`). On
+    /// accept the App re-invokes the *same* action on the *same* node with
+    /// `ActionContext::confirmed = true` via `spawn_invoke_node_action`, so
+    /// the adapter performs the work instead of asking again. Used by the
+    /// trackings adapter's `restore` / `restore-all`.
+    InvokeNodeAction {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_name: String,
+    },
 }
 
 /// A saved query/filter with an optional keyboard shortcut.
@@ -2598,6 +2609,31 @@ impl App {
         self.pending_confirmation = Some((
             msg,
             PendingConfirmation::DeleteContentNode {
+                view_index,
+                pane_id,
+                node_id,
+                action_name,
+            },
+        ));
+    }
+
+    /// Stage the confirm popup for a generic confirm-then-invoke
+    /// (`ActionDispatch::Confirm`). The prompt is adapter-authored — only
+    /// the adapter knows what the action will do (e.g. how many successor
+    /// intervals a restore purges). On accept the App re-invokes the same
+    /// action on the same node with `confirmed: true`.
+    fn confirm_invoke_node_action(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_name: String,
+        prompt: String,
+    ) {
+        self.modal_message = Some(prompt.clone());
+        self.pending_confirmation = Some((
+            prompt,
+            PendingConfirmation::InvokeNodeAction {
                 view_index,
                 pane_id,
                 node_id,
@@ -5873,7 +5909,11 @@ impl App {
         // matching top-bar shortcut while the affordance is open.
         let confirm_active = matches!(
             self.pending_confirmation,
-            Some((_, PendingConfirmation::DeleteContentNode { .. }))
+            Some((
+                _,
+                PendingConfirmation::DeleteContentNode { .. }
+                    | PendingConfirmation::InvokeNodeAction { .. }
+            ))
         );
         let column_config_active = self.column_config_popup.is_some();
         let script_active = self.detached_script.is_some();
@@ -6350,6 +6390,24 @@ impl App {
                 );
                 EditorRequest::None
             }
+            ViewRequest::ConfirmInvokeNodeAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_name,
+                prompt,
+            } => {
+                self.confirm_invoke_node_action(view_index, pane_id, node_id, action_name, prompt);
+                EditorRequest::None
+            }
+            ViewRequest::InvokeContainerAction {
+                view_index,
+                pane_id,
+                action_name,
+            } => {
+                self.spawn_invoke_container_action(view_index, pane_id, action_name);
+                EditorRequest::None
+            }
             ViewRequest::OpenDbScriptRenamePrompt {
                 view_index,
                 pane_id,
@@ -6415,7 +6473,7 @@ impl App {
                 node_id,
                 action_name,
             } => {
-                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name);
+                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, false);
                 EditorRequest::None
             }
             ViewRequest::InvalidateContentSession { view_index } => {
@@ -6685,6 +6743,7 @@ impl App {
         pane_id: crate::views::content_view::PaneId,
         node_id: String,
         action_name: String,
+        confirmed: bool,
     ) {
         let adapter = self
             .content_view(view_index)
@@ -6702,7 +6761,7 @@ impl App {
         // context and relocate it. Every other action ignores it.
         let marked = self.content_marked_node.clone();
         tokio::spawn(async move {
-            let ctx = not_yet_done_content::ActionContext { marked };
+            let ctx = not_yet_done_content::ActionContext { marked, confirmed };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.
             let outcome: not_yet_done_content::Result<(
@@ -6729,6 +6788,73 @@ impl App {
                 view_index,
                 pane_id,
                 node_id: node_id_for_task,
+                action_name: action_name_for_task,
+                result,
+                node_label,
+                node_type,
+            });
+        });
+    }
+
+    /// Invoke an adapter action on the pane's *container* (the adapter
+    /// `root()`), not on the selected row. Used by `actions:` entries
+    /// flagged `on_container: true` (e.g. trackings `restore all`), which
+    /// must fire even at the un-drilled flat root where no row — and no
+    /// `parent:` target — is addressable.
+    ///
+    /// We resolve `adapter.root()`, invoke the action with
+    /// `confirmed: false`, and route the dispatch through the same
+    /// `NodeActionDispatched` → `handle_node_action_dispatched` path as a
+    /// per-row action. The dispatch's `node_id` is the root's id, so a
+    /// returned `Confirm` re-invokes correctly on the root via
+    /// `spawn_invoke_node_action` (which `get_by_id`s the root again).
+    fn spawn_invoke_container_action(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        action_name: String,
+    ) {
+        let adapter = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone);
+        let Some(adapter) = adapter else {
+            self.notify("No adapter available".to_string());
+            return;
+        };
+        let tx = self.load_tx.clone();
+        let action_name_for_task = action_name.clone();
+        tokio::spawn(async move {
+            let outcome: not_yet_done_content::Result<(
+                String,
+                not_yet_done_content::ActionDispatch,
+                String,
+                not_yet_done_content::NodeType,
+            )> = async {
+                let node = adapter.root().await?;
+                let node_id = node.id().to_string();
+                let label = node.label().to_string();
+                let node_type = node.node_type().clone();
+                let ctx = not_yet_done_content::ActionContext::default();
+                let dispatch = node.invoke_action(&action_name_for_task, &ctx).await?;
+                Ok((node_id, dispatch, label, node_type))
+            }
+            .await;
+            let (node_id, result, node_label, node_type) = match outcome {
+                Ok((node_id, dispatch, label, node_type)) => {
+                    (node_id, Ok(dispatch), Some(label), Some(node_type))
+                }
+                Err(e) => (
+                    String::new(),
+                    Err(format!("Action '{action_name_for_task}': {e}")),
+                    None,
+                    None,
+                ),
+            };
+            let _ = tx.send(LoadMsg::NodeActionDispatched {
+                view_index,
+                pane_id,
+                node_id,
                 action_name: action_name_for_task,
                 result,
                 node_label,
@@ -8829,6 +8955,17 @@ impl App {
                 action_name,
             } => {
                 self.delete_content_node_now(view_index, pane_id, node_id, action_name);
+            }
+            PendingConfirmation::InvokeNodeAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_name,
+            } => {
+                // Re-invoke the same action on the same node, now with
+                // `confirmed: true`, so the adapter does the work instead of
+                // returning another `Confirm`.
+                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, true);
             }
             PendingConfirmation::BulkDeleteStaleLinks(link_ids) => {
                 let repo = Arc::clone(&self.link_repo);

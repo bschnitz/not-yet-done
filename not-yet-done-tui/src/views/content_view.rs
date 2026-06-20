@@ -6033,6 +6033,25 @@ impl ContentPane {
                 }
             }
             "custom" => {
+                // `on_container`: invoke the action on the adapter's
+                // container (root) rather than the selected row, through the
+                // `invoke_action` dispatch path (so the adapter's
+                // `ActionDispatch` — e.g. a `Confirm` — is honoured). This is
+                // the only `custom` flavour that goes through `invoke_action`;
+                // the default `custom` still uses the popup/`execute` path.
+                if action.on_container {
+                    if let Some(action_id) = &action.id {
+                        return SubViewMessage::Request(ViewRequest::InvokeContainerAction {
+                            view_index,
+                            pane_id,
+                            action_name: action_id.clone(),
+                        });
+                    }
+                    return SubViewMessage::Request(ViewRequest::Notify(format!(
+                        "container action '{}' missing `id`",
+                        action.name
+                    )));
+                }
                 if let (Some(id), Some(action_id)) =
                     (self.resolve_action_node_id(action), &action.id)
                 {
@@ -11287,6 +11306,7 @@ mod tests {
                     commit_on_save: false,
                     inherit: false,
                     script_scope: Default::default(),
+                    on_container: false,
                 }],
                 children: vec![ChildDef {
                     row_layout: None,
@@ -11457,6 +11477,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         // `a` begins the `al` chord → detected as a prefix …
         assert!(view.yaml_action_chord_prefix("a"));
@@ -13927,6 +13948,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -14487,6 +14509,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
@@ -14507,6 +14530,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         // Root view: tree_find (`/`). Like fuzzy_filter it is declared only
         // here yet must reach every cursor depth (it is in the GLOBAL set).
@@ -14527,6 +14551,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
@@ -14546,6 +14571,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         config
     }
@@ -14634,6 +14660,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
@@ -14659,6 +14686,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
@@ -14677,6 +14705,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -15536,6 +15565,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -15569,6 +15599,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let issues = mock_issues();
@@ -15608,6 +15639,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -15842,6 +15874,7 @@ mod tests {
                 commit_on_save: false,
                 inherit: false,
                 script_scope: Default::default(),
+                on_container: false,
             });
         }
         config
@@ -18493,6 +18526,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     commit_on_save: false,
                     inherit: false,
                     script_scope: Default::default(),
+                    on_container: false,
                 },
                 ActionDef {
                     name: "refresh".to_string(),
@@ -18511,6 +18545,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     commit_on_save: false,
                     inherit: false,
                     script_scope: Default::default(),
+                    on_container: false,
                 },
             ],
             children: vec![],

@@ -1043,6 +1043,19 @@ pub enum ActionDispatch {
     DeleteSelf { confirm: Option<String> },
     /// Reload the current pane.
     Reload,
+    /// Ask the user to confirm before the action does its (often
+    /// irreversible) work. The adapter returns this on the *first*
+    /// invocation — when [`ActionContext::confirmed`] is still `false` —
+    /// with a user-facing `prompt`. The TUI shows a `(y/n)` confirmation
+    /// and, on "y", re-invokes the *same* action on the *same* node with
+    /// `confirmed: true`, at which point the adapter performs the work.
+    ///
+    /// Unlike [`DeleteSelf`] (whose confirm/execute split lives in the
+    /// frontend's delete plumbing), `Confirm` is generic: any action can
+    /// gate itself behind a confirmation, and the adapter authors the
+    /// wording because only it knows what the action will actually do
+    /// (e.g. how many successor intervals a restore will purge).
+    Confirm { prompt: String },
     /// No-op — useful as a default for adapters that haven't migrated.
     Noop,
     /// Adapter rejected the action with a user-displayable error.
@@ -1082,6 +1095,12 @@ pub struct ActionContext {
     /// by the frontend on a `paste-move` invocation so the adapter can
     /// relocate the marked node relative to the invoking (target) node.
     pub marked: Option<MarkedNode>,
+    /// Whether the user has already confirmed this action. `false` on the
+    /// first invocation; the adapter may return
+    /// [`ActionDispatch::Confirm`] to request a `(y/n)` prompt. The TUI
+    /// re-invokes with `confirmed: true` on "y", and the adapter then does
+    /// the work instead of asking again.
+    pub confirmed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2143,6 +2162,7 @@ mod mark_move_contract_tests {
         };
         let ctx = ActionContext {
             marked: Some(marked.clone()),
+            confirmed: false,
         };
 
         let dispatch = node.invoke_action("paste-move", &ctx).await.unwrap();

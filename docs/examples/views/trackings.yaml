@@ -203,17 +203,33 @@ views:
       - name: refresh
         key: r
         type: reload
+      # `restore all` operates on the **whole list** (the adapter container),
+      # not the selected row — so it's declared here as an `on_container`
+      # action rather than a `parent:`-prefixed shortcut. A `parent:` shortcut
+      # resolves its target from the nav stack, which is empty at the
+      # un-drilled flat root; the hint would vanish and the key would do
+      # nothing there. An `on_container` action instead builds its hint
+      # statically (so `A` is always visible) and dispatches against
+      # `adapter.root()`. It confirms before doing anything (see below), and
+      # the `id` is the adapter action the root node handles.
+      - name: restore all
+        key: A
+        type: custom
+        id: restore-all
+        on_container: true
 
     # Adapter-backed per-row shortcuts (A2b), dispatched via `invoke_action`
-    # against the selected tracking (or, for `restore all`, the list root via
-    # the `parent:` prefix).
+    # against the selected tracking.
     #
     #   * `d` delete — soft-delete the tracking, keeping its start/end times,
     #     through the generic confirm-then-delete flow. The row drops out of
     #     the list (only non-deleted trackings are shown).
-    #   * `R` restore — undelete a previously deleted tracking (and purge the
-    #     successors a split produced). `A` restore-all does the same across
-    #     every deleted tracking the list can reach.
+    #   * `R` restore — undelete a previously deleted tracking. Restoring
+    #     **purges** the successor intervals a later split/edit produced
+    #     (irreversible), so it confirms first with a `(y/n)` prompt that
+    #     names how many intervals will be purged. `A restore all` (above)
+    #     does the same across every deleted tracking the list can reach,
+    #     confirming with the combined counts.
     #   * `s` toggle-tracking — start/stop time tracking on the row's *task*
     #     (shares the host's exclusivity policy with the Tasks tab). The
     #     toggle does NOT rebuild the view: the adapter patches the affected
@@ -229,7 +245,6 @@ views:
       d: delete
       R: restore
       s: toggle-tracking
-      A: parent:restore-all
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #

@@ -1502,6 +1502,17 @@ pub struct ActionDef {
     /// bounds (see [`ScriptScope`]). Ignored by non-script actions.
     #[serde(default, rename = "scope")]
     pub script_scope: ScriptScope,
+    /// Invoke this action on the pane's *container* (the adapter `root()`)
+    /// instead of the selected row. Built for actions that operate on the
+    /// whole list/level and must stay reachable even at the un-drilled flat
+    /// root, where there is no selected row and no `parent:` shortcut target
+    /// to address — e.g. trackings `restore all`. Unlike a `shortcuts:`
+    /// `parent:`-prefixed entry (which resolves its target from the nav
+    /// stack and so disappears at the empty root), an `on_container` action
+    /// builds its hint statically and dispatches through `adapter.root()`.
+    /// Today only `type: custom` honours this flag. Default `false`.
+    #[serde(default)]
+    pub on_container: bool,
 }
 
 impl ActionDef {
@@ -1518,6 +1529,13 @@ impl ActionDef {
     pub fn shows_in_action_bar(&self) -> bool {
         if self.hide_from_bar {
             return false;
+        }
+        // A container action (e.g. `restore all`) is shown even though its
+        // type (`custom`) is otherwise status-bar-only: it operates on the
+        // whole level and would have no other visible affordance at the
+        // flat root.
+        if self.on_container {
+            return true;
         }
         matches!(
             self.action_type.as_str(),
@@ -2037,6 +2055,7 @@ views:
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         };
         // Modal/persistent state actions → action bar
         assert!(make("edit").shows_in_action_bar());
@@ -2074,6 +2093,7 @@ views:
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            on_container: false,
         };
         assert!(!action.shows_in_action_bar());
     }
