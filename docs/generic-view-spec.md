@@ -1534,9 +1534,10 @@ Taste tut nichts. Eine `on_container`-Action baut ihren Hint dagegen
 `adapter.root()` über den `invoke_action`-Pfad (nicht die Popup-/`execute`-
 Schiene). So ist der zurückgegebene `ActionDispatch` — z. B. ein `Confirm`
 — wirksam. Heute nutzt nur `type: custom` dieses Flag; Beispiel: der
-Trackings-Tab `A restore all` (wirkt auf alle gelöschten Trackings, fragt
-vorher per `(y/n)` nach). Der Adapter-Action-Name kommt aus dem `id:`-Feld,
-das der Wurzel-Node in `invoke_action` behandelt.
+Trackings-Tab `A restore all` (stellt die gelöschten Trackings **im aktiven
+Query** wieder her — siehe Set-Scoping unten —, fragt vorher per `(y/n)`
+nach). Der Adapter-Action-Name kommt aus dem `id:`-Feld, das der Wurzel-Node
+in `invoke_action` behandelt.
 
 ```yaml
 actions:
@@ -1562,6 +1563,35 @@ Split im Delete-Plumbing der TUI lebt) kann sich so **jede** Aktion hinter
 einer Bestätigung absichern, und der Adapter formuliert den Text, weil nur
 er weiß, was die Aktion anrichtet (z. B. wie viele Nachfolge-Intervalle ein
 Restore purged).
+
+#### Set-scoping: mengen­wirksame Aktionen folgen dem aktiven Query
+
+**Vertrag:** Jede Aktion, die auf **mehr als den aufrufenden Knoten** wirkt
+— eine Container-/listenweite Aktion (`restore-all`), ein Bulk-Delete, eine
+Aggregat-Operation — MUSS auf die **sichtbare Menge** des Panes scopen, nie
+auf das gesamte (inkl. gelöschter Zeilen geladene) Universum des Adapters.
+
+Der Kanal dafür ist `ActionContext.query: Option<String>`: die TUI legt den
+**aktiven Query-Text des Panes** hinein — exakt denselben Filter-String, den
+sie dem Adapter ohnehin bei jedem `list()` über `LoadParams.query` reicht.
+Der Adapter löst die sichtbare Menge daraus selbst neu auf (z. B. via
+`find_filtered`), genau wie beim Listen-Load. Das ist **kein** Zurückfüttern
+gerenderter Inhalte (keine Id-Liste, keine Tabellenzeilen) — nur die
+_Identität_ des aktiven Filters, die der Adapter ohnehin kennt. `None`/leer
+heißt „kein Filter" → die ganze Liste ist im Scope (= was das Pane zeigt).
+
+Damit ist der Query der **einzige** Hebel: Gelöschte erreicht eine
+`restore-all` nur, wenn der Query sie sichtbar macht (der Query ist der
+alleinige Filter, ein `deleted=false` ist nirgends eingebacken — siehe
+„Query = einziger Filter"). Will der Nutzer alle gelöschten wiederherstellen,
+nimmt er sie in den Query auf, statt dass eine Aktion am Filter vorbei die
+ganze DB anfasst.
+
+Einzel-Knoten-Aktionen (eine Zeile löschen/restoren, Toggle) ignorieren
+`ctx.query` — ihr Ziel ist bereits der aufrufende Knoten. Natürliche
+Grenze: `task.undelete` (Tasks-Tab) stellt den **zuletzt gelöschten** Task
+wieder her — ein Undo-Schritt, keine Mengen­operation; es scopt bewusst nicht
+über den Query, weil es per Definition genau einen, den jüngsten, betrifft.
 
 Validator (start-time): leere Action-IDs werden abgelehnt; ein
 `shortcuts:`-Key, der bereits von einem `actions:`-Eintrag der
