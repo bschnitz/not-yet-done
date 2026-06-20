@@ -1749,7 +1749,7 @@ impl App {
     }
 
     /// CP-8 entry point: a `postgres:db_script` row's `e` shortcut
-    /// dispatched `ActionDispatch::OpenEditor { session_kind: "postgres_db_script" }`.
+    /// dispatched `ActionDispatch::OpenEditor { session_kind: "script_editor" }`.
     /// Opens [`PostgresDbScriptSession`] which writes the buffer back to
     /// `<instance_data_dir>/db_scripts/<database>/<script>.sql` on `:w`
     /// and does NOT re-execute — the user re-runs explicitly with `x`.
