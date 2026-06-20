@@ -26,10 +26,19 @@ use crate::tabs::Tab;
 /// function over data.
 #[derive(Debug, Default)]
 pub struct LinkResolveContext {
-    /// All non-deleted task UUIDs.
+    /// Referenced task UUIDs that resolve *live* (present in a `tasks`
+    /// adapter and not soft-deleted). Populated by probing each referenced
+    /// id against the adapter — not a full table dump.
     pub task_ids: HashSet<Uuid>,
-    /// All non-deleted tracking UUIDs.
+    /// Referenced tracking UUIDs that resolve live (present in a `trackings`
+    /// adapter and not soft-deleted).
     pub tracking_ids: HashSet<Uuid>,
+    /// Whether a `tasks` adapter is configured at all. When `false` the host
+    /// has no way to verify task refs (the task DB lives behind the adapter),
+    /// so `tasks/<uuid>` refs are treated as live rather than pruned blind.
+    pub tasks_adapter_present: bool,
+    /// Whether a `trackings` adapter is configured at all (see above).
+    pub trackings_adapter_present: bool,
     /// `(adapter_type, instance_id)` pairs for every currently configured
     /// content adapter, e.g. `("jira", "prod")`. A link whose head matches
     /// `adapter_type` but whose instance segment isn't in this set counts
@@ -64,6 +73,11 @@ pub fn classify_link_ref(raw: &str, ctx: &LinkResolveContext) -> Option<String> 
                 Ok(u) => u,
                 Err(_) => return Some(format!("invalid task uuid: {id_str}")),
             };
+            // No `tasks` adapter configured → the host can't see the task DB,
+            // so leave the ref alone rather than prune what it can't verify.
+            if !ctx.tasks_adapter_present {
+                return None;
+            }
             if !ctx.task_ids.contains(&uuid) {
                 return Some(format!("task {uuid} not found"));
             }
@@ -78,6 +92,10 @@ pub fn classify_link_ref(raw: &str, ctx: &LinkResolveContext) -> Option<String> 
                 Ok(u) => u,
                 Err(_) => return Some(format!("invalid tracking uuid: {id_str}")),
             };
+            // No `trackings` adapter configured → can't verify; keep the ref.
+            if !ctx.trackings_adapter_present {
+                return None;
+            }
             if !ctx.tracking_ids.contains(&uuid) {
                 return Some(format!("tracking {uuid} not found"));
             }
@@ -103,6 +121,31 @@ pub fn classify_link_ref(raw: &str, ctx: &LinkResolveContext) -> Option<String> 
         "postgres" => Some("postgres has no stable IDs".to_string()),
         other => Some(format!("unknown route: {other}")),
     }
+}
+
+/// Does `id` resolve to a *live* node in any of `adapters`? "Live" means
+/// some adapter returns the node from `get_by_id` AND it isn't flagged
+/// `deleted` in its metadata (the local adapters load the whole
+/// include-deleted universe but mark soft-deleted rows). Returns `false`
+/// when no adapter resolves it or every match is deleted — i.e. the ref is
+/// stale. Used by [`App::build_link_resolve_context`].
+async fn probe_ref_live(
+    adapters: &[&dyn not_yet_done_content::ContentAdapter],
+    id: &str,
+) -> bool {
+    for adapter in adapters {
+        if let Ok(node) = adapter.get_by_id(id).await {
+            let deleted = node
+                .metadata()
+                .fields
+                .iter()
+                .any(|f| f.key == "deleted" && f.value == "true");
+            if !deleted {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// State for the `gl` link popup. The [`SearchablePopup`] carries the
@@ -443,25 +486,52 @@ impl App {
         }
     }
 
-    /// Build a [`LinkResolveContext`] from the current process state.
-    /// Issues one query per source (tasks / trackings) plus an in-process
-    /// scan of configured content adapters. Soft-deleted tasks and
-    /// trackings count as stale because their underlying repos exclude
-    /// `deleted = true` rows.
-    fn build_link_resolve_context(&self) -> Result<LinkResolveContext, String> {
-        let task_service = std::sync::Arc::clone(&self.task_service);
-        let tracking_repo = std::sync::Arc::clone(&self.tracking_repo);
-        let (tasks, trackings) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                let t = task_service.list_tasks(None).await;
-                let tr = tracking_repo.find_all().await;
-                (t, tr)
-            })
-        });
-        let tasks = tasks.map_err(|e| format!("task scan failed: {e}"))?;
-        let trackings = trackings.map_err(|e| format!("tracking scan failed: {e}"))?;
-        let task_ids: HashSet<Uuid> = tasks.into_iter().map(|t| t.id).collect();
-        let tracking_ids: HashSet<Uuid> = trackings.into_iter().map(|t| t.id).collect();
+    /// Build a [`LinkResolveContext`] for the given link refs by probing
+    /// the configured adapters. Each `tasks/<uuid>` / `tracking/<uuid>` ref
+    /// is resolved against the matching `tasks` / `trackings` adapter via
+    /// [`ContentAdapter::get_by_id`]; an id counts live when some adapter
+    /// returns it and its node isn't flagged `deleted`. Soft-deleted tasks
+    /// and trackings therefore stay "stale" (the adapter loads the whole
+    /// include-deleted universe but exposes the `deleted` flag), preserving
+    /// the prune semantics from when the host queried the repos directly.
+    ///
+    /// The task/tracking DBs now live behind the adapters, so when no such
+    /// adapter is configured the host can't verify those refs at all — the
+    /// `*_adapter_present` flags record that and [`classify_link_ref`] then
+    /// leaves the refs untouched instead of pruning blind.
+    fn build_link_resolve_context(&self, refs: &[&str]) -> LinkResolveContext {
+        use not_yet_done_content::ContentAdapter;
+
+        // Partition referenced ids by scheme — we only probe ids that are
+        // actually referenced by a link row, not the whole table.
+        let mut task_uuids: HashSet<Uuid> = HashSet::new();
+        let mut tracking_uuids: HashSet<Uuid> = HashSet::new();
+        for raw in refs {
+            let Ok(node_ref) = NodeRef::parse(raw) else {
+                continue;
+            };
+            let (head, tail) = node_ref.split_head();
+            let parsed = tail.and_then(|s| Uuid::parse_str(s).ok());
+            match (head, parsed) {
+                ("tasks", Some(id)) => {
+                    task_uuids.insert(id);
+                }
+                ("tracking", Some(id)) => {
+                    tracking_uuids.insert(id);
+                }
+                _ => {}
+            }
+        }
+
+        let adapters_of = |kind: &str| -> Vec<&dyn ContentAdapter> {
+            self.content_views_iter()
+                .filter_map(|cv| cv.adapter.as_deref())
+                .filter(|a| a.adapter_type() == kind)
+                .collect()
+        };
+        let tasks_adapters = adapters_of("tasks");
+        let trackings_adapters = adapters_of("trackings");
+
         let adapter_instances: HashSet<(String, String)> = self
             .content_views_iter()
             .filter_map(|cv| {
@@ -470,11 +540,32 @@ impl App {
                     .map(|a| (a.adapter_type().to_string(), a.instance_id().to_string()))
             })
             .collect();
-        Ok(LinkResolveContext {
+
+        let (task_ids, tracking_ids) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut live_tasks = HashSet::new();
+                for id in &task_uuids {
+                    if probe_ref_live(&tasks_adapters, &id.to_string()).await {
+                        live_tasks.insert(*id);
+                    }
+                }
+                let mut live_trackings = HashSet::new();
+                for id in &tracking_uuids {
+                    if probe_ref_live(&trackings_adapters, &id.to_string()).await {
+                        live_trackings.insert(*id);
+                    }
+                }
+                (live_tasks, live_trackings)
+            })
+        });
+
+        LinkResolveContext {
             task_ids,
             tracking_ids,
+            tasks_adapter_present: !tasks_adapters.is_empty(),
+            trackings_adapter_present: !trackings_adapters.is_empty(),
             adapter_instances,
-        })
+        }
     }
 
     /// `:linkprune` entry point. Scans every link row, classifies each
@@ -484,14 +575,6 @@ impl App {
     /// empty — the modal then just reports the empty result so the user
     /// knows the scan ran.
     pub fn link_prune_command(&mut self) {
-        let ctx = match self.build_link_resolve_context() {
-            Ok(c) => c,
-            Err(msg) => {
-                self.set_query_error(Some(msg.clone()));
-                self.modal_message = Some(msg);
-                return;
-            }
-        };
         let repo = std::sync::Arc::clone(&self.link_repo);
         let rows = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move { repo.list_all().await })
@@ -509,6 +592,13 @@ impl App {
             self.modal_message = Some("No links in the database.".to_string());
             return;
         }
+        // Resolve only the refs this table actually uses, by probing the
+        // adapters that own the task/tracking data.
+        let refs: Vec<&str> = rows
+            .iter()
+            .flat_map(|r| [r.source_ref.as_str(), r.target_ref.as_str()])
+            .collect();
+        let ctx = self.build_link_resolve_context(&refs);
         let mut stale_ids: Vec<Uuid> = Vec::new();
         let mut sample: Vec<String> = Vec::new();
         for row in &rows {
@@ -763,6 +853,10 @@ mod classify_tests {
         LinkResolveContext {
             task_ids: task_ids.iter().copied().collect(),
             tracking_ids: tracking_ids.iter().copied().collect(),
+            // These tests exercise the verification path, so model a host
+            // that has both adapters configured.
+            tasks_adapter_present: true,
+            trackings_adapter_present: true,
             adapter_instances: instances
                 .iter()
                 .map(|(k, i)| (k.to_string(), i.to_string()))

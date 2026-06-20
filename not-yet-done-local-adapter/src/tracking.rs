@@ -2425,6 +2425,21 @@ impl ContentAdapter for TrackingAdapter {
         }
     }
 
+    /// A running tracking is one whose snapshot row is still `active`
+    /// (`ended_at IS NULL`). Best-effort, non-blocking: a contended lock or
+    /// unloaded snapshot reads as "none".
+    fn has_active_tracking(&self) -> bool {
+        self.snapshot
+            .try_read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|snap| snap.by_id.values().any(|row| row.active))
+            })
+            .unwrap_or(false)
+    }
+
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
             "tracking:root" => tracking_root_actions(),

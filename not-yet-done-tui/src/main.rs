@@ -78,7 +78,6 @@ async fn main() -> Result<()> {
 
     let task_service: Arc<dyn TaskService> = task_module.resolve();
     let tag_service: Arc<dyn TagService> = task_module.resolve();
-    let tracking_repo: Arc<dyn not_yet_done_task_core::repository::TrackingRepository> = task_module.resolve();
     let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> = core_module.resolve();
     let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> = core_module.resolve();
     let link_repo: Arc<dyn not_yet_done_core::repository::LinkRepository> = core_module.resolve();
@@ -105,10 +104,10 @@ async fn main() -> Result<()> {
             + Sync,
     > = Box::new(build_adapter_factories);
 
-    let mut app    = App::new(tui_config, theme, task_service, tag_service, query_shortcut_repo, settings_repo, tracking_repo, link_repo, factory_builder, host_ctx);
+    let mut app    = App::new(tui_config, theme, task_service, tag_service, query_shortcut_repo, settings_repo, link_repo, factory_builder, host_ctx);
 
-    // Load tracking state and column config from DB.
-    app.refresh_tracked_ids();
+    // Load column config from DB. (Tracking state is no longer cached at
+    // App level — the action-bar highlight reads it live from each adapter.)
     app.load_column_config();
     app.load_content_saved_queries();
     app.apply_default_content_queries();

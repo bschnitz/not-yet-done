@@ -286,8 +286,8 @@ impl App {
         // The `tabs:` section and/or the view set may have changed.
         self.rebuild_tab_layout();
 
-        // Refill data the rebuild dropped.
-        self.refresh_tracked_ids();
+        // Refill data the rebuild dropped. (Tracking state is read live
+        // from each adapter, so there is nothing to refresh here.)
         self.reload_link_refs();
 
         Ok("tui.yaml reloaded".to_string())

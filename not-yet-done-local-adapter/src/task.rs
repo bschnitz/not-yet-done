@@ -1996,6 +1996,17 @@ impl ContentAdapter for TaskAdapter {
         }
     }
 
+    /// Any running tracking surfaces from the eager snapshot's `tracked`
+    /// set (folded once from `find_all_active` at load). Best-effort,
+    /// non-blocking: a contended lock or unloaded snapshot reads as "none".
+    fn has_active_tracking(&self) -> bool {
+        self.snapshot
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|snap| !snap.tracked.is_empty()))
+            .unwrap_or(false)
+    }
+
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
             "task:root" => task_root_actions(),

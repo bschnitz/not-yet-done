@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use not_yet_done_core::repository::{
     LinkRepository, QueryShortcutRepository, SettingsRepository,
 };
-use not_yet_done_task_core::repository::TrackingRepository;
 use not_yet_done_task_core::service::TaskService;
 use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
 
@@ -577,7 +576,6 @@ pub struct App {
     pub tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
     pub query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
     settings_repo: Arc<dyn SettingsRepository>,
-    tracking_repo: Arc<dyn TrackingRepository>,
     pub link_repo: Arc<dyn LinkRepository>,
 
     pub load_rx: tokio::sync::mpsc::UnboundedReceiver<LoadMsg>,
@@ -705,9 +703,6 @@ pub struct App {
     /// `:config` picker popup — lists YAML files under the config dir.
     /// Activating a row opens it in a [`crate::edit_session::FileEditSession`].
     pub config_picker_popup: Option<SearchablePopup>,
-
-    /// Cached set of actively tracked task IDs (refreshed on tracking changes).
-    pub tracked_ids: HashSet<Uuid>,
 
     /// Cached set of every `source_ref` + `target_ref` string in the link
     /// table. Drives the "has-links" indicator column without hitting the
@@ -843,7 +838,6 @@ impl App {
         tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
         query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
         settings_repo: Arc<dyn SettingsRepository>,
-        tracking_repo: Arc<dyn TrackingRepository>,
         link_repo: Arc<dyn LinkRepository>,
         adapter_factory_builder: Box<
             dyn Fn() -> std::collections::HashMap<
@@ -904,7 +898,6 @@ impl App {
             tag_service,
             query_shortcut_repo,
             settings_repo,
-            tracking_repo,
             link_repo,
             load_rx,
             load_tx,
@@ -943,7 +936,6 @@ impl App {
             adapter_creds_popup: None,
             query_var_popup: None,
             config_picker_popup: None,
-            tracked_ids: HashSet::new(),
             link_refs: HashSet::new(),
             pending_key: None,
             awaiting_favorite_shortcut: None,
@@ -5450,8 +5442,14 @@ impl App {
             self.tab_bar.set_content_sub_tabs(idx, labels);
         }
 
-        // Action bar lives on each view; push state in.
-        let tracking_active = !self.tracked_ids.is_empty();
+        // Action bar lives on each view; push state in. "Tracking active"
+        // is a global highlight — OR the in-memory active set across every
+        // open adapter (the task/tracking adapters report it; remote
+        // adapters default to `false`). Routed through the adapter contract
+        // so the App no longer queries the tracking repo directly.
+        let tracking_active = self
+            .content_views_iter()
+            .any(|cv| cv.adapter.as_ref().is_some_and(|a| a.has_active_tracking()));
         let session = self.pending_session.as_ref();
         let session_label = |scope: crate::edit_session::SessionScope| -> Option<&str> {
             session.filter(|s| s.scope() == scope).map(|s| s.label())
@@ -7973,10 +7971,6 @@ impl App {
         }
     }
 
-    pub fn refresh_tracked_ids(&mut self) {
-        self.tracked_ids = self.get_tracked_task_ids();
-    }
-
     /// Refresh `link_refs` from the link table. Cheap — a single `list_all`
     /// scan. Called on startup and after every mutation that adds or
     /// removes a link row. Also syncs the snapshot held by views that
@@ -8000,20 +7994,6 @@ impl App {
                 cv.set_link_refs(&self.link_refs);
             }
         }
-    }
-
-    pub fn get_tracked_task_ids(&self) -> HashSet<Uuid> {
-        let repo = Arc::clone(&self.tracking_repo);
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                repo.find_all_active()
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|t| t.task_id)
-                    .collect()
-            })
-        })
     }
 
     /// Returns `true` if an external editor is currently running OR if a
