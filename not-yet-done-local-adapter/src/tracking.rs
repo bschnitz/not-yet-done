@@ -1152,6 +1152,21 @@ fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Meta
             // identically-named tasks stay distinct), no longer via an
             // engine-side `then_by` over these flat rows.
             field("task_id", row.tracking.task_id.to_string(), "Task ID"),
+            // Deleted flag (`"true"`/`""`) — not a visible column, a styling
+            // signal: the TUI renders rows whose `deleted` field is `"true"`
+            // dimmed. The snapshot loads the full include-deleted universe
+            // (#33), so a query that surfaces deleted rows (e.g. dropping
+            // `[deleted, =, false]`) shows them greyed-out as context rather
+            // than as live entries. Mirrors the Tasks (A) `deleted` signal.
+            field(
+                "deleted",
+                if row.tracking.deleted {
+                    "true".to_string()
+                } else {
+                    String::new()
+                },
+                "Deleted",
+            ),
         ],
     }
 }
@@ -2797,6 +2812,27 @@ mod tests {
         let started = get("started").unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&started).is_ok());
         assert!(chrono::DateTime::parse_from_rfc3339(&get("ended").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn entry_metadata_emits_deleted_signal() {
+        let now = chrono::Utc::now();
+        // A live row carries an empty `deleted` field; a soft-deleted row
+        // carries "true" — the TUI dims rows whose `deleted` field is "true".
+        let live = row(tracking(Uuid::from_u128(1), Uuid::from_u128(9), 60, true), "Live", vec![]);
+        let gone = row(
+            deleted_tracking(Uuid::from_u128(2), Uuid::from_u128(9), 60, true),
+            "Gone",
+            vec![],
+        );
+        let get = |md: &Metadata, k: &str| {
+            md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone())
+        };
+        assert_eq!(get(&entry_metadata(&live, now), "deleted").as_deref(), Some(""));
+        assert_eq!(
+            get(&entry_metadata(&gone, now), "deleted").as_deref(),
+            Some("true")
+        );
     }
 
     #[test]
