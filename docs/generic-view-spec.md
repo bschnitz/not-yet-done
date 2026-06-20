@@ -487,24 +487,28 @@ Verhalten / Grenzen:
 - **Kaskadiert beim Schließen.** Wird die Quell-Pane geschlossen, verschwindet
   ihr Detail-Follower mit (eigener Backlink, getrennt von gekoppelten Drills).
 
-#### `group_by:` / `then_by:` / `aggregates:` / `summary_only:` — Gruppierung & Summen (M3)
+#### `group_by:` / `aggregates:` — Gruppierung & Summen (M3)
 
 Stehen auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout` /
-`smooth_scroll`), alle optional. Sie schalten den **gruppierten Render-Pfad** der
-einzeiligen Tabelle ein: die gefilterten Einträge werden nach einem (oder
-mehreren, s. `then_by:`) Schlüsseln partitioniert, jede Partition bekommt eine
-**Gruppen-Kopfzeile** mit Zwischensumme, und unter der ganzen Tabelle steht eine
-angepinnte **Gesamtsumme** (Footer).
+`smooth_scroll`), beide optional. Sie schalten den **gruppierten Render-Pfad** der
+einzeiligen Tabelle ein: die gefilterten Einträge werden nach **einem** Schlüssel
+partitioniert, jede Partition bekommt eine **Gruppen-Kopfzeile** mit Zwischensumme,
+und unter der ganzen Tabelle steht eine angepinnte **Gesamtsumme** (Footer).
+
+Die Engine-Gruppierung ist bewusst **einstufig**. Feinere „Condensing"-Layouts
+(z. B. Trackings-„Condensed": pro Tag _und_ Task eine summierte Zeile) sind
+**Sache des Adapters**, nicht der Engine — sie gehören zur Datenhaltung und
+-Interpretation und lassen sich, wo eine DB darunter liegt, nativ als `GROUP BY`
+erledigen. Der Adapter kondensiert seine Zeilen vorab selbst und liefert eine
+flache Liste, die hier einstufig nach Tag gruppiert wird (s.
+`grouping::condense_cells` als generischen, opt-in nutzbaren Baustein).
 
 ```yaml
-- name: condensed
+- name: grouped
   node_type: "tracking"
-  group_by: { column: started, bucket: day } # äußere Ebene: nach Tag
-  then_by:
-    - { column: task_id } # innere Ebene: pro Tag nach Task
+  group_by: { column: started, bucket: day, order: desc } # nach Tag, neueste zuerst
   aggregates:
-    - { column: duration, op: sum } # Zwischensumme je Ebene + Gesamt
-  summary_only: true # innerste Gruppe = eine repräsentative Zeile
+    - { column: duration, op: sum, total_column: total } # Summe je Tag + Gesamt
 ```
 
 **`group_by:`** — wonach gruppiert wird. Pflichtfeld `column:` ist ein
@@ -536,15 +540,6 @@ Gruppen** — `desc` zeigt bei Datums-Buckets den neuesten Eimer zuerst (das
 unabhängig davon die Adapter-Reihenfolge. `zg` (s. u.) übernimmt das
 konfigurierte `order:` beim Durchschalten.
 
-**`then_by:`** — **verschachtelte** Gruppierung. Eine Liste weiterer Ebenen
-(gleiche Felder wie `group_by:`), nach denen _innerhalb_ jeder äußeren Gruppe
-weiter partitioniert wird. Die volle Ebenenliste ist `[group_by] ++ then_by`.
-Beispiel Trackings-„Condensed": `group_by` nach Tag, `then_by` nach Task → ein
-Tages-Header, darunter je Task eine Zeile mit der Tages-Task-Summe. Ohne
-`group_by:` wird `then_by:` ignoriert. Tipp: die innere Ebene auf einen
-**stabilen, evtl. unsichtbaren** Schlüssel (`task_id`) gruppieren, nicht auf das
-angezeigte Label, damit gleichnamige Einträge nicht fälschlich verschmelzen.
-
 **`aggregates:`** — Liste der Spalten, die je Gruppe und gesamt summiert werden.
 Jeder Eintrag hat `column:` (ein Spalten-`key`) und `op:` (aktuell nur `sum`,
 der Default). Summiert wird auf dem **kanonischen** Wert (für `kind: duration`
@@ -562,22 +557,10 @@ ganz normal als Spalte deklariert (typisch `kind: duration`); solange die
 Gruppierung ausgeschaltet ist (`zg` auf `None`), wird sie **ausgeblendet**,
 weil eine Gruppensumme ohne Gruppen keinen Inhalt hätte.
 
-**`summary_only:`** — `true` blendet die einzelnen Daten-Rows aus. Die
-**innerste** Gruppen-Ebene kollabiert dann zu **je einer repräsentativen
-Daten-Zeile** (aufgebaut aus einem Member der Gruppe, mit dem Gruppen-Total in
-den Aggregat-Spalten) — diese Zeile ist **selektierbar**, sodass Row-Aktionen
-(delete/toggle …) auf sie wirken. Äußere Ebenen bleiben `── label ──`-Header mit
-Zwischensumme. Das ist die „Condensed"-Ansicht der Trackings: pro (Tag, Task)
-genau eine Zeile mit Pfad, Task und Summe. (Ohne `then_by:`, also einstufig,
-kollabiert jede Gruppe direkt zu ihrer repräsentativen Zeile.)
-
 **Laufzeit-Umschaltung (`cycle_grouping`, Default `zg`):** Die Aktion
 `cycle_grouping` (in `keybindings.yaml` bindbar, Default `zg`) schaltet die
 Gruppierung der aktiven Ebene durch: ungruppiert → `day` → `week` → `month` →
-`year` → ungruppiert. Bei verschachtelter Gruppierung rotiert sie nur die
-**äußere** (`group_by`-)Ebene; die inneren `then_by:`-Ebenen bleiben erhalten
-(„Condensed" mit `zg` auf `None` = eine Zeile pro Task über den ganzen
-Zeitraum). Sie ist nur aktiv, wenn die Ebene überhaupt ein `group_by:`
+`year` → ungruppiert. Sie ist nur aktiv, wenn die Ebene überhaupt ein `group_by:`
 konfiguriert hat. Der Umschalt-Status ist View-State (nicht persistiert) und
 überschreibt das konfigurierte `group_by:` nur für die laufende Sitzung.
 

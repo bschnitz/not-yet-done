@@ -25,6 +25,6 @@ pub use layout::{
     compute_table,
 };
 pub use row::{ComputedLine, ComputedMultiRow, ComputedRow, Row};
-pub use group::{GroupPlan, PlanRow, group, group_nested};
+pub use group::{GroupPlan, PlanRow, group};
 pub use grouping::GroupedCell;
 pub use target::{CharBuf, RenderTarget, render_to_target};

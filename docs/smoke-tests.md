@@ -3620,7 +3620,7 @@ bespoke nativen Trackings-Tab (bis C1).
 - [ ] `x` öffnet das `:script`-Menü; ein Script gegen die selektierte Zeile
       bekommt deren JSON (`{json_file}`) übergeben.
 
-### A2c — Condensed (verschachtelte Gruppierung M3 `then_by`)
+### A2c — Condensed (adapter-seitiges Condensing, `tracking:condensed-row`)
 
 - [ ] `v` schaltet auf den **Condensed**-Subtab; `a` schaltet zurück zur
       flachen Liste.
@@ -3816,8 +3816,9 @@ persistiert, wie `zg` — nativ persistierte via `SaveTrackingGrouping`).
       Liste; Aggregat-Spalte + Σ-Footer verschwinden, wie bei `zg` auf
       „ungruppiert").
 - [x] Pfeile + Enter/Space wählen ebenfalls; Esc schließt ohne Änderung.
-- [x] Condensed-Subtab: `u` → `m` rotiert nur die äußere Ebene auf
-      Monat (`── 2026-06`), die innere `then_by`-Task-Ebene bleibt.
+- [x] Condensed-Subtab: `u` → `m` rotiert nur die Tag-Bucket-Ebene auf
+      Monat (`── 2026-06`), die adapter-seitige Pro-Task-Aufschlüsselung
+      bleibt.
 - [x] Auf einer Ebene ohne `group_by` (z. B. Tasks (A)): kein
       `u group`-Hint, `u` bleibt frei für YAML-`shortcuts:`.
 

@@ -247,10 +247,10 @@ views:
   # above does. Because the rows arrive pre-sorted and the engine's day
   # grouping is stable, `S` orders the task rows **within** each day.
   #
-  # Contrast with the engine-side nested grouping (`then_by` + `summary_only`)
-  # this view used to use: there the adapter's item sort was invisible (the
-  # engine ordered cells by group key only). Moving the collapse into the
-  # adapter is what makes `S` work here.
+  # Condensing lives in the adapter on purpose: an engine that only knows how
+  # to bucket rows by a group key can't honour the adapter's item sort within
+  # a cell. Collapsing per (day, task) in the data owner is what makes `S`
+  # order the task rows here.
   #
   # `zg` cycles the day bucket (Day → Week → Month → Year → None) like the
   # flat list. The condensing keys on the task **id**, never the visible

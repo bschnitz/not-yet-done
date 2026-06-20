@@ -30,7 +30,7 @@ use not_yet_done_ratatui::{
 use not_yet_done_table::{
     CellAlignment, CellContent, ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer,
     PlanRow, Row as TRow, RowTemplate, StyledSpan, TableConfig, compute_multiline_table,
-    compute_table, fit_aligned, group_nested,
+    compute_table, fit_aligned, group,
 };
 
 use not_yet_done_content::{
@@ -2063,52 +2063,14 @@ impl ContentPane {
         }
     }
 
-    /// Whether the active level collapses each group to a single summary
-    /// row (M3 `summary_only`). Same level resolution as
-    /// [`current_group_by`](Self::current_group_by).
-    fn current_summary_only(&self, view_defs: &[ViewDef]) -> bool {
-        if self.tree.is_some() {
-            return false;
-        }
-        if let Some(ref child) = self.active_child {
-            child.summary_only
-        } else {
-            self.view_def(view_defs)
-                .map(|vd| vd.summary_only)
-                .unwrap_or(false)
-        }
-    }
-
-    /// The active level's inner grouping levels (M3 nested grouping,
-    /// `then_by`). Read from the same level as
-    /// [`current_group_by`](Self::current_group_by); empty in tree mode.
-    /// Not affected by the runtime `cycle_grouping` override, which only
-    /// toggles the *outer* level.
-    fn current_then_by(&self, view_defs: &[ViewDef]) -> Vec<GroupBy> {
-        if self.tree.is_some() {
-            return Vec::new();
-        }
-        if let Some(ref child) = self.active_child {
-            child.then_by.clone()
-        } else {
-            self.view_def(view_defs)
-                .map(|vd| vd.then_by.clone())
-                .unwrap_or_default()
-        }
-    }
-
-    /// The full effective grouping-level list, outermost first: the
-    /// (override-aware) outer [`current_group_by`](Self::current_group_by)
-    /// followed by the static inner [`current_then_by`](Self::current_then_by)
-    /// levels. Empty when the active level configures no `group_by` at all
-    /// (flat list). When the user has cycled the outer level off but inner
-    /// levels exist, those inner levels remain (e.g. Trackings "Condensed"
-    /// with grouping turned off collapses to one row per task). This is what
-    /// the grouped render path consumes — and that path is **flat-only**: in
-    /// tree mode this is always empty, even when the adapter groups the tree
-    /// itself (`group_by_via_adapter` makes [`current_group_by`] non-`None`
-    /// there, but those groups arrive as tree *nodes*, not as engine-built
-    /// group headers).
+    /// The effective grouping level, or empty when the active level configures
+    /// no `group_by` at all (flat list) or the user has cycled grouping off.
+    /// Engine grouping is single-level; an adapter that wants finer-grained
+    /// condensing pre-condenses its rows itself. This is what the grouped
+    /// render path consumes — and that path is **flat-only**: in tree mode this
+    /// is always empty, even when the adapter groups the tree itself
+    /// (`group_by_via_adapter` makes [`current_group_by`] non-`None` there, but
+    /// those groups arrive as tree *nodes*, not as engine-built group headers).
     fn current_levels(&self, view_defs: &[ViewDef]) -> Vec<GroupBy> {
         if self.is_detail_pane() || self.tree.is_some() {
             return Vec::new();
@@ -2116,12 +2078,7 @@ impl ContentPane {
         if !self.level_has_group_by(view_defs) {
             return Vec::new();
         }
-        let mut levels: Vec<GroupBy> = Vec::new();
-        if let Some(outer) = self.current_group_by(view_defs) {
-            levels.push(outer);
-        }
-        levels.extend(self.current_then_by(view_defs));
-        levels
+        self.current_group_by(view_defs).into_iter().collect()
     }
 
     /// Whether the active level *configures* a `group_by` (M3). Unlike
@@ -4631,7 +4588,6 @@ impl ContentPane {
                 let levels = self.current_levels(view_defs);
                 if !levels.is_empty() {
                     let aggregates = self.current_aggregates(view_defs);
-                    let summary_only = self.current_summary_only(view_defs);
                     self.last_column_keys = columns.iter().map(|c| c.key.clone()).collect();
                     self.table
                         .set_smooth_scroll(self.current_smooth_scroll(view_defs));
@@ -4641,7 +4597,6 @@ impl ContentPane {
                         &columns,
                         &levels,
                         &aggregates,
-                        summary_only,
                         now,
                         &has_link_lookup,
                         &config,
@@ -9995,62 +9950,40 @@ fn build_grouped_table(
     columns: &[ColumnDef],
     levels: &[GroupBy],
     aggregates: &[AggregateDef],
-    summary_only: bool,
     now: chrono::DateTime<chrono::Local>,
     has_link_lookup: &dyn Fn(&str) -> bool,
     config: &TableConfig,
     col_ids: &[TColumnId],
     header: &TRow<u32>,
 ) -> GroupedBuild {
-    // The deepest nesting level; under `summary_only` its headers render as
-    // representative data rows rather than `── label ──` summary headers.
-    let deepest = levels.len().saturating_sub(1);
+    // Engine grouping is single-level; the caller gates on a non-empty
+    // `levels`, so exactly one level is present here.
+    let spec = &levels[0];
 
-    // 1. Nested group-label path per filtered item; order items by the full
-    //    path — honouring each level's configured `order` — so groups are
-    //    contiguous at every level (and chronological for ISO date buckets;
-    //    `desc` puts the newest bucket first). The sort is stable, so rows
-    //    inside a group keep the adapter's order.
-    let mut tagged: Vec<(usize, Vec<String>)> = order
+    // 1. Group-label per filtered item; order items by that label — honouring
+    //    the configured `order` — so groups are contiguous (and chronological
+    //    for ISO date buckets; `desc` puts the newest bucket first). The sort
+    //    is stable, so rows inside a group keep the adapter's order (this is
+    //    how the adapter's item sort survives into each group).
+    let mut tagged: Vec<(usize, String)> = order
         .iter()
         .map(|&i| {
-            let path: Vec<String> = levels
-                .iter()
-                .map(|lvl| {
-                    group_label(
-                        raw_value_by_key(&items[i], columns, &lvl.column),
-                        lvl.bucket,
-                    )
-                })
-                .collect();
-            (i, path)
+            let key = group_label(raw_value_by_key(&items[i], columns, &spec.column), spec.bucket);
+            (i, key)
         })
         .collect();
-    tagged.sort_by(|a, b| {
-        for (k, (ka, kb)) in a.1.iter().zip(b.1.iter()).enumerate() {
-            let ord = match levels.get(k).map(|l| l.order).unwrap_or_default() {
-                GroupOrder::Asc => ka.cmp(kb),
-                GroupOrder::Desc => kb.cmp(ka),
-            };
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-        }
-        std::cmp::Ordering::Equal
+    tagged.sort_by(|a, b| match spec.order {
+        GroupOrder::Asc => a.1.cmp(&b.1),
+        GroupOrder::Desc => b.1.cmp(&a.1),
     });
-    let keys: Vec<Vec<String>> = tagged.iter().map(|(_, p)| p.clone()).collect();
+    let keys: Vec<String> = tagged.iter().map(|(_, k)| k.clone()).collect();
     let sorted_idx: Vec<usize> = tagged.iter().map(|(i, _)| *i).collect();
 
-    // 2. Aggregate columns + their per-item values (in grouped order).
-    let agg_cols: Vec<usize> = aggregates
-        .iter()
-        .filter_map(|a| columns.iter().position(|c| c.key == a.column))
-        .collect();
-    // Split by destination: an aggregate without `total_column` totals on
-    // the `── label ──` header rows; one *with* it writes per-group totals
-    // into that dedicated column on the closing data row of each outermost
-    // group instead. Pairs are (index into `aggregates`/the totals arrays,
-    // column index).
+    // 2. Aggregate columns split by destination: an aggregate without
+    //    `total_column` totals on the `── label ──` header rows; one *with* it
+    //    writes per-group totals into that dedicated column on the closing data
+    //    row of each group instead. Pairs are (index into `aggregates`/the
+    //    totals arrays, column index).
     let header_aggs: Vec<(usize, usize)> = aggregates
         .iter()
         .enumerate()
@@ -10082,19 +10015,19 @@ fn build_grouped_table(
         .collect();
     let values_refs: Vec<&[Option<i64>]> = values_owned.iter().map(|v| v.as_slice()).collect();
 
-    let plan = group_nested(&keys, &values_refs, summary_only, !aggregates.is_empty());
+    let plan = group(&keys, &values_refs, !aggregates.is_empty());
 
-    // Which data-row position closes each outermost group, and the totals
-    // written into the total-target columns there. Computed up front so the
-    // engine's width fitting (step 3) already sees the totals in the cells.
+    // Which data-row position closes each group, and the totals written into
+    // the total-target columns there. Computed up front so the engine's width
+    // fitting (step 3) already sees the totals in the cells.
     let mut pos_totals: std::collections::HashMap<usize, Vec<(usize, i64)>> =
         std::collections::HashMap::new();
     if !column_total_aggs.is_empty() {
         let close =
-            |outer: Option<usize>,
+            |grp: Option<usize>,
              last: Option<usize>,
              map: &mut std::collections::HashMap<usize, Vec<(usize, i64)>>| {
-                if let (Some(g), Some(p)) = (outer, last) {
+                if let (Some(g), Some(p)) = (grp, last) {
                     map.insert(
                         p,
                         column_total_aggs
@@ -10104,22 +10037,15 @@ fn build_grouped_table(
                     );
                 }
             };
-        let mut outer_group: Option<usize> = None;
+        let mut cur_group: Option<usize> = None;
         let mut last_pos: Option<usize> = None;
         let mut data_pos = 0usize;
         for prow in &plan.rows {
             match prow {
-                PlanRow::Header { level, group, .. } => {
-                    if *level == 0 {
-                        close(outer_group, last_pos, &mut pos_totals);
-                        outer_group = Some(*group);
-                        last_pos = None;
-                    }
-                    if summary_only && *level == deepest {
-                        // Renders as a representative data row (step 3).
-                        last_pos = Some(data_pos);
-                        data_pos += 1;
-                    }
+                PlanRow::Header { group, .. } => {
+                    close(cur_group, last_pos, &mut pos_totals);
+                    cur_group = Some(*group);
+                    last_pos = None;
                 }
                 PlanRow::Item { .. } => {
                     last_pos = Some(data_pos);
@@ -10128,7 +10054,7 @@ fn build_grouped_table(
                 PlanRow::GrandTotal => {}
             }
         }
-        close(outer_group, last_pos, &mut pos_totals);
+        close(cur_group, last_pos, &mut pos_totals);
     }
     // The total a target column shows at data-row `row_idx` — the outermost
     // group's total on its closing row, blank everywhere else. Routed
@@ -10162,60 +10088,16 @@ fn build_grouped_table(
         }
         row
     };
-    // A condensed summary row (innermost `summary_only` level): the
-    // representative member's own columns, but every aggregate column shows
-    // the group total instead of the member's single value.
-    let repr_row = |row_idx: usize, pos: usize, totals: &[i64]| -> TRow<u32> {
-        let item = &items[sorted_idx[pos]];
-        let mut row = TRow::new(row_idx as u32);
-        for (ci, col) in columns.iter().enumerate() {
-            if total_target_cols.contains(&ci) {
-                row = row.cell(&col.key, total_cell(row_idx, ci, col));
-            } else if let Some(slot) = agg_cols.iter().position(|&c| c == ci) {
-                // Through `typed_cell_content` so the summed value keeps the
-                // column kind's alignment, exactly like a plain data cell.
-                row = row.cell(&col.key, typed_cell_content(&totals[slot].to_string(), col));
-            } else if col.source.as_deref() == Some("has_links") {
-                let icon = if has_link_lookup(&item.id) {
-                    "🔗"
-                } else {
-                    " "
-                };
-                row = row.cell(&col.key, icon);
-            } else {
-                row = row.cell(&col.key, cell_content_for(item, col, now));
-            }
-        }
-        row
-    };
 
-    // 3. Fit every "data-like" row through the engine in plan order so the
-    //    column widths are consistent: that is every `Item` plus — under
-    //    `summary_only` — every innermost-level `Header` (rendered from its
-    //    representative member). The representative's original-`items` index is
-    //    remembered so the row stays selectable and maps back correctly.
+    // 3. Fit every data (`Item`) row through the engine in plan order so the
+    //    column widths are consistent. Each row's original-`items` index is
+    //    remembered so it stays selectable and maps back correctly.
     let mut data_rows: Vec<TRow<u32>> = Vec::new();
     let mut data_filtered: Vec<usize> = Vec::new();
     for prow in &plan.rows {
-        match prow {
-            PlanRow::Item { index } => {
-                data_rows.push(item_row(data_rows.len(), *index));
-                data_filtered.push(sorted_idx[*index]);
-            }
-            PlanRow::Header {
-                level,
-                group,
-                representative,
-                ..
-            } if summary_only && *level == deepest => {
-                data_rows.push(repr_row(
-                    data_rows.len(),
-                    *representative,
-                    &plan.group_totals[*group],
-                ));
-                data_filtered.push(sorted_idx[*representative]);
-            }
-            _ => {}
+        if let PlanRow::Item { index } = prow {
+            data_rows.push(item_row(data_rows.len(), *index));
+            data_filtered.push(sorted_idx[*index]);
         }
     }
     // Phantom sizing row: the Σ footer's grand totals can be wider than any
@@ -10240,37 +10122,24 @@ fn build_grouped_table(
     let col_widths = computed.col_widths.clone();
     let header_cells = computed.header.map(|h| h.cells).unwrap_or_default();
 
-    // 4. Interleave summary-header rows with the fitted data rows in plan order.
+    // 4. Interleave `── label ──` group-header rows with the fitted data rows
+    //    in plan order.
     let mut widget_rows: Vec<TableWidgetRow> = Vec::new();
     let mut filtered_indices: Vec<usize> = Vec::new();
     let mut next_data = 0usize;
     for prow in &plan.rows {
         match prow {
-            PlanRow::Header { level, .. } if summary_only && *level == deepest => {
-                // Innermost condensed row: a selectable data row.
-                let cr = &computed.rows[next_data];
-                widget_rows.push(item_widget_row(cr, columns));
-                filtered_indices.push(data_filtered[next_data]);
-                next_data += 1;
-            }
-            PlanRow::Header {
-                label,
-                level,
-                group,
-                ..
-            } => {
-                // A `── label ──` group header, indented by nesting depth.
-                // The ISO group key stays the sort identity; only the
-                // rendered text goes through the human-facing mapping.
-                let display =
-                    bucket_display_label(label, levels.get(*level).and_then(|l| l.bucket));
-                let indent = "  ".repeat(*level);
+            PlanRow::Header { label, group, .. } => {
+                // A `── label ──` group header. The ISO group key stays the
+                // sort identity; only the rendered text goes through the
+                // human-facing mapping.
+                let display = bucket_display_label(label, spec.bucket);
                 let totals: Vec<(usize, i64)> = header_aggs
                     .iter()
                     .map(|&(ai, ci)| (ci, plan.group_totals[*group][ai]))
                     .collect();
                 widget_rows.push(summary_row(
-                    format!("{indent}── {display} "),
+                    format!("── {display} "),
                     &totals,
                     columns,
                     &col_widths,
@@ -11455,9 +11324,7 @@ mod tests {
                     editor_in_place: false,
                     leaf_glyph: None,
                     group_by: None,
-                    then_by: Vec::new(),
                     aggregates: Vec::new(),
-                    summary_only: false,
                     mark_read_on_reach_end: None,
                 }],
                 pagination: None,
@@ -11470,9 +11337,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -11687,9 +11552,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -11888,9 +11751,7 @@ mod tests {
             editor_in_place: false,
             leaf_glyph: None,
             group_by: None,
-            then_by: Vec::new(),
             aggregates: Vec::new(),
-            summary_only: false,
             mark_read_on_reach_end: None,
         }];
 
@@ -12194,9 +12055,7 @@ mod tests {
                     editor_in_place: false,
                     leaf_glyph: None,
                     group_by: None,
-                    then_by: Vec::new(),
                     aggregates: Vec::new(),
-                    summary_only: false,
                     mark_read_on_reach_end: None,
                 }],
                 pagination: None,
@@ -12209,9 +12068,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -12334,9 +12191,7 @@ mod tests {
             editor_in_place: false,
             leaf_glyph: None,
             group_by: None,
-            then_by: Vec::new(),
             aggregates: Vec::new(),
-            summary_only: false,
             mark_read_on_reach_end: None,
         }
     }
@@ -12418,9 +12273,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -12581,9 +12434,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -13206,9 +13057,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -14446,9 +14295,7 @@ mod tests {
             editor_in_place: false,
             leaf_glyph: None,
             group_by: None,
-            then_by: Vec::new(),
             aggregates: Vec::new(),
-            summary_only: false,
             mark_read_on_reach_end: None,
         });
 
@@ -14545,9 +14392,7 @@ mod tests {
             editor_in_place: false,
             leaf_glyph: None,
             group_by: None,
-            then_by: Vec::new(),
             aggregates: Vec::new(),
-            summary_only: false,
             mark_read_on_reach_end: None,
         });
 
@@ -14968,9 +14813,7 @@ mod tests {
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -16127,9 +15970,7 @@ mod tests {
                     editor_in_place: false,
                     leaf_glyph: None,
                     group_by: None,
-                    then_by: Vec::new(),
                     aggregates: Vec::new(),
-                    summary_only: false,
                     mark_read_on_reach_end: None,
                 }],
                 pagination: None,
@@ -16142,9 +15983,7 @@ mod tests {
                 shortcuts: view_shortcuts,
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 tree_connector_style: None,
                 unread_style: None,
                 unread_marker: None,
@@ -17637,9 +17476,7 @@ views:
                 editor_in_place: false,
                 leaf_glyph: None,
                 group_by: None,
-                then_by: Vec::new(),
                 aggregates: Vec::new(),
-                summary_only: false,
                 mark_read_on_reach_end: None,
             }],
             pagination: None,
@@ -17652,9 +17489,7 @@ views:
             shortcuts: HashMap::new(),
             leaf_glyph: None,
             group_by: None,
-            then_by: Vec::new(),
             aggregates: Vec::new(),
-            summary_only: false,
             tree_connector_style: None,
             unread_style: None,
             unread_marker: None,
@@ -17886,7 +17721,7 @@ views:
 
     /// Drive [`build_grouped_table`] over a small fixture and return the
     /// build plus the right-aligned total text per summary row (trimmed).
-    fn run_grouped(summary_only: bool) -> (GroupedBuild, Vec<String>, Vec<String>) {
+    fn run_grouped() -> (GroupedBuild, Vec<String>, Vec<String>) {
         let items = vec![
             group_item("0", "B", "30"),
             group_item("1", "A", "10"),
@@ -17926,7 +17761,6 @@ views:
             &columns,
             &levels,
             &aggregates,
-            summary_only,
             chrono::Local::now(),
             &no_links,
             &config,
@@ -17953,7 +17787,7 @@ views:
 
     #[test]
     fn grouped_table_interleaves_headers_items_and_footer() {
-        let (build, header_totals, footer_totals) = run_grouped(false);
+        let (build, header_totals, footer_totals) = run_grouped();
 
         // 2 group headers + 4 items, grand total pinned as footer.
         assert_eq!(build.widget_rows.len(), 6);
@@ -17983,123 +17817,6 @@ views:
             header_a.primary_line()[0].style_id,
             Some(GROUP_HEADER_STYLE_ID)
         );
-    }
-
-    #[test]
-    fn grouped_table_summary_only_renders_representative_rows() {
-        let (build, _header_totals, footer_totals) = run_grouped(true);
-
-        // summary_only collapses each group to ONE *selectable* representative
-        // data row (the Trackings "Condensed" layout) — no `── label ──`
-        // header rows; the group total prints in the aggregate column on the
-        // data row itself.
-        assert_eq!(build.widget_rows.len(), 2);
-        assert!(build.widget_rows.iter().all(|r| r.selectable));
-
-        // Representative = each group's first member. Items 0=B,1=A,2=A,3=B
-        // sort by label to [1,2,0,3], so A's first member is original idx 1
-        // and B's is original idx 0 — the row stays selectable and maps back.
-        assert_eq!(build.filtered_indices, vec![1, 0]);
-
-        // The aggregate column shows the GROUP total (A=30, B=70), not the
-        // representative member's own value.
-        let dur_of = |r: &TableWidgetRow| {
-            r.primary_line()
-                .last()
-                .map(|c| c.text.trim().to_string())
-                .unwrap_or_default()
-        };
-        let totals: Vec<String> = build.widget_rows.iter().map(dur_of).collect();
-        assert_eq!(totals, vec!["30".to_string(), "70".to_string()]);
-
-        // Grand total still pinned as a footer.
-        assert_eq!(footer_totals, vec!["100".to_string()]);
-    }
-
-    /// Nested grouping (M3): `[category, dur-as-inner]`-style two-level layout
-    /// renders an outer `── label ──` header per outer group, then a selectable
-    /// representative row per inner group under `summary_only`.
-    #[test]
-    fn grouped_table_nested_summary_only_outer_header_inner_rows() {
-        // Outer = category (A/B), inner = a second key (the item id here, so
-        // every item is its own inner group). summary_only → outer headers +
-        // one representative data row per inner group.
-        let items = vec![
-            group_item("0", "B", "30"),
-            group_item("1", "A", "10"),
-            group_item("2", "A", "20"),
-        ];
-        let columns = group_columns();
-        let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
-        let mut strategies = std::collections::HashMap::new();
-        for c in &columns {
-            strategies.insert(TColumnId::new(&c.key), parse_sizing(&c.sizing));
-        }
-        let config = TableConfig {
-            max_width: 300,
-            separator: "  ".into(),
-            sizer: Box::new(MixedColSizer { strategies }),
-        };
-        let mut header = TRow::new(0u32).not_selectable();
-        for c in &columns {
-            header = header.cell(&c.key, c.key.clone());
-        }
-        // Inner level keys on `dur` (distinct per item here) so each item is
-        // its own inner group; outer on `category`.
-        let levels = vec![
-            GroupBy {
-                column: "category".into(),
-                bucket: None,
-                order: GroupOrder::Asc,
-            },
-            GroupBy {
-                column: "dur".into(),
-                bucket: None,
-                order: GroupOrder::Asc,
-            },
-        ];
-        let aggregates = vec![AggregateDef {
-            column: "dur".into(),
-            op: AggregateOp::Sum,
-            total_column: None,
-        }];
-        let no_links = |_: &str| false;
-
-        let build = build_grouped_table(
-            &items,
-            &[0, 1, 2],
-            &columns,
-            &levels,
-            &aggregates,
-            true,
-            chrono::Local::now(),
-            &no_links,
-            &config,
-            &col_ids,
-            &header,
-        );
-
-        // Layout: outer header A, inner repr (10), inner repr (20),
-        //         outer header B, inner repr (30).
-        let selectable: Vec<bool> = build.widget_rows.iter().map(|r| r.selectable).collect();
-        assert_eq!(selectable, vec![false, true, true, false, true]);
-
-        // Outer headers are non-selectable (sentinel index); inner rows map to
-        // their representative member (A: idx 1,2; B: idx 0).
-        assert_eq!(
-            build.filtered_indices,
-            vec![usize::MAX, 1, 2, usize::MAX, 0]
-        );
-
-        // Outer header A subtotal = 30, B = 10+20... wait B = 30; A = 10+20=30.
-        let last_text = |r: &TableWidgetRow| {
-            r.primary_line()
-                .last()
-                .map(|c| c.text.trim().to_string())
-                .unwrap_or_default()
-        };
-        assert_eq!(last_text(&build.widget_rows[0]), "30"); // outer A = 10+20
-        assert_eq!(last_text(&build.widget_rows[3]), "30"); // outer B = 30
     }
 
     /// `fixed(n)` maps to the engine's budget-counted constant width;
@@ -18170,7 +17887,6 @@ views:
             &columns,
             &levels,
             &aggregates,
-            false,
             chrono::Local::now(),
             &no_links,
             &config,
@@ -18808,9 +18524,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             shortcuts: HashMap::new(),
             leaf_glyph: None,
             group_by: None,
-            then_by: Vec::new(),
             aggregates: Vec::new(),
-            summary_only: false,
             tree_connector_style: None,
             unread_style: None,
             unread_marker: None,
