@@ -1273,10 +1273,16 @@ pub trait ContentAdapter: Send + Sync {
     fn adapter_type(&self) -> &str;
 
     /// Stable per-instance identifier. Comes from the YAML
-    /// `adapter.id:` field; defaults to [`adapter_type`] when not set.
-    /// Two adapter instances loaded into the same App run must have
-    /// distinct `instance_id`s — the loader validates this.
-    fn instance_id(&self) -> &str;
+    /// `adapter.id:` field; defaults to [`adapter_type`](Self::adapter_type)
+    /// when not set. Two adapter instances loaded into the same App run must
+    /// have distinct `instance_id`s — the loader validates this.
+    ///
+    /// The default mirrors the "no `adapter.id:`" case: a single-instance
+    /// adapter that stores no separate id reports its type. Multi-instance
+    /// adapters override to return the configured id.
+    fn instance_id(&self) -> &str {
+        self.adapter_type()
+    }
 
     /// Per-instance writable data directory. Default:
     /// `<XDG_DATA_HOME>/not_yet_done/<adapter_type>/<instance_id>/`.
@@ -1336,8 +1342,13 @@ pub trait ContentAdapter: Send + Sync {
         std::collections::HashMap::new()
     }
 
-    /// Capabilities of this adapter (for UI feature gating).
-    fn capabilities(&self) -> AdapterCapabilities;
+    /// Capabilities of this adapter (for UI feature gating). The default is
+    /// all-`false` ([`AdapterCapabilities::default`]) — a minimal read-only
+    /// adapter. Adapters opt into features (create/delete/search, eager
+    /// subtree, adapter-side grouping, …) by overriding.
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
 
     /// Subscribe to live connection-status updates. Default returns a
     /// receiver that is permanently `Ready` — adapters that don't perform
