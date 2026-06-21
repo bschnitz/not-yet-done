@@ -38,7 +38,11 @@
 #
 # `d` soft-deletes a tracking (keeping its times) through the confirm flow;
 # `R`/`A` restore deleted trackings; `s` toggles time tracking on the row's
-# task. See the `shortcuts:` block below. Scripts run via the generic
+# task. See the `shortcuts:` block below. `i` splits an interval at a time
+# point and `m` moves it to a new start (both open a form — see the `split`/
+# `move` actions below); these are the same operations the legacy `nyd track
+# split`/`nyd track move` commands ran, now adapter actions so the CLI's
+# generic `do split`/`do move` reach them too. Scripts run via the generic
 # `:script` menu (`x`, `type: script`).
 #
 # ## A2c scope (Condensed + Tree)
@@ -217,6 +221,26 @@ views:
         type: custom
         id: restore-all
         on_container: true
+      # Split the selected interval at a time point into two (the original is
+      # soft-deleted, both parts reference it as predecessor). `type: custom`
+      # with an `id` routes through the generic form popup: the adapter action
+      # declares an `InputSpec::Form` (`at` required, `task` optional to
+      # reassign the second part), the frontend collects the fields and calls
+      # `execute("split", …)`. Same operation as the legacy `nyd track split`.
+      - name: split
+        key: i
+        type: custom
+        id: split
+      # Move the selected interval to a new start time, with the same gravity /
+      # overlap / future guards the legacy `nyd track move` exposed. The form's
+      # `gravity` (start|end) snaps to a boundary and finds the next free slot;
+      # `offset` (+1h, -30min, …) is applied after the snap; the three toggles
+      # relax the overlap/future guards. `type: custom` → form popup →
+      # `execute("move", …)`.
+      - name: move
+        key: m
+        type: custom
+        id: move
 
     # Adapter-backed per-row shortcuts (A2b), dispatched via `invoke_action`
     # against the selected tracking.

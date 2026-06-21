@@ -79,14 +79,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use not_yet_done_content::{
     apply_sort, grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome,
-    AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FsSavedQueryStore,
-    GroupBucket, GroupSpec, HintPlacement, HostContext, HostEvent, InputSpec, Invalidation,
-    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
-    SortDirection, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode,
+    AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FormFieldSpec,
+    FsSavedQueryStore, GroupBucket, GroupSpec, HintPlacement, HostContext, HostEvent, InputSpec,
+    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
+    SavedQueryStore, SortDirection, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode,
 };
+use not_yet_done_task_core::entity::granularity::Granularity;
 use not_yet_done_task_core::entity::tracking;
 use not_yet_done_task_core::error::AppError;
 use not_yet_done_task_core::events::DomainEvent;
+use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
+
+use crate::datetime::{LocalDateTime, LocalOffset};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
@@ -1309,7 +1313,153 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
         NodeAction::new("toggle-tracking", "track", InputSpec::None)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('s'),
+        NodeAction::new("split", "Split", split_input_spec()).with_default_key('i'),
+        NodeAction::new("move", "Move", move_input_spec()).with_default_key('m'),
     ]
+}
+
+/// Form for `split`: the time point to cut at, plus an optional reassignment of
+/// the second part to a different task. Mirrors the CLI `track split <id> <at>
+/// [--task <id>]`.
+fn split_input_spec() -> InputSpec {
+    InputSpec::Form {
+        fields: vec![
+            FormFieldSpec::text("at", "Split at (e.g. '10:30', 'yesterday 14:00')"),
+            FormFieldSpec::text("task", "Reassign 2nd part to task id (optional)").optional(),
+        ],
+    }
+}
+
+/// Form for `move`: the new start time, plus the same gravity / overlap /
+/// future guards the CLI `track move` exposes. `gravity` snaps to a boundary
+/// and finds the next free slot; `offset` is applied after the snap.
+fn move_input_spec() -> InputSpec {
+    InputSpec::Form {
+        fields: vec![
+            FormFieldSpec::text("start", "New start (e.g. 'yesterday 9am', '2026-03-22')"),
+            FormFieldSpec::select(
+                "gravity",
+                "Gravity (snap + next free slot)",
+                vec!["start".to_string(), "end".to_string()],
+            )
+            .optional(),
+            FormFieldSpec::text("offset", "Offset after gravity (e.g. +1h, -30min)").optional(),
+            FormFieldSpec::toggle("allow_overlap", "Allow overlap with other tasks"),
+            FormFieldSpec::toggle("allow_same_task_overlap", "Allow overlap with same task"),
+            FormFieldSpec::toggle("allow_future", "Allow moving into the future"),
+        ],
+    }
+}
+
+/// Read a Form field, treating absent or whitespace-only values as `None`.
+fn form_opt(values: &HashMap<String, String>, key: &str) -> Option<String> {
+    values
+        .get(key)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+/// Read a required Form field; error if absent or empty.
+fn form_required<'a>(values: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
+    match values.get(key).map(|v| v.trim()) {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(invalid_input(format!("field '{key}' is required"))),
+    }
+}
+
+/// A Toggle delivers `"true"`/`"false"`; treat anything other than `"true"` as
+/// off (an absent toggle is off).
+fn form_flag(values: &HashMap<String, String>, key: &str) -> bool {
+    values.get(key).map(|v| v == "true").unwrap_or(false)
+}
+
+/// Wrap a user-facing parse/validation message as a [`ContentError`].
+fn invalid_input(msg: String) -> ContentError {
+    ContentError::Other(msg.into())
+}
+
+/// `execute("split")` — cut the tracking at `at` into two parts (the original
+/// is soft-deleted, both new parts reference it as predecessor). An optional
+/// `task` id reassigns the second part. Delegates to
+/// [`TrackingService::split_tracking`]; emits [`DomainEvent::TrackingChanged`]
+/// so the snapshot rebuilds. Mirrors the CLI `track split`.
+async fn execute_split(
+    handle: &CoreHandle,
+    tracking_id: Uuid,
+    values: &HashMap<String, String>,
+) -> Result<ActionOutcome> {
+    let at: LocalDateTime = form_required(values, "at")?
+        .parse()
+        .map_err(invalid_input)?;
+    let second_task_id = match form_opt(values, "task") {
+        Some(s) => Some(Uuid::parse_str(&s).map_err(|_| invalid_input(format!("invalid task id '{s}'")))?),
+        None => None,
+    };
+    handle
+        .tracking_service
+        .split_tracking(tracking_id, at.into(), second_task_id)
+        .await
+        .map_err(to_content_err)?;
+    emit_tracking_changed(handle, tracking_id);
+    Ok(ActionOutcome::Done {
+        message: Some("Tracking split".to_string()),
+    })
+}
+
+/// `execute("move")` — move the tracking to a new start time, honouring the
+/// gravity / overlap / future guards. Granularity is derived from how the user
+/// expressed `start` (so a bare date snaps to the day, `9am` to the hour, …),
+/// but only when a gravity is set — matching the CLI `track move`. Delegates to
+/// [`TrackingService::move_tracking`]; emits [`DomainEvent::TrackingChanged`].
+async fn execute_move(
+    handle: &CoreHandle,
+    tracking_id: Uuid,
+    values: &HashMap<String, String>,
+) -> Result<ActionOutcome> {
+    let start: LocalDateTime = form_required(values, "start")?
+        .parse()
+        .map_err(invalid_input)?;
+
+    let gravity = match form_opt(values, "gravity").as_deref() {
+        Some("start") => Some(GravityDirection::Start),
+        Some("end") => Some(GravityDirection::End),
+        Some(other) => return Err(invalid_input(format!("invalid gravity '{other}'"))),
+        None => None,
+    };
+    // Granularity only matters when snapping to a boundary, so derive it only
+    // when gravity is set (mirrors the CLI).
+    let granularity = gravity
+        .as_ref()
+        .map(|_| Granularity::from_original(&start.original));
+
+    let offset = match form_opt(values, "offset") {
+        Some(s) => Some(
+            s.parse::<LocalOffset>()
+                .map_err(invalid_input)?
+                .duration,
+        ),
+        None => None,
+    };
+
+    let options = MoveOptions {
+        allow_overlap: form_flag(values, "allow_overlap"),
+        allow_same_task_overlap: form_flag(values, "allow_same_task_overlap"),
+        allow_future: form_flag(values, "allow_future"),
+        gravity,
+        granularity,
+        offset,
+    };
+
+    handle
+        .tracking_service
+        .move_tracking(tracking_id, start.into(), options)
+        .await
+        .map_err(to_content_err)?;
+    emit_tracking_changed(handle, tracking_id);
+    Ok(ActionOutcome::Done {
+        message: Some("Tracking moved".to_string()),
+    })
 }
 
 /// Actions a duration-tree task node (`tracking:tree-item`) exposes. The tree
@@ -1790,12 +1940,18 @@ impl Node for TrackingEntryNode {
     fn actions(&self) -> Vec<NodeAction> {
         tracking_entry_actions()
     }
-    async fn execute(&mut self, action_id: &str, _input: ActionInput) -> Result<ActionOutcome> {
-        match action_id {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
             // Reached via the generic `DeleteSelf` confirm flow, which calls
             // `execute("delete")` after the user confirms.
-            "delete" => execute_delete(&self.handle, self.tracking_id()?).await,
-            other => Err(ContentError::NotSupported(format!(
+            ("delete", _) => execute_delete(&self.handle, self.tracking_id()?).await,
+            ("split", ActionInput::Form(values)) => {
+                execute_split(&self.handle, self.tracking_id()?, &values).await
+            }
+            ("move", ActionInput::Form(values)) => {
+                execute_move(&self.handle, self.tracking_id()?, &values).await
+            }
+            (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on a tracking"
             ))),
         }
@@ -3029,12 +3185,71 @@ mod tests {
         assert!(has(&a, "delete"));
         assert!(has(&a, "restore"));
         assert!(has(&a, "toggle-tracking"));
+        assert!(has(&a, "split"));
+        assert!(has(&a, "move"));
         // `delete` and `toggle-tracking` show in the action bar; `restore`
         // is a recovery shortcut only.
         let key = |id: &str| a.iter().find(|x| x.id == id).and_then(|x| x.default_key);
         assert_eq!(key("delete"), Some('d'));
         assert_eq!(key("toggle-tracking"), Some('s'));
         assert_eq!(key("restore"), Some('R'));
+        assert_eq!(key("split"), Some('i'));
+        assert_eq!(key("move"), Some('m'));
+    }
+
+    #[test]
+    fn split_and_move_advertise_their_form_fields() {
+        let a = tracking_entry_actions();
+        let fields = |id: &str| match &a.iter().find(|x| x.id == id).unwrap().input {
+            InputSpec::Form { fields } => fields.clone(),
+            other => panic!("{id} should be a Form, got {other:?}"),
+        };
+
+        let split = fields("split");
+        let split_keys: Vec<&str> = split.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(split_keys, vec!["at", "task"]);
+        assert!(split.iter().find(|f| f.key == "at").unwrap().required);
+        assert!(!split.iter().find(|f| f.key == "task").unwrap().required);
+
+        let mv = fields("move");
+        let mv_keys: Vec<&str> = mv.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(
+            mv_keys,
+            vec![
+                "start",
+                "gravity",
+                "offset",
+                "allow_overlap",
+                "allow_same_task_overlap",
+                "allow_future",
+            ]
+        );
+        assert!(mv.iter().find(|f| f.key == "start").unwrap().required);
+        // The three guards are toggles (never required); gravity/offset optional.
+        for k in ["gravity", "offset", "allow_overlap", "allow_future"] {
+            assert!(!mv.iter().find(|f| f.key == k).unwrap().required, "{k} optional");
+        }
+    }
+
+    #[test]
+    fn form_helpers_read_required_optional_and_flags() {
+        let mut v = HashMap::new();
+        v.insert("a".to_string(), "  x  ".to_string());
+        v.insert("blank".to_string(), "   ".to_string());
+        v.insert("flag_on".to_string(), "true".to_string());
+        v.insert("flag_off".to_string(), "false".to_string());
+
+        assert_eq!(form_required(&v, "a").unwrap(), "x");
+        assert!(form_required(&v, "blank").is_err());
+        assert!(form_required(&v, "missing").is_err());
+
+        assert_eq!(form_opt(&v, "a"), Some("x".to_string()));
+        assert_eq!(form_opt(&v, "blank"), None);
+        assert_eq!(form_opt(&v, "missing"), None);
+
+        assert!(form_flag(&v, "flag_on"));
+        assert!(!form_flag(&v, "flag_off"));
+        assert!(!form_flag(&v, "missing"));
     }
 
     #[test]
@@ -3926,5 +4141,112 @@ mod restore_scope_tests {
             ActionDispatch::Error(msg) => assert_eq!(msg, "Already deleted"),
             other => panic!("expected an Already-deleted notice, got {other:?}"),
         }
+    }
+
+    /// A fixed completed tracking `[08:00, 10:00]` UTC on a fixed day, returning
+    /// its id. Absolute UTC instants (`Z`) keep the split/move time-math
+    /// independent of the test machine's local timezone. Inserted as a raw
+    /// `ActiveModel` because the repo's `insert` only opens *active* (no-end)
+    /// trackings, and `move` requires a completed one.
+    async fn insert_completed_tracking(db: &sea_orm::DatabaseConnection, task_id: Uuid) -> Uuid {
+        use chrono::TimeZone;
+        let start = Utc.with_ymd_and_hms(2026, 3, 22, 8, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 3, 22, 10, 0, 0).unwrap();
+        let model = tracking_entity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            task_id: Set(task_id),
+            predecessor_id: Set(None),
+            started_at: Set(start),
+            ended_at: Set(Some(end)),
+            deleted: Set(false),
+            created_at: Set(Utc::now()),
+        };
+        model.insert(db).await.expect("insert completed tracking").id
+    }
+
+    #[tokio::test]
+    async fn execute_split_cuts_into_two_and_soft_deletes_original() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Delta project").await;
+        let original = insert_completed_tracking(&db, task).await;
+
+        // Split at the exact UTC midpoint — strictly inside [08:00, 10:00]
+        // regardless of the machine's local offset (RFC3339 `Z` is absolute).
+        let mut values = HashMap::new();
+        values.insert("at".to_string(), "2026-03-22T09:00:00Z".to_string());
+
+        let outcome = execute_split(&handle, original, &values)
+            .await
+            .expect("split succeeds");
+        assert!(matches!(outcome, ActionOutcome::Done { .. }));
+
+        // Original is soft-deleted; exactly two successors reference it.
+        assert!(is_deleted(&handle, original).await, "original soft-deleted");
+        let successors = handle
+            .tracking_repo
+            .find_by_predecessor(original)
+            .await
+            .expect("find successors");
+        assert_eq!(successors.len(), 2, "split produced two new intervals");
+    }
+
+    #[tokio::test]
+    async fn execute_split_missing_at_field_errors() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Epsilon project").await;
+        let original = insert_completed_tracking(&db, task).await;
+
+        // No `at` → required-field error, original untouched.
+        let err = execute_split(&handle, original, &HashMap::new())
+            .await
+            .err()
+            .expect("missing required field");
+        assert!(format!("{err}").contains("'at' is required"));
+        assert!(!is_deleted(&handle, original).await, "original untouched");
+    }
+
+    #[tokio::test]
+    async fn execute_move_relocates_and_soft_deletes_original() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Zeta project").await;
+        let original = insert_completed_tracking(&db, task).await;
+
+        // Move to an earlier absolute start (in the past, no overlap, no
+        // future) — no gravity, so granularity stays None.
+        let mut values = HashMap::new();
+        values.insert("start".to_string(), "2026-03-20T08:00:00Z".to_string());
+
+        let outcome = execute_move(&handle, original, &values)
+            .await
+            .expect("move succeeds");
+        assert!(matches!(outcome, ActionOutcome::Done { .. }));
+
+        // Move soft-deletes the original and creates one successor at the new
+        // start.
+        assert!(is_deleted(&handle, original).await, "original soft-deleted");
+        let successors = handle
+            .tracking_repo
+            .find_by_predecessor(original)
+            .await
+            .expect("find successors");
+        assert_eq!(successors.len(), 1, "move produced one relocated interval");
+    }
+
+    #[tokio::test]
+    async fn execute_move_rejects_invalid_gravity() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Eta project").await;
+        let original = insert_completed_tracking(&db, task).await;
+
+        let mut values = HashMap::new();
+        values.insert("start".to_string(), "2026-03-20T08:00:00Z".to_string());
+        values.insert("gravity".to_string(), "sideways".to_string());
+
+        let err = execute_move(&handle, original, &values)
+            .await
+            .err()
+            .expect("invalid gravity");
+        assert!(format!("{err}").contains("invalid gravity"));
+        assert!(!is_deleted(&handle, original).await, "original untouched");
     }
 }

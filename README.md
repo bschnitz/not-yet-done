@@ -537,6 +537,14 @@ nyd tasks do add -m "$(cat task.md)"      # editor action, body inline (else $ED
 nyd tasks do toggle-tracking <id>         # no-input action
 nyd tasks do delete <id> --yes            # confirm-gated action needs --yes
 nyd pg do run --field name=report --field db=live   # form action
+
+# Trackings carry split/move as form actions (the generic replacement for the
+# legacy `track split`/`track move`): pass the form fields with --field.
+nyd trackings do split <id> --field at="2026-03-22 09:15"
+nyd trackings do split <id> --field at="10:30" --field task=<other-task-id>
+nyd trackings do move  <id> --field start="yesterday 9am"
+nyd trackings do move  <id> --field start=2026-03-20 \
+  --field gravity=start --field offset=+1h --field allow_future=true
 ```
 
 Node ids are opaque and adapter-owned; for the local task/tracking forests you
