@@ -33,6 +33,7 @@ use not_yet_done_task_core::events::DomainEvent;
 use not_yet_done_task_core::repository::TrackingRepository;
 use not_yet_done_task_core::service::TagService;
 use not_yet_done_task_core::service::TaskService;
+use not_yet_done_task_core::service::TrackingService;
 use tokio::sync::broadcast;
 
 pub mod editor_templates;
@@ -71,6 +72,10 @@ pub use tracking::{TrackingAdapter, TrackingAdapterFactory};
 pub struct CoreHandle {
     pub task_service: Arc<dyn TaskService>,
     pub tracking_repo: Arc<dyn TrackingRepository>,
+    /// High-level tracking operations the repo doesn't encapsulate (split/move
+    /// with gravity, overlap + future guards) — backs the Trackings adapter's
+    /// `split`/`move` entry actions.
+    pub tracking_service: Arc<dyn TrackingService>,
     /// Tag listing/management service — backs the task adapter's
     /// `list_values("tags")` (the `option_menu` source) and tag mutations.
     pub tag_service: Arc<dyn TagService>,
@@ -93,6 +98,7 @@ impl CoreHandle {
     pub fn new(
         task_service: Arc<dyn TaskService>,
         tracking_repo: Arc<dyn TrackingRepository>,
+        tracking_service: Arc<dyn TrackingService>,
         tag_service: Arc<dyn TagService>,
         bus: Arc<dyn HostEventBus>,
         channel: String,
@@ -101,6 +107,7 @@ impl CoreHandle {
         Self {
             task_service,
             tracking_repo,
+            tracking_service,
             tag_service,
             bus,
             channel,
@@ -199,6 +206,7 @@ pub fn open_core_handle(
     Ok(CoreHandle::new(
         domain.task_service,
         domain.tracking_repo,
+        domain.tracking_service,
         domain.tag_service,
         ctx.event_bus.clone(),
         dsn,

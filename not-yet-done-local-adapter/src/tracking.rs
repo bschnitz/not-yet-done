@@ -3793,12 +3793,15 @@ mod restore_scope_tests {
 
         let task_service: Arc<dyn TaskService> = module.resolve();
         let tracking_repo: Arc<dyn TrackingRepository> = module.resolve();
+        let tracking_service: Arc<dyn not_yet_done_task_core::service::TrackingService> =
+            module.resolve();
         let tag_service: Arc<dyn not_yet_done_task_core::service::TagService> = module.resolve();
         let bus = Arc::new(InMemoryHostBus::default());
         (
             CoreHandle::new(
                 task_service,
                 tracking_repo,
+                tracking_service,
                 tag_service,
                 bus,
                 "test".to_string(),
