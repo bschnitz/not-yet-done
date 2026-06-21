@@ -160,12 +160,19 @@ struct ViewFileHead {
 // Instance discovery + resolution
 // ---------------------------------------------------------------------------
 
-/// The directory holding view configs: `~/.config/not_yet_done/views/`.
-pub fn views_dir() -> PathBuf {
+/// The not-yet-done config root: `~/.config/not_yet_done/`.
+///
+/// Single source of truth for where front-ends look for configuration —
+/// `views/`, the TUI's `tui.yaml`, and the CLI's `cli.yaml` all live under it.
+pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("not_yet_done")
-        .join("views")
+}
+
+/// The directory holding view configs: `~/.config/not_yet_done/views/`.
+pub fn views_dir() -> PathBuf {
+    config_dir().join("views")
 }
 
 /// One adapter instance discovered in the views directory, plus the path of the

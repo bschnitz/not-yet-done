@@ -501,6 +501,72 @@ nyd backup list
 nyd backup restore 20260323-185627-nyd.db
 ```
 
+### Generic adapter commands
+
+Besides the task-specific commands above, every configured adapter instance
+(each `views/*.yaml`) is addressable generically as `nyd <instance> <verb>`.
+The verbs drive the same `ContentAdapter` protocol the TUI uses, so they work
+for _every_ adapter — tasks, trackings, Jira, Taiga, Postgres, Confluence,
+Stoat — without the CLI hard-coding anything about them:
+
+```bash
+# Read verbs
+nyd tasks ls                       # list children of the root
+nyd tasks ls <id> --tree --depth 2 # a subtree, 2 levels deep
+nyd tasks ls --query 'status=open' # filtered (adapter's query language)
+nyd tasks show <id>                # one node's fields
+nyd tasks actions <id>             # actions available on a node
+nyd tasks actions --type task:item # …or on a node type
+nyd tasks values tags              # enumerate a value source
+nyd tasks ls -o json               # any read verb takes -o table|json
+
+# Mutating verb: `do <action> [id]` runs a node action. The action's input
+# shape (seen in `actions`) decides how input is sourced:
+nyd tasks do add -m "$(cat task.md)"      # editor action, body inline (else $EDITOR)
+nyd tasks do toggle-tracking <id>         # no-input action
+nyd tasks do delete <id> --yes            # confirm-gated action needs --yes
+nyd pg do run --field name=report --field db=live   # form action
+```
+
+Node ids are opaque and adapter-owned; for the local task/tracking forests you
+can use a unique **id prefix** (like a git short hash).
+
+### Aliases & `config edit`
+
+The generic verbs are deliberately explicit. **Aliases** give a short name to a
+fixed invocation, so everyday use stays terse without the CLI growing
+adapter-specific commands. They live in `~/.config/not_yet_done/cli.yaml`:
+
+```yaml
+aliases:
+  toggle: [tasks, do, toggle-tracking, "{0}"] # nyd toggle <id>
+  find: [tasks, ls, --query, "{@}"] # nyd find status=open
+  new: [tasks, do, add, --value, "{parent}"] # nyd new --parent <id>
+```
+
+Trailing args split into **positionals** (bare tokens) and **named** values
+(`--key value`), substituted into the template: `{0}`/`{1}` pick a positional,
+`{@}` splices all of them, `{name}` takes a named value. The first expanded
+token must name an adapter instance, so an alias is just a shorthand for a
+generic verb (it can't reach the built-in commands). A small set of defaults
+ships compiled in (e.g. `add`, `edit`, `rm`, `toggle`, `tree`); a `cli.yaml`
+entry of the same name overrides one.
+
+> **Why aliases instead of more built-in commands?** Block D makes the CLI a
+> thin, fully generic front-end over the adapter protocol so it works for every
+> adapter automatically. Per-adapter convenience verbs would re-introduce the
+> coupling we removed. Aliases keep that convenience in _user_ config, where it
+> costs the codebase nothing and the user can shape it per workflow.
+
+Edit config files in `$EDITOR` (seeding `cli.yaml` with a documented template
+on first use):
+
+```bash
+nyd config edit cli      # ~/.config/not_yet_done/cli.yaml (default target)
+nyd config edit tui      # ~/.config/not_yet_done/tui.yaml
+nyd config edit tasks    # ~/.config/not_yet_done/views/tasks.yaml
+```
+
 ## Filter DSL
 
 Filters are YAML documents with a `query:` key. Used in the TUI editor (`Q`), saved filters, favorites, and the CLI `query run` command.
