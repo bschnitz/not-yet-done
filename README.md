@@ -30,11 +30,9 @@ cargo build --release -p not-yet-done-waybar
 cp target/release/libnyd_waybar.so ~/.config/waybar/cffi/
 ```
 
-Initialize the database on first run:
-
-```bash
-nyd db sync
-```
+No database setup step is needed: each adapter is self-contained and creates
+(and schema-syncs) its backing SQLite file on first open — start the TUI or run
+any `nyd <instance>` command and the store is initialized automatically.
 
 ## TUI
 
@@ -426,74 +424,34 @@ Press `c` to open the column configurator. Toggle columns on/off and reorder the
 
 The CLI binary is `nyd` (installed as `not-yet-done-cli`).
 
-### Task Management
+The CLI is, by design, a **thin generic front-end over the `ContentAdapter`
+protocol**. There are no task-, tracking- or project-specific subcommands:
+tasks, trackings and projects are reached as adapter instances
+(`nyd tasks …`, `nyd trackings …`, `nyd projects …`), and the terse everyday
+forms (`nyd add`, `nyd track <id>`, `nyd summary`, …) are **aliases** over
+those generic verbs. See [Generic adapter commands](#generic-adapter-commands)
+and [Aliases & `config edit`](#aliases--config-edit) below.
+
+> The former hard-coded `task` / `project` / `track` / `query` / `db sync`
+> commands were removed once their adapter replacements landed — `track
+split`/`move` are now adapter actions (`nyd trackings do split …`), projects
+> are an adapter (`nyd projects do create …`), and ad-hoc filters run through
+> any adapter's `--query`. The only remaining built-in commands are `tag` and
+> `backup` (which still operate on the legacy core DB).
+
+### Tags & Backup
+
+Tag styling (fg/bg/symbol) has no generic adapter path yet, so tag management
+stays a built-in command; `backup` keeps the legacy core-DB backups until it
+becomes an adapter action.
 
 ```bash
-# Add a task
-nyd task add "Build API endpoint"
-nyd task add "Design schema" --parent <parent-task-id>
-
-# List all tasks
-nyd task list
-
-# Edit a task
-nyd task edit <id> --description "Updated name"
-
-# Soft-delete
-nyd task delete <id>
-
-# Export a subtree as nested JSON
-nyd task tree <root-id> --pretty
-nyd task tree <root-id> --last-tracked-since "2026-04-01" --pretty
-nyd task tree AcmeCorp --pretty  # resolve by description prefix
-```
-
-### Time Tracking
-
-```bash
-# Start tracking (stops other active trackings by default)
-nyd track start <task-id>
-nyd track start <task-id> --parallel    # keep others running
-
-# Stop tracking
-nyd track stop                          # stop all active
-nyd track stop --task-id <uuid>         # stop specific task
-
-# View summary
-nyd track summary                       # today
-nyd track summary --from "last monday"  # since Monday
-
-# Export as JSON
-nyd track export --from "2026-04-01" --pretty
-
-# Split a tracking at a time point
-nyd track split <entry-id> "14:30"
-
-# Move a tracking to a different start time
-nyd track move <entry-id> "09:00" --gravity start
-
-# Restore a soft-deleted tracking
-nyd track restore <entry-id>
-```
-
-### Query / Filter
-
-```bash
-# Run a filter from a YAML file
-nyd query run --entity tracking --file filter.yaml
-
-# With debug output (shows resolved dates and FilterExpr)
-nyd query run --entity task --file filter.yaml --debug
-
-# Pipe from stdin
-echo 'query: [deleted, =, false]' | nyd query run --entity task
-```
-
-### Database & Backup
-
-```bash
-# Sync schema (run after updates)
-nyd db sync
+# Tags (global or project-specific)
+nyd tag list
+nyd tag add "urgent" --fg "#FFFFFF" --bg "#FF5733" --symbol ""
+nyd tag new                                   # create interactively via $EDITOR
+nyd tag edit global-tag:<uuid> --name "blocked"
+nyd tag delete global-tag:<uuid>
 
 # Backups
 nyd backup create
@@ -586,8 +544,21 @@ Trailing args split into **positionals** (bare tokens) and **named** values
 `{@}` splices all of them, `{name}` takes a named value. The first expanded
 token must name an adapter instance, so an alias is just a shorthand for a
 generic verb (it can't reach the built-in commands). A small set of defaults
-ships compiled in (e.g. `add`, `edit`, `rm`, `toggle`, `tree`); a `cli.yaml`
-entry of the same name overrides one.
+ships compiled in; a `cli.yaml` entry of the same name overrides one:
+
+| Alias     | Expands to                                                                      | Replaces           |
+| --------- | ------------------------------------------------------------------------------- | ------------------ |
+| `add`     | `tasks do add` (editor; `-m` for inline)                                        | `task add`         |
+| `edit`    | `tasks do edit {0}`                                                             | `task edit`        |
+| `rm`      | `tasks do delete {0}`                                                           | `task delete`      |
+| `track`   | `tasks do toggle-tracking {0}`                                                  | `track start/stop` |
+| `toggle`  | `tasks do toggle-tracking {0}` (synonym)                                        | —                  |
+| `tree`    | `tasks ls --tree`                                                               | `task tree`        |
+| `summary` | `trackings ls --tree --type tracking:tree-group --group-by started_at:day:desc` | `track summary`    |
+
+The adapter exposes a single `toggle-tracking` action (start when stopped, stop
+when running), so the old `track start` / `track stop` pair collapses into the
+one `track` alias.
 
 > **Why aliases instead of more built-in commands?** Block D makes the CLI a
 > thin, fully generic front-end over the adapter protocol so it works for every
@@ -606,7 +577,7 @@ nyd config edit tasks    # ~/.config/not_yet_done/views/tasks.yaml
 
 ## Filter DSL
 
-Filters are YAML documents with a `query:` key. Used in the TUI editor (`Q`), saved filters, favorites, and the CLI `query run` command.
+Filters are YAML documents with a `query:` key. Used in the TUI editor (`Q`), saved filters, favorites, and any adapter's `--query` on the CLI (`nyd <instance> ls --query …`).
 
 ### Basic Syntax
 

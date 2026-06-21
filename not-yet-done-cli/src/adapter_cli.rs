@@ -58,10 +58,11 @@ use not_yet_done_content::{
 
 /// Built-in `tusks` subcommands. A first argument matching one of these is
 /// never treated as an adapter instance, so an adapter accidentally named like
-/// a built-in can't shadow it.
-const BUILTIN_COMMANDS: &[&str] = &[
-    "task", "project", "tag", "db", "backup", "track", "query", "help",
-];
+/// a built-in can't shadow it. Only `tag`/`backup` remain (plus `help`); the
+/// former `task`/`project`/`track`/`query`/`db` names were freed when those
+/// commands moved to the adapter protocol (D3b), so they are now usable as
+/// adapter instance names or `cli.yaml` alias names.
+const BUILTIN_COMMANDS: &[&str] = &["tag", "backup", "help"];
 
 /// Output format for the read verbs.
 #[derive(Clone, Copy, PartialEq, Eq)]
