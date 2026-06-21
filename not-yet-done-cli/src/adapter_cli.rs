@@ -11,19 +11,41 @@
 //! nyd <inst> show  ID                                                          [-o table|json]
 //! nyd <inst> actions (ID | --type T)                                           [-o table|json]
 //! nyd <inst> values  SOURCE                                                    [-o table|json]
+//! nyd <inst> do    ACTION [ID] [input flags] [--yes]
 //! ```
 //!
-//! This module owns only the **read** verbs (D2a); the mutating `do` verb and
-//! input mapping come in D2b. Dispatch is intercepted before the legacy
-//! `tusks` command tree in `main.rs`: a first argument that names a configured
-//! adapter instance (and is not a built-in subcommand) routes here; everything
-//! else falls through unchanged.
+//! The **read** verbs (`ls`/`show`/`actions`/`values`) came in D2a; the
+//! mutating **`do`** verb (D2b) drives the same protocol the TUI's
+//! shortcut/menu paths use. It looks up the action's [`InputSpec`] to decide
+//! how to source input from the command line:
+//!
+//! ```text
+//! Editor      → -m <text>  (or $EDITOR on a seeded temp file)
+//! Form        → --field k=v   (repeatable)
+//! Picker      → --value <v>
+//! FilePicker  → --file <path>  (repeatable)
+//! None        → invoke_action; ctx fed from --value / --text / --query / --yes
+//! ```
+//!
+//! For `InputSpec::None` actions the returned [`ActionDispatch`] is handled
+//! here: `Reload`/`Noop` report success, `Error` fails, `Confirm` and
+//! `DeleteSelf` require `--yes` (a confirmed `DeleteSelf` then runs
+//! `execute(action, None)`, mirroring the TUI's confirm→delete plumbing), and
+//! the interactive-only dispatches (`CreateChild`/`OpenEditor`/`ExecuteQuery`)
+//! report that they need a full frontend.
+//!
+//! Dispatch is intercepted before the legacy `tusks` command tree in
+//! `main.rs`: a first argument that names a configured adapter instance (and
+//! is not a built-in subcommand) routes here; everything else falls through
+//! unchanged.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Context, Result};
 use not_yet_done_content::{
-    ContentAdapter, ListParams, Node, NodeAction, NodeSummary, NodeType, SortDirection, SortKey,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, FormFieldSpec,
+    InputSpec, ListParams, Node, NodeAction, NodeSummary, NodeType, SortDirection, SortKey,
     Subtree, ValueOption,
 };
 
@@ -41,19 +63,34 @@ enum Output {
     Json,
 }
 
-/// Parsed generic invocation: `nyd <instance> <verb> [positional] [flags]`.
+/// Parsed generic invocation: `nyd <instance> <verb> [positionals…] [flags]`.
 struct Invocation {
     instance: String,
     verb: String,
-    /// Positional argument: a node id/prefix (ls/show/actions) or a value
-    /// source key (values).
-    positional: Option<String>,
+    /// Positional arguments. Their meaning is verb-specific: a node id/prefix
+    /// or value source for the read verbs (at most one), and `ACTION [ID]` for
+    /// `do` (the action id, then an optional target node id).
+    positionals: Vec<String>,
     type_filter: Option<String>,
     query: Option<String>,
     tree: bool,
     depth: Option<u32>,
     sort: Vec<SortKey>,
     output: Output,
+    // ---- `do` input mapping (D2b) ----
+    /// `-m`/`--message`: editor text supplied inline (skips `$EDITOR`).
+    message: Option<String>,
+    /// `--field k=v` (repeatable): values for an `InputSpec::Form` action.
+    fields: Vec<(String, String)>,
+    /// `--value`: an `InputSpec::Picker` selection, or `ActionContext::value`
+    /// for a value-accepting `InputSpec::None` action.
+    value: Option<String>,
+    /// `--text`: `ActionContext::text` (typed free text, e.g. a new tag name).
+    text: Option<String>,
+    /// `--file` (repeatable): paths for an `InputSpec::FilePicker` action.
+    files: Vec<PathBuf>,
+    /// `--yes`/`-y`: pre-confirm a `Confirm`/`DeleteSelf`-gated action.
+    yes: bool,
 }
 
 /// Try to handle `args` as a generic adapter invocation. Returns `Some(code)`
@@ -96,8 +133,9 @@ fn run(args: &[String]) -> Result<()> {
             "show" | "get" => cmd_show(adapter.as_ref(), &inv).await,
             "actions" => cmd_actions(adapter.as_ref(), &inv).await,
             "values" => cmd_values(adapter.as_ref(), &inv).await,
+            "do" => cmd_do(adapter.as_ref(), &inv).await,
             other => Err(anyhow!(
-                "unknown verb '{other}' (expected ls | show | actions | values)"
+                "unknown verb '{other}' (expected ls | show | actions | values | do)"
             )),
         }
     })
@@ -109,18 +147,23 @@ fn run(args: &[String]) -> Result<()> {
 
 fn parse(args: &[String]) -> Result<Invocation> {
     let instance = args[1].clone();
-    let verb = args
-        .get(2)
-        .cloned()
-        .ok_or_else(|| anyhow!("missing verb for '{instance}' (try: ls | show | actions | values)"))?;
+    let verb = args.get(2).cloned().ok_or_else(|| {
+        anyhow!("missing verb for '{instance}' (try: ls | show | actions | values | do)")
+    })?;
 
-    let mut positional: Option<String> = None;
+    let mut positionals: Vec<String> = Vec::new();
     let mut type_filter = None;
     let mut query = None;
     let mut tree = false;
     let mut depth = None;
     let mut sort = Vec::new();
     let mut output = Output::Table;
+    let mut message = None;
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut value = None;
+    let mut text = None;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut yes = false;
 
     let mut i = 3;
     while i < args.len() {
@@ -151,15 +194,22 @@ fn parse(args: &[String]) -> Result<Invocation> {
                     other => return Err(anyhow!("--output expects table|json, got '{other}'")),
                 };
             }
+            "--message" | "-m" => message = Some(take_value(&mut i, "--message")?),
+            "--field" => {
+                let kv = take_value(&mut i, "--field")?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| anyhow!("--field expects key=value, got '{kv}'"))?;
+                fields.push((k.to_string(), v.to_string()));
+            }
+            "--value" => value = Some(take_value(&mut i, "--value")?),
+            "--text" => text = Some(take_value(&mut i, "--text")?),
+            "--file" => files.push(PathBuf::from(take_value(&mut i, "--file")?)),
+            "--yes" | "-y" => yes = true,
             other if other.starts_with('-') => {
                 return Err(anyhow!("unknown flag '{other}'"));
             }
-            _ => {
-                if positional.is_some() {
-                    return Err(anyhow!("unexpected extra argument '{a}'"));
-                }
-                positional = Some(a.clone());
-            }
+            _ => positionals.push(a.clone()),
         }
         i += 1;
     }
@@ -172,13 +222,19 @@ fn parse(args: &[String]) -> Result<Invocation> {
     Ok(Invocation {
         instance,
         verb,
-        positional,
+        positionals,
         type_filter,
         query,
         tree,
         depth,
         sort,
         output,
+        message,
+        fields,
+        value,
+        text,
+        files,
+        yes,
     })
 }
 
@@ -210,7 +266,7 @@ fn parse_sort(spec: &str) -> Vec<SortKey> {
 // ---------------------------------------------------------------------------
 
 async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
-    let parent: Box<dyn Node> = match &inv.positional {
+    let parent: Box<dyn Node> = match inv.positionals.first() {
         Some(id) => resolve_node(adapter, id).await?,
         None => adapter.root().await?,
     };
@@ -246,8 +302,8 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
 
 async fn cmd_show(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     let id = inv
-        .positional
-        .as_deref()
+        .positionals
+        .first()
         .ok_or_else(|| anyhow!("show requires a node id"))?;
     let mut node = resolve_node(adapter, id).await?;
     // Fill display fields a lazily-built stub leaves as placeholders.
@@ -257,7 +313,7 @@ async fn cmd_show(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
 }
 
 async fn cmd_actions(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
-    let actions: Vec<NodeAction> = if let Some(id) = &inv.positional {
+    let actions: Vec<NodeAction> = if let Some(id) = inv.positionals.first() {
         resolve_node(adapter, id).await?.actions()
     } else if let Some(t) = &inv.type_filter {
         let nt = find_node_type(adapter, t).await?;
@@ -271,12 +327,278 @@ async fn cmd_actions(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<(
 
 async fn cmd_values(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     let source = inv
-        .positional
-        .as_deref()
+        .positionals
+        .first()
         .ok_or_else(|| anyhow!("values requires a source key (e.g. `values tags`)"))?;
     let values = adapter.list_values(source).await?;
     output_values(&values, inv.output);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `do` — invoke a mutating action
+// ---------------------------------------------------------------------------
+
+/// `nyd <inst> do ACTION [ID] [input flags]` — run a node action.
+///
+/// The target node is the one named by the second positional, or the
+/// adapter root when omitted (so container-level actions like `add` work
+/// without an id). The action's [`InputSpec`] selects how input is sourced
+/// and which protocol entry point fires (`execute` vs `invoke_action`).
+async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+    let action_id = inv
+        .positionals
+        .first()
+        .ok_or_else(|| anyhow!("do requires an action id (list them with `actions`)"))?
+        .clone();
+
+    let mut node: Box<dyn Node> = match inv.positionals.get(1) {
+        Some(id) => resolve_node(adapter, id).await?,
+        None => adapter.root().await?,
+    };
+
+    // Resolve the action so we know its input shape. Prefer the node's own
+    // list, fall back to the type-level list (the source the TUI's shortcut
+    // hints use).
+    let action = find_action(node.as_ref(), adapter, &action_id).ok_or_else(|| {
+        let mut avail: Vec<String> = node.actions().into_iter().map(|a| a.id).collect();
+        for a in adapter.actions_for_type(node.node_type()) {
+            if !avail.contains(&a.id) {
+                avail.push(a.id);
+            }
+        }
+        if avail.is_empty() {
+            anyhow!("node '{}' exposes no action '{action_id}'", node.id())
+        } else {
+            anyhow!(
+                "no action '{action_id}' on '{}' (available: {})",
+                node.id(),
+                avail.join(", ")
+            )
+        }
+    })?;
+
+    match action.input {
+        InputSpec::Editor => do_editor(node.as_mut(), &action_id, inv).await,
+        InputSpec::Form { fields } => do_form(node.as_mut(), &action_id, &fields, inv).await,
+        InputSpec::Picker => do_picker(node.as_mut(), &action_id, inv).await,
+        InputSpec::FilePicker { multi } => do_files(node.as_mut(), &action_id, multi, inv).await,
+        InputSpec::None => do_dispatch(node.as_mut(), &action_id, inv).await,
+    }
+}
+
+/// Find an action by id: the node's own [`Node::actions`] first, then the
+/// adapter's type-level [`ContentAdapter::actions_for_type`].
+fn find_action(node: &dyn Node, adapter: &dyn ContentAdapter, id: &str) -> Option<NodeAction> {
+    node.actions()
+        .into_iter()
+        .find(|a| a.id == id)
+        .or_else(|| {
+            adapter
+                .actions_for_type(node.node_type())
+                .into_iter()
+                .find(|a| a.id == id)
+        })
+}
+
+/// `InputSpec::Editor`: seed a buffer from [`Node::prepare`], let the user
+/// fill it (inline via `-m`, else `$EDITOR`), then [`Node::execute`] with
+/// [`ActionInput::Edited`]. The template is passed back as `original` so the
+/// adapter can diff/merge exactly as it does for the TUI editor session.
+async fn do_editor(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+    let prep = node
+        .prepare(action_id)
+        .await
+        .with_context(|| format!("preparing editor for '{action_id}'"))?;
+    let text = match &inv.message {
+        Some(m) => m.clone(),
+        None => edit_in_editor(&prep.template, &prep.suffix)?,
+    };
+    let input = ActionInput::Edited {
+        text,
+        original: prep.template,
+        version: prep.version,
+    };
+    let outcome = node.execute(action_id, input).await?;
+    report_outcome(outcome, action_id)
+}
+
+/// `InputSpec::Form`: start from [`Node::form_prep`] prefills + each field's
+/// static default, then override with `--field k=v`. Required fields must end
+/// up non-empty.
+async fn do_form(
+    node: &mut dyn Node,
+    action_id: &str,
+    specs: &[FormFieldSpec],
+    inv: &Invocation,
+) -> Result<()> {
+    let mut values = node.form_prep(action_id).await.unwrap_or_default();
+    for spec in specs {
+        if !values.contains_key(&spec.key) {
+            if let Some(d) = &spec.default {
+                values.insert(spec.key.clone(), d.clone());
+            }
+        }
+    }
+    for (k, v) in &inv.fields {
+        values.insert(k.clone(), v.clone());
+    }
+    for spec in specs {
+        if spec.required && values.get(&spec.key).map(String::is_empty).unwrap_or(true) {
+            return Err(anyhow!(
+                "missing required field '{}' (pass --field {}=<value>)",
+                spec.key,
+                spec.key
+            ));
+        }
+    }
+    let outcome = node.execute(action_id, ActionInput::Form(values)).await?;
+    report_outcome(outcome, action_id)
+}
+
+/// `InputSpec::Picker`: the chosen value comes from `--value` (enumerate the
+/// options with `actions`/`values`).
+async fn do_picker(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+    let value = inv.value.clone().ok_or_else(|| {
+        anyhow!("action '{action_id}' needs a choice — pass --value <v> (see `values`)")
+    })?;
+    let outcome = node.execute(action_id, ActionInput::Picked(value)).await?;
+    report_outcome(outcome, action_id)
+}
+
+/// `InputSpec::FilePicker`: paths come from one or more `--file` flags.
+async fn do_files(
+    node: &mut dyn Node,
+    action_id: &str,
+    multi: bool,
+    inv: &Invocation,
+) -> Result<()> {
+    if inv.files.is_empty() {
+        return Err(anyhow!("action '{action_id}' needs at least one --file <path>"));
+    }
+    if !multi && inv.files.len() > 1 {
+        return Err(anyhow!("action '{action_id}' accepts only one --file"));
+    }
+    let outcome = node
+        .execute(action_id, ActionInput::Files(inv.files.clone()))
+        .await?;
+    report_outcome(outcome, action_id)
+}
+
+/// `InputSpec::None`: the shortcut/dispatch path. Build an [`ActionContext`]
+/// from the CLI flags, call [`Node::invoke_action`], and act on the returned
+/// [`ActionDispatch`].
+async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+    let ctx = ActionContext {
+        marked: None,
+        confirmed: inv.yes,
+        query: inv.query.clone(),
+        value: inv.value.clone(),
+        text: inv.text.clone(),
+    };
+    let dispatch = node.invoke_action(action_id, &ctx).await?;
+    match dispatch {
+        ActionDispatch::Reload => {
+            println!("ok");
+            Ok(())
+        }
+        ActionDispatch::Noop => {
+            println!("ok (no change)");
+            Ok(())
+        }
+        ActionDispatch::Error(msg) => Err(anyhow!("{msg}")),
+        // Generic confirm gate. With `--yes` we already passed
+        // `confirmed: true`, so the adapter does the work instead of asking;
+        // a `Confirm` here means `--yes` was absent.
+        ActionDispatch::Confirm { prompt } => Err(anyhow!(
+            "{prompt}\n  (re-run with --yes to confirm)"
+        )),
+        // The adapter wants the frontend's delete-confirm flow, which on
+        // "yes" runs `execute(action, None)`. We mirror that: `--yes` →
+        // perform the delete; otherwise surface the (adapter-authored) prompt.
+        ActionDispatch::DeleteSelf { confirm } => {
+            if !inv.yes {
+                let prompt =
+                    confirm.unwrap_or_else(|| format!("Delete '{}'? (y/n)", node.label()));
+                return Err(anyhow!("{prompt}\n  (re-run with --yes to confirm)"));
+            }
+            let outcome = node.execute(action_id, ActionInput::None).await?;
+            report_outcome(outcome, action_id)
+        }
+        // Interactive-only dispatches: they drive a UI flow (name prompt,
+        // editor session, paginated result pane) the CLI can't stand in for.
+        ActionDispatch::CreateChild { hint } => Err(anyhow!(
+            "action '{action_id}' creates a child interactively (hint '{hint}') — use the TUI"
+        )),
+        ActionDispatch::OpenEditor { session_kind, .. } => Err(anyhow!(
+            "action '{action_id}' opens an interactive '{session_kind}' editor — use the TUI"
+        )),
+        ActionDispatch::ExecuteQuery { .. } => Err(anyhow!(
+            "action '{action_id}' runs a query result pane — use the TUI"
+        )),
+    }
+}
+
+/// Report an [`ActionOutcome`] from [`Node::execute`]. A `Reopen` (validation
+/// or conflict — the adapter re-rendered the buffer with error banners) can't
+/// be re-edited non-interactively, so it surfaces as an error with the
+/// rejected buffer attached.
+fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
+    match outcome {
+        ActionOutcome::Done { message } => {
+            println!("{}", message.as_deref().unwrap_or("ok"));
+            Ok(())
+        }
+        ActionOutcome::NoChanges => {
+            println!("no changes");
+            Ok(())
+        }
+        ActionOutcome::Navigate { node_id, .. } => {
+            println!("ok → {node_id}");
+            Ok(())
+        }
+        ActionOutcome::Reopen { content, .. } => Err(anyhow!(
+            "'{action_id}' rejected the input:\n{content}"
+        )),
+    }
+}
+
+/// Open `$EDITOR` (falling back to `$VISUAL`) on a temp file seeded with
+/// `template`, using `suffix` for syntax highlighting, and return the saved
+/// contents. Errors when no editor is configured — callers should suggest
+/// `-m` for non-interactive use.
+fn edit_in_editor(template: &str, suffix: &str) -> Result<String> {
+    use std::io::Write;
+
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .map_err(|_| {
+            anyhow!("no $EDITOR set — pass -m <text> to supply the input non-interactively")
+        })?;
+
+    let mut tmp = tempfile::Builder::new()
+        .suffix(suffix)
+        .tempfile()
+        .context("creating temp file for the editor")?;
+    tmp.write_all(template.as_bytes())
+        .context("writing editor template")?;
+    tmp.flush().ok();
+    let path = tmp.path().to_path_buf();
+
+    // `$EDITOR` may carry arguments (e.g. "code --wait"); split on whitespace.
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow!("$EDITOR is empty"))?;
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(&path)
+        .status()
+        .with_context(|| format!("launching editor '{editor}'"))?;
+    if !status.success() {
+        return Err(anyhow!("editor '{editor}' exited with {status}"));
+    }
+    std::fs::read_to_string(&path).context("reading edited buffer")
 }
 
 // ---------------------------------------------------------------------------
@@ -692,11 +1014,60 @@ mod tests {
         let inv = parse(&args).unwrap();
         assert_eq!(inv.instance, "tasks");
         assert_eq!(inv.verb, "ls");
-        assert_eq!(inv.positional.as_deref(), Some("abc123"));
+        assert_eq!(inv.positionals, vec!["abc123".to_string()]);
         assert_eq!(inv.type_filter.as_deref(), Some("task:item"));
         assert!(inv.tree);
         assert_eq!(inv.depth, Some(2));
         assert!(matches!(inv.output, Output::Json));
+    }
+
+    #[test]
+    fn parse_do_reads_action_node_and_input_flags() {
+        let args: Vec<String> = [
+            "nyd", "tasks", "do", "edit", "abc123", "-m", "new body", "--yes",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let inv = parse(&args).unwrap();
+        assert_eq!(inv.verb, "do");
+        assert_eq!(
+            inv.positionals,
+            vec!["edit".to_string(), "abc123".to_string()]
+        );
+        assert_eq!(inv.message.as_deref(), Some("new body"));
+        assert!(inv.yes);
+    }
+
+    #[test]
+    fn parse_do_collects_fields_files_and_value() {
+        let args: Vec<String> = [
+            "nyd", "pg", "do", "create", "--field", "name=report", "--field", "db=live",
+            "--value", "v1", "--text", "hello", "--file", "/tmp/a.sql", "--file", "/tmp/b.sql",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let inv = parse(&args).unwrap();
+        assert_eq!(
+            inv.fields,
+            vec![
+                ("name".to_string(), "report".to_string()),
+                ("db".to_string(), "live".to_string()),
+            ]
+        );
+        assert_eq!(inv.value.as_deref(), Some("v1"));
+        assert_eq!(inv.text.as_deref(), Some("hello"));
+        assert_eq!(inv.files.len(), 2);
+    }
+
+    #[test]
+    fn parse_field_without_equals_errors() {
+        let args: Vec<String> = ["nyd", "pg", "do", "create", "--field", "noeq"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse(&args).is_err());
     }
 
     #[test]
