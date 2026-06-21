@@ -25,7 +25,7 @@ use crate::repository::{
     TagRepositoryImplParameters, TaskRepositoryImpl, TaskRepositoryImplParameters,
     TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
-use crate::service::{TagService, TaskService, TrackingService};
+use crate::service::{ProjectService, TagService, TaskService, TrackingService};
 
 /// The task-domain services resolved over one database connection.
 ///
@@ -40,6 +40,9 @@ pub struct TaskDomain {
     /// adapter's `split`/`move` actions delegate to it.
     pub tracking_service: Arc<dyn TrackingService>,
     pub tag_service: Arc<dyn TagService>,
+    /// Project listing + CRUD (with cascade delete). Backs the Projects
+    /// adapter (`project:root` / `project:item`).
+    pub project_service: Arc<dyn ProjectService>,
 }
 
 /// Connect to `dsn`, sync the task-domain schema into it, and resolve the
@@ -74,5 +77,6 @@ pub async fn open(dsn: &str) -> Result<TaskDomain, DbErr> {
         tracking_repo: module.resolve(),
         tracking_service: module.resolve(),
         tag_service: module.resolve(),
+        project_service: module.resolve(),
     })
 }

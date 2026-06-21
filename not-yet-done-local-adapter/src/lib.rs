@@ -31,6 +31,7 @@ use std::sync::Arc;
 use not_yet_done_content::{HostEvent, HostEventBus, Invalidation};
 use not_yet_done_task_core::events::DomainEvent;
 use not_yet_done_task_core::repository::TrackingRepository;
+use not_yet_done_task_core::service::ProjectService;
 use not_yet_done_task_core::service::TagService;
 use not_yet_done_task_core::service::TaskService;
 use not_yet_done_task_core::service::TrackingService;
@@ -39,8 +40,12 @@ use tokio::sync::broadcast;
 // Human-friendly datetime / offset parsing for the trackings adapter's
 // `split`/`move` Form actions (mirrors the CLI's datetime.rs / offset.rs).
 mod datetime;
+// Shared `InputSpec::Form` field-map readers for the local adapters'
+// `execute` paths (trackings split/move, projects create/edit/delete).
+mod form;
 pub mod editor_templates;
 pub mod notes;
+pub mod projects;
 pub mod task;
 pub mod tracking;
 // Subtree-restructure tree editor (serialize → parse → diff → apply). Moved
@@ -48,6 +53,7 @@ pub mod tracking;
 // `notes::move_notes`, so it belongs with the task-domain operations. Both the
 // TaskAdapter and the transitional native `RestructureSession` consume it.
 pub mod tree_edit;
+pub use projects::{ProjectAdapter, ProjectAdapterFactory};
 pub use task::{TaskAdapter, TaskAdapterFactory};
 pub use tracking::{TrackingAdapter, TrackingAdapterFactory};
 
@@ -82,6 +88,9 @@ pub struct CoreHandle {
     /// Tag listing/management service — backs the task adapter's
     /// `list_values("tags")` (the `option_menu` source) and tag mutations.
     pub tag_service: Arc<dyn TagService>,
+    /// Project listing + CRUD — backs the Projects adapter's `list` and its
+    /// `create`/`edit`/`delete` actions.
+    pub project_service: Arc<dyn ProjectService>,
     /// Host-owned cross-adapter event bus (see the struct docs).
     bus: Arc<dyn HostEventBus>,
     /// Bus channel key for this handle — the database DSN. Local adapters on
@@ -103,6 +112,7 @@ impl CoreHandle {
         tracking_repo: Arc<dyn TrackingRepository>,
         tracking_service: Arc<dyn TrackingService>,
         tag_service: Arc<dyn TagService>,
+        project_service: Arc<dyn ProjectService>,
         bus: Arc<dyn HostEventBus>,
         channel: String,
         allow_parallel_tracking: bool,
@@ -112,6 +122,7 @@ impl CoreHandle {
             tracking_repo,
             tracking_service,
             tag_service,
+            project_service,
             bus,
             channel,
             allow_parallel_tracking,
@@ -211,6 +222,7 @@ pub fn open_core_handle(
         domain.tracking_repo,
         domain.tracking_service,
         domain.tag_service,
+        domain.project_service,
         ctx.event_bus.clone(),
         dsn,
         cfg.allow_parallel.unwrap_or(false),
@@ -233,7 +245,8 @@ pub fn domain_event_to_invalidation(ev: &DomainEvent) -> Option<Invalidation> {
         DomainEvent::TaskChanged { id } => Invalidation::Node { id: id.to_string() },
         DomainEvent::TrackingStarted { .. }
         | DomainEvent::TrackingStopped { .. }
-        | DomainEvent::TrackingChanged { .. } => Invalidation::All,
+        | DomainEvent::TrackingChanged { .. }
+        | DomainEvent::ProjectChanged { .. } => Invalidation::All,
         DomainEvent::TrackingTick => Invalidation::Repaint,
     })
 }

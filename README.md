@@ -545,6 +545,13 @@ nyd trackings do split <id> --field at="10:30" --field task=<other-task-id>
 nyd trackings do move  <id> --field start="yesterday 9am"
 nyd trackings do move  <id> --field start=2026-03-20 \
   --field gravity=start --field offset=+1h --field allow_future=true
+
+# Projects are an adapter too: the generic verbs manage them with no
+# project-specific command. create/edit/delete are all form actions.
+nyd projects ls                                   # list projects
+nyd projects do create --field name=Acme --field description=Widgets
+nyd projects do edit <id> --field name="Acme Inc."   # omitted fields stay
+nyd projects do delete <id> --field cascade=true     # also soft-delete tasks
 ```
 
 Node ids are opaque and adapter-owned; for the local task/tracking forests you

@@ -77,6 +77,10 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
         "trackings".to_string(),
         Box::new(not_yet_done_local_adapter::TrackingAdapterFactory::new()),
     );
+    factories.insert(
+        "projects".to_string(),
+        Box::new(not_yet_done_local_adapter::ProjectAdapterFactory::new()),
+    );
     factories
 }
 

@@ -47,6 +47,12 @@ pub enum DomainEvent {
     /// if the affected row was running) may change, so consumers refetch.
     /// Distinct from `TrackingStarted`/`Stopped`, which mark live transitions.
     TrackingChanged { tracking_id: Uuid },
+    /// A project was created, renamed, or deleted. Structural: the project
+    /// list changes, and a cascade delete also soft-deletes that project's
+    /// tasks — so task/tracking consumers refetch too (the project id is not
+    /// a task/tracking node id, hence a coarse list refresh rather than a
+    /// targeted node refetch). Carries the affected project id.
+    ProjectChanged { id: Uuid },
     /// Heartbeat while at least one tracking runs (~1 Hz). Carries no id;
     /// consumers map it to a **repaint only**, never a refetch — it exists
     /// so live "elapsed" cells tick.
