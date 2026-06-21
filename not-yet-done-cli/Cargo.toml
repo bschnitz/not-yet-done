@@ -24,6 +24,8 @@ serde                = { workspace = true }
 serde_json           = { workspace = true }
 serde_yaml           = { workspace = true }
 tempfile             = { workspace = true }
+# `--path /A/B` segment matching: substring by default, `re:` opt-in regex.
+regex                = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

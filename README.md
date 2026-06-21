@@ -520,6 +520,17 @@ nyd tasks actions --type task:item # …or on a node type
 nyd tasks values tags              # enumerate a value source
 nyd tasks ls -o json               # any read verb takes -o table|json
 
+# Name a node by a label path instead of an opaque id (--path / -p): one
+# segment per level, matched against child labels by substring (case-folded
+# with -i) or by regex when prefixed `re:`.
+nyd tasks show --path /Inbox/Groceries -i
+nyd tasks ls   --path '/Inbox/re:^Week \d+$'
+
+# Group a tree into date/value buckets (--group-by / -g), for adapters that
+# support adapter-side grouping. Spec is `col[:bucket][:order]`, where bucket
+# is day|week|month|year and order is asc|desc:
+nyd trackings ls --type tracking:tree-group --group-by started_at:day:desc --tree
+
 # Mutating verb: `do <action> [id]` runs a node action. The action's input
 # shape (seen in `actions`) decides how input is sourced:
 nyd tasks do add -m "$(cat task.md)"      # editor action, body inline (else $EDITOR)
@@ -529,7 +540,18 @@ nyd pg do run --field name=report --field db=live   # form action
 ```
 
 Node ids are opaque and adapter-owned; for the local task/tracking forests you
-can use a unique **id prefix** (like a git short hash).
+can use a unique **id prefix** (like a git short hash). Where a verb takes a
+node id (`ls`, `show`, `do`), `--path /A/B` is an alternative that walks down by
+label — the CLI analogue of drilling in by name in the TUI. It uses only the
+protocol's per-level listing, so it works for any adapter; each segment must
+resolve to exactly one child (ambiguous or unmatched segments error and list
+the candidates).
+
+`--group-by` rides along in the list request; only adapters that advertise
+adapter-side grouping act on it (others ignore it with a warning). Grouping is
+tied to the adapter's bucket node type, so select it with `--type` — or hide
+that behind an alias (see below). The bucket key is ISO-formatted, so the
+group order is chronological.
 
 ### Aliases & `config edit`
 
