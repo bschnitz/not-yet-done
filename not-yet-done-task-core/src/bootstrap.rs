@@ -25,7 +25,7 @@ use crate::repository::{
     TagRepositoryImplParameters, TaskRepositoryImpl, TaskRepositoryImplParameters,
     TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
-use crate::service::{TagService, TaskService};
+use crate::service::{TagService, TaskService, TrackingService};
 
 /// The task-domain services resolved over one database connection.
 ///
@@ -35,6 +35,10 @@ use crate::service::{TagService, TaskService};
 pub struct TaskDomain {
     pub task_service: Arc<dyn TaskService>,
     pub tracking_repo: Arc<dyn TrackingRepository>,
+    /// High-level tracking operations (split/move with gravity, overlap and
+    /// future guards) the repository alone doesn't encapsulate. The Trackings
+    /// adapter's `split`/`move` actions delegate to it.
+    pub tracking_service: Arc<dyn TrackingService>,
     pub tag_service: Arc<dyn TagService>,
 }
 
@@ -68,6 +72,7 @@ pub async fn open(dsn: &str) -> Result<TaskDomain, DbErr> {
     Ok(TaskDomain {
         task_service: module.resolve(),
         tracking_repo: module.resolve(),
+        tracking_service: module.resolve(),
         tag_service: module.resolve(),
     })
 }
