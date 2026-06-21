@@ -16,8 +16,6 @@ use not_yet_done_task_core::repository::{
 mod adapter_cli;
 mod cli_config;
 mod commands;
-mod datetime;
-mod offset;
 
 static MODULE: OnceLock<Arc<TaskDomainModule>> = OnceLock::new();
 
@@ -32,30 +30,28 @@ where
         .block_on(f(module))
 }
 
+// The CLI is, by design, a thin generic front-end over the ContentAdapter
+// protocol (Block D): tasks, trackings *and* projects are reached as adapter
+// instances (`nyd tasks …`, `nyd projects do create …`), and the terse
+// everyday forms live as `cli.yaml` aliases (see `cli_config::DEFAULT_ALIASES`),
+// not as hard-coded subcommands. The only built-in `tusks` commands left are
+// the two that have no adapter path yet:
+//   * `tag`    — tag CRUD with fg/bg/symbol styling; the task adapter only
+//                exposes tags as a value source + per-task mutation, so the
+//                standalone management UI still lives here.
+//   * `backup` — backup/list/restore of the legacy core DB; stays until D4
+//                turns it into a `tasks.db` adapter action.
+// The former `task` / `project` / `track` / `query` / `db sync` commands were
+// removed once their adapter replacements landed (D3b-1..3); those names are
+// now free for adapter instances or aliases (see `adapter_cli::BUILTIN_COMMANDS`).
 #[tusks(root)]
 #[command(name = "nyd", about = "not-yet-done — deine Todo-App")]
 pub mod cli {
-    #[command(about = "Task-Verwaltung")]
-    pub use crate::commands::task::cli as task;
-
-    #[command(about = "Projekt-Verwaltung")]
-    pub use crate::commands::project::cli as project;
-
-
     #[command(about = "Tag-Verwaltung")]
     pub use crate::commands::tag::cli as tag;
 
-    #[command(about = "Datenbankoperationen")]
-    pub use crate::commands::db::cli as db;
-
     #[command(about = "Backup erstellen")]
     pub use crate::commands::backup::cli as backup;
-
-    #[command(about = "Time tracking")]
-    pub use crate::commands::track::cli as track;
-
-    #[command(about = "Run filter queries")]
-    pub use crate::commands::query::cli as query;
 }
 
 fn main() -> std::process::ExitCode {
@@ -67,8 +63,6 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = adapter_cli::try_dispatch(&args) {
         return code;
     }
-
-    let sync_schema = args.windows(2).any(|w| w[0] == "db" && w[1] == "sync");
 
     let config_service = ConfigServiceImpl::new();
 
@@ -84,9 +78,12 @@ fn main() -> std::process::ExitCode {
         }
     };
 
+    // The remaining built-in commands (`tag`, `backup`) operate on an existing
+    // core DB; schema sync was only ever triggered by the now-removed
+    // `db sync`, so connect without it.
     let db = tokio::runtime::Runtime::new()
         .expect("tokio Runtime konnte nicht erstellt werden")
-        .block_on(async { db::connect(&db_url, sync_schema).await });
+        .block_on(async { db::connect(&db_url, false).await });
 
     let db = match db {
         Ok(db) => db,

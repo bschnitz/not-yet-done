@@ -48,22 +48,43 @@ use serde::Deserialize;
 /// instances aren't configured the alias still expands, then fails at dispatch
 /// with a clear "no adapter instance" error.
 ///
-/// An alias name must not collide with a built-in `tusks` subcommand (`task`,
-/// `project`, `tag`, `db`, `backup`, `track`, `query`, `help`) or a configured
-/// adapter instance — both are matched *before* aliases, so a colliding name is
-/// unreachable. (Once the legacy task-core commands are removed those names
-/// free up; until then the tracking-toggle default is `toggle`, not `track`.)
+/// An alias name must not collide with a built-in `tusks` subcommand (`tag`,
+/// `backup`, `help`) or a configured adapter instance — both are matched
+/// *before* aliases, so a colliding name is unreachable. The former task-core
+/// commands (`task`/`project`/`track`/`query`/`db`) were removed in D3b, so
+/// those names are now free for aliases (e.g. the `track` toggle below).
 pub const DEFAULT_ALIASES: &[(&str, &[&str])] = &[
-    // Open the new-task editor buffer (or supply it with `-m`).
+    // Open the new-task editor buffer (or supply it inline with `-m`, where the
+    // first line is the title and the rest the description — the same Markdown
+    // buffer the TUI's add action uses).
     ("add", &["tasks", "do", "add"]),
     // Edit a task's buffer: `nyd edit <id>`.
     ("edit", &["tasks", "do", "edit", "{0}"]),
     // Delete a task (needs `--yes`): `nyd rm <id> --yes`.
     ("rm", &["tasks", "do", "delete", "{0}"]),
-    // Toggle tracking on a task: `nyd toggle <id>` (`track` is a built-in).
+    // Toggle time tracking on a task: `nyd track <id>`. The adapter exposes a
+    // single `toggle-tracking` action (start when stopped, stop when running),
+    // so the legacy `track start`/`track stop` pair collapses into one verb.
+    // `toggle` stays as a back-compat synonym.
+    ("track", &["tasks", "do", "toggle-tracking", "{0}"]),
     ("toggle", &["tasks", "do", "toggle-tracking", "{0}"]),
     // The task forest as a tree: `nyd tree`.
     ("tree", &["tasks", "ls", "--tree"]),
+    // Tracked time rolled up per task, bucketed by day (newest first) — the
+    // generic stand-in for the legacy `track summary`. Add `--query` after it
+    // (spliced) to time-box, e.g. `nyd summary --query 'started_at gt last week'`.
+    (
+        "summary",
+        &[
+            "trackings",
+            "ls",
+            "--tree",
+            "--type",
+            "tracking:tree-group",
+            "--group-by",
+            "started_at:day:desc",
+        ],
+    ),
 ];
 
 /// Parsed `cli.yaml`. Only `aliases:` for now; the struct leaves room for
@@ -418,6 +439,40 @@ mod tests {
     #[test]
     fn expand_missing_named_errors() {
         assert!(expand(&v(&["x", "{parent}"]), &[]).is_err());
+    }
+
+    /// Look up a default alias's template by name (defaults are the source of
+    /// truth; `load()` may be shadowed by a real `cli.yaml` in dev/CI).
+    fn default_template(name: &str) -> Vec<String> {
+        DEFAULT_ALIASES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, toks)| toks.iter().map(|t| t.to_string()).collect())
+            .unwrap_or_else(|| panic!("no default alias '{name}'"))
+    }
+
+    #[test]
+    fn default_track_alias_toggles_tracking() {
+        let out = expand(&default_template("track"), &v(&["abc123"])).unwrap();
+        assert_eq!(out, v(&["tasks", "do", "toggle-tracking", "abc123"]));
+    }
+
+    #[test]
+    fn default_summary_alias_is_grouped_tracking_tree() {
+        // No args → the bare grouped-tree invocation.
+        let out = expand(&default_template("summary"), &[]).unwrap();
+        assert_eq!(
+            out,
+            v(&[
+                "trackings",
+                "ls",
+                "--tree",
+                "--type",
+                "tracking:tree-group",
+                "--group-by",
+                "started_at:day:desc",
+            ])
+        );
     }
 
     #[test]

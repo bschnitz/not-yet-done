@@ -18,16 +18,9 @@ tokio                = { workspace = true }
 anyhow               = { workspace = true }
 tusks                = "2.1"
 chrono               = { workspace = true }
-chrono-english       = { workspace = true }
-dateparser           = { workspace = true }
 serde                = { workspace = true }
 serde_json           = { workspace = true }
 serde_yaml           = { workspace = true }
 tempfile             = { workspace = true }
 # `--path /A/B` segment matching: substring by default, `re:` opt-in regex.
 regex                = { workspace = true }
-
-[dev-dependencies]
-assert_cmd = { workspace = true }
-predicates = { workspace = true }
-tempfile   = { workspace = true }

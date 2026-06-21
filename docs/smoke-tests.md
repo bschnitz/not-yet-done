@@ -2110,11 +2110,12 @@ sucht im Tasks-Tree den passenden Knoten und expandiert den Pfad.
 
 Synchroner Refetch der `task_rows` aus der DB. Hauptzweck: in einer
 Command-Chain aus einem Skript (siehe nächster Abschnitt) zwischen
-einem externen `nyd task add` und einem nachgelagerten
-`:focus-task` einklemmen, damit der neu angelegte Task gesehen wird.
+einem externen `nyd add` (Alias für `nyd tasks do add`) und einem
+nachgelagerten `:focus-task` einklemmen, damit der neu angelegte Task
+gesehen wird.
 
-- [ ] In TUI Tasks-Tab; in zweitem Terminal `nyd task add 'Smoke
-reload' --parent <id-eines-existierenden-tasks>` → neue Row
+- [ ] In TUI Tasks-Tab; in zweitem Terminal `nyd add -m 'Smoke
+reload'` → neue Row
       ist im laufenden TUI noch NICHT sichtbar (selbst nach
       Tab-Wechsel hin und zurück, weil `set_active_tab` nur bei
       `Idle` reloaded). `:reload-tasks` → Row erscheint sofort im
@@ -2182,27 +2183,28 @@ only (Drill-Down später).
       Modal *"no row matching …"\_; User muss erst `r` (reload)
       triggern.
 
-## CLI `task show --path`
+## CLI `tasks show --path`
 
-Pfad-basiertes Lookup, teilt Semantik mit `:focus-task`. Erfolg →
-JSON `{"id","description","parent_id"}` auf stdout, exit 0. Fehler
-→ Meldung auf stderr, exit ≠ 0.
+Pfad-basiertes Lookup über den **generischen** `--path`-Resolver (D3b-1) auf
+der Adapter-Instanz `tasks` (das frühere hartkodierte `task show` ist
+entfernt). Ein Segment pro Ebene, gegen Child-Labels per Substring (mit `-i`
+case-gefoldet) oder `re:`-Regex; jedes Segment muss genau ein Kind treffen.
+Erfolg → Node-Felder auf stdout (`-o json` für JSON), exit 0.
 
-- [ ] `nyd task show --path /Work/Clients/Acme/Tickets` →
-      stdout JSON mit `id` + `description` + `parent_id`, exit 0.
-- [ ] `nyd task show -i --path /work/clients/acme/tickets` →
+> ⚠ Der generische Resolver hat andere Fehlermeldungen/Exit-Codes als das alte
+> `task show`. Diese Items beim nächsten Smoke gegen das Ist-Verhalten von
+> `adapter_cli` (substring/`re:`, „ambiguous … list the candidates") neu
+> verifizieren und die erwarteten Strings hier nachziehen.
+
+- [ ] `nyd tasks show --path /Work/Clients/Acme/Tickets` →
+      stdout mit den Node-Feldern, exit 0.
+- [ ] `nyd tasks show -i --path /work/clients/acme/tickets` →
       gleicher Hit wie oben, exit 0.
-- [ ] `nyd task show --path /nope` → stderr _"no task matching
-      'nope' at root level"_, exit 4.
-- [ ] `nyd task show --path 'work/foo'` (kein leading `/`) →
-      stderr _"path must start with '/'"_, exit 2.
-- [ ] `nyd task show --path '/re:[broken('` → stderr _"bad
-      segment …"_, exit 3.
-- [ ] `nyd task show --path /<ambig>` wenn mehrere Root-Tasks
-      matchen → stderr _"…is ambiguous (n candidates):"_ mit
-      Liste, exit 5.
-- [ ] `nyd task show --path /` → stderr _"path is empty"_, exit 2.
-- [ ] Pipe-bar: `nyd task show --path … | jq -r '.id'` liefert
+- [ ] `nyd tasks show --path '/Inbox/re:^Week \d+$'` → Regex-Segment matched.
+- [ ] `nyd tasks show --path /nope` → Fehler (unmatched segment), exit ≠ 0.
+- [ ] `nyd tasks show --path /<ambig>` wenn mehrere Kinder matchen →
+      Fehler mit Kandidatenliste, exit ≠ 0.
+- [ ] Pipe-bar: `nyd tasks show --path … -o json | jq -r '.id'` liefert
       eine valide UUID (smoke fürs JSON-Schema).
 
 ## Script `mode: commands` (script → TUI command relay)
