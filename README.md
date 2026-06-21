@@ -489,6 +489,10 @@ nyd-t project add "Work" --description …       # list / edit / delete too
 nyd-t tag add "urgent" --fg "#FFFFFF" --bg "#FF5733" --symbol ""   # list/edit/new/delete
 nyd-t db sync                                  # create/upgrade the task DB schema
 nyd-t backup create | list | restore <file>   # backs up the task DB (tasks.db)
+
+# Ad-hoc filter queries (debug/inspect a FilterExpr before saving it)
+echo 'query: [deleted, =, false]' | nyd-t query run --entity task     # JSON to stdout
+nyd-t query run --entity tracking --file filter.yaml [--debug]        # --debug dumps the resolved FilterExpr
 ```
 
 The `track export` / `task tree` JSON shapes and `task show` exit codes are a
