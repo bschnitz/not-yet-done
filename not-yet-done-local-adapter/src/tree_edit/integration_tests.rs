@@ -543,6 +543,7 @@ fn build_task_adapter(
     tracking: Arc<dyn TrackingRepository>,
     tracking_service: Arc<dyn not_yet_done_task_core::service::TrackingService>,
     tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
+    project_service: Arc<dyn not_yet_done_task_core::service::ProjectService>,
 ) -> Box<dyn not_yet_done_content::ContentAdapter> {
     use not_yet_done_content::InMemoryHostBus;
     // The self-contained factory would open its *own* database; the test
@@ -554,6 +555,7 @@ fn build_task_adapter(
         tracking,
         tracking_service,
         tag_service,
+        project_service,
         bus,
         "test".to_string(),
         false,
@@ -584,6 +586,29 @@ fn tracking_service_for(
     module.resolve()
 }
 
+/// Resolve a `ProjectService` over the test's in-memory `db` — the
+/// `CoreHandle` now carries one; these task-adapter tests don't exercise
+/// project actions, so any service over the same DB satisfies the constructor.
+fn project_service_for(
+    db: &sea_orm::DatabaseConnection,
+) -> Arc<dyn not_yet_done_task_core::service::ProjectService> {
+    let module = TaskDomainModule::builder()
+        .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .with_component_parameters::<ProjectRepositoryImpl>(ProjectRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .with_component_parameters::<TagRepositoryImpl>(TagRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .with_component_parameters::<TrackingRepositoryImpl>(TrackingRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .build();
+    module.resolve()
+}
+
 /// Flat list `delete-single`: only the invoking task is deleted; its child
 /// survives (and re-roots to the forest top on the next load). The confirm
 /// prompt is the generic one (`None` from the adapter).
@@ -595,7 +620,13 @@ async fn adapter_delete_single_leaves_children() {
     let _child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
 
     let adapter =
-        build_task_adapter(service, tracking, tracking_service_for(&db), _tag_service);
+        build_task_adapter(
+            service,
+            tracking,
+            tracking_service_for(&db),
+            _tag_service,
+            project_service_for(&db),
+        );
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
     // No recursive warning for the single-delete action.
@@ -626,7 +657,13 @@ async fn adapter_delete_recursive_warns_and_cascades() {
     let _grandchild = insert_task(&db, "Grandchild", Some(child.id), TaskStatus::Todo, 0).await;
 
     let adapter =
-        build_task_adapter(service, tracking, tracking_service_for(&db), _tag_service);
+        build_task_adapter(
+            service,
+            tracking,
+            tracking_service_for(&db),
+            _tag_service,
+            project_service_for(&db),
+        );
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
     // The prompt names the cascade and the subtask count (2 descendants).

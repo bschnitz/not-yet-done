@@ -91,6 +91,7 @@ use not_yet_done_task_core::events::DomainEvent;
 use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
 
 use crate::datetime::{LocalDateTime, LocalOffset};
+use crate::form::{form_flag, form_opt, form_required, invalid_input};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
@@ -1351,34 +1352,6 @@ fn move_input_spec() -> InputSpec {
     }
 }
 
-/// Read a Form field, treating absent or whitespace-only values as `None`.
-fn form_opt(values: &HashMap<String, String>, key: &str) -> Option<String> {
-    values
-        .get(key)
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
-}
-
-/// Read a required Form field; error if absent or empty.
-fn form_required<'a>(values: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
-    match values.get(key).map(|v| v.trim()) {
-        Some(v) if !v.is_empty() => Ok(v),
-        _ => Err(invalid_input(format!("field '{key}' is required"))),
-    }
-}
-
-/// A Toggle delivers `"true"`/`"false"`; treat anything other than `"true"` as
-/// off (an absent toggle is off).
-fn form_flag(values: &HashMap<String, String>, key: &str) -> bool {
-    values.get(key).map(|v| v == "true").unwrap_or(false)
-}
-
-/// Wrap a user-facing parse/validation message as a [`ContentError`].
-fn invalid_input(msg: String) -> ContentError {
-    ContentError::Other(msg.into())
-}
-
 /// `execute("split")` — cut the tracking at `at` into two parts (the original
 /// is soft-deleted, both new parts reference it as predecessor). An optional
 /// `task` id reassigns the second part. Delegates to
@@ -2412,7 +2385,11 @@ fn spawn_tracking_bridge(
                         }
                     }
                 }
-                DomainEvent::TaskChanged { .. } | DomainEvent::TrackingChanged { .. } => {
+                DomainEvent::TaskChanged { .. }
+                | DomainEvent::TrackingChanged { .. }
+                // A project rename/cascade-delete can change a task's path or
+                // remove tracked tasks, so resync the whole forest.
+                | DomainEvent::ProjectChanged { .. } => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }
@@ -4011,6 +3988,8 @@ mod restore_scope_tests {
         let tracking_service: Arc<dyn not_yet_done_task_core::service::TrackingService> =
             module.resolve();
         let tag_service: Arc<dyn not_yet_done_task_core::service::TagService> = module.resolve();
+        let project_service: Arc<dyn not_yet_done_task_core::service::ProjectService> =
+            module.resolve();
         let bus = Arc::new(InMemoryHostBus::default());
         (
             CoreHandle::new(
@@ -4018,6 +3997,7 @@ mod restore_scope_tests {
                 tracking_repo,
                 tracking_service,
                 tag_service,
+                project_service,
                 bus,
                 "test".to_string(),
                 false,

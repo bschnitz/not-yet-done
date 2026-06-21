@@ -2027,7 +2027,10 @@ fn spawn_task_bridge(
                         }
                     }
                 }
-                DomainEvent::TrackingChanged { .. } => {
+                DomainEvent::TrackingChanged { .. }
+                // A cascade project delete soft-deletes that project's tasks,
+                // and a rename can shift task paths — resync the whole forest.
+                | DomainEvent::ProjectChanged { .. } => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }

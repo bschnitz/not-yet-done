@@ -1,0 +1,111 @@
+# Example: Projects view configuration (adapterized project management — plan phase D3b-3)
+#
+# Place in: ~/.config/not_yet_done/views/projects.yaml
+#
+# Like `tasks` / `trackings`, the `projects` adapter is *in-process*: it wraps
+# the host's own ProjectService (no network, no adapter-config file).
+# `adapter.type: projects` resolves to the in-process ProjectAdapterFactory the
+# host registers at startup with a live handle to the core services.
+#
+# ## Why a projects adapter
+#
+# Projects used to be reachable only through the bespoke `nyd project …`
+# subcommands. Exposing them as a ContentAdapter means the *generic*
+# frontends manage them with no project-specific glue: this view config
+# stands up a TUI tab, and the same adapter answers the CLI's generic
+# `nyd projects ls` / `nyd projects do <action>` — one implementation, both
+# frontends. (This is the D-block goal: maximise the generic transfer of TUI
+# capabilities to the CLI.)
+#
+# ## Shape
+#
+# A flat list — one `project:item` row per project, no tree. The adapter is
+# **stateless** (no eager snapshot): projects are few, so `list()` reads them
+# fresh each time. Mutations publish `DomainEvent::ProjectChanged` on the
+# core event bus (keyed by DSN), which the generic bridge turns into
+# `Invalidation::All` — so a Tasks or Trackings tab open on the *same* database
+# also resyncs when a project changes (a deleted project cascades to its
+# tasks' membership).
+#
+# ## Actions
+#
+# All three actions are `InputSpec::Form` routed through the generic form
+# popup (`type: custom` + `id`), so they behave identically in the TUI and the
+# CLI (`nyd projects do <id> --field k=v`):
+#
+#   * `create` (`a`, on the root) — Form[name (required), description
+#     (optional)]; adds a project and navigates to it.
+#   * `edit` (`e`, on a row) — Form[name (optional), description (optional)],
+#     prefilled with the current values via `form_prep`; an empty form is a
+#     no-op. Omitting a field leaves it unchanged (`None` = leave as-is).
+#   * `delete` (`d`, on a row) — Form[cascade (toggle)]. The cascade choice is
+#     an explicit form field rather than the generic DeleteSelf confirm, so
+#     the "also soft-delete this project's tasks" decision is visible and works
+#     the same way from the CLI (`--field cascade=true`).
+
+tab:
+  name: Projects
+  order: 3
+  icon: "󰉋"
+
+adapter:
+  type: projects
+  # In-process, self-contained adapter: it opens its own database. Config keys
+  # (all optional) mirror tasks/trackings —
+  #   database: SeaORM DSN of the backing DB. Omit → per-host default
+  #             <data-local>/not_yet_done/tasks.db (the same file tasks/
+  #             trackings use, so projects, tasks and their tracked time share
+  #             one database). Point all three at the same file.
+  # `config_inline: "{}"` is the empty config (all defaults); the host needs a
+  # `config_inline` or a `config:` path to build the instance.
+  config_inline: "{}"
+
+views:
+  - name: projects
+    node_type: "project:item"
+    default: true
+    key: a
+
+    # Two typed columns the adapter exposes. `created` is an RFC3339 datetime.
+    # `S` opens a column/direction picker over the adapter's sortable columns
+    # (name = lexical, created = datetime) and the adapter applies the sort.
+    columns:
+      - key: name
+        label: Name
+        source: label
+        style: text_med
+        sizing: "flex(1)"
+      - key: created
+        label: Created
+        kind: datetime
+        style: secondary
+        sizing: max
+
+    actions:
+      # Local filter-while-typing over the loaded rows.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name]
+      - name: refresh
+        key: r
+        type: reload
+      # Create a project (form popup → `execute("create", …)`). Declared
+      # `on_container: true` so the hint is built statically (always visible at
+      # the un-drilled root) and dispatched against `adapter.root()`.
+      - name: create
+        key: a
+        type: custom
+        id: create
+        on_container: true
+      # Per-row actions: edit prefills the current values, delete asks whether
+      # to cascade. Both route through the generic form popup.
+      - name: edit
+        key: e
+        type: custom
+        id: edit
+      - name: delete
+        key: d
+        type: custom
+        id: delete
