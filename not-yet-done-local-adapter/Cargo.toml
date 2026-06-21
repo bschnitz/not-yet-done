@@ -13,6 +13,11 @@ serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
 dirs        = { workspace = true }
 slug        = "0.1"
+# Human-friendly datetime / offset parsing for the trackings adapter's
+# `split`/`move` actions, which receive their time points as Form strings
+# (mirrors the CLI's `track split`/`track move` parsing).
+chrono-english = { workspace = true }
+dateparser     = { workspace = true }
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-core    = { path = "../not-yet-done-core" }
 not-yet-done-task-core = { path = "../not-yet-done-task-core" }

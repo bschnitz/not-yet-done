@@ -36,6 +36,9 @@ use not_yet_done_task_core::service::TaskService;
 use not_yet_done_task_core::service::TrackingService;
 use tokio::sync::broadcast;
 
+// Human-friendly datetime / offset parsing for the trackings adapter's
+// `split`/`move` Form actions (mirrors the CLI's datetime.rs / offset.rs).
+mod datetime;
 pub mod editor_templates;
 pub mod notes;
 pub mod task;
