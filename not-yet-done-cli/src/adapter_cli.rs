@@ -7,12 +7,19 @@
 //! *every* adapter:
 //!
 //! ```text
-//! nyd <inst> ls   [ID] [--type T] [--query Q] [--tree [--depth N]] [--sort S] [-o table|json]
-//! nyd <inst> show  ID                                                          [-o table|json]
-//! nyd <inst> actions (ID | --type T)                                           [-o table|json]
-//! nyd <inst> values  SOURCE                                                    [-o table|json]
+//! nyd <inst> ls   [ID] [--type T] [--query Q] [--tree [--depth N]] [--sort S] [--group-by G] [-o table|json]
+//! nyd <inst> show  ID                                                                         [-o table|json]
+//! nyd <inst> actions (ID | --type T)                                                          [-o table|json]
+//! nyd <inst> values  SOURCE                                                                   [-o table|json]
 //! nyd <inst> do    ACTION [ID] [input flags] [--yes]
 //! ```
+//!
+//! Any verb that targets a node by id accepts `--path /A/B/C` instead: a
+//! generic front-end walk that descends one label per segment from the root.
+//! A segment matches a child label by substring, or by regex when prefixed
+//! `re:`; `-i` makes the match case-insensitive. The walk uses only the
+//! protocol's per-level `list`, so it works for *every* adapter — the same way
+//! the TUI lets you drill in by name without knowing opaque ids.
 //!
 //! The **read** verbs (`ls`/`show`/`actions`/`values`) came in D2a; the
 //! mutating **`do`** verb (D2b) drives the same protocol the TUI's
@@ -45,8 +52,8 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, FormFieldSpec,
-    InputSpec, ListParams, Node, NodeAction, NodeSummary, NodeType, SortDirection, SortKey,
-    Subtree, ValueOption,
+    GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction, NodeSummary, NodeType,
+    SortDirection, SortKey, Subtree, ValueOption,
 };
 
 /// Built-in `tusks` subcommands. A first argument matching one of these is
@@ -76,6 +83,13 @@ struct Invocation {
     tree: bool,
     depth: Option<u32>,
     sort: Vec<SortKey>,
+    /// `--group-by col[:bucket][:order]`: adapter-side grouping (only adapters
+    /// with `group_by_via_adapter` honor it; others ignore it with a warning).
+    group_by: Option<GroupSpec>,
+    /// `--path /A/B`: name the target node by a label walk instead of an id.
+    path: Option<String>,
+    /// `-i`/`--case-insensitive`: fold case in `--path` segment matching.
+    case_insensitive: bool,
     output: Output,
     // ---- `do` input mapping (D2b) ----
     /// `-m`/`--message`: editor text supplied inline (skips `$EDITOR`).
@@ -207,6 +221,9 @@ fn parse(args: &[String]) -> Result<Invocation> {
     let mut tree = false;
     let mut depth = None;
     let mut sort = Vec::new();
+    let mut group_by = None;
+    let mut path = None;
+    let mut case_insensitive = false;
     let mut output = Output::Table;
     let mut message = None;
     let mut fields: Vec<(String, String)> = Vec::new();
@@ -236,6 +253,11 @@ fn parse(args: &[String]) -> Result<Invocation> {
                 );
             }
             "--sort" | "-s" => sort = parse_sort(&take_value(&mut i, "--sort")?),
+            "--group-by" | "-g" => {
+                group_by = Some(parse_group_by(&take_value(&mut i, "--group-by")?)?)
+            }
+            "--path" | "-p" => path = Some(take_value(&mut i, "--path")?),
+            "--case-insensitive" | "-i" => case_insensitive = true,
             "--output" | "-o" => {
                 let v = take_value(&mut i, "--output")?;
                 output = match v.as_str() {
@@ -278,6 +300,9 @@ fn parse(args: &[String]) -> Result<Invocation> {
         tree,
         depth,
         sort,
+        group_by,
+        path,
+        case_insensitive,
         output,
         message,
         fields,
@@ -311,15 +336,52 @@ fn parse_sort(spec: &str) -> Vec<SortKey> {
         .collect()
 }
 
+/// Parse a `--group-by col[:bucket][:order]` spec into a [`GroupSpec`]. The
+/// first `:`-segment is the column; the rest are an optional date bucket
+/// (`day|week|month|year`) and/or group order (`asc|desc`), in any order.
+/// Group keys are ISO-formatted, so order is over the (chronological) keys.
+/// Defaults: no bucket (verbatim values), ascending order.
+fn parse_group_by(spec: &str) -> Result<GroupSpec> {
+    let mut parts = spec.split(':').map(str::trim);
+    let column = parts
+        .next()
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| anyhow!("--group-by needs a column, got '{spec}'"))?
+        .to_string();
+    let mut bucket = None;
+    let mut order = SortDirection::Asc;
+    for p in parts.filter(|p| !p.is_empty()) {
+        match p.to_ascii_lowercase().as_str() {
+            "day" => bucket = Some(GroupBucket::Day),
+            "week" => bucket = Some(GroupBucket::Week),
+            "month" => bucket = Some(GroupBucket::Month),
+            "year" => bucket = Some(GroupBucket::Year),
+            "asc" => order = SortDirection::Asc,
+            "desc" => order = SortDirection::Desc,
+            other => {
+                return Err(anyhow!(
+                    "--group-by: unknown qualifier '{other}' (expected day|week|month|year or asc|desc)"
+                ))
+            }
+        }
+    }
+    Ok(GroupSpec {
+        column,
+        bucket,
+        order,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Verbs
 // ---------------------------------------------------------------------------
 
 async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
-    let parent: Box<dyn Node> = match inv.positionals.first() {
-        Some(id) => resolve_node(adapter, id).await?,
-        None => adapter.root().await?,
-    };
+    let parent: Box<dyn Node> =
+        match resolve_target(adapter, inv, inv.positionals.first().map(String::as_str)).await? {
+            Some(node) => node,
+            None => adapter.root().await?,
+        };
 
     let child_types = parent.children_types();
     if child_types.is_empty() {
@@ -330,13 +392,20 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     }
     let node_type = pick_type(&child_types, inv.type_filter.as_deref())?;
 
+    if inv.group_by.is_some() && !adapter.capabilities().group_by_via_adapter {
+        eprintln!(
+            "nyd: warning: '{}' does not support adapter-side grouping — --group-by ignored",
+            inv.instance
+        );
+    }
+
     let params = ListParams {
         node_type: node_type.clone(),
         query: inv.query.clone(),
         sort: inv.sort.clone(),
         page: None,
         download: false,
-        group_by: None,
+        group_by: inv.group_by.clone(),
     };
 
     if inv.tree {
@@ -351,11 +420,9 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
 }
 
 async fn cmd_show(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
-    let id = inv
-        .positionals
-        .first()
-        .ok_or_else(|| anyhow!("show requires a node id"))?;
-    let mut node = resolve_node(adapter, id).await?;
+    let mut node = resolve_target(adapter, inv, inv.positionals.first().map(String::as_str))
+        .await?
+        .ok_or_else(|| anyhow!("show requires a node id or --path /A/B"))?;
     // Fill display fields a lazily-built stub leaves as placeholders.
     node.hydrate().await;
     output_node(node.as_ref(), inv.output);
@@ -402,10 +469,11 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
         .ok_or_else(|| anyhow!("do requires an action id (list them with `actions`)"))?
         .clone();
 
-    let mut node: Box<dyn Node> = match inv.positionals.get(1) {
-        Some(id) => resolve_node(adapter, id).await?,
-        None => adapter.root().await?,
-    };
+    let mut node: Box<dyn Node> =
+        match resolve_target(adapter, inv, inv.positionals.get(1).map(String::as_str)).await? {
+            Some(node) => node,
+            None => adapter.root().await?,
+        };
 
     // Resolve the action so we know its input shape. Prefer the node's own
     // list, fall back to the type-level list (the source the TUI's shortcut
@@ -657,6 +725,127 @@ fn pick_type<'a>(child_types: &'a [NodeType], filter: Option<&str>) -> Result<&'
                 anyhow!("no child type '{t}' (available: {})", avail.join(", "))
             }),
     }
+}
+
+/// Resolve the single node a verb targets, preferring `--path` (a label walk)
+/// over an explicit `id`. Returns `None` when neither is given, so the caller
+/// supplies its own default (the adapter root for `ls`/`do`; an error for
+/// `show`). Giving both at once is rejected as ambiguous.
+async fn resolve_target(
+    adapter: &dyn ContentAdapter,
+    inv: &Invocation,
+    id: Option<&str>,
+) -> Result<Option<Box<dyn Node>>> {
+    match (inv.path.as_deref(), id) {
+        (Some(_), Some(_)) => Err(anyhow!(
+            "give a node id or --path, not both"
+        )),
+        (Some(p), None) => Ok(Some(resolve_path(adapter, p, inv.case_insensitive).await?)),
+        (None, Some(id)) => Ok(Some(resolve_node(adapter, id).await?)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// A `--path` segment matcher: a literal substring, or a compiled regex when
+/// the segment was written `re:<pattern>`. Case folding (from `-i`) is baked
+/// in at construction so matching is a plain predicate.
+enum SegMatch {
+    Substring { needle: String, case_insensitive: bool },
+    Regex(regex::Regex),
+}
+
+impl SegMatch {
+    fn parse(seg: &str, case_insensitive: bool) -> Result<Self> {
+        if let Some(pat) = seg.strip_prefix("re:") {
+            let re = regex::RegexBuilder::new(pat)
+                .case_insensitive(case_insensitive)
+                .build()
+                .with_context(|| format!("invalid regex in path segment 're:{pat}'"))?;
+            Ok(SegMatch::Regex(re))
+        } else {
+            Ok(SegMatch::Substring {
+                needle: if case_insensitive { seg.to_lowercase() } else { seg.to_string() },
+                case_insensitive,
+            })
+        }
+    }
+
+    fn matches(&self, label: &str) -> bool {
+        match self {
+            SegMatch::Substring { needle, case_insensitive } => {
+                if *case_insensitive {
+                    label.to_lowercase().contains(needle)
+                } else {
+                    label.contains(needle)
+                }
+            }
+            SegMatch::Regex(re) => re.is_match(label),
+        }
+    }
+}
+
+/// Walk a `/A/B/C` path from the adapter root, descending one node per
+/// segment. Each segment matches a *direct child's* label (across all child
+/// types of the current node) via [`SegMatch`]; a segment must resolve to
+/// exactly one child or the walk errors (ambiguous / not found). Uses only the
+/// per-level `list`, so it works for any adapter — the CLI analogue of drilling
+/// in by name in the TUI.
+async fn resolve_path(
+    adapter: &dyn ContentAdapter,
+    path: &str,
+    case_insensitive: bool,
+) -> Result<Box<dyn Node>> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut current = adapter.root().await?;
+    let mut walked: Vec<String> = Vec::new();
+    for seg in segments {
+        let matcher = SegMatch::parse(seg, case_insensitive)?;
+        let mut matches: Vec<NodeSummary> = Vec::new();
+        for nt in current.children_types() {
+            let params = ListParams {
+                node_type: nt,
+                query: None,
+                sort: Vec::new(),
+                page: None,
+                download: false,
+                group_by: None,
+            };
+            for item in current.list(params).await?.items {
+                if matcher.matches(&item.label) {
+                    matches.push(item);
+                }
+            }
+        }
+        // De-dupe by id (a node can surface under more than one child type).
+        matches.sort_by(|a, b| a.id.cmp(&b.id));
+        matches.dedup_by(|a, b| a.id == b.id);
+        let chosen = match matches.len() {
+            1 => matches.pop().unwrap(),
+            0 => {
+                let at = if walked.is_empty() {
+                    "the root".to_string()
+                } else {
+                    format!("'{}'", walked.join("/"))
+                };
+                return Err(anyhow!("path segment '{seg}' matched no child under {at}"));
+            }
+            _ => {
+                let preview: Vec<&str> =
+                    matches.iter().take(10).map(|s| s.label.as_str()).collect();
+                return Err(anyhow!(
+                    "path segment '{seg}' is ambiguous — matches {} children:\n  {}",
+                    matches.len(),
+                    preview.join("\n  ")
+                ));
+            }
+        };
+        current = adapter
+            .get_by_id(&chosen.id)
+            .await
+            .map_err(|e| anyhow!("resolving '{}': {e}", chosen.label))?;
+        walked.push(chosen.label);
+    }
+    Ok(current)
 }
 
 /// Resolve a node id, with git-style prefix matching for adapters whose ids are
@@ -1127,6 +1316,64 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn parse_group_by_column_only_defaults() {
+        let g = parse_group_by("started_at").unwrap();
+        assert_eq!(g.column, "started_at");
+        assert_eq!(g.bucket, None);
+        assert_eq!(g.order, SortDirection::Asc);
+    }
+
+    #[test]
+    fn parse_group_by_bucket_and_order_any_order() {
+        let g = parse_group_by("started_at:day:desc").unwrap();
+        assert_eq!(g.column, "started_at");
+        assert_eq!(g.bucket, Some(GroupBucket::Day));
+        assert_eq!(g.order, SortDirection::Desc);
+        // order before bucket parses identically
+        let g2 = parse_group_by("started_at:desc:week").unwrap();
+        assert_eq!(g2.bucket, Some(GroupBucket::Week));
+        assert_eq!(g2.order, SortDirection::Desc);
+    }
+
+    #[test]
+    fn parse_group_by_unknown_qualifier_errors() {
+        assert!(parse_group_by("col:fortnight").is_err());
+        assert!(parse_group_by("").is_err());
+    }
+
+    #[test]
+    fn parse_reads_group_by_path_and_case_flag() {
+        let args: Vec<String> = [
+            "nyd", "trk", "ls", "--group-by", "started_at:day", "--path", "/Work/Report", "-i",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let inv = parse(&args).unwrap();
+        assert_eq!(inv.group_by.unwrap().bucket, Some(GroupBucket::Day));
+        assert_eq!(inv.path.as_deref(), Some("/Work/Report"));
+        assert!(inv.case_insensitive);
+    }
+
+    #[test]
+    fn seg_match_substring_and_case_fold() {
+        let m = SegMatch::parse("Rep", false).unwrap();
+        assert!(m.matches("Report"));
+        assert!(!m.matches("REPORT"));
+        let mi = SegMatch::parse("rep", true).unwrap();
+        assert!(mi.matches("REPORT"));
+        assert!(mi.matches("Report"));
+    }
+
+    #[test]
+    fn seg_match_regex_opt_in() {
+        let m = SegMatch::parse(r"re:^Rep", false).unwrap();
+        assert!(m.matches("Report"));
+        assert!(!m.matches("My Report"));
+        assert!(SegMatch::parse("re:[unclosed", false).is_err());
     }
 
     #[test]

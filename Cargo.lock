@@ -3499,6 +3499,7 @@ dependencies = [
  "not-yet-done-host",
  "not-yet-done-task-core",
  "predicates",
+ "regex",
  "sea-orm",
  "serde",
  "serde_json",
