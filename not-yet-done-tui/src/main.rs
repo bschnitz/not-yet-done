@@ -71,21 +71,20 @@ async fn main() -> Result<()> {
     // hands every adapter a `HostContext` at construction. The self-contained
     // local Tasks/Trackings adapters coordinate over it — keyed by their DSN,
     // so two tabs on the same database repaint each other — while remote
-    // adapters ignore it. Capacity mirrors the old domain bus.
-    let host_bus: Arc<dyn not_yet_done_content::HostEventBus> =
-        Arc::new(not_yet_done_content::InMemoryHostBus::new(256));
-    let host_ctx = not_yet_done_content::HostContext {
-        event_bus: host_bus,
-    };
+    // adapters ignore it. Built by `not-yet-done-host` so the CLI and Waybar
+    // construct the identical context (Block D).
+    let host_ctx = not_yet_done_host::host_context();
 
     // Adapter factories are now stateless (each local factory opens its own
     // database in `create`), so this is just the bare builder fn — still a
-    // boxed closure so `App::reload_config` can rebuild the same set.
+    // boxed closure so `App::reload_config` can rebuild the same set. The set
+    // itself lives in `not-yet-done-host` so every front-end shares one
+    // registry.
     let factory_builder: Box<
         dyn Fn() -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>
             + Send
             + Sync,
-    > = Box::new(build_adapter_factories);
+    > = Box::new(not_yet_done_host::factories);
 
     let mut app    = App::new(tui_config, theme, query_shortcut_repo, settings_repo, link_repo, factory_builder, host_ctx);
 
@@ -111,47 +110,6 @@ async fn main() -> Result<()> {
     restore_terminal(&mut terminal)?;
 
     result
-}
-
-/// Wire up the adapter factories the App will use to construct content views.
-///
-/// Every adapter — remote (Jira, Taiga, Postgres, Confluence, Stoat) and the
-/// local Tasks/Trackings — is now stateless to build: each `create` receives
-/// its config string plus the host's `HostContext`, and the local factories
-/// open their own database from that config (Phase C4). So this is a bare
-/// `fn`, re-invokable on every [`App::reload_config`] to rebuild the set.
-pub(crate) fn build_adapter_factories(
-) -> std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> {
-    let mut factories: std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>> = std::collections::HashMap::new();
-    factories.insert(
-        "jira".to_string(),
-        Box::new(not_yet_done_jira_adapter::JiraAdapterFactory::new()),
-    );
-    factories.insert(
-        "taiga".to_string(),
-        Box::new(not_yet_done_taiga_adapter::TaigaAdapterFactory::new()),
-    );
-    factories.insert(
-        "postgres".to_string(),
-        Box::new(not_yet_done_postgres_adapter::PostgresAdapterFactory::new()),
-    );
-    factories.insert(
-        "confluence".to_string(),
-        Box::new(not_yet_done_confluence_adapter::ConfluenceAdapterFactory::new()),
-    );
-    factories.insert(
-        "stoat".to_string(),
-        Box::new(not_yet_done_stoat_adapter::StoatAdapterFactory::new()),
-    );
-    factories.insert(
-        "tasks".to_string(),
-        Box::new(not_yet_done_local_adapter::TaskAdapterFactory::new()),
-    );
-    factories.insert(
-        "trackings".to_string(),
-        Box::new(not_yet_done_local_adapter::TrackingAdapterFactory::new()),
-    );
-    factories
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {

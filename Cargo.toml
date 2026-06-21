@@ -22,6 +22,7 @@ members = [
   "not-yet-done-confluence-adapter",
   "not-yet-done-stoat-adapter",
   "not-yet-done-local-adapter",
+  "not-yet-done-host",
 ]
 
 [workspace.dependencies]
