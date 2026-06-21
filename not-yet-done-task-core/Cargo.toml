@@ -22,3 +22,4 @@ not-yet-done-filter = { path = "../not-yet-done-filter" }
 tokio       = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
+tempfile    = { workspace = true }

@@ -475,6 +475,9 @@ pub fn dispatch_to_view_request(
             prompt,
         }),
         ActionDispatch::Noop => None,
+        // Success-with-a-message (e.g. `backup` reporting its file path): no
+        // data changed, so surface the text in the status bar without a reload.
+        ActionDispatch::Notify { message } => Some(ViewRequest::Notify(message)),
         ActionDispatch::Error(msg) => Some(ViewRequest::Notify(msg)),
     }
 }

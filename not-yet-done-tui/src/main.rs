@@ -100,9 +100,17 @@ async fn main() -> Result<()> {
     // already uses them.
     app.start_content_loads();
 
-    // Daily backup: create one if none exists for today.
+    // Daily backups: create one each, if none exists for today. The legacy
+    // core DB (`nyd.db`: saved queries, settings, links) is backed up by
+    // core; the split-out task domain DB (`tasks.db`: tasks + trackings) is
+    // backed up via the host, which owns the tasks DSN/backup-dir defaults so
+    // the TUI need not depend on `task-core` (C5d). Both are best-effort —
+    // a backup failure must never block startup.
     if let Err(e) = not_yet_done_core::service::BackupServiceImpl.ensure_daily_backup().await {
-        eprintln!("Backup warning: {e}");
+        eprintln!("Backup warning (nyd.db): {e}");
+    }
+    if let Err(e) = not_yet_done_host::ensure_daily_task_backup(10) {
+        eprintln!("Backup warning (tasks.db): {e}");
     }
 
     let mut terminal = setup_terminal()?;

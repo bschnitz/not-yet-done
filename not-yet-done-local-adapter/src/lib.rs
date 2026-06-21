@@ -104,6 +104,14 @@ pub struct CoreHandle {
     /// `tracking:` toggle in the task edit-buffer (A1b) goes through the
     /// adapter, not the host's native session.
     pub allow_parallel_tracking: bool,
+    /// Directory the `backup` action writes timestamped copies of this
+    /// handle's database into. Defaults to
+    /// [`not_yet_done_task_core::backup::default_backup_dir`]; overridable via
+    /// the adapter config's `backup.directory`.
+    backup_dir: std::path::PathBuf,
+    /// How many of *this database's* backups to keep (older ones are pruned).
+    /// Defaults to 10; overridable via the adapter config's `backup.max_count`.
+    backup_max_count: usize,
 }
 
 impl CoreHandle {
@@ -126,7 +134,28 @@ impl CoreHandle {
             bus,
             channel,
             allow_parallel_tracking,
+            backup_dir: not_yet_done_task_core::backup::default_backup_dir(),
+            backup_max_count: 10,
         }
+    }
+
+    /// Override the backup destination and retention for the `backup` action.
+    /// Builder-style so the many `CoreHandle::new` call sites (tests included)
+    /// keep the sensible defaults without change.
+    pub fn with_backup(mut self, dir: std::path::PathBuf, max_count: usize) -> Self {
+        self.backup_dir = dir;
+        self.backup_max_count = max_count;
+        self
+    }
+
+    /// The DSN of the database this handle backs (also its bus channel key).
+    pub fn dsn(&self) -> &str {
+        &self.channel
+    }
+
+    /// The configured backup directory and retention count.
+    pub fn backup_settings(&self) -> (&std::path::Path, usize) {
+        (&self.backup_dir, self.backup_max_count)
     }
 
     /// Publish a [`DomainEvent`] on the host bus for this handle's channel.
@@ -140,6 +169,34 @@ impl CoreHandle {
     /// the bridges downcast back to [`DomainEvent`].
     pub fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
         self.bus.subscribe(&self.channel)
+    }
+}
+
+/// Shared `backup` container action for the local Tasks and Trackings
+/// adapters: write a timestamped copy of the handle's database into the
+/// configured backup directory (default `<data-local>/not_yet_done/backups`)
+/// and prune that database's own backups to the retention count. Returns a
+/// [`Notify`](not_yet_done_content::ActionDispatch::Notify) carrying the path,
+/// or an [`Error`](not_yet_done_content::ActionDispatch::Error).
+///
+/// Both tabs back up the *same* `tasks.db`, so either tab's `backup` does the
+/// identical thing. The blocking file copy runs on the blocking pool so it
+/// never stalls the async runtime.
+pub(crate) async fn invoke_backup(handle: &CoreHandle) -> not_yet_done_content::ActionDispatch {
+    use not_yet_done_content::ActionDispatch;
+    let dsn = handle.dsn().to_string();
+    let (dir, max_count) = handle.backup_settings();
+    let dir = dir.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        not_yet_done_task_core::backup::create_backup_at(&dsn, &dir, max_count)
+    })
+    .await;
+    match result {
+        Ok(Ok(path)) => ActionDispatch::Notify {
+            message: format!("Backup written: {path}"),
+        },
+        Ok(Err(e)) => ActionDispatch::Error(format!("Backup failed: {e}")),
+        Err(e) => ActionDispatch::Error(format!("Backup task panicked: {e}")),
     }
 }
 
@@ -174,6 +231,32 @@ pub struct LocalAdapterConfig {
     /// behaviour; `true` permits concurrent trackings.
     #[serde(default)]
     pub allow_parallel: Option<bool>,
+    /// Where the `backup` action writes timestamped copies of this adapter's
+    /// database, and how many to retain.
+    ///
+    /// *Why it exists:* the `backup` action (a container action on the Tasks
+    /// and Trackings tabs) makes an on-the-spot copy of `tasks.db`. Omit the
+    /// block to use the per-host default directory
+    /// (`<data-local>/not_yet_done/backups`) and keep the last 10 — the same
+    /// location the legacy daily backup used, so all backups stay together.
+    /// Set `directory` to redirect them (e.g. onto a synced volume) or
+    /// `max_count` to keep more/fewer. Retention is per-database: pruning this
+    /// adapter's backups never touches another database's copies in the same
+    /// directory.
+    #[serde(default)]
+    pub backup: Option<BackupSettings>,
+}
+
+/// Optional `backup:` config block for a local adapter (see
+/// [`LocalAdapterConfig::backup`]).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct BackupSettings {
+    /// Backup directory. Default: `<data-local>/not_yet_done/backups`.
+    #[serde(default)]
+    pub directory: Option<std::path::PathBuf>,
+    /// Number of this database's backups to retain. Default: 10.
+    #[serde(default)]
+    pub max_count: Option<usize>,
 }
 
 /// The per-host default task DSN: `<data-local>/not_yet_done/tasks.db`.
@@ -212,6 +295,12 @@ pub fn open_core_handle(
         ContentError::Other(format!("Failed to open task database ({dsn}): {e}").into())
     })?;
 
+    let backup = cfg.backup.unwrap_or_default();
+    let backup_dir = backup
+        .directory
+        .unwrap_or_else(not_yet_done_task_core::backup::default_backup_dir);
+    let backup_max_count = backup.max_count.unwrap_or(10);
+
     Ok(CoreHandle::new(
         domain.task_service,
         domain.tracking_repo,
@@ -221,7 +310,8 @@ pub fn open_core_handle(
         ctx.event_bus.clone(),
         dsn,
         cfg.allow_parallel.unwrap_or(false),
-    ))
+    )
+    .with_backup(backup_dir, backup_max_count))
 }
 
 /// Map a core [`DomainEvent`] to the [`Invalidation`] a local adapter

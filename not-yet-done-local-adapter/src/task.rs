@@ -827,6 +827,9 @@ fn task_root_actions() -> Vec<NodeAction> {
         NodeAction::new("add-sibling", "Add task", InputSpec::Editor)
             .with_placement(HintPlacement::ActionBar)
             .with_default_key('A'),
+        // Container action: snapshot the whole task database (see
+        // `invoke_backup`). DB-wide, so it lives on the root, not a task row.
+        NodeAction::new("backup", "Backup database", InputSpec::None),
     ]
 }
 
@@ -1694,6 +1697,14 @@ impl Node for TaskRootNode {
             invalidate_cache(&self.cache).await;
         }
         outcome
+    }
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        Ok(match name {
+            // Container action: back up the whole task database. No data
+            // changes, so it returns `Notify` (the path) rather than `Reload`.
+            "backup" => crate::invoke_backup(&self.handle).await,
+            _ => ActionDispatch::Noop,
+        })
     }
 }
 
@@ -2913,7 +2924,9 @@ mod tests {
         // resolves either action id to a top-level create.
         assert!(has(&root, "add"));
         assert!(has(&root, "add-sibling"));
-        assert_eq!(root.len(), 2);
+        // `backup` is a list-wide maintenance action on the root.
+        assert!(has(&root, "backup"));
+        assert_eq!(root.len(), 3);
         let item = task_item_actions();
         for id in [
             "edit",

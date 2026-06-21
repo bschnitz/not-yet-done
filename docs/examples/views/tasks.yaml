@@ -101,10 +101,20 @@ tab:
 
 adapter:
   type: tasks
-  # In-process adapter: TaskAdapterFactory ignores this string. The generic
-  # loader still requires *some* config to be present (config_inline or a
-  # readable config: path) before it calls the factory, so a trivial inline
-  # blob keeps this file copy-paste loadable.
+  # In-process adapter. The generic loader requires *some* config to be present
+  # (config_inline or a readable config: path) before it calls the factory, so
+  # a trivial inline blob keeps this file copy-paste loadable. The blob is
+  # parsed as YAML into LocalAdapterConfig; all keys are optional:
+  #   database:        SeaORM DSN of the DB this tab opens (default: per-host
+  #                    tasks.db). Point a Tasks and a Trackings tab at the same
+  #                    file to make them coordinate live.
+  #   allow_parallel:  false (default) = starting a tracking stops the others.
+  #   backup:          { directory, max_count } — target dir + retention for the
+  #                    `backup` action below. Default dir
+  #                    <data-local>/not_yet_done/backups, max_count 10. Pruning
+  #                    is per-database, so tasks.db and nyd.db backups in the
+  #                    same dir never evict each other. Example:
+  #   config_inline: '{ backup: { directory: /mnt/sync/nyd, max_count: 30 } }'
   config_inline: "{}"
 
 views:
@@ -354,6 +364,18 @@ views:
         key: r
         type: reload
         inherit: true
+      # `backup` is a list-wide maintenance action: it writes a timestamped
+      # copy of the underlying `tasks.db` to the configured backup directory
+      # (`backup.directory`, default `<data-local>/not_yet_done/backups`),
+      # pruning to `backup.max_count`. It has no target row, so it is declared
+      # `on_container: true` and dispatches against `adapter.root()`. No
+      # confirm (purely additive); the written path is shown in the status
+      # bar. Listing/restoring backups stays CLI-only (`nyd-t backup`).
+      - name: backup
+        key: B
+        type: custom
+        id: backup
+        on_container: true
 
     # Fire-and-forget actions dispatched through the adapter's
     # `invoke_action`. `delete` routes through the confirm-then-delete flow;

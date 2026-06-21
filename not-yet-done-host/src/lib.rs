@@ -315,6 +315,28 @@ pub fn resolve_adapter_with(
         .map_err(|e| anyhow!("creating adapter '{instance_name}': {e}"))
 }
 
+/// Ensure today's backup of the per-host `tasks.db` exists, creating one if
+/// not. Idempotent (at most one backup per calendar day, matched on the
+/// `YYYYMMDD` prefix and the `-tasks.db` suffix) and pruned to a fixed
+/// retention.
+///
+/// This lives in the host rather than a front-end because the host is the one
+/// crate that knows both the default tasks DSN and the backup directory while
+/// also depending on `not-yet-done-task-core` — so the TUI and CLI can trigger
+/// the tasks.db daily backup without re-coupling to the task domain crate
+/// (C5d deliberately removed `task-core` from the TUI). It targets the
+/// per-host **default** location only; per-view `backup:` overrides apply to
+/// the interactive `backup` adapter action, not to this startup safety net.
+///
+/// `max_count` is the retention bound for tasks.db backups (older ones are
+/// pruned). Returns the new backup path, or `None` if today's already existed.
+pub fn ensure_daily_task_backup(max_count: usize) -> Result<Option<String>> {
+    let dsn = not_yet_done_task_core::bootstrap::default_task_dsn();
+    let dir = not_yet_done_task_core::backup::default_backup_dir();
+    not_yet_done_task_core::backup::ensure_daily_backup_at(&dsn, &dir, max_count)
+        .map_err(|e| anyhow!("tasks.db daily backup failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
