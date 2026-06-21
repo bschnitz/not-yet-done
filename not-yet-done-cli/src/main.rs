@@ -14,6 +14,7 @@ use not_yet_done_task_core::repository::{
 };
 
 mod adapter_cli;
+mod cli_config;
 mod commands;
 mod datetime;
 mod offset;

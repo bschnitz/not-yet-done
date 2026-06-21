@@ -94,29 +94,79 @@ struct Invocation {
 }
 
 /// Try to handle `args` as a generic adapter invocation. Returns `Some(code)`
-/// when the first argument names a configured adapter instance (so this module
-/// took over), or `None` to let the legacy `tusks` path handle it.
+/// when this module took over (the first argument names a configured adapter
+/// instance, a `cli.yaml` alias, or the `config` subcommand), or `None` to let
+/// the legacy `tusks` path handle it.
 ///
 /// Discovery is cheap (it reads the view-config headers only) and side-effect
 /// free, so probing here before the task-core path costs nothing for the
 /// built-in commands.
 pub fn try_dispatch(args: &[String]) -> Option<ExitCode> {
-    let instance = args.get(1)?;
-    if BUILTIN_COMMANDS.contains(&instance.as_str()) || instance.starts_with('-') {
-        return None;
-    }
-    let instances = not_yet_done_host::discover_instances();
-    if !instances.iter().any(|d| d.instance_id() == instance) {
+    let first = args.get(1)?;
+    if first.starts_with('-') {
         return None;
     }
 
-    Some(match run(args) {
+    // `nyd config edit …` — manage config files. Reserved word; a configured
+    // adapter instance named "config" can't be addressed (rename it).
+    if first == "config" {
+        return Some(finish(crate::cli_config::run_config(args)));
+    }
+
+    if BUILTIN_COMMANDS.contains(&first.as_str()) {
+        return None;
+    }
+
+    // A configured adapter instance takes precedence over an alias of the same
+    // name, so a user alias can never shadow a real adapter.
+    let instances = not_yet_done_host::discover_instances();
+    if instances.iter().any(|d| d.instance_id() == first) {
+        return Some(finish(run(args)));
+    }
+
+    // Otherwise: a `cli.yaml` alias? Expand it and re-enter the generic path.
+    match expand_alias(args) {
+        Some(Ok(expanded)) => Some(finish(run(&expanded))),
+        Some(Err(e)) => {
+            eprintln!("nyd: {e:#}");
+            Some(ExitCode::FAILURE)
+        }
+        None => None,
+    }
+}
+
+/// Map a verb result to a process exit code, reporting errors to stderr.
+fn finish(result: Result<()>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nyd: {e:#}");
             ExitCode::FAILURE
         }
-    })
+    }
+}
+
+/// If `args[1]` names a `cli.yaml` alias, expand it into a full argv (program
+/// name + expanded tokens) ready for [`run`]. Returns `None` when it isn't an
+/// alias (fall through to `tusks`), `Some(Err)` when it is but expansion fails
+/// (e.g. a missing positional), `Some(Ok(argv))` on success.
+fn expand_alias(args: &[String]) -> Option<Result<Vec<String>>> {
+    let name = args.get(1)?;
+    let cfg = match crate::cli_config::load() {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+    let template = cfg.alias(name)?.to_vec();
+    let expanded = match crate::cli_config::expand(&template, &args[2..]) {
+        Ok(toks) => toks,
+        Err(e) => {
+            return Some(Err(e.context(format!("expanding alias '{name}'"))))
+        }
+    };
+    let mut argv = Vec::with_capacity(expanded.len() + 1);
+    argv.push(args.first().cloned().unwrap_or_else(|| "nyd".to_string()));
+    argv.extend(expanded);
+    Some(Ok(argv))
 }
 
 /// Parse + execute a generic invocation on its own tokio runtime (adapter
@@ -570,11 +620,12 @@ fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
 fn edit_in_editor(template: &str, suffix: &str) -> Result<String> {
     use std::io::Write;
 
-    let editor = std::env::var("EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .map_err(|_| {
-            anyhow!("no $EDITOR set — pass -m <text> to supply the input non-interactively")
-        })?;
+    // Fail fast with the `-m` hint before seeding a temp file we'd discard.
+    if std::env::var_os("EDITOR").is_none() && std::env::var_os("VISUAL").is_none() {
+        return Err(anyhow!(
+            "no $EDITOR set — pass -m <text> to supply the input non-interactively"
+        ));
+    }
 
     let mut tmp = tempfile::Builder::new()
         .suffix(suffix)
@@ -585,19 +636,7 @@ fn edit_in_editor(template: &str, suffix: &str) -> Result<String> {
     tmp.flush().ok();
     let path = tmp.path().to_path_buf();
 
-    // `$EDITOR` may carry arguments (e.g. "code --wait"); split on whitespace.
-    let mut parts = editor.split_whitespace();
-    let program = parts
-        .next()
-        .ok_or_else(|| anyhow!("$EDITOR is empty"))?;
-    let status = std::process::Command::new(program)
-        .args(parts)
-        .arg(&path)
-        .status()
-        .with_context(|| format!("launching editor '{editor}'"))?;
-    if !status.success() {
-        return Err(anyhow!("editor '{editor}' exited with {status}"));
-    }
+    crate::cli_config::launch_editor(&path)?;
     std::fs::read_to_string(&path).context("reading edited buffer")
 }
 
