@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "not-yet-done-cli",
+  "not-yet-done-task-cli",
   "not-yet-done-core",
   "not-yet-done-tui",
   "not-yet-done-macros",
