@@ -48,6 +48,60 @@ impl BackupServiceImpl {
         format!("{}-{}", timestamp, original_name)
     }
 
+    /// Back up the database at an explicit `db_url`, instead of the one in the
+    /// core config.
+    ///
+    /// *Why it exists:* after the DB-split the task domain lives in its own
+    /// `tasks.db`, separate from the legacy core DB. The `nyd-t` CLI operates
+    /// on that task DB and backs *it* up, while the trait's [`create_backup`]
+    /// (used by the TUI's daily backup) still targets the config DB. Both share
+    /// the same backup directory, timestamp scheme and retention policy.
+    pub async fn create_backup_at(&self, db_url: &str) -> Result<String, CoreError> {
+        let config_service = ConfigServiceImpl::new();
+        let config = config_service.get_config().await
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
+
+        let db_path = Self::extract_db_path(db_url)?;
+
+        let original_filename = db_path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| CoreError::BackupFailed("Invalid database filename".to_string()))?;
+
+        let backup_filename = Self::generate_backup_filename(original_filename);
+        let backup_path = config.backup.directory.join(&backup_filename);
+
+        fs::copy(&db_path, &backup_path)
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to copy database file: {}", e)))?;
+
+        Self::cleanup_old_backups(&config.backup.directory, config.backup.max_count)?;
+
+        Ok(backup_path.to_string_lossy().to_string())
+    }
+
+    /// Restore a backup file into an explicit `db_url`, instead of the one in
+    /// the core config. Counterpart to [`create_backup_at`].
+    pub async fn restore_backup_at(&self, db_url: &str, filename: &str) -> Result<String, CoreError> {
+        let config_service = ConfigServiceImpl::new();
+        let config = config_service.get_config().await
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
+
+        let db_path = Self::extract_db_path(db_url)?;
+        let backup_path = config.backup.directory.join(filename);
+
+        if !backup_path.exists() {
+            return Err(CoreError::BackupFailed(format!("Backup file not found: {}", filename)));
+        }
+
+        if !backup_path.is_file() {
+            return Err(CoreError::BackupFailed(format!("Backup is not a file: {}", filename)));
+        }
+
+        fs::copy(&backup_path, &db_path)
+            .map_err(|e| CoreError::BackupFailed(format!("Failed to restore database file: {}", e)))?;
+
+        Ok(db_path.to_string_lossy().to_string())
+    }
+
     /// Create a backup if none exists for today. Returns the path if a new
     /// backup was created, or None if one already existed.
     pub async fn ensure_daily_backup(&self) -> Result<Option<String>, CoreError> {
@@ -94,28 +148,9 @@ impl BackupServiceImpl {
 impl BackupService for BackupServiceImpl {
     async fn create_backup(&self) -> Result<String, CoreError> {
         let config_service = ConfigServiceImpl::new();
-
         let db_url = config_service.get_database_url().await
             .map_err(|e| CoreError::BackupFailed(format!("Failed to get database URL: {}", e)))?;
-
-        let db_path = Self::extract_db_path(&db_url)?;
-
-        let config = config_service.get_config().await
-            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
-
-        let original_filename = db_path.file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| CoreError::BackupFailed("Invalid database filename".to_string()))?;
-
-        let backup_filename = Self::generate_backup_filename(original_filename);
-        let backup_path = config.backup.directory.join(&backup_filename);
-
-        fs::copy(&db_path, &backup_path)
-            .map_err(|e| CoreError::BackupFailed(format!("Failed to copy database file: {}", e)))?;
-
-        Self::cleanup_old_backups(&config.backup.directory, config.backup.max_count)?;
-
-        Ok(backup_path.to_string_lossy().to_string())
+        self.create_backup_at(&db_url).await
     }
 
     async fn list_backups(&self) -> Result<Vec<String>, CoreError> {
@@ -136,28 +171,8 @@ impl BackupService for BackupServiceImpl {
 
     async fn restore_backup(&self, filename: &str) -> Result<String, CoreError> {
         let config_service = ConfigServiceImpl::new();
-
         let db_url = config_service.get_database_url().await
             .map_err(|e| CoreError::BackupFailed(format!("Failed to get database URL: {}", e)))?;
-
-        let db_path = Self::extract_db_path(&db_url)?;
-
-        let config = config_service.get_config().await
-            .map_err(|e| CoreError::BackupFailed(format!("Failed to get config: {}", e)))?;
-
-        let backup_path = config.backup.directory.join(filename);
-
-        if !backup_path.exists() {
-            return Err(CoreError::BackupFailed(format!("Backup file not found: {}", filename)));
-        }
-
-        if !backup_path.is_file() {
-            return Err(CoreError::BackupFailed(format!("Backup is not a file: {}", filename)));
-        }
-
-        fs::copy(&backup_path, &db_path)
-            .map_err(|e| CoreError::BackupFailed(format!("Failed to restore database file: {}", e)))?;
-
-        Ok(db_path.to_string_lossy().to_string())
+        self.restore_backup_at(&db_url, filename).await
     }
 }

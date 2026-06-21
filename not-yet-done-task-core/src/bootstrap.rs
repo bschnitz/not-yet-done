@@ -45,19 +45,43 @@ pub struct TaskDomain {
     pub project_service: Arc<dyn ProjectService>,
 }
 
-/// Connect to `dsn`, sync the task-domain schema into it, and resolve the
-/// domain services over the connection.
+/// The per-host default task DSN: `<data-local>/not_yet_done/tasks.db`
+/// (e.g. `~/.local/share/not_yet_done/tasks.db`) as a `mode=rwc` SQLite DSN,
+/// so a fresh file is created on first open. Falls back to the temp dir when
+/// no data-local dir is known. Creates the parent directory if missing.
+///
+/// *Why it lives here:* the task DB's location is domain knowledge shared by
+/// every consumer of the core — the in-process Tasks/Trackings content
+/// adapters **and** the standalone `nyd-t` CLI. Keeping it in the core means
+/// both resolve the *same* file when no explicit `database:` DSN is set,
+/// instead of each carrying its own copy that could drift apart.
+pub fn default_task_dsn() -> String {
+    let dir = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("not_yet_done");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("tasks.db");
+    format!("sqlite://{}?mode=rwc", path.display())
+}
+
+/// Connect to `dsn`, sync the task-domain schema into it, and build the DI
+/// module over the connection.
 ///
 /// A fresh SQLite file (`sqlite://…?mode=rwc`) is created and populated with
 /// the current schema on first open. See the module docs for the legacy-schema
 /// caveat.
-pub async fn open(dsn: &str) -> Result<TaskDomain, DbErr> {
+///
+/// Returns the [`TaskDomainModule`] itself for callers that resolve services
+/// ad hoc — the `nyd-t` CLI dispatches each subcommand to a freshly-resolved
+/// service rather than holding the [`TaskDomain`] bundle. [`open`] builds on
+/// this and resolves the bundle for adapter use.
+pub async fn open_module(dsn: &str) -> Result<TaskDomainModule, DbErr> {
     let db = Database::connect(dsn).await?;
     db.get_schema_registry("not_yet_done_task_core::entity::*")
         .sync(&db)
         .await?;
 
-    let module = TaskDomainModule::builder()
+    Ok(TaskDomainModule::builder()
         .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
             db: Some(db.clone()),
         })
@@ -70,7 +94,17 @@ pub async fn open(dsn: &str) -> Result<TaskDomain, DbErr> {
         .with_component_parameters::<TrackingRepositoryImpl>(TrackingRepositoryImplParameters {
             db: Some(db.clone()),
         })
-        .build();
+        .build())
+}
+
+/// Connect to `dsn`, sync the task-domain schema into it, and resolve the
+/// domain services over the connection.
+///
+/// A fresh SQLite file (`sqlite://…?mode=rwc`) is created and populated with
+/// the current schema on first open. See the module docs for the legacy-schema
+/// caveat.
+pub async fn open(dsn: &str) -> Result<TaskDomain, DbErr> {
+    let module = open_module(dsn).await?;
 
     Ok(TaskDomain {
         task_service: module.resolve(),

@@ -12,6 +12,7 @@ uuid        = { workspace = true }
 async-trait = { workspace = true }
 chrono         = { workspace = true }
 regex          = { workspace = true }
+dirs           = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
 not-yet-done-macros = { workspace = true }

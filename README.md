@@ -422,22 +422,78 @@ Press `c` to open the column configurator. Toggle columns on/off and reorder the
 
 ## CLI
 
-The CLI binary is `nyd` (installed as `not-yet-done-cli`).
+There are **two** command-line binaries, by design:
 
-The CLI is, by design, a **thin generic front-end over the `ContentAdapter`
-protocol**. There are no task-, tracking- or project-specific subcommands:
-tasks, trackings and projects are reached as adapter instances
-(`nyd tasks …`, `nyd trackings …`, `nyd projects …`), and the terse everyday
-forms (`nyd add`, `nyd track <id>`, `nyd summary`, …) are **aliases** over
-those generic verbs. See [Generic adapter commands](#generic-adapter-commands)
-and [Aliases & `config edit`](#aliases--config-edit) below.
+| Binary  | Crate                   | Role                                                                                                                                                                                                                                                               |
+| ------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `nyd`   | `not-yet-done-cli`      | Generic front-end over the `ContentAdapter` protocol — drives **foreign** systems (Jira, Confluence, Postgres, Taiga, Stoat) and our own tasks/trackings/projects _as adapters_, all through one uniform interface.                                                |
+| `nyd-t` | `not-yet-done-task-cli` | Dedicated **Tasks & Time-Tracking** CLI on the native domain core (`not-yet-done-task-core`). Produces typed, domain-shaped output (e.g. `track export`'s joined tracking+task JSON, `task tree`'s nested hierarchy) and graded exit codes that scripts depend on. |
+
+Both build on the **same core**: the in-process TUI adapters and `nyd-t` each
+talk to `not-yet-done-task-core` in their own idiom. Adapters are _interop
+boundaries_ (a uniform protocol for many systems); `nyd-t` is the domain's own
+front-end. See [decision 0004](docs/decisions/0004-zwei-cli-binaries-adapter-vs-domain.md)
+for the why.
+
+### `nyd` — generic adapter front-end
+
+`nyd` is a **thin generic front-end over the `ContentAdapter` protocol**. There
+are no task-, tracking- or project-specific subcommands: tasks, trackings and
+projects are reached as adapter instances (`nyd tasks …`, `nyd trackings …`,
+`nyd projects …`), and the terse everyday forms (`nyd add`, `nyd track <id>`,
+`nyd summary`, …) are **aliases** over those generic verbs. See
+[Generic adapter commands](#generic-adapter-commands) and
+[Aliases & `config edit`](#aliases--config-edit) below.
 
 > The former hard-coded `task` / `project` / `track` / `query` / `db sync`
-> commands were removed once their adapter replacements landed — `track
-split`/`move` are now adapter actions (`nyd trackings do split …`), projects
-> are an adapter (`nyd projects do create …`), and ad-hoc filters run through
-> any adapter's `--query`. The only remaining built-in commands are `tag` and
-> `backup` (which still operate on the legacy core DB).
+> commands were removed from `nyd` once their adapter replacements landed —
+> `track split`/`move` are now adapter actions (`nyd trackings do split …`),
+> projects are an adapter (`nyd projects do create …`), and ad-hoc filters run
+> through any adapter's `--query`. The native, domain-shaped equivalents live
+> in `nyd-t` (below). The only built-in commands remaining in `nyd` are `tag`
+> and `backup` (which still operate on the legacy core DB).
+
+### `nyd-t` — Tasks & Time-Tracking CLI
+
+`nyd-t` (installed from `not-yet-done-task-cli`) is the native domain CLI. It
+operates on the split-out **task database** — `NYD_TASKS_DB` when set,
+otherwise the per-host default `<data-local>/not_yet_done/tasks.db` (the same
+file the Tasks/Trackings adapters open when their config carries no explicit
+`database:` DSN). It does **not** read the core config's `database.url` (that
+points at the legacy `nyd.db`).
+
+Run `nyd-t <group> --help` for the full, self-documenting reference; the groups
+are:
+
+```bash
+# Tasks — CRUD, path resolution, subtree export
+nyd-t task add "Write report" --parent <id> --project Work --tag urgent
+nyd-t task list --project Work
+nyd-t task tree <id|description-prefix> [--last-tracked-since 2026-04-01] [--pretty]
+nyd-t task show --path /Work/Clients/Acme/Tickets [-i]   # graded exit codes: 4=not found, 5=ambiguous
+nyd-t task edit <id> --description … --add-tag … --remove-project …
+nyd-t task delete <id>
+
+# Time tracking — start/stop, summary, export, reschedule
+nyd-t track start <task-id> [--parallel]
+nyd-t track stop [--task-id <id>]                        # omit to stop all
+nyd-t track summary [--from 2026-03-01] [--to today] [--task-id <id>]
+nyd-t track export [<ids>…] [--task-id <id>] [--from …] [--to …] \
+                   [--active-only] [--sort-by-started-at asc|desc] [--pretty]
+nyd-t track move  <id> "yesterday 9am" [--gravity start|end] [--offset +1h] [--json]
+nyd-t track split <id> "10:30" [--task <other-task-id>]
+nyd-t track restore <id>
+
+# Projects, tags, schema, backups
+nyd-t project add "Work" --description …       # list / edit / delete too
+nyd-t tag add "urgent" --fg "#FFFFFF" --bg "#FF5733" --symbol ""   # list/edit/new/delete
+nyd-t db sync                                  # create/upgrade the task DB schema
+nyd-t backup create | list | restore <file>   # backs up the task DB (tasks.db)
+```
+
+The `track export` / `task tree` JSON shapes and `task show` exit codes are a
+**stable contract** the user's TUI batch scripts rely on (daily reports,
+hour-totals, “goto task” from Jira/Taiga).
 
 ### Tags & Backup
 

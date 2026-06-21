@@ -176,18 +176,13 @@ pub struct LocalAdapterConfig {
     pub allow_parallel: Option<bool>,
 }
 
-/// The per-host default task DSN: `<data-local>/not_yet_done/tasks.db`
-/// (e.g. `~/.local/share/not_yet_done/tasks.db`) as a `mode=rwc` SQLite DSN,
-/// so a fresh file is created on first open. Falls back to the temp dir when
-/// no data-local dir is known. Creates the parent directory if missing.
-pub fn default_task_dsn() -> String {
-    let dir = dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("not_yet_done");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("tasks.db");
-    format!("sqlite://{}?mode=rwc", path.display())
-}
+/// The per-host default task DSN: `<data-local>/not_yet_done/tasks.db`.
+///
+/// Re-exported from the core ([`not_yet_done_task_core::bootstrap::default_task_dsn`])
+/// so the adapter and the standalone `nyd-t` CLI resolve the *same* file when no
+/// explicit `database:` DSN is set. Kept as a re-export (rather than moving call
+/// sites) so this crate's public surface is unchanged.
+pub use not_yet_done_task_core::bootstrap::default_task_dsn;
 
 /// Parse a local adapter's `config`, open its task database, and bundle the
 /// resolved services with the host bus into a [`CoreHandle`].
