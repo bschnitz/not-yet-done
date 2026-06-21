@@ -1,0 +1,28 @@
+[package]
+name = "not-yet-done-host"
+version = "0.1.0"
+edition = "2024"
+
+# Shared "host" wiring used by every front-end (TUI, CLI, Waybar): the adapter
+# factory registry, the cross-adapter event bus, and instance resolution from
+# the view configs. Lives in its own crate so the CLI and Waybar can build
+# adapters exactly the way the TUI does, without depending on the whole TUI
+# binary crate (Block D — adapterise CLI + Waybar).
+
+[dependencies]
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_yaml = { workspace = true }
+dirs       = { workspace = true }
+
+not-yet-done-content = { path = "../not-yet-done-content" }
+
+# Every adapter the host knows how to construct. Adding an adapter to the
+# product means adding it here (and to `factories()`), once — all front-ends
+# inherit it.
+not-yet-done-jira-adapter       = { path = "../not-yet-done-jira-adapter" }
+not-yet-done-taiga-adapter      = { path = "../not-yet-done-taiga-adapter" }
+not-yet-done-postgres-adapter   = { path = "../not-yet-done-postgres-adapter" }
+not-yet-done-confluence-adapter = { path = "../not-yet-done-confluence-adapter" }
+not-yet-done-stoat-adapter      = { path = "../not-yet-done-stoat-adapter" }
+not-yet-done-local-adapter      = { path = "../not-yet-done-local-adapter" }

@@ -3595,6 +3595,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "not-yet-done-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "not-yet-done-confluence-adapter",
+ "not-yet-done-content",
+ "not-yet-done-jira-adapter",
+ "not-yet-done-local-adapter",
+ "not-yet-done-postgres-adapter",
+ "not-yet-done-stoat-adapter",
+ "not-yet-done-taiga-adapter",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "not-yet-done-jira-adapter"
 version = "0.1.0"
 dependencies = [
@@ -3763,18 +3780,15 @@ dependencies = [
  "crossterm",
  "dirs",
  "fuzzy-matcher",
- "not-yet-done-confluence-adapter",
  "not-yet-done-content",
  "not-yet-done-core",
  "not-yet-done-filter",
  "not-yet-done-forest",
- "not-yet-done-jira-adapter",
+ "not-yet-done-host",
  "not-yet-done-local-adapter",
  "not-yet-done-postgres-adapter",
  "not-yet-done-ratatui",
- "not-yet-done-stoat-adapter",
  "not-yet-done-table",
- "not-yet-done-taiga-adapter",
  "ratatui",
  "ratatui-form-widgets",
  "ratatui-markdown",

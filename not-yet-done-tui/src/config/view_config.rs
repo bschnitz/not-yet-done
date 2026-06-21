@@ -601,46 +601,12 @@ pub struct TabConfig {
     pub icon: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AdapterConfig {
-    #[serde(rename = "type")]
-    pub adapter_type: String,
-    /// Stable per-instance identifier — used for the on-disk data
-    /// directory (`<data>/not_yet_done/<adapter_type>/<id>/`) and for
-    /// scoping things like saved queries. Default = `adapter_type`,
-    /// which means a single configured adapter of a given type just
-    /// works without further config. Multiple instances of the same
-    /// adapter type must each set an explicit `id:` — the loader
-    /// errors on collision.
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub config: Option<String>,
-    #[serde(default)]
-    pub config_inline: Option<String>,
-    /// When `true`, no load is spawned automatically for this tab —
-    /// neither at startup nor when switching to a still-unloaded
-    /// subtab. The user must trigger a `reload` action (e.g. the
-    /// `r` key bound to `type: reload`) to make the adapter actually
-    /// connect and fetch. While unloaded the view shows a
-    /// "Press <key> to connect" banner.
-    ///
-    /// Use this for adapters whose connection is expensive or
-    /// unreliable (Postgres-over-SSH-tunnel via Bastion, slow VPN-
-    /// gated APIs) — auto-loading them on TUI startup would either
-    /// hang for many seconds or surface confusing timeouts when the
-    /// network prerequisite is missing.
-    #[serde(default)]
-    pub manual_connect: bool,
-}
-
-impl AdapterConfig {
-    /// Effective instance id — explicit `id:` if given, else
-    /// `adapter_type`.
-    pub fn effective_instance_id(&self) -> &str {
-        self.id.as_deref().unwrap_or(&self.adapter_type)
-    }
-}
+/// The `adapter:` block of a view file. Defined once in `not-yet-done-host`
+/// (shared with the CLI/Waybar instance resolver) and re-exported here so the
+/// schema can't drift between the TUI's full view parser and the host's
+/// lightweight resolver. See [`not_yet_done_host::AdapterInstance`] for the
+/// field docs.
+pub use not_yet_done_host::AdapterInstance as AdapterConfig;
 
 /// A `shortcuts:` map value. Either a bare action name (`d: delete`) or a
 /// detailed form that also marks the shortcut inheritable
