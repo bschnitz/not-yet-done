@@ -54,6 +54,9 @@ pub mod cli {
     #[command(about = "Manage tags (colours/symbols) for tasks, global or per project")]
     pub use crate::commands::tag::cli as tag;
 
+    #[command(about = "Run YAML filter queries against tasks or trackings (debug/inspect)")]
+    pub use crate::commands::query::cli as query;
+
     #[command(about = "Database operations (schema sync for the tasks/trackings DB)")]
     pub use crate::commands::db::cli as db;
 
