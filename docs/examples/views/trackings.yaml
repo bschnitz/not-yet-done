@@ -221,6 +221,19 @@ views:
         type: custom
         id: restore-all
         on_container: true
+      # `backup` is a list-wide maintenance action: it writes a timestamped
+      # copy of the underlying `tasks.db` to the configured backup directory
+      # (`backup.directory` in `trackings.yaml`/`tasks.yaml`, default
+      # `<data-local>/not_yet_done/backups`), pruning to `backup.max_count`.
+      # Like `restore all` it has no target row, so it is declared
+      # `on_container: true` and dispatches against `adapter.root()`. It needs
+      # no confirm (purely additive) and reports the written path via the
+      # status bar. Listing/restoring backups stays CLI-only (`nyd-t backup`).
+      - name: backup
+        key: B
+        type: custom
+        id: backup
+        on_container: true
       # Split the selected interval at a time point into two (the original is
       # soft-deleted, both parts reference it as predecessor). `type: custom`
       # with an `id` routes through the generic form popup: the adapter action

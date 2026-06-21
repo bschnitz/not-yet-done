@@ -1297,7 +1297,10 @@ async fn resolve_visible_set(
 /// Actions the synthetic list root exposes. `restore-all` is a list-wide
 /// operation (no target row), so it lives on the root rather than an entry.
 fn tracking_root_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("restore-all", "Restore all deleted", InputSpec::None)]
+    vec![
+        NodeAction::new("restore-all", "Restore all deleted", InputSpec::None),
+        NodeAction::new("backup", "Backup database", InputSpec::None),
+    ]
 }
 
 /// Actions a single tracking row exposes. All are fire-and-forget shortcuts
@@ -1836,6 +1839,7 @@ impl Node for TrackingRootNode {
                 };
                 invoke_restore_all(&self.handle, &candidates, ctx.confirmed).await
             }
+            "backup" => crate::invoke_backup(&self.handle).await,
             _ => ActionDispatch::Noop,
         })
     }
@@ -3230,9 +3234,10 @@ mod tests {
     }
 
     #[test]
-    fn root_actions_expose_restore_all_only() {
+    fn root_actions_expose_list_wide_only() {
         let a = tracking_root_actions();
         assert!(has(&a, "restore-all"));
+        assert!(has(&a, "backup"));
         // No per-row affordances on the list root.
         assert!(!has(&a, "delete"));
         assert!(!has(&a, "toggle-tracking"));

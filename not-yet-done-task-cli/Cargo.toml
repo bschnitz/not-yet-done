@@ -14,7 +14,6 @@ name = "nyd-t"
 path = "src/main.rs"
 
 [dependencies]
-not-yet-done-core      = { path = "../not-yet-done-core" }
 not-yet-done-task-core = { path = "../not-yet-done-task-core" }
 sea-orm        = { workspace = true }
 shaku          = { workspace = true }

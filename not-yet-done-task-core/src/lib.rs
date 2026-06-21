@@ -11,6 +11,7 @@
 //! paths so consumers don't churn. C3 removes that bridge and re-points
 //! consumers here directly.
 
+pub mod backup;
 pub mod bootstrap;
 pub mod entity;
 pub mod error;

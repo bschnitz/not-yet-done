@@ -625,6 +625,10 @@ async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> 
             println!("ok (no change)");
             Ok(())
         }
+        ActionDispatch::Notify { message } => {
+            println!("{message}");
+            Ok(())
+        }
         ActionDispatch::Error(msg) => Err(anyhow!("{msg}")),
         // Generic confirm gate. With `--yes` we already passed
         // `confirmed: true`, so the adapter does the work instead of asking;

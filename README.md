@@ -16,7 +16,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
 - **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes
 - **Filter DSL** — YAML-based query language with natural-language date expressions
-- **Daily backups** — automatic daily database backup on startup
+- **Daily backups** — on startup the TUI makes a once-per-day timestamped copy of both databases (`nyd.db` and the split-out `tasks.db`); the Tasks/Trackings tabs also expose a manual `backup` action (`B`), and `nyd-t backup` manages them from the CLI
 
 ## Installation
 

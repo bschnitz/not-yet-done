@@ -1084,6 +1084,16 @@ pub enum ActionDispatch {
     Confirm { prompt: String },
     /// No-op — useful as a default for adapters that haven't migrated.
     Noop,
+    /// The action succeeded and has a user-facing result to report, but did
+    /// *not* change the pane's data (so no reload is warranted). The frontend
+    /// surfaces `message` — the TUI in its status bar, the CLI on stdout.
+    ///
+    /// *Why it exists:* some actions produce a result the user needs to see
+    /// without mutating the view — e.g. `backup` returns the path of the file
+    /// it just wrote. Neither [`ActionDispatch::Reload`] (implies a data
+    /// change) nor [`ActionDispatch::Noop`] (says "nothing happened") fit;
+    /// `Notify` is the generic success-with-a-message channel.
+    Notify { message: String },
     /// Adapter rejected the action with a user-displayable error.
     Error(String),
 }
