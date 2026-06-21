@@ -7,6 +7,11 @@ edition = "2024"
 not-yet-done-core    = { path = "../not-yet-done-core" }
 not-yet-done-task-core = { path = "../not-yet-done-task-core" }
 not-yet-done-filter  = { path = "../not-yet-done-filter" }
+# Generic adapter front-end (Block D): the CLI resolves and drives any
+# configured ContentAdapter via the shared host crate, so the read/`do`
+# verbs work for every adapter, not just the built-in task commands.
+not-yet-done-host    = { path = "../not-yet-done-host" }
+not-yet-done-content = { path = "../not-yet-done-content" }
 sea-orm              = { workspace = true }
 shaku                = { workspace = true }
 tokio                = { workspace = true }

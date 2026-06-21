@@ -13,6 +13,7 @@ use not_yet_done_task_core::repository::{
     TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
 
+mod adapter_cli;
 mod commands;
 mod datetime;
 mod offset;
@@ -58,6 +59,14 @@ pub mod cli {
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
+
+    // Generic adapter front-end (Block D): if the first argument names a
+    // configured adapter instance, drive the ContentAdapter protocol directly
+    // and skip the legacy task-core path entirely (no nyd.db connection needed).
+    if let Some(code) = adapter_cli::try_dispatch(&args) {
+        return code;
+    }
+
     let sync_schema = args.windows(2).any(|w| w[0] == "db" && w[1] == "sync");
 
     let config_service = ConfigServiceImpl::new();
