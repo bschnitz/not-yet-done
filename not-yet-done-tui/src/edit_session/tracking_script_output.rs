@@ -10,11 +10,12 @@ use super::{CommitOutcome, EditSession, SessionScope};
 pub struct ScriptOutputSession {
     template: String,
     scope: SessionScope,
+    suffix: String,
 }
 
 impl ScriptOutputSession {
     pub fn new(content: String) -> Self {
-        Self { template: content, scope: SessionScope::Trackings }
+        Self { template: content, scope: SessionScope::Trackings, suffix: ".txt".to_string() }
     }
 
     /// Override the action-bar scope (defaults to Trackings for legacy
@@ -22,6 +23,14 @@ impl ScriptOutputSession {
     /// `SessionScope::Content`.
     pub fn with_scope(mut self, scope: SessionScope) -> Self {
         self.scope = scope;
+        self
+    }
+
+    /// Override the temp-buffer file extension (defaults to `.txt`). Set from
+    /// the script's `# output:` header so a Markdown-emitting script renders as
+    /// Markdown in the viewer. Pass a value including the leading dot.
+    pub fn with_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.suffix = suffix.into();
         self
     }
 }
@@ -33,7 +42,7 @@ impl EditSession for ScriptOutputSession {
     }
 
     fn suffix(&self) -> &str {
-        ".txt"
+        &self.suffix
     }
 
     fn scope(&self) -> SessionScope {

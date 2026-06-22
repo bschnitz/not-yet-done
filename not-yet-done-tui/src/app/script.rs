@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 
 use not_yet_done_content::NodeRef;
 
-use crate::app::editor::{parse_script_mode, ScriptMode};
+use crate::app::editor::{parse_script_mode, parse_script_output_suffix, ScriptMode};
 use crate::app::{App, ContentSlot, DetachedScript, EditorRequest};
 use crate::components::script_menu::{ScriptMenuEntry, ScriptMenuMessage};
 use crate::edit_session::{ScriptOutputSession, ScriptSession, SessionScope};
@@ -490,6 +490,8 @@ impl App {
 
         let script_content = std::fs::read_to_string(path).unwrap_or_default();
         let mode = parse_script_mode(&script_content);
+        // Capture-output viewer file extension (drives Markdown rendering).
+        let output_suffix = parse_script_output_suffix(&script_content);
         let stdin_json = ctx.build_json();
 
         let child_env = self.child_env_for_script(ctx);
@@ -503,6 +505,7 @@ impl App {
                     &interactive_cmd,
                     mode.captures_output(),
                     mode.emits_commands(),
+                    output_suffix,
                     &child_env,
                 );
             }
@@ -510,11 +513,13 @@ impl App {
                 script_path: script_path.to_string(),
                 stdin_json,
                 capture: mode.captures_output(),
+                output_suffix,
                 child_env,
             };
         }
 
-        let result = self.run_script_background(ctx, script_path, &stdin_json, mode, &child_env);
+        let result =
+            self.run_script_background(ctx, script_path, &stdin_json, mode, &output_suffix, &child_env);
         // Batch scripts may mutate the underlying data (e.g. a period
         // equalizer); reload the pane so the change is visible.
         if let ScriptContext::ContentBatch { view_index, pane_id, .. } = ctx {
@@ -535,6 +540,7 @@ impl App {
         command_template: &str,
         capture: bool,
         emits_commands: bool,
+        output_suffix: String,
         child_env: &std::collections::HashMap<String, String>,
     ) -> EditorRequest {
         let tmp = std::env::temp_dir();
@@ -599,6 +605,7 @@ impl App {
                     output_path: std::path::PathBuf::from(&output_path),
                     capture,
                     emits_commands,
+                    output_suffix,
                 });
             }
             Err(e) => self.notify_error(format!("Failed to launch script: {e}")),
@@ -624,6 +631,7 @@ impl App {
         script_path: &str,
         stdin_json: &str,
         mode: ScriptMode,
+        output_suffix: &str,
         child_env: &std::collections::HashMap<String, String>,
     ) -> EditorRequest {
         use std::process::{Command, Stdio};
@@ -682,7 +690,8 @@ impl App {
                         }
                         if !combined.trim().is_empty() {
                             let session = ScriptOutputSession::new(combined)
-                                .with_scope(ctx.session_scope());
+                                .with_scope(ctx.session_scope())
+                                .with_suffix(output_suffix);
                             return self.open_session(Box::new(session));
                         }
                         self.notify("Script finished (no output)".to_string());

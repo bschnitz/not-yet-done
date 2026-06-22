@@ -423,6 +423,10 @@ pub struct DetachedScript {
     /// `capture` in practice (modes are disjoint), but kept as a
     /// separate flag so the two flows stay independent.
     pub emits_commands: bool,
+    /// Temp-buffer file extension for the captured-output viewer (from the
+    /// script's `# output:` header; `.txt` by default). Unused when
+    /// `emits_commands` — the output is parsed as JSON, not displayed.
+    pub output_suffix: String,
 }
 
 impl DetachedScript {
@@ -8139,6 +8143,7 @@ impl App {
         let output = script.read_output();
         let capture = script.capture;
         let emits_commands = script.emits_commands;
+        let output_suffix = script.output_suffix.clone();
         script.cleanup();
         self.detached_script = None;
 
@@ -8150,7 +8155,8 @@ impl App {
             self.run_script_output_commands(&output_path);
         } else if capture {
             if let Some(content) = output.filter(|s| !s.trim().is_empty()) {
-                let session = crate::edit_session::ScriptOutputSession::new(content);
+                let session = crate::edit_session::ScriptOutputSession::new(content)
+                    .with_suffix(output_suffix);
                 let _ = self.open_session(Box::new(session));
             } else {
                 self.notify("Script finished (no output)".to_string());
