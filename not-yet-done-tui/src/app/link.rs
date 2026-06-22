@@ -776,35 +776,46 @@ impl App {
     }
 
     fn open_link_tasks(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
-        let id_str = tail.ok_or_else(|| LinkRouteError::Stale("missing task id".into()))?;
-        // Validate the id still parses, then report that the legacy
-        // `tasks/<uuid>` navigation target no longer exists. The native
-        // Tasks tab was retired in favour of the generic ContentAdapter
-        // "Tasks" tab; jumping a bare task uuid into that adapter tab is
-        // not wired yet (it would need the adapter's goto-by-id path), so
-        // such links degrade to a clear NotSupported instead of opening
-        // the wrong tab. The link rows themselves remain in the store.
-        Uuid::parse_str(id_str)
-            .map_err(|_| LinkRouteError::Stale(format!("invalid task uuid: {id_str}")))?;
-        Err(LinkRouteError::NotSupported(
-            "task links open in the legacy Tasks tab, which has been removed".into(),
-        ))
+        self.open_link_local("task", "tasks", tail)
     }
 
     fn open_link_tracking(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
-        let id_str = tail.ok_or_else(|| LinkRouteError::Stale("missing tracking id".into()))?;
-        // Validate the id still parses, then report that the legacy
-        // `tracking/<uuid>` navigation target no longer exists. The native
-        // Trackings tab was retired in favour of the generic ContentAdapter
-        // "Trackings" tab; jumping a bare tracking uuid into that adapter
-        // tab is not wired yet (it would need the adapter's goto-by-id
-        // path), so such links degrade to a clear NotSupported instead of
-        // opening the wrong tab. The link rows themselves remain in the store.
-        Uuid::parse_str(id_str)
-            .map_err(|_| LinkRouteError::Stale(format!("invalid tracking uuid: {id_str}")))?;
-        Err(LinkRouteError::NotSupported(
-            "tracking links open in the legacy Trackings tab, which has been removed".into(),
-        ))
+        // The link head is the singular `tracking`, but the in-process
+        // adapter reports the plural `adapter_type()` "trackings".
+        self.open_link_local("tracking", "trackings", tail)
+    }
+
+    /// Reroute a bare `<kind>/<uuid>` link into the in-process adapter tab
+    /// whose `adapter_type()` equals `adapter_type`. The legacy native
+    /// Tasks/Trackings tabs were retired in favour of the generic
+    /// ContentAdapter tabs, so the link now drives the adapter's
+    /// goto-by-id path: we switch to the tab and queue an async tree-find
+    /// with the `id:<uuid>` exact-id escape. That is robust against the
+    /// lazily-ingested tree (a synchronous focus-by-id would miss a node
+    /// in a collapsed/unloaded subtree).
+    fn open_link_local(
+        &mut self,
+        kind: &str,
+        adapter_type: &str,
+        tail: Option<&str>,
+    ) -> Result<(), LinkRouteError> {
+        let id_str = tail.ok_or_else(|| LinkRouteError::Stale(format!("missing {kind} id")))?;
+        let uuid = Uuid::parse_str(id_str)
+            .map_err(|_| LinkRouteError::Stale(format!("invalid {kind} uuid: {id_str}")))?;
+        let slot_idx = self
+            .content_views_indexed()
+            .find(|(_, cv)| {
+                cv.adapter
+                    .as_ref()
+                    .map(|a| a.adapter_type() == adapter_type)
+                    .unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .ok_or_else(|| {
+                LinkRouteError::UnknownRoute(format!("no content tab for {adapter_type}"))
+            })?;
+        self.tree_find_in_tab(slot_idx, None, format!("id:{uuid}"))
+            .map_err(LinkRouteError::NotSupported)
     }
 
     fn open_link_content(
