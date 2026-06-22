@@ -8,12 +8,14 @@ name = "nyd_waybar"
 crate-type = ["cdylib"]
 
 [dependencies]
-not-yet-done-core = { path = "../not-yet-done-core" }
-not-yet-done-task-core = { path = "../not-yet-done-task-core" }
-not-yet-done-filter = { path = "../not-yet-done-filter" }
+# Thin protocol frontend (D6): the module talks to the in-process `trackings`
+# ContentAdapter via the host, instead of opening the database directly. This
+# drops the `not-yet-done-core` / `not-yet-done-task-core` / `sea-orm` coupling
+# and makes the module read the adapter's configured DB (the split-out
+# `tasks.db`), not the legacy core `nyd.db`.
+not-yet-done-content = { path = "../not-yet-done-content" }
+not-yet-done-host    = { path = "../not-yet-done-host" }
 waybar-cffi       = "0.1.1"
 serde             = { workspace = true }
 chrono            = { workspace = true }
 tokio             = { workspace = true }
-sea-orm           = { workspace = true }
-shaku             = { workspace = true }
