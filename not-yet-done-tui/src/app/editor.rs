@@ -62,6 +62,9 @@ pub enum EditorRequest {
         script_path: String,
         stdin_json: String,
         capture: bool,
+        /// Temp-buffer file extension for the captured-output viewer (from the
+        /// script's `# output:` header; `.txt` by default).
+        output_suffix: String,
         child_env: std::collections::HashMap<String, String>,
     },
     None,
@@ -133,6 +136,31 @@ pub fn parse_script_mode(content: &str) -> ScriptMode {
         }
     }
     ScriptMode::Background
+}
+
+/// Parse `# output: <ext>` from the script header — the file extension the
+/// captured-output viewer should use for its temp buffer. The extension drives
+/// syntax highlighting and Markdown preview, so a report-style script that
+/// emits Markdown declares `# output: md` to be rendered as Markdown rather
+/// than plain text. The leading dot is optional (`md` and `.md` both work).
+/// Defaults to `.txt`. Only meaningful for capture-mode scripts.
+pub fn parse_script_output_suffix(content: &str) -> String {
+    for line in content.lines().take(10) {
+        let trimmed = line.trim();
+        let after = trimmed.strip_prefix('#')
+            .or_else(|| trimmed.strip_prefix("//"))
+            .or_else(|| trimmed.strip_prefix("--"))
+            .or_else(|| trimmed.strip_prefix(";;"));
+        if let Some(rest) = after {
+            if let Some(ext) = rest.trim().strip_prefix("output:") {
+                let ext = ext.trim().trim_start_matches('.');
+                if !ext.is_empty() {
+                    return format!(".{ext}");
+                }
+            }
+        }
+    }
+    ".txt".to_string()
 }
 
 // ---------------------------------------------------------------------------

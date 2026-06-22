@@ -303,8 +303,10 @@ async fn dispatch_editor_request(
                 terminal, app, &command, &content, suffix, &spawn_context,
             )?;
         }
-        EditorRequest::Script { script_path, stdin_json, capture, child_env } => {
-            run_interactive_script(terminal, app, &script_path, &stdin_json, capture, &child_env)?;
+        EditorRequest::Script { script_path, stdin_json, capture, output_suffix, child_env } => {
+            run_interactive_script(
+                terminal, app, &script_path, &stdin_json, capture, &output_suffix, &child_env,
+            )?;
         }
         EditorRequest::None => {}
     }
@@ -446,6 +448,7 @@ fn run_interactive_script(
     script_path: &str,
     stdin_json: &str,
     capture: bool,
+    output_suffix: &str,
     child_env: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
@@ -510,7 +513,8 @@ fn run_interactive_script(
             if capture {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if !stdout.trim().is_empty() {
-                    let session = edit_session::ScriptOutputSession::new(stdout.to_string());
+                    let session = edit_session::ScriptOutputSession::new(stdout.to_string())
+                        .with_suffix(output_suffix);
                     let _ = app.open_session(Box::new(session));
                 } else {
                     app.notify("Script finished (no captured output)".to_string());
