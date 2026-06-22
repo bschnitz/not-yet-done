@@ -72,7 +72,7 @@ flowchart TD
     TUI --> NYDRATATUI
 
     CLI --> CORE
-    WAYBAR --> CORE
+    WAYBAR --> CONTENT
 
     JIRA --> CONTENT
     TAIGA --> CONTENT
@@ -91,7 +91,7 @@ flowchart TD
 | **not-yet-done-core**               | DB, SeaORM-Entities, Repositories, Services, Filter-DSL, Config                  | macros                                              |
 | **not-yet-done-tui**                | Terminal-UI: Event-Loop, Views, App-State                                        | core, content, alle Adapter, forest, table, ratatui |
 | **not-yet-done-cli**                | CLI für Scripting/Automation                                                     | core                                                |
-| **not-yet-done-waybar**             | Waybar-CFFI-Modul (aktives Tracking in der Statusbar)                            | core                                                |
+| **not-yet-done-waybar**             | Waybar-CFFI-Modul (aktives Tracking in der Statusbar)                            | content, host                                       |
 | **not-yet-done-content**            | `ContentAdapter`-Trait + `Node`/`Content`-Abstraktion + Auth-Orchestrierung      | —                                                   |
 | **not-yet-done-jira-adapter**       | Jira-Tickets als Content-Baum                                                    | content                                             |
 | **not-yet-done-taiga-adapter**      | Taiga-Items als Content-Baum                                                     | content                                             |
@@ -349,7 +349,10 @@ Preview-Optionen. Theme/Farben kommen aus `ThemeConfig` + user-`tui.yaml`
 - **CLI** (`not-yet-done-cli`) — vollständige Kommandozeile über `core`,
   für Scripting/Automation; teilt DB und Config mit dem TUI.
 - **Waybar** (`not-yet-done-waybar`) — CFFI-`.so`, zeigt das aktive
-  Tracking in der Statusbar; liest dieselbe `core`-DB.
+  Tracking in der Statusbar. Dünner Protokoll-Frontend: löst über den
+  Host denselben In-Process-`trackings`-Adapter auf wie TUI und `nyd`
+  (statt selbst die DB zu öffnen) und liest damit die adapter-konfigurierte
+  DB (die ausgelagerte `tasks.db`), nicht mehr die `core`-DB.
 
 ## Weiterführend
 

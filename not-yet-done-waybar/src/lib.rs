@@ -1,7 +1,7 @@
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::rc::Rc;
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use serde::Deserialize;
 use waybar_cffi::{
     gtk::{
@@ -12,13 +12,12 @@ use waybar_cffi::{
     waybar_module, InitInfo, Module,
 };
 
-use not_yet_done_core::config::ConfigServiceImpl;
-use not_yet_done_core::db;
-use not_yet_done_task_core::module::TaskDomainModule;
-use not_yet_done_task_core::repository::{
-    TaskRepositoryImpl, TaskRepositoryImplParameters,
-    TrackingRepositoryImpl, TrackingRepositoryImplParameters,
-};
+use not_yet_done_content::{ContentAdapter, ListParams, NodeType};
+
+/// The view instance the module reads from — the same `trackings` adapter the
+/// TUI's Trackings tab and `nyd ls trackings` resolve. Discovered from
+/// `~/.config/not_yet_done/views/trackings.yaml`.
+const TRACKINGS_INSTANCE: &str = "trackings";
 
 // ---------------------------------------------------------------------------
 // Config (from waybar JSON)
@@ -79,44 +78,78 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// DB access
+// Adapter access
 // ---------------------------------------------------------------------------
+//
+// The module is a thin protocol frontend (D6): it talks to the *same*
+// in-process `trackings` ContentAdapter the TUI and `nyd` use, instead of
+// opening the database itself. This drops the direct `not-yet-done-core` /
+// `not-yet-done-task-core` coupling and — crucially — makes the module read
+// the adapter's configured database (the split-out `tasks.db`) rather than the
+// legacy core `nyd.db`, which no longer holds trackings after the DB split.
 
-fn connect_db() -> Option<Arc<TaskDomainModule>> {
-    let config_service = ConfigServiceImpl::new();
-    let rt = tokio::runtime::Runtime::new().ok()?;
-    let db_url = rt.block_on(config_service.get_database_url()).ok()?;
-    let db = rt.block_on(db::connect(&db_url, false)).ok()?;
-
-    Some(Arc::new(
-        TaskDomainModule::builder()
-            .with_component_parameters::<TaskRepositoryImpl>(
-                TaskRepositoryImplParameters { db: Some(db.clone()) },
-            )
-            .with_component_parameters::<TrackingRepositoryImpl>(
-                TrackingRepositoryImplParameters { db: Some(db) },
-            )
-            .build(),
-    ))
+/// The flat-list child type. `TrackingRootNode::list` dispatches the *tree* and
+/// *condensed* views by their own type ids and treats every other type id —
+/// this one included — as the flat entry list, which is what we want. Only
+/// `type_id` is read; the rest are inert here.
+fn tracking_entry_type() -> NodeType {
+    NodeType {
+        type_id: "tracking:entry".to_string(),
+        mime_type: "text/plain".to_string(),
+        syntax: None,
+        file_extension: ".txt".to_string(),
+        display_name: "Tracking".to_string(),
+    }
 }
 
-/// Query active trackings and return (task_description, started_at).
-fn get_active_tracking(module: &TaskDomainModule) -> Option<(String, chrono::DateTime<Utc>)> {
-    use not_yet_done_task_core::repository::TrackingRepository;
-    use not_yet_done_task_core::service::TaskService;
-    use shaku::HasComponent;
-
-    let rt = tokio::runtime::Runtime::new().ok()?;
+/// Resolve the `trackings` adapter via the host. Returns `None` (and the module
+/// shows nothing) if no such view is configured or the adapter fails to build.
+fn resolve_trackings_adapter(rt: &tokio::runtime::Runtime) -> Option<Box<dyn ContentAdapter>> {
     rt.block_on(async {
-        let tracking_repo: &dyn TrackingRepository = module.resolve_ref();
-        let active = tracking_repo.find_all_active().await.ok()?;
-        let tracking = active.first()?;
+        let ctx = not_yet_done_host::host_context();
+        not_yet_done_host::resolve_adapter(TRACKINGS_INSTANCE, &ctx)
+    })
+    .map_err(|e| eprintln!("nyd-waybar: could not resolve trackings adapter: {e}"))
+    .ok()
+}
 
-        let task_service: &dyn TaskService = module.resolve_ref();
-        let tasks = task_service.list_tasks(None).await.ok()?;
-        let task = tasks.iter().find(|t| t.id == tracking.task_id)?;
+/// Query the active tracking via the adapter and return (description, elapsed).
+///
+/// `root()` reloads the snapshot from the DB on every call, so a tracking
+/// started or stopped after module init is picked up on the next tick. The
+/// flat entry list marks the running tracking with a `⏱` glyph in its `marker`
+/// field and carries the elapsed time (computed at `now`) in `duration`
+/// (integer seconds).
+fn get_active_tracking(
+    rt: &tokio::runtime::Runtime,
+    adapter: &dyn ContentAdapter,
+) -> Option<(String, Duration)> {
+    rt.block_on(async {
+        let root = adapter.root().await.ok()?;
+        let result = root
+            .list(ListParams {
+                node_type: tracking_entry_type(),
+                query: None,
+                sort: Vec::new(),
+                page: None,
+                download: false,
+                group_by: None,
+            })
+            .await
+            .ok()?;
 
-        Some((task.description.clone(), tracking.started_at))
+        let field = |row: &not_yet_done_content::NodeSummary, key: &str| {
+            row.metadata.fields.iter().find(|f| f.key == key).map(|f| f.value.clone())
+        };
+
+        let active = result
+            .items
+            .iter()
+            .find(|row| field(row, "marker").as_deref() == Some("⏱"))?;
+
+        let desc = field(active, "task").unwrap_or_else(|| active.label.clone());
+        let secs: i64 = field(active, "duration").and_then(|v| v.parse().ok()).unwrap_or(0);
+        Some((desc, Duration::seconds(secs)))
     })
 }
 
@@ -127,13 +160,13 @@ fn get_active_tracking(module: &TaskDomainModule) -> Option<(String, chrono::Dat
 fn update_label(
     label: &Label,
     inner: &GtkBox,
-    module: &Option<Arc<TaskDomainModule>>,
+    rt: &tokio::runtime::Runtime,
+    adapter: &Option<Box<dyn ContentAdapter>>,
     icon: &str,
     max_chars: usize,
 ) {
-    if let Some(module) = module {
-        if let Some((desc, started_at)) = get_active_tracking(module) {
-            let elapsed = Utc::now() - started_at;
+    if let Some(adapter) = adapter {
+        if let Some((desc, elapsed)) = get_active_tracking(rt, adapter.as_ref()) {
             let dur = format_duration_short(elapsed);
             let short_desc = truncate(&desc, max_chars);
             label.set_text(&format!("{icon} {short_desc} {dur}"));
@@ -166,16 +199,23 @@ impl Module for NydModule {
         root.add(&inner);
         root.show_all();
 
-        let module = connect_db();
-        if module.is_none() {
-            eprintln!("nyd-waybar: could not connect to database");
-        }
+        // One runtime and one adapter for the module's lifetime — the adapter
+        // is created within the runtime (like `nyd`) and reused across ticks
+        // (like the TUI), reloading from the DB on each `root()` call.
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => Rc::new(rt),
+            Err(e) => {
+                eprintln!("nyd-waybar: could not start tokio runtime: {e}");
+                return NydModule;
+            }
+        };
+        let adapter = resolve_trackings_adapter(&rt);
 
         let icon = config.icon;
         let max_chars = config.max_chars;
 
         // Initial update immediately.
-        update_label(&label, &inner, &module, &icon, max_chars);
+        update_label(&label, &inner, &rt, &adapter, &icon, max_chars);
 
         // Periodic update via glib timeout.
         let label_ref = RefCell::new(label);
@@ -183,7 +223,14 @@ impl Module for NydModule {
         glib::timeout_add_local(
             std::time::Duration::from_millis(config.interval_ms as u64),
             move || {
-                update_label(&label_ref.borrow(), &inner_ref.borrow(), &module, &icon, max_chars);
+                update_label(
+                    &label_ref.borrow(),
+                    &inner_ref.borrow(),
+                    &rt,
+                    &adapter,
+                    &icon,
+                    max_chars,
+                );
                 glib::ControlFlow::Continue
             },
         );

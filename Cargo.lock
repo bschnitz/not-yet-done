@@ -3835,12 +3835,9 @@ name = "not-yet-done-waybar"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "not-yet-done-core",
- "not-yet-done-filter",
- "not-yet-done-task-core",
- "sea-orm",
+ "not-yet-done-content",
+ "not-yet-done-host",
  "serde",
- "shaku",
  "tokio",
  "waybar-cffi",
 ]

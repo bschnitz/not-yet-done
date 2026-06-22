@@ -1352,6 +1352,13 @@ message).
 
 The Waybar CFFI module shows the currently active tracking in your status bar.
 
+It is a thin frontend over the same in-process `trackings` content adapter the
+TUI and `nyd` use — it does **not** open the database itself. This means it
+reads whatever database that view is configured for (the split-out `tasks.db`),
+stays correct when the storage backend changes, and requires a configured
+`~/.config/not_yet_done/views/trackings.yaml`. If no `trackings` view is
+configured, the module simply shows nothing.
+
 ### Setup
 
 Add to your Waybar config:
