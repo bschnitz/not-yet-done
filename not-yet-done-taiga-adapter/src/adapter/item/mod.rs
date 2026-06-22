@@ -240,6 +240,41 @@ pub(super) async fn fetch_detail(
     })
 }
 
+/// The **list-row** projection of an item detail — mirrors the field keys
+/// `item_summary_to_node_summary` emits (`ref, type, status, assignee,
+/// modified, subject`) so the post-edit row patch refreshes the same columns
+/// the list rendered. `attachments` is intentionally omitted: the detail fetch
+/// carries no attachment count, so the patch keeps the row's last-known value.
+fn item_detail_to_row_summary(d: &ItemDetail, composite_id: &str) -> NodeSummary {
+    let display_ref = match &d.project_slug {
+        Some(slug) if !slug.is_empty() => format!("{slug}#{}", d.r#ref),
+        _ => format!("#{}", d.r#ref),
+    };
+    let f = |key: &str, value: String, label: &str| MetadataField {
+        key: key.into(),
+        value,
+        display_label: label.into(),
+        editable: false,
+        allowed_values: None,
+    };
+    NodeSummary {
+        id: composite_id.to_string(),
+        label: d.subject.clone(),
+        node_type: node_type_for(d.item_type).clone(),
+        metadata: Metadata {
+            fields: vec![
+                f("ref", display_ref, "Ref"),
+                f("type", d.item_type.as_str().to_string(), "Type"),
+                f("status", d.status.clone(), "Status"),
+                f("assignee", d.assignees.join(", "), "Assignee"),
+                f("modified", d.modified.clone().unwrap_or_default(), "Modified"),
+                f("subject", d.subject.clone(), "Subject"),
+            ],
+        },
+        has_children: None,
+    }
+}
+
 #[async_trait]
 impl Node for TaigaItemNode {
     fn id(&self) -> &str {
@@ -260,6 +295,13 @@ impl Node for TaigaItemNode {
         // so we keep this lazy.
         static EMPTY: Metadata = Metadata { fields: vec![] };
         &EMPTY
+    }
+
+    fn row_summary(&self) -> NodeSummary {
+        // `metadata()` is intentionally empty for by-id nodes; the post-edit
+        // row patch needs the list-row shape instead. Delegated to a free
+        // function so it stays testable without constructing a TaigaClient.
+        item_detail_to_row_summary(&self.detail, &self.composite_id)
     }
 
     fn children_types(&self) -> Vec<NodeType> {
@@ -600,5 +642,78 @@ impl Content for TaigaItemNode {
             d.item_type.as_str(),
             d.status,
         ))
+    }
+}
+
+#[cfg(test)]
+mod row_summary_tests {
+    use super::*;
+
+    fn sample_detail() -> ItemDetail {
+        ItemDetail {
+            item_type: ItemType::UserStory,
+            id: 1234,
+            r#ref: 87,
+            project_id: 9,
+            project_slug: Some("demo-board".into()),
+            subject: "Add export button".into(),
+            description: "Lets users download the report.".into(),
+            status: "In progress".into(),
+            assignees: vec!["Dana Lee".into(), "Sam Ray".into()],
+            assignee_usernames: vec!["dana".into(), "sam".into()],
+            tags: vec![],
+            modified: Some("2025-02-03T09:00:00+0000".into()),
+            version: 4,
+            parent_user_story_id: None,
+            parent_user_story_subject: None,
+        }
+    }
+
+    /// The row projection must mirror the keys `item_summary_to_node_summary`
+    /// emits so the post-edit patch refreshes the right columns. `attachments`
+    /// is deliberately absent — the detail fetch has no count — so the patch's
+    /// key-merge keeps the row's last-known attachment value rather than
+    /// blanking it. (Before the fix, `metadata()` was empty, blanking the
+    /// whole row after an edit.)
+    #[test]
+    fn row_summary_mirrors_list_row_keys_and_values() {
+        let d = sample_detail();
+        let row = item_detail_to_row_summary(&d, "userstory:1234");
+
+        assert_eq!(row.id, "userstory:1234");
+        assert_eq!(row.label, "Add export button");
+
+        let keys: Vec<&str> = row.metadata.fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["ref", "type", "status", "assignee", "modified", "subject"]);
+        assert!(!keys.contains(&"attachments"));
+
+        let value = |k: &str| {
+            row.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.as_str())
+                .unwrap_or("")
+        };
+        assert_eq!(value("ref"), "demo-board#87");
+        assert_eq!(value("status"), "In progress");
+        assert_eq!(value("assignee"), "Dana Lee, Sam Ray");
+        assert_eq!(value("modified"), "2025-02-03T09:00:00+0000");
+    }
+
+    /// Without a project slug the ref falls back to a bare `#<ref>`.
+    #[test]
+    fn row_summary_ref_without_slug() {
+        let mut d = sample_detail();
+        d.project_slug = None;
+        let row = item_detail_to_row_summary(&d, "userstory:1234");
+        let ref_val = row
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "ref")
+            .map(|f| f.value.as_str())
+            .unwrap_or("");
+        assert_eq!(ref_val, "#87");
     }
 }

@@ -1774,6 +1774,36 @@ pub trait Node: Send + Sync {
     /// leave the stub, never panic.
     async fn hydrate(&mut self) {}
 
+    /// The **list-row** projection of this node — the [`NodeSummary`] it would
+    /// occupy if it appeared in its parent's [`Node::list`] result.
+    ///
+    /// The post-edit row patch (`patch_content_row`, the only consumer) refreshes
+    /// a row in place by re-fetching the node and copying its fresh values back
+    /// over the visible row. It needs the *row*-shaped projection, **not**
+    /// [`Node::metadata`]: for several adapters `metadata()` is a *detail*
+    /// projection with a different key set (Jira carries `summary` and editable
+    /// flags but no `updated`/`attachments`) or is intentionally empty (Taiga's
+    /// by-id nodes render no metadata table). Copying that over a list row drops
+    /// or reshapes columns until a full reload — exactly the "edit doesn't
+    /// refresh the row" symptom.
+    ///
+    /// Default = assemble from `label`/`node_type`/`metadata`, reproducing the
+    /// long-standing patch behaviour. Adapters whose `metadata()` diverges from
+    /// their `list()` row **must** override this to rebuild the `list()` shape
+    /// from their detail. Fields the detail can't supply (e.g. an attachment
+    /// count not carried in a detail fetch) may be omitted: the patch merges by
+    /// key via [`Metadata::set_field`] and keeps the row's last-known value for
+    /// any key this projection omits.
+    fn row_summary(&self) -> NodeSummary {
+        NodeSummary {
+            id: self.id().to_string(),
+            label: self.label().to_string(),
+            node_type: self.node_type().clone(),
+            metadata: self.metadata().clone(),
+            has_children: None,
+        }
+    }
+
     /// Which child node types can be listed under this node.
     fn children_types(&self) -> Vec<NodeType> {
         Vec::new()

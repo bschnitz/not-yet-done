@@ -115,6 +115,31 @@ fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
     }
 }
 
+/// The **list-row** metadata projection — must mirror the field keys
+/// `JiraRoot::list_issues` emits (`key, type, status, priority, assignee,
+/// updated`), so the post-edit row patch refreshes the same columns the list
+/// rendered. `attachments` is intentionally omitted: the detail fetch doesn't
+/// carry an attachment count, so the patch keeps the row's last-known value.
+fn build_row_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
+    let f = |key: &str, value: String, label: &str| MetadataField {
+        key: key.into(),
+        value,
+        display_label: label.into(),
+        editable: false,
+        allowed_values: None,
+    };
+    Metadata {
+        fields: vec![
+            f("key", detail.key.clone(), "Key"),
+            f("type", detail.issue_type.clone(), "Type"),
+            f("status", detail.status.clone(), "Status"),
+            f("priority", detail.priority.clone(), "Priority"),
+            f("assignee", detail.assignee.clone(), "Assignee"),
+            f("updated", detail.updated.clone(), "Updated"),
+        ],
+    }
+}
+
 fn build_metadata_sparse(key: &str, summary_hint: &str) -> Metadata {
     Metadata {
         fields: vec![
@@ -240,6 +265,25 @@ impl Node for JiraIssueNode {
 
     fn metadata(&self) -> &Metadata {
         &self.cached_metadata
+    }
+
+    fn row_summary(&self) -> NodeSummary {
+        // `metadata()` is the detail/edit-form projection (carries `summary`,
+        // editable flags, no `updated`); the list row needs the `list_issues`
+        // shape. Build it from the loaded detail; a stub that never hydrated
+        // falls back to an empty field set, leaving the patch to keep the row's
+        // base values.
+        let metadata = match self.detail.get() {
+            Some(detail) => build_row_metadata_from_detail(detail),
+            None => Metadata { fields: vec![] },
+        };
+        NodeSummary {
+            id: self.key.clone(),
+            label: self.label().to_string(),
+            node_type: Node::node_type(self).clone(),
+            metadata,
+            has_children: None,
+        }
     }
 
     async fn hydrate(&mut self) {
@@ -687,6 +731,58 @@ mod tests {
             .find(|f| f.key == "summary")
             .map(|f| f.value.as_str());
         assert_eq!(summary_after, Some("Fix login bug"));
+    }
+
+    /// The post-edit row patch overlays `row_summary()` onto the visible list
+    /// row, merging by key. For that to refresh the right columns, the row
+    /// projection's keys must mirror what `JiraRoot::list_issues` emits
+    /// (`key, type, status, priority, assignee, updated`) and carry the fresh
+    /// detail values. `attachments` is deliberately absent — the detail fetch
+    /// has no count — so the patch keeps the row's last-known value there.
+    #[test]
+    fn row_summary_mirrors_list_row_keys_and_values() {
+        let node = test_node(sample_detail());
+        let row = node.row_summary();
+
+        assert_eq!(row.id, "PROJ-42");
+        assert_eq!(row.label, "Fix login bug");
+
+        let keys: Vec<&str> = row.metadata.fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["key", "type", "status", "priority", "assignee", "updated"]
+        );
+        // No `summary` field (that's the detail/edit-form projection) and no
+        // `attachments` (the detail can't supply a count).
+        assert!(!keys.contains(&"summary"));
+        assert!(!keys.contains(&"attachments"));
+
+        let value = |k: &str| {
+            row.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.as_str())
+                .unwrap_or("")
+        };
+        assert_eq!(value("status"), "In Progress");
+        assert_eq!(value("priority"), "High");
+        assert_eq!(value("assignee"), "alice");
+        assert_eq!(value("type"), "Bug");
+    }
+
+    /// A stub that never hydrated has no detail; `row_summary()` then yields an
+    /// empty field set so the patch's merge keeps every base column rather than
+    /// blanking them.
+    #[test]
+    fn row_summary_of_unhydrated_stub_is_empty() {
+        let client = test_client();
+        let scope_id = cache_store::scope_id_for_url("http://localhost:0");
+        let cache = Arc::new(Mutex::new(CacheAlias::new(None, scope_id)));
+        let node = JiraIssueNode::from_key(client, cache, "PROJ-42".into(), "hint".into());
+
+        let row = node.row_summary();
+        assert!(row.metadata.fields.is_empty());
     }
 
     fn sample_comment() -> JiraComment {
