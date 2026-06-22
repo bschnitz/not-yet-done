@@ -32,6 +32,12 @@ use serde::Deserialize;
 
 use not_yet_done_content::{AdapterFactory, ContentAdapter, HostContext, InMemoryHostBus};
 
+pub mod hooks;
+pub use hooks::{
+    fire_connected_hooks, fire_hook, fire_hook_with, HookBinding, HookConfig, HookInputs,
+    HookOutcome, HookReport, HookTarget, HookWhen,
+};
+
 // ---------------------------------------------------------------------------
 // Factory registry
 // ---------------------------------------------------------------------------
@@ -152,12 +158,17 @@ impl AdapterInstance {
     }
 }
 
-/// Minimal view-file head: just enough to find and build the adapter. The TUI
-/// parses the *whole* `ViewFileConfig` (tabs, views, columns, …); the host only
-/// needs the `adapter:` block, so it parses this and ignores the rest.
+/// Minimal view-file head: just enough to find and build the adapter, plus the
+/// optional `hooks:` block. The TUI parses the *whole* `ViewFileConfig` (tabs,
+/// views, columns, …); the host only needs these two, so it parses this and
+/// ignores the rest.
 #[derive(Debug, Clone, Deserialize)]
 struct ViewFileHead {
     adapter: AdapterInstance,
+    /// Lifecycle-hook bindings for this instance (see [`hooks`]). Optional —
+    /// most view files declare none.
+    #[serde(default)]
+    hooks: Option<hooks::HookConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +196,8 @@ pub fn views_dir() -> PathBuf {
 pub struct DiscoveredInstance {
     pub adapter: AdapterInstance,
     pub view_path: PathBuf,
+    /// The instance's `hooks:` config, if any (see [`hooks`]).
+    pub hooks: Option<hooks::HookConfig>,
 }
 
 impl DiscoveredInstance {
@@ -233,10 +246,21 @@ pub fn discover_instances() -> Vec<DiscoveredInstance> {
         };
         out.push(DiscoveredInstance {
             adapter: head.adapter,
+            hooks: head.hooks,
             view_path: path,
         });
     }
     out
+}
+
+/// The `hooks:` config for one instance, parsed from its view file. `None` if
+/// the instance is unknown or declares no hooks. Used by [`hooks::fire_hook`]
+/// when the caller already holds a built adapter but not the parsed config.
+pub fn load_hook_config(instance_name: &str) -> Option<hooks::HookConfig> {
+    discover_instances()
+        .into_iter()
+        .find(|d| d.instance_id() == instance_name)
+        .and_then(|d| d.hooks)
 }
 
 /// Resolve the verbatim config string for an instance: `config_inline` if
@@ -313,28 +337,6 @@ pub fn resolve_adapter_with(
     factory
         .create(found.instance_id(), &cfg, ctx)
         .map_err(|e| anyhow!("creating adapter '{instance_name}': {e}"))
-}
-
-/// Ensure today's backup of the per-host `tasks.db` exists, creating one if
-/// not. Idempotent (at most one backup per calendar day, matched on the
-/// `YYYYMMDD` prefix and the `-tasks.db` suffix) and pruned to a fixed
-/// retention.
-///
-/// This lives in the host rather than a front-end because the host is the one
-/// crate that knows both the default tasks DSN and the backup directory while
-/// also depending on `not-yet-done-task-core` — so the TUI and CLI can trigger
-/// the tasks.db daily backup without re-coupling to the task domain crate
-/// (C5d deliberately removed `task-core` from the TUI). It targets the
-/// per-host **default** location only; per-view `backup:` overrides apply to
-/// the interactive `backup` adapter action, not to this startup safety net.
-///
-/// `max_count` is the retention bound for tasks.db backups (older ones are
-/// pruned). Returns the new backup path, or `None` if today's already existed.
-pub fn ensure_daily_task_backup(max_count: usize) -> Result<Option<String>> {
-    let dsn = not_yet_done_task_core::bootstrap::default_task_dsn();
-    let dir = not_yet_done_task_core::backup::default_backup_dir();
-    not_yet_done_task_core::backup::ensure_daily_backup_at(&dsn, &dir, max_count)
-        .map_err(|e| anyhow!("tasks.db daily backup failed: {e}"))
 }
 
 #[cfg(test)]

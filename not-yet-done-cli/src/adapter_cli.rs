@@ -193,6 +193,11 @@ fn run(args: &[String]) -> Result<()> {
     rt.block_on(async move {
         let ctx = not_yet_done_host::host_context();
         let adapter = not_yet_done_host::resolve_adapter(&inv.instance, &ctx)?;
+        // The adapter just connected (we built it): fire its `connected` hook.
+        // No-op unless this instance's view file configures one; throttled via
+        // the host state file, so e.g. an auto-backup runs at most once a day
+        // however often the CLI is invoked. Best-effort — never blocks the verb.
+        not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected").await;
         match inv.verb.as_str() {
             "ls" | "list" => cmd_ls(adapter.as_ref(), &inv).await,
             "show" | "get" => cmd_show(adapter.as_ref(), &inv).await,

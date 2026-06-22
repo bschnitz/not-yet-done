@@ -2163,6 +2163,12 @@ impl ContentAdapter for TaskAdapter {
         &self.instance_id
     }
 
+    /// Fires `connected` after construction — for this in-process adapter that
+    /// is every program start. Bind `backup` to it (throttled) for auto-backup.
+    fn hooks(&self) -> Vec<&str> {
+        vec!["connected"]
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             // A1b: add/edit (create) and delete/undelete/reparent.

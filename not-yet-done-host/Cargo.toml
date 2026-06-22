@@ -13,6 +13,10 @@ edition = "2024"
 anyhow     = { workspace = true }
 serde      = { workspace = true }
 serde_yaml = { workspace = true }
+# Hook subsystem (D5): chrono timestamps the throttle window; serde_json reads/
+# writes the host-level state file `~/.local/state/not_yet_done/hooks.json`.
+serde_json = { workspace = true }
+chrono     = { workspace = true }
 dirs       = { workspace = true }
 
 not-yet-done-content = { path = "../not-yet-done-content" }
@@ -26,9 +30,3 @@ not-yet-done-postgres-adapter   = { path = "../not-yet-done-postgres-adapter" }
 not-yet-done-confluence-adapter = { path = "../not-yet-done-confluence-adapter" }
 not-yet-done-stoat-adapter      = { path = "../not-yet-done-stoat-adapter" }
 not-yet-done-local-adapter      = { path = "../not-yet-done-local-adapter" }
-
-# The host owns the tasks.db daily-backup (see `ensure_daily_task_backup`):
-# it knows the per-host default DSN and backup dir, so front-ends (TUI/CLI)
-# stay decoupled from the task domain crate (C5d kept task-core out of the
-# TUI).
-not-yet-done-task-core          = { path = "../not-yet-done-task-core" }

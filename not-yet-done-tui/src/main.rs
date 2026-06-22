@@ -100,18 +100,20 @@ async fn main() -> Result<()> {
     // already uses them.
     app.start_content_loads();
 
-    // Daily backups: create one each, if none exists for today. The legacy
-    // core DB (`nyd.db`: saved queries, settings, links) is backed up by
-    // core; the split-out task domain DB (`tasks.db`: tasks + trackings) is
-    // backed up via the host, which owns the tasks DSN/backup-dir defaults so
-    // the TUI need not depend on `task-core` (C5d). Both are best-effort —
-    // a backup failure must never block startup.
+    // Daily backup of the legacy core DB (`nyd.db`: saved queries, settings,
+    // links), owned by core. Best-effort — a backup failure must never block
+    // startup.
     if let Err(e) = not_yet_done_core::service::BackupServiceImpl.ensure_daily_backup().await {
         eprintln!("Backup warning (nyd.db): {e}");
     }
-    if let Err(e) = not_yet_done_host::ensure_daily_task_backup(10) {
-        eprintln!("Backup warning (tasks.db): {e}");
-    }
+    // Fire the `connected` lifecycle hook for every configured instance that
+    // declares one (D5). This generalises the old hard-coded tasks.db daily
+    // backup: the shipped `tasks.yaml` binds the `backup` action to `connected`
+    // with a 24h throttle, so the task DB is backed up once a day on first
+    // launch — but now any adapter can hook any action on any cadence, with no
+    // TUI code change. The throttle is checked before each adapter is built, so
+    // a within-window launch constructs nothing extra.
+    not_yet_done_host::fire_connected_hooks().await;
 
     let mut terminal = setup_terminal()?;
     let result       = run_loop(&mut terminal, &mut app).await;

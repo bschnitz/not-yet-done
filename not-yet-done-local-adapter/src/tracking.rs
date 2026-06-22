@@ -2534,6 +2534,13 @@ impl ContentAdapter for TrackingAdapter {
         &self.instance_id
     }
 
+    /// Fires `connected` after construction (every program start for this
+    /// in-process adapter). The tracking root also exposes the `backup` action,
+    /// so a `connected`→`backup` binding works here too.
+    fn hooks(&self) -> Vec<&str> {
+        vec!["connected"]
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             // A2b: delete (soft) + restore. No create (trackings are born

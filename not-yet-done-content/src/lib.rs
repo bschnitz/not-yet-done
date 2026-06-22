@@ -1717,6 +1717,28 @@ pub trait ContentAdapter: Send + Sync {
     ) -> Result<Option<TreeSearchResults>> {
         Ok(None)
     }
+
+    /// The lifecycle hook ids this adapter can fire (e.g. `["connected"]`).
+    ///
+    /// A *hook* is a named point in an adapter's lifetime that a front-end
+    /// turns into an action invocation via host configuration (`hooks:` in the
+    /// instance's view file): each configured hook binds a `run: <action-id>`
+    /// triple that the host invokes — throttled — whenever the hook fires. This
+    /// method only *declares* which hook ids are meaningful for the adapter; it
+    /// carries no behaviour. The host validates configured hook names against
+    /// this list (warning on unknown ones) so typos surface instead of silently
+    /// never firing.
+    ///
+    /// The first hook is `connected` — fired right after the adapter is
+    /// successfully constructed (the factory's `create` returned `Ok`). For the
+    /// in-process local adapter that is every program start, which is how the
+    /// generalised auto-backup works: bind `backup` to `connected` with a 24h
+    /// throttle and the database is backed up once a day on first use.
+    ///
+    /// The default impl returns an empty list (adapter fires no hooks).
+    fn hooks(&self) -> Vec<&str> {
+        Vec::new()
+    }
 }
 
 /// A single item in the content tree.
