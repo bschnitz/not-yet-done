@@ -22,30 +22,44 @@ die Crates so geschnitten sind:
 - **Kapselung** — Views verwalten ihre Popups, Filter, Favoriten und
   Suche intern. Kommunikation mit der App nur über Message-/Request-Enums.
 - **Adapter-Isolation** — Content-Backends (Jira, Taiga, Postgres,
-  Confluence) hängen ausschließlich an `not-yet-done-content`, nie an
-  `core` oder am TUI. Dadurch bleibt der Abhängigkeitsgraph azyklisch und
-  ein neuer Adapter berührt keinen Kern-Code.
+  Confluence, Stoat, local) hängen ausschließlich an `not-yet-done-content`,
+  nie am TUI. Dadurch bleibt der Abhängigkeitsgraph azyklisch und ein neuer
+  Adapter berührt keinen Kern-Code.
+- **Eine Adapter-Verdrahtung für alle Frontends** — `not-yet-done-host` ist die
+  einzige Crate, die den Vertrag _und_ alle Adapter kennt. TUI, CLI (`nyd`) und
+  Waybar bauen Adapter byte-gleich über `host::resolve_adapter`, statt die
+  Factory-Auswahl zu duplizieren. Begründung in
+  [ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md).
 
 ## Crate-Landschaft
 
-Der Workspace teilt sich in vier Schichten: **Frontends** (was der Nutzer
-startet), die **Content-Adapter-Schicht** (austauschbare Backends), die
-**UI-Bausteine** (rendering-nahe Hilfs-Crates) und den **Datenkern**.
+Der Workspace teilt sich in fünf Schichten: **Frontends** (was der Nutzer
+startet), die **Host-Schicht** (eine Crate, die Adapter für alle Frontends
+gleich baut), die **Content-Adapter-Schicht** (austauschbare Backends), die
+**UI-Bausteine** (rendering-nahe Hilfs-Crates) und den **Datenkern**
+(Legacy-`core` + die ausgelagerte Task-Domäne).
 
 ```mermaid
 flowchart TD
     subgraph Frontends
         TUI[not-yet-done-tui]
-        CLI[not-yet-done-cli]
+        NYD["nyd<br/>not-yet-done-cli"]
+        NYDT["nyd-t<br/>not-yet-done-task-cli"]
         WAYBAR[not-yet-done-waybar]
+    end
+
+    subgraph Host
+        HOST["not-yet-done-host<br/>Factory-Registry · host_context<br/>discover/resolve · hooks"]
     end
 
     subgraph "Content-Adapter-Schicht"
         CONTENT[not-yet-done-content<br/>ContentAdapter-Trait + Auth]
+        LOCAL[not-yet-done-local-adapter<br/>Tasks/Trackings/Projects]
         JIRA[not-yet-done-jira-adapter]
         TAIGA[not-yet-done-taiga-adapter]
         PG[not-yet-done-postgres-adapter]
         CONF[not-yet-done-confluence-adapter]
+        STOAT[not-yet-done-stoat-adapter]
         TRANSPORT[not-yet-done-transport<br/>SSH-Tunnel]
     end
 
@@ -57,82 +71,102 @@ flowchart TD
     end
 
     subgraph Datenkern
-        CORE[not-yet-done-core<br/>Entities/Repos/Services/Filter-DSL]
-        MACROS[not-yet-done-macros<br/>ColumnRegistry u. a.]
+        CORE[not-yet-done-core<br/>nyd.db: Settings/Queries/Links/Tags]
+        TASKCORE[not-yet-done-task-core<br/>tasks.db: Task-/Tracking-Domäne]
+        FILTER[not-yet-done-filter<br/>Filter-DSL]
+        MACROS[not-yet-done-macros]
     end
 
+    TUI --> HOST
     TUI --> CORE
-    TUI --> CONTENT
-    TUI --> JIRA
-    TUI --> TAIGA
+    TUI --> LOCAL
     TUI --> PG
-    TUI --> CONF
     TUI --> FOREST
     TUI --> TABLE
     TUI --> NYDRATATUI
+    NYD --> HOST
+    NYD --> TASKCORE
+    NYDT --> TASKCORE
+    WAYBAR --> HOST
 
-    CLI --> CORE
-    WAYBAR --> CONTENT
+    HOST --> CONTENT
+    HOST --> LOCAL
+    HOST --> JIRA
+    HOST --> TAIGA
+    HOST --> PG
+    HOST --> CONF
+    HOST --> STOAT
 
+    LOCAL --> CONTENT
+    LOCAL --> TASKCORE
     JIRA --> CONTENT
     TAIGA --> CONTENT
     CONF --> CONTENT
+    STOAT --> CONTENT
     PG --> CONTENT
     PG --> TRANSPORT
     TRANSPORT --> CONTENT
 
+    TASKCORE --> FILTER
     FOREST --> TABLE
     NYDRATATUI --> GRID
     CORE --> MACROS
 ```
 
-| Crate                               | Verantwortung                                                                    | Workspace-Deps                                      |
-| ----------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------- |
-| **not-yet-done-core**               | DB, SeaORM-Entities, Repositories, Services, Filter-DSL, Config                  | macros                                              |
-| **not-yet-done-tui**                | Terminal-UI: Event-Loop, Views, App-State                                        | core, content, alle Adapter, forest, table, ratatui |
-| **not-yet-done-cli**                | CLI für Scripting/Automation                                                     | core                                                |
-| **not-yet-done-waybar**             | Waybar-CFFI-Modul (aktives Tracking in der Statusbar)                            | content, host                                       |
-| **not-yet-done-content**            | `ContentAdapter`-Trait + `Node`/`Content`-Abstraktion + Auth-Orchestrierung      | —                                                   |
-| **not-yet-done-jira-adapter**       | Jira-Tickets als Content-Baum                                                    | content                                             |
-| **not-yet-done-taiga-adapter**      | Taiga-Items als Content-Baum                                                     | content                                             |
-| **not-yet-done-postgres-adapter**   | Postgres-DBs/Schemas/Tabellen/DB-Skripte als Content-Baum                        | content, transport                                  |
-| **not-yet-done-confluence-adapter** | Confluence-Spaces/Pages/Kommentare/Attachments                                   | content                                             |
-| **not-yet-done-transport**          | SSH-Tunnel-Support für Adapter (z. B. Postgres hinter Bastion)                   | content                                             |
-| **not-yet-done-forest**             | Baum/Forest → flache Zeilenliste (Tree-Rendering)                                | table                                               |
-| **not-yet-done-table**              | Spalten-Layout & Tabellen-Rendering-Primitive                                    | —                                                   |
-| **not-yet-done-ratatui**            | Ratatui-Erweiterungen (Inline-Editor, Widgets)                                   | grid-core                                           |
-| **not-yet-done-grid-core**          | Grid-Layout-Kern                                                                 | —                                                   |
-| **not-yet-done-macros**             | Proc-Macros (`ColumnRegistry` etc.)                                              | —                                                   |
-| **ratatui_form_widgets**            | Form-Widget-Komponenten (Workspace-Member, aktuell von keinem Crate eingebunden) | —                                                   |
-| **grid-render-sim**                 | Render-Simulation/Testbett für Grid                                              | —                                                   |
+| Crate                               | Verantwortung                                                                      | Workspace-Deps                                                       |
+| ----------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **not-yet-done-core**               | Legacy-DB (`nyd.db`): Settings, Saved Queries, Links, Tags; Config                 | macros                                                               |
+| **not-yet-done-task-core**          | Task-/Tracking-Domäne (`tasks.db`): Entities, Services, Bootstrap, Backup          | filter                                                               |
+| **not-yet-done-filter**             | Filter-DSL (YAML-Query-Sprache, AST → Query, Tree-Operatoren)                      | —                                                                    |
+| **not-yet-done-host**               | Adapter-Verdrahtung für alle Frontends: Factory-Registry, `resolve_adapter`, Hooks | content, alle Adapter                                                |
+| **not-yet-done-tui**                | Terminal-UI: Event-Loop, Views, App-State                                          | core, content, filter, host, local, postgres, forest, table, ratatui |
+| **not-yet-done-cli** (`nyd`)        | Generisches Adapter-Frontend (CLI) + Built-ins `tag`/`backup`/`config`             | host, content, core, task-core, filter                               |
+| **not-yet-done-task-cli** (`nyd-t`) | Native Domänen-CLI für Tasks/Trackings (typed JSON, graded exit codes)             | task-core                                                            |
+| **not-yet-done-waybar**             | Waybar-CFFI-Modul (aktives Tracking in der Statusbar)                              | content, host                                                        |
+| **not-yet-done-content**            | `ContentAdapter`-Trait + `Node`/`Content`-Abstraktion + Auth-Orchestrierung        | —                                                                    |
+| **not-yet-done-local-adapter**      | Tasks/Trackings/Projects als ContentAdapter (über `task-core`)                     | content, task-core, filter                                           |
+| **not-yet-done-jira-adapter**       | Jira-Tickets als Content-Baum                                                      | content                                                              |
+| **not-yet-done-taiga-adapter**      | Taiga-Items als Content-Baum                                                       | content                                                              |
+| **not-yet-done-postgres-adapter**   | Postgres-DBs/Schemas/Tabellen/DB-Skripte als Content-Baum                          | content, transport                                                   |
+| **not-yet-done-confluence-adapter** | Confluence-Spaces/Pages/Kommentare/Attachments                                     | content                                                              |
+| **not-yet-done-stoat-adapter**      | Chat (Stoat/Revolt-Fork) als Streaming-Content-Baum                                | content                                                              |
+| **not-yet-done-transport**          | SSH-Tunnel-Support für Adapter (z. B. Postgres hinter Bastion)                     | content                                                              |
+| **not-yet-done-forest**             | Baum/Forest → flache Zeilenliste (Tree-Rendering)                                  | table                                                                |
+| **not-yet-done-table**              | Spalten-Layout & Tabellen-Rendering-Primitive                                      | —                                                                    |
+| **not-yet-done-ratatui**            | Ratatui-Erweiterungen (Inline-Editor, Widgets)                                     | grid-core                                                            |
+| **not-yet-done-grid-core**          | Grid-Layout-Kern                                                                   | —                                                                    |
+| **not-yet-done-macros**             | Proc-Macros (`ColumnRegistry` etc.)                                                | —                                                                    |
+| **ratatui_form_widgets**            | Form-Widget-Komponenten (Workspace-Member, aktuell von keinem Crate eingebunden)   | —                                                                    |
+| **grid-render-sim**                 | Render-Simulation/Testbett für Grid                                                | —                                                                    |
 
-## Datenkern (`not-yet-done-core`)
+## Datenkern: `core` + `task-core` + `filter`
 
-Der Kern ist frontend- und adapter-agnostisch — weder TUI noch CLI noch
-Adapter sind ihm bekannt. Er stellt bereit:
+Der Datenkern wurde in Block C aufgeteilt. Die **Task-/Tracking-Domäne** liegt
+nicht mehr in der Legacy-DB, sondern in einer eigenen `tasks.db`, betreut von
+`not-yet-done-task-core`; `not-yet-done-core` behält nur noch die
+TUI-Querschnitts-Daten (`nyd.db`); die Filter-DSL ist in `not-yet-done-filter`
+ausgelagert, damit sowohl Domäne als auch Adapter sie ohne `core` nutzen können.
+Begründung des Splits in
+[`adapterize-tasks-trackings.md`](adapterize-tasks-trackings.md).
 
-- **Entities** (SeaORM): `Task`, `Project`, Tags (`GlobalTag` /
-  `ProjectTag` plus Junctions), `Tracking`, `SavedQuery`, `QueryShortcut`,
-  `Link`, `Settings`.
-- **Repositories**: dünne, fokussierte DB-Zugriffsschicht pro Entity
-  (`TaskRepository`, `TrackingRepository`, `TagRepository`,
-  `SavedQueryRepository`, `QueryShortcutRepository`, `LinkRepository`,
-  `SettingsRepository`).
-- **Services**: höherwertige Operationen über mehrere Repos
-  (`TaskService`, `TagService`, `BackupService` für den täglichen Backup
-  beim Start).
-- **Filter-DSL** (`filter/`): YAML-basierte Abfragesprache mit
-  natürlichsprachlichen Datumsausdrücken. AST (`expr.rs`) → SeaORM-Query
-  (`query_filter.rs`), inkl. baumspezifischer Operatoren (`tree_ops.rs`).
+- **`not-yet-done-task-core` (`tasks.db`)** — die eigentliche Domäne: Entities
+  (`Task`, `Tracking`, `Project`, Tags), Services, `bootstrap`
+  (`default_task_dsn()`, `open_module()` — connect + Schema-Sync + DI) und das
+  suffix-bewusste `backup`-Modul. _Eine_ Quelle der Wahrheit für DSN und
+  Backup-Dir, die der local-Adapter (TUI) **und** `nyd-t` teilen. Default-DSN
+  `<data-local>/not_yet_done/tasks.db`, Override `NYD_TASKS_DB`.
+- **`not-yet-done-core` (`nyd.db`)** — frontend-agnostischer Legacy-Kern für
+  Settings, Saved Queries, Query-Shortcuts, Links und (noch) globale Tags, plus
+  `BackupServiceImpl` für den täglichen `nyd.db`-Backup beim Start. Ablage:
+  `dirs::data_local_dir()/not_yet_done/nyd.db`, Config
+  `dirs::config_dir()/not_yet_done/config.yaml`, Override `DATABASE_URL`.
+- **`not-yet-done-filter`** — die YAML-Filter-DSL mit
+  natürlichsprachlichen Datumsausdrücken: AST → Query inkl. baumspezifischer
+  Operatoren. Keine Workspace-Deps; von `task-core`, `local-adapter`, `cli`
+  und `tui` genutzt.
 
-**Ablage:**
-
-- DB (SQLite): `dirs::data_local_dir()/not_yet_done/nyd.db`
-- Config (YAML): `dirs::config_dir()/not_yet_done/config.yaml`
-- Override: Umgebungsvariable `DATABASE_URL`
-
-Schema-Sync läuft beim Start automatisch; punktuelle Migrationen behandeln
-Altdaten (z. B. Tag `color` → `fg_color` + `bg_color` + `symbol`).
+Schema-Sync läuft bei beiden DBs beim Start automatisch; punktuelle Migrationen
+behandeln Altdaten (z. B. Tag `color` → `fg_color` + `bg_color` + `symbol`).
 
 > **Gotcha:** SeaORM-`Uuid`-PKs landen in SQLite als `BLOB(16)`, nicht als
 > Text — ein manueller `TEXT`-Insert schlägt still beim Decode fehl.
@@ -344,15 +378,73 @@ Preview-Optionen. Theme/Farben kommen aus `ThemeConfig` + user-`tui.yaml`
 [`generic-view-spec.md`](generic-view-spec.md), zum Adapter-Vertrag in
 [`content-adapter-spec.md`](content-adapter-spec.md).
 
+## Host-Schicht (`not-yet-done-host`)
+
+`host` ist die **einzige** Crate, die den `ContentAdapter`-Vertrag _und_ alle
+konkreten Adapter-Crates kennt — die gemeinsame Adapter-Verdrahtung, die TUI,
+`nyd` und Waybar teilen, damit jedes Frontend Adapter exakt gleich baut. Sie
+exportiert:
+
+- `factories()` / Factory-Registry — `adapter:`-Typ → Factory. Einen Adapter
+  zum Produkt hinzufügen heißt: hier **einmal** eintragen; alle Frontends erben
+  ihn.
+- `host_context()` — baut den `HostContext` (In-Process-Event-Bus, Pfade).
+- `discover_instances()` — liest die View-Files und parst je einen
+  **`ViewFileHead`** (nur `adapter:` + optional `hooks:`; den Rest des
+  View-Files geht den Host nichts an).
+- `resolve_adapter(instance, ctx)` — Instanz → fertiger
+  `Box<dyn ContentAdapter>`.
+
+Vor Block D lebte diese Logik im TUI-Binary; CLI und Waybar konnten sie nicht
+nutzen, ohne das ganze TUI zu ziehen. Die eigene Crate bricht das auf, hält den
+Graph azyklisch (Frontends → `host` → Adapter → `content`) und behebt u. a. den
+Waybar-Bug, der nach dem DB-Split die falsche DB las. Details in
+[ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md).
+
+### Lifecycle-Hooks
+
+Ein **Hook** ist ein benannter Punkt in der Lebenszeit eines Adapters, den eine
+Frontend-Config zu einer Action-Invocation macht. Der Adapter _deklariert_ seine
+Hook-Ids (`ContentAdapter::hooks()`, Default leer; der local-Adapter:
+`["connected"]`, gefeuert direkt nach erfolgreichem Bau — beim In-Process-Adapter
+also jeder Programmstart). Die Instanz-Config bindet pro Hook eine throttle-bare
+Adapter-Action:
+
+```yaml
+hooks:
+  connected:
+    - run: backup # Adapter-Action-Id
+      when: { throttle: 24h } # höchstens einmal pro Fenster (s/m/h/d)
+```
+
+Der Host feuert Hooks aus jedem Frontend — `fire_hook` gegen einen schon
+gebauten Adapter (CLI, direkt nach `resolve_adapter`), `fire_connected_hooks`
+beim TUI-Start (prüft den Throttle _vor_ dem Adapter-Bau, sodass ein Launch im
+Fenster nichts konstruiert). Der Throttle-Zustand liegt in einer host-globalen,
+adapter-unabhängigen Datei `~/.local/state/not_yet_done/hooks.json`
+(`"<instanz>:<hook>:<action>"` → letzter Fire). So wird das frühere hartkodierte
+tägliche `tasks.db`-Backup ein bloßer Spezialfall: `backup` an `connected` mit
+24 h Throttle — frontend-übergreifend, sodass auch reine `nyd`-Nutzung das
+tägliche Backup auslöst. Best-effort: schlechte Config, unbekannter Hook,
+scheiternde Action oder unschreibbares State-File brechen den Aufrufer nie ab.
+
 ## Frontends neben dem TUI
 
-- **CLI** (`not-yet-done-cli`) — vollständige Kommandozeile über `core`,
-  für Scripting/Automation; teilt DB und Config mit dem TUI.
-- **Waybar** (`not-yet-done-waybar`) — CFFI-`.so`, zeigt das aktive
-  Tracking in der Statusbar. Dünner Protokoll-Frontend: löst über den
-  Host denselben In-Process-`trackings`-Adapter auf wie TUI und `nyd`
-  (statt selbst die DB zu öffnen) und liest damit die adapter-konfigurierte
-  DB (die ausgelagerte `tasks.db`), nicht mehr die `core`-DB.
+- **`nyd`** (`not-yet-done-cli`) — generisches Frontend über das
+  `ContentAdapter`-Protokoll: `nyd <instanz> <verb>` spricht jeden
+  konfigurierten Adapter gleich an (baut ihn über `host::resolve_adapter`).
+  Terse Alltagsformen sind Aliase (`cli.yaml`); `tag`/`backup`/`config` bleiben
+  Built-ins.
+- **`nyd-t`** (`not-yet-done-task-cli`) — native Domänen-CLI direkt auf
+  `task-core`, mit typisiertem, domänengeformtem JSON und abgestuften
+  Exit-Codes (Stabilkontrakt für Batch-Scripts). Adapter sind Interop-Grenzen,
+  `nyd-t` ist die eigene Domäne in ihrem Idiom — siehe
+  [ADR 0004](decisions/0004-zwei-cli-binaries-adapter-vs-domain.md).
+- **Waybar** (`not-yet-done-waybar`) — CFFI-`.so`, zeigt das aktive Tracking in
+  der Statusbar. Dünnes Protokoll-Frontend: löst über den Host denselben
+  In-Process-`trackings`-Adapter auf wie TUI und `nyd` (statt selbst die DB zu
+  öffnen) und liest damit die adapter-konfigurierte `tasks.db`, nicht mehr die
+  `core`-DB.
 
 ## Weiterführend
 
