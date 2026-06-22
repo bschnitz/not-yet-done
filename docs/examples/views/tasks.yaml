@@ -117,6 +117,30 @@ adapter:
   #   config_inline: '{ backup: { directory: /mnt/sync/nyd, max_count: 30 } }'
   config_inline: "{}"
 
+# Lifecycle hooks (D5). A hook is a named point in the adapter's lifetime
+# (declared by `ContentAdapter::hooks()`) that this config turns into an action
+# invocation. `connected` fires right after the adapter is built — for the
+# in-process tasks adapter that is every program start (TUI launch or any `nyd
+# tasks …` command). Each binding runs an adapter action, throttled via the
+# host state file `~/.local/state/not_yet_done/hooks.json`.
+#
+# This is how the daily database backup works: it is *not* hard-coded any more —
+# binding the `backup` action (the same one the `B` key triggers, see below) to
+# `connected` with a 24h throttle backs `tasks.db` up once a day on first use,
+# wherever you launch from. Change `throttle` (`s`/`m`/`h`/`d`), point it at a
+# different action, or drop the block to disable auto-backup. Per binding:
+#   run:   adapter action id to invoke (here `backup`).
+#   on:    target node — omit for the adapter root | { id: <node-id> } |
+#          { query: <q> } (root, with the query set for a set-scoped action).
+#   with:  action inputs — { value: …, text: … } (none needed for backup).
+#   when:  { throttle: <dur> } — fire at most once per window; omit to fire
+#          every time.
+hooks:
+  connected:
+    - run: backup
+      when:
+        throttle: 24h
+
 views:
   # The root view lists the forest's top-level tasks (`parent_id == None`).
   # `tree_label: description` turns it into a tree; the recursive `subtasks`

@@ -3598,6 +3598,7 @@ name = "not-yet-done-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "not-yet-done-confluence-adapter",
  "not-yet-done-content",
@@ -3606,8 +3607,8 @@ dependencies = [
  "not-yet-done-postgres-adapter",
  "not-yet-done-stoat-adapter",
  "not-yet-done-taiga-adapter",
- "not-yet-done-task-core",
  "serde",
+ "serde_json",
  "serde_yaml",
 ]
 
