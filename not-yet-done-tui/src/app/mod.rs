@@ -4708,46 +4708,61 @@ impl App {
             return;
         };
 
+        if let Err(e) = self.tree_find_in_tab(tab_idx, view_name, query) {
+            self.modal_message = Some(format!(":tree-find — {e}"));
+        }
+    }
+
+    /// Queue a tree-find `query` on content tab `tab_idx`, optionally
+    /// switching to `view_name` first, then force a fresh reload. The
+    /// queued query fires when the load lands (see the
+    /// `LoadMsg::ContentItems` handler), so the search runs against an
+    /// up-to-date snapshot — parity with the legacy `:reload-tasks` that
+    /// preceded `:focus-task`.
+    ///
+    /// Shared by `:tree-find` and the `tasks/<uuid>` / `tracking/<uuid>`
+    /// link reroute (via the adapter `id:<uuid>` exact-id escape, which is
+    /// robust against the lazily-ingested tree). Returns `Err(message)`
+    /// (the caller prefixes its own context) when the tab is in an error
+    /// state, the named view is unknown, or the active view is not a tree.
+    pub(crate) fn tree_find_in_tab(
+        &mut self,
+        tab_idx: usize,
+        view_name: Option<String>,
+        query: String,
+    ) -> Result<(), String> {
         self.set_active_tab(Tab::Content(tab_idx));
 
         let pane_id = {
             let cv = match &mut self.content_views[tab_idx] {
                 ContentSlot::Working(cv) => cv,
                 ContentSlot::Broken { name, errors, .. } => {
-                    self.modal_message = Some(format!(
-                        ":tree-find — tab '{name}' is in an error state: {}",
+                    return Err(format!(
+                        "tab '{name}' is in an error state: {}",
                         errors.first().cloned().unwrap_or_default()
                     ));
-                    return;
                 }
             };
             if let Some(v) = view_name {
                 if let Err(available) = cv.switch_to_view_by_name(&v) {
-                    self.modal_message = Some(format!(
-                        ":tree-find — unknown view '{v}' for tab '{tab_name}' (available: {})",
+                    return Err(format!(
+                        "unknown view '{v}' (available: {})",
                         available.join(", ")
                     ));
-                    return;
                 }
             }
             if !cv.active_view_is_tree() {
-                self.modal_message = Some(
-                    ":tree-find — the active view isn't a tree \
-                     (use :focus-node for flat views)"
-                        .to_string(),
+                return Err(
+                    "the active view isn't a tree (use :focus-node for flat views)".to_string(),
                 );
-                return;
             }
             let pane_id = cv.active_pane_id();
             cv.active_pane_mut().queue_pending_tree_find(query);
             pane_id
         };
 
-        // Force a fresh reload; the queued query fires when the load
-        // lands (see the `LoadMsg::ContentItems` handler), so the search
-        // runs against an up-to-date snapshot — parity with the legacy
-        // `:reload-tasks` that preceded `:focus-task`.
         self.spawn_content_load(tab_idx, pane_id);
+        Ok(())
     }
 
     /// `:query apply [-t <Tab>[:<view>]] <name>` — activate the saved
