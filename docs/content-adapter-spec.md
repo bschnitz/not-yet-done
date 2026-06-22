@@ -156,8 +156,26 @@ pub trait Node: Send + Sync {
     /// Type of this node.
     fn node_type(&self) -> &NodeType;
 
-    /// Key-value metadata (status, priority, assignee, etc.).
+    /// Key-value metadata (status, priority, assignee, etc.). This is the
+    /// *detail* projection — it may carry edit-form fields and a different
+    /// key set than the `list()` row (see `row_summary`).
     fn metadata(&self) -> &Metadata;
+
+    /// Populate the display fields a lazily-built stub left empty. `get_by_id`
+    /// may return a node carrying only an id/key (no network round-trip);
+    /// `hydrate` fetches the detail once so `label`/`metadata` are display-ready.
+    /// Default = no-op (eager adapters). Must degrade gracefully on failure.
+    async fn hydrate(&mut self);
+
+    /// The **list-row** projection of this node — the `NodeSummary` it would
+    /// occupy in its parent's `list()`. The post-edit row patch refreshes a
+    /// row in place from this, merging by metadata key (keys this projection
+    /// omits keep the row's last-known value). Default = assemble from
+    /// `label`/`node_type`/`metadata`. Adapters whose `metadata()` diverges
+    /// from their `list()` row (Jira's detail shape, Taiga's empty by-id
+    /// metadata) MUST override this to rebuild the `list()` shape, else an
+    /// edited row drops or reshapes columns until a full reload.
+    fn row_summary(&self) -> NodeSummary;
 
     /// Which child node types are available under this node.
     fn children_types(&self) -> Vec<NodeType>;

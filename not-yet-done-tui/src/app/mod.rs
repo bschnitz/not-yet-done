@@ -3043,9 +3043,17 @@ impl App {
         // and whose metadata is sparse; fill in the real display fields before
         // copying them onto the row. No-op for eager adapters (Taiga, local).
         node.hydrate().await;
-        summary.label = node.label().to_string();
-        summary.metadata = node.metadata().clone();
-        summary.node_type = node.node_type().clone();
+        // Refresh from the node's *list-row* projection, not its `metadata()`:
+        // the latter is a detail projection whose key set diverges from the
+        // list row (Jira) or is empty (Taiga), which would blank columns. Merge
+        // by key so columns the detail can't carry (e.g. attachment counts) keep
+        // the row's last-known value instead of clearing. See Node::row_summary.
+        let fresh = node.row_summary();
+        summary.label = fresh.label;
+        summary.node_type = fresh.node_type;
+        for field in &fresh.metadata.fields {
+            summary.metadata.set_field(&field.key, field.value.clone());
+        }
         let patched = self
             .content_view_mut(view_index)
             .map(|cv| cv.patch_row(&summary))
