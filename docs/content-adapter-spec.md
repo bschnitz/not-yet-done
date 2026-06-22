@@ -61,6 +61,14 @@ pub trait ContentAdapter: Send + Sync {
     async fn list_values(&self, _source: &str) -> Result<Vec<ValueOption>> {
         Ok(Vec::new())
     }
+
+    /// The lifecycle hook ids this adapter fires (e.g. `["connected"]`).
+    /// Declarative only — the host turns a configured hook into a throttled
+    /// action invocation; this just lets it validate hook names. Default empty
+    /// (the adapter fires no hooks).
+    fn hooks(&self) -> Vec<&str> {
+        Vec::new()
+    }
 }
 ```
 
@@ -118,6 +126,19 @@ is implemented as an adapter-agnostic helper in
 delegate to it (Taiga structured filters, Jira JQL — e.g. a `By Key`
 saved query `key = ${key}`). Adapters that don't implement the methods
 get the identity defaults and the popup is never opened.
+
+**Lifecycle hooks.** `hooks()` lets an adapter declare named points in its
+lifetime that a front-end can bind work to — purely through config, no
+adapter behaviour. The host (`not-yet-done-host`) owns firing: it reads the
+instance's `hooks:` block (a map of hook id → bindings, each a `run:`
+action-id with optional `on`/`with`/`when:{throttle}`), validates the hook id
+against this list, then invokes the named adapter action — throttled via a
+shared state file. The first hook is `connected`, fired right after the
+factory builds the adapter (every program start for the in-process local
+adapter); the local adapter declares it so a `connected → backup` binding
+gives a once-a-day database backup with no front-end code. See
+[ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md) and the
+`hooks:` block in [`examples/views/tasks.yaml`](examples/views/tasks.yaml).
 
 ### Node
 

@@ -16,7 +16,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
 - **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes
 - **Filter DSL** — YAML-based query language with natural-language date expressions
-- **Daily backups** — on startup the TUI makes a once-per-day timestamped copy of both databases (`nyd.db` and the split-out `tasks.db`); the Tasks/Trackings tabs also expose a manual `backup` action (`B`), and `nyd-t backup` manages them from the CLI
+- **Daily backups** — the core DB (`nyd.db`) is backed up once a day on startup; the split-out `tasks.db` is backed up through a configurable [lifecycle hook](#lifecycle-hooks) (`backup` bound to the adapter's `connected` event with a 24h throttle), so it happens however you launch — TUI or any `nyd tasks …` command. The Tasks/Trackings tabs also expose a manual `backup` action (`B`), and `nyd-t backup` manages them from the CLI
 
 ## Installation
 
@@ -1402,15 +1402,49 @@ All TUI configuration lives in `~/.config/not_yet_done/tui.yaml`.
 
 ### File Locations
 
-| Purpose    | Path                                                     |
-| ---------- | -------------------------------------------------------- |
-| TUI config | `~/.config/not_yet_done/tui.yaml`                        |
-| Database   | `~/.local/share/not_yet_done/nyd.db`                     |
-| Backups    | `~/.local/share/not_yet_done/backups/`                   |
-| Notes      | `~/.local/share/not_yet_done/notes/`                     |
-| Scripts    | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
+| Purpose              | Path                                                     |
+| -------------------- | -------------------------------------------------------- |
+| TUI config           | `~/.config/not_yet_done/tui.yaml`                        |
+| CLI config (aliases) | `~/.config/not_yet_done/cli.yaml`                        |
+| Adapter view files   | `~/.config/not_yet_done/views/*.yaml`                    |
+| Core database        | `~/.local/share/not_yet_done/nyd.db`                     |
+| Task database        | `~/.local/share/not_yet_done/tasks.db`                   |
+| Backups              | `~/.local/share/not_yet_done/backups/`                   |
+| Hook throttle state  | `~/.local/state/not_yet_done/hooks.json`                 |
+| Notes                | `~/.local/share/not_yet_done/notes/`                     |
+| Scripts              | `~/.local/share/not_yet_done/scripts/<tab>/<view-path>/` |
 
-The `DATABASE_URL` environment variable overrides the configured database path.
+`DATABASE_URL` overrides the core database path; `NYD_TASKS_DB` overrides the
+task database path (otherwise each adapter uses the `database:` DSN from its
+view file, defaulting to `tasks.db`).
+
+### Lifecycle hooks
+
+A **hook** binds an adapter action to a point in the adapter's lifetime,
+configured per instance in its view file (`views/*.yaml`). The only hook so far
+is `connected`, fired right after the adapter is built — for the in-process
+tasks/trackings adapter that is **every program start** (TUI launch or any `nyd
+tasks …` / `nyd trackings …` command). This is how the daily `tasks.db` backup
+works — it is no longer hard-coded:
+
+```yaml
+# views/tasks.yaml — sibling of the `adapter:` block
+hooks:
+  connected:
+    - run: backup # adapter action id (same one the `B` key triggers)
+      on: {} # target node: omit for root | { id: <node-id> } | { query: <q> }
+      with: {} # action inputs: { value: …, text: … } (none needed for backup)
+      when: { throttle: 24h } # fire at most once per window (s/m/h/d); omit to always fire
+```
+
+Each binding runs an adapter action, throttled via the host state file
+`~/.local/state/not_yet_done/hooks.json` (shared across front-ends, so the
+backup fires once a day whichever front-end you launch first). Change the
+`throttle`, point `run` at a different action, or drop the block to disable
+auto-backup. Hooks are best-effort: a bad action or unwritable state file is
+logged and never blocks startup. See
+[decision 0005](docs/decisions/0005-host-crate-und-lifecycle-hooks.md) for the
+design.
 
 ### Editor
 
@@ -1541,14 +1575,33 @@ the phased implementation plan derived from it is in
 [`docs/plan-adapterize-tasks-trackings.md`](docs/plan-adapterize-tasks-trackings.md).
 
 ```
-not-yet-done-core       # Domain logic, entities, repositories, services (SeaORM + SQLite)
-not-yet-done-cli        # CLI binary (nyd) using tusks for argument parsing
-not-yet-done-tui        # TUI binary using ratatui + tuirealm
-not-yet-done-ratatui    # Custom ratatui widgets (Table, TextInput, SelectList, Grid)
-not-yet-done-waybar     # Waybar CFFI module (cdylib)
-not-yet-done-forest     # Tree rendering with post-order fold
-not-yet-done-table      # Column layout computation
-not-yet-done-macros     # Derive macros (ColumnRegistry)
+# Frontends
+not-yet-done-tui          # TUI binary (ratatui + tuirealm)
+not-yet-done-cli          # nyd — generic adapter front-end + tag/backup/config
+not-yet-done-task-cli     # nyd-t — native Tasks/Trackings domain CLI
+not-yet-done-waybar       # Waybar CFFI module (cdylib)
+
+# Host — one adapter-wiring path shared by all front-ends
+not-yet-done-host         # Factory registry, resolve_adapter, lifecycle hooks
+
+# Content adapter contract + backends
+not-yet-done-content      # ContentAdapter/Node trait + auth orchestration
+not-yet-done-local-adapter# Tasks/Trackings/Projects as adapters (over task-core)
+not-yet-done-jira-adapter not-yet-done-taiga-adapter
+not-yet-done-postgres-adapter not-yet-done-confluence-adapter
+not-yet-done-stoat-adapter not-yet-done-transport   # SSH tunnel
+
+# Data core
+not-yet-done-core         # nyd.db: settings, saved queries, links, tags
+not-yet-done-task-core    # tasks.db: task/tracking domain, bootstrap, backup
+not-yet-done-filter       # YAML filter DSL
+
+# UI building blocks
+not-yet-done-forest       # Tree rendering with post-order fold
+not-yet-done-table        # Column layout computation
+not-yet-done-ratatui      # Custom ratatui widgets / inline editor
+not-yet-done-grid-core    # Grid layout core
+not-yet-done-macros       # Derive macros (ColumnRegistry)
 ```
 
 ## License
