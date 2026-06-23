@@ -10,15 +10,27 @@ use not_yet_done_content::*;
 use crate::client::{JiraAttachment, JiraClient};
 
 use super::types::attachment_node_type;
-use super::util::{format_file_size, other_err};
+use super::util::{format_file_size, other_err, prepare_target_dir, safe_attachment_name};
 
 pub(super) fn attachment_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("open", "open", InputSpec::None)]
+    vec![
+        NodeAction::new("open", "open", InputSpec::None),
+        NodeAction::new(
+            "download_all",
+            "download all",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("dir", "Target directory")],
+            },
+        ),
+    ]
 }
 
 pub(super) struct JiraAttachmentNode {
     client: Arc<JiraClient>,
     attachment: JiraAttachment,
+    /// The parent issue key — needed to list **all** sibling attachments for
+    /// the `download_all` action.
+    issue_key: String,
     /// Composite ID: `{issue_key}/attachment/{attachment_id}` for use in `get_by_id`.
     composite_id: String,
     cached_metadata: Metadata,
@@ -76,6 +88,7 @@ impl JiraAttachmentNode {
         Self {
             client,
             attachment,
+            issue_key,
             composite_id,
             cached_metadata,
         }
@@ -120,6 +133,61 @@ impl JiraAttachmentNode {
         Ok(ActionOutcome::Done {
             message: Some(format!("opened {}", self.attachment.filename)),
         })
+    }
+
+    /// Download **every** attachment of the parent issue into `dir_input`.
+    ///
+    /// The target directory is resolved and validated first
+    /// ([`prepare_target_dir`]): a leading `~` is expanded, a missing
+    /// directory (incl. parents) is created, an existing non-directory or an
+    /// inaccessible path is reported as an error before any download starts.
+    /// Each file is then fetched and written; a per-file network/IO failure is
+    /// collected instead of aborting the batch, and the summary reports how
+    /// many of how many succeeded plus the failures. On a filename collision
+    /// within the directory the id-prefixed form is used so nothing is
+    /// clobbered (mirrors the single-attachment `open` cache naming).
+    async fn download_all(&self, dir_input: &str) -> Result<ActionOutcome> {
+        let dir = prepare_target_dir(dir_input)?;
+
+        let attachments = self
+            .client
+            .get_attachments(&self.issue_key)
+            .await
+            .map_err(other_err)?;
+        if attachments.is_empty() {
+            return Ok(ActionOutcome::Done {
+                message: Some(format!("{}: no attachments to download", self.issue_key)),
+            });
+        }
+
+        let total = attachments.len();
+        let mut saved = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+
+        for a in &attachments {
+            let safe = safe_attachment_name(&a.filename);
+            let mut path = dir.join(&safe);
+            if path.exists() {
+                path = dir.join(format!("{}-{}", a.id, safe));
+            }
+            match self.client.download_attachment(&a.content_url).await {
+                Ok(bytes) => match std::fs::write(&path, &bytes) {
+                    Ok(()) => saved += 1,
+                    Err(e) => failures.push(format!("{}: {e}", a.filename)),
+                },
+                Err(e) => failures.push(format!("{}: {e}", a.filename)),
+            }
+        }
+
+        let mut message = format!(
+            "{}: saved {saved}/{total} attachment(s) to {}",
+            self.issue_key,
+            dir.display()
+        );
+        if !failures.is_empty() {
+            message.push_str(&format!(" — {} failed ({})", failures.len(), failures.join("; ")));
+        }
+        Ok(ActionOutcome::Done { message: Some(message) })
     }
 }
 
@@ -176,6 +244,10 @@ impl Node for JiraAttachmentNode {
     ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_via_xdg().await,
+            ("download_all", ActionInput::Form(values)) => {
+                let dir = values.get("dir").map(String::as_str).unwrap_or("");
+                self.download_all(dir).await
+            }
             (id, _) => Err(ContentError::NotSupported(format!(
                 "JiraAttachmentNode action `{id}` not supported"
             ))),
@@ -236,11 +308,29 @@ mod tests {
     }
 
     #[test]
-    fn attachment_node_exposes_open_action() {
+    fn attachment_node_exposes_open_and_download_all_actions() {
         let node = JiraAttachmentNode::new(test_client(), sample_attachment(), "PROJ-42".into());
         let actions = node.actions();
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].id, "open");
+        let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["open", "download_all"]);
         assert!(matches!(actions[0].input, InputSpec::None));
+        assert!(matches!(actions[1].input, InputSpec::Form { .. }));
+    }
+
+    #[tokio::test]
+    async fn download_all_validates_dir_before_network() {
+        // An existing non-directory path must fail fast on validation — before
+        // any client call (the test client points at port 0 and could never
+        // download anything).
+        let node = JiraAttachmentNode::new(test_client(), sample_attachment(), "PROJ-42".into());
+        let mut file = std::env::temp_dir();
+        file.push("nyd_jira_dl_node_not_a_dir");
+        std::fs::write(&file, b"x").unwrap();
+        let outcome = node.download_all(file.to_str().unwrap()).await;
+        match outcome {
+            Err(e) => assert!(format!("{e:?}").contains("not a directory")),
+            Ok(_) => panic!("expected a validation error for a non-directory path"),
+        }
+        std::fs::remove_file(&file).unwrap();
     }
 }
