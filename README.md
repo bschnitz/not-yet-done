@@ -16,6 +16,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
 - **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes
 - **Filter DSL** — YAML-based query language with natural-language date expressions
+- **Anonymization** — `NYD_ANON=1` masks real customer/ticket/person names with deterministic, format-preserving fakes across every adapter, for safe screenshots and screencasts of a production instance
 - **Daily backups** — the core DB (`nyd.db`) is backed up once a day on startup; the split-out `tasks.db` is backed up through a configurable [lifecycle hook](#lifecycle-hooks) (`backup` bound to the adapter's `connected` event with a 24h throttle), so it happens however you launch — TUI or any `nyd tasks …` command. The Tasks/Trackings tabs also expose a manual `backup` action (`B`), and `nyd-t backup` manages them from the CLI
 
 ## Installation
@@ -1527,6 +1528,54 @@ navigation:
 | `form_bg`            | Form panel background            |
 
 </details>
+
+## Anonymization (`NYD_ANON`)
+
+The app normally runs against **production** backends (real Jira/Taiga/
+Confluence instances, the real task/tracking DB). When you want to
+screenshot or screencast it for a product demo, no real customer, ticket
+or person names may appear. Setting `NYD_ANON=1` (truthy: `1`/`true`/
+`yes`/`on`) makes **every** adapter emit plausible fake data instead —
+across the TUI, the `nyd` CLI and the Waybar module alike, because the
+switch sits at the single `host::factories()` chokepoint, not in any one
+frontend. With the flag off there is zero overhead.
+
+```bash
+NYD_ANON=1 not-yet-done-tui
+```
+
+What it does and, just as importantly, what it deliberately does **not**:
+
+- **Format-preserving fakes.** A Jira key stays key-shaped
+  (`PREFIX-123` → `ACME-123`), a Taiga ref stays ref-shaped
+  (`slug#12` → `code#12`), people stay names, filenames keep their
+  extension. The view still _looks_ real.
+- **Real times and structure.** Durations, timestamps and the tree shape
+  pass through verbatim — for a time-tracker the real durations are the
+  whole point of the screenshot.
+- **Deterministic and consistent.** The same real value always maps to
+  the same fake (keyed on a stable hash of the real name, not a DB id),
+  this run and the next — so the same task reads identically in the Tasks
+  tree, in a tracking's `task` column and in its `taskpath`, and a
+  re-recorded screencast stays coherent.
+- **Safe by default.** Anonymization is a mandatory contract with a safe
+  fallback, not an opt-in capability: an adapter (or just a new column)
+  that defines no realism override still gets scrubbed by the generic
+  `StandardAnonymizer` — it can never silently leak.
+- **A read/display mask only — mind the editor.** Editable and
+  exportable bodies (an open editor, a content preview, custom-query
+  results, a downloaded node) are **not** faked, on purpose: faking a body
+  the user then saves would overwrite the real data. So the table rows
+  behind an open editor are clean, but the open body is not — when
+  capturing, don't show an open editor or a raw body preview of a real
+  row.
+- **Not a security guarantee.** It hides plain-text names and keys, not
+  correlation via tree shape or time distribution. It is meant for the
+  demo/screenshot use case, not as protection against an adversary who
+  also has the real database.
+
+Design rationale and the full list of scrubbed vs. raw surfaces are in
+[ADR 0006](docs/decisions/0006-anonymisierung-content-layer.md).
 
 ## Debugging
 

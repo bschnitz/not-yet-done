@@ -140,6 +140,23 @@ gives a once-a-day database backup with no front-end code. See
 [ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md) and the
 `hooks:` block in [`examples/views/tasks.yaml`](examples/views/tasks.yaml).
 
+**Anonymization.** `anonymizer()` returns the strategy used to replace an
+adapter's user-visible values with plausible fakes when anonymization is
+requested (`NYD_ANON=1` → `HostContext.anonymize` → the host wraps every
+adapter in a decorator). It is a **contract obligation, not an opt-in
+capability**: the default returns the always-safe `StandardAnonymizer`
+(free-text tokens → neutral pool words; numbers/durations/timestamps left
+verbatim), so an adapter that does nothing still never leaks. Domain adapters
+override it only for _realism_ — keeping issue keys key-shaped, refs ref-shaped,
+people as names — via the shared helpers in `not_yet_done_content::anonymize`,
+keyed on the hash of the real value so the same value maps to the same fake
+everywhere (cross-run stable). The decorator scrubs display surfaces (rows,
+subtrees, `row_summary()`, detail `metadata()` + `label()`, picker labels,
+search-hit titles) but leaves `id()`/paths (addressing) and editable/exportable
+bodies (`content()`/`prepare()`/`form_prep()`/`picker_options()`/custom queries)
+**raw** — anonymization is a read/display mask, never a write-path rewrite. See
+[ADR 0006](decisions/0006-anonymisierung-content-layer.md).
+
 ### Node
 
 A single item in the content tree. Can be a project, issue, page, table, row, etc.
