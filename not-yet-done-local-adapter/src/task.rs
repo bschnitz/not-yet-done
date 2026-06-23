@@ -414,6 +414,17 @@ impl ForestSnapshot {
     /// tracking buried in a collapsed subtree. Patching the whole chain
     /// refreshes each ancestor's marker; rows not currently visible are
     /// ignored by `patch_row`, so over-reporting is harmless.
+    /// Just the task's own refreshed summary, if present. Used for changes
+    /// that touch only this row and do **not** roll up to ancestors — a tag
+    /// assign/unassign (the `T` column), unlike a tracking toggle whose
+    /// subtree-rollup marker needs the whole ancestor chain.
+    fn summary_one(&self, id: Uuid) -> Vec<NodeSummary> {
+        self.by_id
+            .get(&id)
+            .map(|row| vec![self.summary(id, row, None)])
+            .unwrap_or_default()
+    }
+
     fn summary_with_ancestors(&self, id: Uuid) -> Vec<NodeSummary> {
         let mut out = Vec::new();
         if let Some(row) = self.by_id.get(&id) {
@@ -1404,7 +1415,12 @@ async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDis
 /// consumes a value and validates it. Current membership is read from the
 /// eager snapshot's hidden `tag_ids`; the add/remove goes through
 /// `edit_task`, which accepts the same `global-tag:`/`project-tag:` id form.
-/// Returns `Reload` so the snapshot refreshes and the tag columns re-render.
+/// Emits [`DomainEvent::TaskTagsChanged`] and returns `Noop` (not `Reload`):
+/// only this row's `T` tag column flips and the forest shape is unchanged,
+/// so the bridge patches the row in place (mirroring the tracking toggle)
+/// rather than rebuilding a deep, fully-expanded task tree. A `Reload` here
+/// also re-read the cached snapshot before the async bridge had cleared it,
+/// so the new tag icon stayed invisible until the next app start.
 async fn invoke_toggle_tag(
     handle: &CoreHandle,
     snapshot: &ForestSnapshot,
@@ -1433,8 +1449,11 @@ async fn invoke_toggle_tag(
     };
     match result {
         Ok(_) => {
-            emit_task_changed(handle, task_id);
-            ActionDispatch::Reload
+            handle.publish(DomainEvent::TaskTagsChanged { task_id });
+            // No `Reload`: only the row's tag column changed, so the bridge
+            // patches it in place (see `spawn_task_bridge`) instead of
+            // rebuilding the task tree from a possibly-stale snapshot.
+            ActionDispatch::Noop
         }
         Err(e) => ActionDispatch::Error(format!("Failed to toggle tag: {e}")),
     }
@@ -2020,6 +2039,22 @@ fn spawn_task_bridge(
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::Node { id: id.to_string() });
                 }
+                DomainEvent::TaskTagsChanged { task_id } => {
+                    // Only the task's own `T` tag column flipped — reload the
+                    // snapshot so `tag_symbols` is fresh, then patch that one
+                    // row in place (tags don't roll up to ancestors). Mirrors
+                    // the tracking-marker path; avoids rebuilding a deep tree.
+                    match ForestSnapshot::load(&handle).await {
+                        Ok(snap) => {
+                            *snapshot.write().await = Some(snap.clone());
+                            publish_row_patches(&inv_tx, snap.summary_one(task_id));
+                        }
+                        Err(_) => {
+                            *snapshot.write().await = None;
+                            let _ = inv_tx.send(Invalidation::All);
+                        }
+                    }
+                }
                 DomainEvent::TrackingStarted { task_id, .. }
                 | DomainEvent::TrackingStopped { task_id, .. } => {
                     match ForestSnapshot::load(&handle).await {
@@ -2492,6 +2527,48 @@ mod tests {
         for s in &patches {
             assert_eq!(rollup(s), "⏱", "row {} should carry the rollup", s.id);
         }
+    }
+
+    #[test]
+    fn summary_one_patches_only_the_tagged_row_with_fresh_symbols() {
+        // A tag toggle changes only the task's own `T` column and does not
+        // roll up to ancestors — so the bridge patches exactly one row.
+        let root = Uuid::from_u128(1);
+        let child = Uuid::from_u128(2);
+        let (cid, mut crow) = row(child, "Child", Some(root));
+        crow.tag_symbols = "🏷".to_string();
+        let mut by_id = HashMap::new();
+        let mut children: HashMap<Option<Uuid>, Vec<Uuid>> = HashMap::new();
+        for (id, r) in [row(root, "Root", None), (cid, crow)] {
+            children.entry(r.parent).or_default().push(id);
+            by_id.insert(id, r);
+        }
+        let snap = ForestSnapshot {
+            by_id,
+            children,
+            tracked: HashSet::new(),
+            tracked_subtree: HashSet::new(),
+        };
+
+        let patches = snap.summary_one(child);
+        assert_eq!(patches.len(), 1, "only the tagged row is patched");
+        assert_eq!(patches[0].id, child.to_string());
+        let symbols = patches[0]
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "tag_symbols")
+            .map(|f| f.value.as_str())
+            .unwrap_or_default();
+        assert_eq!(symbols, "🏷", "the row carries its fresh tag symbol");
+        // The parent is never dragged into the patch set.
+        assert!(snap.summary_one(child).iter().all(|s| s.id != root.to_string()));
+    }
+
+    #[test]
+    fn summary_one_for_missing_id_is_empty() {
+        let snap = snapshot_from(vec![row(Uuid::from_u128(1), "Root", None)]);
+        assert!(snap.summary_one(Uuid::from_u128(99)).is_empty());
     }
 
     #[test]

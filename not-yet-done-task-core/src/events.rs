@@ -36,6 +36,15 @@ pub enum DomainEvent {
     /// A task's own fields changed (created, edited, reparented, deleted,
     /// restored). Consumers refetch the affected subtree/list.
     TaskChanged { id: Uuid },
+    /// A task's tag set changed (a tag was assigned or unassigned) but its
+    /// fields and forest position did not. Non-structural, exactly like
+    /// `TrackingStarted`/`Stopped`: only the task's own `T` tag column
+    /// flips, no row is added/removed and (unlike tracking) tags do not
+    /// roll up to ancestors. Consumers patch that single row in place
+    /// rather than refetching the subtree — distinct from `TaskChanged`,
+    /// whose create/delete/reparent semantics force a structural reload
+    /// that would needlessly rebuild a deep, fully-expanded task tree.
+    TaskTagsChanged { task_id: Uuid },
     /// A tracking was started for a task. Structural: a new tracking row
     /// exists and the task is now "running".
     TrackingStarted { task_id: Uuid, tracking_id: Uuid },
