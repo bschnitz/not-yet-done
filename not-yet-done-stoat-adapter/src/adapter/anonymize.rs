@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn author_is_a_person_structural_fields_survive() {
         let a = StoatAnonymizer::default();
-        assert!(!a.scrub_value("author", "Max Mustermann").contains("Mustermann"));
+        assert!(!a.scrub_value("author", "John Doe").contains("Doe"));
         for (k, v) in [("type", "text"), ("time", "2026-06-22T10:00:00Z"), ("edited", "yes")] {
             assert_eq!(a.scrub_value(k, v), v);
         }

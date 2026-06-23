@@ -201,101 +201,101 @@ fn scrub_csv(value: &str, std: &StandardAnonymizer) -> String {
 /// Invented, neutral pseudo task names. Generic enough to read like real task
 /// descriptions on a screenshot, but referencing no real customer/person/work.
 const TASK_NAMES: &[&str] = &[
-    "Backup-Strategie überprüfen",
-    "Onboarding-Dokumentation aktualisieren",
-    "Release-Notes vorbereiten",
-    "Monitoring-Dashboard einrichten",
-    "Datenbank-Migration planen",
-    "API-Endpunkt dokumentieren",
-    "Testabdeckung erhöhen",
-    "CI-Pipeline reparieren",
-    "Logrotation konfigurieren",
-    "Zertifikate erneuern",
-    "Performance-Profiling durchführen",
-    "Code-Review nachziehen",
-    "Abhängigkeiten aktualisieren",
-    "Fehlerbericht reproduzieren",
-    "Konfiguration vereinheitlichen",
-    "Cache-Invalidierung prüfen",
-    "Benutzerhandbuch ergänzen",
-    "Schnittstelle abstimmen",
-    "Wartungsfenster ankündigen",
-    "Rechteverwaltung aufräumen",
-    "Suchindex neu aufbauen",
-    "Verschlüsselung nachrüsten",
-    "Lasttest auswerten",
-    "Alarmierung feinjustieren",
-    "Datenexport automatisieren",
-    "Formularvalidierung ergänzen",
-    "Übersetzung nachpflegen",
-    "Statusseite einrichten",
-    "Rollback-Verfahren testen",
-    "Speicherleck untersuchen",
-    "Build-Zeiten optimieren",
-    "Health-Check erweitern",
-    "Webhook anbinden",
-    "Audit-Log einführen",
-    "Feature-Flag entfernen",
-    "Endnutzer-Feedback sichten",
-    "Inventar abgleichen",
-    "Servertausch vorbereiten",
-    "Notfallplan überarbeiten",
-    "Schulungsunterlagen erstellen",
-    "Datenschutzcheck durchführen",
-    "Lizenzen inventarisieren",
-    "Backup einspielen testen",
-    "Netzwerksegmentierung prüfen",
-    "Ticket-Vorlagen pflegen",
-    "Deployment-Skript härten",
-    "Metriken konsolidieren",
-    "Altsystem abschalten",
-    "Reporting verschlanken",
-    "Zugriffsprotokoll auswerten",
-    "Schema-Versionierung einführen",
-    "Bereitschaftsplan erstellen",
-    "Konfigdrift beseitigen",
-    "Sekundärindex ergänzen",
-    "Fehlerseite gestalten",
-    "Archivierung anstoßen",
-    "Kapazitätsplanung aktualisieren",
-    "Telemetrie reduzieren",
-    "Vertragsdaten prüfen",
-    "Quartalsbericht zusammenstellen",
+    "Review backup strategy",
+    "Update onboarding documentation",
+    "Prepare release notes",
+    "Set up monitoring dashboard",
+    "Plan database migration",
+    "Document API endpoint",
+    "Increase test coverage",
+    "Fix CI pipeline",
+    "Configure log rotation",
+    "Renew certificates",
+    "Run performance profiling",
+    "Catch up on code review",
+    "Update dependencies",
+    "Reproduce bug report",
+    "Unify configuration",
+    "Check cache invalidation",
+    "Extend user manual",
+    "Align on interface",
+    "Announce maintenance window",
+    "Clean up access management",
+    "Rebuild search index",
+    "Add encryption at rest",
+    "Evaluate load test",
+    "Fine-tune alerting",
+    "Automate data export",
+    "Add form validation",
+    "Maintain translations",
+    "Set up status page",
+    "Test rollback procedure",
+    "Investigate memory leak",
+    "Optimize build times",
+    "Extend health check",
+    "Wire up webhook",
+    "Introduce audit log",
+    "Remove feature flag",
+    "Review end-user feedback",
+    "Reconcile inventory",
+    "Prepare server replacement",
+    "Revise emergency plan",
+    "Create training materials",
+    "Run privacy review",
+    "Inventory licenses",
+    "Test backup restore",
+    "Review network segmentation",
+    "Maintain ticket templates",
+    "Harden deployment script",
+    "Consolidate metrics",
+    "Decommission legacy system",
+    "Streamline reporting",
+    "Analyze access log",
+    "Introduce schema versioning",
+    "Create on-call plan",
+    "Eliminate config drift",
+    "Add secondary index",
+    "Design error page",
+    "Trigger archival",
+    "Update capacity planning",
+    "Reduce telemetry",
+    "Check contract data",
+    "Compile quarterly report",
 ];
 
 /// Invented, neutral pseudo project / client names. Company-shaped but fully
 /// fictional.
 const PROJECT_NAMES: &[&str] = &[
-    "Nordlicht Systeme",
-    "Auenbach Logistik",
-    "Kranzberg Medien",
-    "Talwind Energie",
-    "Steinach Werke",
-    "Morgentau Verlag",
-    "Fernblick Software",
-    "Hügelland Bau",
-    "Brunnental Pharma",
-    "Wiesengrund Handel",
-    "Eschenhof Technik",
-    "Lindenau Beratung",
-    "Felsbach Maschinen",
-    "Ahornweg Dienste",
-    "Seeblick Reederei",
-    "Birkenfeld Druck",
-    "Rotbuche Labor",
-    "Silberbach Finanz",
-    "Tannberg Studio",
-    "Klee & Partner",
-    "Habicht Sicherheit",
-    "Marlow Industrie",
-    "Veste Datentechnik",
-    "Kornfeld Genossenschaft",
-    "Uferweg Mobilität",
-    "Distelhof Catering",
-    "Granit Versicherung",
-    "Espenried Recycling",
-    "Wolkenstein Reisen",
-    "Quellwasser Kommunal",
+    "Northlight Systems",
+    "Meadowbrook Logistics",
+    "Crownridge Media",
+    "Tailwind Energy",
+    "Stonebrook Works",
+    "Morningdew Press",
+    "Farview Software",
+    "Hillcrest Construction",
+    "Springwell Pharma",
+    "Greenfield Trading",
+    "Ashgrove Technology",
+    "Lindenwood Consulting",
+    "Rockford Machines",
+    "Maplewood Services",
+    "Lakeview Shipping",
+    "Birchfield Print",
+    "Redbeech Labs",
+    "Silverbrook Finance",
+    "Pinecrest Studio",
+    "Clover & Partners",
+    "Hawk Security",
+    "Marlow Industries",
+    "Bastion Data Systems",
+    "Cornfield Cooperative",
+    "Riverside Mobility",
+    "Thistle Catering",
+    "Granite Insurance",
+    "Aspenwood Recycling",
+    "Cloudstone Travel",
+    "Springwater Municipal",
 ];
 
 #[cfg(test)]
@@ -305,18 +305,18 @@ mod tests {
     #[test]
     fn task_label_is_a_plausible_pseudo_name_and_stable() {
         let a = LocalAnonymizer::task();
-        let once = a.scrub_value("label", "Geheimer Kundenauftrag");
-        let twice = a.scrub_value("label", "Geheimer Kundenauftrag");
+        let once = a.scrub_value("label", "Secret customer order");
+        let twice = a.scrub_value("label", "Secret customer order");
         assert_eq!(once, twice, "deterministic");
         assert!(TASK_NAMES.contains(&once.as_str()), "drawn from the pool");
-        assert!(!once.contains("Kunden"), "real text gone");
+        assert!(!once.contains("customer"), "real text gone");
     }
 
     #[test]
     fn same_task_maps_consistently_across_task_and_tracking() {
         let task = LocalAnonymizer::task();
         let trk = LocalAnonymizer::tracking();
-        let real = "Quartalsabschluss erstellen";
+        let real = "Close out the quarter";
         // The pseudo-name a task carries must equal what a tracking's `task`
         // column and a taskpath segment carry for the same real name.
         let from_task_label = task.scrub_value("label", real);
@@ -382,9 +382,9 @@ mod tests {
     #[test]
     fn project_name_drawn_from_project_pool_not_task_pool() {
         let a = LocalAnonymizer::project();
-        let out = a.scrub_value("name", "Echte Kundenfirma GmbH");
+        let out = a.scrub_value("name", "Real Customer Corp Ltd");
         assert!(PROJECT_NAMES.contains(&out.as_str()));
-        assert!(!out.contains("Kunden"));
+        assert!(!out.contains("Customer"));
     }
 
     #[test]

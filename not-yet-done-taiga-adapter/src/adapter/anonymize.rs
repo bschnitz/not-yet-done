@@ -62,8 +62,8 @@ mod tests {
         let r = a.scrub_value("ref", "demoproject#12");
         assert!(r.ends_with("#12") && !r.contains("demoproject"));
         assert_eq!(a.scrub_value("ref", "#7"), "#7", "bare ref kept");
-        let who = a.scrub_value("assignee", "Max Mustermann, Erika Beispiel");
-        assert!(!who.contains("Mustermann") && !who.contains("Beispiel"));
+        let who = a.scrub_value("assignee", "John Doe, Jane Roe");
+        assert!(!who.contains("Doe") && !who.contains("Roe"));
         assert_eq!(who.split(',').count(), 2, "two assignees preserved");
     }
 

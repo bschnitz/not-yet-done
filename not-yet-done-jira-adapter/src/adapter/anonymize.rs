@@ -81,12 +81,12 @@ mod tests {
         let a = JiraAnonymizer::default();
         let k = a.scrub_value("key", "DEMO-4711");
         assert!(k.ends_with("-4711") && !k.contains("DEMO"));
-        let who = a.scrub_value("assignee", "Max Mustermann");
-        assert!(!who.contains("Mustermann"));
+        let who = a.scrub_value("assignee", "John Doe");
+        assert!(!who.contains("Doe"));
         // Display name and username derive consistently.
         assert_eq!(
-            a.scrub_value("username", "Max Mustermann"),
-            a.scrub_value("display_name", "Max Mustermann").to_lowercase().replace(' ', ".")
+            a.scrub_value("username", "John Doe"),
+            a.scrub_value("display_name", "John Doe").to_lowercase().replace(' ', ".")
         );
     }
 

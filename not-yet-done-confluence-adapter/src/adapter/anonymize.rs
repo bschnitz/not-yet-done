@@ -48,7 +48,7 @@ mod tests {
         // The same space key maps the same wherever it surfaces.
         assert_eq!(a.scrub_value("space", "DEMO"), k);
         assert_eq!(a.scrub_value("space_key", "DEMO"), k);
-        assert!(!a.scrub_value("author", "Max Mustermann").contains("Mustermann"));
+        assert!(!a.scrub_value("author", "John Doe").contains("Doe"));
     }
 
     #[test]
