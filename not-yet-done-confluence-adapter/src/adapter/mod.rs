@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use not_yet_done_content::*;
 
+mod anonymize;
 mod attachment;
 mod auth_bridge;
 mod comment;
@@ -171,6 +172,13 @@ impl ContentAdapter for ConfluenceAdapter {
             "confluence:comment" => comment_actions(),
             _ => Vec::new(),
         }
+    }
+
+    /// Realism anonymizer: keeps space keys code-shaped, authors as person
+    /// names, filenames with extensions; safe StandardAnonymizer fallback.
+    /// See [`anonymize`](self::anonymize).
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(anonymize::ConfluenceAnonymizer::default())
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

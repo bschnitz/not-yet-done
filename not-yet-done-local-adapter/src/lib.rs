@@ -37,6 +37,10 @@ use not_yet_done_task_core::service::TaskService;
 use not_yet_done_task_core::service::TrackingService;
 use tokio::sync::broadcast;
 
+// Domain anonymizer for Tasks/Trackings/Projects: maps the sensitive name
+// columns to stable invented pseudo-names (consistent across the three),
+// passes structural columns through. Returned from `anonymizer()`.
+mod anonymize;
 // Human-friendly datetime / offset parsing for the trackings adapter's
 // `split`/`move` Form actions (mirrors the CLI's datetime.rs / offset.rs).
 mod datetime;

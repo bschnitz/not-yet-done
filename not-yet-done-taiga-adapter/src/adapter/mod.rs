@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use not_yet_done_content::*;
 
+mod anonymize;
 mod attachment;
 mod auth_bridge;
 mod comment;
@@ -103,6 +104,13 @@ impl ContentAdapter for TaigaAdapter {
             })
             .await
             .map_err(|e| ContentError::Other(e.into()))
+    }
+
+    /// Realism anonymizer: keeps refs ref-shaped, assignees/authors as person
+    /// names, filenames with extensions; safe StandardAnonymizer fallback.
+    /// See [`anonymize`](self::anonymize).
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(anonymize::TaigaAnonymizer::default())
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

@@ -2541,6 +2541,13 @@ impl ContentAdapter for TrackingAdapter {
         vec!["connected"]
     }
 
+    /// Anonymize the task name a tracking carries (`label` / `task` / each
+    /// `taskpath` segment) with the same lookup the tasks adapter uses, so a
+    /// tracking shows the pseudo-name its task carries. See [`crate::anonymize`].
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(crate::anonymize::LocalAnonymizer::tracking())
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             // A2b: delete (soft) + restore. No create (trackings are born

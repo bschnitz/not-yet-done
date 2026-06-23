@@ -2169,6 +2169,13 @@ impl ContentAdapter for TaskAdapter {
         vec!["connected"]
     }
 
+    /// Anonymize task names (the `label` / `ancestors` columns) with the
+    /// task-name lookup shared with the trackings adapter, so the same task
+    /// reads identically in both tabs. See [`crate::anonymize`].
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(crate::anonymize::LocalAnonymizer::task())
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             // A1b: add/edit (create) and delete/undelete/reparent.

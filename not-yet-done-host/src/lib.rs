@@ -87,7 +87,14 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
         "projects".to_string(),
         Box::new(not_yet_done_local_adapter::ProjectAdapterFactory::new()),
     );
+    // Wrap every factory so that, when the run requests anonymization
+    // ([`HostContext::anonymize`]), each adapter it produces is masked — one
+    // place, inherited by every front-end. Off by default the wrapper is a
+    // transparent pass-through, so this is free in normal use.
     factories
+        .into_iter()
+        .map(|(ty, factory)| (ty, not_yet_done_content::anonymizing_factory(factory)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +115,21 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
 pub fn host_context() -> HostContext {
     HostContext {
         event_bus: std::sync::Arc::new(InMemoryHostBus::new(256)),
+        anonymize: anonymize_requested(),
     }
+}
+
+/// Whether anonymization (fake data for screenshots/screencasts) is requested,
+/// read from the `NYD_ANON` environment variable. Truthy values: `1`, `true`,
+/// `yes`, `on` (case-insensitive). Anything else — including unset — is off.
+///
+/// An env switch (rather than a config-file key) is deliberate: it is per-run
+/// and set at launch, so a normal session is never accidentally left in
+/// anonymized mode, and a screencast is started by `NYD_ANON=1 not-yet-done`.
+fn anonymize_requested() -> bool {
+    std::env::var("NYD_ANON")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
+pub mod anonymize;
 pub mod auth;
 pub mod grouping;
 pub mod http_log;
@@ -16,6 +17,7 @@ pub mod query_vars;
 pub mod slug;
 pub mod sort_serde;
 
+pub use anonymize::{anonymizing_factory, Anonymizer, StandardAnonymizer};
 pub use grouping::{GroupBucket, GroupSpec};
 
 pub use auth::{
@@ -1739,6 +1741,23 @@ pub trait ContentAdapter: Send + Sync {
     fn hooks(&self) -> Vec<&str> {
         Vec::new()
     }
+
+    /// The [`Anonymizer`](anonymize::Anonymizer) this adapter's user-visible
+    /// output is replaced with when anonymization is requested (the host sets
+    /// [`HostContext::anonymize`] and wraps the adapter — see the
+    /// [`anonymize`](crate::anonymize) module).
+    ///
+    /// Anonymization is a **contract obligation**, not an opt-in: every adapter
+    /// is anonymized when requested. The default returns the domain-agnostic
+    /// [`StandardAnonymizer`](anonymize::StandardAnonymizer) — the mandatory,
+    /// always-safe fallback (it replaces free text with neutral tokens and
+    /// keeps numbers/durations/timestamps verbatim). Adapters that can produce
+    /// *plausible* fakes (stable pseudo-names for Tasks/Trackings/Projects,
+    /// format-preserving keys for Jira/Taiga) override this to return their own
+    /// strategy.
+    fn anonymizer(&self) -> std::sync::Arc<dyn anonymize::Anonymizer> {
+        std::sync::Arc::new(anonymize::StandardAnonymizer::new())
+    }
 }
 
 /// A single item in the content tree.
@@ -2238,6 +2257,12 @@ pub trait HostEventBus: Send + Sync {
 pub struct HostContext {
     /// The cross-adapter coordination bus (see [`HostEventBus`]).
     pub event_bus: std::sync::Arc<dyn HostEventBus>,
+    /// When set, the host wraps every adapter it builds so all user-visible
+    /// output is replaced with plausible fake data — for screenshots/screencasts
+    /// against a live productive instance. Off by default; the host turns it on
+    /// from configuration/environment. See the [`anonymize`](crate::anonymize)
+    /// module for the mechanism and what is / isn't scrubbed.
+    pub anonymize: bool,
 }
 
 /// A ready-made in-process [`HostEventBus`] the host can instantiate directly

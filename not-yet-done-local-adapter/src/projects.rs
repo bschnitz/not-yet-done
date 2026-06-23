@@ -497,6 +497,13 @@ impl ContentAdapter for ProjectAdapter {
         &self.instance_id
     }
 
+    /// Anonymize project names (`label` / `name`) with a dedicated invented
+    /// company-name pool, and the free-text `description` with the standard
+    /// fallback. See [`crate::anonymize`].
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(crate::anonymize::LocalAnonymizer::project())
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             // `create` is a root Form action; `edit`/`delete` are item Form
