@@ -2359,7 +2359,8 @@ fn spawn_tracking_bridge(
                 Err(RecvError::Closed) => break,
             };
             match ev {
-                DomainEvent::TrackingTick => {}
+                // A task's tag set does not appear in the trackings view.
+                DomainEvent::TrackingTick | DomainEvent::TaskTagsChanged { .. } => {}
                 DomainEvent::TrackingStarted { tracking_id, .. }
                 | DomainEvent::TrackingStopped { tracking_id, .. } => {
                     match TrackingSnapshot::load(&handle).await {

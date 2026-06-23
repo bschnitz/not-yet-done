@@ -332,6 +332,13 @@ pub fn open_core_handle(
 pub fn domain_event_to_invalidation(ev: &DomainEvent) -> Option<Invalidation> {
     Some(match ev {
         DomainEvent::TaskChanged { id } => Invalidation::Node { id: id.to_string() },
+        // Generic fallback for consumers without a snapshot-aware bridge. The
+        // task adapter handles this in `spawn_task_bridge` with an in-place
+        // row patch; here we degrade to the same coarse mapping as a field
+        // change so no consumer misses the tag flip.
+        DomainEvent::TaskTagsChanged { task_id } => Invalidation::Node {
+            id: task_id.to_string(),
+        },
         DomainEvent::TrackingStarted { .. }
         | DomainEvent::TrackingStopped { .. }
         | DomainEvent::TrackingChanged { .. }
