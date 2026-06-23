@@ -25,6 +25,7 @@ use not_yet_done_content::{
 
 use crate::client::{DatabaseEntry, PostgresClient, SchemaEntry, TableEntry};
 
+mod anonymize;
 mod cursor_registry;
 mod factory;
 
@@ -457,6 +458,14 @@ impl ContentAdapter for PostgresAdapter {
 
     fn script_store(&self) -> Option<&dyn not_yet_done_content::ScriptStore> {
         Some(&self.script_store)
+    }
+
+    /// Realism anonymizer: catalogue names become `<adjective>_<noun>`
+    /// placeholders (`big_database`, `nifty_schema`) so the tree still reads as a
+    /// database/schema/table; the structural group nodes stay verbatim. The safe
+    /// StandardAnonymizer is the fallback. See [`anonymize`](self::anonymize).
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(anonymize::PostgresAnonymizer::default())
     }
 
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {

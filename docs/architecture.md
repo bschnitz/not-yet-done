@@ -299,7 +299,11 @@ er am _einen_ Chokepoint `host::factories()` sitzt (siehe Host-Schicht).
   Adapter und schieben nur die **anzeigbaren** Rückgaben durch
   `Anonymizer::scrub_value(key, value)`: Listenzeilen, Eager-Subtrees,
   `row_summary()`, Live-Tick-Zeilen, `metadata()` + `label()`, Picker-Labels,
-  Tree-Such-Treffer. **RAW** bleiben `id()`/Pfade (Adressing) und
+  Tree-Such-Treffer. Baum-/Zeilen-**Labels** laufen über
+  `scrub_label(node_type, label)` (Default = `scrub_value("label", …)`), damit
+  Domänen-Adapter über den `NodeType` z. B. Postgres-Schema vs. -Tabelle bzw.
+  Stoat-Server vs. -Channel unterscheiden und die _Art_ lesbar halten können
+  (`big_schema`, `jolly_channel`). **RAW** bleiben `id()`/Pfade (Adressing) und
   editier-/exportierbare Bodies (`content`/`prepare`/`form_prep`/
   `picker_options`/Custom-Query/Batch-`downloaded`) — Anonymisierung ist eine
   reine Lese-Maske, der Store wird nie überschrieben.
