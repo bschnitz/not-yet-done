@@ -75,6 +75,20 @@ pub trait Anonymizer: Send + Sync {
     /// timestamp, duration) untouched so totals/dates stay realistic.
     fn scrub_value(&self, key: &str, value: &str) -> String;
 
+    /// Replace a node's tree/row **label**, given its [`NodeType`] for context.
+    ///
+    /// Why this exists separately from [`scrub_value`](Anonymizer::scrub_value):
+    /// a label always arrives keyed `"label"`, so `scrub_value` alone cannot tell
+    /// a Postgres *schema* name from a *table* name from a Discord *channel* — yet
+    /// a good screenshot mask wants the result to still read like "a schema" /
+    /// "a channel". Domain anonymizers override this to branch on
+    /// `node_type.type_id`. The default keeps the historical behaviour (scrub the
+    /// label as a plain free-text value), so every adapter that does *not*
+    /// override it is unaffected.
+    fn scrub_label(&self, _node_type: &NodeType, label: &str) -> String {
+        self.scrub_value("label", label)
+    }
+
     /// Replace one metadata field's value in place.
     fn scrub_field(&self, field: &mut MetadataField) {
         field.value = self.scrub_value(&field.key, &field.value);
@@ -91,7 +105,7 @@ pub trait Anonymizer: Send + Sync {
     /// every metadata field. `id` / `node_type` / `has_children` are left as-is
     /// (addressing + structure, not display text).
     fn scrub_summary(&self, summary: &mut NodeSummary) {
-        summary.label = self.scrub_value("label", &summary.label);
+        summary.label = self.scrub_label(&summary.node_type, &summary.label);
         self.scrub_metadata(&mut summary.metadata);
     }
 }
@@ -197,14 +211,26 @@ impl Anonymizer for StandardAnonymizer {
 // from fully invented, repo-safe pools. A value carrying no ascii letter (and
 // so nothing to leak — a bare number, a date) is returned verbatim.
 
-/// Invented person names. Repo-safe: no real person.
+/// Invented person names. Repo-safe: no real person. English throughout — the
+/// pools ship in the repo and the whole mask reads in one language.
 const PERSON_POOL: &[&str] = &[
-    "Mara Feldt", "Jonas Brandt", "Lena Kraus", "Tobias Reich", "Nina Walter",
-    "Felix Sommer", "Clara Berg", "David Huber", "Sophie Lang", "Paul Adler",
-    "Hanna Voss", "Erik Daum", "Mira Schardt", "Lukas Frei", "Anja Pohl",
-    "Timo Renz", "Greta Sahl", "Nils Bauer", "Ida Markwart", "Ben Lorenz",
-    "Romy Faber", "Joel Wendt", "Selma Roth", "Kai Mensing", "Lea Birk",
-    "Aaron Stein", "Mia Holl", "Finn Oberg", "Tara Nolde", "Ole Greve",
+    "Mara Fields", "Jonas Brennan", "Lena Crowe", "Tobias Reed", "Nina Walters",
+    "Felix Somers", "Clara Burke", "David Hooper", "Sophie Long", "Paul Adler",
+    "Hanna Vosse", "Erik Dale", "Mira Sharpe", "Lucas Freed", "Anya Poole",
+    "Timo Rennick", "Greta Sayle", "Niles Bowers", "Ida Markwell", "Ben Lawrence",
+    "Romy Farber", "Joel Wendell", "Selma Rothe", "Kai Manning", "Lea Birch",
+    "Aaron Stone", "Mia Holloway", "Finn Overton", "Tara Nolden", "Ollie Graves",
+];
+
+/// Invented adjectives for the `<adjective>_<noun>` label scheme (Postgres
+/// schemas/tables, Stoat servers/channels, …). Repo-safe, English. Picked so
+/// that `big_database`, `nifty_table`, `mellow_channel` read as obvious
+/// placeholders while still telling the viewer *what kind of thing* it is.
+const ADJ_POOL: &[&str] = &[
+    "big", "beautiful", "nifty", "swift", "mellow", "bright", "clever", "jolly",
+    "quiet", "brave", "calm", "eager", "fancy", "gentle", "happy", "keen",
+    "lively", "merry", "noble", "proud", "rapid", "shiny", "tidy", "witty",
+    "amber", "crisp", "dapper", "fleet", "humble", "plucky",
 ];
 
 /// Invented uppercase project codes — shaped like Jira keys / Confluence space
@@ -294,6 +320,22 @@ pub fn pseudo_filename(real: &str) -> String {
         }
         _ => pseudo_text(real),
     }
+}
+
+/// Build an `<adjective>_<noun>` label that hides the real name yet still tells
+/// the viewer *what kind of thing* it is: `pseudo_labeled("customer_prod", "database")`
+/// → `big_database`. The adjective is chosen deterministically from [`ADJ_POOL`]
+/// keyed by the real value (so the same source name always maps the same way and
+/// two distinct names rarely collide); the `noun` is the fixed level name the
+/// caller passes (`"schema"`, `"table"`, `"channel"`, …). A letterless value
+/// (nothing to leak) passes through unchanged. Shared by the Postgres and Stoat
+/// domain anonymizers via their [`Anonymizer::scrub_label`] overrides.
+pub fn pseudo_labeled(real: &str, noun: &str) -> String {
+    if !real.chars().any(|c| c.is_ascii_alphabetic()) {
+        return real.to_string();
+    }
+    let idx = (stable_hash(real) % ADJ_POOL.len() as u64) as usize;
+    format!("{}_{noun}", ADJ_POOL[idx])
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +550,7 @@ pub struct AnonymizingNode {
 
 impl AnonymizingNode {
     fn new(inner: Box<dyn Node>, anon: Arc<dyn Anonymizer>) -> Self {
-        let label = anon.scrub_value("label", inner.label());
+        let label = anon.scrub_label(inner.node_type(), inner.label());
         let mut metadata = inner.metadata().clone();
         anon.scrub_metadata(&mut metadata);
         Self {
@@ -520,7 +562,7 @@ impl AnonymizingNode {
     }
 
     fn refresh_cached(&mut self) {
-        self.label = self.anon.scrub_value("label", self.inner.label());
+        self.label = self.anon.scrub_label(self.inner.node_type(), self.inner.label());
         self.metadata = self.inner.metadata().clone();
         self.anon.scrub_metadata(&mut self.metadata);
     }
@@ -703,6 +745,43 @@ mod tests {
         // Filename: extension preserved, stem scrubbed.
         let f = pseudo_filename("Angebot Kunde.pdf");
         assert!(f.ends_with(".pdf") && !f.contains("Angebot") && !f.contains("Kunde"));
+    }
+
+    #[test]
+    fn pseudo_labeled_keeps_noun_hides_name_is_deterministic() {
+        let a = pseudo_labeled("customer_prod", "database");
+        assert!(a.ends_with("_database"), "noun (kind) preserved: {a}");
+        assert!(!a.contains("customer"), "real name must not survive: {a}");
+        assert_eq!(a, pseudo_labeled("customer_prod", "database"), "deterministic");
+        // Adjective is keyed by the value: same value, different noun → same adj.
+        let adj_db = pseudo_labeled("billing", "database");
+        let adj_schema = pseudo_labeled("billing", "schema");
+        assert_eq!(
+            adj_db.rsplit_once('_').unwrap().0,
+            adj_schema.rsplit_once('_').unwrap().0,
+            "same source name → same adjective across nouns",
+        );
+        assert!(ADJ_POOL.contains(&adj_db.rsplit_once('_').unwrap().0));
+        // Letterless passes through (nothing to leak).
+        assert_eq!(pseudo_labeled("123", "table"), "123");
+    }
+
+    #[test]
+    fn scrub_label_default_matches_label_keyed_scrub_value() {
+        // The default scrub_label must behave exactly like the historical
+        // scrub_value("label", …) so non-overriding adapters are unaffected.
+        let a = StandardAnonymizer::new();
+        let nt = NodeType {
+            type_id: "whatever".into(),
+            mime_type: "text/plain".into(),
+            syntax: None,
+            file_extension: String::new(),
+            display_name: "W".into(),
+        };
+        assert_eq!(
+            a.scrub_label(&nt, "Secret Project Phrase"),
+            a.scrub_value("label", "Secret Project Phrase"),
+        );
     }
 
     #[test]

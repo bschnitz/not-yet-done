@@ -8,6 +8,7 @@
 //! phase (published by the gateway), so the TUI banner tracks reality
 //! end to end.
 
+mod anonymize;
 mod auth_bridge;
 mod category;
 mod channel;
@@ -206,6 +207,14 @@ impl ContentAdapter for StoatAdapter {
 
     fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    /// Realism anonymizer: server/category/channel names become
+    /// `<adjective>_<noun>` placeholders, message bodies become neutral text,
+    /// authors stay person names. The safe StandardAnonymizer is the fallback.
+    /// See [`anonymize`](self::anonymize).
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(anonymize::StoatAnonymizer::default())
     }
 
     async fn root(&self) -> Result<Box<dyn Node>> {

@@ -2,13 +2,14 @@
 
 - **Status:** akzeptiert, umgesetzt
 - **Datum:** 2026-06-23
-- **Betrifft:** `not-yet-done-content` (neues `anonymize`-Modul: `Anonymizer`-Trait,
-  `StandardAnonymizer`, Factory-/Adapter-/Node-Dekoratoren, geteilte Helper;
+- **Betrifft:** `not-yet-done-content` (neues `anonymize`-Modul: `Anonymizer`-Trait
+  inkl. `scrub_label(node_type, label)`, `StandardAnonymizer`, Factory-/Adapter-/
+  Node-Dekoratoren, geteilte Helper inkl. `pseudo_labeled`;
   `ContentAdapter::anonymizer()`, `HostContext.anonymize`),
   `not-yet-done-host` (`factories()`-Wrap, `NYD_ANON`-Auswertung),
   `not-yet-done-local-adapter` (`LocalAnonymizer` für Tasks/Trackings/Projects),
   `not-yet-done-jira-adapter` / `-taiga-adapter` / `-confluence-adapter`
-  (Realismus-`Anonymizer`)
+  / `-postgres-adapter` / `-stoat-adapter` (Realismus-`Anonymizer`)
 - **Baut auf:** [0005 — Host-Crate + Lifecycle-Hooks](0005-host-crate-und-lifecycle-hooks.md)
   (die `factories()`-Registry, an der der Dekorator ansetzt).
 
@@ -85,7 +86,7 @@ flowchart LR
     AF -->|"create(), wenn ctx.anonymize"| AA[AnonymizingAdapter]
     AA -->|"root/get_by_id/list/..."| AN[AnonymizingNode]
     AA -.->|"holt"| ANON["adapter.anonymizer()<br/>Arc&lt;dyn Anonymizer&gt;"]
-    AN -->|"scrub_value je Feld"| ANON
+    AN -->|"scrub_value je Feld / scrub_label"| ANON
     ANON --> OUT["gescrubte NodeSummary / Metadata / label"]
 ```
 
@@ -95,6 +96,14 @@ Adapter und schieben nur die _anzeigbaren_ Rückgaben durch dessen
 Post-Edit-Row-Projektion (`row_summary()`), Live-Tick-Zeilen, Detail-Felder
 (`metadata()`) + `label()`, Value-Picker-Labels und Tree-Such-Treffer
 (Titel + `space_key`).
+
+Für **Baum-/Zeilen-Labels** gibt es daneben `scrub_label(node_type, label)`. Ein
+Label kommt immer mit `key = "label"`, der `scrub_value` also keinen Hinweis gäbe,
+ob es ein Postgres-_Schema_, eine _Tabelle_ oder ein Discord-_Channel_ ist. Über
+den `NodeType` kann ein Domänen-Anonymizer das unterscheiden und ein Label so
+faken, dass die _Art_ des Knotens lesbar bleibt (`big_schema`, `nifty_channel`).
+Der Default delegiert auf `scrub_value("label", …)` — Adapter ohne Override sind
+damit unverändert.
 
 **Bewusst NICHT gescrubt:**
 
@@ -133,9 +142,25 @@ aber er leakt nie — und genau das ist die Aufgabe eines Defaults.
   `pseudo_project_code`, `pseudo_issue_key`, `pseudo_ref`, `pseudo_filename`).
   Ein Issue-Key bleibt key-förmig (`PREFIX-123` → `ACME-123`), ein Taiga-Ref
   ref-förmig (`slug#12` → `code#12`), ein Confluence-Space-Key code-förmig;
-  Personen bleiben Namen, Dateinamen behalten ihre Endung. Jeder nicht
-  aufgezählte Key fällt auf den `StandardAnonymizer` zurück — die Overrides sind
-  rein kosmetisch und können nie leaken.
+  Personen bleiben Namen, Dateinamen behalten ihre Endung. Der Jira-**Status**
+  wird auf einen festen, generischen Pool (`To Do`/`In Progress`/`In Review`/
+  `Blocked`/`Done`/`Backlog`) abgebildet statt wörtlich durchgereicht — ein
+  angepasster Workflow-Status kann einen Kunden-/Projektbegriff tragen. `type`/
+  `priority` bleiben wörtlich (Standard-Enums). Jeder nicht aufgezählte Key fällt
+  auf den `StandardAnonymizer` zurück.
+- **Postgres/Stoat:** `scrub_label`-Overrides nach `node_type`, die echte Namen
+  über den geteilten Helper `pseudo_labeled(value, noun)` in ein
+  `<adjektiv>_<nomen>`-Schema bringen — `big_database`, `nifty_schema`,
+  `mellow_table`, `swift_server`, `jolly_channel`. So bleibt im Screenshot lesbar
+  _was_ ein Knoten ist, ohne den echten Namen. Strukturelle Container bleiben
+  **wörtlich** („Schemas", „Tables", „DB Scripts", `db_script_dir`-Ordner,
+  Stoat-Root); Postgres-Zeilenzellen und Stoat-Message-Bodies laufen über den
+  sicheren Standard-Scrub, Message-Autoren über `pseudo_person`. Das Adjektiv ist
+  wert-gekeyt (C2), also trägt dieselbe Quelle stabil dasselbe Adjektiv.
+
+Alle Pools sind englisch und vollständig erfunden (`PERSON_POOL`, `CODE_POOL`,
+`WORD_POOL`, `ADJ_POOL`) — sie liegen im Repo und dürfen nie reale Begriffe
+enthalten.
 
 ## Konsequenzen
 

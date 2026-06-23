@@ -150,7 +150,11 @@ verbatim), so an adapter that does nothing still never leaks. Domain adapters
 override it only for _realism_ — keeping issue keys key-shaped, refs ref-shaped,
 people as names — via the shared helpers in `not_yet_done_content::anonymize`,
 keyed on the hash of the real value so the same value maps to the same fake
-everywhere (cross-run stable). The decorator scrubs display surfaces (rows,
+everywhere (cross-run stable). For tree/row **labels**, override
+`scrub_label(node_type, label)` (default delegates to `scrub_value("label", …)`):
+a label always arrives keyed `"label"`, so only the `NodeType` lets an adapter
+tell a schema from a table from a channel and keep the _kind_ legible
+(`pseudo_labeled(value, "schema")` → `big_schema`). The decorator scrubs display surfaces (rows,
 subtrees, `row_summary()`, detail `metadata()` + `label()`, picker labels,
 search-hit titles) but leaves `id()`/paths (addressing) and editable/exportable
 bodies (`content()`/`prepare()`/`form_prep()`/`picker_options()`/custom queries)

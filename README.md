@@ -1550,6 +1550,13 @@ What it does and, just as importantly, what it deliberately does **not**:
   (`PREFIX-123` → `ACME-123`), a Taiga ref stays ref-shaped
   (`slug#12` → `code#12`), people stay names, filenames keep their
   extension. The view still _looks_ real.
+- **Kind-preserving labels.** A Postgres or Stoat tree keeps telling you
+  _what_ each node is: real names become `<adjective>_<noun>` placeholders
+  (`big_database`, `nifty_schema`, `mellow_table`, `swift_server`,
+  `jolly_channel`), while the structural signposts — "Schemas", "Tables",
+  "DB Scripts" — stay verbatim. A Jira status maps to a generic pool
+  (`To Do`/`In Progress`/`Done`/…) so a customised workflow status can't
+  leak a customer term.
 - **Real times and structure.** Durations, timestamps and the tree shape
   pass through verbatim — for a time-tracker the real durations are the
   whole point of the screenshot.
