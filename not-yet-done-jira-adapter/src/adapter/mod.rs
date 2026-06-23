@@ -15,6 +15,7 @@ use not_yet_done_content::*;
 
 use crate::client::JiraClient;
 
+mod anonymize;
 mod attachment;
 mod auth_bridge;
 mod cache;
@@ -133,6 +134,13 @@ impl ContentAdapter for JiraAdapter {
             id.to_string(),
             String::new(),
         )))
+    }
+
+    /// Realism anonymizer: keeps issue keys key-shaped, assignees as person
+    /// names, filenames with extensions. The safe StandardAnonymizer is the
+    /// fallback for anything unrecognised. See [`anonymize`](self::anonymize).
+    fn anonymizer(&self) -> std::sync::Arc<dyn not_yet_done_content::Anonymizer> {
+        std::sync::Arc::new(anonymize::JiraAnonymizer::default())
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
