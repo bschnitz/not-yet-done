@@ -282,6 +282,34 @@ Dadurch ist die TUI nie blockiert: ein Adapter, der Credentials braucht,
 meldet `NeedsCreds` über den Status-Channel; die UI öffnet das Formular,
 ohne den Render-Loop zu stoppen.
 
+### Anonymisierung (`NYD_ANON`)
+
+Für Screenshots/Screencasts gegen Produktiv-Instanzen liefert ein
+**Dekorator im Content-Layer** plausible Fake-Daten statt echter Kunden-,
+Ticket- und Personennamen — frontend-unabhängig und nicht vergessbar, weil
+er am _einen_ Chokepoint `host::factories()` sitzt (siehe Host-Schicht).
+
+- `ContentAdapter::anonymizer() -> Arc<dyn Anonymizer>` ist **Pflicht-Vertrag
+  mit sicherem Default**: ohne Override greift der domänen-blinde, garantiert
+  leckfreie `StandardAnonymizer` (ersetzt Freitext-Token durch neutrale
+  Pool-Wörter, lässt Struktur — leer/numerisch/ISO-Datum/Dauer — durch).
+  Domänen-Adapter überschreiben nur für _Realismus_, nie um erst sicher zu
+  werden.
+- `AnonymizingAdapter`/`AnonymizingNode` delegieren alles an den inneren
+  Adapter und schieben nur die **anzeigbaren** Rückgaben durch
+  `Anonymizer::scrub_value(key, value)`: Listenzeilen, Eager-Subtrees,
+  `row_summary()`, Live-Tick-Zeilen, `metadata()` + `label()`, Picker-Labels,
+  Tree-Such-Treffer. **RAW** bleiben `id()`/Pfade (Adressing) und
+  editier-/exportierbare Bodies (`content`/`prepare`/`form_prep`/
+  `picker_options`/Custom-Query/Batch-`downloaded`) — Anonymisierung ist eine
+  reine Lese-Maske, der Store wird nie überschrieben.
+- Konsistenz über `stable_hash(echter Name)`: gleicher Realwert → gleicher
+  Fake, lauf- und versionsstabil; derselbe Task liest sich in allen Tabs
+  identisch.
+
+Details und Trade-offs in
+[ADR 0006](decisions/0006-anonymisierung-content-layer.md).
+
 ## TUI (`not-yet-done-tui`)
 
 ### Render- und Event-Loop
@@ -400,6 +428,13 @@ nutzen, ohne das ganze TUI zu ziehen. Die eigene Crate bricht das auf, hält den
 Graph azyklisch (Frontends → `host` → Adapter → `content`) und behebt u. a. den
 Waybar-Bug, der nach dem DB-Split die falsche DB las. Details in
 [ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md).
+
+`factories()` ist zugleich der Chokepoint der **Anonymisierung**: ist
+`NYD_ANON` truthy (ausgewertet in `host_context()` → `HostContext.anonymize`),
+wird jede registrierte Factory in eine `AnonymizingFactory` gewickelt, deren
+`create()` den gebauten Adapter dekoriert. So erben TUI, `nyd` und Waybar die
+Anonymisierung ohne eigene Zeile Code; im Normalbetrieb (Flag aus) entsteht
+kein Overhead. Siehe [ADR 0006](decisions/0006-anonymisierung-content-layer.md).
 
 ### Lifecycle-Hooks
 
