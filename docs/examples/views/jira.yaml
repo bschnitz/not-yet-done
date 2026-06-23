@@ -175,3 +175,9 @@ views:
             key: o
             type: custom
             id: open # downloads + xdg-open in background
+          - name: download all
+            key: D
+            type: custom
+            id: download_all # InputSpec::Form — prompts for a target directory,
+            # then saves every attachment of the issue there (dir created if
+            # missing; errors on a non-directory path or no permission)
