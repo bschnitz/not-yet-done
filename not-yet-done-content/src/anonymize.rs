@@ -312,7 +312,7 @@ pub fn pseudo_ref(real: &str) -> String {
 }
 
 /// Anonymize a filename, preserving its extension so it still reads like a
-/// file: `Angebot Kunde.pdf` → `<pool words>.pdf`.
+/// file: `Customer quote.pdf` → `<pool words>.pdf`.
 pub fn pseudo_filename(real: &str) -> String {
     match real.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.contains(' ') => {
@@ -672,10 +672,10 @@ mod tests {
     #[test]
     fn standard_replaces_free_text_deterministically() {
         let a = StandardAnonymizer::new();
-        let once = a.scrub_value("label", "Call Beispielfirma GmbH");
-        let twice = a.scrub_value("label", "Call Beispielfirma GmbH");
+        let once = a.scrub_value("label", "Call Example Corp");
+        let twice = a.scrub_value("label", "Call Example Corp");
         assert_eq!(once, twice, "must be deterministic");
-        assert!(!once.contains("Beispielfirma"), "real token must not survive");
+        assert!(!once.contains("Example"), "real token must not survive");
         assert_eq!(once.split_whitespace().count(), 3, "word count preserved");
     }
 
@@ -717,13 +717,13 @@ mod tests {
     #[test]
     fn shared_helpers_are_deterministic_safe_and_format_preserving() {
         // Person: stable, drawn from the pool, real text gone.
-        let p1 = pseudo_person("Erika Mustermann");
-        assert_eq!(p1, pseudo_person("Erika Mustermann"));
+        let p1 = pseudo_person("Jane Roe");
+        assert_eq!(p1, pseudo_person("Jane Roe"));
         assert!(PERSON_POOL.contains(&p1.as_str()));
-        assert!(!p1.contains("Mustermann"));
+        assert!(!p1.contains("Roe"));
         // Username/email derive from the same name → consistent.
-        assert_eq!(pseudo_username("Erika Mustermann"), p1.to_lowercase().replace(' ', "."));
-        assert!(pseudo_email("Erika Mustermann").ends_with("@example.invalid"));
+        assert_eq!(pseudo_username("Jane Roe"), p1.to_lowercase().replace(' ', "."));
+        assert!(pseudo_email("Jane Roe").ends_with("@example.invalid"));
 
         // Issue key: prefix mapped, numeric tail kept, still key-shaped.
         let k = pseudo_issue_key("DEMO-4711");
@@ -743,8 +743,8 @@ mod tests {
         assert_eq!(pseudo_project_code("123"), "123");
 
         // Filename: extension preserved, stem scrubbed.
-        let f = pseudo_filename("Angebot Kunde.pdf");
-        assert!(f.ends_with(".pdf") && !f.contains("Angebot") && !f.contains("Kunde"));
+        let f = pseudo_filename("Customer quote.pdf");
+        assert!(f.ends_with(".pdf") && !f.contains("Customer") && !f.contains("quote"));
     }
 
     #[test]
