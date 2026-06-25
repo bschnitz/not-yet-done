@@ -22,6 +22,7 @@ pub(super) fn attachment_actions() -> Vec<NodeAction> {
                 fields: vec![FormFieldSpec::text("dir", "Target directory")],
             },
         ),
+        NodeAction::new("delete", "delete", InputSpec::None),
     ]
 }
 
@@ -237,6 +238,23 @@ impl Node for JiraAttachmentNode {
         attachment_actions()
     }
 
+    /// `delete` opts into the frontend's generic delete plumbing: returning
+    /// [`ActionDispatch::DeleteSelf`] makes the TUI show a `(y/n)` prompt and,
+    /// on confirm, call `execute("delete", None)` here — which performs the
+    /// REST delete and lets the pane reload. The adapter authors the prompt
+    /// because only it knows the attachment's filename.
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "delete" => Ok(ActionDispatch::DeleteSelf {
+                confirm: Some(format!(
+                    "Delete attachment '{}'? (y/n)",
+                    self.attachment.filename
+                )),
+            }),
+            _ => Ok(ActionDispatch::Noop),
+        }
+    }
+
     async fn execute(
         &mut self,
         action_id: &str,
@@ -247,6 +265,15 @@ impl Node for JiraAttachmentNode {
             ("download_all", ActionInput::Form(values)) => {
                 let dir = values.get("dir").map(String::as_str).unwrap_or("");
                 self.download_all(dir).await
+            }
+            ("delete", ActionInput::None) => {
+                self.client
+                    .delete_attachment(&self.attachment.id)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("deleted {}", self.attachment.filename)),
+                })
             }
             (id, _) => Err(ContentError::NotSupported(format!(
                 "JiraAttachmentNode action `{id}` not supported"
@@ -308,13 +335,29 @@ mod tests {
     }
 
     #[test]
-    fn attachment_node_exposes_open_and_download_all_actions() {
+    fn attachment_node_exposes_open_download_all_and_delete_actions() {
         let node = JiraAttachmentNode::new(test_client(), sample_attachment(), "PROJ-42".into());
         let actions = node.actions();
         let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, vec!["open", "download_all"]);
+        assert_eq!(ids, vec!["open", "download_all", "delete"]);
         assert!(matches!(actions[0].input, InputSpec::None));
         assert!(matches!(actions[1].input, InputSpec::Form { .. }));
+        assert!(matches!(actions[2].input, InputSpec::None));
+    }
+
+    #[tokio::test]
+    async fn delete_requests_confirmation_with_filename() {
+        let node = JiraAttachmentNode::new(test_client(), sample_attachment(), "PROJ-42".into());
+        let dispatch = node
+            .invoke_action("delete", &ActionContext::default())
+            .await
+            .unwrap();
+        match dispatch {
+            ActionDispatch::DeleteSelf { confirm: Some(p) } => {
+                assert!(p.contains("screenshot.png"), "{p}");
+            }
+            other => panic!("expected DeleteSelf with a prompt, got {other:?}"),
+        }
     }
 
     #[tokio::test]

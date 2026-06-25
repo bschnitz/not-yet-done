@@ -304,6 +304,7 @@ async fn build_node_from_id(
             return Ok(Box::new(TaigaAttachmentNode::new(
                 Arc::clone(&client),
                 attachment,
+                item_type,
                 head,
             )));
         }

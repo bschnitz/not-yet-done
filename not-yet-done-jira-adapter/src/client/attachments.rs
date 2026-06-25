@@ -82,6 +82,22 @@ impl JiraClient {
             .collect())
     }
 
+    /// Delete a single attachment by its id
+    /// (`DELETE /rest/api/2/attachment/{id}`). Returns `Ok(())` on a
+    /// success status; an error string otherwise.
+    pub async fn delete_attachment(&self, id: &str) -> Result<(), String> {
+        let url = format!("{}/rest/api/2/attachment/{}", self.base_url, id);
+        http_log::log_request("DELETE", &url);
+        let resp = self
+            .http
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+        http_log::check_status("DELETE", &url, resp).await?;
+        Ok(())
+    }
+
     /// Download the raw bytes of an attachment from its `content_url`
     /// (the `content` field on a Jira attachment object — already an
     /// absolute URL, hence no `base_url` prefix).

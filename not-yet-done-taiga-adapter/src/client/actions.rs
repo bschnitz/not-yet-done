@@ -244,6 +244,30 @@ pub async fn download_attachment(
     Ok(bytes.to_vec())
 }
 
+/// Delete a single attachment (`DELETE /api/v1/{seg}/attachments/{id}`).
+/// The router segment is item-type specific, so the caller passes the
+/// owning item's [`ItemType`]. Returns `Ok(())` on a success status.
+pub async fn delete_attachment(
+    client: &TaigaClient,
+    item_type: ItemType,
+    attachment_id: u64,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/api/v1/{}/attachments/{attachment_id}",
+        client.base_url,
+        item_type.url_segment(),
+    );
+    let headers = client.auth_headers()?;
+    http_log::log_request("DELETE", &url);
+    let resp = client
+        .send_retrying("DELETE", &url, || {
+            client.http.delete(&url).headers(headers.clone())
+        })
+        .await?;
+    http_log::check_status("DELETE", &url, resp).await?;
+    Ok(())
+}
+
 /// Minimal URL-encoder for query-string values. Same shape as the one in
 /// `query.rs`; kept private here to avoid pub-leaking that helper.
 pub(super) fn urlencode(s: &str) -> String {

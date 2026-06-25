@@ -30,8 +30,8 @@ pub use query::{
 };
 pub use history::{TaigaComment, fetch_comments};
 pub use actions::{
-    TaigaAttachment, download_attachment, edit_comment, list_attachments, toggle_watch,
-    upload_attachment,
+    TaigaAttachment, delete_attachment, download_attachment, edit_comment, list_attachments,
+    toggle_watch, upload_attachment,
 };
 pub use project_meta::{TaigaMember, TaigaStatus};
 pub use edit::{
