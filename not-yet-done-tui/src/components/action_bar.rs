@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
@@ -236,45 +236,34 @@ impl ActionBarComponent {
 
     /// Calculate how many rows the bar needs at the given width.
     /// Takeover modes (cmdline/search/fuzzy) always use one row.
+    ///
+    /// Drives off the exact same [`normal_units`](Self::normal_units) layout
+    /// the renderer consumes, so the allocated height always matches the rows
+    /// `render_normal` actually wraps into — hints *and* the active-filter name
+    /// *and* the favorites (which previously weren't counted and so got
+    /// truncated at the right edge instead of wrapping).
     pub fn required_height(&self, available_width: u16) -> u16 {
         if self.cmdline.active || self.search.active || self.fuzzy.active {
             return 1;
         }
-        if self.hints.is_empty()
-            && self.fuzzy_label.is_none()
-            && self.active_filter_name.is_none()
-            && self.favorites.is_empty()
-            && self.mode_label.is_none()
-        {
+        let (prefix, units) = self.normal_units();
+        if prefix.is_none() && units.is_empty() {
             return 0;
         }
-
-        let prefix = if let Some(s) = self.mode_label.as_ref() {
-            s.chars().count() + 5
-        } else if let Some(s) = self.fuzzy_label.as_ref() {
-            s.chars().count() + 5
-        } else {
-            0
-        };
-        let hint_widths: Vec<usize> = self
-            .hints
-            .iter()
-            .map(|h| h.key.chars().count() + 1 + h.desc.chars().count() + 2)
-            .collect();
-        let total: usize = 1 + prefix + hint_widths.iter().sum::<usize>();
         let w = available_width as usize;
-        if total <= w {
+        if w == 0 {
             return 1;
         }
-
+        let prefix_w = prefix.as_ref().map(BarUnit::width).unwrap_or(0);
         let mut lines: u16 = 1;
-        let mut line_used = 1 + prefix;
-        for &hw in &hint_widths {
-            if line_used + hw > w && line_used > 1 {
+        let mut line_used = 1 + prefix_w;
+        for unit in &units {
+            let uw = unit.width();
+            if line_used + uw > w && line_used > 1 {
                 lines += 1;
                 line_used = 1;
             }
-            line_used += hw;
+            line_used += uw;
         }
         lines
     }
@@ -318,7 +307,128 @@ fn write_run(
     }
 }
 
+/// Draw a pre-styled run (used by the unit-based normal-mode layout, where
+/// each run already carries its full [`Style`]). Stops at `right`/`bottom`.
+fn write_run_styled(
+    buf: &mut ratatui::buffer::Buffer,
+    x: &mut u16,
+    y: &mut u16,
+    right: u16,
+    bottom: u16,
+    text: &str,
+    style: Style,
+) {
+    for ch in text.chars() {
+        if *x >= right || *y >= bottom {
+            return;
+        }
+        if let Some(cell) = buf.cell_mut(Position::new(*x, *y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+        *x += 1;
+    }
+}
+
+/// One atomic wrap unit of the normal-mode bar: a sequence of styled runs that
+/// must stay together on a line (a hint `key+desc`, the active-filter name, one
+/// favorite `name [shortcut]`). The renderer wraps to the next line before a
+/// unit that wouldn't fit; it never splits a unit. Group separators (` │ `) are
+/// folded into the unit they precede so they wrap along with it.
+struct BarUnit {
+    runs: Vec<(String, Style)>,
+}
+
+impl BarUnit {
+    fn width(&self) -> usize {
+        self.runs.iter().map(|(s, _)| s.chars().count()).sum()
+    }
+}
+
 impl ActionBarComponent {
+    /// Build the normal-mode bar as an optional leading prefix unit (mode /
+    /// fuzzy label) plus the ordered wrap units (hints → active-filter name →
+    /// favorites). Single source of truth shared by [`required_height`] and
+    /// [`render_normal`] so the height calc and the draw never disagree.
+    ///
+    /// [`required_height`]: Self::required_height
+    fn normal_units(&self) -> (Option<BarUnit>, Vec<BarUnit>) {
+        let t = &self.theme;
+        let bg = t.toolbar_bg();
+        let run = |text: &str, fg: Color, mods: Modifier| {
+            (text.to_string(), Style::default().fg(fg).bg(bg).add_modifier(mods))
+        };
+
+        let prefix = if let Some(label) = self.mode_label.as_deref() {
+            Some(BarUnit {
+                runs: vec![
+                    run(label, t.accent(), Modifier::BOLD),
+                    run("  │  ", t.text_dim(), Modifier::empty()),
+                ],
+            })
+        } else if let Some(label) = self.fuzzy_label.as_deref() {
+            Some(BarUnit {
+                runs: vec![
+                    run(label, t.primary_dim(), Modifier::empty()),
+                    run("  │  ", t.text_dim(), Modifier::empty()),
+                ],
+            })
+        } else {
+            None
+        };
+
+        let mut units: Vec<BarUnit> = Vec::new();
+
+        for hint in &self.hints {
+            let fg = if hint.active { t.accent() } else { t.secondary() };
+            let mods = if hint.active {
+                Modifier::UNDERLINED | Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
+            units.push(BarUnit {
+                runs: vec![
+                    run(&hint.key, t.text_dim(), Modifier::empty()),
+                    run(" ", fg, Modifier::empty()),
+                    run(&hint.desc, fg, mods),
+                    run("  ", t.text_dim(), Modifier::empty()),
+                ],
+            });
+        }
+
+        if let Some(name) = self.active_filter_name.as_deref() {
+            units.push(BarUnit {
+                runs: vec![
+                    run(" │  ", t.text_dim(), Modifier::empty()),
+                    run(name, t.accent(), Modifier::ITALIC),
+                ],
+            });
+        }
+
+        for (i, (name, shortcut)) in self.favorites.iter().enumerate() {
+            let is_active = self.active_filter_name.as_deref() == Some(name.as_str());
+            let fg = if is_active { t.accent() } else { t.secondary() };
+            let mods = if is_active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
+            let mut runs: Vec<(String, Style)> = Vec::new();
+            // The favorites group separator rides with the first favorite so it
+            // wraps as a group marker rather than dangling at a line's end.
+            if i == 0 {
+                runs.push(run("  │  ", t.text_dim(), Modifier::empty()));
+            }
+            runs.push(run(name, fg, mods));
+            runs.push(run(" ", t.text_dim(), Modifier::empty()));
+            runs.push(run(&format!("[{shortcut}]"), t.text_dim(), Modifier::empty()));
+            runs.push(run("  ", t.text_dim(), Modifier::empty()));
+            units.push(BarUnit { runs });
+        }
+
+        (prefix, units)
+    }
+
     fn render_cmdline(&self, frame: &mut Frame, area: Rect) -> Option<Position> {
         let t = &self.theme;
         let bg = t.toolbar_bg();
@@ -482,8 +592,7 @@ impl ActionBarComponent {
     }
 
     fn render_normal(&self, frame: &mut Frame, area: Rect) {
-        let t = &self.theme;
-        let bg = t.toolbar_bg();
+        let (prefix, units) = self.normal_units();
         let buf = frame.buffer_mut();
         let left = area.left();
         let right = area.right();
@@ -491,50 +600,23 @@ impl ActionBarComponent {
         let mut x = left + 1;
         let mut y = area.top();
 
-        if let Some(label) = self.mode_label.as_deref() {
-            write_run(buf, &mut x, &mut y, right, bottom, label, t.accent(), bg, Modifier::BOLD);
-            write_run(buf, &mut x, &mut y, right, bottom, "  │  ", t.text_dim(), bg, Modifier::empty());
-        } else if let Some(label) = self.fuzzy_label.as_deref() {
-            write_run(buf, &mut x, &mut y, right, bottom, label, t.primary_dim(), bg, Modifier::empty());
-            write_run(buf, &mut x, &mut y, right, bottom, "  │  ", t.text_dim(), bg, Modifier::empty());
+        // The prefix (mode/fuzzy label) always anchors the first line.
+        if let Some(unit) = &prefix {
+            for (text, style) in &unit.runs {
+                write_run_styled(buf, &mut x, &mut y, right, bottom, text, *style);
+            }
         }
 
-        for hint in &self.hints {
-            let hint_width =
-                (hint.key.chars().count() + 1 + hint.desc.chars().count() + 2) as u16;
-            if x + hint_width > right && x > left + 1 && y + 1 < bottom {
+        // Each unit wraps as a whole: if it wouldn't fit and we're past the
+        // line start (and there's a line below), advance to the next row.
+        for unit in &units {
+            let uw = unit.width() as u16;
+            if x + uw > right && x > left + 1 && y + 1 < bottom {
                 y += 1;
                 x = left + 1;
             }
-
-            let fg = if hint.active { t.accent() } else { t.secondary() };
-            let mods = if hint.active {
-                Modifier::UNDERLINED | Modifier::BOLD
-            } else {
-                Modifier::empty()
-            };
-
-            write_run(buf, &mut x, &mut y, right, bottom, &hint.key, t.text_dim(), bg, Modifier::empty());
-            write_run(buf, &mut x, &mut y, right, bottom, " ", fg, bg, Modifier::empty());
-            write_run(buf, &mut x, &mut y, right, bottom, &hint.desc, fg, bg, mods);
-            write_run(buf, &mut x, &mut y, right, bottom, "  ", t.text_dim(), bg, Modifier::empty());
-        }
-
-        if let Some(name) = self.active_filter_name.as_deref() {
-            write_run(buf, &mut x, &mut y, right, bottom, " │  ", t.text_dim(), bg, Modifier::empty());
-            write_run(buf, &mut x, &mut y, right, bottom, name, t.accent(), bg, Modifier::ITALIC);
-        }
-        if !self.favorites.is_empty() {
-            write_run(buf, &mut x, &mut y, right, bottom, "  │  ", t.text_dim(), bg, Modifier::empty());
-            for (name, shortcut) in &self.favorites {
-                let is_active = self.active_filter_name.as_deref() == Some(name.as_str());
-                let fg = if is_active { t.accent() } else { t.secondary() };
-                let mods = if is_active { Modifier::BOLD } else { Modifier::empty() };
-                write_run(buf, &mut x, &mut y, right, bottom, name, fg, bg, mods);
-                write_run(buf, &mut x, &mut y, right, bottom, " ", t.text_dim(), bg, Modifier::empty());
-                let bracket = format!("[{shortcut}]");
-                write_run(buf, &mut x, &mut y, right, bottom, &bracket, t.text_dim(), bg, Modifier::empty());
-                write_run(buf, &mut x, &mut y, right, bottom, "  ", t.text_dim(), bg, Modifier::empty());
+            for (text, style) in &unit.runs {
+                write_run_styled(buf, &mut x, &mut y, right, bottom, text, *style);
             }
         }
     }
@@ -582,5 +664,56 @@ impl Component for ActionBarComponent {
     }
     fn perform(&mut self, _cmd: Cmd) -> CmdResult {
         CmdResult::NoChange
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar() -> ActionBarComponent {
+        ActionBarComponent::new(Arc::new(Theme::new(crate::config::ThemeConfig::default())))
+    }
+
+    #[test]
+    fn fits_on_one_line_when_wide_enough() {
+        let mut b = bar();
+        b.set_hints(vec![ActionHint::new("f", "fuzzy filter"), ActionHint::new("/", "search")]);
+        assert_eq!(b.required_height(200), 1);
+    }
+
+    #[test]
+    fn favorites_are_counted_and_force_a_wrap() {
+        // Regression: favorites used to be ignored by `required_height`, so a
+        // bar whose favorites overflowed the width was allocated a single row
+        // and the trailing favorites were truncated at the right edge instead
+        // of wrapping onto a new line.
+        let mut b = bar();
+        b.set_hints(vec![ActionHint::new("f", "fuzzy filter")]);
+        b.set_active_filter_name(Some("My Tickets".into()));
+        b.set_favorites(vec![
+            ("Mentioned In".into(), "ctrl+m".into()),
+            ("My Tickets".into(), "ctrl+i".into()),
+            ("Watched Tickets".into(), "ctrl+w".into()),
+        ]);
+        // Comfortably wide → everything on one line.
+        assert_eq!(b.required_height(200), 1);
+        // Narrow enough that the favorites no longer fit → must wrap, so the
+        // bar reports more than one row (previously stuck at 1).
+        assert!(b.required_height(40) > 1, "favorites must force a wrap");
+    }
+
+    #[test]
+    fn takeover_modes_are_always_one_row() {
+        let mut b = bar();
+        b.set_hints(vec![ActionHint::new("f", "fuzzy filter")]);
+        b.set_favorites(vec![("A".into(), "x".into()); 20]);
+        b.set_search(true, "needle", 6, 0, 0);
+        assert_eq!(b.required_height(10), 1);
+    }
+
+    #[test]
+    fn empty_bar_needs_no_rows() {
+        assert_eq!(bar().required_height(80), 0);
     }
 }
