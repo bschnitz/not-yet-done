@@ -213,3 +213,10 @@ views:
             key: o
             type: custom
             id: open
+        # `delete` must be a `shortcuts:` binding (not an `actions:` entry): a
+        # row-level `type: custom` action dispatches straight to `execute` and
+        # cannot ask for confirmation, whereas a shortcut routes through
+        # `invoke_action`, which returns `DeleteSelf` so the TUI shows a
+        # `(y/n)` prompt before the irreversible REST delete.
+        shortcuts:
+          d: delete
