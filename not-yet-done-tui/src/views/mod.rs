@@ -103,10 +103,13 @@ pub enum ViewRequest {
     OpenScriptMenuForNode {
         view_index: usize,
         pane_id: PaneId,
-        /// `true` when the triggering action declared `scope: filtered_set`:
-        /// hand the whole filtered row set + date bounds to the script
-        /// (batch payload) instead of the single selected node.
-        batch: bool,
+        /// The triggering action's `scope`: which payload the script gets —
+        /// the single selected node (default), the filtered-set batch, or the
+        /// whole table with cursor context (`scope: table`).
+        scope: crate::config::view_config::ScriptScope,
+        /// For `scope: table` only — the action's `default_field`, reported as
+        /// `selected_field` when the column cursor is off. `None` otherwise.
+        default_field: Option<String>,
     },
     /// Open the generic, adapter-driven option menu for the selected content
     /// node. Raised by a `type: option_menu` action. `config` is the menu

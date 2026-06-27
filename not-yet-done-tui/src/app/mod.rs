@@ -6193,12 +6193,20 @@ impl App {
             ViewRequest::OpenScriptMenuForNode {
                 view_index,
                 pane_id,
-                batch,
+                scope,
+                default_field,
             } => {
-                if batch {
-                    self.open_script_menu_for_content_batch(view_index, pane_id);
-                } else {
-                    self.open_script_menu_for_content(view_index, pane_id);
+                use crate::config::view_config::ScriptScope;
+                match scope {
+                    ScriptScope::Node => self.open_script_menu_for_content(view_index, pane_id),
+                    ScriptScope::FilteredSet => {
+                        self.open_script_menu_for_content_batch(view_index, pane_id)
+                    }
+                    ScriptScope::Table => self.open_script_menu_for_content_table(
+                        view_index,
+                        pane_id,
+                        default_field,
+                    ),
                 }
                 EditorRequest::None
             }

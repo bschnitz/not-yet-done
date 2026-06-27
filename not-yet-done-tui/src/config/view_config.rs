@@ -1368,12 +1368,20 @@ fn default_ratio() -> u16 {
 /// equalizers) that operate over the entire filtered list, not one row. The
 /// `tracking_ids` key is retained verbatim so the historical scripts run
 /// unchanged; the mechanism itself is adapter-agnostic.
+/// [`ScriptScope::Table`] passes the **whole currently-displayed table** as a
+/// richer payload — `{"rows": [{id, label, fields}…], "query": …,
+/// "selected_index": …, "selected_field": …}` — so a script can act on the
+/// visible rows *with their cursor context* (which row, which column). It works
+/// on any content table, including the transposed record-detail split (where
+/// each "row" is a field/value pair). `selected_field` is the key under the
+/// column cursor, or the action's `default_field` when the column cursor is off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptScope {
     #[default]
     Node,
     FilteredSet,
+    Table,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1468,6 +1476,11 @@ pub struct ActionDef {
     /// bounds (see [`ScriptScope`]). Ignored by non-script actions.
     #[serde(default, rename = "scope")]
     pub script_scope: ScriptScope,
+    /// For `type: script` with `scope: table`: the field key reported as
+    /// `selected_field` when the column cursor is off (no column highlighted).
+    /// `None` reports `selected_field: null` in that case. Ignored otherwise.
+    #[serde(default)]
+    pub script_default_field: Option<String>,
     /// Invoke this action on the pane's *container* (the adapter `root()`)
     /// instead of the selected row. Built for actions that operate on the
     /// whole list/level and must stay reachable even at the un-drilled flat
@@ -2073,6 +2086,7 @@ views:
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         };
@@ -2112,6 +2126,7 @@ views:
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         };

@@ -30,6 +30,15 @@ use crate::edit_session::{ScriptOutputSession, ScriptSession, SessionScope};
 use crate::tabs::Tab;
 use crate::views::content_view::PaneId;
 
+/// One visible row in a [`ScriptContext::ContentTable`] payload: the same
+/// `(id, label, fields)` triple a single-node script gets, repeated per row.
+#[derive(Debug, Clone)]
+pub struct ScriptRow {
+    pub id: String,
+    pub label: String,
+    pub fields: Vec<(String, String)>,
+}
+
 /// What the open script menu is operating on. Drives the on-disk
 /// scripts directory, the JSON layout handed to executed scripts, the
 /// session scope used for the action-bar slot, and the scaffold
@@ -86,6 +95,30 @@ pub enum ScriptContext {
         /// Scaffold for create-new, pre-resolved at menu-open time.
         new_script_template: String,
     },
+    /// Content-view **table** script (action `scope: table`). Carries the
+    /// whole currently-displayed table with cursor context. JSON shape:
+    /// `{"rows": [{"id":..,"label":..,"fields":{..}}, …], "query": <str|null>,
+    /// "selected_index": <n>, "selected_field": <key|null>}`. Works on any
+    /// content table, including the transposed record-detail split. Scripts
+    /// live in the same per-view directory as [`ContentNode`].
+    ContentTable {
+        view_index: usize,
+        pane_id: PaneId,
+        tab: String,
+        view_path: Vec<String>,
+        /// Every currently-visible row, in display order.
+        rows: Vec<ScriptRow>,
+        /// The active query text (`None` when the pane has none, e.g. a
+        /// detail split).
+        query: Option<String>,
+        /// Cursor row index into `rows`.
+        selected_index: usize,
+        /// Field key under the column cursor, already defaulted (the action's
+        /// `default_field`) when the column cursor was off; `None` if neither.
+        selected_field: Option<String>,
+        /// Scaffold for create-new, pre-resolved at menu-open time.
+        new_script_template: String,
+    },
 }
 
 impl ScriptContext {
@@ -96,7 +129,8 @@ impl ScriptContext {
     pub fn new_script_template(&self) -> &str {
         match self {
             ScriptContext::ContentNode { new_script_template, .. }
-            | ScriptContext::ContentBatch { new_script_template, .. } => new_script_template,
+            | ScriptContext::ContentBatch { new_script_template, .. }
+            | ScriptContext::ContentTable { new_script_template, .. } => new_script_template,
         }
     }
 }
@@ -110,7 +144,8 @@ impl ScriptContext {
     pub fn scripts_dir(&self) -> std::path::PathBuf {
         match self {
             ScriptContext::ContentNode { tab, view_path, .. }
-            | ScriptContext::ContentBatch { tab, view_path, .. } => {
+            | ScriptContext::ContentBatch { tab, view_path, .. }
+            | ScriptContext::ContentTable { tab, view_path, .. } => {
                 let mut p = dirs::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
                     .join("not_yet_done")
@@ -150,6 +185,41 @@ impl ScriptContext {
                     "{{\"tracking_ids\": [{ids}], \"filter_min_date\": {min}, \"filter_max_date\": {max}}}"
                 )
             }
+            ScriptContext::ContentTable {
+                rows, query, selected_index, selected_field, ..
+            } => {
+                let rows_inner = rows
+                    .iter()
+                    .map(|r| {
+                        let fields_inner = r
+                            .fields
+                            .iter()
+                            .map(|(k, v)| format!("{}: {}", json_string(k), json_string(v)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "    {{\"id\": {id}, \"label\": {lbl}, \"fields\": {{{fields}}}}}",
+                            id = json_string(&r.id),
+                            lbl = json_string(&r.label),
+                            fields = fields_inner,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",\n");
+                let query_q = query
+                    .as_ref()
+                    .map(|q| json_string(q))
+                    .unwrap_or_else(|| "null".to_string());
+                let field_q = selected_field
+                    .as_ref()
+                    .map(|f| json_string(f))
+                    .unwrap_or_else(|| "null".to_string());
+                format!(
+                    "{{\n  \"rows\": [\n{rows}\n  ],\n  \"query\": {query_q},\n  \"selected_index\": {idx},\n  \"selected_field\": {field_q}\n}}",
+                    rows = rows_inner,
+                    idx = selected_index,
+                )
+            }
             ScriptContext::ContentNode {
                 tab, instance, node_type, node_id, node_ref, label, fields, ..
             } => {
@@ -176,9 +246,9 @@ impl ScriptContext {
     /// owning tab).
     pub fn session_scope(&self) -> SessionScope {
         match self {
-            ScriptContext::ContentNode { .. } | ScriptContext::ContentBatch { .. } => {
-                SessionScope::Content
-            }
+            ScriptContext::ContentNode { .. }
+            | ScriptContext::ContentBatch { .. }
+            | ScriptContext::ContentTable { .. } => SessionScope::Content,
         }
     }
 }
@@ -332,6 +402,83 @@ impl App {
         self.open_script_menu(ctx);
     }
 
+    /// Open the `:script` menu in **table** mode for a content pane
+    /// (action `scope: table`). Hands the whole currently-displayed table —
+    /// every visible row with its fields, the active query, and the cursor's
+    /// row index + field — to the script, so it can act on the list with full
+    /// cursor context. Works on any content table, including the transposed
+    /// record-detail split. `default_field` (the action's config) is reported
+    /// as `selected_field` when the column cursor is off.
+    pub fn open_script_menu_for_content_table(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        default_field: Option<String>,
+    ) {
+        let Some(slot) = self.content_views.get(view_index) else {
+            self.notify("Content view out of range".to_string());
+            return;
+        };
+        let ContentSlot::Working(cv) = slot else {
+            self.notify("Content view is unavailable".to_string());
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            self.notify("Content view has no adapter".to_string());
+            return;
+        };
+        let kind = adapter.adapter_type().to_string();
+        let Some(pane) = cv.find_pane(pane_id) else {
+            self.notify("Pane not found".to_string());
+            return;
+        };
+        let rows: Vec<ScriptRow> = pane
+            .visible_items()
+            .into_iter()
+            .map(|item| ScriptRow {
+                id: item.id,
+                label: item.label,
+                fields: item
+                    .metadata
+                    .fields
+                    .into_iter()
+                    .map(|f| (f.key, f.value))
+                    .collect(),
+            })
+            .collect();
+        let selected_index = pane.selected_row_index();
+        // Column cursor under the field, else fall back to the action's
+        // configured default field key.
+        let selected_field = pane.selected_field_key().or(default_field);
+        let query_text = pane.current_query_text(&cv.view_defs);
+        let query = if query_text.trim().is_empty() {
+            None
+        } else {
+            Some(query_text)
+        };
+        let view_def_idx = pane.view_def_index();
+        let view_path = pane.view_path_node_types(&cv.view_defs);
+        let per_view_template = cv
+            .view_defs
+            .get(view_def_idx)
+            .and_then(|vd| vd.script_template.clone());
+        let new_script_template =
+            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
+
+        let ctx = ScriptContext::ContentTable {
+            view_index,
+            pane_id,
+            tab: kind,
+            view_path,
+            rows,
+            query,
+            selected_index,
+            selected_field,
+            new_script_template,
+        };
+        self.open_script_menu(ctx);
+    }
+
     /// Internal: enumerate the context's scripts dir, populate the
     /// fuzzy menu and stash the context for the dispatch path.
     ///
@@ -365,7 +512,8 @@ impl App {
 
         let title = match &ctx {
             ScriptContext::ContentNode { tab, view_path, .. }
-            | ScriptContext::ContentBatch { tab, view_path, .. } => {
+            | ScriptContext::ContentBatch { tab, view_path, .. }
+            | ScriptContext::ContentTable { tab, view_path, .. } => {
                 if view_path.is_empty() {
                     format!("Scripts · {tab}")
                 } else {
@@ -520,10 +668,14 @@ impl App {
 
         let result =
             self.run_script_background(ctx, script_path, &stdin_json, mode, &output_suffix, &child_env);
-        // Batch scripts may mutate the underlying data (e.g. a period
-        // equalizer); reload the pane so the change is visible.
-        if let ScriptContext::ContentBatch { view_index, pane_id, .. } = ctx {
-            self.reload_content_pane_current_level(*view_index, *pane_id);
+        // Batch / table scripts may mutate the underlying data (e.g. a period
+        // equalizer, a bulk edit); reload the pane so the change is visible.
+        match ctx {
+            ScriptContext::ContentBatch { view_index, pane_id, .. }
+            | ScriptContext::ContentTable { view_index, pane_id, .. } => {
+                self.reload_content_pane_current_level(*view_index, *pane_id);
+            }
+            ScriptContext::ContentNode { .. } => {}
         }
         result
     }
@@ -829,6 +981,71 @@ mod tests {
             batch.build_json(),
             "{\"tracking_ids\": [], \"filter_min_date\": null, \"filter_max_date\": null}"
         );
+    }
+
+    #[test]
+    fn content_table_json_carries_rows_query_and_cursor() {
+        let table = ScriptContext::ContentTable {
+            view_index: 0,
+            pane_id: 0,
+            tab: "postgres".into(),
+            view_path: vec!["postgres:row".into()],
+            rows: vec![
+                ScriptRow {
+                    id: "1".into(),
+                    label: "Alpha".into(),
+                    fields: vec![("name".into(), "Alpha".into()), ("age".into(), "30".into())],
+                },
+                ScriptRow {
+                    id: "2".into(),
+                    label: "Beta".into(),
+                    fields: vec![("name".into(), "Beta".into()), ("age".into(), "25".into())],
+                },
+            ],
+            query: Some("SELECT * FROM people".into()),
+            selected_index: 1,
+            selected_field: Some("age".into()),
+            new_script_template: String::new(),
+        };
+        assert_eq!(
+            table.build_json(),
+            "{\n  \"rows\": [\n    {\"id\": \"1\", \"label\": \"Alpha\", \"fields\": {\"name\": \"Alpha\", \"age\": \"30\"}},\n    {\"id\": \"2\", \"label\": \"Beta\", \"fields\": {\"name\": \"Beta\", \"age\": \"25\"}}\n  ],\n  \"query\": \"SELECT * FROM people\",\n  \"selected_index\": 1,\n  \"selected_field\": \"age\"\n}"
+        );
+    }
+
+    #[test]
+    fn content_table_json_nulls_absent_query_and_field() {
+        let table = ScriptContext::ContentTable {
+            view_index: 0,
+            pane_id: 0,
+            tab: "postgres".into(),
+            view_path: vec![],
+            rows: vec![],
+            query: None,
+            selected_index: 0,
+            selected_field: None,
+            new_script_template: String::new(),
+        };
+        assert_eq!(
+            table.build_json(),
+            "{\n  \"rows\": [\n\n  ],\n  \"query\": null,\n  \"selected_index\": 0,\n  \"selected_field\": null\n}"
+        );
+    }
+
+    #[test]
+    fn content_table_reuses_content_scripts_dir() {
+        let table = ScriptContext::ContentTable {
+            view_index: 0,
+            pane_id: 0,
+            tab: "postgres".into(),
+            view_path: vec!["postgres:row".into()],
+            rows: vec![],
+            query: None,
+            selected_index: 0,
+            selected_field: None,
+            new_script_template: String::new(),
+        };
+        assert!(table.scripts_dir().ends_with("scripts/postgres/postgres_row"));
     }
 
     #[test]
