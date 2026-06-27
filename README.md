@@ -534,6 +534,7 @@ nyd tasks ls                       # list children of the root
 nyd tasks ls <id> --tree --depth 2 # a subtree, 2 levels deep
 nyd tasks ls --query 'status=open' # filtered (adapter's query language)
 nyd tasks show <id>                # one node's fields
+nyd jira cat <id>                  # a node's raw text body to stdout (content nodes)
 nyd tasks actions <id>             # actions available on a node
 nyd tasks actions --type task:item # …or on a node type
 nyd tasks values tags              # enumerate a value source

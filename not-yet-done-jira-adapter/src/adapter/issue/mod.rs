@@ -22,11 +22,11 @@ use not_yet_done_content::*;
 
 use crate::client::{JiraClient, JiraIssueDetail};
 
-use super::attachment::JiraAttachmentNode;
+use super::attachment::{JiraAttachmentNode, download_summary, write_attachments};
 use super::cache::{JiraCache, fetch_comments, fetch_issue};
 use super::comment::JiraCommentNode;
 use super::types::{attachment_node_type, comment_node_type, issue_node_type};
-use super::util::{format_file_size, other_err, truncate_body};
+use super::util::{format_file_size, other_err, prepare_target_dir, truncate_body};
 
 mod markers;
 mod template;
@@ -36,6 +36,7 @@ mod edit_full;
 mod edit_with_comments;
 mod clone;
 mod transitions;
+mod export;
 
 use template::{edit_full_fields, strip_template_comments};
 
@@ -54,6 +55,14 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
         NodeAction::new("toggle_watch", "toggle watch", InputSpec::None),
         NodeAction::new("open_in_browser", "open in browser", InputSpec::None),
         NodeAction::new("clone", "clone", InputSpec::Editor),
+        NodeAction::new(
+            "download-attachments",
+            "download attachments",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("dir", "Target directory")],
+            },
+        ),
+        NodeAction::new("export-bundle", "export bundle", InputSpec::None),
     ]
 }
 
@@ -453,6 +462,11 @@ impl Node for JiraIssueNode {
             ("clone", ActionInput::Edited { text, .. }) => {
                 self.execute_clone(&text).await
             }
+            ("download-attachments", ActionInput::Form(values)) => {
+                let dir = values.get("dir").map(String::as_str).unwrap_or("");
+                self.download_attachments(dir).await
+            }
+            ("export-bundle", ActionInput::None) => self.export_bundle().await,
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"
             ))),
@@ -475,6 +489,26 @@ impl JiraIssueNode {
             .spawn()
             .map_err(|e| other_err(format!("spawn xdg-open: {e}")))?;
         Ok(ActionOutcome::Done { message: Some(format!("opened {url}")) })
+    }
+
+    /// Download **every** attachment of this issue into `dir_input` via the
+    /// shared [`write_attachments`] helper — the issue-node counterpart to the
+    /// attachment node's `download_all`, so a script can fetch all files with
+    /// only the issue key in hand.
+    async fn download_attachments(&self, dir_input: &str) -> Result<ActionOutcome> {
+        let dir = prepare_target_dir(dir_input)?;
+
+        let attachments = self.client.get_attachments(&self.key).await.map_err(other_err)?;
+        if attachments.is_empty() {
+            return Ok(ActionOutcome::Done {
+                message: Some(format!("{}: no attachments to download", self.key)),
+            });
+        }
+
+        let (saved, total, failures) = write_attachments(&self.client, &attachments, &dir).await;
+        Ok(ActionOutcome::Done {
+            message: Some(download_summary(&self.key, &dir, saved, total, &failures)),
+        })
     }
 
     async fn list_comments(&self) -> Result<ListResult> {
@@ -1148,6 +1182,8 @@ mod tests {
                 "toggle_watch",
                 "open_in_browser",
                 "clone",
+                "download-attachments",
+                "export-bundle",
             ]
         );
         assert!(matches!(actions[0].input, InputSpec::Editor));
@@ -1156,6 +1192,8 @@ mod tests {
         assert!(matches!(actions[3].input, InputSpec::Editor));
         assert!(matches!(actions[5].input, InputSpec::None));
         assert!(matches!(actions[6].input, InputSpec::Editor));
+        assert!(matches!(actions[7].input, InputSpec::Form { .. }));
+        assert!(matches!(actions[8].input, InputSpec::None));
     }
 
     #[test]
