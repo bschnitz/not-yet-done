@@ -2054,6 +2054,17 @@ auch „alle Zeilen + Query + Cursor" (Liste) ab. Die Engine sammelt:
   Spalten-Cursor aus, greift das konfigurierte **`default_field`** der Action
   (sonst `null`).
 
+**Script-Shortcuts (`ctrl+s` im Menü).** Wie im Query-Menü lässt sich im
+Script-Menü einem Script per **`ctrl+s`** eine Taste zuweisen. Der erfasste
+Chord wird in der DB-Tabelle `query_shortcut(scope, name, shortcut)` unter dem
+Scope `script:<tab>/<view-node-type…>` (gleiche Ableitung wie das
+Script-Verzeichnis) für den Dateinamen abgelegt. Liegt der Fokus danach auf
+einer Ebene, die eine `type: script`-Action anbietet, startet der Chord das
+Script direkt — genau so, als hätte man das Menü geöffnet und auf dem Eintrag
+Enter gedrückt (gleicher `scope:`/`default_field`-Kontext). Der Chord wird
+gegen alle in seinem Tab aktiven Tasten geprüft (inkl. Chord-Präfixe) und bei
+Kollision abgelehnt. Belegte Shortcuts erscheinen im Menü als `[chord]`-Suffix.
+
 ### Tag-Verwaltung (`type: tag`)
 
 ```yaml

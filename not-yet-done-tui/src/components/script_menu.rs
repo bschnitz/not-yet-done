@@ -35,6 +35,9 @@ use crate::ui::theme::Theme;
 pub struct ScriptMenuEntry {
     pub path: String,
     pub label: String,
+    /// Key chord bound to this script (shown as a `[chord]` suffix), or
+    /// `None` when no shortcut is assigned.
+    pub shortcut: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub enum ScriptMenuMessage {
     Run { path: String, label: String },
     /// Ctrl+E on a selected entry — open the script in the editor.
     Edit { path: String, label: String },
+    /// Ctrl+S on a selected entry — prompt for a key chord to bind to it.
+    EditShortcut { path: String, label: String },
     /// Ctrl+D on a selected entry — delete the script file.
     Delete { path: String, label: String },
     /// Typed name (or `+name`) + Enter with no fuzzy-selected entry —
@@ -95,6 +100,7 @@ impl ScriptMenuComponent {
         let items: Vec<PopupItem> = entries.iter().map(|e| PopupItem {
             label: e.label.clone(),
             value: e.path.clone(),
+            suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
             ..Default::default()
         }).collect();
         let mut popup = SearchablePopup::new(
@@ -108,6 +114,7 @@ impl ScriptMenuComponent {
         popup = popup.with_hints(vec![
             (kb.label(&ScriptMenuAction::Run), "run / new".into()),
             (kb.label(&ScriptMenuAction::Edit), "edit".into()),
+            (kb.label(&ScriptMenuAction::EditShortcut), "shortcut".into()),
             (kb.label(&ScriptMenuAction::Delete), "delete".into()),
             (kb.label(&ScriptMenuAction::Close), "close".into()),
         ]);
@@ -164,6 +171,18 @@ impl ScriptMenuComponent {
             }
             return ScriptMenuMessage::Handled;
         }
+        if kb.get(&ScriptMenuAction::EditShortcut).is_some_and(|b| b.matches(key)) {
+            let popup = self.popup.as_ref().unwrap();
+            if let Some(item) = popup.selected_item() {
+                let msg = ScriptMenuMessage::EditShortcut {
+                    path: item.value.clone(),
+                    label: item.label.clone(),
+                };
+                self.popup = None;
+                return msg;
+            }
+            return ScriptMenuMessage::Handled;
+        }
         if kb.get(&ScriptMenuAction::Next).is_some_and(|b| b.matches(key)) {
             self.popup.as_mut().unwrap().select_next();
             return ScriptMenuMessage::Handled;
@@ -208,6 +227,7 @@ mod tests {
         let mut m: HashMap<ScriptMenuAction, KeyBinding> = HashMap::new();
         m.insert(ScriptMenuAction::Run, KeyBinding::new("enter"));
         m.insert(ScriptMenuAction::Edit, KeyBinding::new("ctrl+e"));
+        m.insert(ScriptMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
         m.insert(ScriptMenuAction::Next, KeyBinding::new("ctrl+j"));
         m.insert(ScriptMenuAction::Prev, KeyBinding::new("ctrl+k"));
         m.insert(ScriptMenuAction::Delete, KeyBinding::new("ctrl+d"));
@@ -217,8 +237,8 @@ mod tests {
 
     fn entries() -> Vec<ScriptMenuEntry> {
         vec![
-            ScriptMenuEntry { path: "/x/alpha.py".into(), label: "alpha.py".into() },
-            ScriptMenuEntry { path: "/x/beta.py".into(), label: "beta.py".into() },
+            ScriptMenuEntry { path: "/x/alpha.py".into(), label: "alpha.py".into(), shortcut: None },
+            ScriptMenuEntry { path: "/x/beta.py".into(), label: "beta.py".into(), shortcut: Some("1".into()) },
         ]
     }
 
@@ -275,6 +295,16 @@ mod tests {
         }
         let msg = menu.handle_key("enter", &kb);
         assert_eq!(msg, ScriptMenuMessage::CreateNew { name: "alpha".into() });
+    }
+
+    #[test]
+    fn ctrl_s_emits_edit_shortcut() {
+        let mut menu = ScriptMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        let msg = menu.handle_key("ctrl+s", &kb);
+        assert!(matches!(msg, ScriptMenuMessage::EditShortcut { ref path, .. } if path == "/x/alpha.py"));
+        assert!(!menu.is_open());
     }
 
     #[test]

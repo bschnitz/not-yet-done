@@ -723,6 +723,10 @@ pub enum ScriptMenuAction {
     /// Edit the selected entry (open the script in the external editor).
     /// Default Ctrl+E.
     Edit,
+    /// Bind a keyboard shortcut to the selected script so it can be run
+    /// directly from the owning pane without opening the menu. Default
+    /// Ctrl+S (mirrors the query menu's [`QueryMenuAction::EditShortcut`]).
+    EditShortcut,
     Next,
     Prev,
     /// Delete the selected entry from disk.
@@ -735,6 +739,7 @@ impl ScriptMenuAction {
         match self {
             Self::Run => "run",
             Self::Edit => "edit",
+            Self::EditShortcut => "edit_shortcut",
             Self::Next => "next",
             Self::Prev => "prev",
             Self::Delete => "delete",
@@ -755,6 +760,7 @@ impl FromStr for ScriptMenuAction {
         match s {
             "run" => Ok(Self::Run),
             "edit" => Ok(Self::Edit),
+            "edit_shortcut" => Ok(Self::EditShortcut),
             "next" => Ok(Self::Next),
             "prev" => Ok(Self::Prev),
             "delete" => Ok(Self::Delete),
@@ -1062,6 +1068,7 @@ impl Default for KeyBindingSection<ScriptMenuAction> {
         let mut m = HashMap::new();
         m.insert(ScriptMenuAction::Run, KeyBinding::new("enter"));
         m.insert(ScriptMenuAction::Edit, KeyBinding::new("ctrl+e"));
+        m.insert(ScriptMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
         m.insert(ScriptMenuAction::Next, KeyBinding::new("ctrl+j"));
         m.insert(ScriptMenuAction::Prev, KeyBinding::new("ctrl+k"));
         m.insert(ScriptMenuAction::Delete, KeyBinding::new("ctrl+d"));

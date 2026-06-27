@@ -139,6 +139,15 @@ pub enum KeySource {
         table_node_id: String,
         script: String,
     },
+    /// Shortcut bound to a `:script`-menu script (per `query_shortcut` row
+    /// scoped to `script:<tab>/<view_path…>`). Live only while the focused
+    /// pane's level offers a `type: script` action — i.e. the same level the
+    /// menu's scripts directory is derived from. `name` is the script's
+    /// filename; the App rebuilds the run context at dispatch time.
+    ScriptShortcut {
+        scope: String,
+        name: String,
+    },
     /// `query.menu_key` on a YAML view.
     YamlMenuKey {
         view: String,
@@ -211,6 +220,9 @@ impl KeySource {
                 script,
             } => {
                 format!("postgres.script[{table_node_id}/{script}]")
+            }
+            Self::ScriptShortcut { scope, name } => {
+                format!("script[{scope}/{name}]")
             }
             Self::YamlMenuKey { view } => format!("views.{view}.query.menu_key"),
             Self::YamlPreviewKey { view, child_path } => {

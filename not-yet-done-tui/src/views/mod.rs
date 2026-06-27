@@ -502,6 +502,16 @@ pub enum ViewRequest {
         table: String,
         script: String,
     },
+    /// Run a `:script`-menu script directly via its bound shortcut
+    /// (`KeySource::ScriptShortcut`). The App finds the focused level's
+    /// `type: script` action (for its scope + default_field), rebuilds the
+    /// run context, and executes `<scripts_dir>/<name>` — exactly as if the
+    /// user had opened the menu and pressed Enter on that entry.
+    RunScriptShortcut {
+        view_index: usize,
+        pane_id: PaneId,
+        name: String,
+    },
     /// Execute a custom action on a content node (e.g. Jira transition).
     /// If the action needs_input, App fetches options and shows a popup first.
     ExecuteContentAction {

@@ -1105,6 +1105,15 @@ pub struct ContentView {
     /// on bind / delete via [`Self::invalidate_postgres_table_shortcuts`].
     pub postgres_table_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
 
+    /// Lazy cache of `:script`-menu shortcuts, keyed by the focused level's
+    /// script scope (`script:<tab>/<view_path…>`) and holding
+    /// `(script_name, key_chord)` pairs. Populated by the App when a level
+    /// that offers a `type: script` action comes into focus and consulted by
+    /// [`build_view_claims`] to register apply-on-chord handlers symmetric to
+    /// [`Self::postgres_table_shortcuts`]. Cleared on bind via
+    /// `App::bind_script_shortcut`.
+    pub script_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
+
     /// Source of truth for user column-config overrides (popup `c`),
     /// keyed by [`ContentPane::column_level_key`]. Mirrored into every
     /// pane (including ones created by later splits/drills) so a level's
@@ -1732,6 +1741,15 @@ impl ContentPane {
     /// source pane's selected record).
     fn is_detail_pane(&self) -> bool {
         self.detail_source.is_some()
+    }
+
+    /// The source pane this follower mirrors, if this pane is a
+    /// record-detail follower. `None` for ordinary panes. Lets callers
+    /// redirect data operations (e.g. a post-script reload) to the real
+    /// source instead of the synthetic follower, whose items are produced
+    /// by [`Self::detail_items`](content_detail::detail_items), not a fetch.
+    pub fn detail_source(&self) -> Option<PaneId> {
+        self.detail_source
     }
 
     /// Resolve this tree's connector color: the active view's per-view
@@ -6326,6 +6344,7 @@ impl ContentView {
             pending_cursor_closes: Vec::new(),
             pending_mark_read: None,
             postgres_table_shortcuts: std::collections::HashMap::new(),
+            script_shortcuts: std::collections::HashMap::new(),
             column_overrides: std::collections::HashMap::new(),
             nav_chars: Vec::new(),
         };
@@ -7314,6 +7333,13 @@ impl ContentView {
                 ContentPane::new(theme, view_def_index, false, source.capabilities.clone());
             p.detail_source = Some(focus_id);
             p.detail_wrap = false;
+            // Mirror the source's drill level so the follower resolves the
+            // *same* actions (e.g. a `scope: table` script) and scripts dir
+            // as the source row — without this `current_actions` falls back
+            // to the root ViewDef's actions and a row-level `x` is missing
+            // when the follower has focus. Rendering stays synthetic:
+            // `is_detail_pane()` short-circuits columns/layout regardless.
+            p.active_child = source.active_child.clone();
             // Synthetic content: never fetched, so mark it loaded up front
             // (an unloaded pane renders a "loading…" placeholder).
             p.loaded = true;
@@ -7861,6 +7887,57 @@ impl ContentView {
             &self.view_defs,
             kb,
             query_name,
+            shortcut,
+            &bound,
+        )
+    }
+
+    /// The focused level's `type: script` action, if any — returns its
+    /// payload scope and the action's `default_field`. Drives both the
+    /// script-shortcut scope and the App's run-context rebuild on dispatch.
+    pub fn active_script_action(
+        &self,
+    ) -> Option<(crate::config::view_config::ScriptScope, Option<String>)> {
+        self.active_pane()
+            .current_actions(&self.view_defs)
+            .into_iter()
+            .find(|a| a.action_type == "script")
+            .map(|a| (a.script_scope, a.script_default_field.clone()))
+    }
+
+    /// Script-shortcut scope for the focused level — `script:<tab>/<view…>` —
+    /// or `None` when the level offers no `type: script` action (so no
+    /// shortcut could be run there) or the view has no adapter. Computed
+    /// identically at bind time (from the [`ScriptContext`]) and claim-
+    /// registration time so the two always agree.
+    pub fn focused_script_scope(&self) -> Option<String> {
+        self.active_script_action()?;
+        let tab = self.adapter.as_ref()?.adapter_type().to_string();
+        let view_path = self.active_pane().view_path_node_types(&self.view_defs);
+        Some(format!("script:{tab}/{}", view_path.join("/")))
+    }
+
+    /// Conflict description for binding `shortcut` to the script `name` in
+    /// the focused level's scope, or `None` when the key is free. Reuses
+    /// the keymap-wide saved-query collision check (globals, navigation,
+    /// window chords, YAML actions/shortcuts, action chains, plus the
+    /// already-bound script shortcuts) so a script shortcut can never
+    /// shadow a key active in its tab.
+    pub fn script_shortcut_conflict(
+        &self,
+        kb: &KeyBindingConfig,
+        name: &str,
+        shortcut: &str,
+    ) -> Option<String> {
+        let bound: Vec<(String, String)> = self
+            .focused_script_scope()
+            .and_then(|scope| self.script_shortcuts.get(&scope).cloned())
+            .unwrap_or_default();
+        crate::keymap::saved_query_shortcut_conflict(
+            &self.tab_name,
+            &self.view_defs,
+            kb,
+            name,
             shortcut,
             &bound,
         )
@@ -8944,6 +9021,25 @@ impl ContentView {
             }
         }
 
+        // `:script`-menu shortcuts — active in every leaf of the focused
+        // view that offers a `type: script` action (the gate is folded into
+        // `focused_script_scope`). Mirrors the SavedQueryShortcut path; the
+        // cache is populated by the App when the level comes into focus.
+        if let Some(script_scope) = self.focused_script_scope() {
+            if let Some(entries) = self.script_shortcuts.get(&script_scope) {
+                for (name, chord) in entries {
+                    km.push(KeyClaim::handler(
+                        KeyBinding::new(chord.clone()),
+                        scope.clone(),
+                        KeySource::ScriptShortcut {
+                            scope: script_scope.clone(),
+                            name: name.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
         // Record-detail split toggle (`o`) + value-wrap toggle (`X`).
         // Claimed at view level — not in the pane's `build_claims` — because
         // (un)splitting touches `pane_trees`, which only the ContentView
@@ -9068,6 +9164,15 @@ impl ContentView {
             } => {
                 let (db, schema, table) = parse_postgres_table_node_id(table_node_id)?;
                 Some(self.dispatch_postgres_script_apply(db, schema, table, script.clone()))
+            }
+            KeySource::ScriptShortcut { name, .. } => {
+                let view_index = self.view_index;
+                let pane_id = self.active_pane_id();
+                Some(SubViewMessage::Request(ViewRequest::RunScriptShortcut {
+                    view_index,
+                    pane_id,
+                    name: name.clone(),
+                }))
             }
             KeySource::Content(ContentAction::ToggleRecordDetail) => {
                 Some(self.toggle_record_detail())
