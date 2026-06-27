@@ -51,9 +51,9 @@ use std::process::ExitCode;
 
 use anyhow::{anyhow, Context, Result};
 use not_yet_done_content::{
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, FormFieldSpec,
-    GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction, NodeSummary, NodeType,
-    SortDirection, SortKey, Subtree, ValueOption,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, ContentError,
+    FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction, NodeSummary,
+    NodeType, SortDirection, SortKey, Subtree, ValueOption,
 };
 
 /// Built-in `tusks` subcommands. A first argument matching one of these is
@@ -201,11 +201,12 @@ fn run(args: &[String]) -> Result<()> {
         match inv.verb.as_str() {
             "ls" | "list" => cmd_ls(adapter.as_ref(), &inv).await,
             "show" | "get" => cmd_show(adapter.as_ref(), &inv).await,
+            "cat" | "read" => cmd_cat(adapter.as_ref(), &inv).await,
             "actions" => cmd_actions(adapter.as_ref(), &inv).await,
             "values" => cmd_values(adapter.as_ref(), &inv).await,
             "do" => cmd_do(adapter.as_ref(), &inv).await,
             other => Err(anyhow!(
-                "unknown verb '{other}' (expected ls | show | actions | values | do)"
+                "unknown verb '{other}' (expected ls | show | cat | actions | values | do)"
             )),
         }
     })
@@ -435,6 +436,23 @@ async fn cmd_show(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
     Ok(())
 }
 
+/// `nyd <inst> cat ID` — print a node's raw text content to stdout.
+///
+/// Generic across adapters: resolves the node, then writes
+/// `node.content().read_text()` verbatim (no trailing newline added). Errors
+/// when the node has no content body (e.g. a pure container or attachment).
+async fn cmd_cat(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+    let node = resolve_target(adapter, inv, inv.positionals.first().map(String::as_str))
+        .await?
+        .ok_or_else(|| anyhow!("cat requires a node id or --path /A/B"))?;
+    let content = node
+        .content()
+        .ok_or_else(|| anyhow!("node '{}' has no readable content", node.id()))?;
+    let text = content.read_text().await?;
+    print!("{text}");
+    Ok(())
+}
+
 async fn cmd_actions(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     let actions: Vec<NodeAction> = if let Some(id) = inv.positionals.first() {
         resolve_node(adapter, id).await?.actions()
@@ -626,10 +644,20 @@ async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> 
             println!("ok");
             Ok(())
         }
-        ActionDispatch::Noop => {
-            println!("ok (no change)");
-            Ok(())
-        }
+        // `invoke_action` reports no dispatch-style handling. Mirror the TUI's
+        // primary `InputSpec::None` path (it calls `execute` directly): custom
+        // None-actions such as `toggle_watch`, `open_in_browser` and
+        // `export-bundle` do their work in `execute`, not `invoke_action`.
+        // Fall back to it so those are CLI-invocable too; a genuinely
+        // no-op action (no `execute` arm) still reports "ok (no change)".
+        ActionDispatch::Noop => match node.execute(action_id, ActionInput::None).await {
+            Ok(outcome) => report_outcome(outcome, action_id),
+            Err(ContentError::NotSupported(_)) => {
+                println!("ok (no change)");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        },
         ActionDispatch::Notify { message } => {
             println!("{message}");
             Ok(())

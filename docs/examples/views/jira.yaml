@@ -111,6 +111,20 @@ views:
         key: w
         type: custom
         id: toggle_watch # InputSpec::None — toggles current user's watch state
+      - name: download attachments
+        key: D
+        type: custom
+        # InputSpec::Form — prompts for a target directory, then saves every
+        # attachment of *this issue* there as `<id>-<filename>` (same helper as
+        # the attachment list's `download all`; created if missing). The
+        # issue-level variant lets a script fetch all files with only the key.
+        id: download-attachments
+      # `export-bundle` (InputSpec::None) emits a single JSON document —
+      # metadata, `[~user]`→display-name map, the attachment manifest (with the
+      # exact on-disk `<id>-<filename>`), and all comments (newest first). It is
+      # meant for scripts via the CLI (`nyd jira do export-bundle <KEY>`); the
+      # body itself comes from the generic `cat` verb. Bind a key here only if
+      # you want it in the TUI action bar.
 
     children:
       - name: Comments

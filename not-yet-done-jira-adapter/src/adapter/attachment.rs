@@ -142,11 +142,9 @@ impl JiraAttachmentNode {
     /// ([`prepare_target_dir`]): a leading `~` is expanded, a missing
     /// directory (incl. parents) is created, an existing non-directory or an
     /// inaccessible path is reported as an error before any download starts.
-    /// Each file is then fetched and written; a per-file network/IO failure is
-    /// collected instead of aborting the batch, and the summary reports how
-    /// many of how many succeeded plus the failures. On a filename collision
-    /// within the directory the id-prefixed form is used so nothing is
-    /// clobbered (mirrors the single-attachment `open` cache naming).
+    /// Each file is then fetched and written via the shared
+    /// [`write_attachments`] helper (id-prefixed name `<id>-<filename>`), and
+    /// the summary reports how many of how many succeeded plus any failures.
     async fn download_all(&self, dir_input: &str) -> Result<ActionOutcome> {
         let dir = prepare_target_dir(dir_input)?;
 
@@ -161,35 +159,64 @@ impl JiraAttachmentNode {
             });
         }
 
-        let total = attachments.len();
-        let mut saved = 0usize;
-        let mut failures: Vec<String> = Vec::new();
-
-        for a in &attachments {
-            let safe = safe_attachment_name(&a.filename);
-            let mut path = dir.join(&safe);
-            if path.exists() {
-                path = dir.join(format!("{}-{}", a.id, safe));
-            }
-            match self.client.download_attachment(&a.content_url).await {
-                Ok(bytes) => match std::fs::write(&path, &bytes) {
-                    Ok(()) => saved += 1,
-                    Err(e) => failures.push(format!("{}: {e}", a.filename)),
-                },
-                Err(e) => failures.push(format!("{}: {e}", a.filename)),
-            }
-        }
-
-        let mut message = format!(
-            "{}: saved {saved}/{total} attachment(s) to {}",
-            self.issue_key,
-            dir.display()
-        );
-        if !failures.is_empty() {
-            message.push_str(&format!(" — {} failed ({})", failures.len(), failures.join("; ")));
-        }
-        Ok(ActionOutcome::Done { message: Some(message) })
+        let (saved, total, failures) =
+            write_attachments(&self.client, &attachments, &dir).await;
+        Ok(ActionOutcome::Done {
+            message: Some(download_summary(&self.issue_key, &dir, saved, total, &failures)),
+        })
     }
+}
+
+/// Write every attachment into `dir`, naming each file `<id>-<filename>`. The
+/// id prefix is applied unconditionally (not only on collision), so names are
+/// stable, collision-free, and match exactly what the issue node's
+/// `export-bundle` action reports as `written_name`. A per-file network/IO
+/// failure is collected instead of aborting the batch. Returns
+/// `(saved, total, failures)`.
+pub(super) async fn write_attachments(
+    client: &JiraClient,
+    attachments: &[JiraAttachment],
+    dir: &std::path::Path,
+) -> (usize, usize, Vec<String>) {
+    let total = attachments.len();
+    let mut saved = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    for a in attachments {
+        let name = format!("{}-{}", a.id, safe_attachment_name(&a.filename));
+        let path = dir.join(&name);
+        match client.download_attachment(&a.content_url).await {
+            Ok(bytes) => match std::fs::write(&path, &bytes) {
+                Ok(()) => saved += 1,
+                Err(e) => failures.push(format!("{}: {e}", a.filename)),
+            },
+            Err(e) => failures.push(format!("{}: {e}", a.filename)),
+        }
+    }
+
+    (saved, total, failures)
+}
+
+/// Build the user-facing summary line for a batch download.
+pub(super) fn download_summary(
+    issue_key: &str,
+    dir: &std::path::Path,
+    saved: usize,
+    total: usize,
+    failures: &[String],
+) -> String {
+    let mut message = format!(
+        "{issue_key}: saved {saved}/{total} attachment(s) to {}",
+        dir.display()
+    );
+    if !failures.is_empty() {
+        message.push_str(&format!(
+            " — {} failed ({})",
+            failures.len(),
+            failures.join("; ")
+        ));
+    }
+    message
 }
 
 #[async_trait]
