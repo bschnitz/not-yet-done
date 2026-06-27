@@ -52,6 +52,7 @@ impl StoatRoot {
                     fields: vec![
                         field("name", s.name.clone(), "Name"),
                         field("id", s.id.clone(), "ID"),
+                        super::unread_field(state.is_server_unread(&s.id)),
                     ],
                 },
                 has_children: Some(!s.channels.is_empty()),

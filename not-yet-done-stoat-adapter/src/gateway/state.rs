@@ -174,6 +174,16 @@ impl StoatState {
             .unwrap_or(false)
     }
 
+    /// Whether a server has any unread channel (the OR over all of its
+    /// channels, categorised or not). Drives the server-level unread marker,
+    /// mirroring [`is_category_unread`](Self::is_category_unread) one level up.
+    pub fn is_server_unread(&self, server_id: &str) -> bool {
+        self.servers
+            .get(server_id)
+            .map(|s| s.channels.iter().any(|ch| self.is_channel_unread(ch)))
+            .unwrap_or(false)
+    }
+
     /// Channels that are direct messages or group DMs (no `server`).
     pub fn dm_channels(&self) -> impl Iterator<Item = &Channel> {
         self.channels.values().filter(|c| {
@@ -418,6 +428,24 @@ mod tests {
         // Read C1 → category no longer unread (C2 has no messages).
         st.mark_read("C1", NEWER_MSG);
         assert!(!st.is_category_unread("S1", "cat1"));
+    }
+
+    #[test]
+    fn server_unread_is_or_over_all_channels() {
+        let mut st = StoatState::default();
+        let s = server("S1", &["C1", "C2"]);
+        let mut c1 = text_channel("C1", "S1");
+        c1.last_message_id = Some(NEWER_MSG.into());
+        let c2 = text_channel("C2", "S1"); // no messages
+        st.apply_ready(vec![], vec![s], vec![c1, c2]);
+
+        // C1 unread (no read marker) → server unread.
+        assert!(st.is_server_unread("S1"));
+        // Read C1 → server no longer unread (C2 has no messages).
+        st.mark_read("C1", NEWER_MSG);
+        assert!(!st.is_server_unread("S1"));
+        // Unknown server → not unread.
+        assert!(!st.is_server_unread("S9"));
     }
 
     #[test]
