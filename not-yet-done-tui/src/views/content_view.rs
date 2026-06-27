@@ -3753,6 +3753,50 @@ impl ContentPane {
         }
     }
 
+    /// Every currently-visible row's full [`NodeSummary`], in display order.
+    /// Drives `scope: table` scripts (the whole displayed table, with fields).
+    /// Tree-aware: in tree mode it walks the visible entries (skipping `…more`
+    /// placeholders); flat mode follows the fuzzy filter exactly like
+    /// [`Self::filtered_item_ids`], else returns the whole loaded list.
+    pub fn visible_items(&self) -> Vec<NodeSummary> {
+        if self.tree.is_some() {
+            let mut out = Vec::new();
+            for row in 0..self.table.row_count() {
+                if let Some(entry) = self.tree_entry_at_row(row) {
+                    if !entry.is_more_placeholder {
+                        out.push(entry.node.clone());
+                    }
+                }
+            }
+            return out;
+        }
+        if self.table.fuzzy_active {
+            self.filtered_indices
+                .iter()
+                .filter_map(|&i| self.items.get(i))
+                .cloned()
+                .collect()
+        } else {
+            self.items.clone()
+        }
+    }
+
+    /// The selected row's index in the *displayed* order (the value a
+    /// `scope: table` script reports as `selected_index`). This is the table
+    /// cursor row, matching the order of [`Self::visible_items`].
+    pub fn selected_row_index(&self) -> usize {
+        self.table.selected_row()
+    }
+
+    /// The field key under the column cursor, or `None` when the column cursor
+    /// is off. Maps the visible column index through the last-rendered column
+    /// keys, so it tracks per-level column config. Used for `scope: table`'s
+    /// `selected_field` (the caller substitutes its `default_field` on `None`).
+    pub fn selected_field_key(&self) -> Option<String> {
+        let col = self.table.selected_column()?;
+        self.last_column_keys.get(col).cloned()
+    }
+
     /// CF-11: companion of [`Self::selected_item_id`] returning the row's
     /// human-readable label (the `NodeSummary.label` set by the adapter).
     /// Used by generic confirm popups where the id alone (e.g. a numeric
@@ -6067,10 +6111,8 @@ impl ContentPane {
                 return SubViewMessage::Request(ViewRequest::OpenScriptMenuForNode {
                     view_index,
                     pane_id,
-                    batch: matches!(
-                        action.script_scope,
-                        crate::config::view_config::ScriptScope::FilteredSet
-                    ),
+                    scope: action.script_scope,
+                    default_field: action.script_default_field.clone(),
                 });
             }
             "option_menu" => {
@@ -11327,6 +11369,7 @@ mod tests {
                     commit_on_save: false,
                     inherit: false,
                     script_scope: Default::default(),
+                    script_default_field: None,
                     on_container: false,
                     option_menu: None,
                 }],
@@ -11499,6 +11542,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -13971,6 +14015,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         };
@@ -14533,6 +14578,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -14555,6 +14601,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -14577,6 +14624,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -14598,6 +14646,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -14688,6 +14737,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -14715,6 +14765,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -14735,6 +14786,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -15596,6 +15648,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -15631,6 +15684,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -15672,6 +15726,7 @@ mod tests {
             commit_on_save: false,
             inherit: false,
             script_scope: Default::default(),
+            script_default_field: None,
             on_container: false,
             option_menu: None,
         });
@@ -15908,6 +15963,7 @@ mod tests {
                 commit_on_save: false,
                 inherit: false,
                 script_scope: Default::default(),
+                script_default_field: None,
                 on_container: false,
                 option_menu: None,
             });
@@ -18558,6 +18614,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     commit_on_save: false,
                     inherit: false,
                     script_scope: Default::default(),
+                    script_default_field: None,
                     on_container: false,
                     option_menu: None,
                 },
@@ -18578,6 +18635,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     commit_on_save: false,
                     inherit: false,
                     script_scope: Default::default(),
+                    script_default_field: None,
                     on_container: false,
                     option_menu: None,
                 },

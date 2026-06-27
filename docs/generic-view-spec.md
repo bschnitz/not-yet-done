@@ -2006,10 +2006,11 @@ Mutierende Scripts (non-interactive) lösen danach einen Pane-Reload aus.
 - { name: script, key: x, type: script } # scope: node (default)
 ```
 
-| `scope`        | stdin-JSON                                                                                                                                          |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — der **eine** selektierte Knoten                                                               |
-| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **alle** aktuell gefilterten Zeilen-IDs + die Datumsgrenzen der aktiven Query |
+| `scope`        | stdin-JSON                                                                                                                                           |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — der **eine** selektierte Knoten                                                                |
+| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **alle** aktuell gefilterten Zeilen-IDs + die Datumsgrenzen der aktiven Query  |
+| `table`        | `{"rows": [{id, label, fields:{…}}, …], "query": …, "selected_index": …, "selected_field": …}` — die **ganze angezeigte Tabelle** mit Cursor-Kontext |
 
 ```yaml
 - { name: script, key: x, type: script, scope: filtered_set }
@@ -2030,6 +2031,28 @@ Der stdin-Schlüssel heißt aus Backcompat-Gründen `tracking_ids` — der
 Engine-Pfad selbst ist generisch, sodass die historischen Trackings-Scripts
 (`daily_report.py`, `hours_report.py`, …) unverändert über den
 Adapter-Tab laufen.
+
+```yaml
+- { name: script, key: x, type: script, scope: table, default_field: name }
+```
+
+`scope: table` reicht die **ganze aktuell angezeigte Tabelle samt
+Cursor-Kontext** weiter — gedacht für Scripts, die auf einer Zeile/Zelle
+operieren und dabei die Nachbarzeilen oder den Query sehen wollen. Funktioniert
+auf jeder Content-Tabelle, auch auf dem transponierten Record-Detail-Split
+(`o`), wo jede „Zeile" ein Feld/Wert-Paar des Datensatzes ist — damit deckt
+**ein** Scope sowohl „kompletter Datensatz + selektiertes Feld" (Detail) als
+auch „alle Zeilen + Query + Cursor" (Liste) ab. Die Engine sammelt:
+
+- **`rows`** — jede sichtbare Zeile als `{id, label, fields:{…}}` (dieselbe
+  Form wie ein einzelner `node`), in Anzeige-Reihenfolge; bei aktivem
+  Fuzzy-Filter exakt die Treffermenge.
+- **`query`** — der aktive Query-Text der Pane (`null`, wenn keiner anliegt,
+  z. B. im Detail-Split).
+- **`selected_index`** — Index der Cursor-Zeile in `rows`.
+- **`selected_field`** — der Spalten-Key unter dem Spalten-Cursor; ist der
+  Spalten-Cursor aus, greift das konfigurierte **`default_field`** der Action
+  (sonst `null`).
 
 ### Tag-Verwaltung (`type: tag`)
 
