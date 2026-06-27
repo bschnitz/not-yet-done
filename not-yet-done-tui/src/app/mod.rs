@@ -541,6 +541,17 @@ pub struct PostgresScriptCoords {
     pub script: String,
 }
 
+/// Addressing for a `:script`-menu shortcut binding. Carried in the
+/// shortcut-capture state so the captured key chord is persisted under
+/// the right script scope (`script:<tab>/<view_path…>`) for the named
+/// script file.
+#[derive(Debug, Clone)]
+pub struct ScriptShortcutCoords {
+    pub view_index: usize,
+    pub scope: String,
+    pub name: String,
+}
+
 pub enum ContentSlot {
     Working(ContentView),
     Broken {
@@ -742,6 +753,10 @@ pub struct App {
     /// the addressing tuple so the captured key chord lands in the right
     /// `<table_dir>/.shortcuts.yaml`. Reset on capture or Esc.
     pub awaiting_postgres_script_shortcut: Option<PostgresScriptCoords>,
+    /// Pending shortcut capture for a `:script`-menu script. Carries the
+    /// script scope + filename so the captured key chord is persisted via
+    /// the `query_shortcut` table. Reset on capture or Esc.
+    pub awaiting_script_shortcut: Option<ScriptShortcutCoords>,
     /// Modal message popup — blocks input until dismissed.
     pub modal_message: Option<String>,
 
@@ -955,6 +970,7 @@ impl App {
             awaiting_favorite_shortcut: None,
             warned_saved_query_conflicts: std::collections::HashSet::new(),
             awaiting_postgres_script_shortcut: None,
+            awaiting_script_shortcut: None,
             modal_message: None,
             pending_confirmation: None,
             content_views,
@@ -1335,6 +1351,16 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
     ) {
+        // A record-detail follower has no fetchable data of its own — its
+        // rows are the transposed fields of the source's selected record.
+        // Reloading it directly would fetch the source level's rows into the
+        // synthetic pane and blank it. Redirect to the source pane so the
+        // record reloads and `sync_detail_panes` re-transposes it.
+        let pane_id = self
+            .content_view(view_index)
+            .and_then(|cv| cv.find_pane(pane_id))
+            .and_then(|pane| pane.detail_source())
+            .unwrap_or(pane_id);
         let drill = self
             .content_view(view_index)
             .and_then(|cv| cv.find_pane(pane_id))
@@ -3682,6 +3708,8 @@ impl App {
         // Modal message: dismiss on any key (but not when awaiting shortcut/confirm).
         if self.modal_message.is_some()
             && self.awaiting_favorite_shortcut.is_none()
+            && self.awaiting_postgres_script_shortcut.is_none()
+            && self.awaiting_script_shortcut.is_none()
             && self.pending_confirmation.is_none()
         {
             self.modal_message = None;
@@ -3716,6 +3744,31 @@ impl App {
                 let chord = key.to_string();
                 let script_label = coords.script.clone();
                 self.bind_postgres_script_shortcut(coords, &chord);
+                self.modal_message =
+                    Some(format!("Script '{}' bound to [{}]", script_label, chord));
+            }
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
+        // `:script`-menu shortcut capture mode.
+        if let Some(coords) = self.awaiting_script_shortcut.take() {
+            self.modal_message = None;
+            if key == "esc" {
+                // Cancelled.
+            } else if let Some(conflict) = self
+                .content_view(coords.view_index)
+                .and_then(|cv| cv.script_shortcut_conflict(&self.keybindings, &coords.name, key))
+            {
+                self.modal_message = Some(format!(
+                    "Shortcut '{}' is already taken by {}!\n\nPress another key for '{}'\nEsc to cancel",
+                    key, conflict, coords.name
+                ));
+                self.awaiting_script_shortcut = Some(coords);
+            } else {
+                let chord = key.to_string();
+                let script_label = coords.name.clone();
+                self.bind_script_shortcut(coords, &chord);
                 self.modal_message =
                     Some(format!("Script '{}' bound to [{}]", script_label, chord));
             }
@@ -4148,6 +4201,10 @@ impl App {
             // focus isn't on a Postgres table or the cache is already
             // populated for that table.
             self.ensure_postgres_table_shortcuts_loaded(idx);
+            // Same idea for `:script`-menu shortcuts: pre-fill the cache for
+            // the focused level so `build_view_claims` registers run-on-chord
+            // handlers. No-op off a script-capable level / when cached.
+            self.ensure_script_shortcuts_loaded(idx);
             if let Some(cv) = self.content_view_mut(idx) {
                 let msg = cv.handle_key(key);
                 // A `mark_read_on_reach_end` hook may have armed during the
@@ -6210,6 +6267,11 @@ impl App {
                 }
                 EditorRequest::None
             }
+            ViewRequest::RunScriptShortcut {
+                view_index,
+                pane_id,
+                name,
+            } => self.run_script_shortcut(view_index, pane_id, name),
             ViewRequest::OpenOptionMenuForNode {
                 view_index,
                 pane_id,
@@ -7622,6 +7684,59 @@ impl App {
         });
         if let Some(cv) = self.content_view_mut(view_index) {
             cv.postgres_table_shortcuts.insert(table_node_id, entries);
+        }
+    }
+
+    /// Populate `ContentView::script_shortcuts` for the focused level's
+    /// script scope (`script:<tab>/<view…>`). Cache miss → one indexed
+    /// `query_shortcut` lookup. No-op when the level offers no `type:
+    /// script` action (so no scope) or the cache is already populated.
+    /// Called once per content-tab keypress, symmetric with
+    /// [`Self::ensure_postgres_table_shortcuts_loaded`].
+    pub fn ensure_script_shortcuts_loaded(&mut self, view_index: usize) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(scope) = cv.focused_script_scope() else {
+            return;
+        };
+        if cv.script_shortcuts.contains_key(&scope) {
+            return;
+        }
+        let repo = Arc::clone(&self.query_shortcut_repo);
+        let scope_owned = scope.clone();
+        let entries: Vec<(String, String)> = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                repo.list_by_scope(&scope_owned)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| (m.name, m.shortcut))
+                    .collect()
+            })
+        });
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.script_shortcuts.insert(scope, entries);
+        }
+    }
+
+    /// Persist a captured key chord for a `:script`-menu script into the
+    /// `query_shortcut` table, then drop the cached scope entry so the
+    /// next keypress refetches and the new claim goes live.
+    pub fn bind_script_shortcut(&mut self, coords: ScriptShortcutCoords, chord: &str) {
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let scope = coords.scope.clone();
+        let name = coords.name.clone();
+        let chord_owned = chord.to_string();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { shortcut_repo.set(&scope, &name, &chord_owned).await })
+        });
+        if let Err(e) = result {
+            self.notify_error(format!("Failed to persist shortcut: {e}"));
+        }
+        if let Some(cv) = self.content_view_mut(coords.view_index) {
+            cv.script_shortcuts.remove(&coords.scope);
         }
     }
 

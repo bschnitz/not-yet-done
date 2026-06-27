@@ -242,6 +242,30 @@ impl ScriptContext {
         }
     }
 
+    /// Script-shortcut scope (`script:<tab>/<view_path…>`) — the
+    /// `query_shortcut` key under which this context's shortcuts live.
+    /// Mirrors [`crate::views::content_view::ContentView::focused_script_scope`]
+    /// so a chord bound here is registered for the same focused level.
+    pub fn shortcut_scope(&self) -> String {
+        match self {
+            ScriptContext::ContentNode { tab, view_path, .. }
+            | ScriptContext::ContentBatch { tab, view_path, .. }
+            | ScriptContext::ContentTable { tab, view_path, .. } => {
+                format!("script:{tab}/{}", view_path.join("/"))
+            }
+        }
+    }
+
+    /// `view_index` carried by this context — used to address the owning
+    /// content view when persisting / invalidating shortcuts.
+    pub fn view_index(&self) -> usize {
+        match self {
+            ScriptContext::ContentNode { view_index, .. }
+            | ScriptContext::ContentBatch { view_index, .. }
+            | ScriptContext::ContentTable { view_index, .. } => *view_index,
+        }
+    }
+
     /// `SessionScope` for editor sessions (action-bar slot under the
     /// owning tab).
     pub fn session_scope(&self) -> SessionScope {
@@ -288,31 +312,44 @@ impl App {
     /// content view pane. Notifies + bails out when nothing is selected
     /// or the slot is broken.
     pub fn open_script_menu_for_content(&mut self, view_index: usize, pane_id: PaneId) {
+        if let Some(ctx) = self.build_content_node_ctx(view_index, pane_id) {
+            self.open_script_menu(ctx);
+        }
+    }
+
+    /// Build the single-node script context for the focused row, or
+    /// `None` (with a notification) when the view/pane/selection is
+    /// unavailable. Shared by the menu-open path and the shortcut-run path.
+    fn build_content_node_ctx(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> Option<ScriptContext> {
         let Some(slot) = self.content_views.get(view_index) else {
             self.notify("Content view out of range".to_string());
-            return;
+            return None;
         };
         let ContentSlot::Working(cv) = slot else {
             self.notify("Content view is unavailable".to_string());
-            return;
+            return None;
         };
         let Some(adapter) = cv.adapter.as_ref() else {
             self.notify("Content view has no adapter".to_string());
-            return;
+            return None;
         };
         let kind = adapter.adapter_type().to_string();
         let instance = adapter.instance_id().to_string();
         let pane = cv.find_pane(pane_id);
         let Some(pane) = pane else {
             self.notify("Pane not found".to_string());
-            return;
+            return None;
         };
         // Tree-aware: in tree mode the selected summary lives on the
         // tree entry, not in `pane.items` (depth-0 only) — an id lookup
         // there would miss every nested node.
         let Some(item) = pane.selected_item() else {
             self.notify("No row selected".to_string());
-            return;
+            return None;
         };
         let node_id = item.id.clone();
         let node_type = item.node_type.type_id.clone();
@@ -346,7 +383,7 @@ impl App {
             fields,
             new_script_template,
         };
-        self.open_script_menu(ctx);
+        Some(ctx)
     }
 
     /// Open the `:script` menu in **batch** mode for a content pane
@@ -355,22 +392,34 @@ impl App {
     /// legacy batch payload, so the migrated aggregate Trackings scripts
     /// (daily report, period equalizer) run unchanged.
     pub fn open_script_menu_for_content_batch(&mut self, view_index: usize, pane_id: PaneId) {
+        if let Some(ctx) = self.build_content_batch_ctx(view_index, pane_id) {
+            self.open_script_menu(ctx);
+        }
+    }
+
+    /// Build the batch (`scope: filtered_set`) script context, or `None`
+    /// (with a notification) when the view/pane is unavailable.
+    fn build_content_batch_ctx(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+    ) -> Option<ScriptContext> {
         let Some(slot) = self.content_views.get(view_index) else {
             self.notify("Content view out of range".to_string());
-            return;
+            return None;
         };
         let ContentSlot::Working(cv) = slot else {
             self.notify("Content view is unavailable".to_string());
-            return;
+            return None;
         };
         let Some(adapter) = cv.adapter.as_ref() else {
             self.notify("Content view has no adapter".to_string());
-            return;
+            return None;
         };
         let kind = adapter.adapter_type().to_string();
         let Some(pane) = cv.find_pane(pane_id) else {
             self.notify("Pane not found".to_string());
-            return;
+            return None;
         };
         let node_ids = pane.filtered_item_ids();
         let view_def_idx = pane.view_def_index();
@@ -399,7 +448,7 @@ impl App {
             max_date: bounds.as_ref().and_then(|b| b.max),
             new_script_template,
         };
-        self.open_script_menu(ctx);
+        Some(ctx)
     }
 
     /// Open the `:script` menu in **table** mode for a content pane
@@ -415,22 +464,35 @@ impl App {
         pane_id: PaneId,
         default_field: Option<String>,
     ) {
+        if let Some(ctx) = self.build_content_table_ctx(view_index, pane_id, default_field) {
+            self.open_script_menu(ctx);
+        }
+    }
+
+    /// Build the table (`scope: table`) script context, or `None` (with a
+    /// notification) when the view/pane is unavailable.
+    fn build_content_table_ctx(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        default_field: Option<String>,
+    ) -> Option<ScriptContext> {
         let Some(slot) = self.content_views.get(view_index) else {
             self.notify("Content view out of range".to_string());
-            return;
+            return None;
         };
         let ContentSlot::Working(cv) = slot else {
             self.notify("Content view is unavailable".to_string());
-            return;
+            return None;
         };
         let Some(adapter) = cv.adapter.as_ref() else {
             self.notify("Content view has no adapter".to_string());
-            return;
+            return None;
         };
         let kind = adapter.adapter_type().to_string();
         let Some(pane) = cv.find_pane(pane_id) else {
             self.notify("Pane not found".to_string());
-            return;
+            return None;
         };
         let rows: Vec<ScriptRow> = pane
             .visible_items()
@@ -476,7 +538,7 @@ impl App {
             selected_field,
             new_script_template,
         };
-        self.open_script_menu(ctx);
+        Some(ctx)
     }
 
     /// Internal: enumerate the context's scripts dir, populate the
@@ -490,13 +552,34 @@ impl App {
     fn open_script_menu(&mut self, ctx: ScriptContext) {
         let dir = ctx.scripts_dir();
         let _ = std::fs::create_dir_all(&dir);
+        // Map each script's filename → its bound chord (if any) so the menu
+        // can show a `[chord]` suffix. One indexed `query_shortcut` lookup
+        // keyed on this level's script scope.
+        let scope = ctx.shortcut_scope();
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let shortcuts: std::collections::HashMap<String, String> =
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    shortcut_repo
+                        .list_by_scope(&scope)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|m| (m.name, m.shortcut))
+                        .collect()
+                })
+            });
         let mut entries: Vec<ScriptMenuEntry> = match std::fs::read_dir(&dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-                .map(|e| ScriptMenuEntry {
-                    path: e.path().to_string_lossy().to_string(),
-                    label: e.file_name().to_string_lossy().to_string(),
+                .map(|e| {
+                    let label = e.file_name().to_string_lossy().to_string();
+                    ScriptMenuEntry {
+                        path: e.path().to_string_lossy().to_string(),
+                        shortcut: shortcuts.get(&label).cloned(),
+                        label,
+                    }
                 })
                 .collect(),
             Err(_) => Vec::new(),
@@ -549,6 +632,23 @@ impl App {
                     None => EditorRequest::None,
                 }
             }
+            ScriptMenuMessage::EditShortcut { path: _, label } => {
+                // Arm shortcut-capture: the next keypress (handled by the
+                // capture branch in `App::handle_key`) is persisted as this
+                // script's chord under the level's script scope.
+                let ctx = self.script_menu_ctx.take();
+                let Some(ctx) = ctx else { return EditorRequest::None };
+                self.modal_message = Some(format!(
+                    "Press a shortcut key for script '{}'\n\nEsc to cancel",
+                    label
+                ));
+                self.awaiting_script_shortcut = Some(crate::app::ScriptShortcutCoords {
+                    view_index: ctx.view_index(),
+                    scope: ctx.shortcut_scope(),
+                    name: label,
+                });
+                EditorRequest::None
+            }
             ScriptMenuMessage::Edit { path, label } => {
                 let ctx = self.script_menu_ctx.take();
                 let Some(ctx) = ctx else { return EditorRequest::None };
@@ -594,6 +694,44 @@ impl App {
                 self.open_session(Box::new(session))
             }
         }
+    }
+
+    /// Run a `:script`-menu script directly via its bound shortcut
+    /// ([`crate::views::ViewRequest::RunScriptShortcut`]). Resolves the
+    /// focused level's `type: script` action for its payload scope +
+    /// `default_field`, rebuilds the matching [`ScriptContext`], and runs
+    /// `<scripts_dir>/<name>` — equivalent to opening the menu and pressing
+    /// Enter on that entry, but without the popup round-trip.
+    pub fn run_script_shortcut(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        name: String,
+    ) -> EditorRequest {
+        use crate::config::view_config::ScriptScope;
+        let Some((scope, default_field)) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.active_script_action())
+        else {
+            self.notify("No script action available at this level".to_string());
+            return EditorRequest::None;
+        };
+        let ctx = match scope {
+            ScriptScope::Node => self.build_content_node_ctx(view_index, pane_id),
+            ScriptScope::FilteredSet => self.build_content_batch_ctx(view_index, pane_id),
+            ScriptScope::Table => {
+                self.build_content_table_ctx(view_index, pane_id, default_field)
+            }
+        };
+        let Some(ctx) = ctx else {
+            return EditorRequest::None;
+        };
+        let path = ctx.scripts_dir().join(&name);
+        if !path.exists() {
+            self.notify_error(format!("Script not found: {}", path.display()));
+            return EditorRequest::None;
+        }
+        self.run_script(&ctx, &path.to_string_lossy())
     }
 
     /// Snapshot of the source adapter's child-process env for the
