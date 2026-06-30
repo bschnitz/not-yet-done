@@ -2134,6 +2134,110 @@ impl SavedQueryStore for FsSavedQueryStore {
 }
 
 // ---------------------------------------------------------------------------
+// BookmarkStore
+// ---------------------------------------------------------------------------
+
+/// A single bookmarked entry: an adapter-opaque `id` plus the time it was
+/// bookmarked (RFC3339, UTC). Adapters decide what `id` means — for the
+/// Jira adapter it is the issue key, for others it could be any stable
+/// node identifier.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Bookmark {
+    pub id: String,
+    /// RFC3339 timestamp of when the bookmark was added.
+    pub bookmarked_at: String,
+}
+
+/// Adapter-owned persistence for bookmarked nodes.
+///
+/// The store is intentionally adapter-agnostic: it knows only opaque `id`
+/// strings and a timestamp, so any adapter can reuse it to let users pin
+/// nodes and revisit them in a dedicated view. Bookmarking is a toggle —
+/// adding an existing id removes it.
+#[async_trait]
+pub trait BookmarkStore: Send + Sync {
+    /// All bookmarks for this adapter instance. Order is the on-disk
+    /// order (insertion order); callers that want a particular ordering
+    /// sort themselves. Empty when nothing has been bookmarked yet.
+    async fn list(&self) -> Result<Vec<Bookmark>>;
+
+    /// Whether `id` is currently bookmarked.
+    async fn contains(&self, id: &str) -> Result<bool>;
+
+    /// Toggle the bookmark for `id`. Adds it (stamping the current UTC
+    /// time) when missing, removes it when present. Returns `true` when
+    /// the id is now bookmarked, `false` when it was just removed.
+    async fn toggle(&self, id: &str) -> Result<bool>;
+}
+
+/// Filesystem-backed [`BookmarkStore`]. Persists the whole set as a single
+/// `bookmarks.yaml` (a YAML sequence of [`Bookmark`]) under `<root>`. The
+/// directory is created lazily on first write; a missing file reads as an
+/// empty set.
+pub struct FsBookmarkStore {
+    root: std::path::PathBuf,
+}
+
+impl FsBookmarkStore {
+    /// Use `<instance_data_dir>` as the storage root; the set lives in
+    /// `<root>/bookmarks.yaml`.
+    pub fn new(root: std::path::PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn file_path(&self) -> std::path::PathBuf {
+        self.root.join("bookmarks.yaml")
+    }
+
+    async fn read_all(&self) -> Result<Vec<Bookmark>> {
+        match tokio::fs::read_to_string(self.file_path()).await {
+            Ok(s) if s.trim().is_empty() => Ok(Vec::new()),
+            Ok(s) => serde_yaml::from_str(&s).map_err(|e| ContentError::Other(Box::new(e))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(ContentError::Other(Box::new(e))),
+        }
+    }
+
+    async fn write_all(&self, bookmarks: &[Bookmark]) -> Result<()> {
+        tokio::fs::create_dir_all(&self.root)
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+        let body = serde_yaml::to_string(bookmarks).map_err(|e| ContentError::Other(Box::new(e)))?;
+        tokio::fs::write(self.file_path(), body)
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BookmarkStore for FsBookmarkStore {
+    async fn list(&self) -> Result<Vec<Bookmark>> {
+        self.read_all().await
+    }
+
+    async fn contains(&self, id: &str) -> Result<bool> {
+        Ok(self.read_all().await?.iter().any(|b| b.id == id))
+    }
+
+    async fn toggle(&self, id: &str) -> Result<bool> {
+        let mut bookmarks = self.read_all().await?;
+        if let Some(pos) = bookmarks.iter().position(|b| b.id == id) {
+            bookmarks.remove(pos);
+            self.write_all(&bookmarks).await?;
+            Ok(false)
+        } else {
+            bookmarks.push(Bookmark {
+                id: id.to_string(),
+                bookmarked_at: chrono::Utc::now().to_rfc3339(),
+            });
+            self.write_all(&bookmarks).await?;
+            Ok(true)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScriptStore
 // ---------------------------------------------------------------------------
 
@@ -2833,5 +2937,52 @@ mod list_subtree_default_tests {
         let p = find(&st, "p");
         // Both typed child lists merged, child-type (insertion) order kept.
         assert_eq!(child_ids(&p.children), vec!["x1", "y1"]);
+    }
+}
+
+#[cfg(test)]
+mod bookmark_store_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_store_lists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBookmarkStore::new(dir.path().to_path_buf());
+        assert!(store.list().await.unwrap().is_empty());
+        assert!(!store.contains("PROJ-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn toggle_adds_then_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBookmarkStore::new(dir.path().to_path_buf());
+
+        // Add.
+        assert!(store.toggle("PROJ-1").await.unwrap());
+        assert!(store.contains("PROJ-1").await.unwrap());
+        let list = store.list().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "PROJ-1");
+        assert!(!list[0].bookmarked_at.is_empty());
+
+        // Remove.
+        assert!(!store.toggle("PROJ-1").await.unwrap());
+        assert!(!store.contains("PROJ-1").await.unwrap());
+        assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn keeps_insertion_order_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = FsBookmarkStore::new(dir.path().to_path_buf());
+            store.toggle("PROJ-2").await.unwrap();
+            store.toggle("PROJ-1").await.unwrap();
+            store.toggle("PROJ-3").await.unwrap();
+        }
+        // A fresh store over the same dir reads the persisted set.
+        let store = FsBookmarkStore::new(dir.path().to_path_buf());
+        let ids: Vec<String> = store.list().await.unwrap().into_iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec!["PROJ-2", "PROJ-1", "PROJ-3"]);
     }
 }

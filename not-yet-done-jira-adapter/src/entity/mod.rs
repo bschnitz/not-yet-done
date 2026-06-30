@@ -1,4 +1,5 @@
 pub mod auth_session;
+pub mod jira_bookmark;
 pub mod jira_label;
 pub mod jira_user;
 pub mod view_sort_state;

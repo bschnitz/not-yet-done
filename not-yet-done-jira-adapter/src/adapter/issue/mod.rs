@@ -53,6 +53,8 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
         NodeAction::new("transition", "transition", InputSpec::Picker),
         NodeAction::new("create_comment", "add comment", InputSpec::Editor),
         NodeAction::new("toggle_watch", "toggle watch", InputSpec::None),
+        NodeAction::new("toggle-bookmark", "bookmark", InputSpec::None),
+        NodeAction::new("remove-bookmark", "remove bookmark", InputSpec::None),
         NodeAction::new("open_in_browser", "open in browser", InputSpec::None),
         NodeAction::new("clone", "clone", InputSpec::Editor),
         NodeAction::new(
@@ -73,6 +75,11 @@ pub(super) struct JiraIssueNode {
     pub(super) summary_hint: String,
     pub(super) detail: OnceCell<JiraIssueDetail>,
     pub(super) cached_metadata: Metadata,
+    /// Bookmark store for the `toggle-bookmark` action. Present only on
+    /// nodes built at the adapter boundary (`get_by_id`), which is the
+    /// path every action dispatch takes; internal rebuilds (edit/merge)
+    /// leave it `None` and never receive `toggle-bookmark`.
+    pub(super) bookmarks: Option<Arc<dyn BookmarkStore>>,
 }
 
 fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
@@ -179,6 +186,7 @@ impl JiraIssueNode {
         cache: Arc<Mutex<JiraCache>>,
         key: String,
         summary_hint: String,
+        bookmarks: Option<Arc<dyn BookmarkStore>>,
     ) -> Self {
         let cached_metadata = build_metadata_sparse(&key, &summary_hint);
         Self {
@@ -188,6 +196,7 @@ impl JiraIssueNode {
             summary_hint,
             detail: OnceCell::new(),
             cached_metadata,
+            bookmarks,
         }
     }
 
@@ -210,6 +219,7 @@ impl JiraIssueNode {
             summary_hint,
             detail: cell,
             cached_metadata,
+            bookmarks: None,
         }
     }
 
@@ -417,6 +427,34 @@ impl Node for JiraIssueNode {
         }
     }
 
+    /// `remove-bookmark` opts into the generic confirm flow: the first
+    /// invocation (`ctx.confirmed == false`) returns [`ActionDispatch::Confirm`]
+    /// so the TUI shows a `(y/n)` prompt; on "y" it re-invokes with
+    /// `confirmed: true` and we drop the bookmark, then reload so the row
+    /// vanishes from the bookmarks subtab. The normal tickets subtab keeps
+    /// using `toggle-bookmark` via [`Node::execute`] (no confirmation).
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "remove-bookmark" => {
+                let store = self.bookmarks.as_ref().ok_or_else(|| {
+                    other_err("bookmark store unavailable for this node".to_string())
+                })?;
+                if !ctx.confirmed {
+                    return Ok(ActionDispatch::Confirm {
+                        prompt: format!("Remove bookmark for {}? (y/n)", self.key),
+                    });
+                }
+                // Guarded toggle: only remove when actually bookmarked, so a
+                // stale invocation can never accidentally *add* a bookmark.
+                if store.contains(&self.key).await? {
+                    store.toggle(&self.key).await?;
+                }
+                Ok(ActionDispatch::Reload)
+            }
+            _ => Ok(ActionDispatch::Noop),
+        }
+    }
+
     async fn execute(
         &mut self,
         action_id: &str,
@@ -454,6 +492,16 @@ impl Node for JiraIssueNode {
                     .await
                     .map_err(other_err)?;
                 let label = if now_watching { "watching" } else { "no longer watching" };
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("{}: {label}", self.key)),
+                })
+            }
+            ("toggle-bookmark", ActionInput::None) => {
+                let store = self.bookmarks.as_ref().ok_or_else(|| {
+                    other_err("bookmark store unavailable for this node".to_string())
+                })?;
+                let now_bookmarked = store.toggle(&self.key).await?;
+                let label = if now_bookmarked { "bookmarked" } else { "bookmark removed" };
                 Ok(ActionOutcome::Done {
                     message: Some(format!("{}: {label}", self.key)),
                 })
@@ -741,7 +789,7 @@ mod tests {
         let scope_id = cache_store::scope_id_for_url("http://localhost:0");
         let cache = Arc::new(Mutex::new(CacheAlias::new(None, scope_id)));
         let mut node =
-            JiraIssueNode::from_key(client, cache, "PROJ-42".into(), String::new());
+            JiraIssueNode::from_key(client, cache, "PROJ-42".into(), String::new(), None);
 
         // Sparse stub: label falls back to the key; metadata is key + summary.
         assert_eq!(node.label(), "PROJ-42");
@@ -813,7 +861,7 @@ mod tests {
         let client = test_client();
         let scope_id = cache_store::scope_id_for_url("http://localhost:0");
         let cache = Arc::new(Mutex::new(CacheAlias::new(None, scope_id)));
-        let node = JiraIssueNode::from_key(client, cache, "PROJ-42".into(), "hint".into());
+        let node = JiraIssueNode::from_key(client, cache, "PROJ-42".into(), "hint".into(), None);
 
         let row = node.row_summary();
         assert!(row.metadata.fields.is_empty());
@@ -1180,6 +1228,8 @@ mod tests {
                 "transition",
                 "create_comment",
                 "toggle_watch",
+                "toggle-bookmark",
+                "remove-bookmark",
                 "open_in_browser",
                 "clone",
                 "download-attachments",
@@ -1190,10 +1240,13 @@ mod tests {
         assert!(matches!(actions[1].input, InputSpec::Editor));
         assert!(matches!(actions[2].input, InputSpec::Picker));
         assert!(matches!(actions[3].input, InputSpec::Editor));
-        assert!(matches!(actions[5].input, InputSpec::None));
-        assert!(matches!(actions[6].input, InputSpec::Editor));
-        assert!(matches!(actions[7].input, InputSpec::Form { .. }));
-        assert!(matches!(actions[8].input, InputSpec::None));
+        assert!(matches!(actions[4].input, InputSpec::None)); // toggle_watch
+        assert!(matches!(actions[5].input, InputSpec::None)); // toggle-bookmark
+        assert!(matches!(actions[6].input, InputSpec::None)); // remove-bookmark
+        assert!(matches!(actions[7].input, InputSpec::None)); // open_in_browser
+        assert!(matches!(actions[8].input, InputSpec::Editor)); // clone
+        assert!(matches!(actions[9].input, InputSpec::Form { .. })); // download-attachments
+        assert!(matches!(actions[10].input, InputSpec::None)); // export-bundle
     }
 
     #[test]

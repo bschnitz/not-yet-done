@@ -13,9 +13,16 @@ adapter:
   config: jira-adapter.yaml
 
 views:
+  # This tab has two subtabs: the normal ticket list (`key: i`) and the
+  # bookmarks list (`key: m`, defined below). Switch between them with those
+  # keys. Both render the same `jira:issue` rows, so drill-down, comments,
+  # attachments, edit and transitions behave identically — the bookmarks
+  # subtab only swaps the root listing (bookmarked issues) and drops the
+  # query/JQL menu. They share one bookmark set (stored per Jira server).
   - name: tickets
     node_type: "jira:issue"
     default: true
+    key: i
 
     query:
       default: "assignee = currentUser() ORDER BY updated DESC"
@@ -111,6 +118,15 @@ views:
         key: w
         type: custom
         id: toggle_watch # InputSpec::None — toggles current user's watch state
+      - name: bookmark
+        key: B
+        type: custom
+        # InputSpec::None — toggles this issue's bookmark *without* a
+        # confirmation prompt (a `type: custom` action dispatches straight to
+        # `execute`). Bookmarks are stored in the adapter's cache DB keyed by
+        # the Jira server, so the bookmarks subtab below lists exactly these
+        # issues regardless of which view-file instance set them.
+        id: toggle-bookmark
       - name: download attachments
         key: D
         type: custom
@@ -200,5 +216,167 @@ views:
         # cannot ask for confirmation, whereas a shortcut routes through
         # `invoke_action`, which returns `DeleteSelf` so the TUI shows a
         # `(y/n)` prompt before the irreversible REST delete.
+        shortcuts:
+          d: delete
+
+  # ── Bookmarks subtab ─────────────────────────────────────────────────────
+  # Switch here from the tickets subtab with `m`; switch back with `i`. This
+  # is the ordinary tickets view restricted to the issues you bookmarked
+  # (toggle with `B` in the tickets subtab). The rows are the same
+  # `jira:issue` nodes, so drill-down / comments / attachments / edit /
+  # transitions behave exactly as above. The only deliberately-missing piece
+  # is the query/JQL menu: the bookmark set *is* the query.
+  - name: bookmarks
+    node_type: "jira:bookmark"
+    key: m
+
+    # No `query:` block — the bookmark set is the query. There is no JQL
+    # editing and no q-menu here (the one function the bookmarks subtab drops).
+
+    columns:
+      - key: key
+        label: Key
+        style: accent
+        sizing: max
+      - key: type
+        label: Type
+        sizing: max
+      - key: status
+        label: Status
+        style: success
+        sizing: max
+      - key: priority
+        label: Priority
+        style: warning
+        sizing: max
+      - key: summary
+        label: Summary
+        source: label
+        style: text_high
+        sizing: "flex(1)"
+      # Synthetic column carried only by the bookmarks listing. Sort it
+      # locally on demand (`S` / the sort menu) — there is no default
+      # ordering. `kind: datetime` parses the RFC3339 stamp for the sort.
+      - key: bookmarked_at
+        label: Bookmarked
+        kind: datetime
+        sizing: max
+
+    preview:
+      enabled: true
+      source: content
+      split: horizontal
+      ratio: 50
+      keybinding: p
+
+    actions:
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [key, summary]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [summary, key]
+      - name: edit + comments
+        key: e
+        type: edit
+        id: edit_with_comments
+      - name: edit
+        key: E
+        type: edit
+        id: edit_full
+      - name: refresh
+        key: r
+        type: reload
+      - name: comments
+        key: c
+        type: navigate
+        navigate_to: "jira:comment"
+      - name: attachments
+        key: a
+        type: navigate
+        navigate_to: "jira:attachment"
+      - name: transition
+        key: t
+        type: custom
+        id: transition
+
+    # Removing a bookmark here asks for confirmation. Like the attachment
+    # `delete` above, this must be a `shortcuts:` binding (not an `actions:`
+    # entry): a shortcut routes through `invoke_action`, which returns
+    # `Confirm` so the TUI shows a `(y/n)` prompt; on "y" the bookmark is
+    # dropped and the row disappears on reload. (The tickets subtab's `B`
+    # toggles without confirmation via `execute`.)
+    shortcuts:
+      b: remove-bookmark
+
+    children:
+      - name: Comments
+        key: c
+        node_type: "jira:comment"
+        columns:
+          - key: author
+            label: Author
+            style: accent
+            sizing: max
+          - key: created
+            label: Created
+            sizing: max
+          - key: body
+            label: Comment
+            source: label
+            sizing: "flex(1)"
+        preview:
+          enabled: true
+          source: content
+          split: horizontal
+          ratio: 50
+          keybinding: p
+        actions:
+          - name: fuzzy filter
+            key: f
+            type: fuzzy_filter
+          - name: edit
+            key: e
+            type: edit
+            id: edit_full
+          - name: add
+            key: a
+            type: create
+            id: create_comment
+
+      - name: Attachments
+        key: a
+        node_type: "jira:attachment"
+        columns:
+          - key: filename
+            label: Filename
+            source: label
+            style: accent
+            sizing: "flex(1)"
+          - key: author
+            label: Author
+            sizing: max
+          - key: size
+            label: Size
+            sizing: max
+          - key: mime_type
+            label: Type
+            sizing: max
+          - key: created
+            label: Created
+            sizing: max
+        actions:
+          - name: open
+            key: o
+            type: custom
+            id: open
+          - name: download all
+            key: D
+            type: custom
+            id: download_all
         shortcuts:
           d: delete
