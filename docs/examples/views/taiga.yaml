@@ -143,7 +143,7 @@ views:
         key: r
         type: reload
       - name: comments
-        key: c
+        key: C
         type: navigate
         navigate_to: "taiga:comment"
       - name: attachments

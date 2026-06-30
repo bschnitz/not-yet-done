@@ -3476,6 +3476,7 @@ impl App {
                     pane_id,
                     result,
                 } => {
+                    let ok = result.is_ok();
                     match result {
                         Ok(msg) => self.notify(msg),
                         Err(msg) => {
@@ -3484,6 +3485,15 @@ impl App {
                         }
                     }
                     self.reload_content_pane_current_level(view_index, pane_id);
+                    // A successful mutation in one subtab can change what a
+                    // sibling subtab lists (e.g. bookmarking here vs. the
+                    // bookmarks subtab) — invalidate the siblings so they
+                    // reload on next switch instead of showing a stale row.
+                    if ok {
+                        if let Some(cv) = self.content_view_mut(view_index) {
+                            cv.invalidate_sibling_subtabs();
+                        }
+                    }
                 }
                 LoadMsg::OptionMenuItems {
                     view_index,
@@ -6534,6 +6544,14 @@ impl App {
             .and_then(|cv| cv.active_view_def())
             .map(|v| crate::app::node_actions::editor_in_place_for_node_id(v, &node_id))
             .unwrap_or(false);
+        // A `Reload` dispatch means the adapter mutated state (e.g.
+        // removing a bookmark) — invalidate sibling subtabs so they
+        // re-load on next switch, mirroring the `ContentActionDone` path.
+        if matches!(dispatch, not_yet_done_content::ActionDispatch::Reload) {
+            if let Some(cv) = self.content_view_mut(view_index) {
+                cv.invalidate_sibling_subtabs();
+            }
+        }
         if let Some(req) = crate::app::node_actions::dispatch_to_view_request(
             dispatch,
             view_index,

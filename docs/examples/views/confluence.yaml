@@ -199,7 +199,7 @@ views:
             type: edit
             id: create-child
           - name: add comment
-            key: c
+            key: C
             type: edit
             id: add-comment
           - name: upload attachment
@@ -435,7 +435,7 @@ views:
             type: edit
             id: create-child
           - name: add comment
-            key: c
+            key: C
             type: edit
             id: add-comment
           - name: upload attachment

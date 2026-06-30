@@ -103,7 +103,13 @@ views:
         key: r
         type: reload
       - name: comments
-        key: c
+        # `c` is reserved tab-wide by the built-in column-config fallback
+        # (likewise `S` = sort, `:` = command line). Binding an action to
+        # one of those keys is a hard config error at startup — hence `C`
+        # (Shift+C) here. To deliberately take the key anyway, set
+        # `force: true` on the action: it drops the built-in claim for that
+        # key on this level so the action wins cleanly.
+        key: C
         type: navigate
         navigate_to: "jira:comment"
       - name: attachments
@@ -292,7 +298,7 @@ views:
         key: r
         type: reload
       - name: comments
-        key: c
+        key: C
         type: navigate
         navigate_to: "jira:comment"
       - name: attachments
