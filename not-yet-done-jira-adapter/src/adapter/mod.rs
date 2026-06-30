@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use not_yet_done_content::*;
 
-use crate::client::JiraClient;
+use crate::bookmark_store::SqlBookmarkStore;
+use crate::client::{JiraClient, JiraTicket};
 
 mod anonymize;
 mod attachment;
@@ -34,7 +35,7 @@ use auth_bridge::AuthBridge;
 use cache::{JiraCache, fetch_comments, fetch_issue, hydrate_from_db};
 use comment::JiraCommentNode;
 use issue::JiraIssueNode;
-use types::{issue_node_type, label_node_type, user_node_type};
+use types::{bookmark_node_type, issue_node_type, label_node_type, user_node_type};
 use util::other_err;
 
 pub struct JiraAdapter {
@@ -44,6 +45,7 @@ pub struct JiraAdapter {
     cache: Arc<Mutex<JiraCache>>,
     db: Arc<DatabaseConnection>,
     saved_queries: FsSavedQueryStore,
+    bookmarks: Arc<dyn BookmarkStore>,
 }
 
 impl JiraAdapter {
@@ -61,12 +63,19 @@ impl JiraAdapter {
         let cache = Arc::new(Mutex::new(JiraCache::new(Some(db.clone()), scope_id)));
         hydrate_from_db(&cache, &db, scope_id);
 
-        let queries_root = dirs::data_local_dir()
+        let instance_root = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("not_yet_done")
             .join("jira")
-            .join(&instance_id)
-            .join("queries");
+            .join(&instance_id);
+
+        // Bookmarks live in the cache DB keyed by `scope_id` (per server),
+        // not under the per-`instance_id` FS root — so the normal tickets
+        // subtab and the bookmarks subtab share one set even when their
+        // view-files carry different `adapter.id`s. sea-orm stays hidden
+        // behind the `BookmarkStore` trait (see `SqlBookmarkStore`).
+        let bookmarks: Arc<dyn BookmarkStore> =
+            Arc::new(SqlBookmarkStore::new(Arc::clone(&db), scope_id));
 
         Self {
             auth,
@@ -74,7 +83,8 @@ impl JiraAdapter {
             instance_id,
             cache,
             db,
-            saved_queries: FsSavedQueryStore::new(queries_root),
+            saved_queries: FsSavedQueryStore::new(instance_root.join("queries")),
+            bookmarks,
         }
     }
 }
@@ -95,6 +105,7 @@ impl ContentAdapter for JiraAdapter {
             client,
             cache: Arc::clone(&self.cache),
             connection_name: self.connection_name.clone(),
+            bookmarks: Arc::clone(&self.bookmarks),
         }))
     }
 
@@ -133,6 +144,7 @@ impl ContentAdapter for JiraAdapter {
             Arc::clone(&self.cache),
             id.to_string(),
             String::new(),
+            Some(Arc::clone(&self.bookmarks)),
         )))
     }
 
@@ -247,6 +259,7 @@ struct JiraRoot {
     client: Arc<JiraClient>,
     cache: Arc<Mutex<JiraCache>>,
     connection_name: String,
+    bookmarks: Arc<dyn BookmarkStore>,
 }
 
 #[async_trait]
@@ -276,12 +289,18 @@ impl Node for JiraRoot {
     }
 
     fn children_types(&self) -> Vec<NodeType> {
-        vec![issue_node_type(), label_node_type(), user_node_type()]
+        vec![
+            issue_node_type(),
+            bookmark_node_type(),
+            label_node_type(),
+            user_node_type(),
+        ]
     }
 
     fn sortable_columns(&self, node_type: &NodeType) -> Vec<SortableColumn> {
         match node_type.type_id.as_str() {
             "jira:issue" => jql::issue_sortable_columns(),
+            "jira:bookmark" => jql::bookmark_sortable_columns(),
             _ => Vec::new(),
         }
     }
@@ -289,6 +308,7 @@ impl Node for JiraRoot {
     async fn list(&self, params: ListParams) -> Result<ListResult> {
         match params.node_type.type_id.as_str() {
             "jira:issue" => self.list_issues(params).await,
+            "jira:bookmark" => self.list_bookmarked_issues(params).await,
             "jira:label" => self.list_labels().await,
             "jira:user" => self.list_users().await,
             other => Err(ContentError::NotSupported(format!("Unknown node type: {other}"))),
@@ -298,6 +318,80 @@ impl Node for JiraRoot {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         let detail = fetch_issue(&self.client, &self.cache, id).await.map_err(other_err)?;
         Ok(Box::new(JiraIssueNode::new(Arc::clone(&self.client), Arc::clone(&self.cache), detail)))
+    }
+}
+
+/// Map a [`JiraTicket`] to the list-row [`NodeSummary`] shared by the normal
+/// and the bookmarks listing, so both render identical issue columns. When
+/// `bookmarked_at` is `Some`, an extra `bookmarked_at` field is appended for
+/// the bookmarks view's locally-sortable column.
+fn issue_summary(t: JiraTicket, bookmarked_at: Option<String>) -> NodeSummary {
+    let mut fields = vec![
+        MetadataField {
+            key: "key".into(),
+            value: t.key.clone(),
+            display_label: "Key".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
+            key: "type".into(),
+            value: t.issue_type,
+            display_label: "Type".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
+            key: "status".into(),
+            value: t.status,
+            display_label: "Status".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
+            key: "priority".into(),
+            value: t.priority,
+            display_label: "Priority".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
+            key: "assignee".into(),
+            value: t.assignee,
+            display_label: "Assignee".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
+            key: "updated".into(),
+            value: t.updated,
+            display_label: "Updated".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
+            key: "attachments".into(),
+            value: t.attachments_count.to_string(),
+            display_label: "Attachm.".into(),
+            editable: false,
+            allowed_values: None,
+        },
+    ];
+    if let Some(stamp) = bookmarked_at {
+        fields.push(MetadataField {
+            key: "bookmarked_at".into(),
+            value: stamp,
+            display_label: "Bookmarked".into(),
+            editable: false,
+            allowed_values: None,
+        });
+    }
+    NodeSummary {
+        id: t.key.clone(),
+        label: t.summary,
+        node_type: issue_node_type(),
+        metadata: Metadata { fields },
+        has_children: None,
     }
 }
 
@@ -321,65 +415,7 @@ impl JiraRoot {
         let items = page
             .tickets
             .into_iter()
-            .map(|t| NodeSummary {
-                id: t.key.clone(),
-                label: t.summary,
-                node_type: issue_node_type(),
-                metadata: Metadata {
-                    fields: vec![
-                        MetadataField {
-                            key: "key".into(),
-                            value: t.key,
-                            display_label: "Key".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "type".into(),
-                            value: t.issue_type,
-                            display_label: "Type".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "status".into(),
-                            value: t.status,
-                            display_label: "Status".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "priority".into(),
-                            value: t.priority,
-                            display_label: "Priority".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "assignee".into(),
-                            value: t.assignee,
-                            display_label: "Assignee".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "updated".into(),
-                            value: t.updated,
-                            display_label: "Updated".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "attachments".into(),
-                            value: t.attachments_count.to_string(),
-                            display_label: "Attachm.".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                    ],
-                },
-                has_children: None,
-            })
+            .map(|t| issue_summary(t, None))
             .collect();
 
         let page_info = {
@@ -402,6 +438,58 @@ impl JiraRoot {
             items,
             applied_sort,
             page: Some(page_info),
+            batch_download_available: false,
+            downloaded: vec![],
+        })
+    }
+
+    /// Bookmarks view: list exactly the issues recorded in the bookmark
+    /// store, as ordinary `jira:issue` rows. One JQL `key in (...)` call (no
+    /// `ORDER BY`); the synthetic `bookmarked_at` column is injected per row
+    /// and any requested sort is applied locally via [`apply_sort`]. An empty
+    /// store short-circuits without touching the network.
+    async fn list_bookmarked_issues(&self, params: ListParams) -> Result<ListResult> {
+        let bookmarks = self.bookmarks.list().await?;
+        if bookmarks.is_empty() {
+            return Ok(ListResult {
+                items: vec![],
+                applied_sort: Vec::new(),
+                page: None,
+                batch_download_available: false,
+                downloaded: vec![],
+            });
+        }
+
+        // key -> bookmarked_at, to stamp each returned row.
+        let stamps: std::collections::HashMap<String, String> = bookmarks
+            .iter()
+            .map(|b| (b.id.clone(), b.bookmarked_at.clone()))
+            .collect();
+
+        let keys: Vec<String> = bookmarks.iter().map(|b| b.id.clone()).collect();
+        let jql = format!("key in ({})", keys.join(","));
+        let limit = keys.len() as u32;
+        let page = self
+            .client
+            .search(&jql, 0, limit)
+            .await
+            .map_err(other_err)?;
+
+        let mut items: Vec<NodeSummary> = page
+            .tickets
+            .into_iter()
+            .map(|t| {
+                let stamp = stamps.get(&t.key).cloned();
+                issue_summary(t, stamp)
+            })
+            .collect();
+
+        let applied_sort = apply_sort(&mut items, &params.sort, &jql::bookmark_sortable_columns());
+
+        Ok(ListResult {
+            items,
+            applied_sort,
+            page: None,
             batch_download_available: false,
             downloaded: vec![],
         })

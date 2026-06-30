@@ -41,6 +41,21 @@ pub(super) fn issue_sortable_columns() -> Vec<SortableColumn> {
     .collect()
 }
 
+/// Columns the bookmarks list can be sorted on. Same set as the normal
+/// issue list, plus the synthetic `bookmarked_at` column. Unlike the normal
+/// list (server-side JQL `ORDER BY`), the bookmarks list sorts **locally**
+/// via [`not_yet_done_content::apply_sort`], so the [`SortKind`] matters
+/// here: `bookmarked_at` is RFC3339 and sorts as a `DateTime`.
+pub(super) fn bookmark_sortable_columns() -> Vec<SortableColumn> {
+    let mut cols = issue_sortable_columns();
+    cols.push(SortableColumn {
+        key: "bookmarked_at".into(),
+        label: "Bookmarked".into(),
+        kind: SortKind::DateTime,
+    });
+    cols
+}
+
 /// Result of folding a `Vec<SortKey>` into a JQL `ORDER BY` clause.
 pub(super) struct OrderByClause {
     /// `ORDER BY ...` (no leading space) — empty if no column was honoured.
@@ -119,6 +134,19 @@ mod tests {
 
     fn key(c: &str, d: SortDirection) -> SortKey {
         SortKey { column: c.into(), direction: d }
+    }
+
+    #[test]
+    fn bookmark_columns_extend_issue_columns_with_datetime() {
+        let issue = issue_sortable_columns();
+        let bookmark = bookmark_sortable_columns();
+        // Same issue columns, plus exactly one extra (bookmarked_at).
+        assert_eq!(bookmark.len(), issue.len() + 1);
+        let stamp = bookmark
+            .iter()
+            .find(|c| c.key == "bookmarked_at")
+            .expect("bookmarked_at column present");
+        assert_eq!(stamp.kind, SortKind::DateTime);
     }
 
     #[test]

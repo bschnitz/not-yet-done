@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod auth_session_store;
+pub mod bookmark_store;
 pub mod cache_store;
 pub mod client;
 pub mod db;
@@ -13,6 +14,7 @@ pub mod entity;
 
 pub use adapter::{JiraAdapter, JiraAdapterFactory};
 pub use auth_session_store::SqlAuthSessionStore;
+pub use bookmark_store::SqlBookmarkStore;
 pub use client::{
     JiraAttachment, JiraClient, JiraComment, JiraIssueDetail, JiraSession, JiraTicket,
     JiraTransition, JiraUser,

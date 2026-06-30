@@ -44,6 +44,19 @@ pub(super) fn attachment_node_type() -> NodeType {
     }
 }
 
+/// Root list type for the bookmarks view. The *rows* it produces are
+/// ordinary [`issue_node_type`] issues — this type only selects the
+/// bookmark-restricted root listing in `JiraRoot::list`.
+pub(super) fn bookmark_node_type() -> NodeType {
+    NodeType {
+        type_id: "jira:bookmark".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Bookmark".into(),
+    }
+}
+
 pub(super) fn user_node_type() -> NodeType {
     NodeType {
         type_id: "jira:user".into(),
