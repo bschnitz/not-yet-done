@@ -324,6 +324,36 @@ impl KeyMap {
         self.claims.push(claim);
     }
 
+    /// Honour `actions: [{ force: true }]`: drop the *built-in* claims
+    /// (global hotkeys, common fallbacks, window-leader chords, content
+    /// actions) on any key in `keys`, so a YAML action can deliberately
+    /// take over that key without the validator reporting a collision.
+    ///
+    /// Only built-in claims are removed — a key fought over by two YAML
+    /// actions (or a YAML action vs. a saved-query/script shortcut) is a
+    /// genuine config error and stays flagged. For multi-key built-in
+    /// bindings (e.g. `down`/`j`) only the forced key is stripped; the
+    /// claim survives with its remaining keys.
+    pub fn force_override_keys(&mut self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+        self.claims.retain_mut(|c| {
+            let is_builtin = matches!(
+                c.source,
+                KeySource::Global(_)
+                    | KeySource::Common(_)
+                    | KeySource::Window(_)
+                    | KeySource::Content(_)
+            );
+            if !is_builtin {
+                return true;
+            }
+            c.key.0.retain(|k| !keys.iter().any(|fk| fk == k));
+            !c.key.0.is_empty()
+        });
+    }
+
     /// Find every pair of `Handler` claims that share at least one key
     /// string and whose scopes overlap. Reported once per pair.
     pub fn validate(&self) -> Vec<Conflict> {
@@ -450,6 +480,7 @@ fn build_for_view(
     );
     push_view_actions(&mut root_map, tab, view, true);
     push_action_chain_claims(&mut root_map, tab, root_profile(), view, &[], None, kb);
+    root_map.force_override_keys(&forced_keys(&view.actions));
     out.push(ViewLeafMap {
         view: view.name.clone(),
         child_path: Vec::new(),
@@ -507,6 +538,7 @@ fn push_child_leaves(
         Some(child),
         kb,
     );
+    km.force_override_keys(&forced_keys(&child.actions));
     out.push(ViewLeafMap {
         view: view.name.clone(),
         child_path: path.clone(),
@@ -543,6 +575,31 @@ fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig) {
         CommonAction::ScrollPageDown,
     ];
     for action in adapter_common {
+        if let Some(binding) = kb.common.get(&action) {
+            km.push(KeyClaim::handler(
+                binding.clone(),
+                KeyScope::Tab(tab.clone()),
+                KeySource::Common(action),
+            ));
+        }
+    }
+    // App-level fallback keys: dispatched by `App::handle_common_action`
+    // only when the focused `ContentView` returns `Unhandled`, so they are
+    // effectively live at *every* leaf of an adapter tab (root and every
+    // drilldown). They were the validator's blind spot — a YAML `actions:`
+    // entry on, say, `c` shadowed column-config at runtime with no
+    // conflict reported. Claiming them tab-wide makes that collision a
+    // hard error (escape hatch: `force: true` on the action, which strips
+    // the matching built-in claim — see `KeyMap::force_override_keys`).
+    // `JumpMode` (`p`) and `TrackingToggle` (`s`) are intentionally NOT
+    // here: `p` is the usual preview key on content tabs and `s` is a
+    // no-op there, so claiming them would manufacture false conflicts.
+    let app_fallback_common = [
+        CommonAction::ColumnConfig,
+        CommonAction::SortMode,
+        CommonAction::CommandLineOpen,
+    ];
+    for action in app_fallback_common {
         if let Some(binding) = kb.common.get(&action) {
             km.push(KeyClaim::handler(
                 binding.clone(),
@@ -760,6 +817,17 @@ fn push_child_actions(
             ));
         }
     }
+}
+
+/// Keys of every `force: true` action in `actions` — the built-in claims
+/// on these keys are stripped from the leaf (see
+/// [`KeyMap::force_override_keys`]).
+fn forced_keys(actions: &[crate::config::view_config::ActionDef]) -> Vec<String> {
+    actions
+        .iter()
+        .filter(|a| a.force)
+        .map(|a| a.key.clone())
+        .collect()
 }
 
 fn push_action_claims(
@@ -1354,6 +1422,72 @@ views:
             errs.iter()
                 .any(|e| e.contains("Rows") && e.contains("\"h\"")),
             "expected a Rows / 'h' conflict, got: {errs:?}"
+        );
+    }
+
+    /// An `actions:` entry on `c` collides with the App-level column-config
+    /// fallback (`common.column_config`, default `c`), which is now claimed
+    /// tab-wide. Binding it without `force` is a hard error — exactly the
+    /// case that previously slipped through (jira's `c` = comments shadowed
+    /// column-config silently).
+    #[test]
+    fn action_c_conflicts_with_column_config_fallback() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+    actions:
+      - { name: comments, key: c, type: navigate, navigate_to: cc }
+"#;
+        let cfg = yaml_str(yaml);
+        let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("\"c\"") && e.contains("column_config")),
+            "expected a 'c' / column_config conflict, got: {errs:?}"
+        );
+    }
+
+    /// `force: true` is the escape hatch: it strips the built-in
+    /// column-config claim for `c` at that leaf, so the action takes the
+    /// key cleanly and the validator stays quiet.
+    #[test]
+    fn force_action_c_suppresses_column_config_conflict() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+    actions:
+      - { name: comments, key: c, type: navigate, navigate_to: cc, force: true }
+"#;
+        let cfg = yaml_str(yaml);
+        let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
+        assert!(errs.is_empty(), "force should suppress conflict, got: {errs:?}");
+    }
+
+    /// `force` only overrides *built-in* claims — two YAML actions on the
+    /// same key are still a genuine conflict even if one sets `force`.
+    #[test]
+    fn force_does_not_hide_two_yaml_actions_on_same_key() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+    actions:
+      - { name: comments, key: c, type: navigate, navigate_to: cc, force: true }
+      - { name: other, key: c, type: custom, id: other }
+"#;
+        let cfg = yaml_str(yaml);
+        let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
+        assert!(
+            errs.iter().any(|e| e.contains("\"c\"")),
+            "two YAML actions on 'c' must still conflict, got: {errs:?}"
         );
     }
 

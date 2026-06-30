@@ -1499,6 +1499,20 @@ pub struct ActionDef {
     /// with the chosen value. Required for `option_menu`, ignored otherwise.
     #[serde(default)]
     pub option_menu: Option<OptionMenuConfig>,
+    /// Deliberately take over a key that a built-in handler (a global
+    /// hotkey, a common fallback like `c` column-config / `S` sort / `:`
+    /// command-line, a window-leader chord, or a content action) would
+    /// otherwise claim. Binding such a key without `force` is a hard
+    /// config error (the keymap validator reports the collision at
+    /// startup), because the YAML action silently shadows the built-in at
+    /// runtime and the built-in becomes unreachable on that leaf. Setting
+    /// `force: true` is the explicit opt-in: the validator drops the
+    /// built-in's claim for this key at this leaf so the action wins
+    /// cleanly. Only suppresses conflicts against *built-in* claims —
+    /// two YAML actions fighting over one key is still an error. Default
+    /// `false`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 impl ActionDef {
@@ -2089,6 +2103,7 @@ views:
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         };
         // Modal/persistent state actions → action bar
         assert!(make("edit").shows_in_action_bar());
@@ -2129,6 +2144,7 @@ views:
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         };
         assert!(!action.shows_in_action_bar());
     }
@@ -2761,7 +2777,7 @@ views:
     actions:
       - { name: edit, key: e, type: edit, id: edit_full }
       - { name: tr, key: t, type: custom, id: transition }
-      - { name: nav, key: c, type: navigate, navigate_to: t2 }
+      - { name: nav, key: C, type: navigate, navigate_to: t2 }
       - { name: refresh, key: r, type: reload }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();

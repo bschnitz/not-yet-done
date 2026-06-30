@@ -1079,6 +1079,16 @@ pub struct ContentView {
     /// the user must trigger a `reload` action to populate the pane.
     pub manual_connect: bool,
 
+    /// Set once any pane in this view has completed a load without an
+    /// error — i.e. the (single, shared) adapter connection has been
+    /// established. After that, switching to a sibling subtab auto-loads
+    /// it instead of showing the `manual_connect` "press … to connect"
+    /// banner: it is one adapter instance, so one connection serves every
+    /// subtab. Only gates the *implicit* subtab-switch load; the first
+    /// connect on a `manual_connect` tab still requires the explicit
+    /// reload action.
+    connected_once: bool,
+
     /// Cursor ids harvested when panes that hold an
     /// `active_custom_query.cursor_id` are destroyed (CP-6). Drained
     /// by the App after every interaction with this view — each id
@@ -6341,6 +6351,7 @@ impl ContentView {
             header_overlay: crate::components::sort_header::HeaderOverlay::default(),
             source_path: None,
             manual_connect: config.adapter.manual_connect,
+            connected_once: false,
             pending_cursor_closes: Vec::new(),
             pending_mark_read: None,
             postgres_table_shortcuts: std::collections::HashMap::new(),
@@ -6626,6 +6637,24 @@ impl ContentView {
         self.active_subtab = target;
         self.sync_action_bar_hints();
         !self.pane_trees[target].focused_leaf().pane.loaded
+    }
+
+    /// Invalidate every *other* subtab's focused pane after a mutation in
+    /// the active subtab, so switching to a sibling re-loads it instead of
+    /// showing a stale snapshot. The subtabs of one tab share a single
+    /// adapter instance (and its stores), so a change made in one — e.g.
+    /// bookmarking an issue in the tickets subtab — can affect what a
+    /// sibling lists (the bookmarks subtab). Marking the pane unloaded is
+    /// cheap; the reload is deferred until the user actually switches there
+    /// (and, with `connected_once`, happens transparently).
+    pub fn invalidate_sibling_subtabs(&mut self) {
+        let active = self.active_subtab;
+        for (i, tree) in self.pane_trees.iter_mut().enumerate() {
+            if i == active {
+                continue;
+            }
+            tree.focused_leaf_mut().pane.loaded = false;
+        }
     }
 
     /// Allocate a fresh [`PaneId`].
@@ -8277,6 +8306,13 @@ impl ContentView {
         else {
             return;
         };
+        // A result without an error means the shared adapter connection is
+        // live — record it so a later subtab switch auto-loads instead of
+        // showing the `manual_connect` connect banner (one instance, one
+        // connection serves every subtab).
+        if error.is_none() {
+            self.connected_once = true;
+        }
         let view_defs = &self.view_defs;
         let tree = &mut self.pane_trees[tree_idx];
         if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
@@ -8453,6 +8489,12 @@ impl ContentView {
     /// banner can't name a specific key.
     fn manual_connect_banner(&self) -> Option<String> {
         if !self.manual_connect {
+            return None;
+        }
+        // The shared connection is already up (a sibling subtab connected) —
+        // the unloaded pane auto-loads on switch, so don't tell the user to
+        // reconnect.
+        if self.connected_once {
             return None;
         }
         if self.active_pane().loaded {
@@ -9112,7 +9154,12 @@ impl ContentView {
                     return Some(SubViewMessage::SelectionChanged(None));
                 }
                 let needs_load = self.switch_to_view(target);
-                if needs_load && !self.manual_connect {
+                // Auto-load the destination subtab when it has never been
+                // populated — unless this is a `manual_connect` tab that has
+                // not connected yet. Once any subtab has connected, the shared
+                // adapter connection serves every sibling, so switching loads
+                // them transparently (no second "press … to connect").
+                if needs_load && (!self.manual_connect || self.connected_once) {
                     let pane_id = self.active_pane_id();
                     Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
                         view_index: self.view_index,
@@ -11477,6 +11524,7 @@ mod tests {
                     script_default_field: None,
                     on_container: false,
                     option_menu: None,
+                    force: false,
                 }],
                 children: vec![ChildDef {
                     row_layout: None,
@@ -11650,6 +11698,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         // `a` begins the `al` chord → detected as a prefix …
         assert!(view.yaml_action_chord_prefix("a"));
@@ -14123,6 +14172,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -14686,6 +14736,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
@@ -14709,6 +14760,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         // Root view: tree_find (`/`). Like fuzzy_filter it is declared only
         // here yet must reach every cursor depth (it is in the GLOBAL set).
@@ -14732,6 +14784,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
@@ -14754,6 +14807,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         config
     }
@@ -14845,6 +14899,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
@@ -14873,6 +14928,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
@@ -14894,6 +14950,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -15756,6 +15813,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -15792,6 +15850,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let issues = mock_issues();
@@ -15834,6 +15893,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            force: false,
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -16071,6 +16131,7 @@ mod tests {
                 script_default_field: None,
                 on_container: false,
                 option_menu: None,
+                force: false,
             });
         }
         config
@@ -18722,6 +18783,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     script_default_field: None,
                     on_container: false,
                     option_menu: None,
+                    force: false,
                 },
                 ActionDef {
                     name: "refresh".to_string(),
@@ -18743,6 +18805,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     script_default_field: None,
                     on_container: false,
                     option_menu: None,
+                    force: false,
                 },
             ],
             children: vec![],
