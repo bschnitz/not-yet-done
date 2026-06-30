@@ -24,7 +24,16 @@ pub(super) struct JiraConfig {
     /// back to a private SQLite file under the user's local data dir.
     #[serde(default)]
     pub(super) db: Option<DbConfig>,
+    /// Glyph shown in the `bookmarked` marker column for a bookmarked issue
+    /// (non-bookmarked rows stay blank). Defaults to [`DEFAULT_BOOKMARK_MARKER`]
+    /// when unset. Any string is allowed — a Nerd-Font glyph, an emoji, or
+    /// plain ASCII like `*`.
+    #[serde(default)]
+    pub(super) bookmark_marker: Option<String>,
 }
+
+/// Default `bookmarked`-column glyph when `bookmark_marker` is unset.
+pub(super) const DEFAULT_BOOKMARK_MARKER: &str = "★";
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]

@@ -13,3 +13,10 @@ url: https://jira.example.com
 
 # Jira Server: session cookie auth (JSESSIONID + crowd tokens)
 # session_id: "JSESSIONID=abc123; crowd.token_key=xyz"
+
+# Glyph shown in the `bookmarked` marker column on the tickets list for a
+# bookmarked issue (blank otherwise). Default ★. Any string works — a star,
+# a Nerd-Font glyph, or an emoji. Note: emoji (e.g. ⭐) render two cells
+# wide, which can shift column alignment; a single-cell glyph keeps the
+# column width stable.
+# bookmark_marker: "★"

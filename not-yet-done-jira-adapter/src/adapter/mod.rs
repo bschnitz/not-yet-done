@@ -46,6 +46,9 @@ pub struct JiraAdapter {
     db: Arc<DatabaseConnection>,
     saved_queries: FsSavedQueryStore,
     bookmarks: Arc<dyn BookmarkStore>,
+    /// Glyph for the `bookmarked` marker column (config `bookmark_marker`,
+    /// default `★`). Threaded into `JiraRoot` and emitted per row.
+    bookmark_marker: String,
 }
 
 impl JiraAdapter {
@@ -59,6 +62,7 @@ impl JiraAdapter {
         instance_id: String,
         db: Arc<DatabaseConnection>,
         scope_id: Uuid,
+        bookmark_marker: String,
     ) -> Self {
         let cache = Arc::new(Mutex::new(JiraCache::new(Some(db.clone()), scope_id)));
         hydrate_from_db(&cache, &db, scope_id);
@@ -85,6 +89,7 @@ impl JiraAdapter {
             db,
             saved_queries: FsSavedQueryStore::new(instance_root.join("queries")),
             bookmarks,
+            bookmark_marker,
         }
     }
 }
@@ -106,6 +111,7 @@ impl ContentAdapter for JiraAdapter {
             cache: Arc::clone(&self.cache),
             connection_name: self.connection_name.clone(),
             bookmarks: Arc::clone(&self.bookmarks),
+            bookmark_marker: self.bookmark_marker.clone(),
         }))
     }
 
@@ -260,6 +266,7 @@ struct JiraRoot {
     cache: Arc<Mutex<JiraCache>>,
     connection_name: String,
     bookmarks: Arc<dyn BookmarkStore>,
+    bookmark_marker: String,
 }
 
 #[async_trait]
@@ -321,23 +328,25 @@ impl Node for JiraRoot {
     }
 }
 
-/// Glyph shown in the `bookmarked` column for an issue that is in the
-/// bookmark set; non-bookmarked rows carry an empty string so the column
-/// stays blank for them.
-const BOOKMARK_MARKER: &str = "★";
-
 /// Map a [`JiraTicket`] to the list-row [`NodeSummary`] shared by the normal
 /// and the bookmarks listing, so both render identical issue columns. When
 /// `bookmarked_at` is `Some`, an extra `bookmarked_at` field is appended for
 /// the bookmarks view's locally-sortable column. `bookmarked` drives the
 /// `bookmarked` marker column on the tickets list (so a row shows at a glance
 /// whether it is bookmarked); it is always `true` for bookmarks-view rows.
-fn issue_summary(t: JiraTicket, bookmarked_at: Option<String>, bookmarked: bool) -> NodeSummary {
+/// `marker` is the configured glyph shown for a bookmarked row (blank
+/// otherwise).
+fn issue_summary(
+    t: JiraTicket,
+    bookmarked_at: Option<String>,
+    bookmarked: bool,
+    marker: &str,
+) -> NodeSummary {
     let mut fields = vec![
         MetadataField {
             key: "bookmarked".into(),
             value: if bookmarked {
-                BOOKMARK_MARKER.into()
+                marker.to_string()
             } else {
                 String::new()
             },
@@ -446,7 +455,7 @@ impl JiraRoot {
             .into_iter()
             .map(|t| {
                 let is_bm = bookmarked.contains(&t.key);
-                issue_summary(t, None, is_bm)
+                issue_summary(t, None, is_bm, &self.bookmark_marker)
             })
             .collect();
 
@@ -512,7 +521,7 @@ impl JiraRoot {
             .into_iter()
             .map(|t| {
                 let stamp = stamps.get(&t.key).cloned();
-                issue_summary(t, stamp, true)
+                issue_summary(t, stamp, true, &self.bookmark_marker)
             })
             .collect();
 
@@ -640,18 +649,26 @@ mod bookmark_marker_tests {
 
     #[test]
     fn issue_summary_marks_bookmarked_rows() {
-        let yes = issue_summary(ticket(), None, true);
-        let no = issue_summary(ticket(), None, false);
-        assert_eq!(bookmarked_field(&yes), BOOKMARK_MARKER);
+        let yes = issue_summary(ticket(), None, true, "★");
+        let no = issue_summary(ticket(), None, false, "★");
+        assert_eq!(bookmarked_field(&yes), "★");
         assert_eq!(bookmarked_field(&no), "");
+    }
+
+    #[test]
+    fn issue_summary_honours_custom_marker() {
+        let s = issue_summary(ticket(), None, true, "");
+        assert_eq!(bookmarked_field(&s), "");
+        let blank = issue_summary(ticket(), None, false, "");
+        assert_eq!(bookmarked_field(&blank), "");
     }
 
     #[test]
     fn bookmarks_view_rows_are_always_marked() {
         // list_bookmarked_issues passes `true`; the synthetic bookmarked_at
         // column is independent of the marker.
-        let s = issue_summary(ticket(), Some("2026-06-30T10:00:00Z".into()), true);
-        assert_eq!(bookmarked_field(&s), BOOKMARK_MARKER);
+        let s = issue_summary(ticket(), Some("2026-06-30T10:00:00Z".into()), true, "★");
+        assert_eq!(bookmarked_field(&s), "★");
         assert!(s.metadata.fields.iter().any(|f| f.key == "bookmarked_at"));
     }
 }
