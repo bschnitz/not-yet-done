@@ -437,10 +437,6 @@ impl DetachedScript {
     pub fn read_output(&self) -> Option<String> {
         std::fs::read_to_string(&self.output_path).ok()
     }
-
-    pub fn cleanup(&self) {
-        let _ = std::fs::remove_file(&self.output_path);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7901,6 +7897,23 @@ impl App {
             return;
         }
 
+        // `:reload` / `:refresh` — re-fetch the active content pane at its
+        // current level. Primarily for `commands`-mode scripts that mutate
+        // the underlying data (e.g. a period equalizer): the script returns
+        // `:reload` once its synchronous writes are done, so the refresh
+        // can't race ahead of them.
+        if args[0] == "reload" || args[0] == "refresh" {
+            if args.len() > 1 {
+                self.modal_message = Some(format!(":{} takes no arguments", args[0]));
+                return;
+            }
+            let Tab::Content(view_index) = self.active_tab;
+            if let Some(pane_id) = self.content_view(view_index).map(|cv| cv.active_pane_id()) {
+                self.reload_content_pane_current_level(view_index, pane_id);
+            }
+            return;
+        }
+
         if args[0] == "jump" {
             if args.len() != 2 {
                 self.modal_message =
@@ -8267,14 +8280,13 @@ impl App {
         let capture = script.capture;
         let emits_commands = script.emits_commands;
         let output_suffix = script.output_suffix.clone();
-        script.cleanup();
         self.detached_script = None;
 
         if emits_commands {
-            // Re-use the same JSON-commands handler the background path
-            // uses. We pass the path because read_output() already drained
-            // the file; the helper re-reads it itself, so we touch the
-            // file once at this layer instead of duplicating the parser.
+            // Re-use the same JSON-commands handler the background path uses;
+            // it re-reads the file itself. Must run *before* we delete the
+            // file below — deleting first would make it silently find no
+            // commands.
             self.run_script_output_commands(&output_path);
         } else if capture {
             if let Some(content) = output.filter(|s| !s.trim().is_empty()) {
@@ -8285,6 +8297,10 @@ impl App {
                 self.notify("Script finished (no output)".to_string());
             }
         }
+
+        // Remove the marker/output file only now — the commands handler
+        // above re-reads it from disk, so deleting earlier would drop them.
+        let _ = std::fs::remove_file(&output_path);
 
         true
     }
