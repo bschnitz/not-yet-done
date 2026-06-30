@@ -321,12 +321,30 @@ impl Node for JiraRoot {
     }
 }
 
+/// Glyph shown in the `bookmarked` column for an issue that is in the
+/// bookmark set; non-bookmarked rows carry an empty string so the column
+/// stays blank for them.
+const BOOKMARK_MARKER: &str = "★";
+
 /// Map a [`JiraTicket`] to the list-row [`NodeSummary`] shared by the normal
 /// and the bookmarks listing, so both render identical issue columns. When
 /// `bookmarked_at` is `Some`, an extra `bookmarked_at` field is appended for
-/// the bookmarks view's locally-sortable column.
-fn issue_summary(t: JiraTicket, bookmarked_at: Option<String>) -> NodeSummary {
+/// the bookmarks view's locally-sortable column. `bookmarked` drives the
+/// `bookmarked` marker column on the tickets list (so a row shows at a glance
+/// whether it is bookmarked); it is always `true` for bookmarks-view rows.
+fn issue_summary(t: JiraTicket, bookmarked_at: Option<String>, bookmarked: bool) -> NodeSummary {
     let mut fields = vec![
+        MetadataField {
+            key: "bookmarked".into(),
+            value: if bookmarked {
+                BOOKMARK_MARKER.into()
+            } else {
+                String::new()
+            },
+            display_label: "Bookmark".into(),
+            editable: false,
+            allowed_values: None,
+        },
         MetadataField {
             key: "key".into(),
             value: t.key.clone(),
@@ -411,11 +429,25 @@ impl JiraRoot {
             .await
             .map_err(other_err)?;
 
+        // Bookmark set for the `bookmarked` marker column. One store read
+        // per listing; toggling a bookmark reloads the pane, so the marker
+        // stays in sync. A store error must not break the issue list — fall
+        // back to "nothing bookmarked".
+        let bookmarked: std::collections::HashSet<String> = self
+            .bookmarks
+            .list()
+            .await
+            .map(|bs| bs.into_iter().map(|b| b.id).collect())
+            .unwrap_or_default();
+
         let returned = page.tickets.len() as u64;
         let items = page
             .tickets
             .into_iter()
-            .map(|t| issue_summary(t, None))
+            .map(|t| {
+                let is_bm = bookmarked.contains(&t.key);
+                issue_summary(t, None, is_bm)
+            })
             .collect();
 
         let page_info = {
@@ -480,7 +512,7 @@ impl JiraRoot {
             .into_iter()
             .map(|t| {
                 let stamp = stamps.get(&t.key).cloned();
-                issue_summary(t, stamp)
+                issue_summary(t, stamp, true)
             })
             .collect();
 
@@ -577,5 +609,49 @@ impl JiraRoot {
         let users = self.client.all_users().await.map_err(other_err)?;
         cache::persist_users(&self.cache, users.clone()).await;
         Ok(users)
+    }
+}
+
+#[cfg(test)]
+mod bookmark_marker_tests {
+    use super::*;
+
+    fn ticket() -> JiraTicket {
+        JiraTicket {
+            key: "TEST-1".into(),
+            summary: "A ticket".into(),
+            status: "Open".into(),
+            priority: "High".into(),
+            assignee: "me".into(),
+            issue_type: "Bug".into(),
+            updated: "2026-06-30".into(),
+            attachments_count: 0,
+        }
+    }
+
+    fn bookmarked_field(s: &NodeSummary) -> &str {
+        s.metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "bookmarked")
+            .map(|f| f.value.as_str())
+            .expect("bookmarked field present")
+    }
+
+    #[test]
+    fn issue_summary_marks_bookmarked_rows() {
+        let yes = issue_summary(ticket(), None, true);
+        let no = issue_summary(ticket(), None, false);
+        assert_eq!(bookmarked_field(&yes), BOOKMARK_MARKER);
+        assert_eq!(bookmarked_field(&no), "");
+    }
+
+    #[test]
+    fn bookmarks_view_rows_are_always_marked() {
+        // list_bookmarked_issues passes `true`; the synthetic bookmarked_at
+        // column is independent of the marker.
+        let s = issue_summary(ticket(), Some("2026-06-30T10:00:00Z".into()), true);
+        assert_eq!(bookmarked_field(&s), BOOKMARK_MARKER);
+        assert!(s.metadata.fields.iter().any(|f| f.key == "bookmarked_at"));
     }
 }

@@ -38,6 +38,14 @@ views:
       menu_key: q
 
     columns:
+      # Marker column: shows a ★ for issues in the bookmark set (toggle with
+      # B). Backed by the synthetic `bookmarked` metadata field the adapter
+      # emits on every issue row; the marker refreshes when the pane reloads
+      # after a B-toggle. The bookmarks subtab omits it (every row is ★).
+      - key: bookmarked
+        label: "★"
+        style: accent
+        sizing: max
       - key: key
         label: Key
         style: accent
