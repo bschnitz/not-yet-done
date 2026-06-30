@@ -88,6 +88,9 @@ impl AdapterFactory for JiraAdapterFactory {
 
         let scope_id = scope_id_for_url(&cfg.url);
         let name = cfg.name.unwrap_or_else(|| cfg.url.clone());
+        let bookmark_marker = cfg
+            .bookmark_marker
+            .unwrap_or_else(|| super::config::DEFAULT_BOOKMARK_MARKER.to_string());
 
         let store = SqlAuthSessionStore::new(Arc::clone(&db), scope_id);
         let auth = AuthBridge::new(
@@ -114,6 +117,7 @@ impl AdapterFactory for JiraAdapterFactory {
             instance_id.to_string(),
             db,
             scope_id,
+            bookmark_marker,
         )))
     }
 }
