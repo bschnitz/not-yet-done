@@ -196,6 +196,7 @@ impl Node for StoatChannelNode {
                 Ok(ActionOutcome::Navigate {
                     node_id: composite_id(&self.channel_id, &message_id),
                     node_type: message_type().clone(),
+                    message: None,
                 })
             }
             // Rename the channel itself. `PATCH /channels/{id}` is a

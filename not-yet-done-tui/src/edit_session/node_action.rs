@@ -161,28 +161,43 @@ impl EditSession for NodeActionEditSession {
                     message: Some("No changes".into()),
                 }
             }
-            Ok(ActionOutcome::Navigate { node_id: new_id, node_type }) => {
+            Ok(ActionOutcome::Navigate { node_id: new_id, node_type, message }) => {
                 self.mark_applied(text);
                 // commit_on_save: the action just created a node; retarget so
                 // later saves edit it in place instead of creating again.
                 if self.commit_on_save {
                     self.retarget_to_created(new_id.clone()).await;
                 }
-                // A create always carries both `nav` (parent + child type)
-                // and `reload` (origin pane). Splice the new child in place
-                // rather than full-reloading: the App decides tree-local
-                // insert vs. drill-refresh per pane kind.
                 match (self.nav.as_ref(), self.reload) {
+                    // A `type: create` action carries `nav` (parent + child
+                    // type). Splice the new child in place rather than
+                    // full-reloading: the App decides tree-local insert vs.
+                    // drill-refresh per pane kind.
                     (Some(ctx), Some(target)) => {
                         CommitOutcome::FollowUp(FollowUp::InsertContentChild {
                             view_index: ctx.view_index,
                             pane_id: target.pane_id,
                             parent_node_id: ctx.parent_node_id.clone(),
                             child_node_type: ctx.child_node_type.clone(),
-                            message: format!(
-                                "Created {} on {}",
-                                node_type.display_name, ctx.parent_node_id
-                            ),
+                            message: message.unwrap_or_else(|| {
+                                format!(
+                                    "Created {} on {}",
+                                    node_type.display_name, ctx.parent_node_id
+                                )
+                            }),
+                        })
+                    }
+                    // An `edit`-shaped action that nonetheless created a node
+                    // (e.g. Taiga `clone`): there's no parent-list context to
+                    // insert into, so reload the originating pane's current
+                    // level — the new sibling then shows up, same as `r`.
+                    (None, Some(target)) => {
+                        CommitOutcome::FollowUp(FollowUp::ReloadContentPane {
+                            view_index: target.view_index,
+                            pane_id: target.pane_id,
+                            message: message.unwrap_or_else(|| {
+                                format!("Created {}", node_type.display_name)
+                            }),
                         })
                     }
                     _ => self.done_with_row_patch(format!("Created {new_id}")),
@@ -377,6 +392,7 @@ mod tests {
                     Ok(ActionOutcome::Navigate {
                         node_id: "msg".into(),
                         node_type: ntype("mock:message"),
+                        message: None,
                     })
                 }
                 "edit_message" => {
@@ -483,6 +499,45 @@ mod tests {
                 assert_eq!(child_node_type, "mock:message");
             }
             _ => panic!("expected InsertContentChild follow-up"),
+        }
+        assert_eq!(backend.lock().unwrap().sends, vec!["hello".to_string()]);
+    }
+
+    /// An `edit`-shaped action that returns `Navigate` (a new node) but has
+    /// no `nav` context — the Taiga `clone` shape — asks the App to reload the
+    /// originating pane's current level so the new sibling appears. The
+    /// adapter-supplied message rides through unchanged.
+    #[tokio::test]
+    async fn create_without_nav_yields_reload_content_pane() {
+        let backend = Arc::new(Mutex::new(Backend::default()));
+        let adapter = Arc::new(MockAdapter {
+            backend: Arc::clone(&backend),
+            meta: Metadata::default(),
+        });
+        let mut s = NodeActionEditSession::new(
+            adapter,
+            "channel".into(),
+            "send_message".into(),
+            "clone".into(),
+            None,
+            Some(ReloadTarget { view_index: 3, pane_id: 9 }),
+            None,
+            false,
+        )
+        .await
+        .expect("session builds");
+
+        match s.commit("hello").await {
+            CommitOutcome::FollowUp(FollowUp::ReloadContentPane {
+                view_index,
+                pane_id,
+                message,
+            }) => {
+                assert_eq!(view_index, 3);
+                assert_eq!(pane_id, 9);
+                assert!(message.starts_with("Created"), "got {message:?}");
+            }
+            _ => panic!("expected ReloadContentPane follow-up"),
         }
         assert_eq!(backend.lock().unwrap().sends, vec!["hello".to_string()]);
     }

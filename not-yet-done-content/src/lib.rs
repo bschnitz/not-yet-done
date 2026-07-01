@@ -962,9 +962,12 @@ pub enum ActionOutcome {
     /// Nothing changed — no roundtrip needed.
     NoChanges,
     /// The action created or surfaced a new node — caller may navigate.
+    /// `message` is an optional adapter-supplied notification; when `None`
+    /// the caller builds a default from `node_type`.
     Navigate {
         node_id: String,
         node_type: NodeType,
+        message: Option<String>,
     },
 }
 

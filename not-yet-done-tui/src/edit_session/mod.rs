@@ -190,6 +190,15 @@ pub enum FollowUp {
         child_node_type: String,
         message: String,
     },
+    /// An `edit`-shaped action created a new node with no parent-list
+    /// context to splice into (e.g. Taiga `clone`, which creates a sibling).
+    /// Reload the originating pane's current level so the new node appears —
+    /// the same refresh as a manual `r`.
+    ReloadContentPane {
+        view_index: usize,
+        pane_id: PaneId,
+        message: String,
+    },
     /// Live-apply a content view query without persisting.
     ApplyContentFilter {
         view_index: usize,
