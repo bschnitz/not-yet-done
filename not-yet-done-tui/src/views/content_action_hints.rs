@@ -74,7 +74,7 @@ fn content_nav_hint(action: &ContentAction) -> Option<NavHint> {
         ToggleRecordDetail | ToggleDetailWrap | ToggleGroupOrder => return None,
         // Activatable / richer-path sources: surfaced (with their
         // ActiveSource) by the action-bar builder, not here.
-        EditQuery | OpenScriptsMenu | GroupMenu | JumpMode => return None,
+        EditQuery | OpenScriptsMenu | GroupMenu | JumpMode | LinkHop => return None,
     };
     Some(NavHint { label, bar })
 }

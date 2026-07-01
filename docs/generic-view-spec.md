@@ -1485,6 +1485,37 @@ Das Label-Alphabet stammt aus `navigation.jump_chars` (geteilt mit dem
 nativen Tab). Der Sprung wirkt nur auf das fokussierte Pane; in Splits
 gilt er für das gerade aktive Pane.
 
+### Link-Hop (`link_hop`, Default `f`)
+
+Vimium-artige Link-Auswahl: `f` labelt jeden im fokussierten Pane
+sichtbaren Link; das Label tippen öffnet die zugehörige URL im Browser.
+Nützlich vor allem in markdown-gerenderten Panes (z. B. Stoat-Chat), gilt
+aber generisch für jedes Content-Pane.
+
+Erkannt werden zwei Link-Formen aus dem Zeilentext:
+
+- **nackte URLs** — `https://example.com/x`
+- **Markdown-Links** — `[text](url)`; gelabelt wird der angezeigte
+  `text`, geöffnet die `url` (der Markdown-Renderer zeigt nur den Text an,
+  die URL wird aus dem Rohtext rekonstruiert).
+
+Ablauf: `f` labelt alle sichtbaren Links; Label tippen → die URL wird mit
+dem konfigurierten Opener geöffnet (`Esc` bricht ab; gibt es keinen Link,
+erscheint ein Hinweis). Der Overlay teilt sich Label-Alphabet
+(`navigation.jump_chars`) und Bedienlogik mit dem Jump-Mode.
+
+Der Opener ist über `navigation.link_opener` konfigurierbar (Default
+`xdg-open`); der String wird an Whitespace getrennt, die URL als letztes
+Argument angehängt — so funktionieren auch Flags, z. B.
+`firefox --new-tab`. Der Prozess wird abgekoppelt (eigene Prozessgruppe,
+`/dev/null`-Stdio) gestartet, damit die TUI nie auf den Browser blockiert.
+
+```yaml
+navigation:
+  jump_chars: "abcdefghijklmnopqrstuvwxyz"
+  link_opener: "xdg-open"
+```
+
 ---
 
 ## Per-Node-Aktionen (`shortcuts:`)

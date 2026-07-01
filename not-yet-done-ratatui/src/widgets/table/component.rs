@@ -89,6 +89,51 @@ pub struct Table {
     pub(crate) nav_chars: Vec<char>,
     /// Current jump phase.
     pub(crate) jump_phase: JumpPhase,
+    /// Current link-hop phase (independent of `jump_phase`).
+    pub(crate) link_phase: LinkPhase,
+}
+
+/// A located, labelled hop target: a needle string found on a visible line,
+/// carrying the opaque payload the caller wants back on selection.
+#[derive(Debug, Clone)]
+pub struct LinkMatch {
+    /// Absolute data-row index the match sits in.
+    pub row: usize,
+    /// Physical line index within that row (0 = primary line).
+    pub line: usize,
+    /// Char offset of the match start within the concatenated line text.
+    pub col: usize,
+    /// Opaque payload returned when this label is picked (e.g. a URL).
+    pub payload: String,
+    /// The overlay label assigned to this match.
+    pub label: String,
+}
+
+/// Link-hop state machine. Mirrors [`JumpPhase`] but resolves to an opaque
+/// payload (a URL) instead of a row selection, and anchors matches on any
+/// physical line (not just the primary line) so links inside multi-line
+/// bodies get labelled.
+#[derive(Debug, Clone)]
+pub enum LinkPhase {
+    /// Not active.
+    Off,
+    /// Matches found — labels displayed, waiting for label input.
+    ShowingLabels {
+        matches: Vec<LinkMatch>,
+        /// Partial label input so far.
+        input: String,
+    },
+}
+
+/// Outcome of feeding a character to link-hop label input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkHopOutcome {
+    /// The typed char narrowed the set but no unique label yet.
+    Pending,
+    /// A label resolved — here is its payload (URL).
+    Picked(String),
+    /// The typed char matched no label; link-hop is now closed.
+    NoMatch,
 }
 
 /// Jump navigation state machine.
@@ -132,6 +177,7 @@ impl Default for Table {
             keymap: TableKeymap::default(),
             nav_chars: Vec::new(),
             jump_phase: JumpPhase::Off,
+            link_phase: LinkPhase::Off,
         }
     }
 }
@@ -278,6 +324,151 @@ impl Table {
                 String::new()
             }
         }
+    }
+
+    // --- link-hop navigation ---
+
+    /// Whether link-hop is currently displaying labels.
+    pub fn is_link_hop_active(&self) -> bool {
+        matches!(self.link_phase, LinkPhase::ShowingLabels { .. })
+    }
+
+    /// Open link-hop: search every visible physical line for each `(needle,
+    /// payload)` target, label each occurrence, and enter the label-input
+    /// phase. `needle` is the on-screen text (a bare URL, or a markdown
+    /// link's display text); `payload` is what [`Self::link_hop_input`]
+    /// returns when that label is picked (the URL to open).
+    ///
+    /// Returns the number of labelled matches (0 = nothing found, phase
+    /// stays `Off`).
+    pub fn link_hop_open(&mut self, targets: &[(String, String)]) -> usize {
+        self.link_phase = LinkPhase::Off;
+        if self.nav_chars.is_empty() || targets.is_empty() {
+            return 0;
+        }
+        let sep_len = self.separator.chars().count();
+
+        // First pass: collect raw (row, line, col, payload) matches over the
+        // visible rows. Longer needles are searched first so that a markdown
+        // link's display text wins over a bare-URL substring living inside it.
+        let mut order: Vec<usize> = (0..targets.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(targets[i].0.chars().count()));
+
+        let mut raw: Vec<(usize, usize, usize, String)> = Vec::new();
+        for (vi, row) in self
+            .rows
+            .iter()
+            .skip(self.scroll_offset)
+            .take(self.last_visible_data_rows)
+            .enumerate()
+        {
+            let row_idx = self.scroll_offset + vi;
+            for (li, line) in row.lines.iter().enumerate() {
+                // Concatenate the line's cells the same way render lays them
+                // out (cells joined by the separator), tracking each cell's
+                // starting char offset.
+                let mut text = String::new();
+                for (ci, cell) in line.cells.iter().enumerate() {
+                    if ci > 0 {
+                        text.push_str(&self.separator);
+                        let _ = sep_len;
+                    }
+                    text.push_str(&cell.text);
+                }
+                if text.is_empty() {
+                    continue;
+                }
+                let chars: Vec<char> = text.chars().collect();
+                // Mask already-claimed spans on this line so overlapping
+                // needles don't double-label the same characters.
+                let mut claimed = vec![false; chars.len()];
+                for &ti in &order {
+                    let (needle, payload) = &targets[ti];
+                    let needle_chars: Vec<char> = needle.chars().collect();
+                    if needle_chars.is_empty() {
+                        continue;
+                    }
+                    let mut start = 0usize;
+                    while start + needle_chars.len() <= chars.len() {
+                        let hit = chars[start..start + needle_chars.len()] == needle_chars[..];
+                        if hit {
+                            let free = (start..start + needle_chars.len())
+                                .all(|i| !claimed[i]);
+                            if free {
+                                for i in start..start + needle_chars.len() {
+                                    claimed[i] = true;
+                                }
+                                raw.push((row_idx, li, start, payload.clone()));
+                                start += needle_chars.len();
+                                continue;
+                            }
+                        }
+                        start += 1;
+                    }
+                }
+            }
+        }
+
+        if raw.is_empty() {
+            return 0;
+        }
+        // Stable order: top-to-bottom, left-to-right, so labels read naturally.
+        raw.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+
+        let total = raw.len();
+        let mut matches = Vec::with_capacity(total);
+        for (i, (row, line, col, payload)) in raw.into_iter().enumerate() {
+            let label = self.nth_label_of(i, total);
+            if label.is_empty() {
+                continue;
+            }
+            matches.push(LinkMatch { row, line, col, payload, label });
+        }
+        if matches.is_empty() {
+            return 0;
+        }
+        let n = matches.len();
+        self.link_phase = LinkPhase::ShowingLabels {
+            matches,
+            input: String::new(),
+        };
+        n
+    }
+
+    /// Feed a character to link-hop label input. Returns whether a label
+    /// resolved (with its payload), narrowed, or missed.
+    pub fn link_hop_input(&mut self, ch: char) -> LinkHopOutcome {
+        let (matches, mut input) = match std::mem::replace(&mut self.link_phase, LinkPhase::Off) {
+            LinkPhase::ShowingLabels { matches, input } => (matches, input),
+            LinkPhase::Off => return LinkHopOutcome::NoMatch,
+        };
+        input.push(ch);
+        let label_len = self.label_len_for_count(matches.len());
+
+        if input.chars().count() >= label_len {
+            if let Some(m) = matches.iter().find(|m| m.label == input) {
+                return LinkHopOutcome::Picked(m.payload.clone());
+            }
+            return LinkHopOutcome::NoMatch;
+        }
+
+        let still_valid: Vec<&LinkMatch> = matches
+            .iter()
+            .filter(|m| m.label.starts_with(&input))
+            .collect();
+        match still_valid.len() {
+            0 => LinkHopOutcome::NoMatch,
+            1 => LinkHopOutcome::Picked(still_valid[0].payload.clone()),
+            _ => {
+                self.link_phase = LinkPhase::ShowingLabels { matches, input };
+                LinkHopOutcome::Pending
+            }
+        }
+    }
+
+    /// Cancel link-hop.
+    pub fn link_hop_close(&mut self) {
+        self.link_phase = LinkPhase::Off;
     }
 
     /// Set fixed header rows (always visible at top).
@@ -846,6 +1037,27 @@ impl Component for Table {
             _ => (empty_matches, false, ""),
         };
 
+        // Extract link-hop state for rendering: convert absolute row index to
+        // visible index and drop matches scrolled out of view.
+        let empty_links: Vec<(usize, usize, usize, String)> = Vec::new();
+        let (link_matches, link_showing) = match &self.link_phase {
+            LinkPhase::ShowingLabels { matches, .. } => {
+                let visible: Vec<(usize, usize, usize, String)> = matches
+                    .iter()
+                    .filter_map(|m| {
+                        let vi = m.row.checked_sub(self.scroll_offset)?;
+                        if vi < visible_data {
+                            Some((vi, m.line, m.col, m.label.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                (visible, true)
+            }
+            LinkPhase::Off => (empty_links, false),
+        };
+
         // Number of leading characters hidden by horizontal scroll —
         // used to shift jump-mode label positions into the visible area.
         let scrolled_chars = if self.scroll_col_offset > 0 {
@@ -876,6 +1088,8 @@ impl Component for Table {
             jump_matches: &jump_matches,
             jump_showing_labels,
             jump_input,
+            link_matches: &link_matches,
+            link_showing,
         };
         render(frame.buffer_mut(), area, &data);
     }
@@ -1171,5 +1385,92 @@ mod tests {
         // A budget smaller than one row still shows that row (clipped).
         assert_eq!(table.visible_row_count_from(0, 2), 1);
         assert_eq!(table.visible_row_count_from(0, 0), 0);
+    }
+
+    // ── link-hop ──────────────────────────────────────────────────────
+
+    fn link_table(texts: &[&str]) -> Table {
+        let mut t = Table::default().with_rows(
+            texts
+                .iter()
+                .map(|s| TableWidgetRow::new(vec![TableWidgetCell::plain(*s)]))
+                .collect(),
+        );
+        t.set_nav_chars(&['a', 'b', 'c', 'd', 'e', 'f']);
+        t.last_visible_data_rows = texts.len();
+        t
+    }
+
+    #[test]
+    fn link_hop_labels_each_visible_target() {
+        let mut t = link_table(&["see https://a.test now", "and https://b.test too"]);
+        let targets = vec![
+            ("https://a.test".to_string(), "https://a.test".to_string()),
+            ("https://b.test".to_string(), "https://b.test".to_string()),
+        ];
+        assert_eq!(t.link_hop_open(&targets), 2);
+        assert!(t.is_link_hop_active());
+    }
+
+    #[test]
+    fn link_hop_single_label_resolves_to_payload() {
+        let mut t = link_table(&["open [docs](x) here"]);
+        // Needle is the display text, payload the URL.
+        let targets = vec![("docs".to_string(), "https://example.com/docs".to_string())];
+        assert_eq!(t.link_hop_open(&targets), 1);
+        // One match → single-char label 'a'.
+        match t.link_hop_input('a') {
+            LinkHopOutcome::Picked(url) => assert_eq!(url, "https://example.com/docs"),
+            other => panic!("expected Picked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_hop_first_label_maps_to_topmost_match() {
+        let mut t = link_table(&["https://first.test", "https://second.test"]);
+        let targets = vec![
+            ("https://first.test".to_string(), "https://first.test".to_string()),
+            ("https://second.test".to_string(), "https://second.test".to_string()),
+        ];
+        assert_eq!(t.link_hop_open(&targets), 2);
+        // Labels read top-to-bottom: 'a' → first row's URL.
+        match t.link_hop_input('a') {
+            LinkHopOutcome::Picked(url) => assert_eq!(url, "https://first.test"),
+            other => panic!("expected Picked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_hop_no_targets_stays_off() {
+        let mut t = link_table(&["plain row"]);
+        assert_eq!(t.link_hop_open(&[]), 0);
+        assert!(!t.is_link_hop_active());
+    }
+
+    #[test]
+    fn link_hop_needle_absent_from_screen_is_not_labelled() {
+        let mut t = link_table(&["nothing to see"]);
+        let targets = vec![("https://ghost.test".to_string(), "https://ghost.test".to_string())];
+        assert_eq!(t.link_hop_open(&targets), 0);
+        assert!(!t.is_link_hop_active());
+    }
+
+    #[test]
+    fn link_hop_wrong_label_char_misses() {
+        let mut t = link_table(&["https://a.test"]);
+        let targets = vec![("https://a.test".to_string(), "https://a.test".to_string())];
+        assert_eq!(t.link_hop_open(&targets), 1);
+        // Only label is 'a'; 'z' is not a nav char → miss.
+        assert_eq!(t.link_hop_input('z'), LinkHopOutcome::NoMatch);
+    }
+
+    #[test]
+    fn link_hop_close_disarms() {
+        let mut t = link_table(&["https://a.test"]);
+        let targets = vec![("https://a.test".to_string(), "https://a.test".to_string())];
+        t.link_hop_open(&targets);
+        assert!(t.is_link_hop_active());
+        t.link_hop_close();
+        assert!(!t.is_link_hop_active());
     }
 }

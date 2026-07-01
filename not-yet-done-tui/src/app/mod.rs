@@ -3832,6 +3832,39 @@ impl App {
             return EditorRequest::None;
         }
 
+        // Link-hop: intercept all keys while link labels are showing. Esc
+        // cancels; a single label char either narrows (Pending), resolves to
+        // a URL (Picked → open in browser, detached), or misses (NoMatch).
+        if self.active_table_mut().is_some_and(|t| t.link_hop_active()) {
+            if key == "esc" {
+                if let Some(table) = self.active_table_mut() {
+                    table.link_hop_close();
+                }
+            } else if key.chars().count() == 1 && !key.chars().next().unwrap().is_control() {
+                let ch = key.chars().next().unwrap();
+                let outcome = self
+                    .active_table_mut()
+                    .map(|t| t.link_hop_input(ch))
+                    .unwrap_or(not_yet_done_ratatui::LinkHopOutcome::NoMatch);
+                match outcome {
+                    not_yet_done_ratatui::LinkHopOutcome::Picked(url) => {
+                        if let Some(table) = self.active_table_mut() {
+                            table.link_hop_close();
+                        }
+                        self.open_link_in_browser(&url);
+                    }
+                    not_yet_done_ratatui::LinkHopOutcome::NoMatch => {
+                        if let Some(table) = self.active_table_mut() {
+                            table.link_hop_close();
+                        }
+                    }
+                    not_yet_done_ratatui::LinkHopOutcome::Pending => {}
+                }
+            }
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
         // Command line mode: delegate to active view's CmdlineComponent.
         {
             use crate::views::{CmdlineKeyResult, HasCmdline};
@@ -7199,6 +7232,39 @@ impl App {
         let Tab::Content(idx) = self.active_tab;
         self.content_view_mut(idx)
             .map(|cv| &mut cv.active_pane_mut().table)
+    }
+
+    /// Open a URL with the configured link opener (default `xdg-open`),
+    /// detached so the TUI never blocks on the launched browser. The opener
+    /// string is split on whitespace so leading flags work; the URL is the
+    /// final argument. Stdio is nulled and the child is placed in its own
+    /// process group so it can outlive this session cleanly.
+    fn open_link_in_browser(&mut self, url: &str) {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let template = self.config.navigation.link_opener.trim();
+        let mut parts = template.split_whitespace();
+        let Some(program) = parts.next() else {
+            self.notify("No link opener configured".to_string());
+            return;
+        };
+        let args: Vec<&str> = parts.collect();
+
+        let mut cmd = Command::new(program);
+        cmd.args(&args)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Detach into a fresh process group so xdg-open (and the browser it
+        // execs) never shares this TUI's controlling terminal or pipes.
+        cmd.process_group(0);
+
+        match cmd.spawn() {
+            Ok(_child) => self.notify(format!("Opening {url}")),
+            Err(e) => self.notify(format!("Failed to open link: {e}")),
+        }
     }
 
     /// Load column configuration from DB.

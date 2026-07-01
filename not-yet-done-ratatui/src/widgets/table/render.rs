@@ -43,6 +43,11 @@ pub(super) struct RenderData<'a> {
     pub jump_showing_labels: bool,
     /// Current partial label input (to highlight matching labels).
     pub jump_input: &'a str,
+    /// Link-hop: (visible_index, physical_line, char_col, label) per located
+    /// link. Anchored on any physical line (not just the primary line).
+    pub link_matches: &'a [(usize, usize, usize, String)],
+    /// Whether link-hop labels are being shown (dims non-link lines).
+    pub link_showing: bool,
 }
 
 pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
@@ -134,6 +139,36 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
                                     cell.set_char(ch);
                                     cell.set_style(label_style);
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Overlay link-hop labels on this physical line. Anchored at the
+            // link's start column (vimium-style: the label sits over the
+            // link's first characters). `vi` is the visible row index the
+            // link_matches use.
+            if data.link_showing {
+                let label_style = Style::default()
+                    .fg(ratatui::style::Color::Black)
+                    .bg(ratatui::style::Color::Green)
+                    .add_modifier(Modifier::BOLD);
+                for (_, _, col, label) in data
+                    .link_matches
+                    .iter()
+                    .filter(|(mvi, mline, _, _)| *mvi == vi && *mline == li)
+                {
+                    let Some(visible_pos) = col.checked_sub(data.scrolled_chars) else {
+                        continue;
+                    };
+                    let label_x = area.left() + visible_pos as u16;
+                    for (i, ch) in label.chars().enumerate() {
+                        let x = label_x + i as u16;
+                        if x < area.right() {
+                            if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
+                                cell.set_char(ch);
+                                cell.set_style(label_style);
                             }
                         }
                     }
@@ -442,6 +477,8 @@ mod fg_precedence_tests {
             jump_matches: &[],
             jump_showing_labels: false,
             jump_input: "",
+            link_matches: &[],
+            link_showing: false,
         };
         let area = Rect { x: 0, y: 0, width: 10, height };
         let mut buf = Buffer::empty(area);
@@ -530,6 +567,8 @@ mod fg_precedence_tests {
             jump_matches: &[],
             jump_showing_labels: false,
             jump_input: "",
+            link_matches: &[],
+            link_showing: false,
         };
         let area = Rect { x: 0, y: 0, width: 10, height: 1 };
         let mut buf = Buffer::empty(area);

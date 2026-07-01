@@ -158,6 +158,12 @@ keine Sonderfälle mehr.
 - [ ] Rebinding-Test: `jump_mode` in `tui.yaml` auf eine andere Taste
       legen → Hint zeigt die neue Taste UND markiert weiterhin korrekt
       (Identität über die konfigurierte Taste, nicht hartcodiert).
+- [ ] **Link-Hop**: In einem Stoat-Chat mit sichtbaren Links (nackte URL
+      und/oder Markdown-`[text](url)`) `f` drücken → jeder Link bekommt ein
+      grünes Label; Label tippen → URL öffnet im Browser (Opener aus
+      `navigation.link_opener`, Default `xdg-open`), TUI blockiert nicht.
+      `Esc` schließt den Overlay; Pane ohne Link → Hinweis „No links on
+      screen". Generisch auf jedem Content-Tab (nicht nur Stoat).
 
 ## EditSession — Jira (Refactor Phase 7)
 
