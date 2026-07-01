@@ -134,6 +134,12 @@ views:
           - name: messages
             node_type: "stoat:message"
             split: { direction: right, ratio: 0.8, coupled: true }
+            # This message pane is a *coupled* child: drilling in pushes a
+            # nav frame so the pane can hot-replace on the next channel. That
+            # frame would otherwise make Backspace claim `Back` and pop the
+            # chat back to the channel list — navigation that belongs to the
+            # tree on the left. Disable `Back` here so Backspace is inert.
+            keybindings: { back: null }
             # `smooth_scroll: true` makes this (long, multi-line) list scroll
             # one physical line at a time over the whole content instead of
             # jumping message-to-message — the body "glides" continuously.
@@ -272,6 +278,9 @@ views:
               - name: messages
                 node_type: "stoat:message"
                 split: { direction: right, ratio: 0.8, coupled: true }
+                # Disable `Back` on this coupled pane too (see the
+                # uncategorized-channels branch above for why).
+                keybindings: { back: null }
                 # Smooth line-wise scrolling + same chat layout as the
                 # uncategorized-channels branch above.
                 smooth_scroll: true
