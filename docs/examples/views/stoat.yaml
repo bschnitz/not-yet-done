@@ -127,11 +127,13 @@ views:
         # Enter on a channel has no tree-continuing child (messages carry
         # no tree_label), so it DRILLS into the message list. `split` opens
         # that list in a focused pane to the right (80%) while the channel
-        # tree stays on the left (20%).
+        # tree stays on the left (20%). `coupled: true` makes the channel
+        # tree *own* that message pane: drilling into another channel
+        # hot-replaces the open chat instead of stacking a second split.
         children:
           - name: messages
             node_type: "stoat:message"
-            split: { direction: right, ratio: 0.8 }
+            split: { direction: right, ratio: 0.8, coupled: true }
             # `smooth_scroll: true` makes this (long, multi-line) list scroll
             # one physical line at a time over the whole content instead of
             # jumping message-to-message — the body "glides" continuously.
@@ -269,7 +271,7 @@ views:
             children:
               - name: messages
                 node_type: "stoat:message"
-                split: { direction: right, ratio: 0.8 }
+                split: { direction: right, ratio: 0.8, coupled: true }
                 # Smooth line-wise scrolling + same chat layout as the
                 # uncategorized-channels branch above.
                 smooth_scroll: true
