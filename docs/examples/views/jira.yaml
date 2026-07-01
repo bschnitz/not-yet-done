@@ -43,7 +43,7 @@ views:
       # emits on every issue row; the marker refreshes when the pane reloads
       # after a B-toggle. The bookmarks subtab omits it (every row is ★).
       - key: bookmarked
-        label: "★"
+        label: B
         style: accent
         sizing: max
       - key: key
