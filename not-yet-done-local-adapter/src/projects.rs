@@ -228,6 +228,7 @@ async fn execute_create(
     Ok(ActionOutcome::Navigate {
         node_id: created.id.to_string(),
         node_type: project_item_type(),
+        message: None,
     })
 }
 

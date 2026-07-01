@@ -13,6 +13,7 @@ use not_yet_done_content::*;
 use crate::client::{CreateFields, CreatedItem, ItemType, TaigaClient, create_item};
 
 use super::TaigaItemNode;
+use super::node_type_for;
 use super::edit_full::build_tables;
 use super::slugs::TaigaSlugTables;
 use super::template::{
@@ -90,7 +91,7 @@ impl TaigaItemNode {
             assigned_users,
         };
 
-        let CreatedItem { id: _, r#ref: new_ref } =
+        let CreatedItem { id: new_id, r#ref: new_ref } =
             match create_item(&self.client, self.detail.item_type, fields).await {
                 Ok(created) => created,
                 Err(e) => {
@@ -106,7 +107,13 @@ impl TaigaItemNode {
             Some(slug) if !slug.is_empty() => format!("{slug}#{new_ref}"),
             _ => format!("#{new_ref}"),
         };
-        Ok(ActionOutcome::Done {
+        // `clone` is an `edit`-shaped action (it runs on the source item and
+        // opens a pre-filled editor), yet it *creates* a sibling. Report that
+        // as `Navigate` so the TUI reloads the list and the new item shows up
+        // immediately — `Done` would only patch the source row.
+        Ok(ActionOutcome::Navigate {
+            node_id: format!("{}:{}", self.detail.item_type.as_str(), new_id),
+            node_type: node_type_for(self.detail.item_type).clone(),
             message: Some(format!(
                 "Created {} {display_ref}",
                 self.detail.item_type.as_str(),

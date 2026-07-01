@@ -483,6 +483,7 @@ impl Node for JiraIssueNode {
                 Ok(ActionOutcome::Navigate {
                     node_id: format!("{}/comment/{}", self.key, comment.id),
                     node_type: comment_node_type(),
+                    message: None,
                 })
             }
             ("toggle_watch", ActionInput::None) => {

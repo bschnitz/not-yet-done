@@ -1093,6 +1093,7 @@ async fn execute_add(
             Ok(ActionOutcome::Navigate {
                 node_id: created.id.to_string(),
                 node_type: task_item_type(),
+                message: None,
             })
         }
     }

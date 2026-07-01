@@ -673,6 +673,14 @@ impl App {
                 self.notify(message);
                 self.patch_content_row(view_index, pane_id, node_id).await;
             }
+            FollowUp::ReloadContentPane {
+                view_index,
+                pane_id,
+                message,
+            } => {
+                self.notify(message);
+                self.reload_content_pane_current_level(view_index, pane_id);
+            }
             FollowUp::ApplyContentFilter { view_index, content, save_name } => {
                 self.apply_content_query_live(&content, view_index, save_name.as_deref());
             }
