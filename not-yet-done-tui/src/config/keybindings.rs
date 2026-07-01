@@ -477,6 +477,12 @@ pub enum ContentAction {
     /// Registered only while a record-detail follower exists; a no-op
     /// otherwise. Defaults to `X`.
     ToggleDetailWrap,
+    /// Open link-hop on the table (vimium-style link picker): every URL —
+    /// bare URLs and markdown `[text](url)` links — found on a visible line
+    /// gets a label; type the label to open that URL in the browser via the
+    /// configured opener (`xdg-open` by default). Works on any pane whose
+    /// rows carry links (chat messages, comment bodies, …). Defaults to `f`.
+    LinkHop,
 }
 
 impl ContentAction {
@@ -498,6 +504,7 @@ impl ContentAction {
             Self::JumpMode => "jump_mode",
             Self::ToggleRecordDetail => "toggle_record_detail",
             Self::ToggleDetailWrap => "toggle_detail_wrap",
+            Self::LinkHop => "link_hop",
         }
     }
 }
@@ -528,6 +535,7 @@ impl FromStr for ContentAction {
             "jump_mode" => Ok(Self::JumpMode),
             "toggle_record_detail" => Ok(Self::ToggleRecordDetail),
             "toggle_detail_wrap" => Ok(Self::ToggleDetailWrap),
+            "link_hop" => Ok(Self::LinkHop),
             other => Err(format!("unknown content action: {}", other)),
         }
     }
@@ -1015,6 +1023,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::ToggleGroupOrder, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleRecordDetail, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleDetailWrap, KeyBinding::new("X"));
+        m.insert(ContentAction::LinkHop, KeyBinding::new("f"));
         Self { bindings: m }
     }
 }

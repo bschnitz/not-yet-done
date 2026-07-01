@@ -7,6 +7,7 @@ pub mod content_tree;
 pub mod content_view;
 pub mod focus_node;
 pub mod group_aggregate;
+pub mod link_extract;
 pub mod markdown;
 
 use ratatui::Frame;

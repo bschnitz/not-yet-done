@@ -5485,6 +5485,22 @@ impl ContentPane {
             ));
         }
 
+        // Link-hop — label every link visible in the pane; typing a label
+        // opens that URL in the browser. Always claimable (an empty pane just
+        // finds no links and notifies). App-level interceptor drives label
+        // input. Default `f`; configurable via `keybindings.content.link_hop`.
+        if let Some(b) = content_kb
+            .get(&ContentAction::LinkHop)
+            .cloned()
+            .and_then(strip_reserved)
+        {
+            km.push(KeyClaim::handler(
+                b,
+                scope.clone(),
+                KeySource::Content(ContentAction::LinkHop),
+            ));
+        }
+
         // Drill-down / expand — only when the cursor row can open.
         // Recursion-aware (`cursor_can_open`): a recursive tree node has
         // no declared `children:` but still expands into itself.
@@ -5735,6 +5751,12 @@ impl ContentPane {
                 self.table.jump_mode_open();
                 Some(SubViewMessage::SelectionChanged(None))
             }
+            KeySource::Content(ContentAction::LinkHop) => {
+                // Label every link visible in this pane. The App-level
+                // interceptor feeds subsequent label keystrokes and opens the
+                // picked URL.
+                Some(self.open_link_hop())
+            }
             KeySource::Common(CommonAction::ListNext) => {
                 self.nav_and_refresh(Cmd::Move(Direction::Down), view_defs);
                 Some(self.preview_after_nav(view_index, pane_id, view_defs))
@@ -5819,6 +5841,32 @@ impl ContentPane {
             // this would mean `build_claims` and `dispatch_claim` drifted.
             _ => None,
         }
+    }
+
+    /// Open link-hop on this pane: extract `(needle, url)` targets from every
+    /// rendered fragment (each item's label + metadata field values), label
+    /// the ones the table can see, and leave the overlay armed for the
+    /// App-level interceptor. Notifies (rather than arming) when nothing is
+    /// visible to open. See [`crate::views::link_extract`].
+    fn open_link_hop(&mut self) -> SubViewMessage {
+        let fragments: Vec<&str> = self
+            .items
+            .iter()
+            .flat_map(|it| {
+                std::iter::once(it.label.as_str())
+                    .chain(it.metadata.fields.iter().map(|f| f.value.as_str()))
+            })
+            .collect();
+        let targets =
+            crate::views::link_extract::extract_links_from(fragments.iter().copied());
+        if targets.is_empty() {
+            return SubViewMessage::Request(ViewRequest::Notify("No links on screen".to_string()));
+        }
+        let count = self.table.link_hop_open(&targets);
+        if count == 0 {
+            return SubViewMessage::Request(ViewRequest::Notify("No links on screen".to_string()));
+        }
+        SubViewMessage::SelectionChanged(None)
     }
 
     /// Helper used after every cursor move: emit a preview-fetch request
@@ -6809,6 +6857,15 @@ impl ContentView {
                 pane.table.set_nav_chars(&nav_chars);
                 pane.table.jump_mode_open();
                 SubViewMessage::SelectionChanged(None)
+            }
+            ContentAction::LinkHop => {
+                // Label every link visible in the focused pane; the App-level
+                // input intercept resolves a picked label to its URL and opens
+                // it. See `ContentPane::open_link_hop` / `link_extract`.
+                let nav_chars = self.nav_chars.clone();
+                let pane = self.active_pane_mut();
+                pane.table.set_nav_chars(&nav_chars);
+                pane.open_link_hop()
             }
             ContentAction::ToggleRecordDetail => self.toggle_record_detail(),
             ContentAction::ToggleDetailWrap => self.toggle_detail_wrap(),

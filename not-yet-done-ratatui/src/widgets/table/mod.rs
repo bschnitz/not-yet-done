@@ -8,7 +8,7 @@ pub mod keymap;
 pub mod state;
 pub mod style;
 
-pub use component::{Table, JumpPhase};
+pub use component::{Table, JumpPhase, LinkHopOutcome, LinkMatch, LinkPhase};
 // Legacy compat — remove set_data, consumers use set_rows + set_fixed_headers/footers.
 pub use keymap::TableKeymap;
 pub use state::TableEvent;

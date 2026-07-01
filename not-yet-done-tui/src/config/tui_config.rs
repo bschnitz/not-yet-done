@@ -114,15 +114,27 @@ impl Default for TuiConfig {
 pub struct NavigationConfig {
     #[serde(default = "default_jump_chars")]
     pub jump_chars: String,
+    /// Command used by link-hop (`f`) to open a picked URL. The URL is
+    /// appended as the final argument; the string is split on whitespace so
+    /// extra flags work (e.g. `firefox --new-tab`). Default: `xdg-open`.
+    #[serde(default = "default_link_opener")]
+    pub link_opener: String,
 }
 
 fn default_jump_chars() -> String {
     "abcdefghijklmnopqrstuvwxyz".to_string()
 }
 
+fn default_link_opener() -> String {
+    "xdg-open".to_string()
+}
+
 impl Default for NavigationConfig {
     fn default() -> Self {
-        Self { jump_chars: default_jump_chars() }
+        Self {
+            jump_chars: default_jump_chars(),
+            link_opener: default_link_opener(),
+        }
     }
 }
 

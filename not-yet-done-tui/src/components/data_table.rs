@@ -88,6 +88,27 @@ impl DataTable {
         self.table.jump_mode_label_input(ch).is_some()
     }
 
+    /// Open link-hop: label every occurrence of each `(needle, url)` target
+    /// found on a visible line. Returns the number of labelled links.
+    pub fn link_hop_open(&mut self, targets: &[(String, String)]) -> usize {
+        self.table.link_hop_open(targets)
+    }
+
+    /// Whether link-hop labels are currently displayed.
+    pub fn link_hop_active(&self) -> bool {
+        self.table.is_link_hop_active()
+    }
+
+    /// Feed a character to link-hop label input.
+    pub fn link_hop_input(&mut self, ch: char) -> not_yet_done_ratatui::LinkHopOutcome {
+        self.table.link_hop_input(ch)
+    }
+
+    /// Cancel link-hop.
+    pub fn link_hop_close(&mut self) {
+        self.table.link_hop_close();
+    }
+
     /// Update all table data. Preserves visible_rows and restores selection
     /// by pending_focus_id or previously selected ID.
     pub fn set_data(

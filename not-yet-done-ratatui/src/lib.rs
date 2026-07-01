@@ -32,7 +32,8 @@ pub use widgets::select_list::{
 
 // --- table ---
 pub use widgets::table::{
-    Table, JumpPhase, TableEvent, TableKeymap, TableStyle, TableStyleType,
+    Table, JumpPhase, LinkHopOutcome, LinkMatch, LinkPhase, TableEvent, TableKeymap,
+    TableStyle, TableStyleType,
     TableWidgetCell, TableWidgetLine, TableWidgetRow, ColumnStyles, StyleMap,
 };
 
