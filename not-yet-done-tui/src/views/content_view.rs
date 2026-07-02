@@ -9375,6 +9375,34 @@ impl ContentView {
                 Some(self.toggle_record_detail())
             }
             KeySource::Content(ContentAction::ToggleDetailWrap) => Some(self.toggle_detail_wrap()),
+            KeySource::Content(ContentAction::ToggleGroupOrder) => {
+                // Same latent gap as ToggleLongText below: the claim is pushed
+                // in `build_view_claims`, but with no arm here the single-key
+                // path fell through to the pane (which never claims `o`) and
+                // did nothing. The `dispatch_content_action` arm only served
+                // the chained / cmdline path.
+                let view_defs = self.view_defs.clone();
+                let view_index = self.view_index;
+                let pane_id = self.active_pane_id();
+                Some(self.active_pane_mut().try_toggle_group_order(
+                    &view_defs,
+                    view_index,
+                    pane_id,
+                ))
+            }
+            KeySource::Content(ContentAction::ToggleLongText) => {
+                // View-level dispatch of the pane toggle (like ToggleDetailWrap
+                // above): the single-key path routes here, so the arm must
+                // exist or `v` falls through to the pane — which never claims
+                // it — and is silently unhandled.
+                let view_defs = self.view_defs.clone();
+                let view_index = self.view_index;
+                let pane_id = self.active_pane_id();
+                Some(
+                    self.active_pane_mut()
+                        .try_toggle_long_text(&view_defs, view_index, pane_id),
+                )
+            }
             _ => None,
         }
     }
@@ -19056,7 +19084,59 @@ views:
         let row = expand_long_text_row(base, &item, &columns, &col_widths);
         assert_eq!(row.lines.len(), 1);
     }
+
+    #[test]
+    fn toggle_long_text_key_flips_pane_flag() {
+        // Regression: the single-key path routes through `dispatch_view_claim`,
+        // so `v` only works if that dispatcher has an explicit arm (like
+        // `ToggleDetailWrap`). Without it the key falls through to the pane,
+        // which never claims `v`, and nothing happens.
+        let mut config = test_config_with_group_by();
+        config.views[0].columns[1].long_source = Some("description".into());
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        assert!(!view.active_pane().long_text);
+        let msg = view.handle_key("v");
+        assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
+        assert!(view.active_pane().long_text);
+        // Pressing `v` again collapses back.
+        view.handle_key("v");
+        assert!(!view.active_pane().long_text);
+    }
+
+    #[test]
+    fn toggle_long_text_key_ignored_without_long_source() {
+        // No column opts in → `v` stays free (Unhandled) and the flag never
+        // flips, so the key remains available to other views.
+        let config = test_config_with_group_by();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let msg = view.handle_key("v");
+        assert!(matches!(msg, SubViewMessage::Unhandled));
+        assert!(!view.active_pane().long_text);
+    }
+
+    #[test]
+    fn toggle_group_order_via_key_flips_order() {
+        // Same regression class as `v`: `o` reaches `dispatch_view_claim` on
+        // the single-key path, which needs an explicit arm. Configured order
+        // is Asc; `o` flips it to Desc, preserving the bucket.
+        let config = test_config_with_group_by();
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        let msg = view.handle_key("o");
+        assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
+        let gb = view
+            .active_pane()
+            .current_group_by(&view.view_defs)
+            .expect("override grouping");
+        assert_eq!(gb.order, GroupOrder::Desc);
+        assert_eq!(gb.bucket, Some(DateBucket::Day));
+    }
 }
+
 
 /// Create a hardcoded Jira view config (used when no YAML file exists).
 /// Will be replaced by YAML loading in Phase 6.
