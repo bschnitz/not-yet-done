@@ -761,6 +761,7 @@ mod tests {
             label: None,
             source: None,
             collapsed_source: None,
+            long_source: None,
             style: None,
             sizing: "max".into(),
             markdown: false,

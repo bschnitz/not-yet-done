@@ -16,11 +16,11 @@
 # (default ~3 months); there is no saved-query filter in this first
 # iteration — `f` narrows locally instead.
 #
-# Two sibling views on the same rows (switch like on the trackings tab):
-#   `a` — the grouped one-line table below (day buckets + totals)
-#   `v` — "long descriptions": every row renders multi-line with the FULL
-#         description body. Grouping/totals are unavailable there — the
-#         engine never combines `group_by` with a `row_layout`.
+# `v` toggles "long descriptions" in place: the description cell grows to
+# show the FULL multi-line body (soft-wrapped) while the header, columns,
+# day grouping and totals stay exactly as they are; press `v` again to
+# collapse back to the one-line first-line view. This is driven by the
+# description column's `long_source: description` below.
 #
 # `e` opens the edit template on the selected timesheet (editable:
 # project, activity, begin, duration — names resolve case-insensitively,
@@ -82,10 +82,14 @@ views:
         style: tertiary
         sizing: max
       # First non-empty description line (falls back to the activity name
-      # when a record has no description).
+      # when a record has no description). `long_source` points at the full
+      # `description` field so the `v` toggle can expand this cell into a
+      # soft-wrapped multi-line block on demand — the rest of the row is
+      # untouched.
       - key: description
         label: Description
         source: label
+        long_source: description
         style: text_med
         sizing: "flex(1)"
       # Per-group total target (see `aggregates` above); only visible
@@ -107,48 +111,6 @@ views:
         key: e
         type: edit
         id: edit # Node-side action id (see kimai adapter)
-      - name: refresh
-        key: r
-        type: reload
-
-  # Long-description mode: the same timesheets, one multi-line block per
-  # row — header line (project/activity/times), then the full description
-  # body, then a blank spacer. No `group_by` here on purpose: the engine
-  # renders grouping only for one-line rows, never under a `row_layout`.
-  - name: long
-    node_type: "kimai:timesheet"
-    key: v
-
-    columns:
-      - { key: project, style: text_med, sizing: max }
-      - { key: activity, style: secondary, sizing: max }
-      - { key: begin, kind: datetime, style: secondary, sizing: max }
-      - { key: end, kind: datetime, style: secondary, sizing: max }
-      - { key: duration, kind: duration, style: tertiary, sizing: max }
-      # `source: description` reads the full multi-line field (the one-line
-      # view shows `label` = the first non-empty line instead). A markdown
-      # column soft-wraps and must be the only column on its layout line.
-      - {
-          key: description,
-          source: description,
-          markdown: true,
-          sizing: "flex(1)",
-        }
-    row_layout:
-      - [project, activity, begin, end, duration]
-      - [description]
-      - []
-
-    actions:
-      - name: fuzzy filter
-        key: f
-        type: fuzzy_filter
-        fuzzy_filter:
-          fields: [project, activity, description]
-      - name: edit
-        key: e
-        type: edit
-        id: edit
       - name: refresh
         key: r
         type: reload
