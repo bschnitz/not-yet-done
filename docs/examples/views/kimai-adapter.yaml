@@ -1,0 +1,51 @@
+# Example: Kimai adapter credentials
+#
+# Place in: ~/.config/not_yet_done/views/kimai-adapter.yaml
+# Referenced by kimai.yaml via: adapter.config: kimai-adapter.yaml
+#
+# Kimai's API auth depends on the server version:
+#
+#   - up to 2.13: the `X-AUTH-USER` / `X-AUTH-TOKEN` header pair, where the
+#     token is the "API password" set on the user's profile page
+#     → mechanism `user-api-token` (username + token), shown below.
+#   - 2.14+: personal API tokens via `Authorization: Bearer`
+#     → mechanism `bearer-token` with a single `token` binding.
+#
+# The credentials are static, so there is no login flow and no persisted
+# session — the adapter resolves the providers once per process.
+
+url: https://kimai.example.com
+
+name: kimai # optional human-readable label
+
+auth:
+  mechanism: user-api-token
+  bindings:
+    - field: username
+      provider:
+        # `command` runs a shell command and uses its trimmed stdout —
+        # the natural fit for a `pass` entry. Swap for
+        # `{ type: env, var: KIMAI_USER }` or
+        # `{ type: literal, value: alice }`.
+        type: command
+        script: pass show services/kimai/user
+    - field: token
+      provider:
+        type: command
+        script: pass show services/kimai/api-password
+
+# How many days back the timesheet listing reaches (the API is filtered to
+# `begin >= now - lookback_days`). Optional; defaults to 92 (~3 months).
+# Kimai instances accumulate years of records — raise this when you need
+# deeper history, at the cost of a larger initial load.
+# lookback_days: 92
+
+# Hard ceiling (seconds) on every HTTP request, including connection
+# setup. Optional; defaults to 20. See taiga-adapter.yaml for the
+# rationale (a dead keep-alive socket must fail instead of freezing the
+# TUI).
+# request_timeout_secs: 20
+
+# Hard ceiling (seconds) on just the connection-establishment phase
+# (DNS + TCP + TLS). Optional; defaults to min(request_timeout_secs, 10).
+# connect_timeout_secs: 30

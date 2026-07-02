@@ -1,0 +1,96 @@
+# Example: Kimai view configuration
+#
+# Place in: ~/.config/not_yet_done/views/kimai.yaml
+# Credentials live in the adapter config referenced below — see
+# kimai-adapter.yaml next to this file.
+#
+# Read-only timesheet list in the trackings-view layout: one flat row per
+# timesheet, bucketed into day groups with a per-day total closing each
+# group. The adapter resolves Kimai's numeric project/activity ids to
+# names and normalizes the timestamps to RFC3339, so the engine-side
+# `group_by` / `aggregates` below work exactly like on the local
+# trackings tab — `zg` cycles the bucket (Day/Week/Month/Year/None) and
+# `u` opens the direct-jump menu at runtime.
+#
+# The listing is time-boxed to the adapter's `lookback_days` window
+# (default ~3 months); there is no saved-query filter in this first
+# iteration — `f` narrows locally instead.
+
+tab:
+  name: Kimai
+  order: 7
+  icon: "󱎫"
+
+adapter:
+  type: kimai
+  config: kimai-adapter.yaml
+
+views:
+  - name: timesheets
+    node_type: "kimai:timesheet"
+    default: true
+
+    # Day buckets, newest first, with the summed duration routed into the
+    # `total` column on each day's last row (classic time-sheet layout).
+    # `S` opens the item-sort picker over the adapter's sortable columns
+    # (project, customer, activity, duration, begin, end).
+    group_by:
+      column: begin
+      bucket: day
+      order: desc
+    aggregates:
+      - column: duration
+        op: sum
+        total_column: total
+
+    columns:
+      # Constant-width name columns so the time columns never get
+      # squeezed; the description flexes into the rest.
+      - key: project
+        label: Project
+        style: text_med
+        sizing: "fixed(24)"
+      - key: activity
+        label: Activity
+        style: secondary
+        sizing: "fixed(18)"
+      - key: begin
+        label: Begin
+        kind: datetime
+        style: secondary
+        sizing: max
+      - key: end
+        label: End
+        kind: datetime
+        style: secondary
+        sizing: max
+      - key: duration
+        label: Duration
+        kind: duration
+        style: tertiary
+        sizing: max
+      # First non-empty description line (falls back to the activity name
+      # when a record has no description).
+      - key: description
+        label: Description
+        source: label
+        style: text_med
+        sizing: "flex(1)"
+      # Per-group total target (see `aggregates` above); only visible
+      # while grouped.
+      - key: total
+        label: Total
+        kind: duration
+        style: accent
+        sizing: max
+
+    actions:
+      # Local filter-while-typing over the loaded rows.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [project, activity, description]
+      - name: refresh
+        key: r
+        type: reload

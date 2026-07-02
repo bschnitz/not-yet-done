@@ -25,6 +25,7 @@ not-yet-done-content = { path = "../not-yet-done-content" }
 # product means adding it here (and to `factories()`), once — all front-ends
 # inherit it.
 not-yet-done-jira-adapter       = { path = "../not-yet-done-jira-adapter" }
+not-yet-done-kimai-adapter      = { path = "../not-yet-done-kimai-adapter" }
 not-yet-done-taiga-adapter      = { path = "../not-yet-done-taiga-adapter" }
 not-yet-done-postgres-adapter   = { path = "../not-yet-done-postgres-adapter" }
 not-yet-done-confluence-adapter = { path = "../not-yet-done-confluence-adapter" }

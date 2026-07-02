@@ -17,6 +17,7 @@ members = [
   "not-yet-done-filter",
   "not-yet-done-task-core",
   "not-yet-done-jira-adapter",
+  "not-yet-done-kimai-adapter",
   "not-yet-done-taiga-adapter",
   "not-yet-done-transport",
   "not-yet-done-postgres-adapter",

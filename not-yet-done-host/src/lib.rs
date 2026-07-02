@@ -60,6 +60,10 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
         Box::new(not_yet_done_jira_adapter::JiraAdapterFactory::new()),
     );
     factories.insert(
+        "kimai".to_string(),
+        Box::new(not_yet_done_kimai_adapter::KimaiAdapterFactory::new()),
+    );
+    factories.insert(
         "taiga".to_string(),
         Box::new(not_yet_done_taiga_adapter::TaigaAdapterFactory::new()),
     );
