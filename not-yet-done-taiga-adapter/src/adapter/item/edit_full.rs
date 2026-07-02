@@ -189,7 +189,10 @@ impl TaigaItemNode {
             }
         }
         if let Some(body) = &changes.body {
-            fields.description = Some(body.clone());
+            // Resolve `@uu-slug` mentions in the description to `@username`
+            // so Taiga turns them into real mentions (same slug system as the
+            // assignee field).
+            fields.description = Some(template::resolve_user_mentions(body, &tables.users));
         }
 
         let starting_version: u64 = version.parse().unwrap_or(self.detail.version);

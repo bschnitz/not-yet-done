@@ -471,6 +471,59 @@ pub(super) fn resolve_slugs_inplace(
     }
 }
 
+/// Rewrite `@uu-slug` user mentions in free text (comment and description
+/// bodies) to Taiga's wire `@username` form so the server resolves them into
+/// real mentions/notifications. Only matches at a word boundary, so
+/// `mail@uu-x.example` is left intact. Unknown `@uu-…` slugs are kept
+/// verbatim — a body is free text, and a stray token must not block the save.
+///
+/// The header fields (assignee/status/tags) resolve via
+/// [`resolve_slugs_inplace`]; this is the same idea for prose, where the slug
+/// sits inline behind an `@`.
+pub(super) fn resolve_user_mentions(
+    text: &str,
+    users: &not_yet_done_content::slug::SlugTable,
+) -> String {
+    let prefix = USER_PREFIX.as_bytes();
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    let mut i = 0usize;
+    while i + 1 + prefix.len() <= bytes.len() {
+        if bytes[i] == b'@' && &bytes[i + 1..i + 1 + prefix.len()] == prefix {
+            let prev_ok = i == 0 || !is_word_byte(bytes[i - 1]);
+            if prev_ok {
+                let mut end = i + 1 + prefix.len();
+                while end < bytes.len() && is_slug_byte(bytes[end]) {
+                    end += 1;
+                }
+                if end > i + 1 + prefix.len() {
+                    let slug = &text[i + 1..end];
+                    if let Some(username) = users.original_for(slug) {
+                        out.push_str(&text[last..i]);
+                        out.push('@');
+                        out.push_str(username);
+                        last = end;
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_slug_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-'
+}
+
 pub(super) fn render_with_errors(original_text: &str, errors: &[FieldError]) -> String {
     let stripped = strip_banner(original_text);
     let mut out = String::new();
@@ -538,4 +591,55 @@ pub(super) fn diff_against_current(
         None
     };
     ChangeSet { metadata_changes, body: body_change }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use not_yet_done_content::slug::SlugTable;
+
+    fn users() -> SlugTable {
+        // Invented members: (display source, canonical username).
+        SlugTable::build(
+            [
+                ("Ada Lovelace".to_string(), "alovelace".to_string()),
+                ("Grace Hopper".to_string(), "ghopper".to_string()),
+            ],
+            USER_PREFIX,
+        )
+    }
+
+    #[test]
+    fn resolves_known_mention_to_username() {
+        assert_eq!(
+            resolve_user_mentions("cc @uu-ada-lovelace please", &users()),
+            "cc @alovelace please"
+        );
+    }
+
+    #[test]
+    fn resolves_multiple_mentions() {
+        assert_eq!(
+            resolve_user_mentions("@uu-ada-lovelace and @uu-grace-hopper", &users()),
+            "@alovelace and @ghopper"
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_mention_verbatim() {
+        assert_eq!(
+            resolve_user_mentions("hi @uu-nobody there", &users()),
+            "hi @uu-nobody there"
+        );
+    }
+
+    #[test]
+    fn ignores_at_not_on_word_boundary() {
+        // `@uu-` preceded by a word char (e.g. an email local part) is left
+        // alone.
+        assert_eq!(
+            resolve_user_mentions("mail@uu-ada-lovelace.example", &users()),
+            "mail@uu-ada-lovelace.example"
+        );
+    }
 }
