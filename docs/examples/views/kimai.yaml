@@ -15,6 +15,17 @@
 # The listing is time-boxed to the adapter's `lookback_days` window
 # (default ~3 months); there is no saved-query filter in this first
 # iteration — `f` narrows locally instead.
+#
+# Two sibling views on the same rows (switch like on the trackings tab):
+#   `a` — the grouped one-line table below (day buckets + totals)
+#   `v` — "long descriptions": every row renders multi-line with the FULL
+#         description body. Grouping/totals are unavailable there — the
+#         engine never combines `group_by` with a `row_layout`.
+#
+# `e` opens the edit template on the selected timesheet (editable:
+# project, activity, begin, duration — names resolve case-insensitively,
+# the trailing CACHE section lists what's available; the body below `===`
+# is the description; a duration change re-computes the end time).
 
 tab:
   name: Kimai
@@ -29,6 +40,7 @@ views:
   - name: timesheets
     node_type: "kimai:timesheet"
     default: true
+    key: a
 
     # Day buckets, newest first, with the summed duration routed into the
     # `total` column on each day's last row (classic time-sheet layout).
@@ -91,6 +103,52 @@ views:
         type: fuzzy_filter
         fuzzy_filter:
           fields: [project, activity, description]
+      - name: edit
+        key: e
+        type: edit
+        id: edit # Node-side action id (see kimai adapter)
+      - name: refresh
+        key: r
+        type: reload
+
+  # Long-description mode: the same timesheets, one multi-line block per
+  # row — header line (project/activity/times), then the full description
+  # body, then a blank spacer. No `group_by` here on purpose: the engine
+  # renders grouping only for one-line rows, never under a `row_layout`.
+  - name: long
+    node_type: "kimai:timesheet"
+    key: v
+
+    columns:
+      - { key: project, style: text_med, sizing: max }
+      - { key: activity, style: secondary, sizing: max }
+      - { key: begin, kind: datetime, style: secondary, sizing: max }
+      - { key: end, kind: datetime, style: secondary, sizing: max }
+      - { key: duration, kind: duration, style: tertiary, sizing: max }
+      # `source: description` reads the full multi-line field (the one-line
+      # view shows `label` = the first non-empty line instead). A markdown
+      # column soft-wraps and must be the only column on its layout line.
+      - {
+          key: description,
+          source: description,
+          markdown: true,
+          sizing: "flex(1)",
+        }
+    row_layout:
+      - [project, activity, begin, end, duration]
+      - [description]
+      - []
+
+    actions:
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [project, activity, description]
+      - name: edit
+        key: e
+        type: edit
+        id: edit
       - name: refresh
         key: r
         type: reload

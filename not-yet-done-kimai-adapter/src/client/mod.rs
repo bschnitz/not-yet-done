@@ -219,6 +219,32 @@ impl KimaiClient {
         self.get_json(&url, &[]).await
     }
 
+    /// Partial update of one timesheet. `body` carries only the changed
+    /// fields (`project`/`activity` as numeric ids, `begin`/`end` as local
+    /// datetimes without offset, `description` as plain text). Returns the
+    /// updated record.
+    pub async fn patch_timesheet(
+        &self,
+        id: u64,
+        body: &serde_json::Value,
+    ) -> Result<KimaiTimesheet, String> {
+        let url = format!("{}/api/timesheets/{id}", self.base_url);
+        http_log::log_request("PATCH", &url);
+        let resp = self
+            .http
+            .patch(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| http_log::network_error("PATCH", &url, e))?;
+        let resp = http_log::check_status("PATCH", &url, resp).await?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read response: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
+    }
+
     /// All projects visible to the user (for the id → name lookup).
     pub async fn projects(&self) -> Result<Vec<KimaiProject>, String> {
         let url = format!("{}/api/projects", self.base_url);
