@@ -51,6 +51,12 @@ pub enum AuthMechanism {
     /// Adapter sends user + token via HTTP Basic. Required fields:
     /// `username`, `token`.
     BasicAuth,
+    /// Adapter sends username + a static API token in adapter-defined
+    /// request headers (e.g. Kimai's `X-AUTH-USER` / `X-AUTH-TOKEN`
+    /// pair). Like `basic-auth` in its field set, but the wire format is
+    /// the adapter's own, not HTTP Basic. Required fields: `username`,
+    /// `token`.
+    UserApiToken,
 }
 
 /// Where a credential value comes from. Tagged by `type:` in YAML.
@@ -208,6 +214,7 @@ impl AuthSpec {
             AuthMechanism::BearerToken => &["token"],
             AuthMechanism::Cookie => &["cookie"],
             AuthMechanism::BasicAuth => &["username", "token"],
+            AuthMechanism::UserApiToken => &["username", "token"],
         };
 
         let mut seen: Vec<&str> = Vec::with_capacity(self.bindings.len());
@@ -338,6 +345,38 @@ bindings:
         let spec = parse(yaml);
         spec.validate().expect("valid");
         assert_eq!(spec.mechanism, AuthMechanism::BasicAuth);
+    }
+
+    #[test]
+    fn user_api_token_with_command_providers() {
+        let yaml = r#"
+mechanism: user-api-token
+bindings:
+  - field: username
+    provider:
+      type: command
+      script: secret-tool lookup service timetrack field user
+  - field: token
+    provider:
+      type: command
+      script: secret-tool lookup service timetrack field token
+"#;
+        let spec = parse(yaml);
+        spec.validate().expect("valid");
+        assert_eq!(spec.mechanism, AuthMechanism::UserApiToken);
+    }
+
+    #[test]
+    fn user_api_token_requires_both_fields() {
+        let yaml = r#"
+mechanism: user-api-token
+bindings:
+  - field: token
+    provider: { type: literal, value: x }
+"#;
+        let spec = parse(yaml);
+        let err = spec.validate().expect_err("should reject missing username");
+        assert!(err.contains("username"), "error mentions username: {err}");
     }
 
     #[test]

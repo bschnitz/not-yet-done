@@ -3603,6 +3603,7 @@ dependencies = [
  "not-yet-done-confluence-adapter",
  "not-yet-done-content",
  "not-yet-done-jira-adapter",
+ "not-yet-done-kimai-adapter",
  "not-yet-done-local-adapter",
  "not-yet-done-postgres-adapter",
  "not-yet-done-stoat-adapter",
@@ -3631,6 +3632,20 @@ dependencies = [
  "slug",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "not-yet-done-kimai-adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "not-yet-done-content",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
 ]
 
 [[package]]
