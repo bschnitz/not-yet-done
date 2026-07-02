@@ -1052,6 +1052,18 @@ pub struct ColumnDef {
     /// its own marker. Ignored for expanded nodes, leaves, and the label cell.
     #[serde(default)]
     pub collapsed_source: Option<String>,
+    /// Metadata field this cell reads **instead of** `source`/`key` while the
+    /// pane's long-text mode is on (`v`). The full field is soft-wrapped to
+    /// the column width and rendered as a multi-line block, growing the row
+    /// vertically; every other column stays a single fitted line. Unlike
+    /// `markdown` (a permanent multi-line chat layout that forbids grouping),
+    /// this is a runtime toggle that composes with day grouping, totals and
+    /// the header — they render unchanged. `None` (default) opts the column
+    /// out, so the `toggle_long_text` key stays free on that view. Typical
+    /// use: a `source: label` column (clean first line) with
+    /// `long_source: description` (the full body on demand).
+    #[serde(default)]
+    pub long_source: Option<String>,
     /// Theme color reference (e.g. "accent", "text_med", "success").
     #[serde(default)]
     pub style: Option<String>,

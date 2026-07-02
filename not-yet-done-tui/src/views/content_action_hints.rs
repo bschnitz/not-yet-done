@@ -71,7 +71,7 @@ fn content_nav_hint(action: &ContentAction) -> Option<NavHint> {
         // pane-claim-driven resolver never sees them — their status-bar
         // hints are emitted directly by `ContentView::status_bar_hints`
         // under the same gate.
-        ToggleRecordDetail | ToggleDetailWrap | ToggleGroupOrder => return None,
+        ToggleRecordDetail | ToggleDetailWrap | ToggleGroupOrder | ToggleLongText => return None,
         // Activatable / richer-path sources: surfaced (with their
         // ActiveSource) by the action-bar builder, not here.
         EditQuery | OpenScriptsMenu | GroupMenu | JumpMode | LinkHop => return None,

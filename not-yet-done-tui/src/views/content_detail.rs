@@ -58,6 +58,7 @@ fn detail_column(key: &str, label: &str, sizing: String, style: Option<&str>) ->
         label: Some(label.to_string()),
         source: None,
         collapsed_source: None,
+        long_source: None,
         style: style.map(str::to_string),
         sizing,
         markdown: false,

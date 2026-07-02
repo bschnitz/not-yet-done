@@ -483,6 +483,13 @@ pub enum ContentAction {
     /// configured opener (`xdg-open` by default). Works on any pane whose
     /// rows carry links (chat messages, comment bodies, …). Defaults to `f`.
     LinkHop,
+    /// Toggle long-text mode (`v`): a column that declares `long_source`
+    /// stops clipping to a single fitted line and instead renders the full
+    /// field as a soft-wrapped block, growing that row vertically. Every
+    /// other column, the header, day grouping and totals stay exactly as
+    /// they are. Registered only on panes whose active columns declare a
+    /// `long_source`; a no-op elsewhere. Defaults to `v`.
+    ToggleLongText,
 }
 
 impl ContentAction {
@@ -505,6 +512,7 @@ impl ContentAction {
             Self::ToggleRecordDetail => "toggle_record_detail",
             Self::ToggleDetailWrap => "toggle_detail_wrap",
             Self::LinkHop => "link_hop",
+            Self::ToggleLongText => "toggle_long_text",
         }
     }
 }
@@ -1024,6 +1032,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::ToggleRecordDetail, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleDetailWrap, KeyBinding::new("X"));
         m.insert(ContentAction::LinkHop, KeyBinding::new("f"));
+        m.insert(ContentAction::ToggleLongText, KeyBinding::new("v"));
         Self { bindings: m }
     }
 }

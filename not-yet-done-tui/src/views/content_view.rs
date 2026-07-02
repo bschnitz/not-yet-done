@@ -427,6 +427,12 @@ pub struct ContentPane {
     /// values are clipped to the value column. Meaningful only on a
     /// detail pane (`detail_source.is_some()`).
     detail_wrap: bool,
+    /// Long-text mode (`v`): when on, a column that declares `long_source`
+    /// renders the full field as a soft-wrapped multi-line block, growing
+    /// that row vertically; the header, columns, grouping and totals are
+    /// untouched. Default `false`. Meaningful only on a view whose columns
+    /// declare a `long_source` (see [`long_text_available`](Self::long_text_available)).
+    long_text: bool,
 
     /// Snapshot of [`App::link_refs`] for rendering the `has_links`
     /// YAML column source. Synced by [`ContentView::set_link_refs`].
@@ -1189,6 +1195,7 @@ impl ContentPane {
             detail_source: None,
             detail_summary: None,
             detail_wrap: false,
+            long_text: false,
             link_refs: std::collections::HashSet::new(),
             link_node_ref_prefix: None,
             retry_state: None,
@@ -1924,6 +1931,7 @@ impl ContentPane {
                 label: Some(f.display_label.clone()),
                 source: None,
                 collapsed_source: None,
+                long_source: None,
                 style: None,
                 sizing: "auto".into(),
                 markdown: false,
@@ -2307,6 +2315,35 @@ impl ContentPane {
         } else {
             SubViewMessage::Unhandled
         }
+    }
+
+    /// Whether long-text mode is offered here: at least one column in the
+    /// active level declares a `long_source`. Gates the `toggle_long_text`
+    /// key and its status-bar hint, so `v` stays free on every view whose
+    /// columns opt out. Config-only (no adapter capability needed — the full
+    /// field is already in the row's metadata).
+    fn long_text_available(&self, view_defs: &[ViewDef]) -> bool {
+        self.current_columns(view_defs)
+            .iter()
+            .any(|c| c.long_source.is_some())
+    }
+
+    /// Toggle long-text mode (`v`): flip the pane flag and rebuild the table
+    /// so a `long_source` column re-renders as a soft-wrapped multi-line
+    /// block (or back to a single fitted line). A no-op — key unclaimed —
+    /// when no column declares `long_source`.
+    pub(crate) fn try_toggle_long_text(
+        &mut self,
+        view_defs: &[ViewDef],
+        _view_index: usize,
+        _pane_id: PaneId,
+    ) -> SubViewMessage {
+        if !self.long_text_available(view_defs) {
+            return SubViewMessage::Unhandled;
+        }
+        self.long_text = !self.long_text;
+        self.rebuild_table(view_defs);
+        SubViewMessage::SelectionChanged(None)
     }
 
     // ── Tree-fold aggregation (M4) ───────────────────────────────────
@@ -4674,6 +4711,7 @@ impl ContentPane {
                         &config,
                         &col_ids,
                         &header,
+                        self.long_text,
                     );
                     self.last_col_widths = build.col_widths;
                     self.filtered_indices = build.filtered_indices;
@@ -4970,7 +5008,25 @@ impl ContentPane {
                 } else {
                     cells
                 };
-                TableWidgetRow::new(cells)
+                let row = TableWidgetRow::new(cells);
+                // Long-text mode (`v`): expand a `long_source` column into a
+                // soft-wrapped multi-line block. Flat list only — tree rows map
+                // through `tree_visible_indices`, not `filtered_indices`, and
+                // carry their own structure, so they are left untouched.
+                if self.long_text && self.tree.is_none() {
+                    match self
+                        .filtered_indices
+                        .get(ri)
+                        .and_then(|&i| self.items.get(i))
+                    {
+                        Some(item) => {
+                            expand_long_text_row(row, item, &columns, &col_widths)
+                        }
+                        None => row,
+                    }
+                } else {
+                    row
+                }
             })
             .collect();
 
@@ -6892,6 +6948,9 @@ impl ContentView {
             }
             ContentAction::ToggleRecordDetail => self.toggle_record_detail(),
             ContentAction::ToggleDetailWrap => self.toggle_detail_wrap(),
+            ContentAction::ToggleLongText => self
+                .active_pane_mut()
+                .try_toggle_long_text(&view_defs, view_index, pane_id),
         };
         if let SubViewMessage::ContentDrill {
             item_id,
@@ -9191,6 +9250,17 @@ impl ContentView {
                     ));
                 }
             }
+            // Long-text mode (`v`): only when a column opts in via `long_source`,
+            // so the key stays free on every other view.
+            if pane.long_text_available(&self.view_defs) {
+                if let Some(b) = self.content_kb.get(&ContentAction::ToggleLongText) {
+                    km.push(KeyClaim::handler(
+                        b.clone(),
+                        scope.clone(),
+                        KeySource::Content(ContentAction::ToggleLongText),
+                    ));
+                }
+            }
         }
 
         km
@@ -9508,6 +9578,15 @@ impl ContentView {
                     };
                     hints.push((b.hint_label(&self.key_icons), format!("order {arrow}")));
                 }
+            }
+        }
+        // Long-text toggle (`v`) — offered only when a column declares
+        // `long_source`. The label reflects the current mode so the bar shows
+        // state at a glance.
+        if pane.long_text_available(&self.view_defs) {
+            if let Some(b) = self.content_kb.get(&ContentAction::ToggleLongText) {
+                let label = if pane.long_text { "short" } else { "long" };
+                hints.push((b.hint_label(&self.key_icons), label.to_string()));
             }
         }
         hints
@@ -10227,6 +10306,100 @@ fn item_widget_row(
     TableWidgetRow::new(cells)
 }
 
+/// Soft-wrap a full field value to `width` columns, honouring hard line
+/// breaks: every `\n`-delimited line is char-chunked to `width`. An empty
+/// input (or an empty embedded line) yields an empty line. Mirrors the
+/// record-detail follower's value wrapping so both read the same way.
+fn wrap_long_field(value: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for line in value.split('\n') {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut start = 0;
+        while start < chars.len() {
+            let end = (start + width).min(chars.len());
+            out.push(chars[start..end].iter().collect());
+            start = end;
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Long-text mode: re-render one item row as a multi-line block when a
+/// column declares `long_source`. The long column's cell on the first
+/// physical line becomes the first soft-wrapped line of the full field, and
+/// one continuation line per remaining wrapped line is appended — each with
+/// every preceding column blank-padded to its width so the text stays under
+/// its column (the grouped/flat paths both use a two-space separator, which
+/// the padding widths reproduce). The row stays one selectable unit, so the
+/// cursor, `filtered_indices` and actions are unaffected.
+///
+/// Returns `base` untouched when no column declares `long_source`, the field
+/// is empty, or it wraps to a single line (nothing to expand). The long
+/// column's cell style (e.g. the dimmed slot on a deleted row) is carried
+/// onto every wrapped line.
+fn expand_long_text_row(
+    base: TableWidgetRow,
+    item: &NodeSummary,
+    columns: &[ColumnDef],
+    col_widths: &[usize],
+) -> TableWidgetRow {
+    let Some((lci, source)) = columns
+        .iter()
+        .enumerate()
+        .find_map(|(i, c)| c.long_source.as_deref().map(|s| (i, s)))
+    else {
+        return base;
+    };
+    let width = col_widths.get(lci).copied().unwrap_or(0);
+    if width == 0 {
+        return base;
+    }
+    let full = metadata_field_value(item, source);
+    let wrapped = wrap_long_field(full, width);
+    if wrapped.len() <= 1 {
+        return base;
+    }
+
+    let selectable = base.selectable;
+    let mut cells0 = match base.lines.into_iter().next() {
+        Some(l) => l.cells,
+        None => return TableWidgetRow::new(Vec::new()),
+    };
+    let carried_style = cells0.get(lci).and_then(|c| c.style_id);
+    let fit_long = |text: &str| -> TableWidgetCell {
+        let mut c = TableWidgetCell::plain(fit_aligned(text, width, CellAlignment::Left));
+        if let Some(sid) = carried_style {
+            c = c.with_style(sid);
+        }
+        c
+    };
+    if let Some(slot) = cells0.get_mut(lci) {
+        *slot = fit_long(&wrapped[0]);
+    }
+
+    let mut out_lines = vec![TableWidgetLine::new(cells0)];
+    for chunk in &wrapped[1..] {
+        let mut cont: Vec<TableWidgetCell> = col_widths
+            .iter()
+            .take(lci)
+            .map(|w| TableWidgetCell::plain(" ".repeat(*w)))
+            .collect();
+        cont.push(fit_long(chunk));
+        out_lines.push(TableWidgetLine::new(cont));
+    }
+    let mut row = TableWidgetRow::multiline(out_lines);
+    row.selectable = selectable;
+    row
+}
+
 /// Output of [`build_grouped_table`].
 struct GroupedBuild {
     /// Interspersed header + item rows (the scrolling body); `filtered_indices`
@@ -10266,6 +10439,7 @@ fn build_grouped_table(
     config: &TableConfig,
     col_ids: &[TColumnId],
     header: &TRow<u32>,
+    long: bool,
 ) -> GroupedBuild {
     // Engine grouping is single-level; the caller gates on a non-empty
     // `levels`, so exactly one level is present here.
@@ -10462,7 +10636,13 @@ fn build_grouped_table(
                 let deleted = items
                     .get(data_filtered[next_data])
                     .is_some_and(|it| metadata_field_value(it, "deleted") == "true");
-                widget_rows.push(item_widget_row(cr, columns, deleted));
+                let row = item_widget_row(cr, columns, deleted);
+                let row = if long {
+                    expand_long_text_row(row, &items[data_filtered[next_data]], columns, &col_widths)
+                } else {
+                    row
+                };
+                widget_rows.push(row);
                 filtered_indices.push(data_filtered[next_data]);
                 next_data += 1;
             }
@@ -11185,6 +11365,7 @@ mod tests {
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
             ColumnDef {
                 key: "time".into(),
@@ -11200,6 +11381,7 @@ mod tests {
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
             ColumnDef {
                 key: "content".into(),
@@ -11215,6 +11397,7 @@ mod tests {
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
@@ -11294,6 +11477,7 @@ mod tests {
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
             ColumnDef {
                 key: "content".into(),
@@ -11309,6 +11493,7 @@ mod tests {
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
         ];
         let col_ids: Vec<TColumnId> = columns.iter().map(|c| TColumnId::new(&c.key)).collect();
@@ -11557,6 +11742,7 @@ mod tests {
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
+                        long_source: None,
                     },
                     ColumnDef {
                         key: "summary".into(),
@@ -11572,6 +11758,7 @@ mod tests {
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
+                        long_source: None,
                     },
                 ],
                 preview: Some(PreviewConfig {
@@ -11625,6 +11812,7 @@ mod tests {
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
+                        long_source: None,
                     }],
                     preview: None,
                     actions: vec![],
@@ -11860,6 +12048,7 @@ mod tests {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 }],
                 preview: None,
                 actions: vec![],
@@ -12052,6 +12241,7 @@ mod tests {
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             }],
             preview: None,
             actions: Vec::new(),
@@ -12338,6 +12528,7 @@ mod tests {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 }],
                 preview: None,
                 actions: vec![],
@@ -12360,6 +12551,7 @@ mod tests {
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
+                        long_source: None,
                     }],
                     preview: None,
                     actions: vec![],
@@ -12472,6 +12664,7 @@ mod tests {
             label: Some(key.into()),
             source: Some("label".into()),
             collapsed_source: None,
+            long_source: None,
             style: None,
             sizing: "max".into(),
             markdown: false,
@@ -13331,6 +13524,7 @@ mod tests {
             label: Some("Dur".into()),
             source: None,
             collapsed_source: None,
+            long_source: None,
             style: None,
             sizing: "max".into(),
             markdown: false,
@@ -14591,6 +14785,7 @@ mod tests {
                 label: Some("Id".into()),
                 source: Some("label".into()),
                 collapsed_source: None,
+                long_source: None,
                 style: None,
                 sizing: "max".into(),
                 markdown: false,
@@ -14692,6 +14887,7 @@ mod tests {
                 label: Some("Id".into()),
                 source: Some("label".into()),
                 collapsed_source: None,
+                long_source: None,
                 style: None,
                 sizing: "max".into(),
                 markdown: false,
@@ -15153,6 +15349,7 @@ mod tests {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 }],
                 preview: None,
                 actions: vec![],
@@ -16301,6 +16498,7 @@ mod tests {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 }],
                 preview: None,
                 actions: vec![],
@@ -16323,6 +16521,7 @@ mod tests {
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
+                        long_source: None,
                     }],
                     preview: None,
                     actions: vec![],
@@ -17804,6 +18003,7 @@ views:
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             }],
             preview: None,
             actions: vec![],
@@ -17826,6 +18026,7 @@ views:
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 }],
                 preview: None,
                 actions: vec![],
@@ -18046,6 +18247,7 @@ views:
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
             ColumnDef {
                 key: "dur".into(),
@@ -18061,6 +18263,7 @@ views:
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
+                long_source: None,
             },
         ]
     }
@@ -18133,6 +18336,7 @@ views:
             &config,
             &col_ids,
             &header,
+            false,
         );
 
         // Total = the trimmed text of the last cell on each summary row.
@@ -18215,6 +18419,7 @@ views:
             tree_aggregate: None,
             hidden: false,
             collapsed_source: None,
+            long_source: None,
         });
         let items = vec![
             group_item("0", "B", "30"),
@@ -18259,6 +18464,7 @@ views:
             &config,
             &col_ids,
             &header,
+            false,
         );
 
         // Desc: group B first (original indices 0, 3), then A (1, 2).
@@ -18728,6 +18934,128 @@ views:
             Some(not_yet_done_content::GroupBucket::Month)
         );
     }
+
+    fn long_text_columns() -> Vec<ColumnDef> {
+        // A `source: label` column plus a description column whose full body is
+        // read from `long_source` while long-text mode is on.
+        let plain = |key: &str, source: &str, long_source: Option<&str>| ColumnDef {
+            key: key.into(),
+            label: None,
+            source: Some(source.into()),
+            style: None,
+            sizing: "max".into(),
+            markdown: false,
+            kind: ColumnKind::Text,
+            format: None,
+            separator: None,
+            elapsed_from: None,
+            tree_aggregate: None,
+            hidden: false,
+            collapsed_source: None,
+            long_source: long_source.map(|s| s.into()),
+        };
+        vec![
+            plain("project", "project", None),
+            plain("description", "label", Some("description")),
+        ]
+    }
+
+    fn summary_with_description(label: &str, description: &str) -> NodeSummary {
+        NodeSummary {
+            id: "ts-1".into(),
+            label: label.into(),
+            node_type: not_yet_done_content::NodeType {
+                type_id: "mock:timesheet".into(),
+                mime_type: "text/plain".into(),
+                syntax: None,
+                file_extension: ".txt".into(),
+                display_name: "Timesheet".into(),
+            },
+            metadata: not_yet_done_content::Metadata {
+                fields: vec![not_yet_done_content::MetadataField {
+                    key: "description".into(),
+                    value: description.into(),
+                    display_label: "Description".into(),
+                    editable: false,
+                    allowed_values: None,
+                }],
+            },
+            has_children: None,
+        }
+    }
+
+    fn base_row(cells: &[&str]) -> TableWidgetRow {
+        TableWidgetRow::new(
+            cells
+                .iter()
+                .map(|c| TableWidgetCell::plain((*c).to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn wrap_long_field_splits_on_newlines_and_width() {
+        assert_eq!(wrap_long_field("", 5), vec![String::new()]);
+        assert_eq!(wrap_long_field("abc", 5), vec!["abc".to_string()]);
+        assert_eq!(
+            wrap_long_field("abcdefg", 3),
+            vec!["abc".to_string(), "def".to_string(), "g".to_string()]
+        );
+        // Hard line breaks are preserved, then each line is width-chunked.
+        assert_eq!(
+            wrap_long_field("ab\ncdef", 3),
+            vec!["ab".to_string(), "cde".to_string(), "f".to_string()]
+        );
+        // A zero width is clamped to 1.
+        assert_eq!(
+            wrap_long_field("ab", 0),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn expand_long_text_row_grows_only_the_long_column() {
+        let columns = long_text_columns();
+        let col_widths = vec![7, 5];
+        let item = summary_with_description("First line", "abcdefghij");
+        let base = base_row(&["Acme   ", "First"]);
+        let row = expand_long_text_row(base, &item, &columns, &col_widths);
+
+        // "abcdefghij" wraps to 5-wide chunks: "abcde" / "fghij" -> 2 lines.
+        assert_eq!(row.lines.len(), 2);
+        // First physical line keeps the project cell, description = first chunk
+        // padded to width 5.
+        assert_eq!(row.lines[0].cells[0].text, "Acme   ");
+        assert_eq!(row.lines[0].cells[1].text, "abcde");
+        // Continuation line blank-pads the project column to its width, then the
+        // second wrapped chunk under the description column.
+        assert_eq!(row.lines[1].cells[0].text, " ".repeat(7));
+        assert_eq!(row.lines[1].cells[1].text, "fghij");
+        // Still one selectable logical row.
+        assert!(row.selectable);
+    }
+
+    #[test]
+    fn expand_long_text_row_single_line_is_untouched() {
+        let columns = long_text_columns();
+        let col_widths = vec![7, 10];
+        let item = summary_with_description("Short", "short");
+        let base = base_row(&["Acme   ", "Short"]);
+        let row = expand_long_text_row(base, &item, &columns, &col_widths);
+        // Fits in one line -> base row returned unchanged.
+        assert_eq!(row.lines.len(), 1);
+    }
+
+    #[test]
+    fn expand_long_text_row_no_long_column_is_noop() {
+        let mut columns = long_text_columns();
+        columns[1].long_source = None;
+        let col_widths = vec![7, 5];
+        let item = summary_with_description("First", "abcdefghij");
+        let base = base_row(&["Acme   ", "First"]);
+        let row = expand_long_text_row(base, &item, &columns, &col_widths);
+        assert_eq!(row.lines.len(), 1);
+    }
 }
 
 /// Create a hardcoded Jira view config (used when no YAML file exists).
@@ -18770,6 +19098,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 },
                 ColumnDef {
                     key: "type".into(),
@@ -18785,6 +19114,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 },
                 ColumnDef {
                     key: "status".into(),
@@ -18800,6 +19130,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 },
                 ColumnDef {
                     key: "priority".into(),
@@ -18815,6 +19146,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 },
                 ColumnDef {
                     key: "summary".into(),
@@ -18830,6 +19162,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
+                    long_source: None,
                 },
             ],
             preview: Some(PreviewConfig {
