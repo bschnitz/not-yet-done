@@ -81,6 +81,35 @@ where
     out
 }
 
+/// File extensions we treat as viewable images. Used by the link-hop to
+/// decide whether a picked link is opened in the OS image viewer (downloaded
+/// via the adapter) rather than handed to the browser.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "tiff", "tif", "ico",
+];
+
+/// Whether `url` points at an image, judged by the file extension of its path
+/// (query string and fragment stripped first). Case-insensitive.
+pub fn is_image_url(url: &str) -> bool {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    let ext = match path.rsplit_once('.') {
+        Some((_, ext)) => ext,
+        None => return false,
+    };
+    // A dot in a later path segment (e.g. `.../v1.2/file`) must not count; the
+    // extension can't contain a slash.
+    if ext.contains('/') {
+        return false;
+    }
+    IMAGE_EXTENSIONS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(ext))
+}
+
 fn push_unique(out: &mut Vec<(String, String)>, needle: String, url: String) {
     if !out.iter().any(|(n, u)| *n == needle && *u == url) {
         out.push((needle, url));
@@ -151,6 +180,23 @@ mod tests {
     #[test]
     fn no_links_yields_empty() {
         assert!(extract_links("plain text, no links here").is_empty());
+    }
+
+    #[test]
+    fn image_url_detected_by_extension() {
+        assert!(is_image_url("https://cdn.test/a/b/pic.png"));
+        assert!(is_image_url("https://cdn.test/PIC.JPG"));
+        assert!(is_image_url("https://cdn.test/x.jpeg?token=abc#frag"));
+        assert!(is_image_url("https://cdn.test/x.webp/"));
+    }
+
+    #[test]
+    fn non_image_url_rejected() {
+        assert!(!is_image_url("https://example.com/page"));
+        assert!(!is_image_url("https://example.com/archive.zip"));
+        // A dot only in an earlier path segment is not an extension.
+        assert!(!is_image_url("https://example.com/v1.2/file"));
+        assert!(!is_image_url("https://example.com/"));
     }
 
     #[test]

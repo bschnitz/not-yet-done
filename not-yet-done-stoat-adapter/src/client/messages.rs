@@ -33,6 +33,22 @@ pub struct MessageView {
     pub author_name: String,
     pub edited: bool,
     pub timestamp_ms: Option<u64>,
+    /// Uploaded files carried by the message. Rendered as placeholder
+    /// lines in the body (the terminal can't show the image inline); each
+    /// image/file is openable via link-hop when its `url` resolved.
+    pub attachments: Vec<Attachment>,
+}
+
+/// One uploaded file on a message, resolved for display.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub filename: String,
+    /// Absolute download URL (`{autumn}/{tag}/{id}/{filename}`), or `None`
+    /// when the autumn base URL hasn't been discovered yet.
+    pub url: Option<String>,
+    /// True for image attachments (metadata `type: Image` or an
+    /// `image/*` content type) — drives the 🖼 vs 📎 placeholder glyph.
+    pub is_image: bool,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +77,61 @@ struct RawMessage {
     /// carry no `content`.
     #[serde(default)]
     system: Option<serde_json::Value>,
+    /// Uploaded files (Revolt `File` objects). Empty for most messages.
+    #[serde(default)]
+    attachments: Vec<RawFile>,
+}
+
+/// A Revolt `File` object as it appears in a message's `attachments`.
+#[derive(Deserialize)]
+struct RawFile {
+    #[serde(rename = "_id")]
+    id: String,
+    /// Storage bucket (`attachments`, `avatars`, …). Part of the URL path.
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    content_type: String,
+    #[serde(default)]
+    metadata: RawFileMetadata,
+}
+
+#[derive(Deserialize, Default)]
+struct RawFileMetadata {
+    /// `Image`, `Video`, `Audio`, `File`, …
+    #[serde(rename = "type", default)]
+    kind: String,
+}
+
+impl RawFile {
+    /// Resolve into a display [`Attachment`]. Builds the download URL from
+    /// the autumn base when known: `{autumn}/{tag}/{id}/{filename}` with the
+    /// filename percent-encoded so spaces/unicode stay a valid URL.
+    fn into_attachment(self, autumn: Option<&str>) -> Attachment {
+        let is_image =
+            self.metadata.kind == "Image" || self.content_type.starts_with("image/");
+        let tag = if self.tag.is_empty() {
+            "attachments"
+        } else {
+            &self.tag
+        };
+        let url = autumn.map(|base| {
+            format!(
+                "{}/{}/{}/{}",
+                base.trim_end_matches('/'),
+                tag,
+                self.id,
+                percent_encode_segment(&self.filename),
+            )
+        });
+        Attachment {
+            filename: self.filename,
+            url,
+            is_image,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -74,7 +145,13 @@ struct RawUser {
 impl RawMessage {
     /// Resolve into a `MessageView`, looking the author up in `name_of`
     /// (falling back to the raw id) and decoding the ULID timestamp.
-    fn into_view(self, name_of: &dyn Fn(&str) -> Option<String>) -> MessageView {
+    /// `autumn` is the file server base URL used to build attachment links;
+    /// pass `None` before discovery has run.
+    fn into_view(
+        self,
+        name_of: &dyn Fn(&str) -> Option<String>,
+        autumn: Option<&str>,
+    ) -> MessageView {
         let content = match self.content {
             Some(c) if !c.is_empty() => c,
             // System messages have no body; show a stable placeholder so
@@ -84,6 +161,11 @@ impl RawMessage {
         };
         let author_name = name_of(&self.author).unwrap_or_else(|| self.author.clone());
         let timestamp_ms = ulid_timestamp_ms(&self.id);
+        let attachments = self
+            .attachments
+            .into_iter()
+            .map(|f| f.into_attachment(autumn))
+            .collect();
         MessageView {
             id: self.id,
             channel_id: self.channel,
@@ -92,6 +174,7 @@ impl RawMessage {
             author_name,
             edited: self.edited.is_some(),
             timestamp_ms,
+            attachments,
         }
     }
 }
@@ -141,10 +224,11 @@ impl StoatClient {
             .collect();
         let name_of = |id: &str| names.get(id).filter(|n| !n.is_empty()).cloned();
 
+        let autumn = self.autumn_url();
         let mut views: Vec<MessageView> = body
             .messages
             .into_iter()
-            .map(|m| m.into_view(&name_of))
+            .map(|m| m.into_view(&name_of, autumn))
             .collect();
         // Server returns newest-first; flip so the newest sits at the
         // bottom of the list, like every chat client.
@@ -287,7 +371,7 @@ impl StoatClient {
             .await
             .map_err(|e| format!("parse message: {e}"))?;
         let author = author_name.clone();
-        Ok(raw.into_view(&|_id| author.clone()))
+        Ok(raw.into_view(&|_id| author.clone(), self.autumn_url()))
     }
 }
 
@@ -376,7 +460,7 @@ mod tests {
             body.users.into_iter().map(|u| (u.id, u.username)).collect();
         let name_of = |id: &str| names.get(id).cloned();
         let mut views: Vec<MessageView> =
-            body.messages.into_iter().map(|m| m.into_view(&name_of)).collect();
+            body.messages.into_iter().map(|m| m.into_view(&name_of, None)).collect();
         views.reverse();
         // Reversed → oldest first.
         assert_eq!(views[0].author_name, "alice");
@@ -388,12 +472,52 @@ mod tests {
     }
 
     #[test]
+    fn attachment_builds_url_and_flags_image() {
+        // Fully invented payload — no real instance data.
+        let raw: RawMessage = serde_json::from_str(
+            r#"{
+                "_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","channel":"C1","author":"U1","content":"see this",
+                "attachments":[
+                    {"_id":"F1","tag":"attachments","filename":"my photo.png","content_type":"image/png","metadata":{"type":"Image"}},
+                    {"_id":"F2","tag":"attachments","filename":"notes.pdf","content_type":"application/pdf","metadata":{"type":"File"}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let view = raw.into_view(&|_| None, Some("https://autumn.example/"));
+        assert_eq!(view.attachments.len(), 2);
+        let img = &view.attachments[0];
+        assert!(img.is_image);
+        // Trailing slash on the base is trimmed; the space is percent-encoded.
+        assert_eq!(
+            img.url.as_deref(),
+            Some("https://autumn.example/attachments/F1/my%20photo.png")
+        );
+        assert!(!view.attachments[1].is_image);
+    }
+
+    #[test]
+    fn attachment_url_is_none_before_discovery() {
+        let raw: RawMessage = serde_json::from_str(
+            r#"{"_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","channel":"C1","author":"U1",
+                "attachments":[{"_id":"F1","filename":"x.png","content_type":"image/png"}]}"#,
+        )
+        .unwrap();
+        // No autumn base yet → the attachment is listed but has no link, and
+        // an empty `tag` falls back to the `attachments` bucket.
+        let view = raw.into_view(&|_| None, None);
+        assert_eq!(view.attachments.len(), 1);
+        assert!(view.attachments[0].url.is_none());
+        assert!(view.attachments[0].is_image);
+    }
+
+    #[test]
     fn system_message_gets_placeholder() {
         let raw: RawMessage = serde_json::from_str(
             r#"{"_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","channel":"C1","author":"U1","system":{"type":"user_joined"}}"#,
         )
         .unwrap();
-        let view = raw.into_view(&|_| None);
+        let view = raw.into_view(&|_| None, None);
         assert_eq!(view.content, "[system message]");
         // Author falls back to the raw id when unresolved.
         assert_eq!(view.author_name, "U1");

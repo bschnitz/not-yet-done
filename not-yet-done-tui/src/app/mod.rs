@@ -80,6 +80,15 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         result: Result<String, String>,
     },
+    /// An `InputSpec::None` action returned [`ActionOutcome::OpenExternal`]:
+    /// it produced a local file (e.g. a downloaded attachment) the frontend
+    /// should hand to the OS viewer via the configured link opener. `message`
+    /// is the adapter's status line (e.g. "Downloaded 3 images"). The pane is
+    /// not reloaded — opening a file changes nothing in the list.
+    ContentOpenExternal {
+        target: String,
+        message: Option<String>,
+    },
     /// Async-loaded options for a `type: option_menu` popup. `items` are the
     /// adapter's selectable values (`list_values(source)`); `selected_values`
     /// are the stable ids currently set on the node (parsed from its marker
@@ -335,6 +344,97 @@ fn generate_sort_labels(count: usize) -> Vec<String> {
         }
     }
     out
+}
+
+/// Download every image in `urls` through `adapter` into one fresh temp
+/// directory and return the path of the file for `picked` plus the number of
+/// files written. Files are named `NN_<basename>` (index-prefixed so order and
+/// uniqueness hold even when two URLs share a filename); the picked URL is
+/// downloaded first so its file always exists on success. Individual sibling
+/// failures are skipped, but if the picked image itself can't be fetched the
+/// whole call errors so the caller can fall back to the browser.
+///
+/// The directory is a single wiped-and-recreated slot under the temp dir, so a
+/// later link-hop reuses it (only one viewer session matters at a time). The
+/// OS viewer opened on the returned file pages through the siblings written
+/// beside it.
+async fn download_images_to_temp(
+    adapter: &dyn not_yet_done_content::ContentAdapter,
+    urls: &[String],
+    picked: &str,
+) -> Result<(std::path::PathBuf, usize), String> {
+    use tokio::fs;
+
+    let dir = std::env::temp_dir().join("not_yet_done_images");
+    // Fresh slot: drop whatever a previous hop left behind.
+    let _ = fs::remove_dir_all(&dir).await;
+    fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("create temp dir: {e}"))?;
+
+    // Picked first, then the rest in first-seen order (deduped).
+    let mut ordered: Vec<&str> = vec![picked];
+    for u in urls {
+        if u != picked && !ordered.contains(&u.as_str()) {
+            ordered.push(u);
+        }
+    }
+
+    let mut picked_path: Option<std::path::PathBuf> = None;
+    let mut written = 0usize;
+    for (idx, url) in ordered.iter().enumerate() {
+        let bytes = match adapter.download_asset(url).await {
+            Ok(b) => b,
+            Err(e) => {
+                if *url == picked {
+                    return Err(format!("download image: {e}"));
+                }
+                continue;
+            }
+        };
+        let path = dir.join(image_temp_filename(idx, url));
+        if let Err(e) = fs::write(&path, &bytes).await {
+            if *url == picked {
+                return Err(format!("write image: {e}"));
+            }
+            continue;
+        }
+        written += 1;
+        if *url == picked {
+            picked_path = Some(path);
+        }
+    }
+
+    match picked_path {
+        Some(p) => Ok((p, written)),
+        None => Err("picked image was not downloaded".to_string()),
+    }
+}
+
+/// Build a safe, index-prefixed local filename for a downloaded image URL.
+/// The basename is taken from the URL path (query/fragment dropped), reduced
+/// to its last path segment, and stripped of characters that aren't safe in a
+/// filename; an image extension is appended if the derived name lacks one.
+fn image_temp_filename(idx: usize, url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let raw = path.rsplit(['/', '\\']).next().unwrap_or("image");
+    let mut cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        cleaned = "image".to_string();
+    }
+    if !cleaned.contains('.') {
+        cleaned.push_str(".img");
+    }
+    format!("{idx:02}_{cleaned}")
 }
 
 /// A pending confirmation dialog: shows a message, executes on y/Enter, cancels on n/Esc.
@@ -3495,6 +3595,12 @@ impl App {
                         }
                     }
                 }
+                LoadMsg::ContentOpenExternal { target, message } => {
+                    if let Some(msg) = message {
+                        self.notify(msg);
+                    }
+                    self.open_external(&target);
+                }
                 LoadMsg::OptionMenuItems {
                     view_index,
                     pane_id,
@@ -3851,7 +3957,11 @@ impl App {
                         if let Some(table) = self.active_table_mut() {
                             table.link_hop_close();
                         }
-                        self.open_link_in_browser(&url);
+                        if crate::views::link_extract::is_image_url(&url) {
+                            self.open_image_link(&url);
+                        } else {
+                            self.open_link_in_browser(&url);
+                        }
                     }
                     not_yet_done_ratatui::LinkHopOutcome::NoMatch => {
                         if let Some(table) = self.active_table_mut() {
@@ -6696,6 +6806,17 @@ impl App {
                             .await
                     }
                     .await;
+                    // `OpenExternal` takes its own message so the app can hand
+                    // the file to the OS viewer instead of reloading the pane.
+                    if let Ok(not_yet_done_content::ActionOutcome::OpenExternal { target, message }) =
+                        &outcome
+                    {
+                        let _ = tx.send(LoadMsg::ContentOpenExternal {
+                            target: target.clone(),
+                            message: message.clone(),
+                        });
+                        return;
+                    }
                     let result = match outcome {
                         Ok(not_yet_done_content::ActionOutcome::Done { message }) => {
                             Ok(message.unwrap_or_else(|| format!("{action_id} executed")))
@@ -7240,31 +7361,108 @@ impl App {
     /// final argument. Stdio is nulled and the child is placed in its own
     /// process group so it can outlive this session cleanly.
     fn open_link_in_browser(&mut self, url: &str) {
+        match self.spawn_link_opener(url) {
+            Ok(()) => self.notify(format!("Opening {url}")),
+            Err(e) => self.notify(e),
+        }
+    }
+
+    /// Open a local file (or URL) with the configured link opener. Used when
+    /// an adapter action downloaded something (e.g. Stoat image attachments)
+    /// and returned [`ActionOutcome::OpenExternal`]: the file is handed to the
+    /// platform viewer, whose sibling-navigation then reaches the other files
+    /// the action wrote into the same directory. The caller has already shown
+    /// the adapter's status message, so a success here is silent; only a
+    /// spawn failure is surfaced.
+    fn open_external(&mut self, target: &str) {
+        if let Err(e) = self.spawn_link_opener(target) {
+            self.notify_error(e);
+        }
+    }
+
+    /// Link-hop landed on an image URL: rather than opening the URL in the
+    /// browser, download every image linked from the active pane into one
+    /// temp directory and open the picked one in the OS viewer, whose
+    /// sibling-navigation then pages through the rest. Downloads route through
+    /// the pane's adapter (image hosts commonly sit behind auth); if the
+    /// adapter declines (`download_asset` unsupported) or the fetch fails, the
+    /// URL falls back to the browser.
+    fn open_image_link(&mut self, url: &str) {
+        let Tab::Content(idx) = self.active_tab;
+        let adapter = self
+            .content_view(idx)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone);
+        let Some(adapter) = adapter else {
+            self.open_link_in_browser(url);
+            return;
+        };
+        // All image links in the pane, with the picked one guaranteed present
+        // and opened first.
+        let mut all = self
+            .content_view(idx)
+            .map(|cv| cv.active_pane().image_link_urls())
+            .unwrap_or_default();
+        let picked = url.to_string();
+        if !all.iter().any(|u| u == &picked) {
+            all.insert(0, picked.clone());
+        }
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            match download_images_to_temp(adapter.as_ref(), &all, &picked).await {
+                Ok((path, count)) => {
+                    let message = if count > 1 {
+                        Some(format!("Opening image ({count} downloaded)"))
+                    } else {
+                        Some("Opening image".to_string())
+                    };
+                    let _ = tx.send(LoadMsg::ContentOpenExternal {
+                        target: path.to_string_lossy().into_owned(),
+                        message,
+                    });
+                }
+                // Adapter declined or the download failed: hand the URL to the
+                // browser instead.
+                Err(_) => {
+                    let _ = tx.send(LoadMsg::ContentOpenExternal {
+                        target: picked.clone(),
+                        message: Some(format!("Opening {picked}")),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Spawn the configured link opener (default `xdg-open`) on `target`,
+    /// detached. The opener string is split on whitespace so leading flags
+    /// work; `target` is the final argument. Stdio is nulled and the child is
+    /// placed in its own process group so it outlives this session cleanly.
+    /// Returns a user-facing error string on misconfiguration or spawn
+    /// failure; the caller owns the success notification.
+    fn spawn_link_opener(&self, target: &str) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
         let template = self.config.navigation.link_opener.trim();
         let mut parts = template.split_whitespace();
         let Some(program) = parts.next() else {
-            self.notify("No link opener configured".to_string());
-            return;
+            return Err("No link opener configured".to_string());
         };
         let args: Vec<&str> = parts.collect();
 
         let mut cmd = Command::new(program);
         cmd.args(&args)
-            .arg(url)
+            .arg(target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // Detach into a fresh process group so xdg-open (and the browser it
-        // execs) never shares this TUI's controlling terminal or pipes.
+        // Detach into a fresh process group so xdg-open (and the app it execs)
+        // never shares this TUI's controlling terminal or pipes.
         cmd.process_group(0);
 
-        match cmd.spawn() {
-            Ok(_child) => self.notify(format!("Opening {url}")),
-            Err(e) => self.notify(format!("Failed to open link: {e}")),
-        }
+        cmd.spawn()
+            .map(|_child| ())
+            .map_err(|e| format!("Failed to open: {e}"))
     }
 
     /// Load column configuration from DB.
@@ -8661,7 +8859,28 @@ fn load_content_views(
 
 #[cfg(test)]
 mod tests {
-    use super::split_leading_token;
+    use super::{image_temp_filename, split_leading_token};
+
+    #[test]
+    fn image_temp_filename_prefixes_index_and_keeps_basename() {
+        assert_eq!(
+            image_temp_filename(3, "https://cdn.test/a/b/photo.png"),
+            "03_photo.png"
+        );
+    }
+
+    #[test]
+    fn image_temp_filename_drops_query_and_sanitizes() {
+        assert_eq!(
+            image_temp_filename(0, "https://cdn.test/pic name.jpg?tok=1"),
+            "00_pic_name.jpg"
+        );
+    }
+
+    #[test]
+    fn image_temp_filename_appends_extension_when_missing() {
+        assert_eq!(image_temp_filename(1, "https://cdn.test/blob"), "01_blob.img");
+    }
 
     #[test]
     fn split_leading_token_quoted_tab_name_with_spaces() {
