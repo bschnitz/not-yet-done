@@ -713,6 +713,16 @@ fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
             println!("ok → {node_id}");
             Ok(())
         }
+        ActionOutcome::OpenExternal { target, message } => {
+            // No viewer to launch non-interactively — report the message and
+            // the path the frontend would have opened, so a script can act on
+            // it (e.g. `xdg-open` the file itself).
+            if let Some(msg) = message {
+                println!("{msg}");
+            }
+            println!("{target}");
+            Ok(())
+        }
         ActionOutcome::Reopen { content, .. } => Err(anyhow!(
             "'{action_id}' rejected the input:\n{content}"
         )),

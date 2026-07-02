@@ -227,6 +227,10 @@ views:
                 }
               - { name: delete, key: d, type: custom, id: delete_message }
               - { name: react, key: "+", type: custom, id: react }
+              # `i` downloads the message's image attachments to a temp dir
+              # and opens the first in the OS viewer (xdg-open) — the rest
+              # sit in the same dir so the viewer can page through them.
+              - { name: images, key: i, type: custom, id: open-images }
               - { name: refresh, key: r, type: reload }
             # `p` previews the selected message's full body (Markdown) —
             # the same text the table row shows collapsed to one line.
@@ -320,6 +324,9 @@ views:
                     }
                   - { name: delete, key: d, type: custom, id: delete_message }
                   - { name: react, key: "+", type: custom, id: react }
+                  # `i` downloads the message's image attachments and opens
+                  # the first in the OS viewer (see the other messages block).
+                  - { name: images, key: i, type: custom, id: open-images }
                   - { name: refresh, key: r, type: reload }
                 preview:
                   enabled: true

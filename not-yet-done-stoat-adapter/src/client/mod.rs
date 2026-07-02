@@ -13,6 +13,7 @@ pub mod structure;
 pub mod sync;
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use reqwest::Client as HttpClient;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue};
@@ -22,7 +23,7 @@ use not_yet_done_content::http_log;
 
 pub use auth::{StoatSession, perform_login};
 pub use discovery::{RootInfo, fetch_root_info};
-pub use messages::{MessageView, ulid_timestamp_ms};
+pub use messages::{Attachment, MessageView, ulid_timestamp_ms};
 
 const SESSION_TOKEN_HEADER: &str = "x-session-token";
 
@@ -42,6 +43,10 @@ pub struct StoatClient {
     token: String,
     #[allow(dead_code)]
     user_id: String,
+    /// Autumn (file server) base URL, discovered lazily from `GET /api/`
+    /// on the first `discover_ws_url` (i.e. at connect). Empty/unset until
+    /// then — attachment placeholders then render without a link.
+    autumn_url: OnceLock<String>,
 }
 
 impl StoatClient {
@@ -55,11 +60,18 @@ impl StoatClient {
             http,
             token: session.token,
             user_id: session.user_id,
+            autumn_url: OnceLock::new(),
         }))
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Autumn (file server) base URL if discovery has run and the instance
+    /// advertises an enabled autumn endpoint; `None` otherwise.
+    pub fn autumn_url(&self) -> Option<&str> {
+        self.autumn_url.get().map(String::as_str)
     }
 
     /// The session token, for handing to the gateway.
@@ -95,9 +107,38 @@ impl StoatClient {
             .map_err(|e| format!("parse /users/@me: {e}"))
     }
 
-    /// Discover the WebSocket URL via `GET /api/`.
+    /// Download the raw bytes of a file by absolute URL — used to fetch a
+    /// message attachment from the autumn (file) server before handing it to
+    /// the OS viewer. Autumn serves files publicly by id, so no session token
+    /// is sent (and deliberately so: the token belongs to the API host, not
+    /// the file host).
+    pub async fn download_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
+        http_log::log_request("GET", url);
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| http_log::network_error("GET", url, e))?;
+        let resp = http_log::check_status("GET", url, resp).await?;
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("download {url}: {e}"))
+    }
+
+    /// Discover the WebSocket URL via `GET /api/`. Also captures the autumn
+    /// (file server) base URL as a side effect, so later attachment URLs can
+    /// be built without a second discovery round-trip.
     pub async fn discover_ws_url(&self) -> Result<String, String> {
         let info = fetch_root_info(&self.http, &self.base_url).await?;
+        let autumn = &info.features.autumn;
+        if autumn.enabled && !autumn.url.is_empty() {
+            // First writer wins; a repeat discovery (reconnect) is a no-op.
+            let _ = self
+                .autumn_url
+                .set(autumn.url.trim_end_matches('/').to_string());
+        }
         Ok(info.ws)
     }
 }

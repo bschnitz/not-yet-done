@@ -324,6 +324,21 @@ impl ContentAdapter for StoatAdapter {
         }
     }
 
+    /// Fetch an attachment we serve. Attachments live on the autumn file
+    /// host discovered at connect; only URLs under that base are ours, so
+    /// any other link (or a not-yet-discovered host) declines here and the
+    /// frontend falls back to the browser.
+    async fn download_asset(&self, url: &str) -> Result<Vec<u8>> {
+        let client = self.auth.get_client().await.map_err(other_err)?;
+        let is_ours = client
+            .autumn_url()
+            .is_some_and(|base| url.starts_with(base));
+        if !is_ours {
+            return Err(ContentError::NotSupported("download_asset".into()));
+        }
+        client.download_bytes(url).await.map_err(other_err)
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             // Phase 3: messages can be sent (created) and deleted; search

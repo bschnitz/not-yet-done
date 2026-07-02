@@ -8,6 +8,7 @@
 //! recover the channel a bare ULID would not encode.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -22,7 +23,7 @@ use tokio::sync::RwLock;
 use super::mentions;
 use super::other_err;
 use super::types::message_type;
-use crate::client::{MessageView, StoatClient};
+use crate::client::{Attachment, MessageView, StoatClient};
 use crate::gateway::StoatState;
 
 /// Build the composite node id the tree uses for a message.
@@ -43,6 +44,35 @@ fn format_ts(ms: Option<u64>) -> String {
     match ms.and_then(|ms| DateTime::from_timestamp_millis(ms as i64)) {
         Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
         None => String::new(),
+    }
+}
+
+/// Append one placeholder line per attachment to a message body. The
+/// terminal can't render an image inline, so each file shows as a
+/// markdown link `[🖼 filename](url)` (📎 for non-images) — the generic
+/// link-hop (`f`) then labels and opens it via xdg-open, exactly like any
+/// other URL in the pane. When the autumn URL wasn't known the placeholder
+/// degrades to plain `🖼 filename` (no link). An image-only message (empty
+/// body) starts directly with its placeholders, no leading blank line.
+fn render_body_with_attachments(body: &str, attachments: &[crate::client::Attachment]) -> String {
+    if attachments.is_empty() {
+        return body.to_string();
+    }
+    let block = attachments
+        .iter()
+        .map(|att| {
+            let icon = if att.is_image { "🖼" } else { "📎" };
+            match &att.url {
+                Some(url) => format!("[{icon} {}]({})", att.filename, url),
+                None => format!("{icon} {}", att.filename),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.is_empty() {
+        block
+    } else {
+        format!("{body}\n{block}")
     }
 }
 
@@ -71,7 +101,52 @@ pub(super) fn message_actions() -> Vec<NodeAction> {
             .with_placement(HintPlacement::ActionBar),
         NodeAction::new("delete_message", "delete", InputSpec::None),
         NodeAction::new("react", "react", InputSpec::Picker),
+        // Downloads the message's image attachments and opens the first in
+        // the OS viewer (the rest sit in the same temp dir for navigation).
+        NodeAction::new("open-images", "images", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar),
     ]
+}
+
+/// Per-message temp directory for downloaded attachments. Keyed by the
+/// message id so re-opening the same message reuses one directory; wiped
+/// first so the viewer only ever sees the current set (not a stale sibling
+/// from an earlier open).
+fn image_temp_dir(message_id: &str) -> std::io::Result<PathBuf> {
+    let mut dir = std::env::temp_dir();
+    dir.push("not_yet_done_stoat");
+    dir.push(sanitize_component(message_id));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Reduce a string to a safe single path component (message id → dir name):
+/// keep `[A-Za-z0-9._-]`, replace anything else with `_`.
+fn sanitize_component(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Build a safe on-disk filename for the `idx`-th attachment. Strips any
+/// path separators the server filename might carry and prefixes the index
+/// so (a) two attachments sharing a name never collide and (b) the viewer's
+/// alphabetical order matches the message's attachment order.
+fn safe_image_name(idx: usize, filename: &str) -> String {
+    let base = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("image");
+    format!("{idx:02}_{}", sanitize_component(base))
 }
 
 pub(super) struct StoatMessageNode {
@@ -86,6 +161,10 @@ pub(super) struct StoatMessageNode {
     content_body: String,
     /// Server-scoped `id → username` map for resolving mentions.
     users: Arc<HashMap<String, String>>,
+    /// Uploaded files on this message — kept so the `open-images` action can
+    /// download and open them (the display body only holds their placeholder
+    /// text).
+    attachments: Vec<Attachment>,
     /// Live tree state — lets the `mark-read` hook record the channel's
     /// read marker locally so the unread highlight clears immediately,
     /// without waiting for the server's `ChannelAck` WS echo.
@@ -102,8 +181,12 @@ impl StoatMessageNode {
     ) -> Self {
         let composite_id = composite_id(&view.channel_id, &view.id);
         let timestamp = format_ts(view.timestamp_ms);
-        // Display body: `<@ID>` → `@username` (unknown ids kept raw).
-        let display_body = mentions::render_display(&view.content, &users);
+        // Display body: `<@ID>` → `@username` (unknown ids kept raw), then
+        // one placeholder line per attachment appended below (see helper).
+        let display_body = render_body_with_attachments(
+            &mentions::render_display(&view.content, &users),
+            &view.attachments,
+        );
         let mut fields = vec![
             MetadataField {
                 key: "author".into(),
@@ -161,9 +244,58 @@ impl StoatMessageNode {
             label,
             content_body: view.content,
             users,
+            attachments: view.attachments,
             state,
             metadata: Metadata { fields },
         }
+    }
+
+    /// Download every image attachment on this message into one temp dir and
+    /// return the first as an [`ActionOutcome::OpenExternal`] so the frontend
+    /// opens it in the OS viewer; the viewer's sibling-navigation then reaches
+    /// the rest. Non-image files are ignored (the `f` link-hop already opens
+    /// their placeholder URLs). Downloads run sequentially — a message rarely
+    /// carries more than a handful of images, and the autumn server is the
+    /// same host we just talked to.
+    async fn open_images(&self) -> Result<ActionOutcome> {
+        let downloadable: Vec<(&str, &str)> = self
+            .attachments
+            .iter()
+            .filter(|a| a.is_image)
+            .filter_map(|a| a.url.as_deref().map(|url| (url, a.filename.as_str())))
+            .collect();
+        if downloadable.is_empty() {
+            let has_images = self.attachments.iter().any(|a| a.is_image);
+            return Ok(ActionOutcome::Done {
+                message: Some(
+                    if has_images {
+                        // Images exist but autumn wasn't discovered → no URL.
+                        "Image server URL not available — cannot download".to_string()
+                    } else {
+                        "No images in this message".to_string()
+                    },
+                ),
+            });
+        }
+        let dir = image_temp_dir(&self.message_id).map_err(|e| other_err(e.to_string()))?;
+        let mut first: Option<PathBuf> = None;
+        for (idx, (url, filename)) in downloadable.iter().enumerate() {
+            let bytes = self.client.download_bytes(url).await.map_err(other_err)?;
+            let path = dir.join(safe_image_name(idx, filename));
+            tokio::fs::write(&path, &bytes)
+                .await
+                .map_err(|e| other_err(format!("write {}: {e}", path.display())))?;
+            first.get_or_insert(path);
+        }
+        let count = downloadable.len();
+        Ok(ActionOutcome::OpenExternal {
+            target: first.unwrap().to_string_lossy().into_owned(),
+            message: Some(if count == 1 {
+                "Opening image".to_string()
+            } else {
+                format!("Opening {count} images")
+            }),
+        })
     }
 }
 
@@ -300,6 +432,7 @@ impl Node for StoatMessageNode {
                     message: Some(format!("Reacted {emoji}")),
                 })
             }
+            ("open-images", ActionInput::None) => self.open_images().await,
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unsupported action/input for {other}"
             ))),
@@ -363,6 +496,7 @@ mod tests {
             content: "line one\nline two".into(),
             author_id: "U1".into(),
             author_name: "alice".into(),
+            attachments: vec![],
             edited: true,
             timestamp_ms: Some(1469918176385),
         }
@@ -457,10 +591,14 @@ mod tests {
         let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
         let actions = node.actions();
         let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, vec!["edit_message", "delete_message", "react"]);
+        assert_eq!(
+            ids,
+            vec!["edit_message", "delete_message", "react", "open-images"]
+        );
         assert!(matches!(actions[0].input, InputSpec::Editor));
         assert!(matches!(actions[1].input, InputSpec::None));
         assert!(matches!(actions[2].input, InputSpec::Picker));
+        assert!(matches!(actions[3].input, InputSpec::None));
     }
 
     #[tokio::test]
@@ -515,6 +653,7 @@ mod tests {
             content: "hi <@01AAA>".into(),
             author_id: "U1".into(),
             author_name: "bob".into(),
+            attachments: vec![],
             edited: false,
             timestamp_ms: Some(1469918176385),
         }
@@ -563,6 +702,95 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, ActionOutcome::NoChanges));
+    }
+
+    #[test]
+    fn attachments_render_as_placeholder_links() {
+        use crate::client::Attachment;
+        let img = Attachment {
+            filename: "diagram.png".into(),
+            url: Some("https://autumn.example/attachments/F1/diagram.png".into()),
+            is_image: true,
+        };
+        let doc = Attachment {
+            filename: "notes.pdf".into(),
+            url: Some("https://autumn.example/attachments/F2/notes.pdf".into()),
+            is_image: false,
+        };
+        // Image → 🖼 markdown link, non-image → 📎; appended below the body.
+        let out = render_body_with_attachments("hello", std::slice::from_ref(&img));
+        assert_eq!(
+            out,
+            "hello\n[🖼 diagram.png](https://autumn.example/attachments/F1/diagram.png)"
+        );
+        // Non-image gets the paperclip glyph.
+        let out = render_body_with_attachments("hello", std::slice::from_ref(&doc));
+        assert!(out.contains("[📎 notes.pdf]("));
+        // Empty body → placeholders lead, no orphan newline.
+        let out = render_body_with_attachments("", std::slice::from_ref(&img));
+        assert_eq!(
+            out,
+            "[🖼 diagram.png](https://autumn.example/attachments/F1/diagram.png)"
+        );
+        // No attachments → body verbatim.
+        assert_eq!(render_body_with_attachments("hi", &[]), "hi");
+    }
+
+    #[test]
+    fn safe_image_name_strips_paths_and_prefixes_index() {
+        assert_eq!(safe_image_name(0, "photo.png"), "00_photo.png");
+        // Directory parts are dropped (basename only); unsafe chars in the
+        // basename collapse to underscores.
+        assert_eq!(safe_image_name(3, "a/b\\c d.png"), "03_c_d.png");
+        // Empty / separator-only names fall back to a stable stem.
+        assert_eq!(safe_image_name(1, "   "), "01_image");
+    }
+
+    #[tokio::test]
+    async fn open_images_reports_when_none_present() {
+        // A message with no attachments → a friendly Done, no download.
+        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
+        let outcome = node.open_images().await.unwrap();
+        match outcome {
+            ActionOutcome::Done { message } => {
+                assert_eq!(message.as_deref(), Some("No images in this message"));
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_images_reports_when_url_unresolved() {
+        // An image whose autumn URL never resolved → cannot download.
+        let mut view = sample_view();
+        view.attachments = vec![Attachment {
+            filename: "x.png".into(),
+            url: None,
+            is_image: true,
+        }];
+        let node = StoatMessageNode::new(test_client(), view, no_users(), no_state());
+        let outcome = node.open_images().await.unwrap();
+        match outcome {
+            ActionOutcome::Done { message } => {
+                assert!(message.unwrap().contains("cannot download"));
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    #[test]
+    fn attachment_without_url_degrades_to_plain_glyph() {
+        use crate::client::Attachment;
+        // Before autumn discovery the url is None → no link, just the glyph.
+        let att = Attachment {
+            filename: "photo.jpg".into(),
+            url: None,
+            is_image: true,
+        };
+        assert_eq!(
+            render_body_with_attachments("caption", &[att]),
+            "caption\n🖼 photo.jpg"
+        );
     }
 
     #[tokio::test]

@@ -969,6 +969,21 @@ pub enum ActionOutcome {
         node_type: NodeType,
         message: Option<String>,
     },
+    /// The action produced a local file (or URL) the frontend should hand
+    /// to the OS — e.g. an adapter that downloaded an attachment and wants
+    /// it shown in the platform image/PDF viewer. The TUI opens `target`
+    /// with its configured link opener (`xdg-open` by default), detached so
+    /// nothing blocks on the viewer.
+    ///
+    /// `target` is a single entry point on purpose: when an action fetches
+    /// several files it writes them all into one directory and returns the
+    /// first, so the opened viewer can page through its siblings. The
+    /// adapter never spawns a process itself — *how* to open stays the
+    /// frontend's decision (opener config), the adapter only says *what*.
+    OpenExternal {
+        target: String,
+        message: Option<String>,
+    },
 }
 
 /// Initial state for an `InputSpec::Editor` action.
@@ -1359,6 +1374,24 @@ pub trait ContentAdapter: Send + Sync {
 
     /// Direct access to a node by its ID (shortcut, avoids tree traversal).
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>>;
+
+    /// Download a binary asset this adapter serves (e.g. an image
+    /// attachment), by absolute URL, authenticating as the adapter needs to.
+    /// Returns the raw bytes.
+    ///
+    /// The frontend calls this when the user opens an *image* link (via the
+    /// link-hop): rather than sending the URL to a browser, the file is
+    /// fetched here and shown in the OS image viewer. Because attachment URLs
+    /// commonly sit behind auth or on a separate file host, only the adapter
+    /// can fetch them — hence the hook.
+    ///
+    /// The default declines every URL, so an adapter that hasn't opted in
+    /// keeps the browser fallback. An adapter that overrides this SHOULD
+    /// still decline (with [`ContentError::NotSupported`]) any URL it doesn't
+    /// recognise as its own, so unrelated links fall back to the browser too.
+    async fn download_asset(&self, _url: &str) -> Result<Vec<u8>> {
+        Err(ContentError::NotSupported("download_asset".into()))
+    }
 
     /// Synchronous, instance-free lookup of the action set for a given
     /// node type. Used by the TUI to render shortcut hints without

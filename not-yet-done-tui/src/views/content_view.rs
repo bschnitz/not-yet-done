@@ -5869,6 +5869,29 @@ impl ContentPane {
         SubViewMessage::SelectionChanged(None)
     }
 
+    /// Every distinct image URL linked from this pane's items, first-seen
+    /// order preserved. The link-hop uses this to download all images in the
+    /// pane into one directory so the OS viewer can page between them.
+    pub fn image_link_urls(&self) -> Vec<String> {
+        let fragments: Vec<&str> = self
+            .items
+            .iter()
+            .flat_map(|it| {
+                std::iter::once(it.label.as_str())
+                    .chain(it.metadata.fields.iter().map(|f| f.value.as_str()))
+            })
+            .collect();
+        let mut urls: Vec<String> = Vec::new();
+        for (_needle, url) in
+            crate::views::link_extract::extract_links_from(fragments.iter().copied())
+        {
+            if crate::views::link_extract::is_image_url(&url) && !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        urls
+    }
+
     /// Helper used after every cursor move: emit a preview-fetch request
     /// when the new selection has no preview yet, otherwise just notify.
     fn preview_after_nav(

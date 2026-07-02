@@ -203,6 +203,10 @@ impl EditSession for NodeActionEditSession {
                     _ => self.done_with_row_patch(format!("Created {new_id}")),
                 }
             }
+            // Editor-driven actions don't open external viewers (that's a
+            // shortcut-path outcome); surface the message and close without a
+            // row patch so the enum stays exhaustive here.
+            Ok(ActionOutcome::OpenExternal { message, .. }) => CommitOutcome::Cancelled { message },
             Err(e) => CommitOutcome::Cancelled {
                 message: Some(format!("Failed to execute {}: {e}", self.action_id)),
             },
