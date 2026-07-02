@@ -12,6 +12,7 @@ use crate::client::{TaigaComment, delete_comment, edit_comment, fetch_comments};
 
 use super::TaigaItemNode;
 use super::edit_full::{build_tables, edit_full_fields};
+use super::slugs::build_user_table;
 use super::template::{
     self, FieldError, Parsed3b, render_3b, render_with_errors,
 };
@@ -237,6 +238,17 @@ impl TaigaItemNode {
             })
             .collect();
 
+        // Members table so `@uu-slug` mentions in comment bodies resolve to
+        // Taiga's wire `@username` form (the same slug system as the assignee
+        // field). Existing comments render with `@username` already, so the
+        // resolved body compares cleanly against the snapshot when unchanged.
+        let members = self
+            .client
+            .ensure_members(self.detail.project_id)
+            .await
+            .map_err(|e| ContentError::Other(e.into()))?;
+        let users = build_user_table(&members);
+
         // 3. Apply per-comment ops first (independent of item version).
         let mut comment_errors: Vec<String> = Vec::new();
         let mut n_updates = 0usize;
@@ -261,24 +273,27 @@ impl TaigaItemNode {
                 } else {
                     n_deletes += 1;
                 }
-            } else if user_body != snap_body {
-                if let Err(e) = edit_comment(
-                    &self.client,
-                    self.detail.item_type,
-                    self.detail.id,
-                    id,
-                    user_body,
-                )
-                .await
-                {
-                    comment_errors.push(format!("edit {id}: {e}"));
-                } else {
-                    n_updates += 1;
+            } else {
+                let resolved = template::resolve_user_mentions(user_body, &users);
+                if resolved != snap_body {
+                    if let Err(e) = edit_comment(
+                        &self.client,
+                        self.detail.item_type,
+                        self.detail.id,
+                        id,
+                        &resolved,
+                    )
+                    .await
+                    {
+                        comment_errors.push(format!("edit {id}: {e}"));
+                    } else {
+                        n_updates += 1;
+                    }
                 }
             }
         }
 
-        // 4. Collect new-comment bodies.
+        // 4. Collect new-comment bodies (mentions resolved to `@username`).
         let adds: Vec<String> = user
             .blocks
             .iter()
@@ -288,7 +303,7 @@ impl TaigaItemNode {
                     if body.is_empty() {
                         None
                     } else {
-                        Some(body.to_string())
+                        Some(template::resolve_user_mentions(body, &users))
                     }
                 }
                 CommentBlockKind::Existing(_) => None,
