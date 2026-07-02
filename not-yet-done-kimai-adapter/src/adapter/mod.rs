@@ -21,10 +21,17 @@ use crate::client::{KimaiClient, KimaiProject, KimaiTimesheet};
 mod auth_bridge;
 mod config;
 mod factory;
+mod template;
 
 pub use factory::KimaiAdapterFactory;
 
 use auth_bridge::AuthBridge;
+
+/// Action set for a timesheet row. Shared between [`Node::actions`] and
+/// the adapter's instance-free [`ContentAdapter::actions_for_type`].
+fn timesheet_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new("edit", "edit", InputSpec::Editor)]
+}
 
 fn timesheet_node_type() -> NodeType {
     NodeType {
@@ -88,6 +95,13 @@ impl ContentAdapter for KimaiAdapter {
         fetch_timesheet_node(&client, id).await
     }
 
+    fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        match node_type.type_id.as_str() {
+            "kimai:timesheet" => timesheet_actions(),
+            _ => Vec::new(),
+        }
+    }
+
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         self.auth.subscribe_status()
     }
@@ -120,8 +134,12 @@ async fn fetch_timesheet_node(client: &Arc<KimaiClient>, id: &str) -> Result<Box
         projects.into_iter().map(|p| (p.id, p)).collect();
     let activities: HashMap<u64, String> =
         activities.into_iter().map(|a| (a.id, a.name)).collect();
-    let summary = timesheet_summary(ts, &projects, &activities);
-    Ok(Box::new(KimaiTimesheetNode::from_summary(summary)))
+    Ok(Box::new(KimaiTimesheetNode::new(
+        client.clone(),
+        ts,
+        projects,
+        activities,
+    )))
 }
 
 struct KimaiRoot {
@@ -319,22 +337,92 @@ fn timesheet_summary(
 }
 
 /// Leaf node for a single timesheet (detail / `get_by_id` path). Carries
-/// the same fields as the list row.
+/// the same fields as the list row, plus the client, the raw API record
+/// and the lookup tables so the `edit` action can render its template and
+/// PATCH changes back.
 struct KimaiTimesheetNode {
     id: String,
     label: String,
     node_type: NodeType,
     metadata: Metadata,
+    client: Arc<KimaiClient>,
+    ts: KimaiTimesheet,
+    projects: HashMap<u64, KimaiProject>,
+    activities: HashMap<u64, String>,
 }
 
 impl KimaiTimesheetNode {
-    fn from_summary(summary: NodeSummary) -> Self {
+    fn new(
+        client: Arc<KimaiClient>,
+        ts: KimaiTimesheet,
+        projects: HashMap<u64, KimaiProject>,
+        activities: HashMap<u64, String>,
+    ) -> Self {
+        let summary = timesheet_summary(ts.clone(), &projects, &activities);
         Self {
             id: summary.id,
             label: summary.label,
             node_type: summary.node_type,
             metadata: summary.metadata,
+            client,
+            ts,
+            projects,
+            activities,
         }
+    }
+
+    /// Parse the edited buffer, diff against the fresh upstream record and
+    /// PATCH the changed fields. Parse/validation problems reopen the
+    /// editor with an error banner; an upstream change while editing
+    /// reopens with a conflict banner and a renewed version token.
+    async fn execute_edit(&self, text: &str, version: &str) -> Result<ActionOutcome> {
+        let parsed = match template::parse_edit(text) {
+            Ok(parsed) => parsed,
+            Err(errors) => {
+                return Ok(ActionOutcome::Reopen {
+                    content: template::render_with_errors(text, &errors),
+                    new_version: None,
+                });
+            }
+        };
+
+        let fresh = self.client.timesheet(self.ts.id).await.map_err(other_err)?;
+        let fresh_version = template::version_token(&fresh);
+        if fresh_version != version {
+            return Ok(ActionOutcome::Reopen {
+                content: template::render_with_conflict(text),
+                new_version: Some(fresh_version),
+            });
+        }
+
+        let plan = match template::build_edit_plan(
+            &parsed,
+            &fresh,
+            &self.projects,
+            &self.activities,
+        ) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(ActionOutcome::NoChanges),
+            Err(errors) => {
+                return Ok(ActionOutcome::Reopen {
+                    content: template::render_with_errors(text, &errors),
+                    new_version: None,
+                });
+            }
+        };
+
+        self.client
+            .patch_timesheet(self.ts.id, &plan.patch)
+            .await
+            .map_err(other_err)?;
+
+        Ok(ActionOutcome::Done {
+            message: Some(format!(
+                "timesheet {}: updated {}",
+                self.ts.id,
+                plan.changed.join(", ")
+            )),
+        })
     }
 }
 
@@ -354,6 +442,38 @@ impl Node for KimaiTimesheetNode {
 
     fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    fn actions(&self) -> Vec<NodeAction> {
+        timesheet_actions()
+    }
+
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        match action_id {
+            "edit" => Ok(EditorPrep {
+                template: template::render_edit_template(
+                    &self.ts,
+                    &self.projects,
+                    &self.activities,
+                ),
+                version: template::version_token(&self.ts),
+                suffix: ".kimai".into(),
+            }),
+            other => Err(ContentError::NotSupported(format!(
+                "prepare: unknown action {other}"
+            ))),
+        }
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("edit", ActionInput::Edited { text, version, .. }) => {
+                self.execute_edit(&text, &version).await
+            }
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "execute: unknown action {other}"
+            ))),
+        }
     }
 }
 
