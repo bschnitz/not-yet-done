@@ -22,10 +22,13 @@
 # collapse back to the one-line first-line view. This is driven by the
 # description column's `long_source: description` below.
 #
-# `e` opens the edit template on the selected timesheet (editable:
-# project, activity, begin, duration — names resolve case-insensitively,
-# the trailing CACHE section lists what's available; the body below `===`
-# is the description; a duration change re-computes the end time).
+# `e` opens the edit template (as a `.md` buffer) on the selected
+# timesheet (editable: project, activity, begin, duration). Project and
+# activity are shown and entered as whitespace-free *slugs* (with the
+# readable name as an inline comment) so editor word-completion works; the
+# trailing CACHE section lists the available slugs. A full name (any case)
+# or the `#<id>` form are also accepted. The body below `===` is the
+# description; a duration change re-computes the end time.
 
 tab:
   name: Kimai

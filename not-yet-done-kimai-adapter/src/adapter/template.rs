@@ -2,10 +2,13 @@
 //! timesheet. Same layout as the Jira adapter's 3b format: editable
 //! `key: value` lines / `---` / read-only section / `===` / body (the
 //! description), plus a trailing read-only CACHE section advertising the
-//! available project and activity names.
+//! available project and activity *slugs* — single-token, whitespace-free
+//! identifiers, so editor word-completion (vim `<C-n>`) actually works
+//! (project/activity names contain spaces and defeat it).
 //!
-//! Editable fields: `project`, `activity` (by name, resolved back to ids
-//! case-insensitively; the `#<id>` fallback form is accepted verbatim),
+//! Editable fields: `project`, `activity` (by slug — the token shown in the
+//! CACHE and next to each field; a full name (case-insensitive) or the
+//! `#<id>` fallback form are also accepted),
 //! `begin` (local `YYYY-MM-DDTHH:MM[:SS]`, space separator also accepted)
 //! and `duration` (`H:MM[:SS]` or plain seconds). Kimai derives duration
 //! from the begin/end pair, so a duration change is materialised as
@@ -121,9 +124,61 @@ pub(super) fn parse_begin(value: &str) -> Result<NaiveDateTime, String> {
     ))
 }
 
-/// Resolve a project/activity name back to its id. Case-insensitive over
-/// the lookup names; the `#<id>` fallback form (rendered for entities
-/// missing from the lookup) round-trips verbatim.
+/// Turn a display name into a single-token slug: lowercase, every run of
+/// non-alphanumeric characters collapsed to one `-`, leading/trailing `-`
+/// trimmed. Whitespace-free by construction, so editor word-completion can
+/// pick it up. An all-punctuation name slugifies to the empty string — the
+/// caller falls back to the `#<id>` form.
+fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        if ch.is_alphanumeric() {
+            slug.extend(ch.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+/// Build an id → slug map for a set of id → name entries. Slugs are unique:
+/// when two names slugify to the same token, every colliding entry gets its
+/// numeric id appended (`foo` → `foo-7`), so a slug always resolves back to
+/// exactly one id. An empty slug falls back to `id-<id>`.
+fn build_slugs(names: &HashMap<u64, String>) -> HashMap<u64, String> {
+    let base: HashMap<u64, String> = names
+        .iter()
+        .map(|(id, name)| {
+            let s = slugify(name);
+            (*id, if s.is_empty() { format!("id-{id}") } else { s })
+        })
+        .collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for s in base.values() {
+        *counts.entry(s.as_str()).or_default() += 1;
+    }
+    base.iter()
+        .map(|(id, s)| {
+            let slug = if counts[s.as_str()] > 1 {
+                format!("{s}-{id}")
+            } else {
+                s.clone()
+            };
+            (*id, slug)
+        })
+        .collect()
+}
+
+/// Resolve a project/activity value back to its id. Tries, in order: the
+/// `#<id>` fallback form (verbatim), the slug shown in the buffer/CACHE, and
+/// finally a full name (case-insensitive) for backward compatibility and
+/// hand-typed entries. On failure lists the available slugs.
 fn resolve_name(
     value: &str,
     names: &HashMap<u64, String>,
@@ -134,10 +189,14 @@ fn resolve_name(
         return Ok(id);
     }
     let lowered = value.to_lowercase();
+    let slugs = build_slugs(names);
+    if let Some((id, _)) = slugs.iter().find(|(_, s)| **s == lowered) {
+        return Ok(*id);
+    }
     if let Some((id, _)) = names.iter().find(|(_, n)| n.to_lowercase() == lowered) {
         return Ok(*id);
     }
-    let mut available: Vec<&str> = names.values().map(String::as_str).collect();
+    let mut available: Vec<&str> = slugs.values().map(String::as_str).collect();
     available.sort_unstable();
     Err(format!(
         "unknown {what} `{value}` (available: {})",
@@ -151,14 +210,28 @@ pub(super) fn render_edit_template(
     projects: &HashMap<u64, KimaiProject>,
     activities: &HashMap<u64, String>,
 ) -> String {
-    let (project, customer) = projects
+    let project_names: HashMap<u64, String> =
+        projects.iter().map(|(id, p)| (*id, p.name.clone())).collect();
+    let project_slugs = build_slugs(&project_names);
+    let activity_slugs = build_slugs(activities);
+
+    // Editable value = the whitespace-free slug; the readable name rides
+    // along as an inline `# comment` (stripped on parse) so the buffer stays
+    // legible. Entities missing from the lookup fall back to `#<id>`.
+    let render_field =
+        |id: u64, slugs: &HashMap<u64, String>, names: &HashMap<u64, String>| match (
+            slugs.get(&id),
+            names.get(&id),
+        ) {
+            (Some(slug), Some(name)) => format!("{slug}  # {name}"),
+            _ => format!("#{id}"),
+        };
+    let project = render_field(ts.project, &project_slugs, &project_names);
+    let activity = render_field(ts.activity, &activity_slugs, activities);
+    let customer = projects
         .get(&ts.project)
-        .map(|p| (p.name.clone(), p.parent_title.clone().unwrap_or_default()))
-        .unwrap_or_else(|| (format!("#{}", ts.project), String::new()));
-    let activity = activities
-        .get(&ts.activity)
-        .cloned()
-        .unwrap_or_else(|| format!("#{}", ts.activity));
+        .and_then(|p| p.parent_title.clone())
+        .unwrap_or_default();
     let running = ts.end.is_none();
 
     let mut out = String::new();
@@ -190,21 +263,22 @@ pub(super) fn render_edit_template(
     out.push_str(ts.description.as_deref().unwrap_or(""));
     out.push('\n');
 
-    let mut project_names: Vec<&str> =
-        projects.values().map(|p| p.name.as_str()).collect();
-    project_names.sort_unstable();
-    let mut activity_names: Vec<&str> =
-        activities.values().map(String::as_str).collect();
-    activity_names.sort_unstable();
-    if !project_names.is_empty() || !activity_names.is_empty() {
+    // Advertise the slugs (single tokens) so editor word-completion works.
+    let mut project_slug_list: Vec<&str> =
+        project_slugs.values().map(String::as_str).collect();
+    project_slug_list.sort_unstable();
+    let mut activity_slug_list: Vec<&str> =
+        activity_slugs.values().map(String::as_str).collect();
+    activity_slug_list.sort_unstable();
+    if !project_slug_list.is_empty() || !activity_slug_list.is_empty() {
         out.push('\n');
         out.push_str(CACHE_MARKER);
         out.push('\n');
-        if !project_names.is_empty() {
-            out.push_str(&format!("# projects: {}\n", project_names.join(", ")));
+        if !project_slug_list.is_empty() {
+            out.push_str(&format!("# projects: {}\n", project_slug_list.join(", ")));
         }
-        if !activity_names.is_empty() {
-            out.push_str(&format!("# activities: {}\n", activity_names.join(", ")));
+        if !activity_slug_list.is_empty() {
+            out.push_str(&format!("# activities: {}\n", activity_slug_list.join(", ")));
         }
     }
     out
@@ -552,11 +626,13 @@ mod tests {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        assert!(template.contains("project: Website Relaunch"));
+        assert!(template.contains("project: website-relaunch  # Website Relaunch"));
+        assert!(template.contains("activity: development  # Development"));
         assert!(template.contains("begin: 2030-01-15T09:00:00"));
         assert!(template.contains("duration: 1:30:00"));
         assert!(template.contains(CACHE_MARKER));
-        assert!(template.contains("# projects: Internal, Website Relaunch"));
+        assert!(template.contains("# projects: internal, website-relaunch"));
+        assert!(template.contains("# activities: development, meeting"));
 
         let parsed = parse_edit(&template).unwrap();
         assert_eq!(parsed.body, "Refactor login form\nsecond line");
@@ -582,13 +658,52 @@ mod tests {
     }
 
     #[test]
-    fn project_and_activity_resolve_case_insensitively() {
+    fn slugify_produces_single_tokens() {
+        assert_eq!(slugify("Website Relaunch"), "website-relaunch");
+        assert_eq!(slugify("  Multiple   spaces / slashes  "), "multiple-spaces-slashes");
+        assert_eq!(slugify("Bug-Fixing (urgent!)"), "bug-fixing-urgent");
+        assert_eq!(slugify("!!!"), "");
+    }
+
+    #[test]
+    fn build_slugs_disambiguates_collisions() {
+        let names = HashMap::from([
+            (1, "Website Relaunch".to_string()),
+            (2, "Website  Relaunch!".to_string()),
+            (3, "Internal".to_string()),
+        ]);
+        let slugs = build_slugs(&names);
+        // Both collide on `website-relaunch` → id suffix disambiguates.
+        assert_eq!(slugs[&1], "website-relaunch-1");
+        assert_eq!(slugs[&2], "website-relaunch-2");
+        // The unique one stays clean.
+        assert_eq!(slugs[&3], "internal");
+    }
+
+    #[test]
+    fn resolve_name_accepts_slug_name_and_hash_id() {
+        let (projects, _) = lookups();
+        let names: HashMap<u64, String> =
+            projects.iter().map(|(id, p)| (*id, p.name.clone())).collect();
+        // Slug (the CACHE/field form).
+        assert_eq!(resolve_name("website-relaunch", &names, "project").unwrap(), 7);
+        // Full name, any case (backward compat / hand-typed).
+        assert_eq!(resolve_name("Website Relaunch", &names, "project").unwrap(), 7);
+        assert_eq!(resolve_name("WEBSITE RELAUNCH", &names, "project").unwrap(), 7);
+        // `#<id>` fallback for entities missing from the lookup.
+        assert_eq!(resolve_name("#42", &names, "project").unwrap(), 42);
+        let err = resolve_name("nope", &names, "project").unwrap_err();
+        assert!(err.contains("internal, website-relaunch"));
+    }
+
+    #[test]
+    fn project_and_activity_resolve_by_slug() {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
         let edited = template
-            .replace("project: Website Relaunch", "project: internal")
-            .replace("activity: Development", "activity: MEETING");
+            .replace("project: website-relaunch", "project: internal")
+            .replace("activity: development", "activity: meeting");
 
         let parsed = parse_edit(&edited).unwrap();
         let plan = build_edit_plan(&parsed, &ts, &projects, &activities)
@@ -599,17 +714,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_project_lists_available_names() {
+    fn unknown_project_lists_available_slugs() {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        let edited = template.replace("project: Website Relaunch", "project: Nope");
+        let edited = template.replace("project: website-relaunch", "project: Nope");
 
         let parsed = parse_edit(&edited).unwrap();
         let errors = build_edit_plan(&parsed, &ts, &projects, &activities).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("unknown project `Nope`"));
-        assert!(errors[0].contains("Internal, Website Relaunch"));
+        assert!(errors[0].contains("internal, website-relaunch"));
     }
 
     #[test]

@@ -457,7 +457,7 @@ impl Node for KimaiTimesheetNode {
                     &self.activities,
                 ),
                 version: template::version_token(&self.ts),
-                suffix: ".kimai".into(),
+                suffix: ".md".into(),
             }),
             other => Err(ContentError::NotSupported(format!(
                 "prepare: unknown action {other}"
