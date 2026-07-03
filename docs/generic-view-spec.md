@@ -487,6 +487,29 @@ Verhalten / Grenzen:
 - **Kaskadiert beim Schließen.** Wird die Quell-Pane geschlossen, verschwindet
   ihr Detail-Follower mit (eigener Backlink, getrennt von gekoppelten Drills).
 
+#### `window_ops:` — Fenster-/Split-Operationen (`w`-Leader)
+
+Steht auf `ViewDef`, default `false`. Schaltet die über den `w`-Leader
+erreichbaren Fenster-Operationen für diese View frei: `wv` (Split nach rechts),
+`ws` (Split nach unten), `wq` (Pane schließen), `wh`/`wl` (Fokus zur Eltern-/
+Kind-Pane) sowie `w<tag>` (Fokus auf die Pane mit diesem Tag-Buchstaben). Die
+Chords sind über `keybindings.window` konfigurierbar.
+
+Bewusst **opt-in**: Auf jeder View ohne `window_ops: true` greift der
+`w`-Leader nicht und `w` bleibt eine freie, gewöhnliche Taste (Subtab-Wechsel,
+Node-Shortcut, …). Aktiviere es nur dort, wo mehrere Panes wirklich Sinn
+ergeben — eine View mit gekoppeltem Child-`split:` (z. B. der Stoat-Chat) oder
+eine mit `record_detail:`-Split (z. B. Postgres-Zeilen).
+
+```yaml
+- name: chats
+  node_type: "stoat:server"
+  window_ops: true # `w`-Leader (split / close / focus / pane-tag) hier aktiv
+```
+
+Der Schalter gilt für die ganze View (alle Drilldown-Ebenen dieses Subtabs) —
+er wird nicht pro Child gesetzt.
+
 #### `group_by:` / `aggregates:` — Gruppierung & Summen (M3)
 
 Stehen auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout` /
@@ -1485,12 +1508,26 @@ Das Label-Alphabet stammt aus `navigation.jump_chars` (geteilt mit dem
 nativen Tab). Der Sprung wirkt nur auf das fokussierte Pane; in Splits
 gilt er für das gerade aktive Pane.
 
-### Link-Hop (`link_hop`, Default `f`)
+### Link-Hop (`link_hop`, opt-in)
 
-Vimium-artige Link-Auswahl: `f` labelt jeden im fokussierten Pane
-sichtbaren Link; das Label tippen öffnet die zugehörige URL im Browser.
-Nützlich vor allem in markdown-gerenderten Panes (z. B. Stoat-Chat), gilt
-aber generisch für jedes Content-Pane.
+Vimium-artige Link-Auswahl: die konfigurierte Taste (üblich `f`) labelt jeden
+im fokussierten Pane sichtbaren Link; das Label tippen öffnet die zugehörige
+URL im Browser. Nützlich vor allem in markdown-gerenderten Panes (z. B.
+Stoat-Chat).
+
+**Opt-in pro View/Child** — es gibt _keinen_ eingebauten Default. Link-Hop
+wird nur dort geclaimt, wo eine Bindung vorliegt: entweder auf einer View bzw.
+einem Child über `keybindings: { link_hop: f }`, oder global über
+`keybindings.content.link_hop` in der `tui.yaml`. Ohne Bindung bleibt die
+Taste frei. So lässt sich Link-Hop gezielt genau auf den Panes anbieten, die
+tatsächlich Links tragen (z. B. der Messages-Pane des Stoat-Chats):
+
+```yaml
+children:
+  - name: messages
+    node_type: "stoat:message"
+    keybindings: { link_hop: f }
+```
 
 Erkannt werden zwei Link-Formen aus dem Zeilentext:
 

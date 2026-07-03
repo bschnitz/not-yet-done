@@ -464,7 +464,7 @@ fn build_for_view(
     let mut out = Vec::new();
     // Root leaf for this subtab.
     let mut root_map = KeyMap::new();
-    push_tab_wide(&mut root_map, tab, kb);
+    push_tab_wide(&mut root_map, tab, kb, view.window_ops);
     push_subtab_keys(&mut root_map, tab, views);
     push_view_query_keys(&mut root_map, tab, view);
     push_leaf_column_cursor(&mut root_map, tab, root_profile(), view.column_cursor);
@@ -509,7 +509,7 @@ fn push_child_leaves(
     path.push(child.name.clone());
 
     let mut km = KeyMap::new();
-    push_tab_wide(&mut km, tab, kb);
+    push_tab_wide(&mut km, tab, kb, view.window_ops);
     // Subtab keys and view-query keys are active at every drilldown
     // level (Phase 4): pressing the subtab key while drilled in
     // switches the focused subtab. The validator must therefore see
@@ -550,7 +550,7 @@ fn push_child_leaves(
     }
 }
 
-fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig) {
+fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig, window_ops: bool) {
     // Globals — strict overlap with everything.
     for (action, binding) in &kb.global.bindings {
         km.push(KeyClaim::handler(
@@ -614,13 +614,18 @@ fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig) {
     // effective binding before the claim is filed
     // (see `push_leaf_content_keys`).
 
-    // Window-leader chord(s).
-    for (action, binding) in &kb.window.bindings {
-        km.push(KeyClaim::handler(
-            binding.clone(),
-            KeyScope::Tab(tab.clone()),
-            KeySource::Window(action.clone()),
-        ));
+    // Window-leader chord(s) — only claimed for views that opt into
+    // window/split operations (`window_ops: true`). Elsewhere the `w`
+    // leader never engages, so filing the claim would manufacture a
+    // false tab-wide reservation and hide real collisions on `w`.
+    if window_ops {
+        for (action, binding) in &kb.window.bindings {
+            km.push(KeyClaim::handler(
+                binding.clone(),
+                KeyScope::Tab(tab.clone()),
+                KeySource::Window(action.clone()),
+            ));
+        }
     }
 }
 
@@ -1679,6 +1684,9 @@ views:
   - name: main
     node_type: t
     key: a
+    # Window-leader chords are opt-in per view; enable them here so the
+    # window-leader-prefix conflict check below has a claim to hit.
+    window_ops: true
     query:
       menu_key: q
     actions:

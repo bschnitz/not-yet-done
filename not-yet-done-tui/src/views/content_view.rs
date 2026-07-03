@@ -5542,12 +5542,14 @@ impl ContentPane {
         }
 
         // Link-hop — label every link visible in the pane; typing a label
-        // opens that URL in the browser. Always claimable (an empty pane just
-        // finds no links and notifies). App-level interceptor drives label
-        // input. Default `f`; configurable via `keybindings.content.link_hop`.
-        if let Some(b) = content_kb
-            .get(&ContentAction::LinkHop)
-            .cloned()
+        // opens that URL in the browser. Opt-in per view/child: it is only
+        // claimed where a binding is present via `level_binding` (a view or
+        // child `keybindings: { link_hop: f }`, or a global
+        // `keybindings.content.link_hop`). There is no built-in default, so
+        // on views that don't enable it `f` stays a free key. App-level
+        // interceptor drives label input.
+        if let Some(b) = self
+            .level_binding(&ContentAction::LinkHop, content_kb, view_defs)
             .and_then(strip_reserved)
         {
             km.push(KeyClaim::handler(
@@ -6805,6 +6807,17 @@ impl ContentView {
     /// isn't a leader, or the active pane is in a text-input mode and
     /// must see the key untouched).
     fn handle_window_chord(&mut self, key: &str) -> Option<SubViewMessage> {
+        // Window/split operations are opt-in per view (`window_ops: true`).
+        // On any view that doesn't enable them the `w` leader must never
+        // engage, so the key falls through to normal handling (subtab
+        // switch, node shortcut, …) exactly like any other letter.
+        if !self
+            .active_view_def()
+            .map(|v| v.window_ops)
+            .unwrap_or(false)
+        {
+            return None;
+        }
         // Don't intercept while the user is typing into a text input —
         // matters for short leaders like `w` that double as ordinary
         // letters in search / cmdline / fuzzy buffers.
@@ -11753,6 +11766,7 @@ mod tests {
                 name: "issues".into(),
                 node_type: "mock:issue".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![
@@ -12060,6 +12074,7 @@ mod tests {
                 name: "messages".into(),
                 node_type: "mock:msg".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![ColumnDef {
@@ -12540,6 +12555,7 @@ mod tests {
                 name: "databases".into(),
                 node_type: "mock:db".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![ColumnDef {
@@ -12800,6 +12816,7 @@ mod tests {
                 name: "servers".into(),
                 node_type: "mock:server".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![hcol("name")],
@@ -12961,6 +12978,7 @@ mod tests {
                 name: "tasks".into(),
                 node_type: "mock:task".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![hcol("name"), dcol("val")],
@@ -13585,6 +13603,7 @@ mod tests {
                 name: "tasks".into(),
                 node_type: "mock:task".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![hcol("name"), dur],
@@ -15356,6 +15375,7 @@ mod tests {
                 name: "issues".into(),
                 node_type: "mock:issue".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: Some(QueryConfig {
                     default: Some("assignee = me".into()),
@@ -16510,6 +16530,7 @@ mod tests {
                 name: "issues".into(),
                 node_type: "mock:issue".into(),
                 default: true,
+                window_ops: false,
                 key: None,
                 query: None,
                 columns: vec![ColumnDef {
@@ -18015,6 +18036,7 @@ views:
             name: "tree-view".into(),
             node_type: "mock:space".into(),
             default: true,
+            window_ops: false,
             key: None,
             query: None,
             columns: vec![ColumnDef {
@@ -19161,6 +19183,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             name: "tickets".to_string(),
             node_type: "jira:issue".to_string(),
             default: true,
+            window_ops: false,
             key: None,
             query: None,
             columns: vec![
