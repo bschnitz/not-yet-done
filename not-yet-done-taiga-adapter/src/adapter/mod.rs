@@ -306,6 +306,8 @@ async fn build_node_from_id(
                 attachment,
                 item_type,
                 head,
+                item.detail.id,
+                item.detail.project_id,
             )));
         }
     }

@@ -213,6 +213,12 @@ views:
             key: o
             type: custom
             id: open
+          - name: download all
+            key: D
+            type: custom
+            id: download_all # InputSpec::Form — prompts for a target directory,
+            # then saves every attachment of the item there (dir created if
+            # missing; errors on a non-directory path or no permission)
         # `delete` must be a `shortcuts:` binding (not an `actions:` entry): a
         # row-level `type: custom` action dispatches straight to `execute` and
         # cannot ask for confirmation, whereas a shortcut routes through

@@ -9,6 +9,7 @@ pub mod mock;
 
 pub mod anonymize;
 pub mod auth;
+pub mod download;
 pub mod grouping;
 pub mod http_log;
 pub mod link_route;
