@@ -128,9 +128,13 @@ impl ContentAdapter for TaigaAdapter {
     }
 
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        use crate::client::ItemType;
         match node_type.type_id.as_str() {
-            "taiga:task" | "taiga:issue" | "taiga:epic" | "taiga:userstory"
-            | "taiga:item" => item::item_actions(),
+            "taiga:task" => item::item_actions(Some(ItemType::Task)),
+            "taiga:issue" => item::item_actions(Some(ItemType::Issue)),
+            "taiga:epic" => item::item_actions(Some(ItemType::Epic)),
+            "taiga:userstory" => item::item_actions(Some(ItemType::UserStory)),
+            "taiga:item" => item::item_actions(None),
             "taiga:comment" => comment::comment_actions(),
             "taiga:attachment" => attachment::attachment_actions(),
             "taiga:notification" => notification::notification_actions(),

@@ -23,6 +23,7 @@ mod notifications;
 mod project_meta;
 mod edit;
 mod create;
+mod convert;
 
 pub use query::{
     ItemSummary, ItemType, ParsedTaigaQuery, QuerySpec, apply_sort as apply_query_sort,
@@ -31,7 +32,10 @@ pub use query::{
 pub use history::{TaigaComment, fetch_comments};
 pub use actions::{
     TaigaAttachment, delete_attachment, download_attachment, edit_comment, list_attachments,
-    toggle_watch, upload_attachment,
+    toggle_watch, upload_attachment, upload_attachment_bytes,
+};
+pub use convert::{
+    delete_item, fetch_id_name_map, fetch_raw_detail, promote_issue_to_us, userstory_id_by_ref,
 };
 pub use project_meta::{TaigaMember, TaigaStatus};
 pub use edit::{

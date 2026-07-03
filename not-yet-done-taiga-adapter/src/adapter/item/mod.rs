@@ -15,6 +15,7 @@ use crate::client::{
 };
 
 mod clone;
+mod convert;
 mod edit_full;
 mod edit_with_comments;
 mod slugs;
@@ -47,8 +48,11 @@ pub(super) struct ItemDetail {
     pub(super) parent_user_story_subject: Option<String>,
 }
 
-pub(super) fn item_actions() -> Vec<NodeAction> {
-    vec![
+/// Actions available on an item. `item_type` gates the type-specific
+/// conversion action (issue ↔ user story); pass `None` for the generic
+/// `taiga:item` node type, which has no concrete type to convert.
+pub(super) fn item_actions(item_type: Option<ItemType>) -> Vec<NodeAction> {
+    let mut actions = vec![
         NodeAction::new("edit_full", "edit", InputSpec::Editor),
         NodeAction::new("edit_with_comments", "edit + comments", InputSpec::Editor),
         NodeAction::new("toggle_watch", "toggle watch", InputSpec::None),
@@ -59,7 +63,11 @@ pub(super) fn item_actions() -> Vec<NodeAction> {
             InputSpec::FilePicker { multi: true },
         ),
         NodeAction::new("clone", "clone", InputSpec::Editor),
-    ]
+    ];
+    if let Some(action) = item_type.and_then(convert::convert_action) {
+        actions.push(action);
+    }
+    actions
 }
 
 pub(super) struct TaigaItemNode {
@@ -323,7 +331,7 @@ impl Node for TaigaItemNode {
     }
 
     fn actions(&self) -> Vec<NodeAction> {
-        item_actions()
+        item_actions(Some(self.detail.item_type))
     }
 
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
@@ -331,6 +339,7 @@ impl Node for TaigaItemNode {
             "edit_full" => self.prepare_edit_full().await,
             "edit_with_comments" => self.prepare_edit_with_comments().await,
             "clone" => self.prepare_clone().await,
+            "convert_to_userstory" | "convert_to_issue" => self.prepare_convert().await,
             other => Err(ContentError::NotSupported(format!(
                 "prepare: unknown action {other}"
             ))),
@@ -371,6 +380,10 @@ impl Node for TaigaItemNode {
             }
             ("clone", ActionInput::Edited { text, .. }) => {
                 self.execute_clone(&text).await
+            }
+            ("convert_to_userstory", ActionInput::Edited { text, .. })
+            | ("convert_to_issue", ActionInput::Edited { text, .. }) => {
+                self.execute_convert(&text).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"
