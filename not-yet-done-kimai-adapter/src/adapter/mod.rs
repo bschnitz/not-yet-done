@@ -16,7 +16,7 @@ use chrono::{Days, Local};
 
 use not_yet_done_content::*;
 
-use crate::client::{KimaiClient, KimaiProject, KimaiTimesheet};
+use crate::client::{KimaiActivity, KimaiClient, KimaiProject, KimaiTimesheet};
 
 mod auth_bridge;
 mod config;
@@ -132,8 +132,8 @@ async fn fetch_timesheet_node(client: &Arc<KimaiClient>, id: &str) -> Result<Box
     .map_err(other_err)?;
     let projects: HashMap<u64, KimaiProject> =
         projects.into_iter().map(|p| (p.id, p)).collect();
-    let activities: HashMap<u64, String> =
-        activities.into_iter().map(|a| (a.id, a.name)).collect();
+    let activities: HashMap<u64, KimaiActivity> =
+        activities.into_iter().map(|a| (a.id, a)).collect();
     Ok(Box::new(KimaiTimesheetNode::new(
         client.clone(),
         ts,
@@ -219,8 +219,8 @@ impl KimaiRoot {
 
         let projects: HashMap<u64, KimaiProject> =
             projects.into_iter().map(|p| (p.id, p)).collect();
-        let activities: HashMap<u64, String> =
-            activities.into_iter().map(|a| (a.id, a.name)).collect();
+        let activities: HashMap<u64, KimaiActivity> =
+            activities.into_iter().map(|a| (a.id, a)).collect();
 
         let mut items: Vec<NodeSummary> = timesheets
             .into_iter()
@@ -281,7 +281,7 @@ fn normalize_iso_offset(value: &str) -> String {
 fn timesheet_summary(
     ts: KimaiTimesheet,
     projects: &HashMap<u64, KimaiProject>,
-    activities: &HashMap<u64, String>,
+    activities: &HashMap<u64, KimaiActivity>,
 ) -> NodeSummary {
     let (project, customer) = projects
         .get(&ts.project)
@@ -289,7 +289,7 @@ fn timesheet_summary(
         .unwrap_or_else(|| (format!("#{}", ts.project), String::new()));
     let activity = activities
         .get(&ts.activity)
-        .cloned()
+        .map(|a| a.name.clone())
         .unwrap_or_else(|| format!("#{}", ts.activity));
 
     let description = ts.description.unwrap_or_default();
@@ -348,7 +348,7 @@ struct KimaiTimesheetNode {
     client: Arc<KimaiClient>,
     ts: KimaiTimesheet,
     projects: HashMap<u64, KimaiProject>,
-    activities: HashMap<u64, String>,
+    activities: HashMap<u64, KimaiActivity>,
 }
 
 impl KimaiTimesheetNode {
@@ -356,7 +356,7 @@ impl KimaiTimesheetNode {
         client: Arc<KimaiClient>,
         ts: KimaiTimesheet,
         projects: HashMap<u64, KimaiProject>,
-        activities: HashMap<u64, String>,
+        activities: HashMap<u64, KimaiActivity>,
     ) -> Self {
         let summary = timesheet_summary(ts.clone(), &projects, &activities);
         Self {
@@ -522,7 +522,7 @@ mod tests {
         }
     }
 
-    fn lookups() -> (HashMap<u64, KimaiProject>, HashMap<u64, String>) {
+    fn lookups() -> (HashMap<u64, KimaiProject>, HashMap<u64, KimaiActivity>) {
         let projects = HashMap::from([(
             7,
             KimaiProject {
@@ -531,7 +531,15 @@ mod tests {
                 parent_title: Some("Acme Corp".to_string()),
             },
         )]);
-        let activities = HashMap::from([(3, "Development".to_string())]);
+        let activities = HashMap::from([(
+            3,
+            KimaiActivity {
+                id: 3,
+                name: "Development".to_string(),
+                project: None,
+                parent_title: None,
+            },
+        )]);
         (projects, activities)
     }
 

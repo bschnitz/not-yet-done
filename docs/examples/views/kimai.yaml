@@ -23,15 +23,17 @@
 # description column's `long_source: description` below.
 #
 # `e` opens the edit template (as a `.md` buffer) on the selected
-# timesheet (editable: project, activity, begin, duration). The customer
-# and project are coupled into a single `project` field entered as a
-# combined `customer_project` slug (a timesheet only stores the project;
-# Kimai derives its customer). Activity is its own slug. Both are shown as
-# whitespace-free tokens with the readable name as an inline comment so
-# editor word-completion works; the trailing CACHE section lists the
-# available tokens. A full name (any case) or the `#<id>` form are also
-# accepted. The body below `===` is the description; a duration change
-# re-computes the end time.
+# timesheet (editable: entry, begin, duration). Project, activity and
+# customer are coupled into a single `entry` field, because a timesheet
+# only stores a (project, activity) pair, Kimai derives the customer from
+# the project, and an activity is only bookable on the project it belongs
+# to (or on any project when it is global). The `entry` value is one
+# whitespace-free `customer_project_activity` token with the readable
+# `Customer / Project / Activity` as an inline comment, so editor
+# word-completion works; the trailing CACHE section lists every available
+# token (a global activity appears under each project). The direct
+# `#<project-id>_#<activity-id>` escape is also accepted. The body below
+# `===` is the description; a duration change re-computes the end time.
 
 tab:
   name: Kimai

@@ -2,19 +2,24 @@
 //! timesheet. Same layout as the Jira adapter's 3b format: editable
 //! `key: value` lines / `---` / read-only section / `===` / body (the
 //! description), plus a trailing read-only CACHE section advertising the
-//! available project and activity *slugs* — single-token, whitespace-free
-//! identifiers, so editor word-completion (vim `<C-n>`) actually works
-//! (project/activity names contain spaces and defeat it).
+//! available `entry` *tokens* — single, whitespace-free identifiers, so
+//! editor word-completion (vim `<C-n>`) actually works (project/activity
+//! names contain spaces and defeat it).
 //!
-//! Editable fields: `project` (a combined `customer_project` slug — the
-//! customer and project are coupled in one field, since a timesheet only
-//! stores the project and Kimai derives its customer) and `activity` (its
-//! own slug). Both accept the slug shown in the CACHE and next to the
-//! field; a full name (case-insensitive) or the `#<id>` fallback form are
-//! also accepted.
-//! `begin` (local `YYYY-MM-DDTHH:MM[:SS]`, space separator also accepted)
-//! and `duration` (`H:MM[:SS]` or plain seconds). Kimai derives duration
-//! from the begin/end pair, so a duration change is materialised as
+//! A timesheet's project, activity and customer are coupled: a timesheet
+//! stores only a `(project, activity)` pair, Kimai derives the customer
+//! from the project, and an activity is only bookable on the project it is
+//! bound to (or on any project if it is global). So they are edited through
+//! a **single** `entry` field = a `customer_project_activity` token that
+//! resolves as a whole to a `(project_id, activity_id)` pair. The token
+//! shown next to the field and in the CACHE is accepted; the direct
+//! `#<pid>_#<aid>` escape is also accepted (and is what an entry whose
+//! project/activity are unknown to the lookups renders as).
+//!
+//! The remaining editable fields are `begin` (local
+//! `YYYY-MM-DDTHH:MM[:SS]`, space separator also accepted) and `duration`
+//! (`H:MM[:SS]` or plain seconds). Kimai derives duration from the
+//! begin/end pair, so a duration change is materialised as
 //! `end = begin + duration` in the PATCH. Running entries (no end yet)
 //! ignore the duration line — only begin can move.
 
@@ -22,12 +27,12 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 
-use crate::client::{KimaiProject, KimaiTimesheet};
+use crate::client::{KimaiActivity, KimaiProject, KimaiTimesheet};
 
 pub(super) const EDITABLE_MARKER: &str = "---";
 pub(super) const BODY_MARKER: &str = "===";
 pub(super) const CACHE_MARKER: &str =
-    "#### CACHE / available projects & activities (do not edit) ####";
+    "#### CACHE / available entries (do not edit) ####";
 
 const ERROR_BANNER_START: &str = "# ─── ERRORS ───";
 const ERROR_BANNER_END: &str = "# ──────────────";
@@ -150,113 +155,164 @@ fn slugify(name: &str) -> String {
     slug
 }
 
-/// Append `-<id>` to every base token that collides with another, so each
-/// resulting token maps back to exactly one id.
-fn dedup_tokens(base: HashMap<u64, String>) -> HashMap<u64, String> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for t in base.values() {
-        *counts.entry(t.as_str()).or_default() += 1;
+/// A slug, or the `id-<id>` fallback for an all-punctuation name that
+/// slugifies to the empty string.
+fn slug_or_id(name: &str, id: u64) -> String {
+    let s = slugify(name);
+    if s.is_empty() { format!("id-{id}") } else { s }
+}
+
+/// One resolvable `(project, activity)` combination: its combined token
+/// (what the user types / completes), a human-readable display for the
+/// inline comment, and the ids it maps back to.
+struct EntryCombo {
+    token: String,
+    display: String,
+    project_id: u64,
+    activity_id: u64,
+}
+
+/// Whether an activity can be booked on a given project. A *global*
+/// activity (no `project` binding and no owning `parent_title`) fits every
+/// project; otherwise it must belong to this project — by explicit
+/// `project` id when the API provides one, else by matching `parent_title`
+/// against the project name.
+fn activity_valid_for_project(a: &KimaiActivity, pid: u64, pname: &str) -> bool {
+    match a.project {
+        Some(p) => p == pid,
+        None => match a.parent_title.as_deref().filter(|t| !t.is_empty()) {
+            Some(owner) => owner.eq_ignore_ascii_case(pname),
+            None => true,
+        },
     }
-    base.iter()
-        .map(|(id, t)| {
-            let token = if counts[t.as_str()] > 1 {
-                format!("{t}-{id}")
+}
+
+/// Build the base token and display for a `(project, activity)` pair. When
+/// both entities are known the token is a slug chain
+/// `[customer_]project_activity`; if either is unknown to the lookups it
+/// falls back to the fully-escaped `#<pid>_#<aid>` form, which
+/// [`resolve_entry`] accepts directly. Slugs never contain `_` (slugify
+/// maps it to `-`), so the `_` separators are unambiguous.
+fn combo_parts(
+    pid: u64,
+    aid: u64,
+    projects: &HashMap<u64, KimaiProject>,
+    activities: &HashMap<u64, KimaiActivity>,
+) -> (String, String) {
+    let project = projects.get(&pid);
+    let activity = activities.get(&aid);
+    let customer = project
+        .and_then(|p| p.parent_title.as_deref())
+        .filter(|c| !c.is_empty());
+
+    let token = match (project, activity) {
+        (Some(p), Some(a)) => {
+            let proj = slug_or_id(&p.name, pid);
+            let act = slug_or_id(&a.name, aid);
+            match customer {
+                Some(c) => format!("{}_{proj}_{act}", slugify(c)),
+                None => format!("{proj}_{act}"),
+            }
+        }
+        _ => format!("#{pid}_#{aid}"),
+    };
+
+    let proj_display = project
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| format!("#{pid}"));
+    let act_display = activity
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| format!("#{aid}"));
+    let display = match customer {
+        Some(c) => format!("{c} / {proj_display} / {act_display}"),
+        None => format!("{proj_display} / {act_display}"),
+    };
+    (token, display)
+}
+
+/// All bookable `(project, activity)` combinations, plus the current pair
+/// (`ensure`) even if the lookups don't know it or the activity is not
+/// otherwise valid for the project — so an unchanged buffer always
+/// round-trips. Colliding base tokens are disambiguated by appending
+/// `-<pid>-<aid>`.
+fn entry_combos(
+    projects: &HashMap<u64, KimaiProject>,
+    activities: &HashMap<u64, KimaiActivity>,
+    ensure: Option<(u64, u64)>,
+) -> Vec<EntryCombo> {
+    let mut pairs: Vec<(u64, u64)> = Vec::new();
+    for (&pid, p) in projects {
+        for (&aid, a) in activities {
+            if activity_valid_for_project(a, pid, &p.name) {
+                pairs.push((pid, aid));
+            }
+        }
+    }
+    if let Some(pair) = ensure
+        && !pairs.contains(&pair)
+    {
+        pairs.push(pair);
+    }
+
+    let raw: Vec<(String, String, u64, u64)> = pairs
+        .into_iter()
+        .map(|(pid, aid)| {
+            let (token, display) = combo_parts(pid, aid, projects, activities);
+            (token, display, pid, aid)
+        })
+        .collect();
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (token, ..) in &raw {
+        *counts.entry(token.clone()).or_default() += 1;
+    }
+
+    raw.into_iter()
+        .map(|(token, display, pid, aid)| {
+            let token = if counts[&token] > 1 {
+                format!("{token}-{pid}-{aid}")
             } else {
-                t.clone()
+                token
             };
-            (*id, token)
+            EntryCombo {
+                token,
+                display,
+                project_id: pid,
+                activity_id: aid,
+            }
         })
         .collect()
 }
 
-/// Build an id → slug map for a set of id → name entries. Slugs are unique
-/// (colliding names get their numeric id appended); an empty slug falls back
-/// to `id-<id>`. Used for activities.
-fn build_slugs(names: &HashMap<u64, String>) -> HashMap<u64, String> {
-    let base = names
-        .iter()
-        .map(|(id, name)| {
-            let s = slugify(name);
-            (*id, if s.is_empty() { format!("id-{id}") } else { s })
-        })
-        .collect();
-    dedup_tokens(base)
-}
-
-/// Build an id → combined-token map for projects: `customer_project` slug,
-/// or the bare project slug when the project has no customer. Tokens are
-/// unique (collisions get the numeric id appended). This is the coupled
-/// customer+project identifier shown and entered in the edit buffer.
-fn project_tokens(projects: &HashMap<u64, KimaiProject>) -> HashMap<u64, String> {
-    let base = projects
-        .iter()
-        .map(|(id, p)| {
-            let proj = slugify(&p.name);
-            let proj = if proj.is_empty() { format!("id-{id}") } else { proj };
-            let token = match p.parent_title.as_deref().map(slugify).filter(|c| !c.is_empty()) {
-                Some(customer) => format!("{customer}_{proj}"),
-                None => proj,
-            };
-            (*id, token)
-        })
-        .collect();
-    dedup_tokens(base)
-}
-
-/// Resolve an activity value back to its id. Tries, in order: the `#<id>`
-/// fallback form (verbatim), the slug shown in the buffer/CACHE, and finally
-/// a full name (case-insensitive) for backward compatibility and hand-typed
-/// entries. On failure lists the available slugs.
-fn resolve_name(
-    value: &str,
-    names: &HashMap<u64, String>,
-    what: &str,
-) -> Result<u64, String> {
-    let value = value.trim();
-    if let Some(id) = value.strip_prefix('#').and_then(|v| v.parse().ok()) {
-        return Ok(id);
-    }
-    let lowered = value.to_lowercase();
-    let slugs = build_slugs(names);
-    if let Some((id, _)) = slugs.iter().find(|(_, s)| **s == lowered) {
-        return Ok(*id);
-    }
-    if let Some((id, _)) = names.iter().find(|(_, n)| n.to_lowercase() == lowered) {
-        return Ok(*id);
-    }
-    let mut available: Vec<&str> = slugs.values().map(String::as_str).collect();
-    available.sort_unstable();
-    Err(format!(
-        "unknown {what} `{value}` (available: {})",
-        available.join(", ")
-    ))
-}
-
-/// Resolve a project value back to its id. The buffer/CACHE form is the
-/// combined `customer_project` slug; a bare project slug (projects with no
-/// customer), a full project name (case-insensitive) and the `#<id>`
-/// fallback are also accepted. On failure lists the available combined
-/// tokens.
-fn resolve_project(
+/// Resolve an `entry` value back to a `(project_id, activity_id)` pair.
+/// Accepts the direct `#<pid>_#<aid>` escape and, otherwise, an exact
+/// (case-insensitive) match against the combined tokens. On failure lists
+/// the available tokens.
+fn resolve_entry(
     value: &str,
     projects: &HashMap<u64, KimaiProject>,
-) -> Result<u64, String> {
+    activities: &HashMap<u64, KimaiActivity>,
+    ensure: Option<(u64, u64)>,
+) -> Result<(u64, u64), String> {
     let value = value.trim();
-    if let Some(id) = value.strip_prefix('#').and_then(|v| v.parse().ok()) {
-        return Ok(id);
+    if let Some((p, a)) = value.split_once('_')
+        && let (Some(pid), Some(aid)) = (
+            p.trim().strip_prefix('#').and_then(|v| v.parse::<u64>().ok()),
+            a.trim().strip_prefix('#').and_then(|v| v.parse::<u64>().ok()),
+        )
+    {
+        return Ok((pid, aid));
     }
+
+    let combos = entry_combos(projects, activities, ensure);
     let lowered = value.to_lowercase();
-    let tokens = project_tokens(projects);
-    if let Some((id, _)) = tokens.iter().find(|(_, t)| **t == lowered) {
-        return Ok(*id);
+    if let Some(c) = combos.iter().find(|c| c.token == lowered) {
+        return Ok((c.project_id, c.activity_id));
     }
-    if let Some((id, _)) = projects.iter().find(|(_, p)| p.name.to_lowercase() == lowered) {
-        return Ok(*id);
-    }
-    let mut available: Vec<&str> = tokens.values().map(String::as_str).collect();
+    let mut available: Vec<&str> = combos.iter().map(|c| c.token.as_str()).collect();
     available.sort_unstable();
     Err(format!(
-        "unknown project `{value}` (available: {})",
+        "unknown entry `{value}` (available: {})",
         available.join(", ")
     ))
 }
@@ -265,34 +321,23 @@ fn resolve_project(
 pub(super) fn render_edit_template(
     ts: &KimaiTimesheet,
     projects: &HashMap<u64, KimaiProject>,
-    activities: &HashMap<u64, String>,
+    activities: &HashMap<u64, KimaiActivity>,
 ) -> String {
-    let project_token_map = project_tokens(projects);
-    let activity_slugs = build_slugs(activities);
+    let combos = entry_combos(projects, activities, Some((ts.project, ts.activity)));
 
-    // Project value = the combined `customer_project` slug; activity = its
-    // own slug. The readable name(s) ride along as an inline `# comment`
-    // (stripped on parse) so the buffer stays legible. Entities missing from
-    // the lookup fall back to `#<id>`.
-    let project = match (project_token_map.get(&ts.project), projects.get(&ts.project)) {
-        (Some(token), Some(p)) => {
-            let display = match p.parent_title.as_deref().filter(|c| !c.is_empty()) {
-                Some(customer) => format!("{customer} / {}", p.name),
-                None => p.name.clone(),
-            };
-            format!("{token}  # {display}")
-        }
-        _ => format!("#{}", ts.project),
-    };
-    let activity = match (activity_slugs.get(&ts.activity), activities.get(&ts.activity)) {
-        (Some(slug), Some(name)) => format!("{slug}  # {name}"),
-        _ => format!("#{}", ts.activity),
-    };
+    // Single coupled `entry` field = customer_project_activity token. The
+    // current pair is guaranteed present via `ensure`; the readable
+    // `Customer / Project / Activity` rides along as an inline `# comment`
+    // (stripped on parse) so the buffer stays legible.
+    let entry = combos
+        .iter()
+        .find(|c| c.project_id == ts.project && c.activity_id == ts.activity)
+        .map(|c| format!("{}  # {}", c.token, c.display))
+        .unwrap_or_else(|| format!("#{}_#{}", ts.project, ts.activity));
     let running = ts.end.is_none();
 
     let mut out = String::new();
-    out.push_str(&format!("project: {project}\n"));
-    out.push_str(&format!("activity: {activity}\n"));
+    out.push_str(&format!("entry: {entry}\n"));
     out.push_str(&format!("begin: {}\n", local_part(&ts.begin)));
     if running {
         out.push_str("# running entry — duration is ignored, only begin can move\n");
@@ -316,24 +361,16 @@ pub(super) fn render_edit_template(
     out.push_str(ts.description.as_deref().unwrap_or(""));
     out.push('\n');
 
-    // Advertise the tokens (single, whitespace-free) so editor
-    // word-completion works — projects as `customer_project`.
-    let mut project_token_list: Vec<&str> =
-        project_token_map.values().map(String::as_str).collect();
-    project_token_list.sort_unstable();
-    let mut activity_slug_list: Vec<&str> =
-        activity_slugs.values().map(String::as_str).collect();
-    activity_slug_list.sort_unstable();
-    if !project_token_list.is_empty() || !activity_slug_list.is_empty() {
+    // Advertise the combined tokens (single, whitespace-free) so editor
+    // word-completion works.
+    let mut entry_tokens: Vec<&str> = combos.iter().map(|c| c.token.as_str()).collect();
+    entry_tokens.sort_unstable();
+    entry_tokens.dedup();
+    if !entry_tokens.is_empty() {
         out.push('\n');
         out.push_str(CACHE_MARKER);
         out.push('\n');
-        if !project_token_list.is_empty() {
-            out.push_str(&format!("# projects: {}\n", project_token_list.join(", ")));
-        }
-        if !activity_slug_list.is_empty() {
-            out.push_str(&format!("# activities: {}\n", activity_slug_list.join(", ")));
-        }
+        out.push_str(&format!("# entries: {}\n", entry_tokens.join(", ")));
     }
     out
 }
@@ -460,9 +497,9 @@ pub(super) fn build_edit_plan(
     parsed: &ParsedEdit,
     current: &KimaiTimesheet,
     projects: &HashMap<u64, KimaiProject>,
-    activities: &HashMap<u64, String>,
+    activities: &HashMap<u64, KimaiActivity>,
 ) -> Result<Option<EditPlan>, Vec<String>> {
-    const ALLOWED: [&str; 4] = ["project", "activity", "begin", "duration"];
+    const ALLOWED: [&str; 3] = ["entry", "begin", "duration"];
     let mut errors: Vec<String> = Vec::new();
 
     for key in parsed.editable.keys() {
@@ -474,18 +511,9 @@ pub(super) fn build_edit_plan(
         }
     }
 
-    let project_id = parsed.editable.get("project").and_then(|v| {
-        match resolve_project(v, projects) {
-            Ok(id) => Some(id),
-            Err(e) => {
-                errors.push(e);
-                None
-            }
-        }
-    });
-    let activity_id = parsed.editable.get("activity").and_then(|v| {
-        match resolve_name(v, activities, "activity") {
-            Ok(id) => Some(id),
+    let entry = parsed.editable.get("entry").and_then(|v| {
+        match resolve_entry(v, projects, activities, Some((current.project, current.activity))) {
+            Ok(pair) => Some(pair),
             Err(e) => {
                 errors.push(e);
                 None
@@ -509,17 +537,15 @@ pub(super) fn build_edit_plan(
     let mut patch = serde_json::Map::new();
     let mut changed: Vec<&'static str> = Vec::new();
 
-    if let Some(id) = project_id
-        && id != current.project
-    {
-        patch.insert("project".into(), id.into());
-        changed.push("project");
-    }
-    if let Some(id) = activity_id
-        && id != current.activity
-    {
-        patch.insert("activity".into(), id.into());
-        changed.push("activity");
+    if let Some((project_id, activity_id)) = entry {
+        if project_id != current.project {
+            patch.insert("project".into(), project_id.into());
+            changed.push("project");
+        }
+        if activity_id != current.activity {
+            patch.insert("activity".into(), activity_id.into());
+            changed.push("activity");
+        }
     }
 
     let begin_changed = begin
@@ -615,7 +641,7 @@ mod tests {
         }
     }
 
-    fn lookups() -> (HashMap<u64, KimaiProject>, HashMap<u64, String>) {
+    fn lookups() -> (HashMap<u64, KimaiProject>, HashMap<u64, KimaiActivity>) {
         let projects = HashMap::from([
             (
                 7,
@@ -634,8 +660,28 @@ mod tests {
                 },
             ),
         ]);
-        let activities =
-            HashMap::from([(3, "Development".to_string()), (4, "Meeting".to_string())]);
+        // Activity 3 is global (bookable on every project); activity 4 is
+        // bound to project 7 only.
+        let activities = HashMap::from([
+            (
+                3,
+                KimaiActivity {
+                    id: 3,
+                    name: "Development".to_string(),
+                    project: None,
+                    parent_title: None,
+                },
+            ),
+            (
+                4,
+                KimaiActivity {
+                    id: 4,
+                    name: "Meeting".to_string(),
+                    project: Some(7),
+                    parent_title: None,
+                },
+            ),
+        ]);
         (projects, activities)
     }
 
@@ -670,16 +716,22 @@ mod tests {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        assert!(template.contains("project: acme-corp_website-relaunch  # Acme Corp / Website Relaunch"));
-        assert!(template.contains("activity: development  # Development"));
+        assert!(template.contains(
+            "entry: acme-corp_website-relaunch_development  # Acme Corp / Website Relaunch / Development"
+        ));
         assert!(template.contains("begin: 2030-01-15T09:00:00"));
         assert!(template.contains("duration: 1:30:00"));
-        // Customer is no longer a standalone read-only line — it is folded
-        // into the coupled project token above.
+        // Project, activity and customer are folded into the single coupled
+        // `entry` token above — no separate fields survive.
         assert!(!template.contains("customer:"));
+        assert!(!template.contains("project:"));
+        assert!(!template.contains("activity:"));
         assert!(template.contains(CACHE_MARKER));
-        assert!(template.contains("# projects: acme-corp_website-relaunch, internal"));
-        assert!(template.contains("# activities: development, meeting"));
+        // Global activity 3 appears under both projects; bound activity 4
+        // only under its owning project 7.
+        assert!(template.contains(
+            "# entries: acme-corp_website-relaunch_development, acme-corp_website-relaunch_meeting, internal_development"
+        ));
 
         let parsed = parse_edit(&template).unwrap();
         assert_eq!(parsed.body, "Refactor login form\nsecond line");
@@ -713,50 +765,52 @@ mod tests {
     }
 
     #[test]
-    fn build_slugs_disambiguates_collisions() {
-        let names = HashMap::from([
-            (1, "Website Relaunch".to_string()),
-            (2, "Website  Relaunch!".to_string()),
-            (3, "Internal".to_string()),
-        ]);
-        let slugs = build_slugs(&names);
-        // Both collide on `website-relaunch` → id suffix disambiguates.
-        assert_eq!(slugs[&1], "website-relaunch-1");
-        assert_eq!(slugs[&2], "website-relaunch-2");
-        // The unique one stays clean.
-        assert_eq!(slugs[&3], "internal");
+    fn global_activity_appears_under_every_project_bound_activity_only_its_own() {
+        let (projects, activities) = lookups();
+        let combos = entry_combos(&projects, &activities, None);
+        let tokens: Vec<&str> = combos.iter().map(|c| c.token.as_str()).collect();
+        // Global activity 3 under both projects.
+        assert!(tokens.contains(&"acme-corp_website-relaunch_development"));
+        assert!(tokens.contains(&"internal_development"));
+        // Bound activity 4 only under its owning project 7.
+        assert!(tokens.contains(&"acme-corp_website-relaunch_meeting"));
+        assert!(!tokens.contains(&"internal_meeting"));
+        assert_eq!(combos.len(), 3);
     }
 
     #[test]
-    fn resolve_name_accepts_slug_name_and_hash_id() {
-        // Activity resolution: slug / full name (any case) / `#<id>`.
-        let (_, activities) = lookups();
-        assert_eq!(resolve_name("development", &activities, "activity").unwrap(), 3);
-        assert_eq!(resolve_name("Development", &activities, "activity").unwrap(), 3);
-        assert_eq!(resolve_name("MEETING", &activities, "activity").unwrap(), 4);
-        assert_eq!(resolve_name("#42", &activities, "activity").unwrap(), 42);
-        let err = resolve_name("nope", &activities, "activity").unwrap_err();
-        assert!(err.contains("development, meeting"));
-    }
-
-    #[test]
-    fn resolve_project_accepts_combined_name_and_hash_id() {
-        let (projects, _) = lookups();
-        // Combined `customer_project` token.
-        assert_eq!(resolve_project("acme-corp_website-relaunch", &projects).unwrap(), 7);
+    fn resolve_entry_accepts_token_and_escape() {
+        let (projects, activities) = lookups();
+        assert_eq!(
+            resolve_entry("acme-corp_website-relaunch_development", &projects, &activities, None)
+                .unwrap(),
+            (7, 3)
+        );
+        // Case-insensitive on the token.
+        assert_eq!(
+            resolve_entry("ACME-CORP_WEBSITE-RELAUNCH_MEETING", &projects, &activities, None)
+                .unwrap(),
+            (7, 4)
+        );
         // Bare token for the customer-less project.
-        assert_eq!(resolve_project("internal", &projects).unwrap(), 8);
-        // Full project name (any case), backward compat.
-        assert_eq!(resolve_project("Website Relaunch", &projects).unwrap(), 7);
-        assert_eq!(resolve_project("WEBSITE RELAUNCH", &projects).unwrap(), 7);
-        // `#<id>` fallback.
-        assert_eq!(resolve_project("#42", &projects).unwrap(), 42);
-        let err = resolve_project("nope", &projects).unwrap_err();
-        assert!(err.contains("acme-corp_website-relaunch, internal"));
+        assert_eq!(
+            resolve_entry("internal_development", &projects, &activities, None).unwrap(),
+            (8, 3)
+        );
+        // Direct `#<pid>_#<aid>` escape, resolvable even without lookups.
+        assert_eq!(
+            resolve_entry("#42_#99", &projects, &activities, None).unwrap(),
+            (42, 99)
+        );
+        let err = resolve_entry("nope", &projects, &activities, None).unwrap_err();
+        assert!(err.contains("unknown entry `nope`"));
+        assert!(err.contains("acme-corp_website-relaunch_development"));
     }
 
     #[test]
-    fn same_project_name_under_two_customers_gets_distinct_tokens() {
+    fn colliding_entry_tokens_get_disambiguated() {
+        // Same project name under the same customer → identical base token
+        // for a shared global activity; the id pair disambiguates.
         let projects = HashMap::from([
             (
                 1,
@@ -771,54 +825,71 @@ mod tests {
                 KimaiProject {
                     id: 2,
                     name: "Support".to_string(),
-                    parent_title: Some("Globex".to_string()),
+                    parent_title: Some("Acme Corp".to_string()),
                 },
             ),
         ]);
-        assert_eq!(resolve_project("acme-corp_support", &projects).unwrap(), 1);
-        assert_eq!(resolve_project("globex_support", &projects).unwrap(), 2);
+        let activities = HashMap::from([(
+            5,
+            KimaiActivity {
+                id: 5,
+                name: "Dev".to_string(),
+                project: None,
+                parent_title: None,
+            },
+        )]);
+        assert_eq!(
+            resolve_entry("acme-corp_support_dev-1-5", &projects, &activities, None).unwrap(),
+            (1, 5)
+        );
+        assert_eq!(
+            resolve_entry("acme-corp_support_dev-2-5", &projects, &activities, None).unwrap(),
+            (2, 5)
+        );
     }
 
     #[test]
-    fn project_and_activity_resolve_by_slug() {
+    fn entry_edit_patches_changed_ids_only() {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        let edited = template
-            .replace("project: acme-corp_website-relaunch", "project: internal")
-            .replace("activity: development", "activity: meeting");
-
+        // Switch project only (activity 3 is global, stays valid).
+        let edited = template.replace(
+            "entry: acme-corp_website-relaunch_development",
+            "entry: internal_development",
+        );
         let parsed = parse_edit(&edited).unwrap();
         let plan = build_edit_plan(&parsed, &ts, &projects, &activities)
             .unwrap()
             .expect("changed");
         assert_eq!(plan.patch["project"], 8);
-        assert_eq!(plan.patch["activity"], 4);
-    }
+        assert!(plan.patch.get("activity").is_none());
+        assert_eq!(plan.changed, vec!["project"]);
 
-    #[test]
-    fn unknown_project_lists_available_tokens() {
-        let (projects, activities) = lookups();
-        let ts = sample_timesheet();
-        let template = render_edit_template(&ts, &projects, &activities);
-        let edited = template.replace("project: acme-corp_website-relaunch", "project: Nope");
-
+        // Switch activity only (still project 7).
+        let edited = template.replace(
+            "entry: acme-corp_website-relaunch_development",
+            "entry: acme-corp_website-relaunch_meeting",
+        );
         let parsed = parse_edit(&edited).unwrap();
-        let errors = build_edit_plan(&parsed, &ts, &projects, &activities).unwrap_err();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("unknown project `Nope`"));
-        assert!(errors[0].contains("acme-corp_website-relaunch, internal"));
+        let plan = build_edit_plan(&parsed, &ts, &projects, &activities)
+            .unwrap()
+            .expect("changed");
+        assert_eq!(plan.patch["activity"], 4);
+        assert!(plan.patch.get("project").is_none());
+        assert_eq!(plan.changed, vec!["activity"]);
     }
 
     #[test]
     fn hash_id_fallback_round_trips() {
-        let (_, activities) = lookups();
-        let ts = sample_timesheet();
-        // Project 7 missing from the lookup → rendered as `#7`; saving the
-        // unchanged buffer must not fail resolution or produce a patch.
+        // Both entities missing from the lookups → entry renders as the
+        // `#<pid>_#<aid>` escape; the unchanged buffer must resolve back to
+        // the current pair and produce no patch.
         let projects = HashMap::new();
+        let activities = HashMap::new();
+        let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        assert!(template.contains("project: #7"));
+        assert!(template.contains("entry: #7_#3"));
         let parsed = parse_edit(&template).unwrap();
         let plan = build_edit_plan(&parsed, &ts, &projects, &activities).unwrap();
         assert!(plan.is_none());
