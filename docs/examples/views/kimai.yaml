@@ -23,12 +23,15 @@
 # description column's `long_source: description` below.
 #
 # `e` opens the edit template (as a `.md` buffer) on the selected
-# timesheet (editable: project, activity, begin, duration). Project and
-# activity are shown and entered as whitespace-free *slugs* (with the
-# readable name as an inline comment) so editor word-completion works; the
-# trailing CACHE section lists the available slugs. A full name (any case)
-# or the `#<id>` form are also accepted. The body below `===` is the
-# description; a duration change re-computes the end time.
+# timesheet (editable: project, activity, begin, duration). The customer
+# and project are coupled into a single `project` field entered as a
+# combined `customer_project` slug (a timesheet only stores the project;
+# Kimai derives its customer). Activity is its own slug. Both are shown as
+# whitespace-free tokens with the readable name as an inline comment so
+# editor word-completion works; the trailing CACHE section lists the
+# available tokens. A full name (any case) or the `#<id>` form are also
+# accepted. The body below `===` is the description; a duration change
+# re-computes the end time.
 
 tab:
   name: Kimai

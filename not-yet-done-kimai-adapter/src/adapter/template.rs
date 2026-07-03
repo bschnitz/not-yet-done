@@ -6,9 +6,12 @@
 //! identifiers, so editor word-completion (vim `<C-n>`) actually works
 //! (project/activity names contain spaces and defeat it).
 //!
-//! Editable fields: `project`, `activity` (by slug — the token shown in the
-//! CACHE and next to each field; a full name (case-insensitive) or the
-//! `#<id>` fallback form are also accepted),
+//! Editable fields: `project` (a combined `customer_project` slug — the
+//! customer and project are coupled in one field, since a timesheet only
+//! stores the project and Kimai derives its customer) and `activity` (its
+//! own slug). Both accept the slug shown in the CACHE and next to the
+//! field; a full name (case-insensitive) or the `#<id>` fallback form are
+//! also accepted.
 //! `begin` (local `YYYY-MM-DDTHH:MM[:SS]`, space separator also accepted)
 //! and `duration` (`H:MM[:SS]` or plain seconds). Kimai derives duration
 //! from the begin/end pair, so a duration change is materialised as
@@ -147,38 +150,63 @@ fn slugify(name: &str) -> String {
     slug
 }
 
-/// Build an id → slug map for a set of id → name entries. Slugs are unique:
-/// when two names slugify to the same token, every colliding entry gets its
-/// numeric id appended (`foo` → `foo-7`), so a slug always resolves back to
-/// exactly one id. An empty slug falls back to `id-<id>`.
+/// Append `-<id>` to every base token that collides with another, so each
+/// resulting token maps back to exactly one id.
+fn dedup_tokens(base: HashMap<u64, String>) -> HashMap<u64, String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for t in base.values() {
+        *counts.entry(t.as_str()).or_default() += 1;
+    }
+    base.iter()
+        .map(|(id, t)| {
+            let token = if counts[t.as_str()] > 1 {
+                format!("{t}-{id}")
+            } else {
+                t.clone()
+            };
+            (*id, token)
+        })
+        .collect()
+}
+
+/// Build an id → slug map for a set of id → name entries. Slugs are unique
+/// (colliding names get their numeric id appended); an empty slug falls back
+/// to `id-<id>`. Used for activities.
 fn build_slugs(names: &HashMap<u64, String>) -> HashMap<u64, String> {
-    let base: HashMap<u64, String> = names
+    let base = names
         .iter()
         .map(|(id, name)| {
             let s = slugify(name);
             (*id, if s.is_empty() { format!("id-{id}") } else { s })
         })
         .collect();
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for s in base.values() {
-        *counts.entry(s.as_str()).or_default() += 1;
-    }
-    base.iter()
-        .map(|(id, s)| {
-            let slug = if counts[s.as_str()] > 1 {
-                format!("{s}-{id}")
-            } else {
-                s.clone()
-            };
-            (*id, slug)
-        })
-        .collect()
+    dedup_tokens(base)
 }
 
-/// Resolve a project/activity value back to its id. Tries, in order: the
-/// `#<id>` fallback form (verbatim), the slug shown in the buffer/CACHE, and
-/// finally a full name (case-insensitive) for backward compatibility and
-/// hand-typed entries. On failure lists the available slugs.
+/// Build an id → combined-token map for projects: `customer_project` slug,
+/// or the bare project slug when the project has no customer. Tokens are
+/// unique (collisions get the numeric id appended). This is the coupled
+/// customer+project identifier shown and entered in the edit buffer.
+fn project_tokens(projects: &HashMap<u64, KimaiProject>) -> HashMap<u64, String> {
+    let base = projects
+        .iter()
+        .map(|(id, p)| {
+            let proj = slugify(&p.name);
+            let proj = if proj.is_empty() { format!("id-{id}") } else { proj };
+            let token = match p.parent_title.as_deref().map(slugify).filter(|c| !c.is_empty()) {
+                Some(customer) => format!("{customer}_{proj}"),
+                None => proj,
+            };
+            (*id, token)
+        })
+        .collect();
+    dedup_tokens(base)
+}
+
+/// Resolve an activity value back to its id. Tries, in order: the `#<id>`
+/// fallback form (verbatim), the slug shown in the buffer/CACHE, and finally
+/// a full name (case-insensitive) for backward compatibility and hand-typed
+/// entries. On failure lists the available slugs.
 fn resolve_name(
     value: &str,
     names: &HashMap<u64, String>,
@@ -204,34 +232,62 @@ fn resolve_name(
     ))
 }
 
+/// Resolve a project value back to its id. The buffer/CACHE form is the
+/// combined `customer_project` slug; a bare project slug (projects with no
+/// customer), a full project name (case-insensitive) and the `#<id>`
+/// fallback are also accepted. On failure lists the available combined
+/// tokens.
+fn resolve_project(
+    value: &str,
+    projects: &HashMap<u64, KimaiProject>,
+) -> Result<u64, String> {
+    let value = value.trim();
+    if let Some(id) = value.strip_prefix('#').and_then(|v| v.parse().ok()) {
+        return Ok(id);
+    }
+    let lowered = value.to_lowercase();
+    let tokens = project_tokens(projects);
+    if let Some((id, _)) = tokens.iter().find(|(_, t)| **t == lowered) {
+        return Ok(*id);
+    }
+    if let Some((id, _)) = projects.iter().find(|(_, p)| p.name.to_lowercase() == lowered) {
+        return Ok(*id);
+    }
+    let mut available: Vec<&str> = tokens.values().map(String::as_str).collect();
+    available.sort_unstable();
+    Err(format!(
+        "unknown project `{value}` (available: {})",
+        available.join(", ")
+    ))
+}
+
 /// Render the edit buffer for one timesheet.
 pub(super) fn render_edit_template(
     ts: &KimaiTimesheet,
     projects: &HashMap<u64, KimaiProject>,
     activities: &HashMap<u64, String>,
 ) -> String {
-    let project_names: HashMap<u64, String> =
-        projects.iter().map(|(id, p)| (*id, p.name.clone())).collect();
-    let project_slugs = build_slugs(&project_names);
+    let project_token_map = project_tokens(projects);
     let activity_slugs = build_slugs(activities);
 
-    // Editable value = the whitespace-free slug; the readable name rides
-    // along as an inline `# comment` (stripped on parse) so the buffer stays
-    // legible. Entities missing from the lookup fall back to `#<id>`.
-    let render_field =
-        |id: u64, slugs: &HashMap<u64, String>, names: &HashMap<u64, String>| match (
-            slugs.get(&id),
-            names.get(&id),
-        ) {
-            (Some(slug), Some(name)) => format!("{slug}  # {name}"),
-            _ => format!("#{id}"),
-        };
-    let project = render_field(ts.project, &project_slugs, &project_names);
-    let activity = render_field(ts.activity, &activity_slugs, activities);
-    let customer = projects
-        .get(&ts.project)
-        .and_then(|p| p.parent_title.clone())
-        .unwrap_or_default();
+    // Project value = the combined `customer_project` slug; activity = its
+    // own slug. The readable name(s) ride along as an inline `# comment`
+    // (stripped on parse) so the buffer stays legible. Entities missing from
+    // the lookup fall back to `#<id>`.
+    let project = match (project_token_map.get(&ts.project), projects.get(&ts.project)) {
+        (Some(token), Some(p)) => {
+            let display = match p.parent_title.as_deref().filter(|c| !c.is_empty()) {
+                Some(customer) => format!("{customer} / {}", p.name),
+                None => p.name.clone(),
+            };
+            format!("{token}  # {display}")
+        }
+        _ => format!("#{}", ts.project),
+    };
+    let activity = match (activity_slugs.get(&ts.activity), activities.get(&ts.activity)) {
+        (Some(slug), Some(name)) => format!("{slug}  # {name}"),
+        _ => format!("#{}", ts.activity),
+    };
     let running = ts.end.is_none();
 
     let mut out = String::new();
@@ -248,9 +304,6 @@ pub(super) fn render_edit_template(
     out.push_str(EDITABLE_MARKER);
     out.push('\n');
     out.push_str(&format!("id: {}\n", ts.id));
-    if !customer.is_empty() {
-        out.push_str(&format!("customer: {customer}\n"));
-    }
     out.push_str(&format!(
         "end: {}\n",
         ts.end.as_deref().map(local_part).unwrap_or("(running)")
@@ -263,19 +316,20 @@ pub(super) fn render_edit_template(
     out.push_str(ts.description.as_deref().unwrap_or(""));
     out.push('\n');
 
-    // Advertise the slugs (single tokens) so editor word-completion works.
-    let mut project_slug_list: Vec<&str> =
-        project_slugs.values().map(String::as_str).collect();
-    project_slug_list.sort_unstable();
+    // Advertise the tokens (single, whitespace-free) so editor
+    // word-completion works — projects as `customer_project`.
+    let mut project_token_list: Vec<&str> =
+        project_token_map.values().map(String::as_str).collect();
+    project_token_list.sort_unstable();
     let mut activity_slug_list: Vec<&str> =
         activity_slugs.values().map(String::as_str).collect();
     activity_slug_list.sort_unstable();
-    if !project_slug_list.is_empty() || !activity_slug_list.is_empty() {
+    if !project_token_list.is_empty() || !activity_slug_list.is_empty() {
         out.push('\n');
         out.push_str(CACHE_MARKER);
         out.push('\n');
-        if !project_slug_list.is_empty() {
-            out.push_str(&format!("# projects: {}\n", project_slug_list.join(", ")));
+        if !project_token_list.is_empty() {
+            out.push_str(&format!("# projects: {}\n", project_token_list.join(", ")));
         }
         if !activity_slug_list.is_empty() {
             out.push_str(&format!("# activities: {}\n", activity_slug_list.join(", ")));
@@ -420,34 +474,24 @@ pub(super) fn build_edit_plan(
         }
     }
 
-    let project_names: HashMap<u64, String> = projects
-        .iter()
-        .map(|(id, p)| (*id, p.name.clone()))
-        .collect();
-    let resolve = |value: Option<&String>,
-                       names: &HashMap<u64, String>,
-                       what: &str,
-                       errors: &mut Vec<String>| {
-        value.and_then(|v| match resolve_name(v, names, what) {
+    let project_id = parsed.editable.get("project").and_then(|v| {
+        match resolve_project(v, projects) {
             Ok(id) => Some(id),
             Err(e) => {
                 errors.push(e);
                 None
             }
-        })
-    };
-    let project_id = resolve(
-        parsed.editable.get("project"),
-        &project_names,
-        "project",
-        &mut errors,
-    );
-    let activity_id = resolve(
-        parsed.editable.get("activity"),
-        activities,
-        "activity",
-        &mut errors,
-    );
+        }
+    });
+    let activity_id = parsed.editable.get("activity").and_then(|v| {
+        match resolve_name(v, activities, "activity") {
+            Ok(id) => Some(id),
+            Err(e) => {
+                errors.push(e);
+                None
+            }
+        }
+    });
     let begin = parsed.editable.get("begin").and_then(|v| {
         parse_begin(v).map_err(|e| errors.push(e)).ok()
     });
@@ -626,12 +670,15 @@ mod tests {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        assert!(template.contains("project: website-relaunch  # Website Relaunch"));
+        assert!(template.contains("project: acme-corp_website-relaunch  # Acme Corp / Website Relaunch"));
         assert!(template.contains("activity: development  # Development"));
         assert!(template.contains("begin: 2030-01-15T09:00:00"));
         assert!(template.contains("duration: 1:30:00"));
+        // Customer is no longer a standalone read-only line — it is folded
+        // into the coupled project token above.
+        assert!(!template.contains("customer:"));
         assert!(template.contains(CACHE_MARKER));
-        assert!(template.contains("# projects: internal, website-relaunch"));
+        assert!(template.contains("# projects: acme-corp_website-relaunch, internal"));
         assert!(template.contains("# activities: development, meeting"));
 
         let parsed = parse_edit(&template).unwrap();
@@ -682,18 +729,54 @@ mod tests {
 
     #[test]
     fn resolve_name_accepts_slug_name_and_hash_id() {
+        // Activity resolution: slug / full name (any case) / `#<id>`.
+        let (_, activities) = lookups();
+        assert_eq!(resolve_name("development", &activities, "activity").unwrap(), 3);
+        assert_eq!(resolve_name("Development", &activities, "activity").unwrap(), 3);
+        assert_eq!(resolve_name("MEETING", &activities, "activity").unwrap(), 4);
+        assert_eq!(resolve_name("#42", &activities, "activity").unwrap(), 42);
+        let err = resolve_name("nope", &activities, "activity").unwrap_err();
+        assert!(err.contains("development, meeting"));
+    }
+
+    #[test]
+    fn resolve_project_accepts_combined_name_and_hash_id() {
         let (projects, _) = lookups();
-        let names: HashMap<u64, String> =
-            projects.iter().map(|(id, p)| (*id, p.name.clone())).collect();
-        // Slug (the CACHE/field form).
-        assert_eq!(resolve_name("website-relaunch", &names, "project").unwrap(), 7);
-        // Full name, any case (backward compat / hand-typed).
-        assert_eq!(resolve_name("Website Relaunch", &names, "project").unwrap(), 7);
-        assert_eq!(resolve_name("WEBSITE RELAUNCH", &names, "project").unwrap(), 7);
-        // `#<id>` fallback for entities missing from the lookup.
-        assert_eq!(resolve_name("#42", &names, "project").unwrap(), 42);
-        let err = resolve_name("nope", &names, "project").unwrap_err();
-        assert!(err.contains("internal, website-relaunch"));
+        // Combined `customer_project` token.
+        assert_eq!(resolve_project("acme-corp_website-relaunch", &projects).unwrap(), 7);
+        // Bare token for the customer-less project.
+        assert_eq!(resolve_project("internal", &projects).unwrap(), 8);
+        // Full project name (any case), backward compat.
+        assert_eq!(resolve_project("Website Relaunch", &projects).unwrap(), 7);
+        assert_eq!(resolve_project("WEBSITE RELAUNCH", &projects).unwrap(), 7);
+        // `#<id>` fallback.
+        assert_eq!(resolve_project("#42", &projects).unwrap(), 42);
+        let err = resolve_project("nope", &projects).unwrap_err();
+        assert!(err.contains("acme-corp_website-relaunch, internal"));
+    }
+
+    #[test]
+    fn same_project_name_under_two_customers_gets_distinct_tokens() {
+        let projects = HashMap::from([
+            (
+                1,
+                KimaiProject {
+                    id: 1,
+                    name: "Support".to_string(),
+                    parent_title: Some("Acme Corp".to_string()),
+                },
+            ),
+            (
+                2,
+                KimaiProject {
+                    id: 2,
+                    name: "Support".to_string(),
+                    parent_title: Some("Globex".to_string()),
+                },
+            ),
+        ]);
+        assert_eq!(resolve_project("acme-corp_support", &projects).unwrap(), 1);
+        assert_eq!(resolve_project("globex_support", &projects).unwrap(), 2);
     }
 
     #[test]
@@ -702,7 +785,7 @@ mod tests {
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
         let edited = template
-            .replace("project: website-relaunch", "project: internal")
+            .replace("project: acme-corp_website-relaunch", "project: internal")
             .replace("activity: development", "activity: meeting");
 
         let parsed = parse_edit(&edited).unwrap();
@@ -714,17 +797,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_project_lists_available_slugs() {
+    fn unknown_project_lists_available_tokens() {
         let (projects, activities) = lookups();
         let ts = sample_timesheet();
         let template = render_edit_template(&ts, &projects, &activities);
-        let edited = template.replace("project: website-relaunch", "project: Nope");
+        let edited = template.replace("project: acme-corp_website-relaunch", "project: Nope");
 
         let parsed = parse_edit(&edited).unwrap();
         let errors = build_edit_plan(&parsed, &ts, &projects, &activities).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("unknown project `Nope`"));
-        assert!(errors[0].contains("internal, website-relaunch"));
+        assert!(errors[0].contains("acme-corp_website-relaunch, internal"));
     }
 
     #[test]
