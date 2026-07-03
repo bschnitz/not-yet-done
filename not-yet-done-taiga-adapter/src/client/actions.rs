@@ -171,7 +171,8 @@ pub async fn list_attachments(
 }
 
 /// Upload a single file as an attachment on the given item. Taiga accepts
-/// one file per request, so callers loop for multi-select.
+/// one file per request, so callers loop for multi-select. Reads the file
+/// from disk and delegates to [`upload_attachment_bytes`].
 pub async fn upload_attachment(
     client: &TaigaClient,
     item_type: ItemType,
@@ -187,8 +188,21 @@ pub async fn upload_attachment(
         .and_then(|n| n.to_str())
         .ok_or_else(|| format!("non-UTF-8 filename: {}", file_path.display()))?
         .to_string();
+    upload_attachment_bytes(client, item_type, item_id, project_id, &filename, bytes).await
+}
 
-    let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.clone());
+/// Upload attachment content already held in memory. Used by the conversion
+/// flow, which downloads an attachment from the source item and re-uploads
+/// it to the target without touching the filesystem.
+pub async fn upload_attachment_bytes(
+    client: &TaigaClient,
+    item_type: ItemType,
+    item_id: u64,
+    project_id: u64,
+    filename: &str,
+    bytes: Vec<u8>,
+) -> Result<TaigaAttachment, String> {
+    let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
     let form = reqwest::multipart::Form::new()
         .part("attached_file", part)
         .text("project", project_id.to_string())
