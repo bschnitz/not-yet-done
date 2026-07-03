@@ -809,6 +809,7 @@ mod tests {
             name: "root".into(),
             node_type: "mock:root".into(),
             default: true,
+            window_ops: false,
             key: None,
             query: None,
             columns,

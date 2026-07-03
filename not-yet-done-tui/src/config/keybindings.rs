@@ -1031,7 +1031,10 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::ToggleGroupOrder, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleRecordDetail, KeyBinding::new("o"));
         m.insert(ContentAction::ToggleDetailWrap, KeyBinding::new("X"));
-        m.insert(ContentAction::LinkHop, KeyBinding::new("f"));
+        // `LinkHop` is intentionally NOT bound by default: link-hop is
+        // opt-in per view/child. A view enables it by binding the action
+        // on itself or a child (`keybindings: { link_hop: f }`); with no
+        // binding present the claim is never filed and `f` stays free.
         m.insert(ContentAction::ToggleLongText, KeyBinding::new("v"));
         Self { bindings: m }
     }

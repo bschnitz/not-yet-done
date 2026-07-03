@@ -62,6 +62,10 @@ views:
   - name: chats
     node_type: "stoat:server"
     default: true
+    # Enable the `w` window-leader chords (split / close / focus / pane-tag
+    # switch) on this view — it uses a coupled message split below, so
+    # multi-pane navigation is meaningful here. Off by default everywhere else.
+    window_ops: true
     tree_label: name
     # UNREAD highlight (read-state from Revolt `sync/unreads` + acks): a
     # server/category/channel with unread messages gets the marker glyph + its
@@ -139,7 +143,11 @@ views:
             # frame would otherwise make Backspace claim `Back` and pop the
             # chat back to the channel list — navigation that belongs to the
             # tree on the left. Disable `Back` here so Backspace is inert.
-            keybindings: { back: null }
+            # `link_hop: f` opts this pane into vimium-style link-hop (label
+            # every visible link, type the label to open it). Link-hop is
+            # opt-in per view/child now, so it is bound only where useful —
+            # here, on the chat messages that actually carry URLs.
+            keybindings: { back: null, link_hop: f }
             # `smooth_scroll: true` makes this (long, multi-line) list scroll
             # one physical line at a time over the whole content instead of
             # jumping message-to-message — the body "glides" continuously.
@@ -284,7 +292,11 @@ views:
                 split: { direction: right, ratio: 0.8, coupled: true }
                 # Disable `Back` on this coupled pane too (see the
                 # uncategorized-channels branch above for why).
-                keybindings: { back: null }
+                # `link_hop: f` opts this pane into vimium-style link-hop (label
+                # every visible link, type the label to open it). Link-hop is
+                # opt-in per view/child now, so it is bound only where useful —
+                # here, on the chat messages that actually carry URLs.
+                keybindings: { back: null, link_hop: f }
                 # Smooth line-wise scrolling + same chat layout as the
                 # uncategorized-channels branch above.
                 smooth_scroll: true

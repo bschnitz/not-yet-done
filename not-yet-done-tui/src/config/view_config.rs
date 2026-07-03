@@ -704,6 +704,17 @@ pub struct ViewDef {
     /// in the list. See docs/generic-view-spec.md `record_detail:`.
     #[serde(default)]
     pub record_detail: bool,
+    /// Opt-in for the window/split operations reachable via the `w`
+    /// leader chord (split right/down, close pane, focus parent/child,
+    /// pane-tag switch). Off by default so `w` stays a free, ordinary key
+    /// on every other view; enable it only where multiple panes actually
+    /// make sense — a view with a coupled child `split:` (e.g. the Stoat
+    /// chat) or one that offers a `record_detail:` split (e.g. Postgres
+    /// rows). When `false`, the `w` chord never engages and the key falls
+    /// through to normal handling. See docs/generic-view-spec.md
+    /// `window_ops:`.
+    #[serde(default)]
+    pub window_ops: bool,
     /// When set, this view renders as a tree: rows of this level expand
     /// into rows of the first ChildDef that itself sets `tree_label`,
     /// and so on down the chain. The referenced key must exist in

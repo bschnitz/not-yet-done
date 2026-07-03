@@ -500,6 +500,7 @@ mod tests {
             name: "v".into(),
             node_type: node_type.into(),
             default: false,
+            window_ops: false,
             key: None,
             query: None,
             columns: Vec::new(),
