@@ -64,13 +64,20 @@ pub struct KimaiProject {
     pub parent_title: Option<String>,
 }
 
-/// One entry of `GET /api/activities`. The API also carries a
-/// `parentTitle` (the owning project for project-bound activities), but
-/// that is redundant with the timesheet's own project id — not mapped.
+/// One entry of `GET /api/activities`. An activity is either *global*
+/// (bookable on any project — `project`/`parent_title` absent) or bound to
+/// one project. `project` is the owning project's id when the API includes
+/// it; `parent_title` is that project's name. Both drive the
+/// project↔activity coupling in the edit buffer's combined `entry` field.
 #[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct KimaiActivity {
     pub id: u64,
     pub name: String,
+    #[serde(default)]
+    pub project: Option<u64>,
+    #[serde(default)]
+    pub parent_title: Option<String>,
 }
 
 #[derive(Deserialize)]
