@@ -102,6 +102,31 @@ impl ContentAdapter for KimaiAdapter {
         }
     }
 
+    /// Reference data surfaced to any frontend (menu or CLI `values`).
+    /// `entry_combos` yields every bookable project+activity slug — the same
+    /// completion set edit mode offers — as `value` = the slug token and
+    /// `label` = "Customer / Project / Activity". Used to build a local
+    /// task-path → Kimai-slug mapping outside the editor.
+    async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
+        match source {
+            "entry_combos" => {
+                let client = self.auth.get_client().await.map_err(other_err)?;
+                let (projects, activities) =
+                    tokio::try_join!(client.projects(), client.activities())
+                        .map_err(other_err)?;
+                let projects: HashMap<u64, KimaiProject> =
+                    projects.into_iter().map(|p| (p.id, p)).collect();
+                let activities: HashMap<u64, KimaiActivity> =
+                    activities.into_iter().map(|a| (a.id, a)).collect();
+                Ok(template::entry_slug_options(&projects, &activities)
+                    .into_iter()
+                    .map(|(value, label)| ValueOption { value, label })
+                    .collect())
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         self.auth.subscribe_status()
     }
