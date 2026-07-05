@@ -140,6 +140,9 @@ mod tests {
             ActionOutcome::Navigate { .. } => {
                 panic!("expected Reopen for empty body, got Navigate")
             }
+            ActionOutcome::OpenExternal { .. } | ActionOutcome::OpenEditor { .. } => {
+                panic!("expected Reopen for empty body, got a menu/external outcome")
+            }
         }
     }
 

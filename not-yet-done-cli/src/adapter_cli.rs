@@ -726,6 +726,9 @@ fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
         ActionOutcome::Reopen { content, .. } => Err(anyhow!(
             "'{action_id}' rejected the input:\n{content}"
         )),
+        ActionOutcome::OpenEditor { action_id: next } => Err(anyhow!(
+            "'{action_id}' opens an interactive editor for '{next}' — use the TUI"
+        )),
     }
 }
 

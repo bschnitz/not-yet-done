@@ -153,6 +153,8 @@ mod tests {
             ActionOutcome::Reopen { .. } => "Reopen",
             ActionOutcome::NoChanges => "NoChanges",
             ActionOutcome::Navigate { .. } => "Navigate",
+            ActionOutcome::OpenExternal { .. } => "OpenExternal",
+            ActionOutcome::OpenEditor { .. } => "OpenEditor",
         }
     }
 

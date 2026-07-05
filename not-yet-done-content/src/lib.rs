@@ -985,6 +985,23 @@ pub enum ActionOutcome {
         target: String,
         message: Option<String>,
     },
+    /// The action was a *menu step*, not a terminal mutation: it resolved
+    /// which follow-up editor action should run next. The frontend opens the
+    /// editor for `action_id` on the **same** node, reusing the standard
+    /// editor flow ([`Node::prepare`] → edit → [`Node::execute`]) — no new
+    /// editor plumbing.
+    ///
+    /// *Why it exists:* some conversions can't be shown in a single editor
+    /// because the target type isn't known yet, and which source fields drop
+    /// depends on that target. So a `Picker`/`Form` action first lets the user
+    /// choose the target (the menu), then returns `OpenEditor { action_id }`
+    /// pointing at a type-specific editor action (e.g. `"convert:userstory"`)
+    /// whose `prepare` renders the exactly-right buffer. It generalises the
+    /// "pick a variant, then edit it" flow for any adapter.
+    ///
+    /// Interactive-only: the flow needs `$EDITOR`, so non-interactive
+    /// frontends (the CLI) reject it.
+    OpenEditor { action_id: String },
 }
 
 /// Initial state for an `InputSpec::Editor` action.

@@ -168,6 +168,9 @@ mod tests {
             ActionOutcome::Done { .. } => panic!("expected Reopen, got Done"),
             ActionOutcome::NoChanges => panic!("expected Reopen, got NoChanges"),
             ActionOutcome::Navigate { .. } => panic!("expected Reopen, got Navigate"),
+            ActionOutcome::OpenExternal { .. } | ActionOutcome::OpenEditor { .. } => {
+                panic!("expected Reopen, got a menu/external outcome")
+            }
         }
     }
 

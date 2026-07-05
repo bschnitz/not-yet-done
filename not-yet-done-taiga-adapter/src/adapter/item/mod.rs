@@ -64,8 +64,15 @@ pub(super) fn item_actions(item_type: Option<ItemType>) -> Vec<NodeAction> {
         ),
         NodeAction::new("clone", "clone", InputSpec::Editor),
     ];
-    if let Some(action) = item_type.and_then(convert::convert_action) {
-        actions.push(action);
+    if let Some(item_type) = item_type {
+        // The convert menu (Picker) plus its hidden per-target editor actions.
+        // The editor actions are never key-bound; they exist so the edit
+        // session's `actions()` membership check passes when `OpenEditor`
+        // opens `convert:<target>` after the user picks from the menu.
+        if let Some(action) = convert::convert_action(item_type) {
+            actions.push(action);
+            actions.extend(convert::convert_editor_actions(item_type));
+        }
     }
     actions
 }
@@ -334,12 +341,26 @@ impl Node for TaigaItemNode {
         item_actions(Some(self.detail.item_type))
     }
 
+    async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
+        match action_id {
+            convert::CONVERT_ACTION_ID => {
+                Ok(convert::convert_target_options(self.detail.item_type))
+            }
+            other => Err(ContentError::NotSupported(format!(
+                "picker_options: unknown action {other}"
+            ))),
+        }
+    }
+
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        // A `convert:<target>` id routes to the target-specific convert editor.
+        if let Some(target) = convert::parse_convert_target(action_id) {
+            return self.prepare_convert(target).await;
+        }
         match action_id {
             "edit_full" => self.prepare_edit_full().await,
             "edit_with_comments" => self.prepare_edit_with_comments().await,
             "clone" => self.prepare_clone().await,
-            convert::CONVERT_ACTION_ID => self.prepare_convert().await,
             other => Err(ContentError::NotSupported(format!(
                 "prepare: unknown action {other}"
             ))),
@@ -381,8 +402,24 @@ impl Node for TaigaItemNode {
             ("clone", ActionInput::Edited { text, .. }) => {
                 self.execute_clone(&text).await
             }
-            (convert::CONVERT_ACTION_ID, ActionInput::Edited { text, .. }) => {
-                self.execute_convert(&text).await
+            (convert::CONVERT_ACTION_ID, ActionInput::Picked(value)) => {
+                // Menu step: the picked value is a `convert:<target>` editor
+                // action id. Hand it back so the frontend opens that editor on
+                // this same node (prepare → edit → execute reuse the plumbing).
+                if convert::parse_convert_target(&value).is_some() {
+                    Ok(ActionOutcome::OpenEditor { action_id: value })
+                } else {
+                    Err(ContentError::NotSupported(format!(
+                        "convert: unknown target selection {value}"
+                    )))
+                }
+            }
+            (id, ActionInput::Edited { text, .. })
+                if convert::parse_convert_target(id).is_some() =>
+            {
+                let target = convert::parse_convert_target(id)
+                    .expect("guard already checked this is a convert target");
+                self.execute_convert(target, &text).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"

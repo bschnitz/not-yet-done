@@ -107,6 +107,12 @@ mod tests {
             Ok(ActionOutcome::Navigate { .. }) => {
                 panic!("expected NoChanges for empty selection, got Navigate")
             }
+            Ok(ActionOutcome::OpenExternal { .. }) => {
+                panic!("expected NoChanges for empty selection, got OpenExternal")
+            }
+            Ok(ActionOutcome::OpenEditor { .. }) => {
+                panic!("expected NoChanges for empty selection, got OpenEditor")
+            }
             Err(e) => panic!("expected NoChanges, got Err: {e}"),
         }
     }
