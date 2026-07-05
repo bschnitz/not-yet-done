@@ -158,21 +158,18 @@ views:
         key: A
         type: custom
         id: upload_attachment
-      # Convert between issue and user story. Each action only appears on the
-      # matching row type (convert-to-user-story on issues, convert-to-issue on
-      # user stories); the key is inert on other types. Both open an editor
-      # pre-filled with the target's fields plus a note listing what has no
-      # equivalent on the target type. On save the adapter creates the target
-      # (issue→user story uses Taiga's native promote), migrates comments +
-      # attachments, then DELETES the source — so it is an `edit`-style action.
-      - name: convert to user story
-        key: U
+      # Convert between issue and user story. One action for both directions:
+      # its direction is derived from the row's own type (issue → user story,
+      # user story → issue) and the label reflects the target; on tasks/epics
+      # it is inert. Opens an editor pre-filled with the target's fields plus a
+      # note listing what has no equivalent on the target type. On save the
+      # adapter creates the target (issue→user story uses Taiga's native
+      # promote), migrates comments + attachments, then DELETES the source — so
+      # it is an `edit`-style action.
+      - name: convert
+        key: V
         type: edit
-        id: convert_to_userstory
-      - name: convert to issue
-        key: I
-        type: edit
-        id: convert_to_issue
+        id: convert
 
     children:
       - name: Comments
