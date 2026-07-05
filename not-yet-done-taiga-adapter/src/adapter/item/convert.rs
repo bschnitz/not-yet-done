@@ -1,21 +1,24 @@
-//! `convert` action (issue ↔ user story).
+//! `convert` action — change a Taiga item's type.
 //!
-//! A single action whose direction is derived from the row's own type: on an
-//! issue it converts to a user story, on a user story it converts to an issue
-//! (its label reflects the target). Tasks/epics have no target, so it never
-//! appears there.
+//! Convert is a two-step flow. Triggering it opens a **target-type picker**
+//! (an `InputSpec::Picker` listing every type the source can become — issue,
+//! epic, user story; never task, and never the source's own type). Picking a
+//! target returns [`ActionOutcome::OpenEditor`] for that target's dedicated
+//! editor action `convert:<target>`, which the frontend then opens like any
+//! other editor. Choosing the target *before* the editor lets each editor be
+//! purpose-built for its destination — different conversion directions drop
+//! different source fields, which no single editor could represent cleanly.
 //!
-//! Taiga has no symmetric "change type" endpoint, so conversion means:
+//! Taiga has no symmetric "change type" endpoint, so a conversion means:
 //! create the target item, migrate comments + attachments, then delete the
-//! source. Both directions use the normal `create_item` endpoint — Taiga's
+//! source. All directions use the normal `create_item` endpoint — Taiga's
 //! native `promote_to_us` is missing on some deployments (plain-HTML 404), so
-//! we don't rely on it. Either way the editor opens
-//! **first** with the target's fields pre-filled plus a read-only infoblock
-//! ("what will be migrated / deleted") and an editable conversion note
-//! listing the source fields that have no equivalent on the target type.
+//! we don't rely on it. The editor opens with the target's fields pre-filled
+//! plus a read-only infoblock ("what will be migrated / deleted") and an
+//! editable conversion note listing source fields with no target equivalent.
 //!
-//! Ordering is strict: create/promote → migrate → **only on success** delete
-//! the source. A migration failure keeps the source and reports a warning; a
+//! Ordering is strict: create → migrate → **only on success** delete the
+//! source. A migration failure keeps the source and reports a warning; a
 //! delete failure navigates to the new item and warns "delete manually".
 
 use std::collections::HashSet;
@@ -37,30 +40,83 @@ use super::template::{
     resolve_slugs_inplace, validate_3b,
 };
 
-/// The item type an item of `from` converts into, if conversion is supported.
-pub(super) fn convert_target(from: ItemType) -> Option<ItemType> {
-    match from {
-        ItemType::Issue => Some(ItemType::UserStory),
-        ItemType::UserStory => Some(ItemType::Issue),
-        _ => None,
+/// The convert *menu* action id — an `InputSpec::Picker` whose options are the
+/// per-target editor action ids. Selecting one yields
+/// [`ActionOutcome::OpenEditor`] for that target's editor.
+pub(super) const CONVERT_ACTION_ID: &str = "convert";
+
+/// Prefix marking a per-target convert *editor* action id (`convert:<target>`).
+const CONVERT_EDITOR_PREFIX: &str = "convert:";
+
+/// The types an item of `from` can convert into: issue, epic and user story,
+/// minus the source's own type. Task is never a target (only a source) — a
+/// task can still convert *out* into any of the three.
+pub(super) fn convert_targets(from: ItemType) -> Vec<ItemType> {
+    [ItemType::Issue, ItemType::Epic, ItemType::UserStory]
+        .into_iter()
+        .filter(|&t| t != from)
+        .collect()
+}
+
+/// The editor action id for converting into `target` (`convert:userstory` etc.).
+pub(super) fn convert_editor_action_id(target: ItemType) -> String {
+    format!("{CONVERT_EDITOR_PREFIX}{}", target.as_str())
+}
+
+/// Parse a per-target convert editor action id back into its target type.
+/// Returns `None` for the bare menu id `"convert"` or any non-convert id.
+pub(super) fn parse_convert_target(action_id: &str) -> Option<ItemType> {
+    let rest = action_id.strip_prefix(CONVERT_EDITOR_PREFIX)?;
+    ItemType::parse(rest).ok()
+}
+
+/// Human-readable target label for the picker menu.
+fn target_menu_label(target: ItemType) -> &'static str {
+    match target {
+        ItemType::UserStory => "user story",
+        ItemType::Issue => "issue",
+        ItemType::Epic => "epic",
+        ItemType::Task => "task",
     }
 }
 
-/// The convert action id — a single action for both directions; the target is
-/// derived from the row's own type at prepare/execute time.
-pub(super) const CONVERT_ACTION_ID: &str = "convert";
+/// Picker options for the convert menu: one per available target, whose value
+/// is the target's editor action id (so the picked value drives `OpenEditor`).
+pub(super) fn convert_target_options(from: ItemType) -> Vec<ActionOption> {
+    convert_targets(from)
+        .into_iter()
+        .map(|t| ActionOption {
+            label: format!("convert to {}", target_menu_label(t)),
+            value: convert_editor_action_id(t),
+        })
+        .collect()
+}
 
-/// The convert action offered on an item of type `from` (none for
-/// tasks/epics). One stable id, but the label reflects the resolved target so
-/// the row still reads "convert to user story" / "convert to issue".
+/// The convert *menu* action offered on an item of type `from` — a single
+/// `Picker`, or `None` when there are no targets. The picked value is a
+/// `convert:<target>` editor action id.
 pub(super) fn convert_action(from: ItemType) -> Option<NodeAction> {
-    let target = convert_target(from)?;
-    let label = match target {
-        ItemType::UserStory => "convert to user story",
-        ItemType::Issue => "convert to issue",
-        _ => return None,
-    };
-    Some(NodeAction::new(CONVERT_ACTION_ID, label, InputSpec::Editor))
+    if convert_targets(from).is_empty() {
+        return None;
+    }
+    Some(NodeAction::new(CONVERT_ACTION_ID, "convert", InputSpec::Picker))
+}
+
+/// The per-target convert *editor* actions for an item of type `from`. These
+/// are never key-bound or shown in the action bar — they exist only so
+/// `actions()` membership passes when `OpenEditor` opens one (the edit session
+/// validates the action id against `node.actions()` before calling `prepare`).
+pub(super) fn convert_editor_actions(from: ItemType) -> Vec<NodeAction> {
+    convert_targets(from)
+        .into_iter()
+        .map(|t| {
+            NodeAction::new(
+                convert_editor_action_id(t),
+                format!("convert to {}", target_menu_label(t)),
+                InputSpec::Editor,
+            )
+        })
+        .collect()
 }
 
 impl TaigaItemNode {
@@ -71,8 +127,7 @@ impl TaigaItemNode {
         }
     }
 
-    pub(super) async fn prepare_convert(&self) -> Result<EditorPrep> {
-        let target = self.require_convert_target()?;
+    pub(super) async fn prepare_convert(&self, target: ItemType) -> Result<EditorPrep> {
         let (statuses, members, tags) =
             fetch_project_meta(&self.client, self.detail.project_id, target).await?;
         let tables = build_tables(&statuses, &members, &tags);
@@ -118,8 +173,11 @@ impl TaigaItemNode {
         })
     }
 
-    pub(super) async fn execute_convert(&mut self, text: &str) -> Result<ActionOutcome> {
-        let target = self.require_convert_target()?;
+    pub(super) async fn execute_convert(
+        &mut self,
+        target: ItemType,
+        text: &str,
+    ) -> Result<ActionOutcome> {
         let editable_fields = edit_full_fields();
         let (statuses, members, tags) =
             fetch_project_meta(&self.client, self.detail.project_id, target).await?;
@@ -267,15 +325,6 @@ impl TaigaItemNode {
             node_id: format!("{}:{}", target.as_str(), new_id),
             node_type: node_type_for(target).clone(),
             message: Some(message),
-        })
-    }
-
-    fn require_convert_target(&self) -> Result<ItemType> {
-        convert_target(self.detail.item_type).ok_or_else(|| {
-            ContentError::NotSupported(format!(
-                "cannot convert a {}",
-                self.detail.item_type.as_str()
-            ))
         })
     }
 
@@ -647,23 +696,72 @@ mod tests {
     }
 
     #[test]
-    fn convert_target_is_symmetric_for_issue_and_userstory() {
-        assert_eq!(convert_target(ItemType::Issue), Some(ItemType::UserStory));
-        assert_eq!(convert_target(ItemType::UserStory), Some(ItemType::Issue));
-        assert_eq!(convert_target(ItemType::Task), None);
-        assert_eq!(convert_target(ItemType::Epic), None);
+    fn convert_targets_exclude_task_and_self() {
+        use std::collections::HashSet;
+        // Issue → {epic, user story} (never task, never itself).
+        let issue: HashSet<_> = convert_targets(ItemType::Issue).into_iter().collect();
+        assert_eq!(
+            issue,
+            HashSet::from([ItemType::Epic, ItemType::UserStory])
+        );
+        // Task is only ever a source, so it can convert into all three.
+        let task: HashSet<_> = convert_targets(ItemType::Task).into_iter().collect();
+        assert_eq!(
+            task,
+            HashSet::from([ItemType::Issue, ItemType::Epic, ItemType::UserStory])
+        );
+        // Task is never a target for any source.
+        for from in [ItemType::Issue, ItemType::Epic, ItemType::UserStory, ItemType::Task] {
+            assert!(
+                !convert_targets(from).contains(&ItemType::Task),
+                "task must never be a convert target (from {from:?})"
+            );
+        }
     }
 
     #[test]
-    fn convert_action_labels_match_target() {
-        // A single stable id for both directions; only the label differs.
+    fn convert_action_is_a_picker() {
+        // convert is now a single Picker action; the target is chosen from its
+        // options, not baked into the id.
         let a = convert_action(ItemType::Issue).unwrap();
         assert_eq!(a.id, CONVERT_ACTION_ID);
-        assert_eq!(a.label, "convert to user story");
-        let b = convert_action(ItemType::UserStory).unwrap();
-        assert_eq!(b.id, CONVERT_ACTION_ID);
-        assert_eq!(b.label, "convert to issue");
-        assert!(convert_action(ItemType::Task).is_none());
+        assert_eq!(a.label, "convert");
+        assert!(matches!(a.input, InputSpec::Picker));
+    }
+
+    #[test]
+    fn convert_target_options_map_to_editor_action_ids() {
+        let opts = convert_target_options(ItemType::Issue);
+        // One option per target, value = the target's editor action id.
+        assert_eq!(opts.len(), 2);
+        assert!(opts.iter().any(|o| o.value == "convert:epic"
+            && o.label == "convert to epic"));
+        assert!(opts.iter().any(|o| o.value == "convert:userstory"
+            && o.label == "convert to user story"));
+    }
+
+    #[test]
+    fn parse_convert_target_round_trips_and_rejects_bare_id() {
+        for t in [ItemType::Issue, ItemType::Epic, ItemType::UserStory] {
+            let id = convert_editor_action_id(t);
+            assert_eq!(parse_convert_target(&id), Some(t));
+        }
+        // The bare menu id and unrelated ids are not editor targets.
+        assert_eq!(parse_convert_target(CONVERT_ACTION_ID), None);
+        assert_eq!(parse_convert_target("edit_full"), None);
+        assert_eq!(parse_convert_target("convert:bogus"), None);
+    }
+
+    #[test]
+    fn convert_editor_actions_cover_every_target() {
+        let actions = convert_editor_actions(ItemType::Task);
+        let ids: Vec<_> = actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&"convert:issue"));
+        assert!(ids.contains(&"convert:epic"));
+        assert!(ids.contains(&"convert:userstory"));
+        // All are editor actions (they open a type-specific buffer).
+        assert!(actions.iter().all(|a| matches!(a.input, InputSpec::Editor)));
     }
 
     #[test]

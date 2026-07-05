@@ -158,17 +158,17 @@ views:
         key: A
         type: custom
         id: upload_attachment
-      # Convert between issue and user story. One action for both directions:
-      # its direction is derived from the row's own type (issue → user story,
-      # user story → issue) and the label reflects the target; on tasks/epics
-      # it is inert. Opens an editor pre-filled with the target's fields plus a
-      # note listing what has no equivalent on the target type. On save the
-      # adapter creates the target (issue→user story uses Taiga's native
-      # promote), migrates comments + attachments, then DELETES the source — so
-      # it is an `edit`-style action.
+      # Convert an item to another type. Opens a target-type picker (issue,
+      # epic, user story — never task, and never the row's own type); tasks can
+      # convert out but are never a target. Picking a target opens a
+      # type-specific editor pre-filled with the target's fields plus a note
+      # listing what has no equivalent there. On save the adapter creates the
+      # target, migrates comments + attachments, then DELETES the source. It is
+      # a `custom` (Picker) action; the per-target `convert:<type>` editors it
+      # opens need no keybinding of their own.
       - name: convert
         key: V
-        type: edit
+        type: custom
         id: convert
 
     children:

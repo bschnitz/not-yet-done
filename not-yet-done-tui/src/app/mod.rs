@@ -80,6 +80,20 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         result: Result<String, String>,
     },
+    /// A menu-step action returned [`ActionOutcome::OpenEditor`]: the user
+    /// picked a target from a `Picker` (e.g. Taiga's convert target menu) and
+    /// the adapter asked to open a type-specific editor for `action_id` on the
+    /// same node. Routed back to the main thread so `open_content_editor` can
+    /// build the `NodeActionEditSession` (network-heavy prepare stays
+    /// off-thread). `commit_on_save` is false / `editor_profile` is default —
+    /// these editors reuse the node's standard edit plumbing.
+    OpenContentEditorForAction {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+        label: String,
+    },
     /// An `InputSpec::None` action returned [`ActionOutcome::OpenExternal`]:
     /// it produced a local file (e.g. a downloaded attachment) the frontend
     /// should hand to the OS viewer via the configured link opener. `message`
@@ -3595,6 +3609,17 @@ impl App {
                         }
                     }
                 }
+                LoadMsg::OpenContentEditorForAction {
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_id,
+                    label,
+                } => {
+                    self.open_content_editor(
+                        view_index, pane_id, node_id, action_id, label, None, false,
+                    );
+                }
                 LoadMsg::ContentOpenExternal { target, message } => {
                     if let Some(msg) = message {
                         self.notify(msg);
@@ -5882,59 +5907,15 @@ impl App {
                 editor_profile,
                 commit_on_save,
             } => {
-                let adapter = self
-                    .content_view(view_index)
-                    .and_then(|cv| cv.adapter.as_ref())
-                    .map(Arc::clone);
-                let Some(adapter) = adapter else {
-                    self.notify("No adapter available".to_string());
-                    return EditorRequest::None;
-                };
-                // Reject a second open while one is already up *or* still
-                // loading. `open_session` has its own busy guard, but that
-                // only catches the window after the detached child exists;
-                // this closes the gap while the off-thread prepare runs.
-                if self.editor_busy() {
-                    self.notify("Editor is already open".to_string());
-                    return EditorRequest::None;
-                }
-                // Build the session off-thread. Its `prepare` does the
-                // network-heavy metadata/comment fetches that previously ran
-                // under a `block_on` on the render thread — a dead connection
-                // there froze the whole TUI. Now the ready session arrives via
-                // `LoadMsg::EditorSessionReady` and is opened from
-                // `handle_load_msg`; the wait is bounded by the adapter's own
-                // request timeout, and the UI stays responsive throughout.
-                let reload = Some(crate::edit_session::ReloadTarget {
+                self.open_content_editor(
                     view_index,
                     pane_id,
-                });
-                self.editor_load_token = self.editor_load_token.wrapping_add(1);
-                let token = self.editor_load_token;
-                let msg = format!("⏳ Opening editor: {label}…");
-                self.notify(msg.clone());
-                self.editor_loading_msg = Some(msg);
-                let tx = self.load_tx.clone();
-                tokio::spawn(async move {
-                    let result = crate::edit_session::NodeActionEditSession::new(
-                        adapter,
-                        node_id.clone(),
-                        action_id,
-                        label,
-                        None,
-                        reload,
-                        editor_profile,
-                        commit_on_save,
-                    )
-                    .await
-                    .map(|s| Box::new(s) as Box<dyn crate::edit_session::EditSession>)
-                    .map_err(|e| e.to_string());
-                    let _ = tx.send(LoadMsg::EditorSessionReady {
-                        node_id,
-                        token,
-                        result,
-                    });
-                });
+                    node_id,
+                    action_id,
+                    label,
+                    editor_profile,
+                    commit_on_save,
+                );
                 EditorRequest::None
             }
             ViewRequest::SpawnContentLoad {
@@ -7150,6 +7131,77 @@ impl App {
         });
     }
 
+    /// Build a `NodeActionEditSession` off-thread and open it in `$EDITOR`.
+    /// Shared by the `OpenContentEditor` ViewRequest and the
+    /// `OpenContentEditorForAction` LoadMsg — the latter is the Picker→editor
+    /// chaining produced by [`ActionOutcome::OpenEditor`], where a menu step
+    /// selects the target action id and then opens its type-specific editor
+    /// on the same node.
+    fn open_content_editor(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+        label: String,
+        editor_profile: Option<String>,
+        commit_on_save: bool,
+    ) {
+        let adapter = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone);
+        let Some(adapter) = adapter else {
+            self.notify("No adapter available".to_string());
+            return;
+        };
+        // Reject a second open while one is already up *or* still
+        // loading. `open_session` has its own busy guard, but that
+        // only catches the window after the detached child exists;
+        // this closes the gap while the off-thread prepare runs.
+        if self.editor_busy() {
+            self.notify("Editor is already open".to_string());
+            return;
+        }
+        // Build the session off-thread. Its `prepare` does the
+        // network-heavy metadata/comment fetches that previously ran
+        // under a `block_on` on the render thread — a dead connection
+        // there froze the whole TUI. Now the ready session arrives via
+        // `LoadMsg::EditorSessionReady` and is opened from
+        // `handle_load_msg`; the wait is bounded by the adapter's own
+        // request timeout, and the UI stays responsive throughout.
+        let reload = Some(crate::edit_session::ReloadTarget {
+            view_index,
+            pane_id,
+        });
+        self.editor_load_token = self.editor_load_token.wrapping_add(1);
+        let token = self.editor_load_token;
+        let msg = format!("⏳ Opening editor: {label}…");
+        self.notify(msg.clone());
+        self.editor_loading_msg = Some(msg);
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            let result = crate::edit_session::NodeActionEditSession::new(
+                adapter,
+                node_id.clone(),
+                action_id,
+                label,
+                None,
+                reload,
+                editor_profile,
+                commit_on_save,
+            )
+            .await
+            .map(|s| Box::new(s) as Box<dyn crate::edit_session::EditSession>)
+            .map_err(|e| e.to_string());
+            let _ = tx.send(LoadMsg::EditorSessionReady {
+                node_id,
+                token,
+                result,
+            });
+        });
+    }
+
     fn execute_content_action(
         &mut self,
         view_index: usize,
@@ -7171,24 +7223,56 @@ impl App {
         let vi = view_index;
         let pid = pane_id;
         tokio::spawn(async move {
-            let outcome = async {
-                let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(&action_id, not_yet_done_content::ActionInput::Picked(value))
-                    .await
-            }
-            .await;
-            let result = match outcome {
-                Ok(not_yet_done_content::ActionOutcome::Done { message }) => {
-                    Ok(message.unwrap_or_else(|| format!("{action_id} executed")))
-                }
-                Ok(_) => Ok(format!("{action_id} executed")),
+            // `open_editor` short-circuits the ContentActionDone path: an
+            // `ActionOutcome::OpenEditor` is a menu step (e.g. Taiga's
+            // convert target picker) that must chain into a type-specific
+            // editor on the same node rather than notify + reload.
+            let mut open_editor: Option<(String, String)> = None;
+            let result = match adapter.get_by_id(&node_id).await {
                 Err(e) => Err(format!("Action failed: {action_id}: {e}")),
+                Ok(mut node) => {
+                    match node
+                        .execute(&action_id, not_yet_done_content::ActionInput::Picked(value))
+                        .await
+                    {
+                        Ok(not_yet_done_content::ActionOutcome::Done { message }) => {
+                            Ok(message.unwrap_or_else(|| format!("{action_id} executed")))
+                        }
+                        Ok(not_yet_done_content::ActionOutcome::OpenEditor {
+                            action_id: next,
+                        }) => {
+                            // Resolve the editor label from the node's own
+                            // action list (the picked value is a real action
+                            // id present in `actions()`); fall back to the id.
+                            let label = node
+                                .actions()
+                                .into_iter()
+                                .find(|a| a.id == next)
+                                .map(|a| a.label)
+                                .unwrap_or_else(|| next.clone());
+                            open_editor = Some((next, label));
+                            Ok(String::new())
+                        }
+                        Ok(_) => Ok(format!("{action_id} executed")),
+                        Err(e) => Err(format!("Action failed: {action_id}: {e}")),
+                    }
+                }
             };
-            let _ = tx.send(LoadMsg::ContentActionDone {
-                view_index: vi,
-                pane_id: pid,
-                result,
-            });
+            if let Some((next, label)) = open_editor {
+                let _ = tx.send(LoadMsg::OpenContentEditorForAction {
+                    view_index: vi,
+                    pane_id: pid,
+                    node_id,
+                    action_id: next,
+                    label,
+                });
+            } else {
+                let _ = tx.send(LoadMsg::ContentActionDone {
+                    view_index: vi,
+                    pane_id: pid,
+                    result,
+                });
+            }
         });
     }
 

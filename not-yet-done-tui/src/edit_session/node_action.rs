@@ -207,6 +207,13 @@ impl EditSession for NodeActionEditSession {
             // shortcut-path outcome); surface the message and close without a
             // row patch so the enum stays exhaustive here.
             Ok(ActionOutcome::OpenExternal { message, .. }) => CommitOutcome::Cancelled { message },
+            // A menu→editor chaining outcome (`OpenEditor`) is produced by the
+            // *shortcut* (picker) path, not by an editor commit; there's no
+            // session-reopen-as-a-different-action here, so surface a note and
+            // close cleanly to keep the match exhaustive.
+            Ok(ActionOutcome::OpenEditor { action_id }) => CommitOutcome::Cancelled {
+                message: Some(format!("`{action_id}` must be opened from the action menu")),
+            },
             Err(e) => CommitOutcome::Cancelled {
                 message: Some(format!("Failed to execute {}: {e}", self.action_id)),
             },
