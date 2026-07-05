@@ -284,6 +284,23 @@ fn entry_combos(
         .collect()
 }
 
+/// The complete set of bookable project+activity entry slugs as
+/// `(token, display)` pairs, sorted by token for a stable order. This is the
+/// same completion set edit mode offers, surfaced for consumers outside the
+/// editor (e.g. the adapter's `list_values("entry_combos")` → CLI). Keeps
+/// [`EntryCombo`] private: callers only ever need the token and its label.
+pub(super) fn entry_slug_options(
+    projects: &HashMap<u64, KimaiProject>,
+    activities: &HashMap<u64, KimaiActivity>,
+) -> Vec<(String, String)> {
+    let mut options: Vec<(String, String)> = entry_combos(projects, activities, None)
+        .into_iter()
+        .map(|c| (c.token, c.display))
+        .collect();
+    options.sort_by(|a, b| a.0.cmp(&b.0));
+    options
+}
+
 /// Resolve an `entry` value back to a `(project_id, activity_id)` pair.
 /// Accepts the direct `#<pid>_#<aid>` escape and, otherwise, an exact
 /// (case-insensitive) match against the combined tokens. On failure lists
@@ -737,6 +754,37 @@ mod tests {
         assert_eq!(parsed.body, "Refactor login form\nsecond line");
         let plan = build_edit_plan(&parsed, &ts, &projects, &activities).unwrap();
         assert!(plan.is_none(), "unchanged buffer must produce no patch");
+    }
+
+    #[test]
+    fn entry_slug_options_lists_every_bookable_combo_sorted() {
+        let (projects, activities) = lookups();
+        let options = entry_slug_options(&projects, &activities);
+
+        // Global activity 3 pairs with both projects; bound activity 4 only
+        // with its owning project 7. Sorted by token.
+        let tokens: Vec<&str> = options.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            tokens,
+            vec![
+                "acme-corp_website-relaunch_development",
+                "acme-corp_website-relaunch_meeting",
+                "internal_development",
+            ]
+        );
+
+        // The label is the human-readable "Customer / Project / Activity".
+        let dev = options
+            .iter()
+            .find(|(t, _)| t == "acme-corp_website-relaunch_development")
+            .unwrap();
+        assert_eq!(dev.1, "Acme Corp / Website Relaunch / Development");
+        // A customer-less project drops the leading segment.
+        let internal = options
+            .iter()
+            .find(|(t, _)| t == "internal_development")
+            .unwrap();
+        assert_eq!(internal.1, "Internal / Development");
     }
 
     #[test]
