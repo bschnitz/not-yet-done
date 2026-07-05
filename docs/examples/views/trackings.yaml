@@ -476,7 +476,10 @@ views:
         label: Task
         source: label
         style: text_med
-        sizing: "flex(1)"
+        # Tree/label column: hug the visible tree content (deepest connector +
+        # longest label) instead of stretching to fill — `flex` would push the
+        # Own/Cumulated columns to the far right. `fit` never crowds them out.
+        sizing: fit
       - key: duration
         label: Own
         kind: duration
@@ -524,7 +527,8 @@ views:
             label: Task
             source: label
             style: text_med
-            sizing: "flex(1)"
+            # See tree-group level: hug tree content, don't stretch.
+            sizing: fit
           - key: duration
             label: Own
             kind: duration
