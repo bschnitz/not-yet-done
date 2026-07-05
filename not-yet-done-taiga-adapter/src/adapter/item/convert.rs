@@ -184,34 +184,55 @@ impl TaigaItemNode {
             }
         };
 
-        // 2. Set the status deterministically — `create_item` omits it so the
-        //    new item lands on the project's default; subject/description/
-        //    tags/assignees were all set at create time.
-        let dst_detail = super::fetch_detail(&self.client, target, new_id).await?;
-        let mut current_version = dst_detail.version;
-        let fields = EditFields {
-            status_id,
-            ..EditFields::default()
-        };
-        if !fields.is_empty() {
-            current_version = self
-                .patch_target(target, new_id, current_version, &fields)
-                .await?;
-        }
-
-        // 3. Migrate comments (chronological), then attachments (dedup by
-        //    name+size in case the promote copied some). Any failure aborts
-        //    the migration and preserves the source.
+        // Everything past the create is best-effort: the target already exists,
+        // so we must still return `Navigate` — which reloads the originating
+        // pane so the new item shows up and the (deleted) source drops out.
+        // Aborting here with `?` would strand the new item off-screen behind a
+        // stale list. So reconcile/migrate/delete only record warnings.
         let mut warnings: Vec<String> = Vec::new();
-        let migrated_comments = self
-            .migrate_comments(target, new_id, &mut current_version, &mut warnings)
-            .await;
-        let migrated_attachments = if migrated_comments {
-            self.migrate_attachments(target, new_id, &mut warnings).await
+
+        // 2. Re-fetch the fresh target for its version + ref. Comment
+        //    migration needs the version, so a fetch failure skips migration
+        //    (and keeps the source) rather than aborting.
+        let dst_detail = match super::fetch_detail(&self.client, target, new_id).await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                warnings.push(format!("could not load new {}: {e}", target.as_str()));
+                None
+            }
+        };
+
+        // 3. Reconcile the status (create omits it → project default), then
+        //    migrate comments (chronological) + attachments (dedup by
+        //    name+size). All best-effort; the first migration failure keeps
+        //    the source.
+        let migration_ok = if let Some(dst) = &dst_detail {
+            let mut current_version = dst.version;
+            let fields = EditFields {
+                status_id,
+                ..EditFields::default()
+            };
+            if !fields.is_empty() {
+                match self
+                    .patch_target(target, new_id, current_version, &fields)
+                    .await
+                {
+                    Ok(v) => current_version = v,
+                    Err(e) => warnings.push(format!("status not set: {e}")),
+                }
+            }
+            let migrated_comments = self
+                .migrate_comments(target, new_id, &mut current_version, &mut warnings)
+                .await;
+            let migrated_attachments = if migrated_comments {
+                self.migrate_attachments(target, new_id, &mut warnings).await
+            } else {
+                false
+            };
+            migrated_comments && migrated_attachments
         } else {
             false
         };
-        let migration_ok = migrated_comments && migrated_attachments;
 
         // 4. Delete the source only when everything migrated.
         if migration_ok {
@@ -226,9 +247,12 @@ impl TaigaItemNode {
             ));
         }
 
-        let dst_ref = match &dst_detail.project_slug {
-            Some(slug) if !slug.is_empty() => format!("{slug}#{}", dst_detail.r#ref),
-            _ => format!("#{}", dst_detail.r#ref),
+        let dst_ref = match &dst_detail {
+            Some(d) => match &d.project_slug {
+                Some(slug) if !slug.is_empty() => format!("{slug}#{}", d.r#ref),
+                _ => format!("#{}", d.r#ref),
+            },
+            None => format!("id {new_id}"),
         };
         let mut message = format!(
             "Converted {} {} → {} {dst_ref}",
