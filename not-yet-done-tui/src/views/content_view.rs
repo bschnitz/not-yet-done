@@ -983,6 +983,13 @@ pub struct ContentView {
     /// [`ActionHint`]'s `active` flag. (Jump-mode is read live from the
     /// pane and needs no storage.)
     active_editor: Option<String>,
+    /// Action id of the currently-focused content editor (e.g.
+    /// `"convert:userstory"`), so a modal `custom` action's bar hint lights
+    /// up while its editor is open. `None` when no content editor is focused.
+    content_editor_action_id: Option<String>,
+    /// Action id the open content-action picker popup was launched for (e.g.
+    /// `"convert"`), App-owned (`content_action_popup`). `None` when closed.
+    content_action_popup_id: Option<String>,
     tracking_active: bool,
     cut_active: bool,
     /// A content-delete confirmation popup is open (App-owned
@@ -5064,7 +5071,16 @@ impl ContentPane {
         let mut hints: Vec<ActionBarHint> = Vec::new();
         for action in self.current_actions(view_defs) {
             if action.shows_in_action_bar() {
-                let source = source_for_action_type(&action.action_type, &action.name);
+                // A `custom` action forced into the bar (`in_action_bar`) is a
+                // modal menu→editor flow keyed on its stable id, not one of the
+                // fixed typed sources; `on_container` custom keeps the Confirm
+                // mapping from `source_for_action_type`.
+                let source = match (action.action_type.as_str(), &action.id) {
+                    ("custom", Some(id)) if action.in_action_bar => {
+                        ActiveSource::ContentAction(id.clone())
+                    }
+                    _ => source_for_action_type(&action.action_type, &action.name),
+                };
                 hints.push(ActionBarHint::new(
                     action.key.clone(),
                     action.name.clone(),
@@ -6446,6 +6462,8 @@ impl ContentView {
         let mut cv = Self {
             action_bar,
             active_editor: None,
+            content_editor_action_id: None,
+            content_action_popup_id: None,
             tracking_active: false,
             cut_active: false,
             confirm_active: false,
@@ -6575,6 +6593,8 @@ impl ContentView {
     pub fn sync_action_bar(
         &mut self,
         active_editor: Option<&str>,
+        content_editor_action_id: Option<&str>,
+        content_action_popup_id: Option<&str>,
         tracking_active: bool,
         cut_active: bool,
         confirm_active: bool,
@@ -6585,6 +6605,8 @@ impl ContentView {
         // resolve each hint's `active` flag (the bar no longer special-cases
         // descriptions). Must happen before `action_bar_hints()` reads it.
         self.active_editor = active_editor.map(|s| s.to_string());
+        self.content_editor_action_id = content_editor_action_id.map(|s| s.to_string());
+        self.content_action_popup_id = content_action_popup_id.map(|s| s.to_string());
         self.tracking_active = tracking_active;
         self.cut_active = cut_active;
         self.confirm_active = confirm_active;
@@ -9536,6 +9558,15 @@ impl ContentView {
             ActiveSource::Tracking => self.tracking_active,
             ActiveSource::MarkMove => self.cut_active,
             ActiveSource::Script => self.script_active,
+            ActiveSource::ContentAction(id) => {
+                // Lit while the target picker popup for this action is open, or
+                // the editor it opened is focused (its action id equals `id` or
+                // is prefixed `"<id>:"`, so `convert` covers `convert:userstory`).
+                self.content_action_popup_id.as_deref() == Some(id.as_str())
+                    || self.content_editor_action_id.as_deref().is_some_and(|eid| {
+                        eid == id || eid.starts_with(&format!("{id}:"))
+                    })
+            }
         }
     }
 
@@ -11825,6 +11856,7 @@ mod tests {
                     text_search: None,
                     tree_find: None,
                     hide_from_bar: false,
+                    in_action_bar: false,
                     editor: None,
                     under_selection: false,
                     commit_on_save: false,
@@ -12000,6 +12032,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -14485,6 +14518,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15051,6 +15085,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15075,6 +15110,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15099,6 +15135,7 @@ mod tests {
             text_search: None,
             tree_find: Some(crate::config::view_config::TreeFindActionConfig { prompt: None }),
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15122,6 +15159,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15214,6 +15252,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15243,6 +15282,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -15265,6 +15305,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -16130,6 +16171,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -16167,6 +16209,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: true,
             commit_on_save: false,
@@ -16210,6 +16253,7 @@ mod tests {
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -16448,6 +16492,7 @@ mod tests {
                 text_search: None,
                 tree_find: None,
                 hide_from_bar: false,
+                in_action_bar: false,
                 editor: None,
                 under_selection: false,
                 commit_on_save: false,
@@ -19291,6 +19336,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     text_search: None,
                     tree_find: None,
                     hide_from_bar: false,
+                    in_action_bar: false,
                     editor: None,
                     under_selection: false,
                     commit_on_save: false,
@@ -19313,6 +19359,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     text_search: None,
                     tree_find: None,
                     hide_from_bar: false,
+                    in_action_bar: false,
                     editor: None,
                     under_selection: false,
                     commit_on_save: false,

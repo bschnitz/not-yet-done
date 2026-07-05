@@ -114,6 +114,13 @@ pub enum ActiveSource {
     MarkMove,
     /// A detached script is running.
     Script,
+    /// A modal `custom` content action (a menu→editor flow such as Taiga
+    /// `convert`) is in progress: its target picker popup is open, or the
+    /// editor it opened is focused. The string is the action's stable id
+    /// (e.g. `"convert"`); it matches the open popup's action id, or an
+    /// active content editor whose action id equals it or is prefixed by
+    /// `"<id>:"` (so `"convert"` covers `"convert:userstory"`).
+    ContentAction(String),
 }
 
 /// A built action-bar hint: the key label, the description, and the reason it

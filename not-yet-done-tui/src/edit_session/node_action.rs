@@ -118,6 +118,10 @@ impl EditSession for NodeActionEditSession {
         &self.label
     }
 
+    fn action_id(&self) -> &str {
+        &self.action_id
+    }
+
     async fn commit(&mut self, text: &str) -> CommitOutcome {
         // Live-apply / close after nothing changed since the last apply
         // (including repeated `:w`) must not re-send. `last_applied` starts

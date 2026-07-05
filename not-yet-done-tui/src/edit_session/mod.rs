@@ -130,6 +130,15 @@ pub trait EditSession: Send + Sync {
     /// (e.g. "add", "edit").
     fn label(&self) -> &str;
 
+    /// The adapter-side action id this session commits through (e.g.
+    /// `"edit_full"`, `"convert:userstory"`). Empty for sessions with no
+    /// node action (the default). The content action bar keys a modal
+    /// action's active state on this so a menu→editor flow (Taiga `convert`)
+    /// lights up its top-bar hint while the editor is open.
+    fn action_id(&self) -> &str {
+        ""
+    }
+
     /// Editor closed; the saved buffer is `text`.
     async fn commit(&mut self, text: &str) -> CommitOutcome;
 

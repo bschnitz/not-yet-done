@@ -1451,6 +1451,14 @@ pub struct ActionDef {
     /// to true to only show the action in the status bar keybinding hints.
     #[serde(default)]
     pub hide_from_bar: bool,
+    /// Force this action into the action bar (top bar) even though its
+    /// `type` is otherwise status-bar-only (`custom`). Use for a `custom`
+    /// action that opens a *modal flow* — a picker followed by an editor,
+    /// e.g. Taiga `convert` — so it reads as an ongoing operation and lights
+    /// up while its picker popup or resulting editor is open. Requires an
+    /// `id` (the active-state resolver keys on it). Default `false`.
+    #[serde(default)]
+    pub in_action_bar: bool,
     /// Editor profile to open for `edit`/`create` actions, by name (a key
     /// under the top-level `editors:` block). `None` → the `default`
     /// profile. Validated at config load: an unknown name is a hard error.
@@ -1558,6 +1566,11 @@ impl ActionDef {
         // whole level and would have no other visible affordance at the
         // flat root.
         if self.on_container {
+            return true;
+        }
+        // A `custom` action can opt into the bar when it opens a modal flow
+        // (picker → editor), e.g. Taiga `convert`.
+        if self.in_action_bar {
             return true;
         }
         matches!(
@@ -2118,6 +2131,7 @@ views:
             text_search: None,
             tree_find: None,
             hide_from_bar: false,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -2159,6 +2173,7 @@ views:
             text_search: None,
             tree_find: None,
             hide_from_bar: true,
+            in_action_bar: false,
             editor: None,
             under_selection: false,
             commit_on_save: false,
@@ -2191,8 +2206,7 @@ views:
       - name: edit
         key: e
         type: edit
-        hide_from_bar: true
-"#;
+        hide_from_bar: true"#;
         let config: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         let actions = &config.views[0].actions;
         assert_eq!(actions.len(), 2);

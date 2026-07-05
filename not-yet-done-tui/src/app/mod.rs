@@ -5744,6 +5744,17 @@ impl App {
         };
         let content_active_editor =
             session_label(crate::edit_session::SessionScope::Content).map(|s| s.to_string());
+        // Action id of the focused content editor + of any open action picker
+        // popup — let a modal `custom` action (Taiga `convert`) light up its
+        // top-bar hint across both phases of its menu→editor flow.
+        let content_editor_action_id = session
+            .filter(|s| s.scope() == crate::edit_session::SessionScope::Content)
+            .map(|s| s.action_id().to_string())
+            .filter(|s| !s.is_empty());
+        let content_action_popup_id = self
+            .content_action_popup
+            .as_ref()
+            .map(|p| p.action_id.clone());
         let cut_active = self.content_marked_node.is_some();
         // Active sources owned by the App (popups / detached scripts) — pushed
         // into the focused content view so its hint resolver can light up the
@@ -5763,6 +5774,8 @@ impl App {
             if let Some(cv) = self.content_view_mut(idx) {
                 cv.sync_action_bar(
                     content_active_editor.as_deref(),
+                    content_editor_action_id.as_deref(),
+                    content_action_popup_id.as_deref(),
                     tracking_active,
                     cut_active,
                     confirm_active,

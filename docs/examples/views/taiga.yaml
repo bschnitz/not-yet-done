@@ -170,6 +170,10 @@ views:
         key: V
         type: custom
         id: convert
+        # Modal menu→editor flow: keep it in the top action bar (custom is
+        # otherwise status-bar-only) and light it up while the target picker or
+        # its editor is open.
+        in_action_bar: true
 
     children:
       - name: Comments
