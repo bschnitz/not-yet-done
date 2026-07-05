@@ -7,8 +7,9 @@
 //!
 //! Taiga has no symmetric "change type" endpoint, so conversion means:
 //! create the target item, migrate comments + attachments, then delete the
-//! source. Issue → user story uses Taiga's native `promote_to_us`; user
-//! story → issue is a manual `create_item`. Either way the editor opens
+//! source. Both directions use the normal `create_item` endpoint — Taiga's
+//! native `promote_to_us` is missing on some deployments (plain-HTML 404), so
+//! we don't rely on it. Either way the editor opens
 //! **first** with the target's fields pre-filled plus a read-only infoblock
 //! ("what will be migrated / deleted") and an editable conversion note
 //! listing the source fields that have no equivalent on the target type.
@@ -24,7 +25,7 @@ use not_yet_done_content::*;
 use crate::client::{
     self, CreateFields, EditFields, ItemPatch, ItemType, PatchOutcome, TaigaClient, TaigaMember,
     TaigaStatus, add_comment, create_item, delete_item, download_attachment, fetch_comments,
-    list_attachments, patch_item, promote_issue_to_us, upload_attachment_bytes,
+    list_attachments, patch_item, upload_attachment_bytes,
 };
 
 use super::TaigaItemNode;
@@ -158,57 +159,39 @@ impl TaigaItemNode {
         let tag_list = split_csv(parsed.editable.get("tags"));
         let description = template::resolve_user_mentions(parsed.body.trim(), &tables.users);
 
-        // 1. Create the target item.
-        let new_id = match target {
-            ItemType::UserStory => {
-                match promote_issue_to_us(&self.client, self.detail.id, self.detail.project_id)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => return Ok(reopen_banner(text, format!("promote_to_us failed: {e}"))),
-                }
-            }
-            ItemType::Issue => {
-                let fields = CreateFields {
-                    project_id: self.detail.project_id,
-                    subject: subject.clone(),
-                    description: description.clone(),
-                    tags: tag_list.clone(),
-                    user_story_id: None,
-                    assigned_to,
-                    assigned_users: assigned_users.clone(),
-                };
-                match create_item(&self.client, ItemType::Issue, fields).await {
-                    Ok(created) => created.id,
-                    Err(e) => return Ok(reopen_banner(text, format!("create issue failed: {e}"))),
-                }
-            }
-            _ => {
-                return Err(ContentError::NotSupported(
-                    "unsupported conversion target".into(),
+        // 1. Create the target item. Both directions go through the normal
+        //    create endpoint — Taiga's native `promote_to_us` is missing on
+        //    some deployments (plain-HTML 404). Provenance is recorded in the
+        //    editable conversion note in the body, not via a
+        //    `generated_from_issue` link, which would couple the new item to
+        //    the source's deletion.
+        let create_fields = CreateFields {
+            project_id: self.detail.project_id,
+            subject: subject.clone(),
+            description: description.clone(),
+            tags: tag_list.clone(),
+            user_story_id: None,
+            assigned_to,
+            assigned_users: assigned_users.clone(),
+        };
+        let new_id = match create_item(&self.client, target, create_fields).await {
+            Ok(created) => created.id,
+            Err(e) => {
+                return Ok(reopen_banner(
+                    text,
+                    format!("create {} failed: {e}", target.as_str()),
                 ));
             }
         };
 
-        // 2. Reconcile the target's fields. For the promote path this
-        //    normalises everything (the copy semantics are version-dependent);
-        //    for the manual create only the status needs a deterministic set
-        //    (create omits it, letting Taiga assign the default).
+        // 2. Set the status deterministically — `create_item` omits it so the
+        //    new item lands on the project's default; subject/description/
+        //    tags/assignees were all set at create time.
         let dst_detail = super::fetch_detail(&self.client, target, new_id).await?;
         let mut current_version = dst_detail.version;
-        let fields = match target {
-            ItemType::UserStory => EditFields {
-                subject: Some(subject.clone()),
-                description: Some(description.clone()),
-                status_id,
-                assigned_to: Some(assigned_to),
-                assigned_users: Some(assigned_users.clone()),
-                tags: Some(tag_list.clone()),
-            },
-            _ => EditFields {
-                status_id,
-                ..EditFields::default()
-            },
+        let fields = EditFields {
+            status_id,
+            ..EditFields::default()
         };
         if !fields.is_empty() {
             current_version = self
