@@ -339,7 +339,7 @@ impl Node for TaigaItemNode {
             "edit_full" => self.prepare_edit_full().await,
             "edit_with_comments" => self.prepare_edit_with_comments().await,
             "clone" => self.prepare_clone().await,
-            "convert_to_userstory" | "convert_to_issue" => self.prepare_convert().await,
+            convert::CONVERT_ACTION_ID => self.prepare_convert().await,
             other => Err(ContentError::NotSupported(format!(
                 "prepare: unknown action {other}"
             ))),
@@ -381,8 +381,7 @@ impl Node for TaigaItemNode {
             ("clone", ActionInput::Edited { text, .. }) => {
                 self.execute_clone(&text).await
             }
-            ("convert_to_userstory", ActionInput::Edited { text, .. })
-            | ("convert_to_issue", ActionInput::Edited { text, .. }) => {
+            (convert::CONVERT_ACTION_ID, ActionInput::Edited { text, .. }) => {
                 self.execute_convert(&text).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(

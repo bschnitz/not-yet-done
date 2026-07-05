@@ -1,4 +1,9 @@
-//! `convert_to_userstory` / `convert_to_issue` actions.
+//! `convert` action (issue ↔ user story).
+//!
+//! A single action whose direction is derived from the row's own type: on an
+//! issue it converts to a user story, on a user story it converts to an issue
+//! (its label reflects the target). Tasks/epics have no target, so it never
+//! appears there.
 //!
 //! Taiga has no symmetric "change type" endpoint, so conversion means:
 //! create the target item, migrate comments + attachments, then delete the
@@ -40,16 +45,21 @@ pub(super) fn convert_target(from: ItemType) -> Option<ItemType> {
     }
 }
 
+/// The convert action id — a single action for both directions; the target is
+/// derived from the row's own type at prepare/execute time.
+pub(super) const CONVERT_ACTION_ID: &str = "convert";
+
 /// The convert action offered on an item of type `from` (none for
-/// tasks/epics).
+/// tasks/epics). One stable id, but the label reflects the resolved target so
+/// the row still reads "convert to user story" / "convert to issue".
 pub(super) fn convert_action(from: ItemType) -> Option<NodeAction> {
     let target = convert_target(from)?;
-    let (id, label) = match target {
-        ItemType::UserStory => ("convert_to_userstory", "convert to user story"),
-        ItemType::Issue => ("convert_to_issue", "convert to issue"),
+    let label = match target {
+        ItemType::UserStory => "convert to user story",
+        ItemType::Issue => "convert to issue",
         _ => return None,
     };
-    Some(NodeAction::new(id, label, InputSpec::Editor))
+    Some(NodeAction::new(CONVERT_ACTION_ID, label, InputSpec::Editor))
 }
 
 impl TaigaItemNode {
@@ -639,10 +649,13 @@ mod tests {
 
     #[test]
     fn convert_action_labels_match_target() {
+        // A single stable id for both directions; only the label differs.
         let a = convert_action(ItemType::Issue).unwrap();
-        assert_eq!(a.id, "convert_to_userstory");
+        assert_eq!(a.id, CONVERT_ACTION_ID);
+        assert_eq!(a.label, "convert to user story");
         let b = convert_action(ItemType::UserStory).unwrap();
-        assert_eq!(b.id, "convert_to_issue");
+        assert_eq!(b.id, CONVERT_ACTION_ID);
+        assert_eq!(b.label, "convert to issue");
         assert!(convert_action(ItemType::Task).is_none());
     }
 
