@@ -2336,10 +2336,12 @@ impl ContentAdapter for TaskAdapter {
                 TagItem::Global(t) => ValueOption {
                     value: format!("global-tag:{}", t.id),
                     label: tag_menu_label(&t.name, t.symbol.as_deref(), None),
+                    ..Default::default()
                 },
                 TagItem::Project { tag, project_name } => ValueOption {
                     value: format!("project-tag:{}", tag.id),
                     label: tag_menu_label(&tag.name, tag.symbol.as_deref(), Some(&project_name)),
+                    ..Default::default()
                 },
             })
             .collect();

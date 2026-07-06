@@ -104,9 +104,11 @@ impl ContentAdapter for KimaiAdapter {
 
     /// Reference data surfaced to any frontend (menu or CLI `values`).
     /// `entry_combos` yields every bookable project+activity slug — the same
-    /// completion set edit mode offers — as `value` = the slug token and
-    /// `label` = "Customer / Project / Activity". Used to build a local
-    /// task-path → Kimai-slug mapping outside the editor.
+    /// completion set edit mode offers — as `value` = the slug token,
+    /// `label` = "Customer / Project / Activity", and `extra` carrying the
+    /// `project` / `activity` clear names separately (so consumers can group
+    /// by them). Used to build a local task-path → Kimai-slug mapping outside
+    /// the editor.
     async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
         match source {
             "entry_combos" => {
@@ -120,7 +122,16 @@ impl ContentAdapter for KimaiAdapter {
                     activities.into_iter().map(|a| (a.id, a)).collect();
                 Ok(template::entry_slug_options(&projects, &activities)
                     .into_iter()
-                    .map(|(value, label)| ValueOption { value, label })
+                    .map(|e| ValueOption {
+                        value: e.token,
+                        label: e.label,
+                        extra: [
+                            ("project".to_string(), e.project),
+                            ("activity".to_string(), e.activity),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    })
                     .collect())
             }
             _ => Ok(Vec::new()),
