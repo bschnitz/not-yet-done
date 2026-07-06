@@ -168,6 +168,8 @@ fn slug_or_id(name: &str, id: u64) -> String {
 struct EntryCombo {
     token: String,
     display: String,
+    project: String,
+    activity: String,
     project_id: u64,
     activity_id: u64,
 }
@@ -198,7 +200,7 @@ fn combo_parts(
     aid: u64,
     projects: &HashMap<u64, KimaiProject>,
     activities: &HashMap<u64, KimaiActivity>,
-) -> (String, String) {
+) -> (String, String, String, String) {
     let project = projects.get(&pid);
     let activity = activities.get(&aid);
     let customer = project
@@ -227,7 +229,7 @@ fn combo_parts(
         Some(c) => format!("{c} / {proj_display} / {act_display}"),
         None => format!("{proj_display} / {act_display}"),
     };
-    (token, display)
+    (token, display, proj_display, act_display)
 }
 
 /// All bookable `(project, activity)` combinations, plus the current pair
@@ -254,11 +256,12 @@ fn entry_combos(
         pairs.push(pair);
     }
 
-    let raw: Vec<(String, String, u64, u64)> = pairs
+    let raw: Vec<(String, String, String, String, u64, u64)> = pairs
         .into_iter()
         .map(|(pid, aid)| {
-            let (token, display) = combo_parts(pid, aid, projects, activities);
-            (token, display, pid, aid)
+            let (token, display, project, activity) =
+                combo_parts(pid, aid, projects, activities);
+            (token, display, project, activity, pid, aid)
         })
         .collect();
 
@@ -268,7 +271,7 @@ fn entry_combos(
     }
 
     raw.into_iter()
-        .map(|(token, display, pid, aid)| {
+        .map(|(token, display, project, activity, pid, aid)| {
             let token = if counts[&token] > 1 {
                 format!("{token}-{pid}-{aid}")
             } else {
@@ -277,6 +280,8 @@ fn entry_combos(
             EntryCombo {
                 token,
                 display,
+                project,
+                activity,
                 project_id: pid,
                 activity_id: aid,
             }
@@ -284,20 +289,35 @@ fn entry_combos(
         .collect()
 }
 
-/// The complete set of bookable project+activity entry slugs as
-/// `(token, display)` pairs, sorted by token for a stable order. This is the
-/// same completion set edit mode offers, surfaced for consumers outside the
-/// editor (e.g. the adapter's `list_values("entry_combos")` → CLI). Keeps
-/// [`EntryCombo`] private: callers only ever need the token and its label.
+/// One bookable entry surfaced to consumers outside the editor: the slug
+/// `token`, its readable `label` ("Customer / Project / Activity"), and the
+/// project / activity clear names broken out separately (needed e.g. to group
+/// a report by "Project - Activity").
+pub(super) struct EntrySlug {
+    pub token: String,
+    pub label: String,
+    pub project: String,
+    pub activity: String,
+}
+
+/// The complete set of bookable project+activity entries, sorted by token for
+/// a stable order. This is the same completion set edit mode offers, surfaced
+/// for consumers outside the editor (e.g. the adapter's
+/// `list_values("entry_combos")` → CLI). Keeps [`EntryCombo`] private.
 pub(super) fn entry_slug_options(
     projects: &HashMap<u64, KimaiProject>,
     activities: &HashMap<u64, KimaiActivity>,
-) -> Vec<(String, String)> {
-    let mut options: Vec<(String, String)> = entry_combos(projects, activities, None)
+) -> Vec<EntrySlug> {
+    let mut options: Vec<EntrySlug> = entry_combos(projects, activities, None)
         .into_iter()
-        .map(|c| (c.token, c.display))
+        .map(|c| EntrySlug {
+            token: c.token,
+            label: c.display,
+            project: c.project,
+            activity: c.activity,
+        })
         .collect();
-    options.sort_by(|a, b| a.0.cmp(&b.0));
+    options.sort_by(|a, b| a.token.cmp(&b.token));
     options
 }
 
@@ -763,7 +783,7 @@ mod tests {
 
         // Global activity 3 pairs with both projects; bound activity 4 only
         // with its owning project 7. Sorted by token.
-        let tokens: Vec<&str> = options.iter().map(|(t, _)| t.as_str()).collect();
+        let tokens: Vec<&str> = options.iter().map(|e| e.token.as_str()).collect();
         assert_eq!(
             tokens,
             vec![
@@ -773,18 +793,23 @@ mod tests {
             ]
         );
 
-        // The label is the human-readable "Customer / Project / Activity".
+        // The label is the human-readable "Customer / Project / Activity";
+        // project and activity clear names are also broken out separately.
         let dev = options
             .iter()
-            .find(|(t, _)| t == "acme-corp_website-relaunch_development")
+            .find(|e| e.token == "acme-corp_website-relaunch_development")
             .unwrap();
-        assert_eq!(dev.1, "Acme Corp / Website Relaunch / Development");
+        assert_eq!(dev.label, "Acme Corp / Website Relaunch / Development");
+        assert_eq!(dev.project, "Website Relaunch");
+        assert_eq!(dev.activity, "Development");
         // A customer-less project drops the leading segment.
         let internal = options
             .iter()
-            .find(|(t, _)| t == "internal_development")
+            .find(|e| e.token == "internal_development")
             .unwrap();
-        assert_eq!(internal.1, "Internal / Development");
+        assert_eq!(internal.label, "Internal / Development");
+        assert_eq!(internal.project, "Internal");
+        assert_eq!(internal.activity, "Development");
     }
 
     #[test]

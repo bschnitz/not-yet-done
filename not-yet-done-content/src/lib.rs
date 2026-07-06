@@ -1032,13 +1032,18 @@ pub struct ActionOption {
 /// fetches such a list, lets the user choose, and then feeds the chosen
 /// `value` back into a value-accepting action via [`ActionContext::value`].
 /// The adapter never learns which widget sourced the value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ValueOption {
     /// Stable value handed back to the adapter (e.g. a tag id like
     /// `global-tag:<uuid>`). Opaque to the frontend.
     pub value: String,
     /// Human-readable label shown in the menu.
     pub label: String,
+    /// Optional structured detail carried alongside the value for consumers
+    /// that need more than the display label (e.g. Kimai's `entry_combos`
+    /// attaches `project` / `activity` clear names next to the slug token).
+    /// Empty for sources with no such breakdown; frontends may ignore it.
+    pub extra: std::collections::BTreeMap<String, String>,
 }
 
 /// Where a hint should render — drives the split between the highlighted

@@ -1140,7 +1140,20 @@ fn output_values(values: &[ValueOption], output: Output) {
         Output::Json => {
             let arr: Vec<serde_json::Value> = values
                 .iter()
-                .map(|v| serde_json::json!({ "value": v.value, "label": v.label }))
+                .map(|v| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("value".into(), v.value.clone().into());
+                    obj.insert("label".into(), v.label.clone().into());
+                    if !v.extra.is_empty() {
+                        let extra: serde_json::Map<String, serde_json::Value> = v
+                            .extra
+                            .iter()
+                            .map(|(k, val)| (k.clone(), val.clone().into()))
+                            .collect();
+                        obj.insert("extra".into(), serde_json::Value::Object(extra));
+                    }
+                    serde_json::Value::Object(obj)
+                })
                 .collect();
             print_json(&serde_json::Value::Array(arr));
         }
