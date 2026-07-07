@@ -9,8 +9,9 @@
 //!   (Kimai 2.14+).
 //!
 //! Endpoints used: `/api/version` (session validation), `/api/timesheets`
-//! (paged list), `/api/projects` + `/api/activities` (id → name lookups —
-//! the timesheet list carries only numeric ids).
+//! (paged list `GET`, single `GET`, `PATCH` edit, `POST` create),
+//! `/api/projects` + `/api/activities` (id → name lookups — the timesheet
+//! list carries only numeric ids).
 
 use std::time::Duration;
 
@@ -245,6 +246,31 @@ impl KimaiClient {
             .await
             .map_err(|e| http_log::network_error("PATCH", &url, e))?;
         let resp = http_log::check_status("PATCH", &url, resp).await?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read response: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
+    }
+
+    /// Create a new timesheet. `body` carries `begin`/`end` (local datetimes
+    /// without offset), `project`/`activity` (numeric ids) and `description`,
+    /// exactly like the PATCH payload. Returns the created record (with its
+    /// server-assigned id).
+    pub async fn create_timesheet(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<KimaiTimesheet, String> {
+        let url = format!("{}/api/timesheets", self.base_url);
+        http_log::log_request("POST", &url);
+        let resp = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| http_log::network_error("POST", &url, e))?;
+        let resp = http_log::check_status("POST", &url, resp).await?;
         let text = resp
             .text()
             .await

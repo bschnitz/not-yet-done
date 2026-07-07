@@ -629,6 +629,60 @@ pub(super) fn build_edit_plan(
     }))
 }
 
+/// Build the POST body for a new timesheet from the create form's fields.
+/// Resolves the `entry` token to a `(project, activity)` id pair (same tokens
+/// the edit buffer and `entry_combos` use, plus the `#<pid>_#<aid>` escape),
+/// parses the local `begin` and the `duration`, and materialises
+/// `end = begin + duration` (Kimai derives duration from the begin/end pair,
+/// exactly as the edit path does). All field problems are collected like
+/// [`build_edit_plan`]; `description` may be empty.
+pub(super) fn build_create_body(
+    entry: &str,
+    begin: &str,
+    duration: &str,
+    description: &str,
+    projects: &HashMap<u64, KimaiProject>,
+    activities: &HashMap<u64, KimaiActivity>,
+) -> Result<serde_json::Value, Vec<String>> {
+    let mut errors: Vec<String> = Vec::new();
+
+    let pair = match resolve_entry(entry, projects, activities, None) {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            errors.push(e);
+            None
+        }
+    };
+    let begin_dt = parse_begin(begin).map_err(|e| errors.push(e)).ok();
+    let secs = parse_duration(duration).map_err(|e| errors.push(e)).ok();
+    if let Some(s) = secs
+        && s <= 0
+    {
+        errors.push(format!("duration must be positive, got `{duration}`"));
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    let (project_id, activity_id) = pair.expect("no error → pair resolved");
+    let begin_dt = begin_dt.expect("no error → begin parsed");
+    let end_dt = begin_dt + chrono::Duration::seconds(secs.expect("no error → duration parsed"));
+
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "begin".into(),
+        begin_dt.format("%Y-%m-%dT%H:%M:%S").to_string().into(),
+    );
+    body.insert(
+        "end".into(),
+        end_dt.format("%Y-%m-%dT%H:%M:%S").to_string().into(),
+    );
+    body.insert("project".into(), project_id.into());
+    body.insert("activity".into(), activity_id.into());
+    body.insert("description".into(), description.trim().into());
+    Ok(serde_json::Value::Object(body))
+}
+
 /// Prepend an error banner above the user's buffer for a Reopen. A
 /// pre-existing banner is stripped first so reopens don't stack.
 pub(super) fn render_with_errors(text: &str, errors: &[String]) -> String {
@@ -1045,6 +1099,56 @@ mod tests {
         assert_eq!(rebanned.matches(ERROR_BANNER_START).count(), 1);
         let parsed = parse_edit(&rebanned).unwrap();
         assert_eq!(parsed.body, "Refactor login form\nsecond line");
+    }
+
+    #[test]
+    fn build_create_body_resolves_entry_and_derives_end() {
+        let (projects, activities) = lookups();
+        let body = build_create_body(
+            "acme-corp_website-relaunch_development",
+            "2030-01-15T09:00",
+            "1:30:00",
+            "  Kickoff  ",
+            &projects,
+            &activities,
+        )
+        .unwrap();
+        assert_eq!(body["project"], 7);
+        assert_eq!(body["activity"], 3);
+        assert_eq!(body["begin"], "2030-01-15T09:00:00");
+        assert_eq!(body["end"], "2030-01-15T10:30:00");
+        assert_eq!(body["description"], "Kickoff");
+    }
+
+    #[test]
+    fn build_create_body_accepts_hash_escape_and_seconds_and_empty_description() {
+        let body = build_create_body(
+            "#42_#99",
+            "2030-01-15 08:00:00",
+            "5400",
+            "",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(body["project"], 42);
+        assert_eq!(body["activity"], 99);
+        assert_eq!(body["begin"], "2030-01-15T08:00:00");
+        assert_eq!(body["end"], "2030-01-15T09:30:00");
+        assert_eq!(body["description"], "");
+    }
+
+    #[test]
+    fn build_create_body_collects_field_errors() {
+        let (projects, activities) = lookups();
+        let errors = build_create_body(
+            "nope", "not-a-date", "0", "x", &projects, &activities,
+        )
+        .unwrap_err();
+        // Unknown entry, unparseable begin, and non-positive duration all reported.
+        assert!(errors.iter().any(|e| e.contains("unknown entry `nope`")));
+        assert!(errors.iter().any(|e| e.contains("invalid begin")));
+        assert!(errors.iter().any(|e| e.contains("duration must be positive")));
     }
 
     #[test]
