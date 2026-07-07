@@ -39,10 +39,11 @@
 # `d` soft-deletes a tracking (keeping its times) through the confirm flow;
 # `R`/`A` restore deleted trackings; `s` toggles time tracking on the row's
 # task. See the `shortcuts:` block below. `i` splits an interval at a time
-# point and `m` moves it to a new start (both open a form — see the `split`/
+# point and `M` moves it to a new start (both open a form — see the `split`/
 # `move` actions below); these are the same operations the legacy `nyd track
 # split`/`nyd track move` commands ran, now adapter actions so the CLI's
-# generic `do split`/`do move` reach them too. Scripts run via the generic
+# generic `do split`/`do move` reach them too. `m`/`p` repack an interval into
+# another day's free slot (mark-move / paste-move). Scripts run via the generic
 # `:script` menu (`x`, `type: script`).
 #
 # ## A2c scope (Condensed + Tree)
@@ -249,9 +250,11 @@ views:
       # `gravity` (start|end) snaps to a boundary and finds the next free slot;
       # `offset` (+1h, -30min, …) is applied after the snap; the three toggles
       # relax the overlap/future guards. `type: custom` → form popup →
-      # `execute("move", …)`.
+      # `execute("move", …)`. Bound to `M` (shift-m) — plain `m` is the
+      # `mark-move` gesture below; this manual-form move is the escape hatch
+      # for an arbitrary start time the repack cascade doesn't cover.
       - name: move
-        key: m
+        key: M
         type: custom
         id: move
 
@@ -286,6 +289,15 @@ views:
       d: delete
       R: restore
       s: toggle-tracking
+      # Repack an interval into another day slot (`mark-move` / `paste-move`,
+      # the generic move-clipboard vocabulary). `m` marks the selected
+      # tracking; `p` on another row moves the marked interval — keeping its
+      # own task and duration — into *that row's day*: directly after the
+      # target if it fits, else (after a `(y/n)` confirm) directly after the
+      # day's last interval, else directly before the day's first interval,
+      # else it aborts with "no room". Only the flat list offers it.
+      m: mark-move
+      p: paste-move
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #

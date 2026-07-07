@@ -81,13 +81,14 @@ use not_yet_done_content::{
     apply_sort, grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome,
     AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FormFieldSpec,
     FsSavedQueryStore, GroupBucket, GroupSpec, HintPlacement, HostContext, HostEvent, InputSpec,
-    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result,
-    SavedQueryStore, SortDirection, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode,
+    Invalidation, MarkedNode, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
+    Result, SavedQueryStore, SortDirection, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode,
 };
 use not_yet_done_task_core::entity::granularity::Granularity;
 use not_yet_done_task_core::entity::tracking;
 use not_yet_done_task_core::error::AppError;
 use not_yet_done_task_core::events::DomainEvent;
+use not_yet_done_task_core::local_context::LocalContext;
 use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
 
 use crate::datetime::{LocalDateTime, LocalOffset};
@@ -1319,6 +1320,18 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
             .with_default_key('s'),
         NodeAction::new("split", "Split", split_input_spec()).with_default_key('i'),
         NodeAction::new("move", "Move", move_input_spec()).with_default_key('m'),
+        // Repack (mark/paste): `mark-move` records the row as the move source
+        // via the frontend's generic move clipboard (returns `Noop`; the App
+        // does the marking). `paste-move` slots the marked interval — keeping
+        // its duration and its own task — into the target row's *day*, directly
+        // after the target, cascading to the day's end and then before the
+        // day's first interval when there is no room. See [`invoke_paste_move`].
+        // No `default_key` (it is dead — the YAML `shortcuts:` `m`/`p` are
+        // authoritative). `ActionBar` placement is what surfaces their hints.
+        NodeAction::new("mark-move", "Mark for move", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar),
+        NodeAction::new("paste-move", "Move here", InputSpec::None)
+            .with_placement(HintPlacement::ActionBar),
     ]
 }
 
@@ -1436,6 +1449,235 @@ async fn execute_move(
     Ok(ActionOutcome::Done {
         message: Some("Tracking moved".to_string()),
     })
+}
+
+/// A candidate slot for a `paste-move`: the UTC instant the marked interval
+/// would start at, and whether the free gap there is at least as long as the
+/// interval's own duration.
+struct PasteSlot {
+    start: chrono::DateTime<chrono::Utc>,
+    fits: bool,
+}
+
+/// The three placements `paste-move` considers, all on the target row's local
+/// day and all preserving the marked interval's duration `d`:
+///
+/// * `after` — directly after the target (`target_end`), up to the next
+///   interval that starts on or after it (or the day's end).
+/// * `end` — directly after the day's last interval, up to midnight.
+/// * `before` — directly before the day's first interval, back to midnight
+///   (so it *ends* where the first one starts).
+///
+/// Occupied intervals are the day's non-deleted, completed trackings *except*
+/// the marked one (it is being relocated, so its current slot counts as free).
+/// The target row is included, so "after the target" and "the day's end"
+/// coincide when the target is the day's last interval.
+fn paste_slots(
+    snapshot: &TrackingSnapshot,
+    tz: chrono::FixedOffset,
+    marked: Uuid,
+    target_start: chrono::DateTime<chrono::Utc>,
+    target_end: chrono::DateTime<chrono::Utc>,
+    d: chrono::Duration,
+) -> (PasteSlot, PasteSlot, PasteSlot) {
+    use chrono::TimeZone;
+    let day = target_start.with_timezone(&tz).date_naive();
+    let day_start = tz
+        .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let day_end = day_start + chrono::Duration::days(1);
+
+    // Occupied [start, end] intervals on this local day, excluding the marked
+    // interval, sorted by start.
+    let mut occupied: Vec<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+        snapshot
+            .order
+            .iter()
+            .filter_map(|id| snapshot.by_id.get(id))
+            .filter(|r| !r.tracking.deleted && r.tracking.id != marked)
+            .filter_map(|r| r.tracking.ended_at.map(|e| (r.tracking.started_at, e)))
+            .filter(|(s, _)| s.with_timezone(&tz).date_naive() == day)
+            .collect();
+    occupied.sort_by_key(|(s, _)| *s);
+
+    // After the target: gap up to the next interval starting at/after it.
+    let next_after = occupied
+        .iter()
+        .filter(|(s, _)| *s >= target_end)
+        .map(|(s, _)| *s)
+        .min()
+        .unwrap_or(day_end);
+    let after = PasteSlot {
+        start: target_end,
+        fits: next_after - target_end >= d,
+    };
+
+    // End of the day: directly after the last interval (target included via
+    // `occupied` + the target row itself), gap up to midnight.
+    let last_end = occupied
+        .iter()
+        .map(|(_, e)| *e)
+        .chain(std::iter::once(target_end))
+        .max()
+        .unwrap_or(target_end);
+    let end = PasteSlot {
+        start: last_end,
+        fits: day_end - last_end >= d,
+    };
+
+    // Before the first interval: gap from midnight; the slot ends where the
+    // first interval starts, so it starts `d` earlier.
+    let first_start = occupied
+        .iter()
+        .map(|(s, _)| *s)
+        .chain(std::iter::once(target_start))
+        .min()
+        .unwrap_or(target_start);
+    let before = PasteSlot {
+        start: first_start - d,
+        fits: first_start - day_start >= d,
+    };
+
+    (after, end, before)
+}
+
+/// `invoke_action("paste-move")` — repack the marked tracking into the target
+/// row's day (see [`paste_slots`]). Keeps the marked interval's own task and
+/// duration; only its start/end move. Reuses [`TrackingService::move_tracking`]
+/// (gravity-free, so the resolved start is used verbatim) to soft-delete the
+/// original and insert the relocated copy.
+///
+/// The two fallbacks are gated behind confirmations, threaded through the
+/// adapter-shared [`PasteCell`] because the generic confirm flow only carries a
+/// single `confirmed` bool:
+///
+/// 1. first invocation, room after the target → move, done;
+/// 2. no room after → ask "move to the day's end?";
+/// 3. confirmed, room at the end → move; else ask "move before the first?";
+/// 4. confirmed, room before the first → move; else abort with a message.
+async fn invoke_paste_move(
+    handle: &CoreHandle,
+    snapshot: &TrackingSnapshot,
+    flow: &PasteCell,
+    target: Uuid,
+    ctx: &ActionContext,
+) -> ActionDispatch {
+    // The marked source comes from the frontend's generic move clipboard.
+    let Some(MarkedNode { node_id, node_type, .. }) = ctx.marked.as_ref() else {
+        return ActionDispatch::Error("Nothing marked — press `m` on a tracking first".to_string());
+    };
+    if node_type.type_id != tracking_entry_type().type_id {
+        return ActionDispatch::Error("Only a tracking can be moved here".to_string());
+    }
+    let Ok(marked) = Uuid::parse_str(node_id) else {
+        return ActionDispatch::Error("Invalid marked tracking".to_string());
+    };
+    if marked == target {
+        return ActionDispatch::Error("Marked tracking is the target — pick another row".to_string());
+    }
+
+    let Some(m_row) = snapshot.by_id.get(&marked) else {
+        return ActionDispatch::Error("Marked tracking no longer exists".to_string());
+    };
+    let Some(t_row) = snapshot.by_id.get(&target) else {
+        return ActionDispatch::Error("Target tracking no longer exists".to_string());
+    };
+    let (Some(m_start), Some(m_end)) = (Some(m_row.tracking.started_at), m_row.tracking.ended_at)
+    else {
+        return ActionDispatch::Error("Can't move a running tracking".to_string());
+    };
+    let Some(t_end) = t_row.tracking.ended_at else {
+        return ActionDispatch::Error("Can't paste after a running tracking".to_string());
+    };
+    let d = m_end - m_start;
+    let tz = *chrono::Local::now().offset();
+    let (after, end, before) = paste_slots(
+        snapshot,
+        tz,
+        marked,
+        t_row.tracking.started_at,
+        t_end,
+        d,
+    );
+
+    // Resolve which slot to move into, driven by the confirm stage.
+    let (start, clear) = if !ctx.confirmed {
+        *flow.lock().unwrap() = None;
+        if after.fits {
+            (Some(after.start), true)
+        } else {
+            *flow.lock().unwrap() = Some(PasteFlow { marked, target, stage: PasteStage::AskedEnd });
+            return ActionDispatch::Confirm {
+                prompt: "Not enough room after the selected tracking. Move to the end of the day? (y/n)"
+                    .to_string(),
+            };
+        }
+    } else {
+        let stage = flow
+            .lock()
+            .unwrap()
+            .filter(|f| f.marked == marked && f.target == target)
+            .map(|f| f.stage);
+        match stage {
+            Some(PasteStage::AskedEnd) if end.fits => (Some(end.start), true),
+            Some(PasteStage::AskedEnd) => {
+                *flow.lock().unwrap() =
+                    Some(PasteFlow { marked, target, stage: PasteStage::AskedBefore });
+                return ActionDispatch::Confirm {
+                    prompt: "No room at the end of the day either. Move before the day's first tracking? (y/n)"
+                        .to_string(),
+                };
+            }
+            Some(PasteStage::AskedBefore) if before.fits => (Some(before.start), true),
+            Some(PasteStage::AskedBefore) => {
+                *flow.lock().unwrap() = None;
+                return ActionDispatch::Error(
+                    "No room for this tracking anywhere on that day.".to_string(),
+                );
+            }
+            // Stale/lost stage (something changed mid-chain) — restart cleanly.
+            None => {
+                if after.fits {
+                    (Some(after.start), true)
+                } else {
+                    *flow.lock().unwrap() =
+                        Some(PasteFlow { marked, target, stage: PasteStage::AskedEnd });
+                    return ActionDispatch::Confirm {
+                        prompt: "Not enough room after the selected tracking. Move to the end of the day? (y/n)"
+                            .to_string(),
+                    };
+                }
+            }
+        }
+    };
+
+    let Some(start) = start else {
+        return ActionDispatch::Noop;
+    };
+    if clear {
+        *flow.lock().unwrap() = None;
+    }
+
+    let options = MoveOptions {
+        allow_overlap: false,
+        allow_same_task_overlap: false,
+        allow_future: false,
+        gravity: None,
+        granularity: None,
+        offset: None,
+    };
+    match handle
+        .tracking_service
+        .move_tracking(marked, LocalContext::new(start, tz), options)
+        .await
+    {
+        Ok(_) => {
+            emit_tracking_changed(handle, marked);
+            ActionDispatch::Reload
+        }
+        Err(e) => ActionDispatch::Error(format!("Move failed: {e}")),
+    }
 }
 
 /// Actions a duration-tree task node (`tracking:tree-item`) exposes. The tree
@@ -1679,6 +1921,9 @@ struct TrackingRootNode {
     handle: CoreHandle,
     node_type: NodeType,
     metadata: Metadata,
+    /// Threaded into the entry nodes `get_child` builds so a `paste-move`
+    /// reached through a drilled child shares the adapter's confirm state.
+    flow: PasteCell,
 }
 
 #[async_trait]
@@ -1820,7 +2065,7 @@ impl Node for TrackingRootNode {
         if id.starts_with(CONDENSED_ID_PREFIX) {
             return TrackingCondensedNode::fetch(&self.snapshot, &self.handle, id);
         }
-        TrackingEntryNode::fetch(&self.snapshot, &self.handle, id)
+        TrackingEntryNode::fetch(&self.snapshot, &self.handle, &self.flow, id)
     }
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
@@ -1845,9 +2090,36 @@ impl Node for TrackingRootNode {
     }
 }
 
+/// Which fallback question the pending `paste-move` confirm chain is on.
+/// The generic confirm mechanism only round-trips a single `confirmed` bool,
+/// so the two-step "ans Ende?" → "vor das erste?" cascade needs this to
+/// remember which question a re-invocation is answering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteStage {
+    /// Asked "no room after the target — move to the day's end?"
+    AskedEnd,
+    /// Asked "no room at the day's end either — move before the day's first?"
+    AskedBefore,
+}
+
+/// The in-flight `paste-move` confirm chain. Keyed by `(marked, target)` so a
+/// stale confirm (the user marked/selected something else meanwhile) restarts
+/// cleanly instead of acting on the wrong pair. Lives on the adapter (shared
+/// via `Arc`) so it survives the fresh `get_by_id` each confirm re-invoke does.
+#[derive(Clone, Copy, Debug)]
+struct PasteFlow {
+    marked: Uuid,
+    target: Uuid,
+    stage: PasteStage,
+}
+
+/// Shared, adapter-lived cell holding the current `paste-move` confirm stage.
+type PasteCell = Arc<std::sync::Mutex<Option<PasteFlow>>>;
+
 /// A single tracking row. A leaf: it has no children. Carries the live
 /// [`CoreHandle`] and the row's `task_id` so its actions (delete / restore /
-/// toggle-tracking) can mutate through the services.
+/// toggle-tracking) can mutate through the services. The `snapshot` + `flow`
+/// back the `paste-move` repack action (day-slot search + confirm cascade).
 struct TrackingEntryNode {
     id_str: String,
     label: String,
@@ -1856,12 +2128,18 @@ struct TrackingEntryNode {
     handle: CoreHandle,
     /// The tracked task — `toggle-tracking` flips tracking on it.
     task_id: Uuid,
+    /// The whole tracking universe — `paste-move` reads the target day's
+    /// intervals from it to find a free slot.
+    snapshot: Arc<TrackingSnapshot>,
+    /// Adapter-shared `paste-move` confirm-chain state (see [`PasteFlow`]).
+    flow: PasteCell,
 }
 
 impl TrackingEntryNode {
     fn fetch(
         snapshot: &Arc<TrackingSnapshot>,
         handle: &CoreHandle,
+        flow: &PasteCell,
         id: &str,
     ) -> Result<Box<dyn Node>> {
         let uuid = Uuid::parse_str(id).map_err(|_| ContentError::NotFound(id.to_string()))?;
@@ -1877,6 +2155,8 @@ impl TrackingEntryNode {
             metadata: entry_metadata(row, now),
             handle: handle.clone(),
             task_id: row.tracking.task_id,
+            snapshot: snapshot.clone(),
+            flow: flow.clone(),
         }))
     }
 
@@ -1947,6 +2227,16 @@ impl Node for TrackingEntryNode {
                 Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
             },
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            // `mark-move` is handled entirely by the frontend's generic move
+            // clipboard (it reads this row's label/type and records it); the
+            // adapter only needs to not reject the action.
+            "mark-move" => ActionDispatch::Noop,
+            "paste-move" => match self.tracking_id() {
+                Ok(target) => {
+                    invoke_paste_move(&self.handle, &self.snapshot, &self.flow, target, ctx).await
+                }
+                Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
+            },
             _ => ActionDispatch::Noop,
         })
     }
@@ -2455,6 +2745,10 @@ pub struct TrackingAdapter {
     /// (`Arc`) with [`spawn_tracking_bridge`] so a start/stop re-paces the
     /// timer through the same atomic without an extra redundant announce.
     last_live_secs: Arc<std::sync::atomic::AtomicU64>,
+    /// In-flight `paste-move` confirm-chain state, shared with every node the
+    /// adapter hands out so the two-step fallback cascade survives the fresh
+    /// `get_by_id` each confirm re-invocation performs (see [`PasteFlow`]).
+    paste_flow: PasteCell,
 }
 
 impl TrackingAdapter {
@@ -2487,6 +2781,7 @@ impl TrackingAdapter {
             snapshot,
             saved_queries: FsSavedQueryStore::new(queries_root),
             last_live_secs,
+            paste_flow: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2611,6 +2906,7 @@ impl ContentAdapter for TrackingAdapter {
             handle: self.handle.clone(),
             node_type: tracking_root_type(),
             metadata: Metadata::default(),
+            flow: self.paste_flow.clone(),
         }))
     }
 
@@ -2622,6 +2918,7 @@ impl ContentAdapter for TrackingAdapter {
                 handle: self.handle.clone(),
                 node_type: tracking_root_type(),
                 metadata: Metadata::default(),
+                flow: self.paste_flow.clone(),
             }));
         }
         // `treegrp:…` addresses a grouped-tree bucket node.
@@ -2633,7 +2930,7 @@ impl ContentAdapter for TrackingAdapter {
         if id.starts_with(TREE_ID_PREFIX) {
             return TrackingTreeNode::fetch(&snapshot, &self.handle, id);
         }
-        TrackingEntryNode::fetch(&snapshot, &self.handle, id)
+        TrackingEntryNode::fetch(&snapshot, &self.handle, &self.paste_flow, id)
     }
 
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
@@ -2770,6 +3067,119 @@ mod tests {
             visible_cache: Default::default(),
             fold_cache: Default::default(),
         })
+    }
+
+    /// A completed tracking with an *explicit* UTC start/end, so day-boundary
+    /// maths in [`paste_slots`] is deterministic (unlike the `now()`-relative
+    /// [`tracking`] fixture).
+    fn fixed_tracking(
+        id: Uuid,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> tracking::Model {
+        tracking::Model {
+            id,
+            task_id: Uuid::from_u128(1),
+            predecessor_id: None,
+            started_at: start,
+            ended_at: Some(end),
+            deleted: false,
+            created_at: start,
+        }
+    }
+
+    #[test]
+    fn paste_slots_cascade_after_end_before_and_abort() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::east_opt(0).unwrap(); // UTC-aligned local day
+        // A helper for "HH:MM on 2026-01-15" in the UTC-aligned local day.
+        let at = |h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, 1, 15, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+
+        let a = Uuid::from_u128(10); // 09:00–10:00
+        let t = Uuid::from_u128(11); // 10:00–11:00  (the target)
+        let b = Uuid::from_u128(12); // 12:00–13:00
+        let marked = Uuid::from_u128(99); // lives elsewhere; not in the day
+        let snap = snapshot_from(vec![
+            (a, row(fixed_tracking(a, at(9, 0), at(10, 0)), "a", vec!["a"])),
+            (t, row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"])),
+            (b, row(fixed_tracking(b, at(12, 0), at(13, 0)), "b", vec!["b"])),
+        ]);
+
+        // 1h fits directly after the target (11:00 → next interval at 12:00).
+        let (after, _end, _before) = paste_slots(
+            &snap, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(1),
+        );
+        assert!(after.fits);
+        assert_eq!(after.start, at(11, 0));
+
+        // 1h30m does NOT fit after (only 1h gap) but fits at the day's end,
+        // flush after the last interval (b ends 13:00).
+        let (after, end, _before) = paste_slots(
+            &snap, tz, marked, at(10, 0), at(11, 0), chrono::Duration::minutes(90),
+        );
+        assert!(!after.fits);
+        assert!(end.fits);
+        assert_eq!(end.start, at(13, 0));
+
+        // Now a day packed toward midnight: target 10:00–11:00, then a long
+        // interval 11:00–23:30. The end-gap (23:30→24:00 = 30m) is tiny while
+        // the before-gap (00:00→10:00 = 10h) is large.
+        let long = Uuid::from_u128(20);
+        let packed = snapshot_from(vec![
+            (t, row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"])),
+            (long, row(fixed_tracking(long, at(11, 0), at(23, 30)), "l", vec!["l"])),
+        ]);
+
+        // 5h fits neither after (0 gap) nor at the end (30m) but does before
+        // the first interval — flush against it, so it starts `d` earlier.
+        let (after, end, before) = paste_slots(
+            &packed, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(5),
+        );
+        assert!(!after.fits);
+        assert!(!end.fits);
+        assert!(before.fits);
+        assert_eq!(before.start, at(10, 0) - chrono::Duration::hours(5));
+
+        // Bigger than any free gap anywhere (before-gap is the largest, 10h) →
+        // all three report no room.
+        let (after, end, before) = paste_slots(
+            &packed, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(11),
+        );
+        assert!(!after.fits && !end.fits && !before.fits);
+    }
+
+    #[test]
+    fn paste_slots_ignores_marked_and_deleted_intervals() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let at = |h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, 1, 15, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+
+        let t = Uuid::from_u128(11); // target 10:00–11:00
+        let marked = Uuid::from_u128(99); // currently sits 11:00–13:00 on the day
+        let del = Uuid::from_u128(50); // deleted 11:30–12:30
+        let mut m_del = fixed_tracking(del, at(11, 30), at(12, 30));
+        m_del.deleted = true;
+        let snap = snapshot_from(vec![
+            (t, row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"])),
+            (marked, row(fixed_tracking(marked, at(11, 0), at(13, 0)), "m", vec!["m"])),
+            (del, row(m_del, "d", vec!["d"])),
+        ]);
+
+        // The marked interval's own slot (11:00–13:00) and the deleted one both
+        // count as free, so a 2h paste fits directly after the target.
+        let (after, _end, _before) = paste_slots(
+            &snap, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(2),
+        );
+        assert!(after.fits);
+        assert_eq!(after.start, at(11, 0));
     }
 
     #[test]
@@ -3183,6 +3593,9 @@ mod tests {
         assert!(has(&a, "toggle-tracking"));
         assert!(has(&a, "split"));
         assert!(has(&a, "move"));
+        // Repack actions: `m` marks, `p` pastes (keys bound in YAML).
+        assert!(has(&a, "mark-move"));
+        assert!(has(&a, "paste-move"));
         // `delete` and `toggle-tracking` show in the action bar; `restore`
         // is a recovery shortcut only.
         let key = |id: &str| a.iter().find(|x| x.id == id).and_then(|x| x.default_key);
@@ -3191,6 +3604,13 @@ mod tests {
         assert_eq!(key("restore"), Some('R'));
         assert_eq!(key("split"), Some('i'));
         assert_eq!(key("move"), Some('m'));
+        // The repack actions carry no dead `default_key` (YAML drives them)…
+        assert_eq!(key("mark-move"), None);
+        assert_eq!(key("paste-move"), None);
+        // …but sit in the action bar so their hints stay visible.
+        let placement = |id: &str| a.iter().find(|x| x.id == id).map(|x| x.placement);
+        assert_eq!(placement("mark-move"), Some(HintPlacement::ActionBar));
+        assert_eq!(placement("paste-move"), Some(HintPlacement::ActionBar));
     }
 
     #[test]
@@ -4119,7 +4539,8 @@ mod restore_scope_tests {
         let ctx = ActionContext::default();
 
         // A live row routes into the generic delete-confirm flow.
-        let live_node = TrackingEntryNode::fetch(&snapshot, &handle, &live.id.to_string())
+        let flow: PasteCell = Arc::new(std::sync::Mutex::new(None));
+        let live_node = TrackingEntryNode::fetch(&snapshot, &handle, &flow, &live.id.to_string())
             .expect("fetch live node");
         assert!(matches!(
             live_node
@@ -4131,7 +4552,7 @@ mod restore_scope_tests {
 
         // An already-deleted row short-circuits with a neutral notice — no
         // confirm, no re-delete.
-        let gone_node = TrackingEntryNode::fetch(&snapshot, &handle, &gone.to_string())
+        let gone_node = TrackingEntryNode::fetch(&snapshot, &handle, &flow, &gone.to_string())
             .expect("fetch deleted node");
         match gone_node
             .invoke_action("delete", &ctx)
