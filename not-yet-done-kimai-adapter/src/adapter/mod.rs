@@ -1,7 +1,8 @@
 //! Kimai ContentAdapter implementation.
 //!
-//! Read-only, flat: the root lists `kimai:timesheet` rows for the
-//! configured lookback window. Grouping (day/week/month) happens
+//! Flat: the root lists `kimai:timesheet` rows for the configured lookback
+//! window; each row can be edited (`edit`, PATCH) and the root can create a
+//! new entry (`create`, POST). Grouping (day/week/month) happens
 //! engine-side via the view's `group_by` — the adapter only has to emit
 //! RFC3339 `begin`/`end` values and a numeric `duration` (seconds), like
 //! the local trackings adapter. Project and activity arrive as numeric
@@ -31,6 +32,31 @@ use auth_bridge::AuthBridge;
 /// the adapter's instance-free [`ContentAdapter::actions_for_type`].
 fn timesheet_actions() -> Vec<NodeAction> {
     vec![NodeAction::new("edit", "edit", InputSpec::Editor)]
+}
+
+/// Form fields for the root `create` action — a brand-new timesheet. `entry`
+/// is the same `customer_project_activity` token the edit buffer/`entry_combos`
+/// expose (the `#<pid>_#<aid>` escape works too); `duration` accepts `H:MM:SS`
+/// or plain seconds and fixes `end = begin + duration`.
+fn create_form_fields() -> Vec<FormFieldSpec> {
+    vec![
+        FormFieldSpec::text("entry", "Entry (customer_project_activity token)"),
+        FormFieldSpec::text("begin", "Begin (YYYY-MM-DDTHH:MM[:SS])"),
+        FormFieldSpec::text("duration", "Duration (H:MM:SS or seconds)"),
+        FormFieldSpec::text("description", "Description").optional(),
+    ]
+}
+
+/// Action set for the root: create a new timesheet. Shared between
+/// [`KimaiRoot::actions`] and [`ContentAdapter::actions_for_type`].
+fn root_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new(
+        "create",
+        "create",
+        InputSpec::Form {
+            fields: create_form_fields(),
+        },
+    )]
 }
 
 fn timesheet_node_type() -> NodeType {
@@ -98,6 +124,7 @@ impl ContentAdapter for KimaiAdapter {
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
             "kimai:timesheet" => timesheet_actions(),
+            "kimai:root" => root_actions(),
             _ => Vec::new(),
         }
     }
@@ -233,9 +260,64 @@ impl Node for KimaiRoot {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         fetch_timesheet_node(&self.client, id).await
     }
+
+    fn actions(&self) -> Vec<NodeAction> {
+        root_actions()
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("create", ActionInput::Form(fields)) => self.execute_create(fields).await,
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "execute: unknown action {other}"
+            ))),
+        }
+    }
 }
 
 impl KimaiRoot {
+    /// Resolve the create form, POST a new timesheet, and navigate to it.
+    /// Fetches the project/activity lookups (needed to resolve the `entry`
+    /// token) then delegates to [`template::build_create_body`]; field errors
+    /// surface as a single `ContentError` (a `Form` action has no editor to
+    /// reopen). The created record's id drives the `Navigate` outcome.
+    async fn execute_create(
+        &self,
+        fields: std::collections::HashMap<String, String>,
+    ) -> Result<ActionOutcome> {
+        let get = |key: &str| fields.get(key).map(String::as_str).unwrap_or("");
+
+        let (projects, activities) =
+            tokio::try_join!(self.client.projects(), self.client.activities())
+                .map_err(other_err)?;
+        let projects: HashMap<u64, KimaiProject> =
+            projects.into_iter().map(|p| (p.id, p)).collect();
+        let activities: HashMap<u64, KimaiActivity> =
+            activities.into_iter().map(|a| (a.id, a)).collect();
+
+        let body = template::build_create_body(
+            get("entry"),
+            get("begin"),
+            get("duration"),
+            get("description"),
+            &projects,
+            &activities,
+        )
+        .map_err(|errors| other_err(errors.join("; ")))?;
+
+        let created = self
+            .client
+            .create_timesheet(&body)
+            .await
+            .map_err(other_err)?;
+
+        Ok(ActionOutcome::Navigate {
+            node_id: created.id.to_string(),
+            node_type: timesheet_node_type(),
+            message: Some(format!("timesheet {}: created", created.id)),
+        })
+    }
+
     /// One bulk listing: timesheets since the lookback boundary plus both
     /// lookup tables, fetched concurrently. Sorting is always local —
     /// Kimai's server order (begin desc) is just the input order.
@@ -516,6 +598,25 @@ impl Node for KimaiTimesheetNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_create_action_is_a_four_field_form() {
+        let actions = root_actions();
+        assert_eq!(actions.len(), 1);
+        let create = &actions[0];
+        assert_eq!(create.id, "create");
+        match &create.input {
+            InputSpec::Form { fields } => {
+                let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+                assert_eq!(keys, vec!["entry", "begin", "duration", "description"]);
+                // description is the only optional field.
+                let desc = fields.iter().find(|f| f.key == "description").unwrap();
+                assert!(!desc.required);
+                assert!(fields.iter().filter(|f| f.required).count() == 3);
+            }
+            other => panic!("expected a Form input, got {other:?}"),
+        }
+    }
 
     #[test]
     fn normalizes_offset_without_colon() {
