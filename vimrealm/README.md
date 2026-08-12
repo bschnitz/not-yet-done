@@ -115,9 +115,9 @@ Each layer is testable without the one above it:
 ## Hosting it as a pane
 
 The widget is a pane like any other, not an overlay: give it rows in your
-layout and call `view`. In this workspace that is
-`not-yet-done-tui/src/components/builtin_editor.rs` — worth reading as a
-worked example. It shows the three things a host has to decide:
+layout and call `view`. The `vim_demo` example under `examples/` is a
+complete worked host — run it with `cargo run --example vim_demo`. It shows
+the three things a host has to decide:
 
 - **Who owns the keyboard.** While the pane is open it must see every key
   ahead of the application's own bindings, including a global quit binding —

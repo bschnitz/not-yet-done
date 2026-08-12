@@ -20,7 +20,7 @@ use tuirealm::event::KeyEvent;
 use vimrealm::{VimEditor, VimEvent, VimStyle, VimStyleType};
 
 const SAMPLE: &str = "\
-Ein modaler Editor als Widget.
+A modal editor as a widget.
 
 Normal mode: h j k l  w b e  0 ^ $  gg G, counts like 3w or 2dd,
 edits x d c y p P D C, undo u and redo Ctrl+R.
