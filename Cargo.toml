@@ -70,7 +70,7 @@ dirs = "6.0.0"
 keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
-fieldsmith = { path = "fieldsmith", version = "0.1" }
+fieldsmith = { path = "fieldsmith", version = "0.2" }
 # reqwest 0.13 flipped the default TLS backend from native-tls to rustls
 # and made `query`/`form` opt-in features. We keep native-tls (openssl)
 # to preserve the existing behaviour and stay on a single TLS stack with

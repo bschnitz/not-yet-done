@@ -1,7 +1,7 @@
 [package]
 name = "fieldsmith"
 description = "Reflect, template, and interactively build config structs from a single derive."
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bschnitz/not-yet-done"
@@ -14,7 +14,7 @@ categories = ["config", "development-tools", "command-line-interface"]
 stdin = ["dep:dialoguer", "dep:console", "dep:serde", "dep:serde_yaml"]
 
 [dependencies]
-fieldsmith-derive = { path = "../fieldsmith-derive", version = "0.1.0" }
+fieldsmith-derive = { path = "../fieldsmith-derive", version = "0.1.1" }
 dialoguer = { version = "0.11", optional = true }
 # Terminal styling for the interactive driver (dimmed help, red retry hints).
 # dialoguer re-exports this crate; pin the same major to share one copy.
