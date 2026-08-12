@@ -183,7 +183,7 @@ impl TaskRepository for TaskRepositoryImpl {
         status: Option<task::TaskStatus>,
         priority: Option<i32>,
     ) -> Result<task::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let mut model = ActiveModel {
             description: Set(description),
             parent_id: Set(parent_id),
@@ -216,7 +216,7 @@ impl TaskRepository for TaskRepositoryImpl {
     async fn find_all(&self, project_id: Option<Uuid>) -> Result<Vec<task::Model>, AppError> {
         use crate::entity::task::Column;
         use sea_orm::QuerySelect;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         let query = task::Entity::find().filter(Column::Deleted.eq(false));
 
@@ -245,7 +245,7 @@ impl TaskRepository for TaskRepositoryImpl {
     ) -> Result<Vec<task::Model>, AppError> {
         use crate::entity::task::Column;
         use sea_orm::QuerySelect;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         // Same as `find_all` but without the implicit `deleted = false` —
         // the full task universe, deleted rows included.
@@ -271,7 +271,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<task::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         task::Entity::find_by_id(id)
             .one(db)
             .await?
@@ -279,7 +279,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn soft_delete(&self, id: Uuid) -> Result<(), AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let task = self.find_by_id(id).await?;
         let mut model: ActiveModel = task.into();
         let now = chrono::Utc::now();
@@ -293,7 +293,7 @@ impl TaskRepository for TaskRepositoryImpl {
     async fn soft_delete_recursive(&self, id: Uuid) -> Result<usize, AppError> {
         use crate::entity::task::Column;
 
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let now = chrono::Utc::now();
 
         // Collect all descendant IDs (BFS).
@@ -332,7 +332,7 @@ impl TaskRepository for TaskRepositoryImpl {
         use crate::entity::task::Column;
         use sea_orm::QueryOrder;
 
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         // Find the most recent deleted_at timestamp.
         let latest = task::Entity::find()
@@ -368,7 +368,7 @@ impl TaskRepository for TaskRepositoryImpl {
         id: Uuid,
         description: String,
     ) -> Result<task::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let task = self.find_by_id(id).await?;
         let mut model: ActiveModel = task.into();
         model.description = Set(description);
@@ -385,7 +385,7 @@ impl TaskRepository for TaskRepositoryImpl {
         parent_id: Option<Option<Uuid>>,
         deleted: Option<bool>,
     ) -> Result<task::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let task = self.find_by_id(id).await?;
         let parent_changed = parent_id.is_some() && parent_id != Some(task.parent_id);
         let mut model: ActiveModel = task.into();
@@ -421,7 +421,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn assign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let join = task_project::ActiveModel {
             task_id: Set(task_id),
             project_id: Set(project_id),
@@ -432,7 +432,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn unassign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         task_project::Entity::delete_many()
             .filter(task_project::Column::TaskId.eq(task_id))
             .filter(task_project::Column::ProjectId.eq(project_id))
@@ -443,7 +443,7 @@ impl TaskRepository for TaskRepositoryImpl {
 
     async fn soft_delete_by_project(&self, project_id: Uuid) -> Result<(), AppError> {
         use crate::entity::task::Column;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         let task_ids: Vec<Uuid> = task_project::Entity::find()
             .filter(task_project::Column::ProjectId.eq(project_id))
@@ -469,7 +469,7 @@ impl TaskRepository for TaskRepositoryImpl {
 
     async fn assign_global_tag(&self, task_id: Uuid, tag_id: Uuid) -> Result<(), AppError> {
         use crate::entity::task_global_tag;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         task_global_tag::ActiveModel {
             task_id: Set(task_id),
             global_tag_id: Set(tag_id),
@@ -481,7 +481,7 @@ impl TaskRepository for TaskRepositoryImpl {
 
     async fn unassign_global_tag(&self, task_id: Uuid, tag_id: Uuid) -> Result<(), AppError> {
         use crate::entity::task_global_tag;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         task_global_tag::Entity::delete_many()
             .filter(task_global_tag::Column::TaskId.eq(task_id))
             .filter(task_global_tag::Column::GlobalTagId.eq(tag_id))
@@ -492,7 +492,7 @@ impl TaskRepository for TaskRepositoryImpl {
 
     async fn assign_project_tag(&self, task_id: Uuid, tag_id: Uuid) -> Result<(), AppError> {
         use crate::entity::task_project_tag;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         task_project_tag::ActiveModel {
             task_id: Set(task_id),
             project_tag_id: Set(tag_id),
@@ -504,7 +504,7 @@ impl TaskRepository for TaskRepositoryImpl {
 
     async fn unassign_project_tag(&self, task_id: Uuid, tag_id: Uuid) -> Result<(), AppError> {
         use crate::entity::task_project_tag;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         task_project_tag::Entity::delete_many()
             .filter(task_project_tag::Column::TaskId.eq(task_id))
             .filter(task_project_tag::Column::ProjectTagId.eq(tag_id))
@@ -514,7 +514,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn find_project_ids_for_task(&self, task_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(task_project::Entity::find()
             .filter(task_project::Column::TaskId.eq(task_id))
             .all(db)
@@ -537,7 +537,7 @@ impl TaskRepository for TaskRepositoryImpl {
         if task_ids.is_empty() {
             return Ok(out);
         }
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         let g_links = task_global_tag::Entity::find()
             .filter(task_global_tag::Column::TaskId.is_in(task_ids.to_vec()))
@@ -595,7 +595,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn find_filtered(&self, expr: &FilterExpr) -> Result<Vec<task::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let resolved = crate::filter::tree_ops::resolve_tree_operators(expr, db).await?;
         let condition = FilterBuilder::new(&TaskColumnRegistry).build(&resolved)?;
         Ok(task::Entity::find().filter(condition).all(db).await?)
@@ -609,7 +609,7 @@ impl TaskRepository for TaskRepositoryImpl {
         let mut results = self.find_filtered(expr).await?;
 
         if options.include_ancestors && !results.is_empty() {
-            let db = self.db.as_ref().expect("DB nicht initialisiert");
+            let db = self.db.as_ref().expect("DB not initialized");
             let result_ids: std::collections::HashSet<Uuid> =
                 results.iter().map(|t| t.id).collect();
 
@@ -652,7 +652,7 @@ impl TaskRepository for TaskRepositoryImpl {
     ) -> Result<Vec<task::Model>, AppError> {
         use crate::entity::task::Column;
 
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         // Look up the root to get its path prefix.
         let root = self.find_by_id(root_id).await?;
@@ -708,7 +708,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn apply_batch(&self, ops: Vec<TaskOp>) -> Result<Vec<task::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let mut results = Vec::new();
 
         for op in ops {
@@ -772,7 +772,7 @@ impl TaskRepository for TaskRepositoryImpl {
     }
 
     async fn rebuild_all_paths(&self) -> Result<usize, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         // Load all tasks (including deleted) to build the parent map.
         let all: Vec<task::Model> = task::Entity::find().all(db).await?;
         let parents: HashMap<Uuid, Option<Uuid>> =

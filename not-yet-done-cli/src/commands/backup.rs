@@ -12,7 +12,7 @@ pub mod cli {
         });
         match result {
             Ok(path) => {
-                println!("✓ Backup erstellt: {}", path);
+                println!("✓ Backup created: {}", path);
                 0
             }
             Err(e) => {
@@ -58,7 +58,7 @@ pub mod cli {
         });
         match result {
             Ok(path) => {
-                println!("✓ Datenbank wiederhergestellt: {}", path);
+                println!("✓ Database restored: {}", path);
                 0
             }
             Err(e) => {

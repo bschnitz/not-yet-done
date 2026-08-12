@@ -186,7 +186,7 @@ async fn resolve_project(
     }
 }
 
-/// Löst einen Tag-ID-String auf.
+/// Resolves a tag-id string.
 /// Formate: "global-tag:<uuid>", "project-tag:<uuid>", oder plain "<uuid>" (→ global)
 fn parse_tag_id(id: &str) -> Result<TagId, AppError> {
     if let Some(rest) = id.strip_prefix("global-tag:") {

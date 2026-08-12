@@ -39,7 +39,7 @@ impl ProjectRepository for ProjectRepositoryImpl {
         name: String,
         description: Option<String>,
     ) -> Result<project::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let model = ActiveModel {
             name: Set(name),
             description: Set(description),
@@ -49,12 +49,12 @@ impl ProjectRepository for ProjectRepositoryImpl {
     }
 
     async fn find_all(&self) -> Result<Vec<project::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(project::Entity::find().all(db).await?)
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<project::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         project::Entity::find_by_id(id)
             .one(db)
             .await?
@@ -65,7 +65,7 @@ impl ProjectRepository for ProjectRepositoryImpl {
         use crate::entity::project::Column;
         use sea_orm::ColumnTrait;
         use sea_orm::QueryFilter;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(project::Entity::find()
             .filter(Column::Name.eq(name))
             .one(db)
@@ -78,7 +78,7 @@ impl ProjectRepository for ProjectRepositoryImpl {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<project::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let project = self.find_by_id(id).await?;
         let mut model: ActiveModel = project.into();
         if let Some(n) = name {
@@ -92,7 +92,7 @@ impl ProjectRepository for ProjectRepositoryImpl {
 
     async fn delete(&self, id: Uuid) -> Result<(), AppError> {
         use sea_orm::ModelTrait;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let project = self.find_by_id(id).await?;
         project.delete(db).await?;
         Ok(())

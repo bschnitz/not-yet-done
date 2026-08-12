@@ -20,10 +20,10 @@ where
 {
     let module = MODULE
         .get()
-        .expect("TaskDomainModule nicht initialisiert")
+        .expect("TaskDomainModule not initialized")
         .clone();
     tokio::runtime::Runtime::new()
-        .expect("tokio Runtime konnte nicht erstellt werden")
+        .expect("failed to create the tokio runtime")
         .block_on(f(module))
 }
 
@@ -31,7 +31,7 @@ where
 /// in `main` from `NYD_TASKS_DB` or the per-host default; the `backup` command
 /// uses it so it backs up the *task* DB rather than the legacy core DB.
 pub fn tasks_dsn() -> &'static str {
-    DSN.get().expect("DSN nicht initialisiert")
+    DSN.get().expect("DSN not initialized")
 }
 
 // `nyd-t` is the dedicated tasks/trackings CLI: a first-class client of the
@@ -83,22 +83,22 @@ fn main() -> std::process::ExitCode {
     // fresh SQLite file is created and populated on first open), so there is no
     // separate `db sync` step to special-case here.
     let module = tokio::runtime::Runtime::new()
-        .expect("tokio Runtime konnte nicht erstellt werden")
+        .expect("failed to create the tokio runtime")
         .block_on(async { bootstrap::open_module(&dsn).await });
 
     let module = match module {
         Ok(module) => Arc::new(module),
         Err(e) => {
-            eprintln!("Datenbankverbindung fehlgeschlagen: {e}");
+            eprintln!("Database connection failed: {e}");
             return std::process::ExitCode::FAILURE;
         }
     };
 
     MODULE
         .set(module)
-        .unwrap_or_else(|_| panic!("MODULE bereits gesetzt"));
+        .unwrap_or_else(|_| panic!("MODULE already set"));
     DSN.set(dsn)
-        .unwrap_or_else(|_| panic!("DSN bereits gesetzt"));
+        .unwrap_or_else(|_| panic!("DSN already set"));
 
     std::process::ExitCode::from(cli::exec_cli().unwrap_or(0))
 }

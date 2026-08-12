@@ -64,7 +64,7 @@ pub struct QueryShortcutRepositoryImpl {
 #[async_trait]
 impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
     async fn list_by_scope(&self, scope: &str) -> Result<Vec<query_shortcut::Model>, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))
             .all(db)
@@ -78,7 +78,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         kind: &str,
         shortcut: &str,
     ) -> Result<query_shortcut::Model, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let existing = query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))
             .filter(query_shortcut::Column::Name.eq(name))
@@ -101,7 +101,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
     }
 
     async fn unset(&self, scope: &str, name: &str) -> Result<(), CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         query_shortcut::Entity::delete_many()
             .filter(query_shortcut::Column::Scope.eq(scope))
             .filter(query_shortcut::Column::Name.eq(name))
@@ -111,7 +111,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
     }
 
     async fn rename(&self, scope: &str, old_name: &str, new_name: &str) -> Result<(), CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let row = query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))
             .filter(query_shortcut::Column::Name.eq(old_name))

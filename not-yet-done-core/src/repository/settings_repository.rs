@@ -25,7 +25,7 @@ pub struct SettingsRepositoryImpl {
 #[async_trait]
 impl SettingsRepository for SettingsRepositoryImpl {
     async fn get(&self, key: &str) -> Result<Option<String>, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let row = settings::Entity::find()
             .filter(settings::Column::Key.eq(key))
             .one(db)
@@ -34,7 +34,7 @@ impl SettingsRepository for SettingsRepositoryImpl {
     }
 
     async fn set(&self, key: &str, value: &str) -> Result<(), CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         // Try to find existing.
         if let Some(existing) = settings::Entity::find()
@@ -57,7 +57,7 @@ impl SettingsRepository for SettingsRepositoryImpl {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         settings::Entity::delete_many()
             .filter(settings::Column::Key.eq(key))
             .exec(db)

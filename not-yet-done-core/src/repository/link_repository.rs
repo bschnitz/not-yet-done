@@ -54,7 +54,7 @@ pub struct LinkRepositoryImpl {
 #[async_trait]
 impl LinkRepository for LinkRepositoryImpl {
     async fn create(&self, source: &NodeRef, target: &NodeRef) -> Result<link::Model, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let source_s = source.as_str().to_string();
         let target_s = target.as_str().to_string();
 
@@ -76,12 +76,12 @@ impl LinkRepository for LinkRepositoryImpl {
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<link::Model>, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(link::Entity::find_by_id(id).one(db).await?)
     }
 
     async fn outgoing(&self, source: &NodeRef) -> Result<Vec<link::Model>, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(link::Entity::find()
             .filter(link::Column::SourceRef.eq(source.as_str()))
             .order_by_desc(link::Column::CreatedAt)
@@ -90,7 +90,7 @@ impl LinkRepository for LinkRepositoryImpl {
     }
 
     async fn incoming(&self, target: &NodeRef) -> Result<Vec<link::Model>, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(link::Entity::find()
             .filter(link::Column::TargetRef.eq(target.as_str()))
             .order_by_desc(link::Column::CreatedAt)
@@ -99,7 +99,7 @@ impl LinkRepository for LinkRepositoryImpl {
     }
 
     async fn count_for(&self, node: &NodeRef) -> Result<u64, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let s = node.as_str();
         Ok(link::Entity::find()
             .filter(
@@ -112,13 +112,13 @@ impl LinkRepository for LinkRepositoryImpl {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         link::Entity::delete_by_id(id).exec(db).await?;
         Ok(())
     }
 
     async fn list_all(&self) -> Result<Vec<link::Model>, CoreError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(link::Entity::find()
             .order_by_desc(link::Column::CreatedAt)
             .all(db)
