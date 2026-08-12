@@ -1,0 +1,120 @@
+# Example: card mode — a 2 x 3 card per row
+#
+# Place in: ~/.config/not_yet_done/views/cards.yaml
+# Adapter config: ~/.config/not_yet_done/views/jira-adapter.yaml (see jira.yaml)
+#
+# Card mode is the table's alternative rendering: one logical row becomes one
+# framed card whose fields sit in a grid of `columns:` slots per line. It is a
+# generic table feature — every level with `columns:` can offer it — so this
+# file is a *shape* demo. It rides on the Jira adapter only because that one
+# ships all six columns used below; the `card:` block is the point and works
+# the same on any adapter (see `docs/generic-view-spec.md`, section `card:`).
+#
+# ## Why cards
+#
+# `row_layout:` solves the same problem (a table too wide for its content) but
+# wants every physical line spelled out with its columns — reordering six
+# fields means editing two lists. Card mode takes *one* field list plus *one*
+# number and derives the line grid from it, and adds the frame, labels and
+# inter-card gap that `row_layout:` has no notion of. It is also switchable:
+# the same level stays reachable as a table.
+#
+# ## The 2 x 3 shape
+#
+# Six fields at `columns: 3` -> two card lines. The row count is *derived*
+# (`fields / columns`, rounded up), so there is no `rows:` key that could fall
+# out of sync with the field list. Trailing slots of the last line stay blank,
+# which keeps every card the same height even when the field count is not a
+# multiple of `columns:`.
+#
+#   line 1: key     status   updated
+#   line 2: assignee creator summary    <- weights: [1, 1, 2] widens the third
+#
+# ## Switching
+#
+# Declaring `card:` only makes the mode *available*. `key: C` toggles it at
+# runtime; the choice is stored per level (under `card_mode:<tab>`) and
+# survives a restart. Set `default: true` to open the level in card mode
+# instead. The underlying action (`toggle_card_mode`) has no default binding on
+# purpose — a level without a `card:` block never loses a key to it.
+
+tab:
+  name: Cards
+  order: 9
+  icon: "󰆟"
+
+adapter:
+  type: jira
+  config: jira-adapter.yaml
+
+views:
+  - name: cards
+    node_type: "jira:issue"
+    default: true
+    key: i
+
+    # The card reads its values straight out of these cells, so every
+    # `card.fields` entry must name a key declared here. Hiding a column via
+    # the column popup (`c`) also drops it from the card and the grid closes up.
+    columns:
+      - { key: key, label: Key, source: key, style: accent, sizing: max }
+      - { key: summary, label: Summary, source: summary, sizing: "flex(1)" }
+      - { key: status, label: Status, source: status, style: secondary, sizing: max }
+      - { key: assignee, label: Assignee, source: assignee, sizing: max }
+      - { key: creator, label: Creator, source: creator, style: text_dim, sizing: max }
+      - { key: updated, label: Updated, source: updated, kind: datetime, sizing: max }
+
+    card:
+      # Toggle key. Accepts the same forms as any other binding, including
+      # alternatives (`key: [C, ctrl+d]`).
+      key: C
+
+      # Three fields side by side; six fields therefore make a two-line card.
+      columns: 3
+
+      # Drop `fields:` and the card shows *every* column of this level in its
+      # own order — the usual choice, since a column added later then appears
+      # in the card too. It is spelled out here only to put `summary` on the
+      # wide third slot (see `weights:`); the order below is the card's, not
+      # the table's.
+      fields: [key, status, updated, assignee, creator, summary]
+
+      # One weight per grid column. The third slot gets half the inner width so
+      # the summary has room; drop `weights:` for equal shares. The rounding
+      # remainder goes to the last slot, so every card line ends flush right.
+      weights: [1, 1, 2]
+
+      # `inline` = "Label: value" (the default). `none` shows bare values;
+      # `above` puts labels on their own line, doubling the card's line count.
+      labels: inline
+
+      # `rounded` (default), `plain` (square corners) or `none` (no frame).
+      border: rounded
+
+      # A rule between two cards — the glyph repeated across the card width.
+      # It takes the place of the last `gap:` line (so `gap: 1` + divider is one
+      # ruled line, not a blank one plus a rule) and is never drawn after the
+      # last card. `border: none` + `divider: "─"` is the frameless look.
+      # divider: "─"
+
+      # Frame and label colours default to the theme slots `card_border` /
+      # `card_label`; override them per level with a theme colour name.
+      # border_style: text_dim
+      # label_style: secondary
+
+      # Blank columns inside the frame, and blank lines after each card. The
+      # gap lines never take the selection highlight, so cards read as blocks.
+      padding: 1
+      gap: 1
+
+      # Filler between two grid slots (default two spaces).
+      separator: "  "
+
+      # `true` would open this level in card mode; a stored per-level choice
+      # (the toggle key) wins over this once the user has flipped the mode.
+      default: false
+
+    actions:
+      - name: refresh
+        key: r
+        type: reload

@@ -77,9 +77,18 @@ mod tests {
         assert!(!db.contains("customer"), "real name leaked: {db}");
         assert_eq!(db, a.scrub_label(&nt("postgres:database"), "customer_prod"));
 
-        assert!(a.scrub_label(&nt("postgres:schema"), "billing").ends_with("_schema"));
-        assert!(a.scrub_label(&nt("postgres:table"), "invoices").ends_with("_table"));
-        assert!(a.scrub_label(&nt("postgres:db_script"), "monthly.sql").ends_with("_script"));
+        assert!(
+            a.scrub_label(&nt("postgres:schema"), "billing")
+                .ends_with("_schema")
+        );
+        assert!(
+            a.scrub_label(&nt("postgres:table"), "invoices")
+                .ends_with("_table")
+        );
+        assert!(
+            a.scrub_label(&nt("postgres:db_script"), "monthly.sql")
+                .ends_with("_script")
+        );
     }
 
     #[test]

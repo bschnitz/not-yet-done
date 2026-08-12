@@ -8,12 +8,13 @@
 //! [`LocalContext`](not_yet_done_task_core::local_context::LocalContext), and
 //! `"+1h"` / `"-30min"` into a [`chrono::Duration`].
 //!
-//! This mirrors the CLI's `datetime.rs` / `offset.rs` (same chrono-english →
-//! dateparser fallback, same offset grammar) so both frontends accept exactly
-//! the same inputs now that `track split`/`track move` are adapter actions
-//! rather than hardcoded CLI commands.
+//! The parsing grammar itself lives in the shared, app-agnostic [`natural_date`]
+//! crate (period boundaries, `in X`, part-of-day, abbreviations, chrono-english,
+//! dateparser fallback, the signed-offset grammar); this module only keeps the
+//! app-specific wrapper (`original` for `Granularity`, the local UTC offset for
+//! day-boundary math, the `LocalContext` conversion).
 
-use chrono::{DateTime, FixedOffset, Local, NaiveTime, Utc};
+use chrono::{DateTime, FixedOffset, Local, Utc};
 use not_yet_done_task_core::local_context::LocalContext;
 
 /// A parsed datetime, always stored as UTC internally.
@@ -50,33 +51,17 @@ impl std::str::FromStr for LocalDateTime {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let timezone = Self::current_offset();
-
-        // 1. chrono-english: relative expressions (yesterday, next friday 8pm,
-        //    today 9am, …)
-        if let Ok(dt) =
-            chrono_english::parse_date_string(s, Local::now(), chrono_english::Dialect::Us)
-        {
-            return Ok(LocalDateTime {
-                utc: dt.with_timezone(&Utc),
-                timezone,
-                original: s.to_string(),
-            });
-        }
-
-        // 2. dateparser fallback: broad absolute formats (RFC3339, unix
-        //    timestamps, "2026-03-22 09:15", "6:15pm", …). Local default
-        //    timezone, midnight as default time for date-only strings.
-        dateparser::parse_with(s, &Local, NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+        natural_date::resolve_datetime(s, Local::now())
             .map(|utc| LocalDateTime {
                 utc,
                 timezone,
                 original: s.to_string(),
             })
-            .map_err(|_| {
+            .ok_or_else(|| {
                 format!(
                     "Cannot parse '{}' as a date/time. \
                      Accepted formats include: '2026-03-22', '2026-03-22 09:15', \
-                     'yesterday', 'today 9am', 'next friday 8pm'",
+                     'yesterday', 'today 9am', 'next friday 8pm', 'in 2 hours', 'eod'",
                     s
                 )
             })
@@ -94,42 +79,15 @@ impl std::str::FromStr for LocalOffset {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use chrono::Duration;
-
-        let s = s.trim();
-
-        let (sign, rest) = if let Some(r) = s.strip_prefix('+') {
-            (1i64, r)
-        } else if let Some(r) = s.strip_prefix('-') {
-            (-1i64, r)
-        } else {
-            return Err(format!(
-                "Invalid offset '{}': must start with '+' or '-' (e.g. +1h, -30min, +2days)",
-                s
-            ));
-        };
-
-        let split = rest
-            .find(|c: char| c.is_alphabetic())
-            .ok_or_else(|| format!("Invalid offset '{}': missing unit", s))?;
-        let (num_str, unit) = rest.split_at(split);
-
-        let num: i64 = num_str
-            .parse()
-            .map_err(|_| format!("Invalid offset '{}': '{}' is not a number", s, num_str))?;
-
-        let duration = match unit.to_lowercase().as_str() {
-            "s" | "sec" | "secs" | "second" | "seconds" => Duration::seconds(sign * num),
-            "m" | "min" | "mins" | "minute" | "minutes" => Duration::minutes(sign * num),
-            "h" | "hr" | "hrs" | "hour" | "hours" => Duration::hours(sign * num),
-            "d" | "day" | "days" => Duration::days(sign * num),
-            "w" | "week" | "weeks" => Duration::weeks(sign * num),
-            other => {
-                return Err(format!("Unknown time unit '{}'. Use: s, min, h, d, w", other));
-            }
-        };
-
-        Ok(LocalOffset { duration })
+        natural_date::resolve_offset(s)
+            .map(|duration| LocalOffset { duration })
+            .ok_or_else(|| {
+                format!(
+                    "Invalid offset '{}': must start with '+' or '-' and a unit \
+                     (e.g. +1h, -30min, +2days)",
+                    s.trim()
+                )
+            })
     }
 }
 

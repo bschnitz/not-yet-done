@@ -21,6 +21,10 @@ name = "select_list_demo"
 path = "examples/select_list_demo.rs"
 
 [[example]]
+name = "event_form"
+path = "examples/event_form.rs"
+
+[[example]]
 name = "column_ordering"
 path = "examples/column_ordering.rs"
 
@@ -28,6 +32,10 @@ path = "examples/column_ordering.rs"
 name = "file_picker_demo"
 path = "examples/file_picker_demo.rs"
 required-features = []
+
+[[example]]
+name = "leader_list_demo"
+path = "examples/leader_list_demo.rs"
 
 [dev-dependencies]
 arboard = { workspace = true }
@@ -42,3 +50,13 @@ tempfile = "3.27.0"
 fuzzy-matcher = { workspace = true }
 globset = { workspace = true }
 ignore = { workspace = true }
+# Live natural-language date/time preview for `FormFieldKind::DateTime`. Optional
+# so the date field is a plain text field without it; the feature only adds the
+# resolved-preview line. `chrono` is pulled in alongside for `now`.
+natural-date = { path = "../natural-date", optional = true }
+chrono = { workspace = true, optional = true }
+
+[features]
+default = ["natural-date"]
+# Enables the resolved-instant preview line under a `FormFieldKind::DateTime`.
+natural-date = ["dep:natural-date", "dep:chrono"]

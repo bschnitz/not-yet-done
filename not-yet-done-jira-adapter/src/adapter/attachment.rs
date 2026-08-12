@@ -38,7 +38,11 @@ pub(super) struct JiraAttachmentNode {
 }
 
 impl JiraAttachmentNode {
-    pub(super) fn new(client: Arc<JiraClient>, attachment: JiraAttachment, issue_key: String) -> Self {
+    pub(super) fn new(
+        client: Arc<JiraClient>,
+        attachment: JiraAttachment,
+        issue_key: String,
+    ) -> Self {
         let cached_metadata = Metadata {
             fields: vec![
                 MetadataField {
@@ -103,13 +107,9 @@ impl JiraAttachmentNode {
         let mut dir = std::env::temp_dir();
         dir.push("not_yet_done");
         dir.push("jira_attachments");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| other_err(format!("create temp dir: {e}")))?;
+        std::fs::create_dir_all(&dir).map_err(|e| other_err(format!("create temp dir: {e}")))?;
 
-        let safe_name = self
-            .attachment
-            .filename
-            .replace(['/', '\\'], "_");
+        let safe_name = self.attachment.filename.replace(['/', '\\'], "_");
         let mut path = dir;
         path.push(format!("{}-{}", self.attachment.id, safe_name));
 
@@ -159,10 +159,15 @@ impl JiraAttachmentNode {
             });
         }
 
-        let (saved, total, failures) =
-            write_attachments(&self.client, &attachments, &dir).await;
+        let (saved, total, failures) = write_attachments(&self.client, &attachments, &dir).await;
         Ok(ActionOutcome::Done {
-            message: Some(download_summary(&self.issue_key, &dir, saved, total, &failures)),
+            message: Some(download_summary(
+                &self.issue_key,
+                &dir,
+                saved,
+                total,
+                &failures,
+            )),
         })
     }
 }
@@ -239,20 +244,6 @@ impl Node for JiraAttachmentNode {
         &self.cached_metadata
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![]
-    }
-
-    async fn list(&self, _params: ListParams) -> Result<ListResult> {
-        Ok(ListResult {
-            items: vec![],
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         Err(ContentError::NotFound(format!("No child: {id}")))
     }
@@ -260,11 +251,6 @@ impl Node for JiraAttachmentNode {
     fn content(&self) -> Option<&dyn Content> {
         None
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        attachment_actions()
-    }
-
     /// `delete` opts into the frontend's generic delete plumbing: returning
     /// [`ActionDispatch::DeleteSelf`] makes the TUI show a `(y/n)` prompt and,
     /// on confirm, call `execute("delete", None)` here — which performs the
@@ -282,11 +268,7 @@ impl Node for JiraAttachmentNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_via_xdg().await,
             ("download_all", ActionInput::Form(values)) => {
@@ -314,9 +296,7 @@ mod tests {
     use super::*;
 
     fn test_client() -> Arc<JiraClient> {
-        Arc::new(
-            JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap(),
-        )
+        Arc::new(JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap())
     }
 
     fn sample_attachment() -> JiraAttachment {
@@ -349,10 +329,11 @@ mod tests {
         assert_eq!(meta.fields[5].value, "PROJ-42");
     }
 
-    #[test]
-    fn attachment_node_has_no_children() {
+    #[tokio::test]
+    async fn attachment_node_has_no_children() {
+        let adapter = crate::adapter::test_adapter().await;
         let node = JiraAttachmentNode::new(test_client(), sample_attachment(), "PROJ-42".into());
-        assert!(node.children_types().is_empty());
+        assert!(not_yet_done_content::children::child_types(&adapter, &node).is_empty());
     }
 
     #[test]
@@ -363,8 +344,7 @@ mod tests {
 
     #[test]
     fn attachment_node_exposes_open_download_all_and_delete_actions() {
-        let node = JiraAttachmentNode::new(test_client(), sample_attachment(), "PROJ-42".into());
-        let actions = node.actions();
+        let actions = attachment_actions();
         let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["open", "download_all", "delete"]);
         assert!(matches!(actions[0].input, InputSpec::None));

@@ -19,14 +19,14 @@ use not_yet_done_ratatui::widgets::{
     multi_choice::{
         MultiChoice, MultiChoiceEvent, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType,
     },
-    text_input::{TextInput, TextInputEvent, TextInputStyle, TextInputStyleType, ATTR_ERROR},
+    text_input::{ATTR_ERROR, TextInput, TextInputEvent, TextInputStyle, TextInputStyleType},
 };
 use ratatui::{
+    DefaultTerminal, Frame,
     layout::{Constraint, Direction as LayoutDir, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
-    DefaultTerminal, Frame,
 };
 use tuirealm::{
     application::{Application, PollStrategy},
@@ -243,7 +243,9 @@ impl AppComponent<Msg, NoUserEvent> for PlaylistNameComp {
 // --- Builder functions ---
 
 fn make_genres() -> MultiChoiceWrapper {
-    fn changed() -> Msg { Msg::GenresChanged }
+    fn changed() -> Msg {
+        Msg::GenresChanged
+    }
     MultiChoiceWrapper {
         component: MultiChoice::default()
             .with_title("Genres")
@@ -258,7 +260,9 @@ fn make_genres() -> MultiChoiceWrapper {
 }
 
 fn make_mood() -> MultiChoiceWrapper {
-    fn changed() -> Msg { Msg::MoodChanged }
+    fn changed() -> Msg {
+        Msg::MoodChanged
+    }
     MultiChoiceWrapper {
         component: MultiChoice::default()
             .with_title("Mood")
@@ -306,12 +310,18 @@ impl Model {
     }
 
     fn focus_next(&self) -> Id {
-        let idx = FOCUS_ORDER.iter().position(|id| *id == self.active).unwrap_or(0);
+        let idx = FOCUS_ORDER
+            .iter()
+            .position(|id| *id == self.active)
+            .unwrap_or(0);
         FOCUS_ORDER[(idx + 1) % FOCUS_ORDER.len()].clone()
     }
 
     fn focus_prev(&self) -> Id {
-        let idx = FOCUS_ORDER.iter().position(|id| *id == self.active).unwrap_or(0);
+        let idx = FOCUS_ORDER
+            .iter()
+            .position(|id| *id == self.active)
+            .unwrap_or(0);
         FOCUS_ORDER[(idx + FOCUS_ORDER.len() - 1) % FOCUS_ORDER.len()].clone()
     }
 
@@ -322,7 +332,11 @@ impl Model {
 
     fn is_valid(&self) -> bool {
         let mc_selected = |id: &Id| {
-            if let Ok(State::Vec(v)) = self.app.state(id) { !v.is_empty() } else { false }
+            if let Ok(State::Vec(v)) = self.app.state(id) {
+                !v.is_empty()
+            } else {
+                false
+            }
         };
         let text_non_empty = |id: &Id| {
             if let Ok(State::Single(StateValue::String(s))) = self.app.state(id) {
@@ -331,9 +345,7 @@ impl Model {
                 false
             }
         };
-        mc_selected(&Id::Genres)
-            && mc_selected(&Id::Mood)
-            && text_non_empty(&Id::PlaylistName)
+        mc_selected(&Id::Genres) && mc_selected(&Id::Mood) && text_non_empty(&Id::PlaylistName)
     }
 
     fn validate(&mut self) -> bool {
@@ -370,7 +382,13 @@ impl Model {
             if let Ok(State::Vec(values)) = self.app.state(id) {
                 values
                     .into_iter()
-                    .filter_map(|v| if let StateValue::Usize(i) = v { Some(i) } else { None })
+                    .filter_map(|v| {
+                        if let StateValue::Usize(i) = v {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
                     .collect()
             } else {
                 vec![]
@@ -415,12 +433,7 @@ impl Model {
         let panel_h = 18u16;
         let px = area.x + area.width.saturating_sub(panel_w) / 2;
         let py = area.y + area.height.saturating_sub(panel_h) / 2;
-        let panel = Rect::new(
-            px,
-            py,
-            panel_w.min(area.width),
-            panel_h.min(area.height),
-        );
+        let panel = Rect::new(px, py, panel_w.min(area.width), panel_h.min(area.height));
         frame.render_widget(Block::default().style(Style::default().bg(PANEL_BG)), panel);
 
         let inner = Rect::new(
@@ -451,10 +464,7 @@ impl Model {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("♪ ", Style::default().fg(ACTIVE_ACCENT)),
-                Span::styled(
-                    "Playlist Builder",
-                    Style::default().fg(ACCENT).bold(),
-                ),
+                Span::styled("Playlist Builder", Style::default().fg(ACCENT).bold()),
             ])),
             chunks[0],
         );
@@ -487,10 +497,7 @@ impl Model {
                 Style::default().fg(Color::Gray).bg(Color::DarkGray),
             )
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![submit_span])),
-            chunks[8],
-        );
+        frame.render_widget(Paragraph::new(Line::from(vec![submit_span])), chunks[8]);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -581,8 +588,7 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
     execute!(std::io::stdout(), SetCursorStyle::BlinkingBar)?;
 
     let mut app: App = Application::init(
-        EventListenerCfg::default()
-            .crossterm_input_listener(Duration::from_millis(20), 3),
+        EventListenerCfg::default().crossterm_input_listener(Duration::from_millis(20), 3),
     );
 
     app.mount(Id::Genres, Box::new(make_genres()), vec![])
@@ -592,7 +598,8 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
     app.mount(Id::PlaylistName, Box::new(make_playlist_name()), vec![])
         .expect("failed to mount PlaylistName");
 
-    app.active(&Id::Genres).expect("failed to set initial focus");
+    app.active(&Id::Genres)
+        .expect("failed to set initial focus");
 
     let mut model = Model::new(app);
 
@@ -602,7 +609,10 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
             model.redraw = false;
         }
 
-        if let Ok(msgs) = model.app.tick(PollStrategy::Once(Duration::from_millis(20))) {
+        if let Ok(msgs) = model
+            .app
+            .tick(PollStrategy::Once(Duration::from_millis(20)))
+        {
             if !msgs.is_empty() {
                 model.redraw = true;
                 for msg in msgs {

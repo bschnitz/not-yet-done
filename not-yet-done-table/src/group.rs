@@ -93,7 +93,10 @@ pub fn group(keys: &[String], values: &[&[Option<i64>]], footer: bool) -> GroupP
             }
         }
         group_totals.push(totals);
-        rows.push(PlanRow::Header { label: (*label).to_string(), group: g });
+        rows.push(PlanRow::Header {
+            label: (*label).to_string(),
+            group: g,
+        });
         for &item in &members[g] {
             rows.push(PlanRow::Item { index: item });
         }
@@ -111,7 +114,11 @@ pub fn group(keys: &[String], values: &[&[Option<i64>]], footer: bool) -> GroupP
         rows.push(PlanRow::GrandTotal);
     }
 
-    GroupPlan { rows, group_totals, grand_totals }
+    GroupPlan {
+        rows,
+        group_totals,
+        grand_totals,
+    }
 }
 
 #[cfg(test)]
@@ -138,7 +145,10 @@ mod tests {
         assert_eq!(
             plan.rows,
             vec![
-                PlanRow::Header { label: "A".into(), group: 0 },
+                PlanRow::Header {
+                    label: "A".into(),
+                    group: 0
+                },
                 PlanRow::Item { index: 0 },
                 PlanRow::Item { index: 1 },
                 PlanRow::Item { index: 2 },
@@ -158,10 +168,16 @@ mod tests {
         assert_eq!(
             plan.rows,
             vec![
-                PlanRow::Header { label: "B".into(), group: 0 },
+                PlanRow::Header {
+                    label: "B".into(),
+                    group: 0
+                },
                 PlanRow::Item { index: 0 },
                 PlanRow::Item { index: 2 },
-                PlanRow::Header { label: "A".into(), group: 1 },
+                PlanRow::Header {
+                    label: "A".into(),
+                    group: 1
+                },
                 PlanRow::Item { index: 1 },
                 PlanRow::Item { index: 3 },
             ]
@@ -206,14 +222,23 @@ mod tests {
         assert_eq!(
             plan.rows,
             vec![
-                PlanRow::Header { label: "A".into(), group: 0 },
+                PlanRow::Header {
+                    label: "A".into(),
+                    group: 0
+                },
                 PlanRow::Item { index: 0 },
                 PlanRow::Item { index: 2 },
-                PlanRow::Header { label: "B".into(), group: 1 },
+                PlanRow::Header {
+                    label: "B".into(),
+                    group: 1
+                },
                 PlanRow::Item { index: 1 },
             ]
         );
-        assert_eq!(plan.group_totals, vec![Vec::<i64>::new(), Vec::<i64>::new()]);
+        assert_eq!(
+            plan.group_totals,
+            vec![Vec::<i64>::new(), Vec::<i64>::new()]
+        );
         assert!(plan.grand_totals.is_empty());
     }
 

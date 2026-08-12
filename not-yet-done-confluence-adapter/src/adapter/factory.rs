@@ -12,10 +12,12 @@ use std::sync::{Arc, Mutex};
 
 use sea_orm::DatabaseConnection;
 
-use not_yet_done_content::{AdapterFactory, ContentAdapter, ContentError, Result};
+use not_yet_done_content::{
+    ContentAdapter, ContentError, MechanismSpec, Result, TypedAdapterFactory,
+};
 
 use super::ConfluenceAdapter;
-use super::auth_bridge::AuthBridge;
+use super::auth_bridge::{AuthBridge, MECHANISMS};
 use crate::auth_session_store::SqlAuthSessionStore;
 use crate::cache_store::scope_id_for_url;
 use crate::config::ConfluenceConfig;
@@ -39,10 +41,7 @@ impl ConfluenceAdapterFactory {
     /// Bridges async `Database::connect` into the sync
     /// `AdapterFactory::create` path via `block_in_place`; requires a
     /// multi-threaded Tokio runtime.
-    fn connection_for(
-        &self,
-        db_url: &str,
-    ) -> std::result::Result<Arc<DatabaseConnection>, String> {
+    fn connection_for(&self, db_url: &str) -> std::result::Result<Arc<DatabaseConnection>, String> {
         if let Some(existing) = self.connections.lock().unwrap().get(db_url).cloned() {
             return Ok(existing);
         }
@@ -68,23 +67,26 @@ impl ConfluenceAdapterFactory {
     }
 }
 
-impl AdapterFactory for ConfluenceAdapterFactory {
+impl TypedAdapterFactory for ConfluenceAdapterFactory {
+    type Config = ConfluenceConfig;
+
     fn adapter_type(&self) -> &str {
         "confluence"
     }
 
-    fn create(
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        MECHANISMS
+    }
+
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: ConfluenceConfig,
         _ctx: &not_yet_done_content::HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let cfg: ConfluenceConfig = serde_yaml::from_str(config)
-            .map_err(|e| ContentError::Other(format!("Invalid Confluence config: {e}").into()))?;
-
-        cfg.auth
-            .validate()
-            .map_err(|e| ContentError::Other(format!("Invalid Confluence auth spec: {e}").into()))?;
+        cfg.auth.validate_against(MECHANISMS).map_err(|e| {
+            ContentError::Other(format!("Invalid Confluence auth spec: {e}").into())
+        })?;
 
         let db_url = match &cfg.db {
             Some(c) => c.url.clone(),

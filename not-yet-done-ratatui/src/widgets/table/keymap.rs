@@ -20,7 +20,7 @@ pub struct TableKeymap {
 impl Default for TableKeymap {
     fn default() -> Self {
         Self {
-            move_up:  Keys::plain(Key::Up),
+            move_up: Keys::plain(Key::Up),
             move_down: Keys::plain(Key::Down),
             half_page_up: Keys::ctrl(Key::Char('u')),
             half_page_down: Keys::ctrl(Key::Char('d')),
@@ -28,8 +28,8 @@ impl Default for TableKeymap {
             page_down: Keys::ctrl(Key::Char('f')),
             move_first: Keys::plain(Key::Home),
             move_last: Keys::plain(Key::End),
-            confirm:  Keys::plain(Key::Enter),
-            cancel:   Keys::plain(Key::Esc),
+            confirm: Keys::plain(Key::Enter),
+            cancel: Keys::plain(Key::Esc),
         }
     }
 }

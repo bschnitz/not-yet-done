@@ -7,9 +7,12 @@
 //! - [`CellContent`], [`CellAlignment`], [`StyledSpan`] — cell data with alignment and styles
 //! - [`Row`], [`ComputedRow`] — input and output row types
 //! - [`compute_table`] — layout computation (column widths, cell fitting, alignment)
+//! - [`CardSpec`], [`compute_cards`] — card layout (one row = one bordered card,
+//!   fields in a grid of `columns` per line)
 //! - [`fit_to_width`], [`fit_aligned`] — unicode-aware text truncation/padding
 //! - [`RenderTarget`], [`CharBuf`] — abstraction for character-based rendering and testing
 
+pub mod card;
 pub mod cell;
 pub mod column;
 pub mod group;
@@ -18,13 +21,20 @@ pub mod layout;
 pub mod row;
 pub mod target;
 
-pub use cell::{CellAlignment, CellContent, StyledSpan, fit_to_width, fit_aligned, fit_to_width_with_highlights, fit_aligned_with_highlights};
-pub use column::{ColSizer, ColStrategy, ColumnId, FixedColSizer, MixedColSizer};
-pub use layout::{
-    ComputedMultiTable, ComputedTable, LineTemplate, RowTemplate, TableConfig, compute_multiline_table,
-    compute_table,
+pub use card::{
+    CardBorder, CardField, CardLabels, CardSpan, CardSpanKind, CardSpec, ComputedCard,
+    ComputedCardLine, ComputedCards, compute_cards,
 };
-pub use row::{ComputedLine, ComputedMultiRow, ComputedRow, Row};
+pub use cell::{
+    CellAlignment, CellContent, StyledSpan, fit_aligned, fit_aligned_with_highlights, fit_to_width,
+    fit_to_width_with_highlights,
+};
+pub use column::{ColSizer, ColStrategy, ColumnId, FixedColSizer, MixedColSizer};
 pub use group::{GroupPlan, PlanRow, group};
 pub use grouping::GroupedCell;
+pub use layout::{
+    ComputedMultiTable, ComputedTable, LineTemplate, RowTemplate, TableConfig,
+    compute_multiline_table, compute_table,
+};
+pub use row::{ComputedLine, ComputedMultiRow, ComputedRow, Row};
 pub use target::{CharBuf, RenderTarget, render_to_target};

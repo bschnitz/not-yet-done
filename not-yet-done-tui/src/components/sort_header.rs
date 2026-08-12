@@ -81,11 +81,7 @@ pub fn header_text(
 /// already-laid-out text (post-sizing) and overlay state. The fitted
 /// text may differ from `header_text(original, ...)` due to padding /
 /// truncation by the layout engine.
-pub fn header_cell(
-    fitted: &str,
-    column_key: &str,
-    overlay: &HeaderOverlay,
-) -> TableWidgetCell {
+pub fn header_cell(fitted: &str, column_key: &str, overlay: &HeaderOverlay) -> TableWidgetCell {
     match overlay {
         HeaderOverlay::None => TableWidgetCell::plain(fitted.to_string()),
         HeaderOverlay::PickColumn { labels, input_len } => match labels.get(column_key) {
@@ -153,7 +149,12 @@ pub fn render_direction_picker_overlay(
         return;
     }
     let width = table_area.right().saturating_sub(x);
-    let overlay_area = Rect { x, y: table_area.y, width, height: 1 };
+    let overlay_area = Rect {
+        x,
+        y: table_area.y,
+        width,
+        height: 1,
+    };
     let line = Line::from(Span::styled(DIRECTION_PICKER_LABEL.to_string(), style));
     frame.render_widget(Paragraph::new(line), overlay_area);
 }
@@ -197,21 +198,33 @@ mod tests {
     use super::*;
 
     fn applied(col: &str, dir: SortDirection) -> Vec<SortKey> {
-        vec![SortKey { column: col.into(), direction: dir }]
+        vec![SortKey {
+            column: col.into(),
+            direction: dir,
+        }]
     }
 
     #[test]
     fn sort_arrow_appends_for_sorted_column() {
         let a = applied("modified", SortDirection::Desc);
-        assert_eq!(header_text("Modified", "modified", &a, &HeaderOverlay::None), "Modified ▼");
-        assert_eq!(header_text("Status", "status", &a, &HeaderOverlay::None), "Status");
+        assert_eq!(
+            header_text("Modified", "modified", &a, &HeaderOverlay::None),
+            "Modified ▼"
+        );
+        assert_eq!(
+            header_text("Status", "status", &a, &HeaderOverlay::None),
+            "Status"
+        );
     }
 
     #[test]
     fn pick_column_weaves_label_into_header() {
         let mut labels = HashMap::new();
         labels.insert("status".to_string(), "a".to_string());
-        let overlay = HeaderOverlay::PickColumn { labels, input_len: 0 };
+        let overlay = HeaderOverlay::PickColumn {
+            labels,
+            input_len: 0,
+        };
         assert_eq!(header_text("Status", "status", &[], &overlay), "atatus");
         assert_eq!(header_text("Pri", "priority", &[], &overlay), "Pri");
     }
@@ -224,7 +237,10 @@ mod tests {
         let a = applied("status", SortDirection::Asc);
         let mut labels = HashMap::new();
         labels.insert("status".to_string(), "a".to_string());
-        let overlay = HeaderOverlay::PickColumn { labels, input_len: 0 };
+        let overlay = HeaderOverlay::PickColumn {
+            labels,
+            input_len: 0,
+        };
         assert_eq!(header_text("Status", "status", &a, &overlay), "atatus ▲");
     }
 
@@ -232,7 +248,10 @@ mod tests {
     fn pick_column_short_header_keeps_label() {
         let mut labels = HashMap::new();
         labels.insert("notes".to_string(), "a".to_string());
-        let overlay = HeaderOverlay::PickColumn { labels, input_len: 0 };
+        let overlay = HeaderOverlay::PickColumn {
+            labels,
+            input_len: 0,
+        };
         assert_eq!(header_text("N", "notes", &[], &overlay), "a");
     }
 
@@ -240,7 +259,9 @@ mod tests {
     fn pick_direction_keeps_original_header() {
         // Picker is drawn as overlay; the underlying header text must
         // stay at original width to not push other columns.
-        let overlay = HeaderOverlay::PickDirection { column_key: "status".to_string() };
+        let overlay = HeaderOverlay::PickDirection {
+            column_key: "status".to_string(),
+        };
         assert_eq!(header_text("Status", "status", &[], &overlay), "Status");
         assert_eq!(header_text("Pri", "priority", &[], &overlay), "Pri");
     }
@@ -248,7 +269,9 @@ mod tests {
     #[test]
     fn pick_direction_keeps_arrow_under_overlay() {
         let a = applied("status", SortDirection::Desc);
-        let overlay = HeaderOverlay::PickDirection { column_key: "status".to_string() };
+        let overlay = HeaderOverlay::PickDirection {
+            column_key: "status".to_string(),
+        };
         assert_eq!(header_text("Status", "status", &a, &overlay), "Status ▼");
     }
 
@@ -256,9 +279,15 @@ mod tests {
     fn header_cell_dims_non_candidates_in_pick_column() {
         let mut labels = HashMap::new();
         labels.insert("status".to_string(), "a".to_string());
-        let overlay = HeaderOverlay::PickColumn { labels, input_len: 0 };
+        let overlay = HeaderOverlay::PickColumn {
+            labels,
+            input_len: 0,
+        };
         let candidate = header_cell("atatus", "status", &overlay);
-        assert!(candidate.style_id.is_none(), "candidate should not be dimmed");
+        assert!(
+            candidate.style_id.is_none(),
+            "candidate should not be dimmed"
+        );
         assert_eq!(candidate.highlights, vec![0..1]);
         let non_candidate = header_cell("Pri", "priority", &overlay);
         assert_eq!(non_candidate.style_id, Some(DIM_STYLE_ID));
@@ -266,12 +295,17 @@ mod tests {
 
     #[test]
     fn header_cell_dims_other_columns_in_pick_direction() {
-        let overlay = HeaderOverlay::PickDirection { column_key: "status".to_string() };
+        let overlay = HeaderOverlay::PickDirection {
+            column_key: "status".to_string(),
+        };
         // Chosen column: cell is plain (no dim, no special highlights);
         // the picker is drawn on top by render_direction_picker_overlay.
         let chosen = header_cell("Status", "status", &overlay);
         assert!(chosen.style_id.is_none());
         assert_eq!(chosen.highlights, Vec::<std::ops::Range<usize>>::new());
-        assert_eq!(header_cell("Pri", "priority", &overlay).style_id, Some(DIM_STYLE_ID));
+        assert_eq!(
+            header_cell("Pri", "priority", &overlay).style_id,
+            Some(DIM_STYLE_ID)
+        );
     }
 }

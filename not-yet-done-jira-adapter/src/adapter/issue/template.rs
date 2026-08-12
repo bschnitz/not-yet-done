@@ -8,16 +8,14 @@ use not_yet_done_content::*;
 
 use crate::client::JiraIssueDetail;
 
-use super::super::util::normalize_blank_lines;
 use super::JiraIssueNode;
 use super::markers::{
-    BODY_MARKER, CACHE_MARKER, CONFLICT_BANNER_END, CONFLICT_BANNER_START,
-    CONFLICT_MARK_MIDDLE, EDITABLE_MARKER, ERROR_BANNER_END, ERROR_BANNER_START,
-    FOREIGN_BANNER_END, FOREIGN_BANNER_START,
+    BODY_MARKER, CACHE_MARKER, CONFLICT_BANNER_END, CONFLICT_BANNER_START, CONFLICT_MARK_MIDDLE,
+    EDITABLE_MARKER, ERROR_BANNER_END, ERROR_BANNER_START, FOREIGN_BANNER_END,
+    FOREIGN_BANNER_START,
 };
-use super::slugs::{
-    SlugTables, build_slug_tables, editable_value_with_slugs, resolved_to_slug,
-};
+use super::slugs::{SlugTables, build_slug_tables, editable_value_with_slugs, resolved_to_slug};
+use super::wiki_md::normalize_ws;
 
 /// Field-level error produced by [`JiraIssueNode::parse_3b`] /
 /// [`JiraIssueNode::validate_3b`]. Rendered as a `# • <message>` bullet
@@ -43,23 +41,38 @@ pub(super) struct Parsed3b {
 pub(super) struct ChangeSet {
     pub(super) metadata_changes: Vec<(String, String)>,
     pub(super) content: Option<Vec<u8>>,
+    /// Resolved target status *name* when the editable `status` field changed.
+    /// Kept apart from `metadata_changes` because a status change is not a
+    /// plain field PUT — it routes to a workflow transition
+    /// ([`JiraIssueNode::apply_status_transition`]).
+    pub(super) status_change: Option<String>,
 }
 
 /// Editable fields for the `edit_full` action on a Jira issue. Hard-coded
-/// rather than YAML-driven — the adapter owns the action's shape.
+/// rather than YAML-driven — the adapter owns the action's shape. `status`
+/// looks like an ordinary field on the editor surface but is resolved to a
+/// workflow transition on save (see [`ChangeSet::status_change`]).
 pub(super) fn edit_full_fields() -> Vec<String> {
-    vec!["summary".into(), "labels".into(), "assignee".into()]
+    vec![
+        "summary".into(),
+        "status".into(),
+        "labels".into(),
+        "assignee".into(),
+    ]
 }
 
 /// Return the metadata value for `key` directly from `JiraIssueDetail`,
 /// for keys we know about. Empty string for unknown keys.
 pub(super) fn field_value_from_detail(d: &JiraIssueDetail, key: &str) -> String {
     match key {
-        "summary"  => d.summary.clone(),
+        "summary" => d.summary.clone(),
         "assignee" => d.assignee.clone(),
+        "creator" => d.creator.clone(),
+        "fix_versions" => d.fix_versions.clone(),
+        "reporter" => d.reporter.clone(),
         "priority" => d.priority.clone(),
-        "status"   => d.status.clone(),
-        "type"     => d.issue_type.clone(),
+        "status" => d.status.clone(),
+        "type" => d.issue_type.clone(),
         "key" | "number" => d.key.clone(),
         _ => String::new(),
     }
@@ -115,7 +128,7 @@ pub(super) fn strip_template_comments(text: &str) -> String {
 /// Render the trailing CACHE section. Empty string when both tables are
 /// empty (no available slugs to advertise).
 pub(super) fn render_cache_section(tables: &SlugTables) -> String {
-    if tables.labels.is_empty() && tables.users.is_empty() {
+    if tables.labels.is_empty() && tables.users.is_empty() && tables.statuses.is_empty() {
         return String::new();
     }
     let mut out = String::new();
@@ -132,7 +145,36 @@ pub(super) fn render_cache_section(tables: &SlugTables) -> String {
         out.push_str(&tables.users.slugs().join(", "));
         out.push('\n');
     }
+    if !tables.statuses.is_empty() {
+        out.push_str("# statuses: ");
+        out.push_str(&tables.statuses.slugs().join(", "));
+        out.push('\n');
+    }
     out
+}
+
+/// Append the read-only metadata block that sits below the `---` marker:
+/// every standard field that the caller did *not* place in the editable
+/// section above it. Single source for both render paths, so the two can't
+/// drift apart on which fields a ticket buffer shows.
+fn push_readonly_section(out: &mut String, detail: &JiraIssueDetail, editable_set: &HashSet<&str>) {
+    for (label, value) in [
+        ("number", detail.key.as_str()),
+        ("type", detail.issue_type.as_str()),
+        ("status", detail.status.as_str()),
+        ("priority", detail.priority.as_str()),
+        ("assignee", detail.assignee.as_str()),
+        ("creator", detail.creator.as_str()),
+        ("fix_versions", detail.fix_versions.as_str()),
+    ] {
+        // `number` doesn't exist as an editable key so always show it;
+        // others suppress when the caller put them above the marker.
+        let editable_key = if label == "number" { "key" } else { label };
+        if editable_set.contains(editable_key) || editable_set.contains(label) {
+            continue;
+        }
+        out.push_str(&format!("{label}: {value}\n"));
+    }
 }
 
 /// Build a 3b buffer from a `Parsed3b` + the read-only fields of `detail`.
@@ -156,21 +198,8 @@ pub(super) fn render_3b_from_parsed(
     }
     out.push_str(EDITABLE_MARKER);
     out.push('\n');
-    let editable_set: HashSet<&str> =
-        editable_fields.iter().map(String::as_str).collect();
-    for (label, value) in [
-        ("number",   detail.key.as_str()),
-        ("type",     detail.issue_type.as_str()),
-        ("status",   detail.status.as_str()),
-        ("priority", detail.priority.as_str()),
-        ("assignee", detail.assignee.as_str()),
-    ] {
-        let editable_key = if label == "number" { "key" } else { label };
-        if editable_set.contains(editable_key) || editable_set.contains(label) {
-            continue;
-        }
-        out.push_str(&format!("{label}: {value}\n"));
-    }
+    let editable_set: HashSet<&str> = editable_fields.iter().map(String::as_str).collect();
+    push_readonly_section(&mut out, detail, &editable_set);
     out.push_str(BODY_MARKER);
     out.push_str("\n\n");
     out.push_str(&parsed.body);
@@ -187,10 +216,7 @@ pub(super) fn metadata_changes_to_fields(
     for (key, value) in changes {
         match key.as_str() {
             "summary" => {
-                fields.insert(
-                    "summary".into(),
-                    serde_json::Value::String(value.clone()),
-                );
+                fields.insert("summary".into(), serde_json::Value::String(value.clone()));
             }
             "labels" => {
                 let arr: Vec<serde_json::Value> = value
@@ -232,12 +258,27 @@ impl JiraIssueNode {
         detail: &JiraIssueDetail,
         editable_overrides: Option<&HashMap<String, String>>,
         body_override: Option<&str>,
+        tables: &SlugTables,
     ) -> String {
-        self.render_3b_full(editable_fields, detail, editable_overrides, body_override, true)
+        self.render_3b_full(
+            editable_fields,
+            detail,
+            editable_overrides,
+            body_override,
+            true,
+            tables,
+        )
     }
 
     /// Variant that lets the caller suppress the trailing CACHE section,
     /// so `render_with_comments` can place it after the comment list.
+    ///
+    /// `tables` is threaded in (rather than built here) because the status
+    /// slug table needs the async live-transitions + workflow-edge lookup,
+    /// which a sync render method can't perform. Sync callers pass
+    /// [`build_slug_tables`] (empty status table → status renders as its plain
+    /// name and round-trips unchanged); async callers pass
+    /// [`JiraIssueNode::slug_tables`].
     pub(super) fn render_3b_full(
         &self,
         editable_fields: &[String],
@@ -245,39 +286,22 @@ impl JiraIssueNode {
         editable_overrides: Option<&HashMap<String, String>>,
         body_override: Option<&str>,
         append_cache: bool,
+        tables: &SlugTables,
     ) -> String {
-        let tables = build_slug_tables(&self.cache);
         let mut out = String::new();
 
         for key in editable_fields {
             let value = editable_overrides
                 .and_then(|o| o.get(key).cloned())
-                .unwrap_or_else(|| editable_value_with_slugs(detail, key, &tables));
+                .unwrap_or_else(|| editable_value_with_slugs(detail, key, tables));
             out.push_str(&format!("{key}: {value}\n"));
         }
 
         out.push_str(EDITABLE_MARKER);
         out.push('\n');
 
-        // Read-only section: every standard metadata field that isn't
-        // already in the editable section.
-        let editable_set: HashSet<&str> =
-            editable_fields.iter().map(String::as_str).collect();
-        for (label, value) in [
-            ("number",   detail.key.as_str()),
-            ("type",     detail.issue_type.as_str()),
-            ("status",   detail.status.as_str()),
-            ("priority", detail.priority.as_str()),
-            ("assignee", detail.assignee.as_str()),
-        ] {
-            // `number` doesn't exist as an editable key so always show it;
-            // others suppress when caller put them above the marker.
-            let editable_key = if label == "number" { "key" } else { label };
-            if editable_set.contains(editable_key) || editable_set.contains(label) {
-                continue;
-            }
-            out.push_str(&format!("{label}: {value}\n"));
-        }
+        let editable_set: HashSet<&str> = editable_fields.iter().map(String::as_str).collect();
+        push_readonly_section(&mut out, detail, &editable_set);
 
         out.push_str(BODY_MARKER);
         out.push_str("\n\n");
@@ -300,7 +324,11 @@ impl JiraIssueNode {
         let text = strip_banner(text);
 
         #[derive(PartialEq)]
-        enum Section { Editable, Readonly, Body }
+        enum Section {
+            Editable,
+            Readonly,
+            Body,
+        }
         let mut section = Section::Editable;
 
         let mut editable: HashMap<String, String> = HashMap::new();
@@ -410,11 +438,14 @@ impl JiraIssueNode {
 
     /// Field-level checks on a parsed buffer. Reports unknown editable keys
     /// and missing-required values. Run after `parse_3b` succeeds.
-    pub(super) fn validate_3b(&self, parsed: &Parsed3b, editable_fields: &[String]) -> Vec<FieldError> {
+    pub(super) fn validate_3b(
+        &self,
+        parsed: &Parsed3b,
+        editable_fields: &[String],
+    ) -> Vec<FieldError> {
         let mut errors = Vec::new();
 
-        let allowed: HashSet<&str> =
-            editable_fields.iter().map(String::as_str).collect();
+        let allowed: HashSet<&str> = editable_fields.iter().map(String::as_str).collect();
 
         for key in parsed.editable.keys() {
             if !allowed.contains(key.as_str()) {
@@ -451,11 +482,20 @@ impl JiraIssueNode {
         detail: &JiraIssueDetail,
     ) -> ChangeSet {
         let mut metadata_changes = Vec::new();
+        let mut status_change = None;
         for (key, new_value) in &parsed.editable {
+            // Status is not a plain field write: a change routes to a workflow
+            // transition, so it never joins `metadata_changes` (which feeds
+            // `metadata_changes_to_fields` — that rejects `status`).
+            if key == "status" {
+                if field_value_from_detail(detail, "status") != *new_value {
+                    status_change = Some(new_value.clone());
+                }
+                continue;
+            }
             let unchanged = match key.as_str() {
                 "labels" => {
-                    let mut current: Vec<&str> =
-                        detail.labels.iter().map(String::as_str).collect();
+                    let mut current: Vec<&str> = detail.labels.iter().map(String::as_str).collect();
                     current.sort();
                     let mut new_list: Vec<&str> = new_value
                         .split(',')
@@ -477,17 +517,26 @@ impl JiraIssueNode {
         // Whitespace-tolerant body compare: Jira sometimes round-trips a
         // description with different blank-line spacing (e.g. UI saves
         // re-format wiki markup with extra blank lines, REST returns it
-        // single-spaced). If the bodies are semantically equal, skip the
-        // write — otherwise we'd churn the issue without the user having
-        // touched the body.
+        // single-spaced). On top of that, the `edit_markdown` flow feeds a
+        // body that has been through `wiki→md→wiki`, which the round-trip
+        // guard only guarantees stable *modulo `normalize_ws`* (per-line
+        // trim + blank-line drop) — a weaker `normalize_blank_lines` compare
+        // would flag such an untouched body as changed, churn a needless PUT,
+        // and (since a just-added comment already bumped the version) turn it
+        // into a spurious upstream conflict. Compare with the same
+        // normalization the guard uses so an untouched body is never a change.
         let body = parsed.body.trim();
-        let content = if normalize_blank_lines(body) != normalize_blank_lines(detail.description.trim()) {
+        let content = if normalize_ws(body) != normalize_ws(detail.description.trim()) {
             Some(body.as_bytes().to_vec())
         } else {
             None
         };
 
-        ChangeSet { metadata_changes, content }
+        ChangeSet {
+            metadata_changes,
+            content,
+            status_change,
+        }
     }
 
     /// If the user emptied a required editable field (caught by

@@ -15,25 +15,27 @@ use not_yet_done_content::{NodeSummary, PageInfo};
 
 use crate::views::content_view::{CustomQueryRunState, PaneId};
 
+mod adapter_db_script;
+mod adapter_query;
 mod content_query_filter;
 mod error_view;
 mod file_edit;
 mod node_action;
-mod postgres_db_script;
-mod postgres_query;
+mod notification_view;
 mod saved_query;
 mod tracking_script;
 mod tracking_script_output;
 
+pub use adapter_db_script::AdapterDbScriptSession;
+pub use adapter_query::{
+    AdapterQuerySession, DEFAULT_PAGE_SIZE as ADAPTER_QUERY_DEFAULT_PAGE_SIZE,
+    parse_query_area as adapter_parse_query_area,
+};
 pub use content_query_filter::ContentQueryFilterSession;
 pub use error_view::ErrorViewSession;
 pub use file_edit::FileEditSession;
 pub use node_action::{NavContext, NodeActionEditSession, ReloadTarget};
-pub use postgres_db_script::PostgresDbScriptSession;
-pub use postgres_query::{
-    parse_query_area as postgres_parse_query_area, PostgresQuerySession,
-    DEFAULT_PAGE_SIZE as POSTGRES_QUERY_DEFAULT_PAGE_SIZE,
-};
+pub use notification_view::NotificationViewSession;
 pub use saved_query::SavedQueryEditSession;
 pub use tracking_script::ScriptSession;
 pub use tracking_script_output::ScriptOutputSession;
@@ -81,6 +83,13 @@ pub struct EditorSpawnContext {
     /// The map is a snapshot at spawn time — not refreshed if connection
     /// state changes later.
     pub child_env: std::collections::HashMap<String, String>,
+    /// When `Some(path)`, the editor operates on this **persistent** file
+    /// instead of a throwaway temp file: the buffer is written there, the
+    /// file survives after the editor closes, and sibling files (e.g.
+    /// downloaded attachments referenced by relative path) resolve from its
+    /// directory. Sourced from [`not_yet_done_content::EditorPrep::file_path`].
+    /// `None` keeps the classic temp-file behaviour.
+    pub persistent_file: Option<std::path::PathBuf>,
 }
 
 /// One round-trip through `$EDITOR`.
@@ -213,6 +222,9 @@ pub enum FollowUp {
         view_index: usize,
         content: String,
         save_name: Option<String>,
+        /// How the buffer is meant to be run — an extended document goes
+        /// through the executor, an adapter-native body to the adapter.
+        kind: not_yet_done_content::QueryKind,
     },
     /// Final close: apply + optionally save content query; optional shortcut prompt.
     CloseContentQuery {
@@ -220,6 +232,8 @@ pub enum FollowUp {
         content: String,
         save_name: Option<String>,
         is_new: bool,
+        /// Also picks the store the body is written to.
+        kind: not_yet_done_content::QueryKind,
     },
     /// Set the inline query-error overlay (e.g. tree-edit parse/apply error).
     SetQueryError(String),
@@ -254,10 +268,7 @@ pub enum FollowUp {
     /// view at `view_index` should refresh its saved-query list so the
     /// new body is picked up on next apply. `message` is surfaced via
     /// the notification bar.
-    ReloadContentSavedQueries {
-        view_index: usize,
-        message: String,
-    },
+    ReloadContentSavedQueries { view_index: usize, message: String },
 }
 
 #[cfg(test)]
@@ -272,13 +283,23 @@ mod tests {
 
     #[async_trait]
     impl EditSession for EchoSession {
-        fn template(&self) -> &str { &self.template }
-        fn suffix(&self) -> &str { ".md" }
-        fn scope(&self) -> SessionScope { SessionScope::Tasks }
-        fn label(&self) -> &str { "echo" }
+        fn template(&self) -> &str {
+            &self.template
+        }
+        fn suffix(&self) -> &str {
+            ".md"
+        }
+        fn scope(&self) -> SessionScope {
+            SessionScope::Tasks
+        }
+        fn label(&self) -> &str {
+            "echo"
+        }
         async fn commit(&mut self, text: &str) -> CommitOutcome {
             self.last_commit = Some(text.to_string());
-            CommitOutcome::Done { message: Some(format!("got {} bytes", text.len())) }
+            CommitOutcome::Done {
+                message: Some(format!("got {} bytes", text.len())),
+            }
         }
     }
 
@@ -302,7 +323,10 @@ mod tests {
 
     #[tokio::test]
     async fn live_apply_default_is_noop() {
-        let mut session = EchoSession { template: String::new(), last_commit: None };
+        let mut session = EchoSession {
+            template: String::new(),
+            last_commit: None,
+        };
         let follow_up = session.live_apply("anything").await;
         assert!(follow_up.is_none());
         assert!(session.last_commit.is_none());

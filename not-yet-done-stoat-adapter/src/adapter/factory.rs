@@ -10,9 +10,15 @@ use std::sync::{Arc, Mutex};
 
 use sea_orm::DatabaseConnection;
 
-use not_yet_done_content::{AdapterFactory, ContentAdapter, ContentError, Result};
+use not_yet_done_content::{
+    ContentAdapter, ContentError, MechanismSpec, Result, TypedAdapterFactory,
+};
 
-use super::{StoatAdapter, auth_bridge::AuthBridge, config::StoatConfig};
+use super::{
+    StoatAdapter,
+    auth_bridge::{AuthBridge, MECHANISMS},
+    config::StoatConfig,
+};
 use crate::auth_session_store::SqlAuthSessionStore;
 use crate::db::scope_id_for_url;
 
@@ -57,22 +63,25 @@ impl StoatAdapterFactory {
     }
 }
 
-impl AdapterFactory for StoatAdapterFactory {
+impl TypedAdapterFactory for StoatAdapterFactory {
+    type Config = StoatConfig;
+
     fn adapter_type(&self) -> &str {
         "stoat"
     }
 
-    fn create(
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        MECHANISMS
+    }
+
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: StoatConfig,
         _ctx: &not_yet_done_content::HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let cfg: StoatConfig = serde_yaml::from_str(config)
-            .map_err(|e| ContentError::Other(format!("Invalid Stoat config: {e}").into()))?;
-
         cfg.auth
-            .validate()
+            .validate_against(MECHANISMS)
             .map_err(|e| ContentError::Other(format!("Invalid Stoat auth spec: {e}").into()))?;
 
         let db_url = match &cfg.db {

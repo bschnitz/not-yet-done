@@ -131,6 +131,8 @@ impl JiraIssueNode {
 
         let json = serde_json::to_string_pretty(&bundle)
             .map_err(|e| other_err(format!("serialize export bundle: {e}")))?;
-        Ok(ActionOutcome::Done { message: Some(json) })
+        Ok(ActionOutcome::Done {
+            message: Some(json),
+        })
     }
 }

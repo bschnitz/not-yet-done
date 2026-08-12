@@ -99,13 +99,18 @@ pub(super) fn convert_action(from: ItemType) -> Option<NodeAction> {
     if convert_targets(from).is_empty() {
         return None;
     }
-    Some(NodeAction::new(CONVERT_ACTION_ID, "convert", InputSpec::Picker))
+    Some(NodeAction::new(
+        CONVERT_ACTION_ID,
+        "convert",
+        InputSpec::Picker,
+    ))
 }
 
 /// The per-target convert *editor* actions for an item of type `from`. These
 /// are never key-bound or shown in the action bar — they exist only so
-/// `actions()` membership passes when `OpenEditor` opens one (the edit session
-/// validates the action id against `node.actions()` before calling `prepare`).
+/// action-set membership passes when `OpenEditor` opens one (the edit session
+/// validates the action id against the adapter's `actions_for_type` before
+/// calling `prepare`).
 pub(super) fn convert_editor_actions(from: ItemType) -> Vec<NodeAction> {
     convert_targets(from)
         .into_iter()
@@ -170,6 +175,7 @@ impl TaigaItemNode {
             template,
             version: String::new(),
             suffix: ".md".into(),
+            file_path: None,
         })
     }
 
@@ -205,7 +211,10 @@ impl TaigaItemNode {
         // Extract target fields from the resolved buffer.
         let subject = parsed.editable.get("subject").cloned().unwrap_or_default();
         let status_name = parsed.editable.get("status").cloned().unwrap_or_default();
-        let status_id = statuses.iter().find(|s| s.name == status_name).map(|s| s.id);
+        let status_id = statuses
+            .iter()
+            .find(|s| s.name == status_name)
+            .map(|s| s.id);
         let assignee_usernames = split_csv(parsed.editable.get("assignee"));
         let mut assigned_users: Vec<u64> = Vec::new();
         for name in &assignee_usernames {
@@ -283,7 +292,8 @@ impl TaigaItemNode {
                 .migrate_comments(target, new_id, &mut current_version, &mut warnings)
                 .await;
             let migrated_attachments = if migrated_comments {
-                self.migrate_attachments(target, new_id, &mut warnings).await
+                self.migrate_attachments(target, new_id, &mut warnings)
+                    .await
             } else {
                 false
             };
@@ -388,7 +398,10 @@ impl TaigaItemNode {
             };
         comments.sort_by(|a, b| a.created.cmp(&b.created));
         for c in &comments {
-            let body = format!("> _Originally by {} on {}_\n\n{}", c.author, c.created, c.body);
+            let body = format!(
+                "> _Originally by {} on {}_\n\n{}",
+                c.author, c.created, c.body
+            );
             match add_comment(&self.client, target, new_id, *version, &body).await {
                 Ok(PatchOutcome::Updated { new_version }) => *version = new_version,
                 Ok(PatchOutcome::VersionConflict { .. }) => {
@@ -422,10 +435,9 @@ impl TaigaItemNode {
         new_id: u64,
         warnings: &mut Vec<String>,
     ) -> bool {
-        let existing =
-            list_attachments(&self.client, target, new_id, self.detail.project_id)
-                .await
-                .unwrap_or_default();
+        let existing = list_attachments(&self.client, target, new_id, self.detail.project_id)
+            .await
+            .unwrap_or_default();
         let existing_keys: HashSet<(String, u64)> =
             existing.iter().map(|a| (a.name.clone(), a.size)).collect();
         let src = match list_attachments(
@@ -663,8 +675,14 @@ mod tests {
     fn tables() -> TaigaSlugTables {
         // Invented target-type metadata.
         let statuses = vec![
-            TaigaStatus { id: 10, name: "New".into() },
-            TaigaStatus { id: 11, name: "In progress".into() },
+            TaigaStatus {
+                id: 10,
+                name: "New".into(),
+            },
+            TaigaStatus {
+                id: 11,
+                name: "In progress".into(),
+            },
         ];
         let members = vec![TaigaMember {
             id: 5,
@@ -687,6 +705,7 @@ mod tests {
             status: "Open".into(),
             assignees: vec!["Grace Hopper".into()],
             assignee_usernames: vec!["ghopper".into()],
+            creator: "Grace Hopper".into(),
             tags: vec!["frontend".into()],
             modified: None,
             version: 1,
@@ -700,10 +719,7 @@ mod tests {
         use std::collections::HashSet;
         // Issue → {epic, user story} (never task, never itself).
         let issue: HashSet<_> = convert_targets(ItemType::Issue).into_iter().collect();
-        assert_eq!(
-            issue,
-            HashSet::from([ItemType::Epic, ItemType::UserStory])
-        );
+        assert_eq!(issue, HashSet::from([ItemType::Epic, ItemType::UserStory]));
         // Task is only ever a source, so it can convert into all three.
         let task: HashSet<_> = convert_targets(ItemType::Task).into_iter().collect();
         assert_eq!(
@@ -711,7 +727,12 @@ mod tests {
             HashSet::from([ItemType::Issue, ItemType::Epic, ItemType::UserStory])
         );
         // Task is never a target for any source.
-        for from in [ItemType::Issue, ItemType::Epic, ItemType::UserStory, ItemType::Task] {
+        for from in [
+            ItemType::Issue,
+            ItemType::Epic,
+            ItemType::UserStory,
+            ItemType::Task,
+        ] {
             assert!(
                 !convert_targets(from).contains(&ItemType::Task),
                 "task must never be a convert target (from {from:?})"
@@ -734,10 +755,14 @@ mod tests {
         let opts = convert_target_options(ItemType::Issue);
         // One option per target, value = the target's editor action id.
         assert_eq!(opts.len(), 2);
-        assert!(opts.iter().any(|o| o.value == "convert:epic"
-            && o.label == "convert to epic"));
-        assert!(opts.iter().any(|o| o.value == "convert:userstory"
-            && o.label == "convert to user story"));
+        assert!(
+            opts.iter()
+                .any(|o| o.value == "convert:epic" && o.label == "convert to epic")
+        );
+        assert!(
+            opts.iter()
+                .any(|o| o.value == "convert:userstory" && o.label == "convert to user story")
+        );
     }
 
     #[test]
@@ -784,8 +809,14 @@ mod tests {
         // `prepare_convert` computes the initial status slug from the first
         // project-ordered status; mirror that here.
         let statuses = [
-            TaigaStatus { id: 10, name: "New".into() },
-            TaigaStatus { id: 11, name: "In progress".into() },
+            TaigaStatus {
+                id: 10,
+                name: "New".into(),
+            },
+            TaigaStatus {
+                id: 11,
+                name: "In progress".into(),
+            },
         ];
         let default_slug = tables.statuses.slug_for(&statuses[0].name).unwrap();
         let buf = render_convert_template(
@@ -799,7 +830,7 @@ mod tests {
         );
 
         // Header carries the target's initial status slug.
-        assert!(buf.contains("status: ss-new"));
+        assert!(buf.contains("status: ss_new"));
         // Read-only note advertises the destructive action + counts.
         assert!(buf.contains("2 comment(s) + 1 attachment(s) will be migrated"));
         assert!(buf.contains("will be DELETED on save"));
@@ -812,7 +843,7 @@ mod tests {
         assert!(!parsed.editable.contains_key("converting"));
         assert!(!parsed.editable.contains_key("note"));
         assert_eq!(parsed.editable.get("subject").unwrap(), "Broken export");
-        assert_eq!(parsed.editable.get("assignee").unwrap(), "uu-grace-hopper");
+        assert_eq!(parsed.editable.get("assignee").unwrap(), "uu_grace_hopper");
 
         // Slugs resolve against the target tables.
         let mut errs = validate_3b(&parsed, &edit_full_fields());

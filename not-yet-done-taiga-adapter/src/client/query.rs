@@ -18,6 +18,15 @@
 //! emitted per `(item_type, filter-set)` tuple. Specs run in parallel
 //! and the merged result is sliced to the caller's effective page after
 //! a global sort.
+//!
+//! **Filter keys are passed to Taiga verbatim and are not validated —
+//! neither here nor by the server.** Taiga's list endpoints silently
+//! *ignore* a query param they don't support and answer with the complete
+//! unfiltered list, so a typo (or a plausible-looking filter that simply
+//! isn't one, e.g. `ref`) does not fail loudly: it floods the result.
+//! Verify a new filter key against the live API before shipping it in a
+//! view config. For ref lookups use `q`, Taiga's full-text filter, which
+//! matches the ref as well as the subject.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -146,8 +155,8 @@ pub struct ParsedTaigaQuery {
 /// silently — that's how the TUI signals a non-applicable conditional
 /// placeholder (e.g. `<input_if_numeric>` with non-numeric input).
 pub fn parse_taiga_query(yaml: &str) -> Result<ParsedTaigaQuery, String> {
-    let raw: RawTaigaQuery = serde_yaml::from_str(yaml.trim())
-        .map_err(|e| format!("parse taiga query: {e}"))?;
+    let raw: RawTaigaQuery =
+        serde_yaml::from_str(yaml.trim()).map_err(|e| format!("parse taiga query: {e}"))?;
     let queries = expand_queries(raw.queries)?;
     let sort = raw
         .sort
@@ -155,7 +164,11 @@ pub fn parse_taiga_query(yaml: &str) -> Result<ParsedTaigaQuery, String> {
         .map(parse_sort_key)
         .collect::<Result<Vec<_>, _>>()?;
     let page_size = raw.page.and_then(|p| p.size);
-    Ok(ParsedTaigaQuery { queries, sort, page_size })
+    Ok(ParsedTaigaQuery {
+        queries,
+        sort,
+        page_size,
+    })
 }
 
 /// Compatibility shim so existing call sites keep compiling. Returns just
@@ -198,7 +211,10 @@ fn parse_sort_key(raw: RawSortKey) -> Result<SortKey, String> {
         "desc" | "descending" => SortDirection::Desc,
         other => return Err(format!("unknown sort direction: {other}")),
     };
-    Ok(SortKey { column: raw.column, direction })
+    Ok(SortKey {
+        column: raw.column,
+        direction,
+    })
 }
 
 fn parse_types(v: &serde_yaml::Value) -> Result<Vec<ItemType>, String> {
@@ -276,9 +292,7 @@ fn flatten_value(v: &serde_yaml::Value) -> Vec<String> {
         serde_yaml::Value::Bool(b) => vec![b.to_string()],
         serde_yaml::Value::Number(n) => vec![n.to_string()],
         serde_yaml::Value::String(s) => vec![s.clone()],
-        serde_yaml::Value::Sequence(seq) => {
-            seq.iter().flat_map(flatten_value).collect()
-        }
+        serde_yaml::Value::Sequence(seq) => seq.iter().flat_map(flatten_value).collect(),
         serde_yaml::Value::Mapping(_) | serde_yaml::Value::Tagged(_) => {
             vec![serde_yaml::to_string(v).unwrap_or_default()]
         }
@@ -306,14 +320,21 @@ pub struct ItemSummary {
     pub subject: String,
     pub status: String,
     /// All assignee user IDs from `assigned_users`. After
-    /// `resolve_assignees`, sorted current-user-first then alphabetical.
+    /// `resolve_people`, sorted current-user-first then alphabetical.
     pub assignee_ids: Vec<u64>,
     /// Display names parallel to `assignee_ids`. Empty until
-    /// `resolve_assignees` runs.
+    /// `resolve_people` runs.
     pub assignees: Vec<String>,
     /// Canonical usernames parallel to `assignee_ids`. Empty until
-    /// `resolve_assignees` runs.
+    /// `resolve_people` runs.
     pub assignee_usernames: Vec<String>,
+    /// Id of the user who created the item (Taiga's `owner`). `0` when the
+    /// payload carries no owner.
+    pub creator_id: u64,
+    /// Display name of the creator. Taken from `owner_extra_info` when the
+    /// payload carries it, otherwise filled from the project members cache
+    /// by `resolve_people`.
+    pub creator: String,
     pub modified: Option<String>,
     pub total_attachments: u64,
 }
@@ -328,9 +349,7 @@ pub async fn run_queries(
     let mut handles = Vec::with_capacity(specs.len());
     for spec in specs {
         let client = Arc::clone(&client);
-        handles.push(tokio::spawn(
-            async move { run_one(&client, spec).await },
-        ));
+        handles.push(tokio::spawn(async move { run_one(&client, spec).await }));
     }
     let mut all = Vec::new();
     for h in handles {
@@ -339,26 +358,27 @@ pub async fn run_queries(
     }
     // Dedup by (item_type, id) — multiple specs can pull the same row
     // (e.g. /tasks?q=foo + /tasks?ref=42 if input is numeric).
-    all.sort_by(|a, b| {
-        a.item_type
-            .cmp(&b.item_type)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    all.sort_by(|a, b| a.item_type.cmp(&b.item_type).then_with(|| a.id.cmp(&b.id)));
     all.dedup_by(|a, b| a.item_type == b.item_type && a.id == b.id);
-    resolve_assignees(&client, &mut all).await;
+    resolve_people(&client, &mut all).await;
     Ok(all)
 }
 
-/// Fill `assignees` / `assignee_usernames` on each summary by looking up
-/// `assignee_ids` against the per-project members cache, then re-order
-/// the IDs (and parallel display/username vectors) so the current user
-/// appears first, with the remaining members sorted alphabetically by
-/// display name. Missing members fall back to `user-<id>`.
-async fn resolve_assignees(client: &TaigaClient, items: &mut [ItemSummary]) {
+/// Fill the display-name fields that the list payload only carries as ids.
+///
+/// For assignees: look `assignee_ids` up against the per-project members
+/// cache, then re-order the IDs (and parallel display/username vectors) so
+/// the current user appears first, with the remaining members sorted
+/// alphabetically by display name. Missing members fall back to `user-<id>`.
+///
+/// For the creator: only used as a fallback. Taiga normally embeds the name
+/// in `owner_extra_info`, so [`parse_item`] has it already; this covers the
+/// deployments (or serializer versions) that send the bare `owner` id.
+async fn resolve_people(client: &TaigaClient, items: &mut [ItemSummary]) {
     let current_user_id = client.current_user_id().await.unwrap_or(0);
     let needed_projects: HashSet<u64> = items
         .iter()
-        .filter(|it| !it.assignee_ids.is_empty())
+        .filter(|it| !it.assignee_ids.is_empty() || (it.creator.is_empty() && it.creator_id != 0))
         .map(|it| it.project_id)
         .collect();
     let mut member_by_id: HashMap<u64, TaigaMember> = HashMap::new();
@@ -370,6 +390,9 @@ async fn resolve_assignees(client: &TaigaClient, items: &mut [ItemSummary]) {
         }
     }
     for it in items.iter_mut() {
+        if it.creator.is_empty() && it.creator_id != 0 {
+            it.creator = member_display_name(member_by_id.get(&it.creator_id), it.creator_id);
+        }
         if it.assignee_ids.is_empty() {
             continue;
         }
@@ -408,20 +431,39 @@ async fn resolve_assignees(client: &TaigaClient, items: &mut [ItemSummary]) {
     }
 }
 
+/// Human-readable name for a project member: full name where Taiga has one,
+/// username otherwise, and `user-<id>` when the member isn't in the project's
+/// member list at all (a former member, or a cross-project owner).
+pub(crate) fn member_display_name(member: Option<&TaigaMember>, id: u64) -> String {
+    match member {
+        Some(m) if !m.full_name.is_empty() => m.full_name.clone(),
+        Some(m) => m.username.clone(),
+        None => format!("user-{id}"),
+    }
+}
+
 /// Default sort when neither runtime params nor YAML provide one:
 /// type-priority asc, modified desc. Mirrors the legacy behaviour
 /// pre-sort feature.
 pub fn default_sort() -> Vec<SortKey> {
     vec![
-        SortKey { column: "type".into(), direction: SortDirection::Asc },
-        SortKey { column: "modified".into(), direction: SortDirection::Desc },
+        SortKey {
+            column: "type".into(),
+            direction: SortDirection::Asc,
+        },
+        SortKey {
+            column: "modified".into(),
+            direction: SortDirection::Desc,
+        },
     ]
 }
 
 /// Sortable column keys advertised by [`Node::sortable_columns`] for
 /// `taiga:item` and the per-type variants.
 pub fn sortable_column_keys() -> &'static [&'static str] {
-    &["ref", "type", "status", "assignee", "subject", "modified", "project"]
+    &[
+        "ref", "type", "status", "assignee", "creator", "subject", "modified", "project",
+    ]
 }
 
 /// Apply the requested sort to `items` in place, dropping keys that map
@@ -451,28 +493,37 @@ pub fn apply_sort(items: &mut [ItemSummary], sort: &[SortKey]) -> Vec<SortKey> {
     applied
 }
 
-fn compare_on_column(
-    column: &str,
-    a: &ItemSummary,
-    b: &ItemSummary,
-) -> std::cmp::Ordering {
+/// Order two person names case-insensitively, with unset names last in
+/// ascending order (an unassigned row at the top of the list would push the
+/// rows the user actually wants to see off the screen).
+fn compare_people(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ => a.to_lowercase().cmp(&b.to_lowercase()),
+    }
+}
+
+fn compare_on_column(column: &str, a: &ItemSummary, b: &ItemSummary) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match column {
         "ref" => a.r#ref.cmp(&b.r#ref),
-        "type" => a.item_type.sort_priority().cmp(&b.item_type.sort_priority()),
+        "type" => a
+            .item_type
+            .sort_priority()
+            .cmp(&b.item_type.sort_priority()),
         "status" => a.status.cmp(&b.status),
         "assignee" => {
             // Compare by first display name (which is current-user-first
             // for the logged-in user); empty assignee lists sort last.
-            let a_key = a.assignees.first().map(String::as_str).unwrap_or("");
-            let b_key = b.assignees.first().map(String::as_str).unwrap_or("");
-            match (a_key.is_empty(), b_key.is_empty()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Greater,
-                (false, true) => Ordering::Less,
-                _ => a_key.to_lowercase().cmp(&b_key.to_lowercase()),
-            }
+            compare_people(
+                a.assignees.first().map(String::as_str).unwrap_or(""),
+                b.assignees.first().map(String::as_str).unwrap_or(""),
+            )
         }
+        "creator" => compare_people(&a.creator, &b.creator),
         "subject" => a.subject.cmp(&b.subject),
         "modified" => a.modified.cmp(&b.modified),
         "project" => a
@@ -495,10 +546,7 @@ const FETCH_PAGE_SIZE: u32 = 100;
 /// 10 000 items, which is more than enough for an interactive view.
 const FETCH_MAX_PAGES: u32 = 100;
 
-async fn run_one(
-    client: &TaigaClient,
-    spec: QuerySpec,
-) -> Result<Vec<ItemSummary>, String> {
+async fn run_one(client: &TaigaClient, spec: QuerySpec) -> Result<Vec<ItemSummary>, String> {
     let endpoint = format!("{}{}", client.base_url, spec.item_type.endpoint());
 
     // Resolve `$me` once per filter — it's stable for the duration of
@@ -520,7 +568,9 @@ async fn run_one(
         let headers = client.auth_headers()?;
         http_log::log_request("GET", &url);
         let resp = client
-            .send_retrying("GET", &url, || client.http.get(&url).headers(headers.clone()))
+            .send_retrying("GET", &url, || {
+                client.http.get(&url).headers(headers.clone())
+            })
             .await?;
 
         // Some Taiga deployments respond with 404 when paging past the
@@ -538,7 +588,10 @@ async fn run_one(
             .map_err(|e| format!("{} parse: {e}", spec.item_type.as_str()))?;
 
         let count = raw.len();
-        all.extend(raw.into_iter().map(|item| parse_item(spec.item_type, &item)));
+        all.extend(
+            raw.into_iter()
+                .map(|item| parse_item(spec.item_type, &item)),
+        );
 
         if count < FETCH_PAGE_SIZE as usize {
             break;
@@ -549,6 +602,28 @@ async fn run_one(
         }
     }
     Ok(all)
+}
+
+/// Display name of the item's creator, read from the `owner_extra_info` block
+/// that Taiga embeds next to the bare `owner` id. Prefers Taiga's own
+/// pre-rendered `full_name_display`, falls back to `full_name` / `username`,
+/// and returns empty when the block is absent — the caller then resolves the
+/// id against the project members cache.
+///
+/// Shared with the detail path (`adapter::item`), which reads the same block
+/// out of the single-item payload.
+pub(crate) fn owner_display_name(v: &serde_json::Value) -> String {
+    let Some(info) = v.get("owner_extra_info") else {
+        return String::new();
+    };
+    for key in ["full_name_display", "full_name", "username"] {
+        if let Some(name) = info.get(key).and_then(|x| x.as_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn parse_item(item_type: ItemType, v: &serde_json::Value) -> ItemSummary {
@@ -598,6 +673,8 @@ fn parse_item(item_type: ItemType, v: &serde_json::Value) -> ItemSummary {
         assignee_ids,
         assignees: Vec::new(),
         assignee_usernames: Vec::new(),
+        creator_id: u("owner"),
+        creator: owner_display_name(v),
         modified: v
             .get("modified_date")
             .and_then(|x| x.as_str())
@@ -708,7 +785,11 @@ queries:
         assert!(pairs.contains(&(ItemType::Issue, "2".to_string())));
         assert!(pairs.contains(&(ItemType::Issue, "3".to_string())));
         for s in &specs {
-            assert!(s.params.iter().any(|(k, v)| k == "assigned_to" && v == "$me"));
+            assert!(
+                s.params
+                    .iter()
+                    .any(|(k, v)| k == "assigned_to" && v == "$me")
+            );
         }
     }
 
@@ -801,9 +882,57 @@ sort:
             assignee_ids: Vec::new(),
             assignees: Vec::new(),
             assignee_usernames: Vec::new(),
+            creator_id: 0,
+            creator: String::new(),
             modified: modified.map(|s| s.into()),
             total_attachments: 0,
         }
+    }
+
+    /// Taiga pre-renders the creator name next to the bare id, so the list
+    /// path needs no member lookup in the common case. `full_name_display`
+    /// wins; a blank one falls through to the username.
+    #[test]
+    fn owner_name_prefers_the_display_name_and_falls_back_to_username() {
+        let with_display = serde_json::json!({
+            "owner": 5,
+            "owner_extra_info": { "username": "gh", "full_name_display": "Grace Hopper" },
+        });
+        assert_eq!(owner_display_name(&with_display), "Grace Hopper");
+
+        let blank_display = serde_json::json!({
+            "owner": 5,
+            "owner_extra_info": { "username": "gh", "full_name_display": "" },
+        });
+        assert_eq!(owner_display_name(&blank_display), "gh");
+
+        // No embedded block at all — the caller resolves the id instead.
+        assert_eq!(owner_display_name(&serde_json::json!({ "owner": 5 })), "");
+    }
+
+    /// Rows without a creator must sort last ascending, not first: an item
+    /// whose owner Taiga no longer reports would otherwise head the list.
+    #[test]
+    fn creator_sort_is_case_insensitive_with_unset_names_last() {
+        let mut items = vec![
+            item(ItemType::Task, 1, "Open", None),
+            item(ItemType::Task, 2, "Open", None),
+            item(ItemType::Task, 3, "Open", None),
+        ];
+        items[0].creator = "zoe".into();
+        items[1].creator = String::new();
+        items[2].creator = "Ada".into();
+
+        let applied = apply_sort(
+            &mut items,
+            &[SortKey {
+                column: "creator".into(),
+                direction: SortDirection::Asc,
+            }],
+        );
+        assert_eq!(applied.len(), 1, "creator must be an honoured sort column");
+        let order: Vec<&str> = items.iter().map(|i| i.creator.as_str()).collect();
+        assert_eq!(order, ["Ada", "zoe", ""]);
     }
 
     #[test]
@@ -815,8 +944,14 @@ sort:
         let applied = apply_sort(
             &mut items,
             &[
-                SortKey { column: "nonsense".into(), direction: SortDirection::Asc },
-                SortKey { column: "ref".into(), direction: SortDirection::Asc },
+                SortKey {
+                    column: "nonsense".into(),
+                    direction: SortDirection::Asc,
+                },
+                SortKey {
+                    column: "ref".into(),
+                    direction: SortDirection::Asc,
+                },
             ],
         );
         assert_eq!(applied.len(), 1);
@@ -834,7 +969,10 @@ sort:
         ];
         apply_sort(
             &mut items,
-            &[SortKey { column: "modified".into(), direction: SortDirection::Desc }],
+            &[SortKey {
+                column: "modified".into(),
+                direction: SortDirection::Desc,
+            }],
         );
         // None sorts low under Option<T>, so DESC puts Some(latest) first
         // and None last.

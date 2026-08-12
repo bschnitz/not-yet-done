@@ -5,17 +5,15 @@
 use not_yet_done_content::*;
 
 use crate::client::{
-    EditFields, ItemPatch, ItemType, PatchOutcome, TaigaClient, TaigaMember,
-    TaigaStatus, patch_item,
+    EditFields, ItemPatch, ItemType, PatchOutcome, TaigaClient, TaigaMember, TaigaStatus,
+    patch_item,
 };
 
 use super::TaigaItemNode;
-use super::slugs::{
-    TaigaSlugTables, build_status_table, build_tag_table, build_user_table,
-};
+use super::slugs::{TaigaSlugTables, build_status_table, build_tag_table, build_user_table};
 use super::template::{
-    self, FieldError, Parsed3b, edit_full_fields as fields_list,
-    render_3b, render_with_errors, resolve_slugs_inplace, validate_3b,
+    self, FieldError, Parsed3b, edit_full_fields as fields_list, render_3b, render_with_errors,
+    resolve_slugs_inplace, validate_3b,
 };
 
 pub(super) fn edit_full_fields() -> Vec<String> {
@@ -60,21 +58,14 @@ pub(super) fn build_tables(
 impl TaigaItemNode {
     pub(super) async fn prepare_edit_full(&self) -> Result<EditorPrep> {
         let (statuses, members, tags) =
-            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type)
-                .await?;
+            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type).await?;
         let tables = build_tables(&statuses, &members, &tags);
-        let template = render_3b(
-            &edit_full_fields(),
-            &self.detail,
-            &tables,
-            None,
-            None,
-            true,
-        );
+        let template = render_3b(&edit_full_fields(), &self.detail, &tables, None, None, true);
         Ok(EditorPrep {
             template,
             version: self.detail.version.to_string(),
             suffix: ".md".into(),
+            file_path: None,
         })
     }
 
@@ -101,8 +92,7 @@ impl TaigaItemNode {
     ) -> Result<ActionOutcome> {
         let editable_fields = edit_full_fields();
         let (statuses, members, tags) =
-            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type)
-                .await?;
+            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type).await?;
         let tables = build_tables(&statuses, &members, &tags);
 
         // Parse → validate → resolve slugs.
@@ -163,9 +153,7 @@ impl TaigaItemNode {
                             .find(|m| m.username == *u)
                             .map(|m| m.id)
                             .ok_or_else(|| {
-                                ContentError::Other(
-                                    format!("assignee `{u}` not in project").into(),
-                                )
+                                ContentError::Other(format!("assignee `{u}` not in project").into())
                             })?;
                         ids.push(id);
                     }
@@ -189,7 +177,7 @@ impl TaigaItemNode {
             }
         }
         if let Some(body) = &changes.body {
-            // Resolve `@uu-slug` mentions in the description to `@username`
+            // Resolve `@uu_slug` mentions in the description to `@username`
             // so Taiga turns them into real mentions (same slug system as the
             // assignee field).
             fields.description = Some(template::resolve_user_mentions(body, &tables.users));
@@ -243,23 +231,24 @@ impl TaigaItemNode {
         }
 
         // Refresh self.detail so subsequent reads/preview reflect the new state.
-        let fresh = super::fetch_detail(&self.client, self.detail.item_type, self.detail.id)
-            .await?;
+        let fresh =
+            super::fetch_detail(&self.client, self.detail.item_type, self.detail.id).await?;
         self.detail = fresh;
 
         let display_ref = match &self.detail.project_slug {
             Some(slug) if !slug.is_empty() => format!("{slug}#{}", self.detail.r#ref),
             _ => format!("#{}", self.detail.r#ref),
         };
-        let n_changes = changes.metadata_changes.len()
-            + usize::from(changes.body.is_some());
+        let n_changes = changes.metadata_changes.len() + usize::from(changes.body.is_some());
         let comment_part = if comments.is_empty() {
             String::new()
         } else {
             format!(", +{} comment(s)", comments.len())
         };
         Ok(ActionOutcome::Done {
-            message: Some(format!("{display_ref} updated ({n_changes} field(s){comment_part})")),
+            message: Some(format!(
+                "{display_ref} updated ({n_changes} field(s){comment_part})"
+            )),
         })
     }
 
@@ -268,17 +257,13 @@ impl TaigaItemNode {
         user_parsed: &Parsed3b,
         server_message: &str,
     ) -> Result<ActionOutcome> {
-        let fresh = super::fetch_detail(&self.client, self.detail.item_type, self.detail.id)
-            .await?;
+        let fresh =
+            super::fetch_detail(&self.client, self.detail.item_type, self.detail.id).await?;
         let (statuses, members, tags) =
             fetch_project_meta(&self.client, fresh.project_id, fresh.item_type).await?;
         let tables = build_tables(&statuses, &members, &tags);
-        let buf = template::render_3b_from_parsed(
-            user_parsed,
-            &edit_full_fields(),
-            &fresh,
-            &tables,
-        );
+        let buf =
+            template::render_3b_from_parsed(user_parsed, &edit_full_fields(), &fresh, &tables);
         let banner_err = FieldError {
             message: format!("upstream changed (version conflict): {server_message}"),
         };
@@ -327,4 +312,3 @@ fn restore_blanked_subject(
     }
     if found { Some(out) } else { None }
 }
-

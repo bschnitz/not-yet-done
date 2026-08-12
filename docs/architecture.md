@@ -58,6 +58,8 @@ flowchart TD
         JIRA[not-yet-done-jira-adapter]
         TAIGA[not-yet-done-taiga-adapter]
         PG[not-yet-done-postgres-adapter]
+        SQLITE[not-yet-done-sqlite-adapter]
+        SQLCORE["not-yet-done-sql-core<br/>quote_ident · sql_shape<br/>Script-Ablage · ScriptStore<br/>DB-Script-Knotenbaum · Completions<br/>Editor-Protokolle: view_ddl · row_edit"]
         CONF[not-yet-done-confluence-adapter]
         STOAT[not-yet-done-stoat-adapter]
         TRANSPORT[not-yet-done-transport<br/>SSH-Tunnel]
@@ -94,6 +96,7 @@ flowchart TD
     HOST --> JIRA
     HOST --> TAIGA
     HOST --> PG
+    HOST --> SQLITE
     HOST --> CONF
     HOST --> STOAT
 
@@ -105,6 +108,10 @@ flowchart TD
     STOAT --> CONTENT
     PG --> CONTENT
     PG --> TRANSPORT
+    PG --> SQLCORE
+    SQLITE --> CONTENT
+    SQLITE --> SQLCORE
+    SQLCORE --> CONTENT
     TRANSPORT --> CONTENT
 
     TASKCORE --> FILTER
@@ -113,31 +120,32 @@ flowchart TD
     CORE --> MACROS
 ```
 
-| Crate                               | Verantwortung                                                                      | Workspace-Deps                                                       |
-| ----------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| **not-yet-done-core**               | Legacy-DB (`nyd.db`): Settings, Saved Queries, Links, Tags; Config                 | macros                                                               |
-| **not-yet-done-task-core**          | Task-/Tracking-Domäne (`tasks.db`): Entities, Services, Bootstrap, Backup          | filter                                                               |
-| **not-yet-done-filter**             | Filter-DSL (YAML-Query-Sprache, AST → Query, Tree-Operatoren)                      | —                                                                    |
-| **not-yet-done-host**               | Adapter-Verdrahtung für alle Frontends: Factory-Registry, `resolve_adapter`, Hooks | content, alle Adapter                                                |
-| **not-yet-done-tui**                | Terminal-UI: Event-Loop, Views, App-State                                          | core, content, filter, host, local, postgres, forest, table, ratatui |
-| **not-yet-done-cli** (`nyd`)        | Generisches Adapter-Frontend (CLI) + Built-ins `tag`/`backup`/`config`             | host, content, core, task-core, filter                               |
-| **not-yet-done-task-cli** (`nyd-t`) | Native Domänen-CLI für Tasks/Trackings (typed JSON, graded exit codes)             | task-core                                                            |
-| **not-yet-done-waybar**             | Waybar-CFFI-Modul (aktives Tracking in der Statusbar)                              | content, host                                                        |
-| **not-yet-done-content**            | `ContentAdapter`-Trait + `Node`/`Content`-Abstraktion + Auth-Orchestrierung        | —                                                                    |
-| **not-yet-done-local-adapter**      | Tasks/Trackings/Projects als ContentAdapter (über `task-core`)                     | content, task-core, filter                                           |
-| **not-yet-done-jira-adapter**       | Jira-Tickets als Content-Baum                                                      | content                                                              |
-| **not-yet-done-taiga-adapter**      | Taiga-Items als Content-Baum                                                       | content                                                              |
-| **not-yet-done-postgres-adapter**   | Postgres-DBs/Schemas/Tabellen/DB-Skripte als Content-Baum                          | content, transport                                                   |
-| **not-yet-done-confluence-adapter** | Confluence-Spaces/Pages/Kommentare/Attachments                                     | content                                                              |
-| **not-yet-done-stoat-adapter**      | Chat (Stoat/Revolt-Fork) als Streaming-Content-Baum                                | content                                                              |
-| **not-yet-done-transport**          | SSH-Tunnel-Support für Adapter (z. B. Postgres hinter Bastion)                     | content                                                              |
-| **not-yet-done-forest**             | Baum/Forest → flache Zeilenliste (Tree-Rendering)                                  | table                                                                |
-| **not-yet-done-table**              | Spalten-Layout & Tabellen-Rendering-Primitive                                      | —                                                                    |
-| **not-yet-done-ratatui**            | Ratatui-Erweiterungen (Inline-Editor, Widgets)                                     | grid-core                                                            |
-| **not-yet-done-grid-core**          | Grid-Layout-Kern                                                                   | —                                                                    |
-| **not-yet-done-macros**             | Proc-Macros (`ColumnRegistry` etc.)                                                | —                                                                    |
-| **ratatui_form_widgets**            | Form-Widget-Komponenten (Workspace-Member, aktuell von keinem Crate eingebunden)   | —                                                                    |
-| **grid-render-sim**                 | Render-Simulation/Testbett für Grid                                                | —                                                                    |
+| Crate                               | Verantwortung                                                                                                                                                                                | Workspace-Deps                                                       |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **not-yet-done-core**               | Legacy-DB (`nyd.db`): Settings, Saved Queries, Links, Tags; Config                                                                                                                           | macros                                                               |
+| **not-yet-done-task-core**          | Task-/Tracking-Domäne (`tasks.db`): Entities, Services, Bootstrap, Backup                                                                                                                    | filter                                                               |
+| **not-yet-done-filter**             | Filter-DSL (YAML-Query-Sprache, AST → Query, Tree-Operatoren)                                                                                                                                | —                                                                    |
+| **not-yet-done-host**               | Adapter-Verdrahtung für alle Frontends: Factory-Registry, `resolve_adapter`, Hooks                                                                                                           | content, alle Adapter                                                |
+| **not-yet-done-tui**                | Terminal-UI: Event-Loop, Views, App-State                                                                                                                                                    | core, content, filter, host, local, postgres, forest, table, ratatui |
+| **not-yet-done-cli** (`nyd`)        | Generisches Adapter-Frontend (CLI) + Built-ins `tag`/`backup`/`config`                                                                                                                       | host, content, core, task-core, filter                               |
+| **not-yet-done-task-cli** (`nyd-t`) | Native Domänen-CLI für Tasks/Trackings (typed JSON, graded exit codes)                                                                                                                       | task-core                                                            |
+| **not-yet-done-waybar**             | Waybar-CFFI-Modul (aktives Tracking in der Statusbar)                                                                                                                                        | content, host                                                        |
+| **not-yet-done-content**            | `ContentAdapter`-Trait + `Node`/`Content`-Abstraktion + Auth-Orchestrierung                                                                                                                  | —                                                                    |
+| **not-yet-done-local-adapter**      | Tasks/Trackings/Projects als ContentAdapter (über `task-core`)                                                                                                                               | content, task-core, filter                                           |
+| **not-yet-done-jira-adapter**       | Jira-Tickets als Content-Baum                                                                                                                                                                | content                                                              |
+| **not-yet-done-taiga-adapter**      | Taiga-Items als Content-Baum                                                                                                                                                                 | content                                                              |
+| **not-yet-done-postgres-adapter**   | Postgres-DBs/Schemas/Tabellen/DB-Skripte als Content-Baum                                                                                                                                    | content, transport, sql-core                                         |
+| **not-yet-done-sqlite-adapter**     | SQLite-Dateien (aus `sources:`-Globs)/Tabellen/Zeilen/DB-Skripte als Content-Baum                                                                                                            | content, sql-core                                                    |
+| **not-yet-done-sql-core**           | Backend-neutrale SQL-Bausteine: Identifier-Quoting, SQL-Text-Sniffer, Script-Dateiablage, `ScriptStore`, DB-Script-Knotenbaum, Editor-Completions, Puffer-Protokolle für View-/Zeilen-Editor | content                                                              |
+| **not-yet-done-confluence-adapter** | Confluence-Spaces/Pages/Kommentare/Attachments                                                                                                                                               | content                                                              |
+| **not-yet-done-stoat-adapter**      | Chat (Stoat/Revolt-Fork) als Streaming-Content-Baum                                                                                                                                          | content                                                              |
+| **not-yet-done-transport**          | SSH-Tunnel-Support für Adapter (z. B. Postgres hinter Bastion)                                                                                                                               | content                                                              |
+| **not-yet-done-forest**             | Baum/Forest → flache Zeilenliste (Tree-Rendering)                                                                                                                                            | table                                                                |
+| **not-yet-done-table**              | Spalten-Layout & Tabellen-Rendering-Primitive                                                                                                                                                | —                                                                    |
+| **not-yet-done-ratatui**            | Ratatui-Erweiterungen (Inline-Editor, Widgets: TextInput/MultiChoice/Toggle + spec-getriebener Form-Treiber)                                                                                 | grid-core                                                            |
+| **not-yet-done-grid-core**          | Grid-Layout-Kern                                                                                                                                                                             | —                                                                    |
+| **not-yet-done-macros**             | Proc-Macros (`ColumnRegistry` etc.)                                                                                                                                                          | —                                                                    |
+| **grid-render-sim**                 | Render-Simulation/Testbett für Grid                                                                                                                                                          | —                                                                    |
 
 ## Datenkern: `core` + `task-core` + `filter`
 
@@ -189,6 +197,16 @@ Factory + YAML registriert — kein Kern-Code ändert sich.
 - `search_in_tree(query, limit)` — serverseitige Baumsuche (z. B.
   Confluence CQL), liefert Treffer **mit Ancestor-Pfad** für lazy
   Expand-to-Hit
+- `locate_node_path(node_id)` — wo ein Knoten im Baum liegt, in derselben
+  Pfadform wie ein Suchtreffer. Nur dafür da, einem **Link** in einen noch
+  nicht aufgeklappten Subtree zu folgen; Default `Ok(None)` heißt „kann ich
+  nicht", und kostet genau dieses Deep-Link-Verhalten, nichts weiter. Adapter
+  mit `unstable_node_ids` (Postgres, SQLite — Zeilen-IDs sind Offsets in ein
+  Result-Set) lassen den Default stehen, weil ihre IDs einen Link ohnehin
+  nicht überleben. Tasks liefern die Ancestor-Kette aus dem Snapshot,
+  Confluence eine Ein-Zeilen-CQL auf `id = <page>` — und teilt den
+  Pfadbau mit `search_in_tree`, damit Link und Suche denselben Weg
+  aufklappen.
 - `subscribe_status()` — `watch::Receiver<AdapterStatus>` für Live-Auth-/
   Verbindungsstatus (`Idle`/`Connecting`/`Ready`/`Busy`/`NeedsCreds`/`Failed`)
 - `submit_credentials(fields)` / `try_refresh_session()` — interaktive bzw.
@@ -212,8 +230,103 @@ Factory + YAML registriert — kein Kern-Code ändert sich.
   der dreistufige Aktions-Flow (Editor-Buffer rendern bzw. Picker-Optionen
   liefern → Nutzereingabe → finalisieren)
 
-Implementierungen: `jira-`, `taiga-`, `postgres-`, `confluence-`,
+Implementierungen: `jira-`, `taiga-`, `postgres-`, `sqlite-`, `confluence-`,
 `stoat-adapter`.
+
+### SQL-Adapter (Postgres + SQLite)
+
+Zwei Adapter sprechen SQL. Sie teilen **einen** Crate und **einen** Ast des
+Baums — den Katalog-Ast baut jeder selbst:
+
+- **`not-yet-done-sql-core`** hält, was von der Datenbank unabhängig ist:
+  `quote_ident` (Doppelquote ist SQL-Standard, eine Impl reicht für beide),
+  die reinen Text-Sniffer in `sql_shape` (ist das ein `SELECT`? mehrere
+  Statements?), die Datei-Ablage der Skripte und die **komplette
+  `ScriptStore`-Impl**. Adapterspezifisch bleibt allein die ID-Grammatik,
+  hinter dem Trait **`NodeScriptLayout`**: der Adapter sagt, in welche
+  Pfadsegmente eine Node-ID zerfällt, alles andere ist geteilt. Der Grund
+  für den Schnitt: Ohne ihn wäre der zweite SQL-Adapter zu ~1100 Zeilen eine
+  Kopie des ersten geworden.
+- **Der Skript-Ast selbst ist geteilt, nicht nur seine Ablage.**
+  `db_script_nodes` liefert ihn als fertige `Node`s: die drei Knotentypen
+  (Gruppe/Ordner/Skript), ihre Actions samt Formular-Validierung, die
+  Listings und die CRUD-Dispatches. Ein Adapter sagt nur noch, _wo_ der Ast
+  hängt (`DatabaseNode::get_child("db_scripts")`) und _unter welchem Key_.
+  Dass das geht, liegt am Host: die TUI keyt allein auf die **ID-Form**
+  `<key>/db_scripts/<segmente…>`, nie auf Typ-IDs — ein weiterer SQL-Adapter
+  braucht deshalb null TUI-Änderungen.
+  - Die Typ-IDs tragen trotzdem ein Adapter-Präfix (`postgres:db_script`
+    vs. `sqlite:db_script`), damit YAML-Views sie unterscheiden können. Das
+    Präfix steht erst zur Laufzeit fest, `Node::node_type()` gibt aber
+    `&NodeType` zurück — die Typen können also keine `static LazyLock` sein
+    und liegen stattdessen im geteilten `Arc<DbScriptTree>`, das jeder Knoten
+    des Astes hält. Nebeneffekt: ein `ScriptStore` pro Adapter-Instanz statt
+    einer Neukonstruktion pro Action.
+- **Editor-Completions teilen den Mechanismus, nicht die Namen.** Der
+  Skript-Editor bekommt eine angehängte Kommentarzeile
+  (`-- table completions: …`) mit einem kurzen Token pro Tabelle, die beim
+  Speichern wieder verschwindet; beim Ausführen werden die Tokens expandiert.
+  Backend-neutral ist daran alles außer der Frage, wie viele Ebenen einen
+  Namen qualifizieren, und das erledigt ein einziger Helfer:
+  `script_completions::qualified_table` liefert für zwei Teile
+  `tt_public__users` → `"public"."users"`, für einen einstufig
+  `tt_notes` → `"notes"`. Ein Adapter liefert nur die Liste. Ersetzt wird in
+  **einem** Durchlauf über die Identifier-Läufe des Querys statt mit einer
+  Regex pro Tabelle — das kostet bei 500 Tabellen
+  nicht 500 Regex-Kompilate pro Ausführung, und eine Teil-Ersetzung
+  (`tt_public__user` innerhalb von `tt_public__user_orders`) ist konstruktiv
+  unmöglich.
+- **Schreibende Editoren teilen das Puffer-Protokoll, nicht das SQL.** Zwei
+  Dinge sind editierbar: die **View-Definition** (`E` → `edit_view`,
+  `view_ddl`) und eine **Datenzeile** (`e` → `edit_row`, `row_edit`).
+  Backend-neutral ist daran der ganze Ablauf: Puffer rendern (Kopfkommentar +
+  Inhalt), Fehler-Banner setzen und beim nächsten Speichern wieder
+  abschneiden, den Puffer parsen, gegen den Stand beim Öffnen diffen und das
+  `UPDATE` bauen. Der Adapter liefert nur das Dialekt-Wissen — wie eine View
+  ersetzt wird (SQLite: Drop + Create in _einer_ Transaktion; Postgres:
+  `CREATE OR REPLACE`), und wodurch eine Zeile adressierbar ist (Primary Key,
+  sonst SQLites impliziter `rowid` bzw. der schmalste Unique-Index über
+  NOT-NULL-Spalten; `ctid` bewusst nicht, weil er bei jedem `UPDATE` wandert).
+  - **Abgelehnt wird nie als Fehler**, sondern als `Reopen` mit dem eigenen
+    Text plus Banner: der Puffer ist die einzige Kopie dessen, was der Nutzer
+    getippt hat. Scheitert das Statement selbst, steht es **mit** im Banner —
+    ein Typ- oder Constraint-Fehler ist mit dem `UPDATE` davor viel leichter
+    zuzuordnen. Genau deshalb spleißt `build_update` Literale statt
+    Platzhalter.
+  - **Der Offset in einer Zeilen-ID adressiert nichts.** Row-IDs sind
+    `unstable_node_ids`, der Offset ist nur, _wie_ die Zeile gefunden wurde.
+    Was zählt, sind die beim Öffnen gelesenen Schlüssel- und Zellwerte; sie
+    reisen im opaken `version`-Token der Edit-Session mit und sind es, was
+    jedes spätere Statement benutzt. Eine Seite, die sich darunter
+    verschiebt, kann das Schreiben deshalb nicht umlenken, und ein
+    Zellwert-Vergleich erkennt eine fremde Änderung, statt sie stillschweigend
+    zu überschreiben.
+- **Die Katalog-Bäume unterscheiden sich bewusst**, weil die Backends sich
+  unterscheiden. Postgres:
+  `Datenbank → Schemas → Schema → Tables → Tabelle → Zeilen`. SQLite hat
+  keinen Schema-Namensraum, also ist der Baum eine Ebene flacher:
+  `Datei → Tables → Tabelle → Zeilen`.
+- **Woher die Wurzelknoten kommen, ist der eigentliche Unterschied.**
+  Postgres fragt den Server (`pg_database`) — es gibt nichts zu
+  konfigurieren. Bei SQLite _ist_ eine Datenbank eine Datei, also gibt es
+  keinen Katalog: `sources:` listet beliebig viele Glob-Patterns, und jede
+  getroffene Datei wird ein Wurzelkind. Die Patterns werden bei jedem
+  Reload neu gematcht, damit eine neu angelegte Datei ohne Neustart
+  auftaucht.
+- **Node-IDs müssen stabil sein** (sie landen in Skript-Pfaden auf Platte
+  und in der `query_shortcut`-Tabelle), ein Dateipfad ist aber kein
+  Pfadsegment. Deshalb identifiziert SQLite jede Quelle über
+  `<sanitisierter stem>-<FNV-1a-Hash des absoluten Pfads>`: lesbar, ein
+  einziges Segment, und kollisionsfrei zwischen `app/data.db` und
+  `backup/data.db`.
+- **Paginiert wird unterschiedlich, und die View sagt wie.** Postgres kann
+  serverseitige Cursor (`pagination: mode: cursor`), SQLite nicht: die
+  Datenbank ist eine lokale Datei, ein höherer `OFFSET` kostet einen
+  Page-Scan statt eines Round-Trips, und ein offener Cursor würde nur eine
+  Schreibsperre halten — der Adapter weist die Cursor-Absicht deshalb ab,
+  statt sie vorzutäuschen (`mode: server`). Der Host liest den Modus **immer**
+  aus dem `pagination:`-Block des Ergebnis-Panes, auch für die erste Seite;
+  so entscheidet die Config und nicht eine Annahme über das Backend.
 
 ### Streaming-Adapter (Gateway-Pattern)
 

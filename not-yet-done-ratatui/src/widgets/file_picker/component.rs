@@ -13,11 +13,9 @@ use tuirealm::event::{Event, NoUserEvent};
 use tuirealm::props::{AttrValue, Attribute, PropPayload, PropValue, QueryResult};
 use tuirealm::state::{State, StateValue};
 
-use crate::widgets::common::render::{render_prefixed_line, PREFIX_LEN};
+use crate::widgets::common::render::{PREFIX_LEN, render_prefixed_line};
 use crate::widgets::common::types::{FilterMode, SelectionMarker, SelectionMode};
-use crate::widgets::select_list::{
-    ATTR_SELECTED, SelectList, SelectListEvent, SelectListKeymap,
-};
+use crate::widgets::select_list::{ATTR_SELECTED, SelectList, SelectListEvent, SelectListKeymap};
 use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 use super::{
@@ -372,11 +370,7 @@ impl FilePicker {
         let (parent, prefix) = parse_dir_input(&expanded);
         self.populate_dir_picker(&parent, &prefix);
 
-        let files_base: PathBuf = if dir_path.is_dir() {
-            dir_path
-        } else {
-            parent
-        };
+        let files_base: PathBuf = if dir_path.is_dir() { dir_path } else { parent };
         self.populate_files(&files_base);
     }
 
@@ -573,7 +567,11 @@ impl FilePicker {
     }
 
     fn directory_value(&self) -> String {
-        match self.directory.query(Attribute::Value).map(|q| q.into_attr()) {
+        match self
+            .directory
+            .query(Attribute::Value)
+            .map(|q| q.into_attr())
+        {
             Some(AttrValue::String(s)) => s,
             _ => String::new(),
         }
@@ -664,7 +662,10 @@ impl FilePicker {
     /// `true` when the file picker body should be expanded under its
     /// title (Glob or Files focused). The title is always visible.
     fn files_picker_open(&self) -> bool {
-        matches!(self.focus_slot, FilePickerFocus::Glob | FilePickerFocus::Files)
+        matches!(
+            self.focus_slot,
+            FilePickerFocus::Glob | FilePickerFocus::Files
+        )
     }
 }
 
@@ -907,11 +908,10 @@ fn select_list_bar_bg(active: bool, style: &FilePickerStyle) -> Option<Color> {
     } else {
         style.select_list_inactive.as_ref()
     };
-    list_style
-        .and_then(|s| {
-            s.style(crate::widgets::select_list::SelectListStyleType::Item)
-                .and_then(|st| st.bg)
-        })
+    list_style.and_then(|s| {
+        s.style(crate::widgets::select_list::SelectListStyleType::Item)
+            .and_then(|st| st.bg)
+    })
 }
 
 /// Expand a leading `~` or `~/` against `$HOME`. Embedded tildes
@@ -922,7 +922,9 @@ fn expand_tilde(s: &str) -> String {
 }
 
 fn expand_tilde_with(s: &str, home: Option<&str>) -> String {
-    let Some(home) = home else { return s.to_string() };
+    let Some(home) = home else {
+        return s.to_string();
+    };
     if s == "~" {
         return home.to_string();
     }
@@ -1080,14 +1082,14 @@ impl FilePicker {
 
         let panel_bg = self.style.panel_bg;
         if let Some(bg) = panel_bg {
-            let bg_block = ratatui::widgets::Block::default()
-                .style(Style::default().bg(bg));
+            let bg_block = ratatui::widgets::Block::default().style(Style::default().bg(bg));
             frame.render_widget(bg_block, area);
         }
 
-        let title_style = self.style.title_style.unwrap_or_else(|| {
-            Style::default().add_modifier(Modifier::BOLD)
-        });
+        let title_style = self
+            .style
+            .title_style
+            .unwrap_or_else(|| Style::default().add_modifier(Modifier::BOLD));
         let help_lines = self.help_lines(area.width.saturating_sub(4));
         let help_h = help_lines.len() as u16;
 
@@ -1136,12 +1138,14 @@ impl FilePicker {
     /// Build the help-bar lines from the live keymap, greedily wrapping
     /// each `<keys> <label>` entry across rows.
     fn help_lines(&self, max_width: u16) -> Vec<Line<'static>> {
-        let keys_style = self.style.help_keys_style.unwrap_or_else(|| {
-            Style::default().add_modifier(Modifier::BOLD)
-        });
-        let labels_style = self.style.help_labels_style.unwrap_or_else(|| {
-            Style::default().fg(Color::DarkGray)
-        });
+        let keys_style = self
+            .style
+            .help_keys_style
+            .unwrap_or_else(|| Style::default().add_modifier(Modifier::BOLD));
+        let labels_style = self
+            .style
+            .help_labels_style
+            .unwrap_or_else(|| Style::default().fg(Color::DarkGray));
 
         let entries: Vec<(String, &'static str)> = vec![
             (
@@ -1298,37 +1302,25 @@ impl AppComponent<FilePickerEvent, NoUserEvent> for FilePicker {
         let forwarded = Event::Keyboard(key_ev);
         match self.focus_slot {
             FilePickerFocus::Directory => {
-                let sub_ev = <TextInput as AppComponent<_, _>>::on(
-                    &mut self.directory,
-                    &forwarded,
-                );
+                let sub_ev = <TextInput as AppComponent<_, _>>::on(&mut self.directory, &forwarded);
                 if matches!(sub_ev, Some(TextInputEvent::Changed(_))) {
                     self.reload();
                 }
             }
             FilePickerFocus::Glob => {
-                let sub_ev = <TextInput as AppComponent<_, _>>::on(
-                    &mut self.glob,
-                    &forwarded,
-                );
+                let sub_ev = <TextInput as AppComponent<_, _>>::on(&mut self.glob, &forwarded);
                 if matches!(sub_ev, Some(TextInputEvent::Changed(_))) {
                     self.reload();
                 }
             }
             FilePickerFocus::Files => {
-                let sub_ev = <SelectList as AppComponent<_, _>>::on(
-                    &mut self.files,
-                    &forwarded,
-                );
+                let sub_ev = <SelectList as AppComponent<_, _>>::on(&mut self.files, &forwarded);
                 if let Some(SelectListEvent::SelectionChanged(idxs)) = sub_ev {
                     self.sync_selected_from_files(idxs);
                 }
             }
             FilePickerFocus::Selected => {
-                let _ = <SelectList as AppComponent<_, _>>::on(
-                    &mut self.selected,
-                    &forwarded,
-                );
+                let _ = <SelectList as AppComponent<_, _>>::on(&mut self.selected, &forwarded);
             }
         }
         None
@@ -1350,7 +1342,10 @@ mod tests {
     }
 
     fn key(code: Key, mods: KeyModifiers) -> Event<NoUserEvent> {
-        Event::Keyboard(KeyEvent { code, modifiers: mods })
+        Event::Keyboard(KeyEvent {
+            code,
+            modifiers: mods,
+        })
     }
 
     fn touch(dir: &Path, rel: &str) {
@@ -1398,10 +1393,8 @@ mod tests {
     fn esc_emits_cancelled() {
         let mut p = FilePicker::default();
         p.attr(Attribute::Focus, AttrValue::Flag(true));
-        let out = <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Esc, KeyModifiers::NONE),
-        );
+        let out =
+            <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Esc, KeyModifiers::NONE));
         assert_eq!(out, Some(FilePickerEvent::Cancelled));
     }
 
@@ -1410,15 +1403,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join("alpha")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Directory);
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Enter, KeyModifiers::CONTROL),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Enter, KeyModifiers::CONTROL));
 
         let alpha_str = format!("{}/", tmp.path().join("alpha").display());
         assert_eq!(
@@ -1439,16 +1428,10 @@ mod tests {
         p.set_focus_slot(FilePickerFocus::Files);
 
         assert!(p.selected_paths.is_empty());
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Enter, KeyModifiers::CONTROL),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Enter, KeyModifiers::CONTROL));
         assert_eq!(p.selected_paths.len(), 1);
         // Ctrl+Enter again toggles it back off.
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Enter, KeyModifiers::CONTROL),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Enter, KeyModifiers::CONTROL));
         assert!(p.selected_paths.is_empty());
     }
 
@@ -1470,17 +1453,11 @@ mod tests {
 
         // Enter is no longer bound for toggle (typing into filter falls
         // through to nothing for Enter, so nothing changes there).
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Enter, KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Enter, KeyModifiers::NONE));
         assert!(p.selected_paths.is_empty());
 
         // Space now toggles.
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char(' '), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char(' '), KeyModifiers::NONE));
         assert_eq!(p.selected_paths.len(), 1);
     }
 
@@ -1497,14 +1474,8 @@ mod tests {
         let mut p = FilePicker::default();
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Directory);
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char('a'), KeyModifiers::NONE),
-        );
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char('/'), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char('a'), KeyModifiers::NONE));
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char('/'), KeyModifiers::NONE));
         let v = p.directory.query(Attribute::Value).map(|q| q.into_attr());
         assert_eq!(v, Some(AttrValue::String("a/".into())));
     }
@@ -1569,8 +1540,7 @@ mod tests {
         fs::create_dir(tmp.path().join("beta")).unwrap();
         touch(tmp.path(), "ignored_file.txt");
 
-        let p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
 
         // 2 subdirs, alphabetically; the file is excluded.
         assert_eq!(p.dir_picker_paths.len(), 2);
@@ -1585,8 +1555,7 @@ mod tests {
         fs::create_dir(tmp.path().join("hallo_welt")).unwrap();
         fs::create_dir(tmp.path().join("holla_welt")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
         assert_eq!(p.dir_picker_paths.len(), 3);
 
         // Append "hall" so the input becomes ".../hall". The dropdown
@@ -1658,18 +1627,14 @@ mod tests {
         fs::create_dir(tmp.path().join("alpha")).unwrap();
         touch(&tmp.path().join("alpha"), "inside.txt");
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Directory);
 
         // Cursor is on `alpha` (the only entry); Enter descends. The
         // resolved value gets a trailing slash so the next dropdown
         // enumeration lists alpha's children unfiltered.
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Enter, KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Enter, KeyModifiers::NONE));
 
         let dir_value = p.directory.query(Attribute::Value).map(|q| q.into_attr());
         let alpha_str = format!("{}/", tmp.path().join("alpha").display());
@@ -1726,8 +1691,7 @@ mod tests {
 
     #[test]
     fn missing_directory_marks_invalid_and_retitles() {
-        let p = FilePicker::default()
-            .with_initial_directory("/does/not/exist/hopefully");
+        let p = FilePicker::default().with_initial_directory("/does/not/exist/hopefully");
         assert!(!p.is_directory_valid());
         assert_eq!(p.directory.title, "Directory (not found)");
     }
@@ -1742,8 +1706,7 @@ mod tests {
     #[test]
     fn fixing_directory_clears_invalid_flag() {
         let tmp = TempDir::new().unwrap();
-        let mut p = FilePicker::default()
-            .with_initial_directory("/does/not/exist");
+        let mut p = FilePicker::default().with_initial_directory("/does/not/exist");
         assert!(!p.is_directory_valid());
 
         p.directory.attr(
@@ -1791,8 +1754,7 @@ mod tests {
         let file_path = tmp.path().join("alpha.txt");
 
         let captured = file_path.display().to_string();
-        let mut p = FilePicker::default()
-            .with_paste_provider(move || Some(captured.clone()));
+        let mut p = FilePicker::default().with_paste_provider(move || Some(captured.clone()));
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         // Even from Glob focus, paste does the global "set dir + select" dance.
         p.set_focus_slot(FilePickerFocus::Glob);
@@ -1829,8 +1791,8 @@ mod tests {
 
     #[test]
     fn paste_invalid_path_sets_error_banner() {
-        let mut p = FilePicker::default()
-            .with_paste_provider(|| Some("/no/such/path/at/all".to_string()));
+        let mut p =
+            FilePicker::default().with_paste_provider(|| Some("/no/such/path/at/all".to_string()));
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         <FilePicker as AppComponent<_, _>>::on(&mut p, &ctrl('v'));
         assert!(p.paste_error.is_some());
@@ -1851,16 +1813,13 @@ mod tests {
 
     #[test]
     fn paste_error_clears_on_next_keypress() {
-        let mut p = FilePicker::default()
-            .with_paste_provider(|| Some("/no/such/thing".to_string()));
+        let mut p =
+            FilePicker::default().with_paste_provider(|| Some("/no/such/thing".to_string()));
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         <FilePicker as AppComponent<_, _>>::on(&mut p, &ctrl('v'));
         assert!(p.paste_error.is_some());
         // Any subsequent key wipes the banner.
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char('a'), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char('a'), KeyModifiers::NONE));
         assert!(p.paste_error.is_none());
     }
 
@@ -1871,8 +1830,7 @@ mod tests {
         fs::create_dir(tmp.path().join("not-yet-done-tui")).unwrap();
         fs::create_dir(tmp.path().join("other")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
 
         // Type "core" — fuzzy matches the `-core` suffix, prunes `other`
         // and `not-yet-done-tui` (no `c` available).
@@ -1891,8 +1849,7 @@ mod tests {
         fs::create_dir(tmp.path().join("not-yet-done-ratatui")).unwrap();
         fs::create_dir(tmp.path().join("other")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Directory);
 
@@ -1900,14 +1857,10 @@ mod tests {
         // with it; the LCP is `not-yet-done-`. `other` is excluded
         // (it doesn't fuzzy-match `not`).
         let value = format!("{}/not", tmp.path().display());
-        p.directory
-            .attr(Attribute::Value, AttrValue::String(value));
+        p.directory.attr(Attribute::Value, AttrValue::String(value));
         p.reload();
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Tab, KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Tab, KeyModifiers::NONE));
 
         let expected = format!("{}/not-yet-done-", tmp.path().display());
         assert_eq!(
@@ -1921,8 +1874,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join("not-yet-done-core")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Directory);
 
@@ -1934,10 +1886,7 @@ mod tests {
         p.reload();
         assert_eq!(p.dir_picker_paths.len(), 1);
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Tab, KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Tab, KeyModifiers::NONE));
 
         assert_eq!(
             p.directory.query(Attribute::Value).map(|q| q.into_attr()),
@@ -1990,8 +1939,7 @@ mod tests {
         fs::create_dir(&nested).unwrap();
         fs::create_dir(nested.join("inner")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(nested.display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(nested.display().to_string());
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Directory);
 
@@ -2002,10 +1950,7 @@ mod tests {
             .attr(Attribute::Value, AttrValue::String(with_dotdot));
         p.reload();
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Enter, KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Enter, KeyModifiers::NONE));
 
         // Directory now points at tmp (the grandparent), with trailing
         // `/` appended so the dropdown enumerates its children.
@@ -2028,16 +1973,10 @@ mod tests {
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Files);
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char('a'), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char('a'), KeyModifiers::NONE));
         assert_eq!(p.files.filter_query, "a");
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char(','), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char(','), KeyModifiers::NONE));
         assert_eq!(p.files.filter_query, "");
     }
 
@@ -2047,16 +1986,10 @@ mod tests {
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Selected);
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char('x'), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char('x'), KeyModifiers::NONE));
         assert_eq!(p.selected.filter_query, "x");
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char(','), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char(','), KeyModifiers::NONE));
         assert_eq!(p.selected.filter_query, "");
     }
 
@@ -2070,15 +2003,9 @@ mod tests {
         p.attr(Attribute::Focus, AttrValue::Flag(true));
         p.set_focus_slot(FilePickerFocus::Selected);
 
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char('x'), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char('x'), KeyModifiers::NONE));
         // Comma is no longer bound — typing it appends to the filter.
-        <FilePicker as AppComponent<_, _>>::on(
-            &mut p,
-            &key(Key::Char(','), KeyModifiers::NONE),
-        );
+        <FilePicker as AppComponent<_, _>>::on(&mut p, &key(Key::Char(','), KeyModifiers::NONE));
         assert_eq!(p.selected.filter_query, "x,");
         // Ctrl+U wipes it.
         <FilePicker as AppComponent<_, _>>::on(&mut p, &ctrl('u'));
@@ -2159,8 +2086,7 @@ mod tests {
         fs::create_dir(tmp.path().join(".cache")).unwrap();
         fs::create_dir(tmp.path().join("plain")).unwrap();
 
-        let mut p = FilePicker::default()
-            .with_initial_directory(tmp.path().display().to_string());
+        let mut p = FilePicker::default().with_initial_directory(tmp.path().display().to_string());
         // All 3 subdirs visible when no prefix has been typed.
         assert_eq!(p.dir_picker_paths.len(), 3);
 
@@ -2171,9 +2097,10 @@ mod tests {
         p.reload();
 
         assert_eq!(p.dir_picker_paths.len(), 2);
-        assert!(p.dir_picker_paths.iter().all(|p| p
-            .file_name()
-            .map(|n| n.to_string_lossy().starts_with('.'))
-            .unwrap_or(false)));
+        assert!(p.dir_picker_paths.iter().all(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with('.'))
+                .unwrap_or(false)
+        }));
     }
 }

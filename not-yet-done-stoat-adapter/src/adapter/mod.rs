@@ -9,10 +9,11 @@
 //! end to end.
 
 mod anonymize;
+mod attachment;
 mod auth_bridge;
 mod category;
 mod channel;
-mod config;
+pub mod config;
 mod factory;
 mod members;
 mod mentions;
@@ -27,11 +28,12 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 use not_yet_done_content::{
-    ActionInput, AdapterCapabilities, AdapterStatus, ContentAdapter, ContentError, Invalidation,
-    MetadataField, Node, NodeType, Result,
+    ActionInput, AdapterCapabilities, AdapterStatus, Child, ContentAdapter, ContentError,
+    Invalidation, MetadataField, Node, NodeType, Result,
 };
 
 use crate::gateway::{StoatGateway, StoatState};
+use attachment::StoatAttachmentNode;
 use auth_bridge::AuthBridge;
 use category::StoatCategoryNode;
 use channel::StoatChannelNode;
@@ -63,9 +65,7 @@ pub(in crate::adapter) fn form_field(input: &ActionInput, key: &str) -> Result<S
             }
             Ok(value.to_string())
         }
-        _ => Err(ContentError::NotSupported(
-            "expected form input".into(),
-        )),
+        _ => Err(ContentError::NotSupported("expected form input".into())),
     }
 }
 
@@ -167,6 +167,20 @@ impl StoatAdapter {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        // Announce the connect attempt *synchronously*, before the task that
+        // performs it is even spawned. Our listings project the in-memory
+        // snapshot, which is empty until the socket is up — a frontend must
+        // be able to tell "connecting, ask again in a moment" from "idle,
+        // nothing is happening" the instant `root()` returns. Left on `Idle`
+        // the CLI cannot distinguish the two and prints an empty list as if
+        // the account had no servers.
+        if matches!(*self.status_tx.borrow(), AdapterStatus::Idle) {
+            let _ = self.status_tx.send(AdapterStatus::Connecting {
+                retry: 1,
+                max_retries: 1,
+                timeout_secs: 0,
+            });
+        }
         let auth = Arc::clone(&self.auth);
         let state = Arc::clone(&self.state);
         let status_tx = self.status_tx.clone();
@@ -197,6 +211,29 @@ impl StoatAdapter {
             *guard = Some(gw);
         });
     }
+
+    /// Assemble an adapter from a ready state + client for in-crate tests,
+    /// so the generic `children::list` / `children::child_types` free
+    /// functions can be driven against a node without a live gateway.
+    #[cfg(test)]
+    pub(in crate::adapter) fn for_test(
+        state: Arc<RwLock<StoatState>>,
+        client: Arc<crate::client::StoatClient>,
+    ) -> Self {
+        let (status_tx, status_rx) = watch::channel(AdapterStatus::Idle);
+        let (inv_tx, _) = broadcast::channel(64);
+        Self {
+            auth: AuthBridge::for_test("https://chat.example.invalid", client),
+            name: "test".into(),
+            instance_id: "test".into(),
+            state,
+            status_tx,
+            _status_keepalive: status_rx,
+            inv_tx,
+            gateway: Arc::new(Mutex::new(None)),
+            members: Arc::new(MemberCache::default()),
+        }
+    }
 }
 
 #[async_trait]
@@ -224,7 +261,6 @@ impl ContentAdapter for StoatAdapter {
         self.spawn_gateway_bootstrap();
         Ok(Box::new(StoatRoot {
             connection_name: self.name.clone(),
-            state: Arc::clone(&self.state),
         }))
     }
 
@@ -255,6 +291,31 @@ impl ContentAdapter for StoatAdapter {
             )));
         }
 
+        // Attachment composites `<channel>/msg/<msg>/file/<fileid>` must be
+        // tested BEFORE the message split — the `/msg/` marker matches them
+        // too and would mis-read the trailing `/file/…` as part of the
+        // message id. Revolt has no per-file endpoint, so the parent message
+        // is re-fetched and the file picked out of its attachment list.
+        if let Some((channel_id, message_id, file_id)) = attachment::split_attachment_composite(id)
+        {
+            let client = self.auth.get_client().await.map_err(other_err)?;
+            let view = client
+                .fetch_message(channel_id, message_id, None)
+                .await
+                .map_err(other_err)?;
+            let found = view
+                .attachments
+                .into_iter()
+                .find(|a| a.id == file_id)
+                .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+            return Ok(Box::new(StoatAttachmentNode::new(
+                client,
+                channel_id.to_string(),
+                message_id.to_string(),
+                found,
+            )));
+        }
+
         if let Some((channel_id, message_id)) = message::split_composite(id) {
             let client = self.auth.get_client().await.map_err(other_err)?;
             // Single-fetch has no `users[]` array; the preview only reads
@@ -265,7 +326,7 @@ impl ContentAdapter for StoatAdapter {
                 .await
                 .map_err(other_err)?;
             // Server-scoped user map so `<@ID>` mentions render as
-            // `@username` and the edit path can build `@uu-…` slugs.
+            // `@username` and the edit path can build `@uu_…` slugs.
             let users =
                 members::channel_user_map(&self.state, &self.members, &client, channel_id).await;
             return Ok(Box::new(StoatMessageNode::new(
@@ -279,7 +340,6 @@ impl ContentAdapter for StoatAdapter {
         if id == "root" {
             return Ok(Box::new(StoatRoot {
                 connection_name: self.name.clone(),
-                state: Arc::clone(&self.state),
             }));
         }
 
@@ -358,6 +418,145 @@ impl ContentAdapter for StoatAdapter {
             "stoat:category" => category::category_actions(),
             "stoat:channel" => channel::channel_actions(),
             "stoat:message" => message::message_actions(),
+            "stoat:attachment" => attachment::attachment_actions(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The single source of truth about what lives under a Stoat node,
+    /// keyed on the node's `type_id`. Each `Child` fetcher reconstructs its
+    /// listing inputs from the adapter's shared `state`/`members` plus
+    /// `node.id()` — no concrete-node downcast:
+    ///
+    /// - root → `stoat:server` + `stoat:channel` (DMs), both pure state reads.
+    /// - server (`node.id()` = server id) → `stoat:category` +
+    ///   `stoat:channel` (uncategorized), both scoped by the server id.
+    /// - category (`node.id()` = `<server>/cat/<catid>` composite) →
+    ///   `stoat:channel`; the composite carries BOTH the server id and the
+    ///   category id, so `split_category_composite` recovers everything the
+    ///   filter needs from the id alone.
+    /// - channel (`node.id()` = channel id) → `stoat:message`, a REST pull
+    ///   via the shared client/state/members.
+    /// - message → leaf (no children).
+    ///
+    /// No node declares sortable columns (Stoat lists in server/declared
+    /// order), so every `columns` list is empty.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<Child<'a>> {
+        match node.node_type().type_id.as_str() {
+            "stoat:root" => vec![
+                Child {
+                    node_type: types::server_type().clone(),
+                    columns: Vec::new(),
+                    list: Box::new(move |_params| {
+                        Box::pin(async move {
+                            let state = self.state.read().await;
+                            Ok(root::list_servers_from(&state))
+                        })
+                    }),
+                },
+                Child {
+                    node_type: types::channel_type().clone(),
+                    columns: Vec::new(),
+                    list: Box::new(move |_params| {
+                        Box::pin(async move {
+                            let state = self.state.read().await;
+                            Ok(root::list_dms_from(&state))
+                        })
+                    }),
+                },
+            ],
+            "stoat:server" => {
+                let server_id = node.id().to_string();
+                let server_id_2 = server_id.clone();
+                vec![
+                    Child {
+                        node_type: types::category_type().clone(),
+                        columns: Vec::new(),
+                        list: Box::new(move |_params| {
+                            Box::pin(async move {
+                                let state = self.state.read().await;
+                                Ok(server::list_server_categories(&state, &server_id))
+                            })
+                        }),
+                    },
+                    Child {
+                        node_type: types::channel_type().clone(),
+                        columns: Vec::new(),
+                        list: Box::new(move |_params| {
+                            Box::pin(async move {
+                                let state = self.state.read().await;
+                                Ok(server::list_uncategorized_channels(&state, &server_id_2))
+                            })
+                        }),
+                    },
+                ]
+            }
+            "stoat:category" => {
+                // The composite id `<server>/cat/<catid>` carries BOTH parts,
+                // so the filter is fully reconstructable from `node.id()`.
+                let (server_id, category_id) = match category::split_category_composite(node.id()) {
+                    Some((s, c)) => (s.to_string(), c.to_string()),
+                    // Malformed id → no children (mirrors the empty-state
+                    // fallthrough of the legacy list path).
+                    None => return Vec::new(),
+                };
+                vec![Child {
+                    node_type: types::channel_type().clone(),
+                    columns: Vec::new(),
+                    list: Box::new(move |_params| {
+                        Box::pin(async move {
+                            let state = self.state.read().await;
+                            Ok(category::list_category_channels(
+                                &state,
+                                &server_id,
+                                &category_id,
+                            ))
+                        })
+                    }),
+                }]
+            }
+            "stoat:channel" => {
+                let channel_id = node.id().to_string();
+                vec![Child {
+                    node_type: types::message_type().clone(),
+                    columns: Vec::new(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            channel::list_channel_messages(
+                                &client,
+                                &self.state,
+                                &self.members,
+                                &channel_id,
+                                params,
+                            )
+                            .await
+                        })
+                    }),
+                }]
+            }
+            // A message's children are its uploaded files. Revolt embeds
+            // them in the message document (no per-file endpoint), so the
+            // listing re-fetches the message — cheap, and it keeps the
+            // attachment rows in step with an edited/deleted message.
+            "stoat:message" => {
+                let Some((channel_id, message_id)) = message::split_composite(node.id()) else {
+                    return Vec::new();
+                };
+                let (channel_id, message_id) = (channel_id.to_string(), message_id.to_string());
+                vec![Child {
+                    node_type: types::attachment_type().clone(),
+                    columns: Vec::new(),
+                    list: Box::new(move |_params| {
+                        Box::pin(async move {
+                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            attachment::list_message_attachments(&client, &channel_id, &message_id)
+                                .await
+                        })
+                    }),
+                }]
+            }
+            // Attachments (and anything unknown) are leaves.
             _ => Vec::new(),
         }
     }
@@ -376,6 +575,13 @@ impl ContentAdapter for StoatAdapter {
     ) -> Result<()> {
         self.auth
             .submit_credentials(fields)
+            .await
+            .map_err(|e| ContentError::Other(e.into()))
+    }
+
+    async fn cancel_credentials(&self) -> Result<()> {
+        self.auth
+            .cancel_credentials()
             .await
             .map_err(|e| ContentError::Other(e.into()))
     }

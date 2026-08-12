@@ -32,10 +32,10 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    apply_sort, ActionInput, ActionOutcome, AdapterCapabilities,
-    AdapterFactory, ContentAdapter, ContentError, FormFieldSpec, HintPlacement, HostContext,
-    InputSpec, Invalidation, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result, SortKind, SortableColumn,
+    ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema, ContentAdapter, ContentError,
+    FormFieldSpec, HostContext, InputSpec, Invalidation, ListParams, ListResult, Metadata,
+    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, TypedAdapterFactory,
+    apply_sort,
 };
 use not_yet_done_task_core::entity::project;
 use not_yet_done_task_core::error::AppError;
@@ -43,8 +43,8 @@ use not_yet_done_task_core::events::DomainEvent;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::form::{form_flag, form_opt, form_required};
 use crate::CoreHandle;
+use crate::form::{form_flag, form_opt, form_required};
 
 /// Stable id of the synthetic list-root node.
 const ROOT_ID: &str = "project:root";
@@ -127,18 +127,33 @@ fn item_summary(p: &project::Model) -> NodeSummary {
 /// Columns a project list can be sorted on (the `S` item-sort). The adapter
 /// applies the sort itself in [`ProjectRootNode::list`] via the generic
 /// [`apply_sort`].
-fn project_sortable_columns() -> Vec<SortableColumn> {
-    [
-        ("name", "Name", SortKind::Text),
-        ("created", "Created", SortKind::DateTime),
-    ]
-    .into_iter()
-    .map(|(key, label, kind)| SortableColumn {
-        key: key.to_string(),
-        label: label.to_string(),
-        kind,
+fn project_columns() -> Vec<ColumnSchema> {
+    [("name", "Name", "text"), ("created", "Created", "datetime")]
+        .into_iter()
+        .map(|(key, label, value_type)| ColumnSchema::new(key, label).typed(value_type))
+        .collect()
+}
+
+/// List every project as a sorted flat list of `project:item` rows — the one
+/// implementation both the legacy [`ProjectRootNode::list`] and the
+/// [`ContentAdapter::childs`] fetch closure run. Projects have no query
+/// language, so the pane's query is ignored; `params.sort` is applied via the
+/// generic [`apply_sort`].
+async fn list_projects(handle: &CoreHandle, params: &ListParams) -> Result<ListResult> {
+    let projects = handle
+        .project_service
+        .list_projects()
+        .await
+        .map_err(to_content_err)?;
+    let mut items: Vec<NodeSummary> = projects.iter().map(item_summary).collect();
+    let applied = apply_sort(&mut items, &params.sort, &project_columns());
+    Ok(ListResult {
+        items,
+        applied_sort: applied,
+        page: None,
+        batch_download_available: false,
+        downloaded: Vec::new(),
     })
-    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -148,23 +163,19 @@ fn project_sortable_columns() -> Vec<SortableColumn> {
 /// The root exposes `create` — a list-wide operation (no target row), so it
 /// lives on the root rather than an item.
 fn project_root_actions() -> Vec<NodeAction> {
-    vec![
-        NodeAction::new("create", "New project", create_input_spec())
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
-    ]
+    vec![NodeAction::new(
+        "create",
+        "New project",
+        create_input_spec(),
+    )]
 }
 
 /// Actions a single project row exposes: `edit` (rename / re-describe) and
 /// `delete` (with an optional cascade onto the project's tasks).
 fn project_item_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("edit", "Edit", edit_input_spec())
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('e'),
-        NodeAction::new("delete", "Delete", delete_input_spec())
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('d'),
+        NodeAction::new("edit", "Edit", edit_input_spec()),
+        NodeAction::new("delete", "Delete", delete_input_spec()),
     ]
 }
 
@@ -303,34 +314,6 @@ impl Node for ProjectRootNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![project_item_type()]
-    }
-    fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
-        project_sortable_columns()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        project_root_actions()
-    }
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        // Projects have no query language; the pane's query (if any) is
-        // ignored — the whole list is returned and sorted per `params.sort`.
-        let projects = self
-            .handle
-            .project_service
-            .list_projects()
-            .await
-            .map_err(to_content_err)?;
-        let mut items: Vec<NodeSummary> = projects.iter().map(item_summary).collect();
-        let applied = apply_sort(&mut items, &params.sort, &project_sortable_columns());
-        Ok(ListResult {
-            items,
-            applied_sort: applied,
-            page: None,
-            batch_download_available: false,
-            downloaded: Vec::new(),
-        })
-    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         ProjectItemNode::fetch(&self.handle, id).await
     }
@@ -398,12 +381,6 @@ impl Node for ProjectItemNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    fn children_types(&self) -> Vec<NodeType> {
-        Vec::new()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        project_item_actions()
-    }
     async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
         let mut prefill = HashMap::new();
         if action_id == "edit" {
@@ -447,18 +424,20 @@ impl ProjectAdapterFactory {
     }
 }
 
-impl AdapterFactory for ProjectAdapterFactory {
+impl TypedAdapterFactory for ProjectAdapterFactory {
+    type Config = crate::LocalAdapterConfig;
+
     fn adapter_type(&self) -> &str {
         "projects"
     }
 
-    fn create(
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: crate::LocalAdapterConfig,
         ctx: &HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let handle = crate::open_core_handle(config, ctx)?;
+        let handle = crate::open_core_handle(cfg, ctx)?;
         Ok(Box::new(ProjectAdapter::new(instance_id, handle)))
     }
 }
@@ -542,6 +521,24 @@ impl ContentAdapter for ProjectAdapter {
         ProjectItemNode::fetch(&self.handle, id).await
     }
 
+    /// Single source of truth about a project node's children. The root lists
+    /// `project:item` rows via the shared [`list_projects`] free fn; a project
+    /// row is a leaf. The fetch closure reads only from adapter state
+    /// (`self.handle`), never the concrete node.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+        use not_yet_done_content::Child;
+        match node.node_type().type_id.as_str() {
+            "project:root" => vec![Child {
+                node_type: project_item_type(),
+                columns: project_columns(),
+                list: Box::new(move |params| {
+                    Box::pin(async move { list_projects(&self.handle, &params).await })
+                }),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
         self.inv_tx.subscribe()
     }
@@ -575,17 +572,13 @@ mod tests {
     #[test]
     fn actions_advertise_their_form_fields() {
         let create_fields = match create_input_spec() {
-            InputSpec::Form { fields } => {
-                fields.into_iter().map(|f| f.key).collect::<Vec<_>>()
-            }
+            InputSpec::Form { fields } => fields.into_iter().map(|f| f.key).collect::<Vec<_>>(),
             _ => panic!("create must be a Form"),
         };
         assert_eq!(create_fields, vec!["name", "description"]);
 
         let delete_fields = match delete_input_spec() {
-            InputSpec::Form { fields } => {
-                fields.into_iter().map(|f| f.key).collect::<Vec<_>>()
-            }
+            InputSpec::Form { fields } => fields.into_iter().map(|f| f.key).collect::<Vec<_>>(),
             _ => panic!("delete must be a Form"),
         };
         assert_eq!(delete_fields, vec!["cascade"]);
@@ -655,7 +648,10 @@ mod tests {
         let (adapter, _db) = setup().await;
         let mut root = adapter.root().await.unwrap();
         let outcome = root
-            .execute("create", form(&[("name", "Acme"), ("description", "Widgets")]))
+            .execute(
+                "create",
+                form(&[("name", "Acme"), ("description", "Widgets")]),
+            )
             .await
             .unwrap();
         let new_id = match outcome {
@@ -671,7 +667,10 @@ mod tests {
             download: false,
             group_by: None,
         };
-        let list = adapter.root().await.unwrap().list(params).await.unwrap();
+        let root = adapter.root().await.unwrap();
+        let list = not_yet_done_content::children::list(&adapter, root.as_ref(), params)
+            .await
+            .unwrap();
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id, new_id);
         assert_eq!(list.items[0].label, "Acme");
@@ -710,7 +709,9 @@ mod tests {
         assert_eq!(prep.get("name").map(String::as_str), Some("Old"));
 
         let mut node = adapter.get_by_id(&id).await.unwrap();
-        node.execute("edit", form(&[("name", "New")])).await.unwrap();
+        node.execute("edit", form(&[("name", "New")]))
+            .await
+            .unwrap();
         let reloaded = adapter.get_by_id(&id).await.unwrap();
         assert_eq!(reloaded.label(), "New");
     }
@@ -743,7 +744,10 @@ mod tests {
             download: false,
             group_by: None,
         };
-        let list = adapter.root().await.unwrap().list(params).await.unwrap();
+        let root = adapter.root().await.unwrap();
+        let list = not_yet_done_content::children::list(&adapter, root.as_ref(), params)
+            .await
+            .unwrap();
         assert!(list.items.is_empty(), "project should be gone");
     }
 }

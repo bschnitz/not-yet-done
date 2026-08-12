@@ -84,7 +84,8 @@ mod tests {
 
     #[test]
     fn strip_handles_xmllint_output_shape() {
-        let xmllint_out = "<?xml version=\"1.0\"?>\n<root>\n  <p>hello</p>\n  <p>world</p>\n</root>\n";
+        let xmllint_out =
+            "<?xml version=\"1.0\"?>\n<root>\n  <p>hello</p>\n  <p>world</p>\n</root>\n";
         let stripped = strip_root_wrapper(xmllint_out);
         assert_eq!(stripped, "  <p>hello</p>\n  <p>world</p>");
     }

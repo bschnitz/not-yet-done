@@ -27,18 +27,18 @@ pub struct MultiChoiceKeymap {
 impl Default for MultiChoiceKeymap {
     fn default() -> Self {
         Self {
-            move_up:             Keys::plain(Key::Up),
-            move_down:           Keys::plain(Key::Down),
-            toggle:              Keys::plain(Key::Char(' ')),
-            close:               Keys::plain(Key::Esc),
-            select_all:          Keys::ctrl(Key::Char('a')),
-            select_none:         Keys::ctrl(Key::Char('n')),
-            filter_cursor_left:  Keys::plain(Key::Left),
+            move_up: Keys::plain(Key::Up),
+            move_down: Keys::plain(Key::Down),
+            toggle: Keys::plain(Key::Char(' ')),
+            close: Keys::plain(Key::Esc),
+            select_all: Keys::ctrl(Key::Char('a')),
+            select_none: Keys::ctrl(Key::Char('n')),
+            filter_cursor_left: Keys::plain(Key::Left),
             filter_cursor_right: Keys::plain(Key::Right),
-            filter_delete:       Keys::plain(Key::Backspace),
-            filter_clear:        Keys::ctrl(Key::Char('u')),
-            order_up:            Keys::one(Key::Up, tuirealm::event::KeyModifiers::CONTROL),
-            order_down:          Keys::one(Key::Down, tuirealm::event::KeyModifiers::CONTROL),
+            filter_delete: Keys::plain(Key::Backspace),
+            filter_clear: Keys::ctrl(Key::Char('u')),
+            order_up: Keys::one(Key::Up, tuirealm::event::KeyModifiers::CONTROL),
+            order_down: Keys::one(Key::Down, tuirealm::event::KeyModifiers::CONTROL),
         }
     }
 }

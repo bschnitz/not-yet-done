@@ -35,11 +35,7 @@ pub async fn create_item(
     item_type: ItemType,
     fields: CreateFields,
 ) -> Result<CreatedItem, String> {
-    let url = format!(
-        "{}/api/v1/{}",
-        client.base_url,
-        item_type.url_segment(),
-    );
+    let url = format!("{}/api/v1/{}", client.base_url, item_type.url_segment(),);
 
     let mut body: Map<String, Value> = Map::new();
     body.insert("project".into(), json!(fields.project_id));
@@ -75,7 +71,11 @@ pub async fn create_item(
     http_log::log_request("POST", &url);
     let resp = client
         .send_retrying("POST", &url, || {
-            client.http.post(&url).headers(headers.clone()).json(&payload)
+            client
+                .http
+                .post(&url)
+                .headers(headers.clone())
+                .json(&payload)
         })
         .await?;
 
@@ -88,8 +88,7 @@ pub async fn create_item(
         http_log::log_error("POST", &msg);
         return Err(msg);
     }
-    let v: Value = serde_json::from_str(&body_text)
-        .map_err(|e| format!("POST parse: {e}"))?;
+    let v: Value = serde_json::from_str(&body_text).map_err(|e| format!("POST parse: {e}"))?;
     let id = v
         .get("id")
         .and_then(|x| x.as_u64())

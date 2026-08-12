@@ -37,20 +37,33 @@ fn write_node(
     tracked_ids: &HashSet<Uuid>,
 ) {
     let indent = " ".repeat(depth * indent_size);
-    let marker = if task.deleted { 'D' } else { status_marker(&task.status) };
+    let marker = if task.deleted {
+        'D'
+    } else {
+        status_marker(&task.status)
+    };
     let short_id = short_id(task.id);
-    let flags = if tracked_ids.contains(&task.id) { "-t " } else { "" };
+    let flags = if tracked_ids.contains(&task.id) {
+        "-t "
+    } else {
+        ""
+    };
 
     out.push_str(&format!(
         "{indent}- [{marker}] {flags}{}  (p={}  id={short_id})\n",
         task.description, task.priority,
     ));
 
-    let mut children: Vec<&Task> = all.iter()
+    let mut children: Vec<&Task> = all
+        .iter()
         .filter(|t| t.parent_id == Some(task.id) && t.id != task.id)
         .collect();
     // Non-deleted first, then deleted. Within each group, sort by description.
-    children.sort_by(|a, b| a.deleted.cmp(&b.deleted).then(a.description.cmp(&b.description)));
+    children.sort_by(|a, b| {
+        a.deleted
+            .cmp(&b.deleted)
+            .then(a.description.cmp(&b.description))
+    });
 
     for child in children {
         write_node(out, child, all, depth + 1, indent_size, tracked_ids);
@@ -76,7 +89,13 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn task(id_prefix: &str, desc: &str, parent_prefix: Option<&str>, status: TaskStatus, priority: i32) -> Task {
+    fn task(
+        id_prefix: &str,
+        desc: &str,
+        parent_prefix: Option<&str>,
+        status: TaskStatus,
+        priority: i32,
+    ) -> Task {
         Task {
             id: make_uuid(id_prefix),
             description: desc.to_string(),

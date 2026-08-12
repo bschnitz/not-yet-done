@@ -11,17 +11,29 @@ pub mod cli {
         #[arg(help = "Task description")] description: String,
         #[arg(long, help = "Assign to project (name or ID)")] project: Option<String>,
         #[arg(long, help = "Set parent task (ID)")] parent: Option<String>,
-        #[arg(long, help = "Assign a tag (name, ID, global-tag:<id> or project-tag:<id>)")] tag: Option<String>,
+        #[arg(
+            long,
+            help = "Assign a tag (name, ID, global-tag:<id> or project-tag:<id>)"
+        )]
+        tag: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::TaskService;
+            use shaku::HasComponent;
             let service: &dyn TaskService = module.resolve_ref();
-            service.add_task(description, project, parent, tag, None, None).await
+            service
+                .add_task(description, project, parent, tag, None, None)
+                .await
         });
         match result {
-            Ok(task) => { println!("✓ Task created: [{}] {}", task.id, task.description); 0 }
-            Err(e)   => { eprintln!("Error: {e}"); 1 }
+            Ok(task) => {
+                println!("✓ Task created: [{}] {}", task.id, task.description);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -31,40 +43,50 @@ pub mod cli {
         #[arg(long, help = "Filter by project (name or ID)")] project: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::TaskService;
+            use shaku::HasComponent;
             let service: &dyn TaskService = module.resolve_ref();
             service.list_tasks(project).await
         });
         match result {
-            Ok(tasks) if tasks.is_empty() => { println!("No tasks found."); 0 }
+            Ok(tasks) if tasks.is_empty() => {
+                println!("No tasks found.");
+                0
+            }
             Ok(tasks) => {
                 for task in tasks {
                     println!("[{}] {:?} | {}", task.id, task.status, task.description);
                 }
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
     /// Soft-delete a task
     #[command(about = "Soft-delete a task by ID")]
-    pub fn delete(
-        #[arg(help = "Task ID")] id: String,
-    ) -> u8 {
+    pub fn delete(#[arg(help = "Task ID")] id: String) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::TaskService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
             let id = Uuid::parse_str(&id)
                 .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn TaskService = module.resolve_ref();
             service.delete_task(id).await
         });
         match result {
-            Ok(()) => { println!("✓ Task deleted."); 0 }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Ok(()) => {
+                println!("✓ Task deleted.");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -82,8 +104,7 @@ pub mod cli {
         #[arg(help = "Root task ID (or description prefix)")] root: String,
         #[arg(long, help = "Only include leaves tracked at or after this date")]
         last_tracked_since: Option<crate::datetime::LocalDateTime>,
-        #[arg(long, help = "Pretty-print the JSON output")]
-        pretty: bool,
+        #[arg(long, help = "Pretty-print the JSON output")] pretty: bool,
     ) -> u8 {
         use not_yet_done_task_core::service::TaskService;
         use sea_orm::prelude::Uuid;
@@ -104,7 +125,8 @@ pub mod cli {
                 match result {
                     Ok(tasks) => {
                         let lower = root.to_lowercase();
-                        let matches: Vec<_> = tasks.iter()
+                        let matches: Vec<_> = tasks
+                            .iter()
                             .filter(|t| t.description.to_lowercase().starts_with(&lower))
                             .collect();
                         if matches.len() == 1 {
@@ -120,7 +142,10 @@ pub mod cli {
                             return 1;
                         }
                     }
-                    Err(e) => { eprintln!("Error: {e}"); return 1; }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        return 1;
+                    }
                 }
             }
         };
@@ -142,7 +167,10 @@ pub mod cli {
 
                 // Build a nested tree from the flat list.
                 let id_set: HashSet<Uuid> = tasks.iter().map(|t| t.id).collect();
-                let mut children_map: HashMap<Option<Uuid>, Vec<&not_yet_done_task_core::entity::task::Model>> = HashMap::new();
+                let mut children_map: HashMap<
+                    Option<Uuid>,
+                    Vec<&not_yet_done_task_core::entity::task::Model>,
+                > = HashMap::new();
                 for t in &tasks {
                     // Group by parent, but if parent is not in our set, treat as top-level.
                     let key = if t.parent_id.map(|p| id_set.contains(&p)).unwrap_or(false) {
@@ -155,22 +183,28 @@ pub mod cli {
 
                 fn build_tree(
                     parent: Option<Uuid>,
-                    children_map: &HashMap<Option<Uuid>, Vec<&not_yet_done_task_core::entity::task::Model>>,
+                    children_map: &HashMap<
+                        Option<Uuid>,
+                        Vec<&not_yet_done_task_core::entity::task::Model>,
+                    >,
                 ) -> Vec<TreeNode> {
                     let Some(children) = children_map.get(&parent) else {
                         return vec![];
                     };
-                    children.iter().map(|t| {
-                        use chrono::SecondsFormat;
-                        TreeNode {
-                            id: t.id.to_string(),
-                            description: t.description.clone(),
-                            last_tracked_at: t.last_tracked_at.map(|dt|
-                                dt.to_rfc3339_opts(SecondsFormat::Nanos, true)
-                            ),
-                            children: build_tree(Some(t.id), children_map),
-                        }
-                    }).collect()
+                    children
+                        .iter()
+                        .map(|t| {
+                            use chrono::SecondsFormat;
+                            TreeNode {
+                                id: t.id.to_string(),
+                                description: t.description.clone(),
+                                last_tracked_at: t
+                                    .last_tracked_at
+                                    .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Nanos, true)),
+                                children: build_tree(Some(t.id), children_map),
+                            }
+                        })
+                        .collect()
                 }
 
                 let roots = build_tree(None, &children_map);
@@ -182,11 +216,20 @@ pub mod cli {
                 };
 
                 match json_str {
-                    Ok(s) => { println!("{s}"); 0 }
-                    Err(e) => { eprintln!("Error serializing JSON: {e}"); 1 }
+                    Ok(s) => {
+                        println!("{s}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("Error serializing JSON: {e}");
+                        1
+                    }
                 }
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -205,13 +248,20 @@ pub mod cli {
     ///   nyd-t taskshow -i --path '/work/clients/acme/tickets/re:\b42\b'
     #[command(about = "Resolve a /-rooted description path to a task (JSON on stdout)")]
     pub fn show(
-        #[arg(long, help = "/-rooted path of segment matchers (re: prefix opts in to regex)")]
+        #[arg(
+            long,
+            help = "/-rooted path of segment matchers (re: prefix opts in to regex)"
+        )]
         path: String,
-        #[arg(short = 'i', long, help = "Case-insensitive matching")]
-        case_insensitive: bool,
+        #[arg(short = 'i', long, help = "Case-insensitive matching")] case_insensitive: bool,
+        #[arg(
+            long,
+            help = "On an ambiguous match, resolve to the first candidate (walk order) instead of failing"
+        )]
+        first: bool,
     ) -> u8 {
         use not_yet_done_task_core::service::TaskService;
-        use not_yet_done_task_core::task_path::{walk_task_path, WalkOutcome};
+        use not_yet_done_task_core::task_path::{WalkOutcome, walk_task_path};
         use serde::Serialize;
         use shaku::HasComponent;
 
@@ -221,28 +271,45 @@ pub mod cli {
         });
         let tasks = match result {
             Ok(t) => t,
-            Err(e) => { eprintln!("Error: {e}"); return 1; }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                return 1;
+            }
+        };
+
+        // Emit one resolved task as `{"id","description","parent_id"}` JSON on
+        // stdout (exit 0) or a serialization error (exit 1). Shared by the
+        // unique `Found` case and the `--first` ambiguity fallback.
+        let emit = |id: sea_orm::prelude::Uuid| -> u8 {
+            let task = tasks
+                .iter()
+                .find(|t| t.id == id)
+                .expect("walker returned known id");
+            #[derive(Serialize)]
+            struct Out<'a> {
+                id: String,
+                description: &'a str,
+                parent_id: Option<String>,
+            }
+            let out = Out {
+                id: task.id.to_string(),
+                description: &task.description,
+                parent_id: task.parent_id.map(|p| p.to_string()),
+            };
+            match serde_json::to_string(&out) {
+                Ok(s) => {
+                    println!("{s}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error serializing JSON: {e}");
+                    1
+                }
+            }
         };
 
         match walk_task_path(&tasks, &path, case_insensitive) {
-            WalkOutcome::Found(id) => {
-                let task = tasks.iter().find(|t| t.id == id).expect("walker returned known id");
-                #[derive(Serialize)]
-                struct Out<'a> {
-                    id: String,
-                    description: &'a str,
-                    parent_id: Option<String>,
-                }
-                let out = Out {
-                    id: task.id.to_string(),
-                    description: &task.description,
-                    parent_id: task.parent_id.map(|p| p.to_string()),
-                };
-                match serde_json::to_string(&out) {
-                    Ok(s) => { println!("{s}"); 0 }
-                    Err(e) => { eprintln!("Error serializing JSON: {e}"); 1 }
-                }
-            }
+            WalkOutcome::Found(id) => emit(id),
             WalkOutcome::MissingLeadingSlash => {
                 eprintln!("Error: path must start with '/' (got {path:?})");
                 2
@@ -272,7 +339,20 @@ pub mod cli {
                 eprintln!("Error: no task matching {seg:?} at {scope}");
                 4
             }
-            WalkOutcome::Ambiguous { seg, candidates, .. } => {
+            WalkOutcome::Ambiguous {
+                seg, candidates, ..
+            } => {
+                if first {
+                    // Caller opted in to a best-effort resolve: take the first
+                    // candidate. Walk order follows `find_all` (no explicit
+                    // ORDER BY → SQLite rowid/insertion order), so among
+                    // duplicates the oldest — the original — comes first. Used
+                    // by the scripted goto jumps so a duplicated ticket still
+                    // navigates instead of dead-ending on the ambiguity guard.
+                    if let Some(id) = candidates.first().copied() {
+                        return emit(id);
+                    }
+                }
                 eprintln!(
                     "Error: {seg:?} is ambiguous ({} candidates):",
                     candidates.len()
@@ -296,22 +376,44 @@ pub mod cli {
         #[arg(help = "Task ID")] id: String,
         #[arg(long, help = "New description")] description: Option<String>,
         #[arg(long, help = "Add project assignment (name or ID)")] add_project: Option<String>,
-        #[arg(long, help = "Remove project assignment (name or ID)")] remove_project: Option<String>,
-        #[arg(long, help = "Add tag (name, ID, global-tag:<id> or project-tag:<id>)")] add_tag: Option<String>,
-        #[arg(long, help = "Remove tag (name, ID, global-tag:<id> or project-tag:<id>)")] remove_tag: Option<String>,
+        #[arg(long, help = "Remove project assignment (name or ID)")] remove_project: Option<
+            String,
+        >,
+        #[arg(long, help = "Add tag (name, ID, global-tag:<id> or project-tag:<id>)")]
+        add_tag: Option<String>,
+        #[arg(
+            long,
+            help = "Remove tag (name, ID, global-tag:<id> or project-tag:<id>)"
+        )]
+        remove_tag: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::TaskService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
             let id = Uuid::parse_str(&id)
                 .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn TaskService = module.resolve_ref();
-            service.edit_task(id, description, add_project, remove_project, add_tag, remove_tag).await
+            service
+                .edit_task(
+                    id,
+                    description,
+                    add_project,
+                    remove_project,
+                    add_tag,
+                    remove_tag,
+                )
+                .await
         });
         match result {
-            Ok(task) => { println!("✓ Task updated: [{}] {}", task.id, task.description); 0 }
-            Err(e)   => { eprintln!("Error: {e}"); 1 }
+            Ok(task) => {
+                println!("✓ Task updated: [{}] {}", task.id, task.description);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 }

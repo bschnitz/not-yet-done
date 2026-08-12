@@ -52,23 +52,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use not_yet_done_content::HostEvent;
 use not_yet_done_content::{
-    apply_sort, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
-    AdapterFactory, ContentAdapter, ContentError, EditorPrep, FsSavedQueryStore, HintPlacement,
-    HostContext, InputSpec, Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary,
-    NodeType,
-    Result, SavedQueryStore, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode, TreeFindHit,
-    TreeSearchResults,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
+    ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec, Invalidation,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
+    SortKey, Subtree, SubtreeNode, TreeFindHit, TreeSearchResults, TypedAdapterFactory, apply_sort,
 };
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
-use not_yet_done_content::HostEvent;
 use not_yet_done_task_core::events::DomainEvent;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 use crate::editor_templates::{self, FieldError, ParseResult};
-use crate::{as_domain_event, notes, publish_row_patches, tree_edit, CoreHandle};
+use crate::{CoreHandle, as_domain_event, notes, publish_row_patches, tree_edit};
 
 /// Indent width for the subtree-restructure outline buffer (`edit-tree`).
 /// The `tree_edit` parser infers depth from indentation per level, so any
@@ -167,6 +165,9 @@ struct ForestSnapshot {
     /// `views/tasks.yaml`): a collapsed node shows `⏱` when a tracking it
     /// hides is running, even though its own row isn't the tracked one.
     tracked_subtree: HashSet<Uuid>,
+    /// Glyph for the active-tracking marker (own + roll-up), from the adapter
+    /// config via [`CoreHandle::tracking_marker`]. Default `⏱`.
+    marker: Arc<str>,
 }
 
 impl ForestSnapshot {
@@ -258,6 +259,7 @@ impl ForestSnapshot {
             children,
             tracked,
             tracked_subtree,
+            marker: handle.tracking_marker(),
         }))
     }
 
@@ -304,7 +306,7 @@ impl ForestSnapshot {
                     .collect()
             })
             .unwrap_or_default();
-        apply_sort(&mut items, sort, &task_sortable_columns());
+        apply_sort(&mut items, sort, &task_columns());
         items
     }
 
@@ -362,6 +364,7 @@ impl ForestSnapshot {
                 self.tracked.contains(&id),
                 self.tracked_subtree.contains(&id),
                 self.ancestors_json(id),
+                &self.marker,
             ),
             has_children: Some(has_children),
         }
@@ -400,7 +403,7 @@ impl ForestSnapshot {
         // The flat list view is the one projection that reports its sort
         // back to the engine (the tree's `applied_sort` rides each level's
         // order instead). Empty `sort` = depth-first forest order.
-        let applied = apply_sort(&mut out, sort, &task_sortable_columns());
+        let applied = apply_sort(&mut out, sort, &task_columns());
         (out, applied)
     }
 
@@ -432,7 +435,9 @@ impl ForestSnapshot {
         }
         let mut cur = self.by_id.get(&id).and_then(|r| r.parent);
         while let Some(pid) = cur {
-            let Some(row) = self.by_id.get(&pid) else { break };
+            let Some(row) = self.by_id.get(&pid) else {
+                break;
+            };
             out.push(self.summary(pid, row, None));
             cur = row.parent;
         }
@@ -450,7 +455,9 @@ impl ForestSnapshot {
         let mut chain: Vec<serde_json::Value> = Vec::new();
         let mut cur = self.by_id.get(&id).and_then(|r| r.parent);
         while let Some(pid) = cur {
-            let Some(row) = self.by_id.get(&pid) else { break };
+            let Some(row) = self.by_id.get(&pid) else {
+                break;
+            };
             chain.push(serde_json::json!({
                 "id": pid.to_string(),
                 "description": row.task.description,
@@ -641,10 +648,7 @@ fn field(key: &str, value: String, label: &str) -> MetadataField {
 /// (the re-rooted, cycle-free forest link) bounds each walk by the tree
 /// depth, and the `insert` short-circuit both dedupes shared ancestors and
 /// makes a corrupt cycle harmless (a node already inserted stops the walk).
-fn fold_tracked_subtree(
-    tracked: &HashSet<Uuid>,
-    by_id: &HashMap<Uuid, TaskRow>,
-) -> HashSet<Uuid> {
+fn fold_tracked_subtree(tracked: &HashSet<Uuid>, by_id: &HashMap<Uuid, TaskRow>) -> HashSet<Uuid> {
     let mut subtree: HashSet<Uuid> = HashSet::new();
     for &leaf in tracked {
         let mut cur = Some(leaf);
@@ -663,31 +667,43 @@ fn task_metadata(
     is_tracked: bool,
     is_tracked_subtree: bool,
     ancestors_json: String,
+    marker: &str,
 ) -> Metadata {
     let t = &row.task;
     Metadata {
         fields: vec![
             // Marker column: a running stopwatch glyph when this task has an
             // open tracking, blank otherwise. `views/tasks.yaml` renders it
-            // as a narrow `kind: text` column. Mirrors the native tab's `⏱`.
+            // as a narrow `kind: text` column. Glyph is configurable via the
+            // adapter's `tracking_marker` (default `⏱`).
             field(
                 "tracking",
-                if is_tracked { "⏱".to_string() } else { String::new() },
+                if is_tracked {
+                    marker.to_string()
+                } else {
+                    String::new()
+                },
                 "Tracking",
             ),
-            // Roll-up marker: `⏱` when this task *or any descendant* is
-            // tracked. `views/tasks.yaml` wires it as the `tracking` column's
-            // `collapsed_source`, so a collapsed node surfaces a running
-            // tracking it hides; an expanded node keeps showing only its own.
+            // Roll-up marker: the tracking glyph when this task *or any
+            // descendant* is tracked. `views/tasks.yaml` wires it as the
+            // `tracking` column's `collapsed_source`, so a collapsed node
+            // surfaces a running tracking it hides; an expanded node keeps
+            // showing only its own.
             field(
                 "tracking_rollup",
                 if is_tracked_subtree {
-                    "⏱".to_string()
+                    marker.to_string()
                 } else {
                     String::new()
                 },
                 "Tracking (subtree)",
             ),
+            // The description lives in `label` *and* here. `label` is the
+            // structural slot the tree renders a task by; the field makes
+            // `description` a column like any other — sortable and
+            // filterable without anyone having to know it is also the label.
+            field("description", t.description.clone(), "Description"),
             field("status", status_icon(&t.status).to_string(), "Status"),
             field("priority", t.priority.to_string(), "Priority"),
             // Tag columns mirror the native split: `tag_symbols` (icons only)
@@ -727,7 +743,11 @@ fn task_metadata(
             // this can actually be `true`.
             field(
                 "deleted",
-                if t.deleted { "true".to_string() } else { String::new() },
+                if t.deleted {
+                    "true".to_string()
+                } else {
+                    String::new()
+                },
                 "Deleted",
             ),
             // Root→parent chain as a JSON array string (see
@@ -739,24 +759,20 @@ fn task_metadata(
 }
 
 /// Columns a list of tasks can be sorted on, each tagged with the
-/// [`SortKind`] that tells the generic [`apply_sort`] how to compare its
+/// `value_type` that tells the generic [`apply_sort`] how to compare its
 /// cells (lexical / chronological). The adapter sorts in-memory itself —
 /// the flat list reports the applied keys, the tree sorts each level's
 /// siblings (see [`ForestSnapshot::child_summaries`] / [`ForestSnapshot::subtree`]).
-fn task_sortable_columns() -> Vec<SortableColumn> {
+fn task_columns() -> Vec<ColumnSchema> {
     [
-        ("description", "Description", SortKind::Text),
-        ("status", "Status", SortKind::Text),
-        ("priority", "Priority", SortKind::Text),
-        ("created", "Created", SortKind::DateTime),
-        ("updated", "Updated", SortKind::DateTime),
+        ("description", "Description", "text"),
+        ("status", "Status", "text"),
+        ("priority", "Priority", "text"),
+        ("created", "Created", "datetime"),
+        ("updated", "Updated", "datetime"),
     ]
     .into_iter()
-    .map(|(key, label, kind)| SortableColumn {
-        key: key.to_string(),
-        label: label.to_string(),
-        kind,
-    })
+    .map(|(key, label, value_type)| ColumnSchema::new(key, label).typed(value_type))
     .collect()
 }
 
@@ -818,6 +834,61 @@ async fn resolve_match_set(
 }
 
 // ---------------------------------------------------------------------------
+// Per-node list bodies (single source of truth)
+// ---------------------------------------------------------------------------
+//
+// The forest's three list projections extracted as free functions so BOTH the
+// legacy `Node::list` arms AND the `ContentAdapter::childs` fetch closures run
+// one implementation — a `task:item` (tree) level, a `task:flat` list view,
+// and a task's child level all live here, not duplicated per node.
+
+/// The `task:item` tree projection of the forest roots (`parent == None`):
+/// the visible-set filter (matches plus ancestors) applied per level, siblings
+/// sorted per `params.sort`. Backs the root's tree child type.
+async fn list_root_items(
+    snapshot: &ForestSnapshot,
+    handle: &CoreHandle,
+    params: &not_yet_done_content::ListParams,
+) -> Result<not_yet_done_content::ListResult> {
+    let filter = resolve_visible_set(snapshot, handle, &params.query).await?;
+    Ok(list_result(snapshot.child_summaries(
+        None,
+        filter.as_ref(),
+        &params.sort,
+    )))
+}
+
+/// The `task:flat` "list view" projection: the whole forest flat, filter =
+/// matches only (no ancestor fill-in), echoing the applied sort. Backs the
+/// root's flat child type.
+async fn list_root_flat(
+    snapshot: &ForestSnapshot,
+    handle: &CoreHandle,
+    params: &not_yet_done_content::ListParams,
+) -> Result<not_yet_done_content::ListResult> {
+    let filter = resolve_match_set(handle, &params.query).await?;
+    let (items, applied) = snapshot.flat_summaries(filter.as_ref(), &params.sort);
+    Ok(list_result_with_sort(items, applied))
+}
+
+/// A single task's child level (`parent == id`): the same visible-set tree
+/// semantics as [`list_root_items`], scoped under `id`. Backs a task item's
+/// `task:item` child type.
+async fn list_item_children(
+    snapshot: &ForestSnapshot,
+    handle: &CoreHandle,
+    id: Uuid,
+    params: &not_yet_done_content::ListParams,
+) -> Result<not_yet_done_content::ListResult> {
+    let filter = resolve_visible_set(snapshot, handle, &params.query).await?;
+    Ok(list_result(snapshot.child_summaries(
+        Some(id),
+        filter.as_ref(),
+        &params.sort,
+    )))
+}
+
+// ---------------------------------------------------------------------------
 // Actions (A1b)
 // ---------------------------------------------------------------------------
 
@@ -827,17 +898,13 @@ async fn resolve_match_set(
 /// by default).
 fn task_root_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("add", "Add task", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
+        NodeAction::new("add", "Add task", InputSpec::Editor),
         // Sibling-of-a-top-level-task *is* a top-level task, so on the root
         // `add-sibling` aliases `add` (both → `prepare_add(None)`). It exists
         // here only so the empty-tree create fallback — which invokes the
         // configured action id on the forest root when nothing is selected —
         // finds the id rather than erroring.
-        NodeAction::new("add-sibling", "Add task", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('A'),
+        NodeAction::new("add-sibling", "Add task", InputSpec::Editor),
         // Container action: snapshot the whole task database (see
         // `invoke_backup`). DB-wide, so it lives on the root, not a task row.
         NodeAction::new("backup", "Backup database", InputSpec::None),
@@ -851,44 +918,31 @@ fn task_root_actions() -> Vec<NodeAction> {
 /// dispatched through [`Node::invoke_action`].
 fn task_item_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("edit", "Edit", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('e'),
-        NodeAction::new("add", "Add subtask", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
+        NodeAction::new("edit", "Edit", InputSpec::Editor),
+        NodeAction::new("add", "Add subtask", InputSpec::Editor),
         // Add a *sibling* of this task: the new node's parent is this task's
         // own (effective, re-rooted) parent, so it lands next to it rather
         // than nested under it. At a top-level task the parent is `None`, so
         // the sibling is another top-level task.
-        NodeAction::new("add-sibling", "Add sibling", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('A'),
+        NodeAction::new("add-sibling", "Add sibling", InputSpec::Editor),
         // Subtree-restructure outline editor: edit the task and its whole
         // subtree as one indented checkbox list — reparent, re-status,
         // add/remove rows in a single buffer. Bound to `ctrl+n` in
-        // `tasks.yaml` (mirrors the native tab's "edit node" key); no
-        // `default_key` here because a ctrl-combo isn't a single `char`.
+        // `tasks.yaml` (mirrors the native tab's "edit node" key).
         NodeAction::new("edit-tree", "edit node", InputSpec::Editor),
         // Free-form per-task notes: edit the task's standalone notes
         // markdown file (no frontmatter/description — the buffer *is* the
         // raw file). Bound to `o` in `tasks.yaml`, mirroring the native
         // tab's notes key. Saving an empty buffer deletes the file.
-        NodeAction::new("edit-notes", "notes", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('o'),
-        NodeAction::new("delete", "Delete", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('d'),
+        NodeAction::new("edit-notes", "notes", InputSpec::Editor),
+        NodeAction::new("delete", "Delete", InputSpec::None),
         // Non-recursive single-task delete for the flat list view, which
         // has no hierarchy on screen. No default key — the flat list's
         // `tasks.yaml` binds `d` to it explicitly; the tree view's `d`
         // stays the recursive `delete`. See [`execute_delete_single`].
         NodeAction::new("delete-single", "Delete", InputSpec::None),
-        NodeAction::new("undelete", "Undelete", InputSpec::None).with_default_key('u'),
-        NodeAction::new("toggle-tracking", "track", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('s'),
+        NodeAction::new("undelete", "Undelete", InputSpec::None),
+        NodeAction::new("toggle-tracking", "track", InputSpec::None),
         // Value-accepting action for the generic `option_menu`: assigns or
         // unassigns the tag whose stable id arrives in `ctx.value`. Declares
         // no widget (`InputSpec::None`) — the menu sources the value (from
@@ -1019,6 +1073,7 @@ fn prepare_add(parent_id: Option<Uuid>) -> EditorPrep {
         template: editor_templates::new_task(parent_id),
         version: String::new(),
         suffix: ".md".into(),
+        file_path: None,
     }
 }
 
@@ -1046,6 +1101,7 @@ async fn prepare_edit(
         template,
         version: task.updated_at.to_rfc3339(),
         suffix: ".md".into(),
+        file_path: None,
     })
 }
 
@@ -1173,7 +1229,13 @@ async fn execute_edit(
             if parent_changed {
                 let new_rows: Vec<task::Model> = all
                     .iter()
-                    .map(|t| if t.id == updated.id { updated.clone() } else { t.clone() })
+                    .map(|t| {
+                        if t.id == updated.id {
+                            updated.clone()
+                        } else {
+                            t.clone()
+                        }
+                    })
                     .collect();
                 notes::move_notes(&updated, &all, &new_rows);
                 notes::write_notes(&updated, &new_rows, &notes_text);
@@ -1214,6 +1276,7 @@ fn prepare_edit_tree(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep> 
         template,
         version: String::new(),
         suffix: ".md".into(),
+        file_path: None,
     })
 }
 
@@ -1282,6 +1345,7 @@ fn prepare_edit_notes(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep>
         template: notes_str,
         version: String::new(),
         suffix: ".md".into(),
+        file_path: None,
     })
 }
 
@@ -1503,7 +1567,11 @@ async fn invoke_rename_tag(
     };
     match handle
         .tag_service
-        .edit(tag_id.to_string(), Some(name.to_string()), TagStylePatch::default())
+        .edit(
+            tag_id.to_string(),
+            Some(name.to_string()),
+            TagStylePatch::default(),
+        )
         .await
     {
         Ok(_) => ActionDispatch::Reload,
@@ -1557,7 +1625,13 @@ async fn invoke_paste_move(
         Ok(updated) => {
             let new_rows: Vec<task::Model> = all
                 .iter()
-                .map(|t| if t.id == updated.id { updated.clone() } else { t.clone() })
+                .map(|t| {
+                    if t.id == updated.id {
+                        updated.clone()
+                    } else {
+                        t.clone()
+                    }
+                })
                 .collect();
             notes::move_notes(&updated, &all, &new_rows);
             emit_task_changed(handle, updated.id);
@@ -1572,7 +1646,11 @@ async fn invoke_paste_move(
 /// without needing a mark + a target. A no-op (friendly error) when the
 /// task is already top-level. No cycle check is needed — the root is never
 /// a descendant of anything.
-async fn invoke_unnest(handle: &CoreHandle, snapshot: &ForestSnapshot, task_id: Uuid) -> ActionDispatch {
+async fn invoke_unnest(
+    handle: &CoreHandle,
+    snapshot: &ForestSnapshot,
+    task_id: Uuid,
+) -> ActionDispatch {
     let Some(row) = snapshot.by_id.get(&task_id) else {
         return ActionDispatch::Error(format!("Task not found: {task_id}"));
     };
@@ -1588,7 +1666,13 @@ async fn invoke_unnest(handle: &CoreHandle, snapshot: &ForestSnapshot, task_id: 
         Ok(updated) => {
             let new_rows: Vec<task::Model> = all
                 .iter()
-                .map(|t| if t.id == updated.id { updated.clone() } else { t.clone() })
+                .map(|t| {
+                    if t.id == updated.id {
+                        updated.clone()
+                    } else {
+                        t.clone()
+                    }
+                })
                 .collect();
             notes::move_notes(&updated, &all, &new_rows);
             emit_task_changed(handle, updated.id);
@@ -1619,6 +1703,24 @@ async fn invalidate_cache(cache: &SnapshotCell) {
     *cache.write().await = None;
 }
 
+/// Whether a completed action mutated the forest and so requires the cached
+/// snapshot to be dropped before the follow-up reload.
+///
+/// `add` reports success with [`ActionOutcome::Navigate`] (it navigates to the
+/// freshly created task); `edit`/`delete`/notes report [`ActionOutcome::Done`].
+/// Both changed the DB and must invalidate. A validation `Reopen` or a
+/// `NoChanges` outcome touched nothing, so the cache stays. Matching only
+/// `Done` here (the prior behaviour) skipped the create path — the new task
+/// then relied on the async event bridge clearing the cache first, which it
+/// only sometimes won, producing the intermittent "new task not visible until
+/// restart" bug.
+fn outcome_changed_forest(outcome: &Result<ActionOutcome>) -> bool {
+    matches!(
+        outcome,
+        Ok(ActionOutcome::Done { .. } | ActionOutcome::Navigate { .. })
+    )
+}
+
 /// Synthetic forest root. Lists the top-level tasks (`parent_id == None`).
 struct TaskRootNode {
     snapshot: Arc<ForestSnapshot>,
@@ -1643,52 +1745,6 @@ impl Node for TaskRootNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![task_item_type(), task_flat_type()]
-    }
-    fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
-        task_sortable_columns()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        task_root_actions()
-    }
-    async fn list(
-        &self,
-        params: not_yet_done_content::ListParams,
-    ) -> Result<not_yet_done_content::ListResult> {
-        // `task:flat` routes to the list-view projection: the whole
-        // forest flat, filter = matches only (no ancestor fill-in).
-        if params.node_type.type_id == task_flat_type().type_id {
-            let filter = resolve_match_set(&self.handle, &params.query).await?;
-            let (items, applied) = self.snapshot.flat_summaries(filter.as_ref(), &params.sort);
-            return Ok(list_result_with_sort(items, applied));
-        }
-        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(list_result(
-            self.snapshot.child_summaries(None, filter.as_ref(), &params.sort),
-        ))
-    }
-    async fn list_subtree(
-        &self,
-        params: not_yet_done_content::ListParams,
-        depth: u32,
-    ) -> Result<Subtree> {
-        // The flat list view (`task:flat`) is a single level of leaf rows —
-        // no expansion, so depth is irrelevant.
-        if params.node_type.type_id == task_flat_type().type_id {
-            let filter = resolve_match_set(&self.handle, &params.query).await?;
-            let (items, _) = self.snapshot.flat_summaries(filter.as_ref(), &params.sort);
-            return Ok(leaf_subtree(items));
-        }
-        // Tree view: same visible-set semantics as `list`, expanded in one
-        // pass instead of a per-node cascade (capability
-        // `supports_eager_subtree`). `params.sort` reorders each subtree's
-        // siblings (applied per level inside `subtree`).
-        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(self
-            .snapshot
-            .subtree(None, filter.as_ref(), depth, &params.sort))
-    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
     }
@@ -1711,9 +1767,11 @@ impl Node for TaskRootNode {
                 "action `{other}` not supported on the task root"
             ))),
         };
-        // A successful add changed the forest — drop the cache so the
-        // reload that follows reads the new task (race-free with the bridge).
-        if matches!(outcome, Ok(ActionOutcome::Done { .. })) {
+        // A successful add changed the forest — drop the cache so the reload
+        // that follows reads the new task (race-free with the async bridge).
+        // The root only offers `add`, which returns `Navigate`; see
+        // [`outcome_changed_forest`].
+        if outcome_changed_forest(&outcome) {
             invalidate_cache(&self.cache).await;
         }
         outcome
@@ -1777,6 +1835,7 @@ impl TaskItemNode {
                 snapshot.tracked.contains(&uuid),
                 snapshot.tracked_subtree.contains(&uuid),
                 snapshot.ancestors_json(uuid),
+                &snapshot.marker,
             ),
         }))
     }
@@ -1795,36 +1854,6 @@ impl Node for TaskItemNode {
     }
     fn metadata(&self) -> &Metadata {
         &self.metadata
-    }
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![task_item_type()]
-    }
-    fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
-        task_sortable_columns()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        task_item_actions()
-    }
-    async fn list(
-        &self,
-        params: not_yet_done_content::ListParams,
-    ) -> Result<not_yet_done_content::ListResult> {
-        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(list_result(self.snapshot.child_summaries(
-            Some(self.id),
-            filter.as_ref(),
-            &params.sort,
-        )))
-    }
-    async fn list_subtree(
-        &self,
-        params: not_yet_done_content::ListParams,
-        depth: u32,
-    ) -> Result<Subtree> {
-        let filter = resolve_visible_set(&self.snapshot, &self.handle, &params.query).await?;
-        Ok(self
-            .snapshot
-            .subtree(Some(self.id), filter.as_ref(), depth, &params.sort))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
@@ -1874,9 +1903,9 @@ impl Node for TaskItemNode {
         };
         // Any successful add/edit/delete changed the forest — drop the cache
         // so the follow-up reload reads fresh, even on the cached drill path
-        // (race-free with the async event bridge). A validation `Reopen`
-        // made no DB change, so leave the cache intact.
-        if matches!(outcome, Ok(ActionOutcome::Done { .. })) {
+        // (race-free with the async event bridge). See
+        // [`outcome_changed_forest`] for why `add`'s `Navigate` counts too.
+        if outcome_changed_forest(&outcome) {
             invalidate_cache(&self.cache).await;
         }
         outcome
@@ -1915,8 +1944,7 @@ impl Node for TaskItemNode {
             "undelete" => invoke_undelete(&self.handle).await,
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.id).await,
             "toggle-tag" => {
-                invoke_toggle_tag(&self.handle, &self.snapshot, self.id, ctx.value.as_deref())
-                    .await
+                invoke_toggle_tag(&self.handle, &self.snapshot, self.id, ctx.value.as_deref()).await
             }
             "create-tag" => invoke_create_tag(&self.handle, ctx.text.as_deref()).await,
             "rename-tag" => {
@@ -2103,18 +2131,20 @@ impl TaskAdapterFactory {
     }
 }
 
-impl AdapterFactory for TaskAdapterFactory {
+impl TypedAdapterFactory for TaskAdapterFactory {
+    type Config = crate::LocalAdapterConfig;
+
     fn adapter_type(&self) -> &str {
         "tasks"
     }
 
-    fn create(
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: crate::LocalAdapterConfig,
         ctx: &HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let handle = crate::open_core_handle(config, ctx)?;
+        let handle = crate::open_core_handle(cfg, ctx)?;
         Ok(Box::new(TaskAdapter::new(instance_id, handle)))
     }
 }
@@ -2132,7 +2162,7 @@ pub struct TaskAdapter {
     /// YAML the native tab persists; applying one filters the forest via
     /// [`resolve_visible_set`]. Shortcuts live in the `query_shortcut`
     /// table under the generic `tasks/<id>/<view>` scope.
-    saved_queries: FsSavedQueryStore,
+    saved_queries: FsQueryStore,
 }
 
 impl TaskAdapter {
@@ -2161,7 +2191,7 @@ impl TaskAdapter {
             handle,
             inv_tx,
             snapshot,
-            saved_queries: FsSavedQueryStore::new(queries_root),
+            saved_queries: FsQueryStore::new(queries_root, ".yaml"),
         }
     }
 
@@ -2184,8 +2214,67 @@ impl TaskAdapter {
     /// Force a fresh load (reload semantics) and cache it.
     async fn reload_snapshot(&self) -> Result<Arc<ForestSnapshot>> {
         let snap = ForestSnapshot::load(&self.handle).await?;
+        // Opt-in tracing (`NYD_DEBUG_TREEFIND=1`) shared with the TUI's
+        // tree-find pipeline log: confirms in a live occurrence of the
+        // "external task not visible until restart" report whether this fresh
+        // reload actually contains the newly-created task (total count) — the
+        // data side of the pipeline. Self-contained (different crate than the
+        // TUI trace) but writes the same `$TMPDIR/nyd-treefind-debug.log`.
+        if std::env::var_os("NYD_DEBUG_TREEFIND").is_some() {
+            let path = std::env::temp_dir().join("nyd-treefind-debug.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let roots = snap.children.get(&None).map(|v| v.len()).unwrap_or(0);
+                let _ = writeln!(
+                    f,
+                    "[treefind] reload_snapshot: tasks={} roots={roots}",
+                    snap.by_id.len()
+                );
+            }
+        }
         *self.snapshot.write().await = Some(snap.clone());
         Ok(snap)
+    }
+
+    /// Eager tree/flat projection for the forest root. `task:flat` is a single
+    /// level of leaf rows (depth irrelevant); anything else is the expanded
+    /// tree of roots, sorted per level. Ported from the former
+    /// `TaskRootNode::list_subtree` — see [`Self::eager_subtree`].
+    async fn root_subtree(
+        &self,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let snapshot = self.snapshot().await?;
+        // The flat list view (`task:flat`) is a single level of leaf rows —
+        // no expansion, so depth is irrelevant.
+        if params.node_type.type_id == task_flat_type().type_id {
+            let filter = resolve_match_set(&self.handle, &params.query).await?;
+            let (items, _) = snapshot.flat_summaries(filter.as_ref(), &params.sort);
+            return Ok(leaf_subtree(items));
+        }
+        // Tree view: same visible-set semantics as `list`, expanded in one
+        // pass instead of a per-node cascade. `params.sort` reorders each
+        // subtree's siblings (applied per level inside `subtree`).
+        let filter = resolve_visible_set(&snapshot, &self.handle, &params.query).await?;
+        Ok(snapshot.subtree(None, filter.as_ref(), depth, &params.sort))
+    }
+
+    /// Eager subtree under one task. Ported from `TaskItemNode::list_subtree`.
+    async fn item_subtree(
+        &self,
+        id: &str,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let uuid = Uuid::parse_str(id).map_err(|_| ContentError::NotFound(id.to_string()))?;
+        let snapshot = self.snapshot().await?;
+        let filter = resolve_visible_set(&snapshot, &self.handle, &params.query).await?;
+        Ok(snapshot.subtree(Some(uuid), filter.as_ref(), depth, &params.sort))
     }
 }
 
@@ -2277,6 +2366,77 @@ impl ContentAdapter for TaskAdapter {
         TaskItemNode::fetch(&snapshot, &self.snapshot, &self.handle, id)
     }
 
+    /// Single source of truth about a task node's children. The root offers a
+    /// `task:item` tree level and a `task:flat` list-view level; a task offers
+    /// a `task:item` child level under its own id. Each fetch closure loads a
+    /// fresh snapshot the same way `get_by_id` does (`self.snapshot()`, which
+    /// loads on miss) rather than reading a concrete node's shared `Arc`, and
+    /// runs the same free fn the legacy `Node::list` delegates to.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+        use not_yet_done_content::Child;
+        match node.node_type().type_id.as_str() {
+            "task:root" => vec![
+                Child {
+                    node_type: task_item_type(),
+                    columns: task_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let snapshot = self.snapshot().await?;
+                            list_root_items(&snapshot, &self.handle, &params).await
+                        })
+                    }),
+                },
+                Child {
+                    node_type: task_flat_type(),
+                    columns: task_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let snapshot = self.snapshot().await?;
+                            list_root_flat(&snapshot, &self.handle, &params).await
+                        })
+                    }),
+                },
+            ],
+            "task:item" => {
+                // The uuid is the node's id (never downcast the node).
+                let id = node.id().to_string();
+                vec![Child {
+                    node_type: task_item_type(),
+                    columns: task_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let uuid = Uuid::parse_str(&id)
+                                .map_err(|_| ContentError::NotFound(id.clone()))?;
+                            let snapshot = self.snapshot().await?;
+                            list_item_children(&snapshot, &self.handle, uuid, &params).await
+                        })
+                    }),
+                }]
+            }
+            // `task:flat` rows are leaves; anything else has no children.
+            _ => Vec::new(),
+        }
+    }
+
+    /// Fast, per-level-sorted subtree over the in-memory forest (capability
+    /// `supports_eager_subtree`): the whole expanded shape is built in one
+    /// projection walk instead of the generic per-node expand cascade, and —
+    /// unlike that cascade — it carries `params.sort` down every level. The
+    /// root and task-item container kinds have an eager path; leaves fall
+    /// through to `None` so the generic recursion handles them.
+    async fn eager_subtree(
+        &self,
+        node: &dyn Node,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Option<Result<Subtree>> {
+        match node.node_type().type_id.as_str() {
+            "task:root" => Some(self.root_subtree(params, depth).await),
+            "task:item" => Some(self.item_subtree(node.id(), params, depth).await),
+            _ => None,
+        }
+    }
+
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
         self.inv_tx.subscribe()
     }
@@ -2309,6 +2469,20 @@ impl ContentAdapter for TaskAdapter {
     async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
         let snapshot = self.snapshot().await?;
         Ok(Some(snapshot.tree_search(query, limit)))
+    }
+
+    /// Ancestor chain for a task id, so a link can be followed into a
+    /// subtree that isn't expanded yet. `None` when the id isn't a uuid
+    /// or the task is gone.
+    async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
+        let Ok(uuid) = Uuid::parse_str(node_id) else {
+            return Ok(None);
+        };
+        let snapshot = self.snapshot().await?;
+        if !snapshot.by_id.contains_key(&uuid) {
+            return Ok(None);
+        }
+        Ok(Some(snapshot.path_to(uuid)))
     }
 
     /// Serve the `"tags"` value list backing the TUI `option_menu`: every
@@ -2431,6 +2605,7 @@ mod tests {
             children,
             tracked: HashSet::new(),
             tracked_subtree: HashSet::new(),
+            marker: Arc::from("⏱"),
         })
     }
 
@@ -2504,6 +2679,7 @@ mod tests {
             children,
             tracked,
             tracked_subtree,
+            marker: Arc::from("⏱"),
         };
 
         let rollup = |s: &NodeSummary| {
@@ -2551,6 +2727,7 @@ mod tests {
             children,
             tracked: HashSet::new(),
             tracked_subtree: HashSet::new(),
+            marker: Arc::from("⏱"),
         };
 
         let patches = snap.summary_one(child);
@@ -2565,7 +2742,11 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(symbols, "🏷", "the row carries its fresh tag symbol");
         // The parent is never dragged into the patch set.
-        assert!(snap.summary_one(child).iter().all(|s| s.id != root.to_string()));
+        assert!(
+            snap.summary_one(child)
+                .iter()
+                .all(|s| s.id != root.to_string())
+        );
     }
 
     #[test]
@@ -2728,7 +2909,11 @@ mod tests {
 
         // Unknown / unparseable id → no hits (no panic, no fallback to
         // description search).
-        assert!(snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50).hits.is_empty());
+        assert!(
+            snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50)
+                .hits
+                .is_empty()
+        );
         assert!(snap.tree_search("id:not-a-uuid", 50).hits.is_empty());
     }
 
@@ -2766,7 +2951,11 @@ mod tests {
         let matches: HashSet<Uuid> = [c, d].into_iter().collect();
         let (flat, _) = snap.flat_summaries(Some(&matches), &[]);
         let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(labels, vec!["C", "D"], "nested match surfaces, no ancestors");
+        assert_eq!(
+            labels,
+            vec!["C", "D"],
+            "nested match surfaces, no ancestors"
+        );
     }
 
     /// Helper: a single-key sort on `column` in `direction`.
@@ -2793,7 +2982,8 @@ mod tests {
             row(c, "Bravo", None),
         ]);
 
-        let (flat, applied) = snap.flat_summaries(None, &sort_by("description", SortDirection::Asc));
+        let (flat, applied) =
+            snap.flat_summaries(None, &sort_by("description", SortDirection::Asc));
         let labels: Vec<&str> = flat.iter().map(|s| s.label.as_str()).collect();
         assert_eq!(labels, vec!["Alpha", "Bravo", "Charlie"]);
         assert_eq!(applied.len(), 1, "the recognised sort key is reported back");
@@ -2832,7 +3022,12 @@ mod tests {
             row(p2_apricot, "Apricot", Some(p2)),
         ]);
 
-        let st = snap.subtree(None, None, u32::MAX, &sort_by("description", SortDirection::Asc));
+        let st = snap.subtree(
+            None,
+            None,
+            u32::MAX,
+            &sort_by("description", SortDirection::Asc),
+        );
         let kids = |node: &SubtreeNode| -> Vec<String> {
             node.children
                 .items
@@ -2895,8 +3090,13 @@ mod tests {
         r.tag_names = "home, urgent".into();
         r.tag_symbols = "🔥".into();
         r.has_notes = true;
-        let md = task_metadata(&r, true, true, "[]".to_string());
-        let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        let md = task_metadata(&r, true, true, "[]".to_string(), "⏱");
+        let get = |k: &str| {
+            md.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("priority").as_deref(), Some("5"));
         // status is rendered as the native nerd-font glyph, not a text label.
         assert_eq!(get("status").as_deref(), Some("󰄳"));
@@ -2913,20 +3113,49 @@ mod tests {
         // from the own-marker so `collapsed_source` can pick it up).
         assert_eq!(get("tracking_rollup").as_deref(), Some("⏱"));
         // Own marker off, but a tracked descendant lights the roll-up only.
-        let md_rollup = task_metadata(&r, false, true, "[]".to_string());
-        let get_rollup =
-            |k: &str| md_rollup.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        let md_rollup = task_metadata(&r, false, true, "[]".to_string(), "⏱");
+        let get_rollup = |k: &str| {
+            md_rollup
+                .fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get_rollup("tracking").as_deref(), Some(""));
         assert_eq!(get_rollup("tracking_rollup").as_deref(), Some("⏱"));
-        let md_off = task_metadata(&r, false, false, "[]".to_string());
+        let md_off = task_metadata(&r, false, false, "[]".to_string(), "⏱");
         assert_eq!(
-            md_off.fields.iter().find(|f| f.key == "tracking").map(|f| f.value.as_str()),
+            md_off
+                .fields
+                .iter()
+                .find(|f| f.key == "tracking")
+                .map(|f| f.value.as_str()),
             Some("")
         );
         assert_eq!(
-            md_off.fields.iter().find(|f| f.key == "tracking_rollup").map(|f| f.value.as_str()),
+            md_off
+                .fields
+                .iter()
+                .find(|f| f.key == "tracking_rollup")
+                .map(|f| f.value.as_str()),
             Some("")
         );
+    }
+
+    #[test]
+    fn custom_tracking_marker_propagates_to_own_and_rollup() {
+        // A configured `tracking_marker` (here the VS16 emoji clock) must
+        // reach both the own-marker and the roll-up marker cell.
+        let (_, r) = row(Uuid::from_u128(8), "Track me", None);
+        let md = task_metadata(&r, true, true, "[]".to_string(), "⏱️");
+        let get = |k: &str| {
+            md.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+        };
+        assert_eq!(get("tracking").as_deref(), Some("⏱️"));
+        assert_eq!(get("tracking_rollup").as_deref(), Some("⏱️"));
     }
 
     #[test]
@@ -3090,6 +3319,37 @@ mod tests {
             cell.read().await.is_none(),
             "cache must be cleared so the next read reloads fresh"
         );
+    }
+
+    #[test]
+    fn add_navigate_outcome_invalidates_cache() {
+        // Regression: `add` reports success via `Navigate`, not `Done`. The
+        // post-mutation cache drop must fire for it, or the new task races the
+        // async bridge and is intermittently missing until an app restart.
+        let navigate = Ok(ActionOutcome::Navigate {
+            node_id: Uuid::from_u128(1).to_string(),
+            node_type: task_item_type(),
+            message: None,
+        });
+        assert!(
+            outcome_changed_forest(&navigate),
+            "an `add`'s Navigate outcome must invalidate the cache"
+        );
+
+        // Edits/deletes report `Done` — still a mutation.
+        assert!(outcome_changed_forest(&Ok(ActionOutcome::Done {
+            message: None
+        })));
+
+        // A validation reopen / no-op made no DB change — cache stays.
+        assert!(!outcome_changed_forest(&Ok(ActionOutcome::Reopen {
+            content: String::new(),
+            new_version: None,
+        })));
+        assert!(!outcome_changed_forest(&Ok(ActionOutcome::NoChanges)));
+        assert!(!outcome_changed_forest(&Err(ContentError::NotFound(
+            "x".into()
+        ))));
     }
 
     // ── Adapter contract: query is the single filter, deleted-as-context ──

@@ -28,15 +28,18 @@ use super::comment::JiraCommentNode;
 use super::types::{attachment_node_type, comment_node_type, issue_node_type};
 use super::util::{format_file_size, other_err, prepare_target_dir, truncate_body};
 
-mod markers;
-mod template;
-mod slugs;
-mod merge;
+mod clone;
 mod edit_full;
 mod edit_with_comments;
-mod clone;
-mod transitions;
 mod export;
+mod link;
+mod markers;
+mod merge;
+mod slugs;
+mod template;
+mod transitions;
+mod wiki_md;
+mod workspace;
 
 use template::{edit_full_fields, strip_template_comments};
 
@@ -49,6 +52,13 @@ use template::{edit_full_fields, strip_template_comments};
 pub(super) fn issue_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("edit_full", "edit", InputSpec::Editor),
+        NodeAction::new("edit_markdown", "edit (markdown)", InputSpec::Editor),
+        // CLI-oriented counterparts of `edit_markdown`, sharing its exact
+        // buffer and write-back pipeline: `to_markdown` prints the Markdown to
+        // stdout (`ActionOutcome::Done`), `from_markdown` takes that same
+        // Markdown back (`-m`, `--file`, or stdin) and writes the ticket.
+        NodeAction::new("to_markdown", "to markdown", InputSpec::None),
+        NodeAction::new("from_markdown", "from markdown", InputSpec::Editor),
         NodeAction::new("edit_with_comments", "edit + comments", InputSpec::Editor),
         NodeAction::new("transition", "transition", InputSpec::Picker),
         NodeAction::new("create_comment", "add comment", InputSpec::Editor),
@@ -58,6 +68,20 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
         NodeAction::new("open_in_browser", "open in browser", InputSpec::None),
         NodeAction::new("clone", "clone", InputSpec::Editor),
         NodeAction::new(
+            "link",
+            "link issue",
+            InputSpec::Form {
+                fields: vec![
+                    FormFieldSpec::text("target", "Target issue key (e.g. PROJ-123)"),
+                    FormFieldSpec::text(
+                        "relation",
+                        "Relation (e.g. blocks, is blocked by, relates to)",
+                    )
+                    .with_default("relates to"),
+                ],
+            },
+        ),
+        NodeAction::new(
             "download-attachments",
             "download attachments",
             InputSpec::Form {
@@ -65,6 +89,13 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
             },
         ),
         NodeAction::new("export-bundle", "export bundle", InputSpec::None),
+        NodeAction::new(
+            "export_workspace",
+            "export workspace",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("dir", "Workspace base directory")],
+            },
+        ),
     ]
 }
 
@@ -80,6 +111,13 @@ pub(super) struct JiraIssueNode {
     /// path every action dispatch takes; internal rebuilds (edit/merge)
     /// leave it `None` and never receive `toggle-bookmark`.
     pub(super) bookmarks: Option<Arc<dyn BookmarkStore>>,
+    /// Base directory for the persistent ticket workspace, attached at the
+    /// `get_by_id`/`get_child` boundary via [`with_workspace_base`]. `None`
+    /// on internal rebuilds (edit/merge), which never dispatch the
+    /// `edit_markdown` / `export_workspace` actions.
+    ///
+    /// [`with_workspace_base`]: JiraIssueNode::with_workspace_base
+    pub(super) workspace_base: Option<Arc<std::path::PathBuf>>,
 }
 
 fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
@@ -127,15 +165,30 @@ fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
                 editable: false,
                 allowed_values: None,
             },
+            MetadataField {
+                key: "creator".into(),
+                value: detail.creator.clone(),
+                display_label: "Creator".into(),
+                editable: false,
+                allowed_values: None,
+            },
+            MetadataField {
+                key: "fix_versions".into(),
+                value: detail.fix_versions.clone(),
+                display_label: "Fix Versions".into(),
+                editable: false,
+                allowed_values: None,
+            },
         ],
     }
 }
 
 /// The **list-row** metadata projection — must mirror the field keys
 /// `JiraRoot::list_issues` emits (`key, type, status, priority, assignee,
-/// updated`), so the post-edit row patch refreshes the same columns the list
-/// rendered. `attachments` is intentionally omitted: the detail fetch doesn't
-/// carry an attachment count, so the patch keeps the row's last-known value.
+/// creator, fix_versions, updated`), so the post-edit row patch refreshes the
+/// same columns the list rendered. `attachments` is intentionally omitted: the
+/// detail fetch doesn't carry an attachment count, so the patch keeps the row's
+/// last-known value.
 fn build_row_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
     let f = |key: &str, value: String, label: &str| MetadataField {
         key: key.into(),
@@ -151,6 +204,8 @@ fn build_row_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
             f("status", detail.status.clone(), "Status"),
             f("priority", detail.priority.clone(), "Priority"),
             f("assignee", detail.assignee.clone(), "Assignee"),
+            f("creator", detail.creator.clone(), "Creator"),
+            f("fix_versions", detail.fix_versions.clone(), "Fix Versions"),
             f("updated", detail.updated.clone(), "Updated"),
         ],
     }
@@ -197,7 +252,16 @@ impl JiraIssueNode {
             detail: OnceCell::new(),
             cached_metadata,
             bookmarks,
+            workspace_base: None,
         }
+    }
+
+    /// Attach the ticket-workspace base directory. Called at the
+    /// `get_by_id`/`get_child` boundary so the `edit_markdown` /
+    /// `export_workspace` actions can materialise `<base>/<KEY>-<slug>/`.
+    pub(super) fn with_workspace_base(mut self, base: Arc<std::path::PathBuf>) -> Self {
+        self.workspace_base = Some(base);
+        self
     }
 
     /// Construct with detail already loaded. Used by `write_description`
@@ -220,6 +284,7 @@ impl JiraIssueNode {
             detail: cell,
             cached_metadata,
             bookmarks: None,
+            workspace_base: None,
         }
     }
 
@@ -318,20 +383,6 @@ impl Node for JiraIssueNode {
         }
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![comment_node_type(), attachment_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "jira:comment" => self.list_comments().await,
-            "jira:attachment" => self.list_attachments().await,
-            other => Err(ContentError::NotSupported(format!(
-                "Unknown child type: {other}"
-            ))),
-        }
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         // Extract plain ID from composite format (e.g. "PROJ-1/comment/123" → "123")
         let plain_id = id.rsplit('/').next().unwrap_or(id);
@@ -341,7 +392,9 @@ impl Node for JiraIssueNode {
             .map_err(other_err)?;
         if let Some(comment) = comments.into_iter().find(|c| c.id == plain_id) {
             return Ok(Box::new(JiraCommentNode::new(
-                Arc::clone(&self.client), comment, self.key.clone(),
+                Arc::clone(&self.client),
+                comment,
+                self.key.clone(),
             )));
         }
 
@@ -365,18 +418,54 @@ impl Node for JiraIssueNode {
         Some(self)
     }
 
-    fn actions(&self) -> Vec<NodeAction> {
-        issue_actions()
-    }
-
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         match action_id {
             "edit_full" => {
                 let detail = self.detail().await?;
+                let tables = self.slug_tables(detail).await;
                 Ok(EditorPrep {
-                    template: self.render_3b(&edit_full_fields(), detail, None, None),
+                    template: self.render_3b(&edit_full_fields(), detail, None, None, &tables),
                     version: detail.updated.clone(),
                     suffix: ".jira".into(),
+                    file_path: None,
+                })
+            }
+            "edit_markdown" => {
+                // Guarded build: refuses if the description or any comment
+                // wouldn't survive a lossless wiki→md→wiki round-trip.
+                let template = self.ticket_markdown(true).await?;
+                let detail = self.detail().await?;
+                // When a workspace base is configured, open a persistent
+                // `<base>/<KEY>-<slug>/ticket.md` and sync attachments on
+                // demand so the image links resolve locally. Without one, fall
+                // back to the classic throwaway temp file.
+                let file_path = match &self.workspace_base {
+                    Some(base) => {
+                        let dir = workspace::ticket_dir(base, &self.key, &detail.summary);
+                        workspace::sync_attachments(&self.client, &self.key, &dir).await?;
+                        Some(dir.join(workspace::TICKET_FILE))
+                    }
+                    None => None,
+                };
+                Ok(EditorPrep {
+                    template,
+                    version: detail.updated.clone(),
+                    suffix: ".md".into(),
+                    file_path,
+                })
+            }
+            "from_markdown" => {
+                // Same guarded Markdown buffer as `edit_markdown`, but no
+                // persistent workspace file — this is the CLI write-back entry
+                // point (`do_editor` supplies the edited text from `-m`/`--file`
+                // /stdin and never launches an interactive editor).
+                let template = self.ticket_markdown(true).await?;
+                let detail = self.detail().await?;
+                Ok(EditorPrep {
+                    template,
+                    version: detail.updated.clone(),
+                    suffix: ".md".into(),
+                    file_path: None,
                 })
             }
             "edit_with_comments" => {
@@ -384,24 +473,24 @@ impl Node for JiraIssueNode {
                 let comments = fetch_comments(&self.client, &self.cache, &self.key)
                     .await
                     .map_err(other_err)?;
-                let mention_sources: Vec<&str> =
-                    comments.iter().map(|c| c.body.as_str()).collect();
-                super::cache::resolve_unknown_mentions(&self.client, &self.cache, &mention_sources).await;
-                let template = self.render_with_comments(
-                    &edit_full_fields(),
-                    detail,
-                    &comments,
-                );
+                let mention_sources: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
+                super::cache::resolve_unknown_mentions(&self.client, &self.cache, &mention_sources)
+                    .await;
+                let tables = self.slug_tables(detail).await;
+                let template =
+                    self.render_with_comments(&edit_full_fields(), detail, &comments, &tables);
                 Ok(EditorPrep {
                     template,
                     version: detail.updated.clone(),
                     suffix: ".jira".into(),
+                    file_path: None,
                 })
             }
             "create_comment" => Ok(EditorPrep {
                 template: format!("# New comment for {}\n\n", self.key),
                 version: String::new(),
                 suffix: ".jira".into(),
+                file_path: None,
             }),
             "clone" => self.prepare_clone().await,
             other => Err(ContentError::NotSupported(format!(
@@ -425,6 +514,22 @@ impl Node for JiraIssueNode {
                 "picker_options: unknown action {other}"
             ))),
         }
+    }
+
+    /// Prefill the `export_workspace` form's `dir` field with the configured
+    /// workspace base so the user only edits it when they want a one-off
+    /// location. Other form actions carry no prefill.
+    async fn form_prep(
+        &self,
+        action_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut prefill = std::collections::HashMap::new();
+        if action_id == "export_workspace" {
+            if let Some(base) = &self.workspace_base {
+                prefill.insert("dir".to_string(), base.display().to_string());
+            }
+        }
+        Ok(prefill)
     }
 
     /// `remove-bookmark` opts into the generic confirm flow: the first
@@ -455,17 +560,58 @@ impl Node for JiraIssueNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("edit_full", ActionInput::Edited { text, original, version }) => {
-                self.execute_edit_full(&text, &version, Some(&original)).await
+            (
+                "edit_full",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => {
+                self.execute_edit_full(&text, &version, Some(&original))
+                    .await
             }
-            ("edit_with_comments", ActionInput::Edited { text, original, version }) => {
-                self.execute_edit_with_comments(&text, &original, &version).await
+            (
+                "edit_markdown",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => {
+                self.execute_edit_markdown(&text, &version, Some(&original))
+                    .await
+            }
+            ("to_markdown", ActionInput::None) => {
+                // Print the exact buffer `edit_markdown`/`from_markdown` open
+                // with (guarded, so what round-trips out writes cleanly back).
+                Ok(ActionOutcome::Done {
+                    message: Some(self.ticket_markdown(true).await?),
+                })
+            }
+            (
+                "from_markdown",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => {
+                self.execute_edit_markdown(&text, &version, Some(&original))
+                    .await
+            }
+            (
+                "edit_with_comments",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => {
+                self.execute_edit_with_comments(&text, &original, &version)
+                    .await
             }
             ("transition", ActionInput::Picked(transition_chain)) => {
                 self.execute_transition_chain(&transition_chain).await
@@ -492,7 +638,11 @@ impl Node for JiraIssueNode {
                     .toggle_watch(&self.key)
                     .await
                     .map_err(other_err)?;
-                let label = if now_watching { "watching" } else { "no longer watching" };
+                let label = if now_watching {
+                    "watching"
+                } else {
+                    "no longer watching"
+                };
                 Ok(ActionOutcome::Done {
                     message: Some(format!("{}: {label}", self.key)),
                 })
@@ -502,20 +652,27 @@ impl Node for JiraIssueNode {
                     other_err("bookmark store unavailable for this node".to_string())
                 })?;
                 let now_bookmarked = store.toggle(&self.key).await?;
-                let label = if now_bookmarked { "bookmarked" } else { "bookmark removed" };
+                let label = if now_bookmarked {
+                    "bookmarked"
+                } else {
+                    "bookmark removed"
+                };
                 Ok(ActionOutcome::Done {
                     message: Some(format!("{}: {label}", self.key)),
                 })
             }
             ("open_in_browser", ActionInput::None) => self.open_in_browser(),
-            ("clone", ActionInput::Edited { text, .. }) => {
-                self.execute_clone(&text).await
-            }
+            ("clone", ActionInput::Edited { text, .. }) => self.execute_clone(&text).await,
+            ("link", ActionInput::Form(values)) => self.execute_link(&values).await,
             ("download-attachments", ActionInput::Form(values)) => {
                 let dir = values.get("dir").map(String::as_str).unwrap_or("");
                 self.download_attachments(dir).await
             }
             ("export-bundle", ActionInput::None) => self.export_bundle().await,
+            ("export_workspace", ActionInput::Form(values)) => {
+                let dir = values.get("dir").map(String::as_str).unwrap_or("");
+                self.export_workspace(dir).await
+            }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"
             ))),
@@ -537,7 +694,66 @@ impl JiraIssueNode {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| other_err(format!("spawn xdg-open: {e}")))?;
-        Ok(ActionOutcome::Done { message: Some(format!("opened {url}")) })
+        Ok(ActionOutcome::Done {
+            message: Some(format!("opened {url}")),
+        })
+    }
+
+    /// Build the ticket body + comments as one Markdown buffer — the shared
+    /// content of the `edit_markdown` editor and the `export_workspace` file.
+    /// When `guarded`, refuse (with a descriptive error) if the description or
+    /// any comment would not survive a lossless wiki→md→wiki round-trip; the
+    /// unguarded path is for the read-only export, which never writes back.
+    async fn ticket_markdown(&self, guarded: bool) -> Result<String> {
+        let detail = self.detail().await?;
+        let comments = fetch_comments(&self.client, &self.cache, &self.key)
+            .await
+            .map_err(other_err)?;
+        if guarded {
+            if let Some(diff) = wiki_md::roundtrip_diff(&detail.description) {
+                return Err(other_err(format!(
+                    "Markdown edit unavailable for {}: the description uses Jira \
+                     markup that would not survive a lossless round-trip. Use the \
+                     plain 'edit' action instead.\n\nFirst divergence:\n{diff}",
+                    self.key
+                )));
+            }
+            for c in &comments {
+                if let Some(diff) = wiki_md::roundtrip_diff(&c.body) {
+                    return Err(other_err(format!(
+                        "Markdown edit unavailable for {}: comment {} uses Jira \
+                         markup that would not survive a lossless round-trip. Use \
+                         the plain 'edit + comments' action instead.\n\nFirst \
+                         divergence:\n{diff}",
+                        self.key, c.id
+                    )));
+                }
+            }
+        }
+        let mention_sources: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
+        super::cache::resolve_unknown_mentions(&self.client, &self.cache, &mention_sources).await;
+        let tables = self.slug_tables(detail).await;
+        let canonical = self.render_with_comments(&edit_full_fields(), detail, &comments, &tables);
+        Ok(edit_with_comments::comments_canonical_to_md(&canonical))
+    }
+
+    /// Materialise the `export_workspace` folder: `<base>/<KEY>-<slug>/` with
+    /// `ticket.md` (unguarded Markdown) and on-demand `attachments/`. No editor
+    /// and no Jira write-back — a local, read-oriented snapshot.
+    async fn export_workspace(&self, base_input: &str) -> Result<ActionOutcome> {
+        let base = prepare_target_dir(base_input)?;
+        let markdown = self.ticket_markdown(false).await?;
+        let detail = self.detail().await?;
+        let dir =
+            workspace::materialize(&self.client, &self.key, &detail.summary, &markdown, &base)
+                .await?;
+        Ok(ActionOutcome::Done {
+            message: Some(format!(
+                "{}: exported workspace to {}",
+                self.key,
+                dir.display()
+            )),
+        })
     }
 
     /// Download **every** attachment of this issue into `dir_input` via the
@@ -547,7 +763,11 @@ impl JiraIssueNode {
     async fn download_attachments(&self, dir_input: &str) -> Result<ActionOutcome> {
         let dir = prepare_target_dir(dir_input)?;
 
-        let attachments = self.client.get_attachments(&self.key).await.map_err(other_err)?;
+        let attachments = self
+            .client
+            .get_attachments(&self.key)
+            .await
+            .map_err(other_err)?;
         if attachments.is_empty() {
             return Ok(ActionOutcome::Done {
                 message: Some(format!("{}: no attachments to download", self.key)),
@@ -559,121 +779,129 @@ impl JiraIssueNode {
             message: Some(download_summary(&self.key, &dir, saved, total, &failures)),
         })
     }
+}
 
-    async fn list_comments(&self) -> Result<ListResult> {
-        let comments = fetch_comments(&self.client, &self.cache, &self.key)
-            .await
-            .map_err(other_err)?;
+/// List an issue's comments — the single fetch source behind both the issue
+/// node's legacy `list` (for `jira:comment`) and the adapter's
+/// [`ContentAdapter::childs`] declaration. Reconstructs from adapter state
+/// (`client`, `cache`) plus the issue key (= the node's `id()`).
+pub(super) async fn list_comments(
+    client: &Arc<JiraClient>,
+    cache: &Arc<Mutex<JiraCache>>,
+    key: &str,
+) -> Result<ListResult> {
+    let comments = fetch_comments(client, cache, key)
+        .await
+        .map_err(other_err)?;
 
-        let issue_key = &self.key;
-        let items = comments
-            .into_iter()
-            .map(|c| {
-                let preview = truncate_body(&c.body, 80);
-                NodeSummary {
-                    id: format!("{issue_key}/comment/{}", c.id),
-                    label: preview,
-                    node_type: comment_node_type(),
-                    metadata: Metadata {
-                        fields: vec![
-                            MetadataField {
-                                key: "author".into(),
-                                value: c.author,
-                                display_label: "Author".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "created".into(),
-                                value: c.created,
-                                display_label: "Created".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                        ],
-                    },
-                    has_children: None,
-                }
-            })
-            .collect();
-
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
+    let issue_key = key;
+    let items = comments
+        .into_iter()
+        .map(|c| {
+            let preview = truncate_body(&c.body, 80);
+            NodeSummary {
+                id: format!("{issue_key}/comment/{}", c.id),
+                label: preview,
+                node_type: comment_node_type(),
+                metadata: Metadata {
+                    fields: vec![
+                        MetadataField {
+                            key: "author".into(),
+                            value: c.author,
+                            display_label: "Author".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "created".into(),
+                            value: c.created,
+                            display_label: "Created".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                    ],
+                },
+                has_children: None,
+            }
         })
-    }
+        .collect();
 
-    async fn list_attachments(&self) -> Result<ListResult> {
-        let attachments = self
-            .client
-            .get_attachments(&self.key)
-            .await
-            .map_err(other_err)?;
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    })
+}
 
-        let issue_key = &self.key;
-        let items = attachments
-            .into_iter()
-            .map(|a| {
-                let size_display = format_file_size(a.size);
-                NodeSummary {
-                    id: format!("{issue_key}/attachment/{}", a.id),
-                    label: a.filename.clone(),
-                    node_type: attachment_node_type(),
-                    metadata: Metadata {
-                        fields: vec![
-                            MetadataField {
-                                key: "filename".into(),
-                                value: a.filename,
-                                display_label: "Filename".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "author".into(),
-                                value: a.author,
-                                display_label: "Author".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "size".into(),
-                                value: size_display,
-                                display_label: "Size".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "mime_type".into(),
-                                value: a.mime_type,
-                                display_label: "Type".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "created".into(),
-                                value: a.created,
-                                display_label: "Created".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                        ],
-                    },
-                    has_children: None,
-                }
-            })
-            .collect();
+/// List an issue's attachments — the single fetch source behind both the
+/// issue node's legacy `list` (for `jira:attachment`) and the adapter's
+/// [`ContentAdapter::childs`] declaration. Reconstructs from adapter state
+/// (`client`) plus the issue key (= the node's `id()`).
+pub(super) async fn list_attachments(client: &Arc<JiraClient>, key: &str) -> Result<ListResult> {
+    let attachments = client.get_attachments(key).await.map_err(other_err)?;
 
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
+    let issue_key = key;
+    let items = attachments
+        .into_iter()
+        .map(|a| {
+            let size_display = format_file_size(a.size);
+            NodeSummary {
+                id: format!("{issue_key}/attachment/{}", a.id),
+                label: a.filename.clone(),
+                node_type: attachment_node_type(),
+                metadata: Metadata {
+                    fields: vec![
+                        MetadataField {
+                            key: "filename".into(),
+                            value: a.filename,
+                            display_label: "Filename".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "author".into(),
+                            value: a.author,
+                            display_label: "Author".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "size".into(),
+                            value: size_display,
+                            display_label: "Size".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "mime_type".into(),
+                            value: a.mime_type,
+                            display_label: "Type".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "created".into(),
+                            value: a.created,
+                            display_label: "Created".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                    ],
+                },
+                has_children: None,
+            }
         })
-    }
+        .collect();
+
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    })
 }
 
 #[async_trait]
@@ -698,23 +926,22 @@ impl Content for JiraIssueNode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::edit_with_comments::{
-        CommentBlockKind, is_delete_keyword, parse_comment_header_id, render_comment_header,
-    };
-    use super::markers::{ADD_COMMENT_MARKER, CACHE_MARKER, ERROR_BANNER_START};
-    use super::slugs::{build_slug_tables, resolve_slugs_inplace};
-    use super::template::{ChangeSet, FieldError};
-    use crate::cache_store;
-    use crate::client::{JiraAttachment, JiraComment, JiraUser};
     use super::super::cache::JiraCache as CacheAlias;
     use super::super::util::normalize_blank_lines;
+    use super::edit_with_comments::{
+        CommentBlockKind, comments_canonical_to_md, comments_md_to_canonical, is_delete_keyword,
+        parse_comment_header_id, render_comment_header,
+    };
+    use super::markers::{ADD_COMMENT_MARKER, CACHE_MARKER, ERROR_BANNER_START};
+    use super::slugs::{build_slug_tables, build_status_table, resolve_slugs_inplace};
+    use super::template::{ChangeSet, FieldError};
+    use super::*;
+    use crate::cache_store;
+    use crate::client::{JiraAttachment, JiraComment, JiraUser};
     use std::sync::Mutex;
 
     fn test_client() -> Arc<JiraClient> {
-        Arc::new(
-            JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap(),
-        )
+        Arc::new(JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap())
     }
 
     /// Project an issue's user references (assignee, reporter, creator) into
@@ -730,7 +957,11 @@ mod tests {
             if key.is_empty() {
                 continue;
             }
-            let display_name = if display.is_empty() { key.clone() } else { display.clone() };
+            let display_name = if display.is_empty() {
+                key.clone()
+            } else {
+                display.clone()
+            };
             users.push(JiraUser {
                 name: key.clone(),
                 display_name,
@@ -752,8 +983,14 @@ mod tests {
         let client = test_client();
         let scope_id = cache_store::scope_id_for_url("http://localhost:0");
         let cache = Arc::new(Mutex::new(CacheAlias::new(None, scope_id)));
-        cache.lock().unwrap().merge_users(issue_users_for_test(&detail));
-        cache.lock().unwrap().merge_labels(detail.labels.iter().cloned());
+        cache
+            .lock()
+            .unwrap()
+            .merge_users(issue_users_for_test(&detail));
+        cache
+            .lock()
+            .unwrap()
+            .merge_labels(detail.labels.iter().cloned());
         JiraIssueNode::new(client, cache, detail)
     }
 
@@ -771,9 +1008,10 @@ mod tests {
             assignee_key: "alice".into(),
             reporter: String::new(),
             reporter_key: String::new(),
-            creator: String::new(),
-            creator_key: String::new(),
+            creator: "bob".into(),
+            creator_key: "bob".into(),
             labels: Vec::new(),
+            fix_versions: "1.2.0, 1.3.0".into(),
             updated: "2025-01-01T00:00:00.000+0000".into(),
         }
     }
@@ -819,9 +1057,10 @@ mod tests {
     /// The post-edit row patch overlays `row_summary()` onto the visible list
     /// row, merging by key. For that to refresh the right columns, the row
     /// projection's keys must mirror what `JiraRoot::list_issues` emits
-    /// (`key, type, status, priority, assignee, updated`) and carry the fresh
-    /// detail values. `attachments` is deliberately absent — the detail fetch
-    /// has no count — so the patch keeps the row's last-known value there.
+    /// (`key, type, status, priority, assignee, creator, fix_versions, updated`)
+    /// and carry the fresh detail values. `attachments` is deliberately absent —
+    /// the detail fetch has no count — so the patch keeps the row's last-known
+    /// value there.
     #[test]
     fn row_summary_mirrors_list_row_keys_and_values() {
         let node = test_node(sample_detail());
@@ -833,7 +1072,16 @@ mod tests {
         let keys: Vec<&str> = row.metadata.fields.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(
             keys,
-            ["key", "type", "status", "priority", "assignee", "updated"]
+            [
+                "key",
+                "type",
+                "status",
+                "priority",
+                "assignee",
+                "creator",
+                "fix_versions",
+                "updated"
+            ]
         );
         // No `summary` field (that's the detail/edit-form projection) and no
         // `attachments` (the detail can't supply a count).
@@ -851,6 +1099,8 @@ mod tests {
         assert_eq!(value("status"), "In Progress");
         assert_eq!(value("priority"), "High");
         assert_eq!(value("assignee"), "alice");
+        assert_eq!(value("creator"), "bob");
+        assert_eq!(value("fix_versions"), "1.2.0, 1.3.0");
         assert_eq!(value("type"), "Bug");
     }
 
@@ -904,7 +1154,10 @@ mod tests {
 
     /// Helper: parse + diff against current upstream, mirroring what the
     /// removed `parse_editor_output` returned.
-    fn diff_buffer(node: &JiraIssueNode, text: &str) -> std::result::Result<ChangeSet, Vec<FieldError>> {
+    fn diff_buffer(
+        node: &JiraIssueNode,
+        text: &str,
+    ) -> std::result::Result<ChangeSet, Vec<FieldError>> {
         let mut parsed = node.parse_3b(text)?;
         let tables = build_slug_tables(&node.cache);
         let mut errors: Vec<FieldError> = Vec::new();
@@ -918,14 +1171,20 @@ mod tests {
     #[test]
     fn template_3b_layout() {
         let node = test_node(sample_detail());
-        let template = node.render_3b(&["summary".into()], node.detail_now(), None, None);
+        let template = node.render_3b(
+            &["summary".into()],
+            node.detail_now(),
+            None,
+            None,
+            &build_slug_tables(&node.cache),
+        );
 
         // Editable section comes first.
         assert!(template.contains("summary: Fix login bug"));
 
         // 3b markers, in order.
         let dash_pos = template.find("\n---\n").expect("missing --- marker");
-        let eq_pos   = template.find("\n===\n").expect("missing === marker");
+        let eq_pos = template.find("\n===\n").expect("missing === marker");
         assert!(dash_pos < eq_pos, "--- must come before ===");
 
         assert!(template.contains("number: PROJ-42"));
@@ -933,9 +1192,36 @@ mod tests {
         assert!(template.contains("status: In Progress"));
         assert!(template.contains("priority: High"));
         assert!(template.contains("assignee: alice"));
+        // Several fix versions render as one comma-separated read-only line.
+        assert!(template.contains("fix_versions: 1.2.0, 1.3.0"));
 
         // Body after `===`.
         assert!(template.contains("The login form crashes on submit."));
+    }
+
+    /// The read-only block is informational: re-saving a rendered buffer
+    /// unchanged must not diff. Guards the newest read-only key specifically —
+    /// a parser that took `fix_versions` for an editable field would turn every
+    /// plain save into a phantom field change.
+    #[test]
+    fn read_only_fix_versions_line_does_not_diff() {
+        let node = test_node(sample_detail());
+        let template = node.render_3b(
+            &["summary".into()],
+            node.detail_now(),
+            None,
+            None,
+            &build_slug_tables(&node.cache),
+        );
+        assert!(template.contains("fix_versions: "), "line must be rendered");
+
+        let output = diff_buffer(&node, &template).unwrap();
+        assert_eq!(
+            output.metadata_changes.len(),
+            0,
+            "{:?}",
+            output.metadata_changes
+        );
     }
 
     #[test]
@@ -946,11 +1232,12 @@ mod tests {
             node.detail_now(),
             None,
             None,
+            &build_slug_tables(&node.cache),
         );
 
         assert!(template.contains("summary: Fix login bug"));
-        // Assignee renders as a `uu-…` slug derived from display_name.
-        assert!(template.contains("assignee: uu-alice"));
+        // Assignee renders as a `uu_…` slug derived from display_name.
+        assert!(template.contains("assignee: uu_alice"));
         // Editable fields move *out* of the read-only section.
         let after_dash = template.split("\n---\n").nth(1).unwrap_or("");
         assert!(!after_dash.contains("assignee:"));
@@ -1000,6 +1287,70 @@ mod tests {
         assert_eq!(body, "New description with more details.");
     }
 
+    /// With a populated status table the editable `status` field renders as an
+    /// `ss_…` slug and the CACHE legend lists the reachable statuses — the same
+    /// slug treatment labels and users already get.
+    #[test]
+    fn status_renders_as_slug_with_cache_legend() {
+        let node = test_node(sample_detail());
+        let mut tables = build_slug_tables(&node.cache);
+        tables.statuses = build_status_table(["Done", "In Review"], &node.detail_now().status);
+        let template = node.render_3b(
+            &["summary".into(), "status".into()],
+            node.detail_now(),
+            None,
+            None,
+            &tables,
+        );
+
+        // Current status "In Progress" → normalized slug in the editable section.
+        assert!(
+            template.contains("status: ss_in_progress"),
+            "got: {template}"
+        );
+        // Reachable statuses listed in the CACHE legend.
+        assert!(template.contains("# statuses: "), "got: {template}");
+        assert!(template.contains("ss_done"), "got: {template}");
+        assert!(template.contains("ss_in_review"), "got: {template}");
+    }
+
+    /// A changed status routes to `ChangeSet::status_change` (→ workflow
+    /// transition), never to `metadata_changes` (which feeds the field PUT that
+    /// rejects `status`).
+    #[test]
+    fn diff_status_change_routes_to_status_change() {
+        let node = test_node(sample_detail());
+        let text = "summary: Fix login bug\n\
+                    status: Done\n\
+                    ---\n\
+                    ===\n\
+                    \n\
+                    The login form crashes on submit.";
+
+        let output = diff_buffer(&node, text).unwrap();
+        assert!(
+            output.metadata_changes.iter().all(|(k, _)| k != "status"),
+            "status must not be a metadata change: {:?}",
+            output.metadata_changes
+        );
+        assert_eq!(output.status_change.as_deref(), Some("Done"));
+    }
+
+    /// An unchanged status leaves `status_change` empty — no spurious transition.
+    #[test]
+    fn diff_unchanged_status_no_transition() {
+        let node = test_node(sample_detail());
+        let text = "summary: Fix login bug\n\
+                    status: In Progress\n\
+                    ---\n\
+                    ===\n\
+                    \n\
+                    The login form crashes on submit.";
+
+        let output = diff_buffer(&node, text).unwrap();
+        assert!(output.status_change.is_none());
+    }
+
     #[test]
     fn diff_strips_inline_comments() {
         let node = test_node(sample_detail());
@@ -1022,7 +1373,11 @@ mod tests {
         match node.parse_3b(text) {
             Ok(_) => panic!("expected parse error"),
             Err(errs) => {
-                let msg = errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join(" | ");
+                let msg = errs
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
                 assert!(msg.contains("---") || msg.contains("==="), "got: {msg}");
             }
         }
@@ -1034,7 +1389,10 @@ mod tests {
         let text = "summary: ok\nbogus: surprise\n---\n===\n\nbody";
         let parsed = node.parse_3b(text).unwrap();
         let errs = node.validate_3b(&parsed, &["summary".into()]);
-        assert!(errs.iter().any(|e| e.message.contains("bogus")), "got: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.message.contains("bogus")),
+            "got: {errs:?}"
+        );
     }
 
     #[test]
@@ -1043,7 +1401,10 @@ mod tests {
         let text = "summary:   \n---\n===\n\nbody";
         let parsed = node.parse_3b(text).unwrap();
         let errs = node.validate_3b(&parsed, &["summary".into()]);
-        assert!(errs.iter().any(|e| e.message.contains("summary must not be empty")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("summary must not be empty"))
+        );
     }
 
     #[test]
@@ -1051,7 +1412,12 @@ mod tests {
         let node = test_node(sample_detail());
         let original = "summary: Fix login bug\n---\nstatus: Open\n===\n\nBody";
         let user = "summary:   \n---\nstatus: Open\n===\n\nBody";
-        let out = node.restore_blanked_editable(user, Some(original), &["summary".into()], node.detail_now());
+        let out = node.restore_blanked_editable(
+            user,
+            Some(original),
+            &["summary".into()],
+            node.detail_now(),
+        );
         assert!(out.contains("summary: Fix login bug"));
         assert!(out.contains("Body"));
     }
@@ -1061,7 +1427,12 @@ mod tests {
         let node = test_node(sample_detail());
         let original = "summary: Fix login bug\n---\n===\n\nOld body";
         let user = "summary: Updated title\n---\n===\n\nNew body";
-        let out = node.restore_blanked_editable(user, Some(original), &["summary".into()], node.detail_now());
+        let out = node.restore_blanked_editable(
+            user,
+            Some(original),
+            &["summary".into()],
+            node.detail_now(),
+        );
         assert_eq!(out, user);
     }
 
@@ -1090,7 +1461,9 @@ mod tests {
     fn render_with_errors_does_not_stack_banner() {
         let node = test_node(sample_detail());
         let original = "summary: x\n---\n===\n\nbody";
-        let errors = vec![FieldError { message: "first".into() }];
+        let errors = vec![FieldError {
+            message: "first".into(),
+        }];
         let once = node.render_with_errors(original, &errors);
         let twice = node.render_with_errors(&once, &errors);
         assert_eq!(once, twice, "banners should not stack on repeated reopens");
@@ -1105,7 +1478,9 @@ mod tests {
         let theirs = "summary: Original\n---\nstatus: Closed\n===\n\nOriginal body\n";
         let mut opts = diffy::MergeOptions::new();
         opts.set_conflict_style(diffy::ConflictStyle::Merge);
-        let merged = opts.merge(ancestor, ours, theirs).expect("disjoint merge should succeed");
+        let merged = opts
+            .merge(ancestor, ours, theirs)
+            .expect("disjoint merge should succeed");
         assert!(merged.contains("summary: User-changed"));
         assert!(merged.contains("status: Closed"));
         assert!(!merged.contains("<<<<<<<"));
@@ -1120,7 +1495,9 @@ mod tests {
         let theirs = "summary: Upstream\n---\n===\n\nbody\n";
         let mut opts = diffy::MergeOptions::new();
         opts.set_conflict_style(diffy::ConflictStyle::Merge);
-        let conflict = opts.merge(ancestor, ours, theirs).expect_err("should conflict");
+        let conflict = opts
+            .merge(ancestor, ours, theirs)
+            .expect_err("should conflict");
         assert!(conflict.contains("<<<<<<<"));
         assert!(conflict.contains("======="));
         assert!(conflict.contains(">>>>>>>"));
@@ -1134,11 +1511,13 @@ mod tests {
     #[test]
     fn diffy_merge_body_disjoint_lines_clean() {
         let ancestor = "summary: x\n---\n===\n\nline1\nline2\nline3\n";
-        let ours     = "summary: x\n---\n===\n\nline1-edited\nline2\nline3\n";
-        let theirs   = "summary: x\n---\n===\n\nline1\nline2\nline3-edited\n";
+        let ours = "summary: x\n---\n===\n\nline1-edited\nline2\nline3\n";
+        let theirs = "summary: x\n---\n===\n\nline1\nline2\nline3-edited\n";
         let mut opts = diffy::MergeOptions::new();
         opts.set_conflict_style(diffy::ConflictStyle::Merge);
-        let merged = opts.merge(ancestor, ours, theirs).expect("disjoint body lines should merge");
+        let merged = opts
+            .merge(ancestor, ours, theirs)
+            .expect("disjoint body lines should merge");
         assert!(merged.contains("line1-edited"));
         assert!(merged.contains("line3-edited"));
         assert!(!merged.contains("<<<<<<<"));
@@ -1152,18 +1531,20 @@ mod tests {
     #[test]
     fn diffy_merge_tolerates_server_reformatted_body() {
         let ancestor = "summary: x\n---\n===\n\npara1\npara2\npara3\nTest\n";
-        let ours     = "summary: x\n---\n===\n\npara1\npara2\npara3\nToast\n";
+        let ours = "summary: x\n---\n===\n\npara1\npara2\npara3\nToast\n";
         // theirs: every paragraph followed by a blank line, plus the same
         // last-line edit.
-        let theirs   = "summary: x\n---\n===\n\npara1\n\npara2\n\npara3\n\nUpstream\n";
+        let theirs = "summary: x\n---\n===\n\npara1\n\npara2\n\npara3\n\nUpstream\n";
 
         let ancestor_n = normalize_blank_lines(ancestor);
-        let ours_n     = normalize_blank_lines(ours);
-        let theirs_n   = normalize_blank_lines(theirs);
+        let ours_n = normalize_blank_lines(ours);
+        let theirs_n = normalize_blank_lines(theirs);
 
         let mut opts = diffy::MergeOptions::new();
         opts.set_conflict_style(diffy::ConflictStyle::Merge);
-        let conflict = opts.merge(&ancestor_n, &ours_n, &theirs_n).expect_err("last line should conflict");
+        let conflict = opts
+            .merge(&ancestor_n, &ours_n, &theirs_n)
+            .expect_err("last line should conflict");
 
         // The conflict region should be small — only the last-line change,
         // not the entire body.
@@ -1189,7 +1570,8 @@ mod tests {
         let text = "<<<<<<< ours\nsummary: User\n=======\nsummary: Upstream\n>>>>>>> theirs\n---\n===\n\nbody";
         let err = node.parse_3b(text).unwrap_err();
         assert!(
-            err.iter().any(|e| e.message.contains("unresolved conflict marker")),
+            err.iter()
+                .any(|e| e.message.contains("unresolved conflict marker")),
             "expected conflict-marker rejection, got: {err:?}",
         );
     }
@@ -1199,7 +1581,13 @@ mod tests {
         let node = test_node(sample_detail());
         let fields = vec!["summary".into(), "assignee".into()];
 
-        let template = node.render_3b(&fields, node.detail_now(), None, None);
+        let template = node.render_3b(
+            &fields,
+            node.detail_now(),
+            None,
+            None,
+            &build_slug_tables(&node.cache),
+        );
         let output = diff_buffer(&node, &template).unwrap();
 
         // Unchanged template → no content change, no metadata changes
@@ -1207,10 +1595,11 @@ mod tests {
         assert_eq!(output.metadata_changes.len(), 0);
     }
 
-    #[test]
-    fn issue_node_has_children_types() {
+    #[tokio::test]
+    async fn issue_node_has_children_types() {
+        let adapter = crate::adapter::test_adapter().await;
         let node = test_node(sample_detail());
-        let types = node.children_types();
+        let types = not_yet_done_content::children::child_types(&adapter, &node);
         assert_eq!(types.len(), 2);
         assert_eq!(types[0].type_id, "jira:comment");
         assert_eq!(types[1].type_id, "jira:attachment");
@@ -1218,13 +1607,15 @@ mod tests {
 
     #[test]
     fn issue_node_declares_actions() {
-        let node = test_node(sample_detail());
-        let actions = node.actions();
+        let actions = issue_actions();
         let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
                 "edit_full",
+                "edit_markdown",
+                "to_markdown",
+                "from_markdown",
                 "edit_with_comments",
                 "transition",
                 "create_comment",
@@ -1233,21 +1624,28 @@ mod tests {
                 "remove-bookmark",
                 "open_in_browser",
                 "clone",
+                "link",
                 "download-attachments",
                 "export-bundle",
+                "export_workspace",
             ]
         );
-        assert!(matches!(actions[0].input, InputSpec::Editor));
-        assert!(matches!(actions[1].input, InputSpec::Editor));
-        assert!(matches!(actions[2].input, InputSpec::Picker));
-        assert!(matches!(actions[3].input, InputSpec::Editor));
-        assert!(matches!(actions[4].input, InputSpec::None)); // toggle_watch
-        assert!(matches!(actions[5].input, InputSpec::None)); // toggle-bookmark
-        assert!(matches!(actions[6].input, InputSpec::None)); // remove-bookmark
-        assert!(matches!(actions[7].input, InputSpec::None)); // open_in_browser
-        assert!(matches!(actions[8].input, InputSpec::Editor)); // clone
-        assert!(matches!(actions[9].input, InputSpec::Form { .. })); // download-attachments
-        assert!(matches!(actions[10].input, InputSpec::None)); // export-bundle
+        assert!(matches!(actions[0].input, InputSpec::Editor)); // edit_full
+        assert!(matches!(actions[1].input, InputSpec::Editor)); // edit_markdown
+        assert!(matches!(actions[2].input, InputSpec::None)); // to_markdown
+        assert!(matches!(actions[3].input, InputSpec::Editor)); // from_markdown
+        assert!(matches!(actions[4].input, InputSpec::Editor)); // edit_with_comments
+        assert!(matches!(actions[5].input, InputSpec::Picker)); // transition
+        assert!(matches!(actions[6].input, InputSpec::Editor)); // create_comment
+        assert!(matches!(actions[7].input, InputSpec::None)); // toggle_watch
+        assert!(matches!(actions[8].input, InputSpec::None)); // toggle-bookmark
+        assert!(matches!(actions[9].input, InputSpec::None)); // remove-bookmark
+        assert!(matches!(actions[10].input, InputSpec::None)); // open_in_browser
+        assert!(matches!(actions[11].input, InputSpec::Editor)); // clone
+        assert!(matches!(actions[12].input, InputSpec::Form { .. })); // link
+        assert!(matches!(actions[13].input, InputSpec::Form { .. })); // download-attachments
+        assert!(matches!(actions[14].input, InputSpec::None)); // export-bundle
+        assert!(matches!(actions[15].input, InputSpec::Form { .. })); // export_workspace
     }
 
     #[test]
@@ -1283,9 +1681,19 @@ mod tests {
         let node = test_node(sample_detail());
         let comments = vec![
             make_comment("1", "bob", "2025-05-01T10:00:00.000+0000", "old comment"),
-            make_comment("2", "alice", "2025-06-01T10:00:00.000+0000", "newer comment"),
+            make_comment(
+                "2",
+                "alice",
+                "2025-06-01T10:00:00.000+0000",
+                "newer comment",
+            ),
         ];
-        let buf = node.render_with_comments(&edit_full_fields(), node.detail_now(), &comments);
+        let buf = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
 
         let pos2 = buf.find("(id=2)").expect("id=2 marker");
         let pos1 = buf.find("(id=1)").expect("id=1 marker");
@@ -1301,9 +1709,16 @@ mod tests {
             make_comment("10", "alice", "2025-06-01T10:00:00.000+0000", "first body"),
             make_comment("20", "bob", "2025-06-02T10:00:00.000+0000", "second body"),
         ];
-        let buf = node.render_with_comments(&edit_full_fields(), node.detail_now(), &comments);
+        let buf = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
 
-        let parsed = node.parse_with_comments(&buf).expect("parse should succeed");
+        let parsed = node
+            .parse_with_comments(&buf)
+            .expect("parse should succeed");
         assert_eq!(parsed.blocks.len(), 2);
         assert!(matches!(&parsed.blocks[0].kind, CommentBlockKind::Existing(id) if id == "20"));
         assert_eq!(parsed.blocks[0].body, "second body");
@@ -1321,7 +1736,12 @@ mod tests {
     #[test]
     fn parse_with_comments_picks_up_add_blocks() {
         let node = test_node(sample_detail());
-        let buf = node.render_with_comments(&edit_full_fields(), node.detail_now(), &[]);
+        let buf = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &[],
+            &build_slug_tables(&node.cache),
+        );
         // Insert the new-comment block before the trailing CACHE section.
         let buf = match buf.find(CACHE_MARKER) {
             Some(pos) => format!(
@@ -1332,7 +1752,9 @@ mod tests {
             None => format!("{buf}--- add ---\n\nthis is a brand new comment\n"),
         };
 
-        let parsed = node.parse_with_comments(&buf).expect("parse should succeed");
+        let parsed = node
+            .parse_with_comments(&buf)
+            .expect("parse should succeed");
         assert_eq!(parsed.blocks.len(), 1);
         assert!(matches!(parsed.blocks[0].kind, CommentBlockKind::Add));
         assert_eq!(parsed.blocks[0].body, "this is a brand new comment");
@@ -1341,7 +1763,12 @@ mod tests {
     #[test]
     fn render_with_comments_includes_empty_add_placeholder() {
         let node = test_node(sample_detail());
-        let buf = node.render_with_comments(&edit_full_fields(), node.detail_now(), &[]);
+        let buf = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &[],
+            &build_slug_tables(&node.cache),
+        );
         assert!(
             buf.contains(ADD_COMMENT_MARKER),
             "render must include an `--- add ---` placeholder"
@@ -1353,8 +1780,15 @@ mod tests {
         let node = test_node(sample_detail());
         // Default render now includes an empty `--- add ---` placeholder —
         // it must not appear in the parsed blocks.
-        let buf = node.render_with_comments(&edit_full_fields(), node.detail_now(), &[]);
-        let parsed = node.parse_with_comments(&buf).expect("parse should succeed");
+        let buf = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &[],
+            &build_slug_tables(&node.cache),
+        );
+        let parsed = node
+            .parse_with_comments(&buf)
+            .expect("parse should succeed");
         assert!(
             parsed.blocks.is_empty(),
             "empty add placeholder must be dropped, got {:?}",
@@ -1365,13 +1799,20 @@ mod tests {
     #[test]
     fn parse_with_comments_drops_whitespace_only_add_block() {
         let node = test_node(sample_detail());
-        let buf = node.render_with_comments(&edit_full_fields(), node.detail_now(), &[]);
+        let buf = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &[],
+            &build_slug_tables(&node.cache),
+        );
         // Insert a second add block that contains only whitespace.
         let buf = match buf.find(CACHE_MARKER) {
             Some(pos) => format!("{}--- add ---\n\n   \n\t\n\n{}", &buf[..pos], &buf[pos..]),
             None => format!("{buf}--- add ---\n\n   \n"),
         };
-        let parsed = node.parse_with_comments(&buf).expect("parse should succeed");
+        let parsed = node
+            .parse_with_comments(&buf)
+            .expect("parse should succeed");
         assert!(parsed.blocks.is_empty());
     }
 
@@ -1381,6 +1822,282 @@ mod tests {
         // No --- marker between editable and read-only sections.
         let buf = "summary: x\nnumber: PROJ-42\n=== \n\nbody\n";
         assert!(node.parse_with_comments(buf).is_err());
+    }
+
+    // ───────────── edit_markdown: canonical ⇄ markdown comments ─────────────
+
+    #[test]
+    fn edit_markdown_renders_comment_section_and_headings() {
+        let node = test_node(sample_detail());
+        let comments = vec![
+            make_comment("10", "alice", "2025-06-01T10:00:00.000+0000", "first body"),
+            make_comment("20", "bob", "2025-06-02T10:00:00.000+0000", "second body"),
+        ];
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
+        let md = comments_canonical_to_md(&canonical);
+
+        // Header rendered as GFM tables, body/comments below the divider.
+        assert!(
+            md.contains("| Field | Value |"),
+            "header should be a GFM table"
+        );
+        assert!(md.contains("## Comments <!-- jira comments section -->"));
+        assert!(md.contains("### Add Comment <!-- jira comment add -->"));
+        assert!(md.contains("<!-- jira comment id=10 -->"));
+        assert!(md.contains("<!-- jira comment id=20 -->"));
+        assert!(md.contains("first body"));
+        assert!(md.contains("second body"));
+
+        // Newest comment (id=20) still comes first.
+        let pos20 = md.find("id=20").unwrap();
+        let pos10 = md.find("id=10").unwrap();
+        assert!(pos20 < pos10, "newest comment must come first");
+    }
+
+    #[test]
+    fn edit_markdown_round_trip_preserves_header_and_comments() {
+        let node = test_node(sample_detail());
+        let comments = vec![
+            make_comment("10", "alice", "2025-06-01T10:00:00.000+0000", "first body"),
+            make_comment("20", "bob", "2025-06-02T10:00:00.000+0000", "second body"),
+        ];
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
+        let md = comments_canonical_to_md(&canonical);
+        let back = comments_md_to_canonical(&md);
+        let parsed = node
+            .parse_with_comments(&back)
+            .expect("re-parse should succeed");
+
+        // Header survives.
+        assert_eq!(
+            parsed.header.editable.get("summary").map(String::as_str),
+            Some("Fix login bug")
+        );
+        assert_eq!(parsed.header.body, "The login form crashes on submit.");
+
+        // Both comments survive, newest first, bodies intact.
+        assert_eq!(parsed.blocks.len(), 2);
+        assert!(matches!(&parsed.blocks[0].kind, CommentBlockKind::Existing(id) if id == "20"));
+        assert_eq!(parsed.blocks[0].body, "second body");
+        assert!(matches!(&parsed.blocks[1].kind, CommentBlockKind::Existing(id) if id == "10"));
+        assert_eq!(parsed.blocks[1].body, "first body");
+    }
+
+    #[test]
+    fn edit_markdown_add_block_round_trips() {
+        let node = test_node(sample_detail());
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &[],
+            &build_slug_tables(&node.cache),
+        );
+        let md = comments_canonical_to_md(&canonical);
+        // User fills in the empty add placeholder.
+        let md = md.replace(
+            "### Add Comment <!-- jira comment add -->",
+            "### Add Comment <!-- jira comment add -->\n\nbrand new md comment",
+        );
+        let back = comments_md_to_canonical(&md);
+        let parsed = node
+            .parse_with_comments(&back)
+            .expect("re-parse should succeed");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert!(matches!(parsed.blocks[0].kind, CommentBlockKind::Add));
+        assert_eq!(parsed.blocks[0].body, "brand new md comment");
+    }
+
+    #[test]
+    fn edit_markdown_del_keyword_survives_round_trip() {
+        let node = test_node(sample_detail());
+        let comments = vec![make_comment(
+            "10",
+            "alice",
+            "2025-06-01T10:00:00.000+0000",
+            "first body",
+        )];
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
+        let md = comments_canonical_to_md(&canonical);
+        // User replaces the comment body with the sole-body delete keyword.
+        let md = md.replace("first body", "del");
+        let back = comments_md_to_canonical(&md);
+        let parsed = node
+            .parse_with_comments(&back)
+            .expect("re-parse should succeed");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert!(matches!(&parsed.blocks[0].kind, CommentBlockKind::Existing(id) if id == "10"));
+        assert!(is_delete_keyword(&parsed.blocks[0].body));
+    }
+
+    #[test]
+    fn edit_markdown_without_comments_degrades_to_body_only() {
+        // A plain 3b buffer (no comment markers) must round-trip through the
+        // md transforms unchanged modulo markup, exercising the fallback paths.
+        let node = test_node(sample_detail());
+        let canonical = node.render_3b(
+            &edit_full_fields(),
+            node.detail_now(),
+            None,
+            None,
+            &build_slug_tables(&node.cache),
+        );
+        let md = comments_canonical_to_md(&canonical);
+        assert!(!md.contains("<!-- jira comments section -->"));
+        assert!(md.contains("| Field | Value |"), "header still tabled");
+
+        let back = comments_md_to_canonical(&md);
+        let parsed = node.parse_3b(&back).expect("re-parse should succeed");
+        assert_eq!(parsed.body, "The login form crashes on submit.");
+    }
+
+    #[test]
+    fn edit_markdown_add_comment_before_paneled_foreign_comment() {
+        // Repro: user writes a NEW comment under the Add heading, and the next
+        // existing (foreign) comment's body contains {panel} blocks. The typed
+        // text must stay in the Add block and must NOT leak into the existing
+        // comment (which would surface as an illegal "editing someone else's
+        // comment" on save).
+        let node = test_node(sample_detail());
+        let foreign_body = "{panel:title=Constraints}\nfirst constraint\nsecond constraint\n{panel}\n\n{panel:title=Next Steps}\nship it\n{panel}";
+        let comments = vec![make_comment(
+            "555",
+            "someone-else",
+            "2025-06-01T10:00:00.000+0000",
+            foreign_body,
+        )];
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
+        let md = comments_canonical_to_md(&canonical);
+
+        // User types a reply into the empty Add placeholder.
+        let typed = "@some_user thanks, this is my brand new reply\nwith a second line";
+        let md = md.replace(
+            "### Add Comment <!-- jira comment add -->",
+            &format!("### Add Comment <!-- jira comment add -->\n\n{typed}"),
+        );
+
+        let back = comments_md_to_canonical(&md);
+        let parsed = node
+            .parse_with_comments(&back)
+            .expect("re-parse should succeed");
+
+        assert_eq!(
+            parsed.blocks.len(),
+            2,
+            "expected one Add + one Existing block, got {:?}",
+            parsed.blocks
+        );
+        let add = parsed
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, CommentBlockKind::Add))
+            .expect("add block present");
+        assert!(
+            add.body.contains("brand new reply"),
+            "add block must hold the typed reply, got {:?}",
+            add.body
+        );
+
+        let existing = parsed
+            .blocks
+            .iter()
+            .find(|b| matches!(&b.kind, CommentBlockKind::Existing(id) if id == "555"))
+            .expect("existing comment 555 present");
+        assert!(
+            !existing.body.contains("brand new reply"),
+            "typed reply leaked into the foreign comment body: {:?}",
+            existing.body
+        );
+        // And the foreign comment's body must round-trip back to its wiki form.
+        assert!(
+            existing.body.contains("{panel:title=Constraints}")
+                && existing.body.contains("first constraint"),
+            "foreign panel body must survive the round-trip, got {:?}",
+            existing.body
+        );
+    }
+
+    #[test]
+    fn edit_markdown_filling_add_does_not_perturb_other_comments() {
+        // The real-world repro: a long comment history where several foreign
+        // comments carry titled panels. The user only fills the Add block.
+        // Parsing the "opened" buffer and the "saved" buffer must yield
+        // byte-identical bodies for every EXISTING comment — otherwise the
+        // save-time classifier flags an untouched foreign comment as edited
+        // ("cannot edit comment N: not authored by you").
+        let node = test_node(sample_detail());
+        let paneled = "{panel:title=Constraints|titleBGColor=#f2f2f2}\nsome constraint text\n{panel}\n\n{panel:title=Approach|titleBGColor=#f2f2f2}\n- step one\n- step two\n{panel}\n\n{panel:title=Next Steps|titleBGColor=#f2f2f2}\n{panel}";
+        let comments = vec![
+            make_comment(
+                "555",
+                "someone-else",
+                "2026-01-05T10:00:00.000+0000",
+                paneled,
+            ),
+            make_comment("444", "me", "2026-01-04T10:00:00.000+0000", ""),
+            make_comment(
+                "333",
+                "someone-else",
+                "2026-01-03T10:00:00.000+0000",
+                "*Ergebnis:* \nfollow-up line",
+            ),
+        ];
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+        );
+        let opened_md = comments_canonical_to_md(&canonical);
+        let saved_md = opened_md.replace(
+            "### Add Comment <!-- jira comment add -->",
+            "### Add Comment <!-- jira comment add -->\n\n@some_user here is my reply\nspanning two lines",
+        );
+
+        let opened = node
+            .parse_with_comments(&comments_md_to_canonical(&opened_md))
+            .expect("opened parses");
+        let saved = node
+            .parse_with_comments(&comments_md_to_canonical(&saved_md))
+            .expect("saved parses");
+
+        for id in ["555", "444", "333"] {
+            let ob = opened
+                .blocks
+                .iter()
+                .find(|b| matches!(&b.kind, CommentBlockKind::Existing(x) if x == id))
+                .map(|b| b.body.clone());
+            let sb = saved
+                .blocks
+                .iter()
+                .find(|b| matches!(&b.kind, CommentBlockKind::Existing(x) if x == id))
+                .map(|b| b.body.clone());
+            assert_eq!(
+                ob, sb,
+                "comment {id} body changed merely by filling the Add block:\n opened={ob:?}\n saved={sb:?}"
+            );
+        }
     }
 
     // Quick smoke: cross-module helpers / nodes still wire up correctly.

@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, DatabaseConnection, EntityTrait, Set,
-};
+use sea_orm::{ActiveModelBehavior, ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use shaku::Component;
 use uuid::Uuid;
 
@@ -10,7 +8,11 @@ use crate::error::AppError;
 
 #[async_trait]
 pub trait ProjectRepository: shaku::Interface {
-    async fn insert(&self, name: String, description: Option<String>) -> Result<project::Model, AppError>;
+    async fn insert(
+        &self,
+        name: String,
+        description: Option<String>,
+    ) -> Result<project::Model, AppError>;
     async fn find_all(&self) -> Result<Vec<project::Model>, AppError>;
     async fn find_by_id(&self, id: Uuid) -> Result<project::Model, AppError>;
     async fn find_by_name(&self, name: &str) -> Result<Option<project::Model>, AppError>;
@@ -60,9 +62,9 @@ impl ProjectRepository for ProjectRepositoryImpl {
     }
 
     async fn find_by_name(&self, name: &str) -> Result<Option<project::Model>, AppError> {
+        use crate::entity::project::Column;
         use sea_orm::ColumnTrait;
         use sea_orm::QueryFilter;
-        use crate::entity::project::Column;
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(project::Entity::find()
             .filter(Column::Name.eq(name))

@@ -6,10 +6,12 @@
 # Tested against Confluence 9.2.19 (Server/DC). Atlassian Cloud's REST
 # shape differs and is not supported — that's a separate adapter.
 #
-# Authentication: only the cookie mechanism is wired today. Use a script
-# that prints the live session cookies (JSESSIONID + crowd.token_key
-# + atlassian.xsrf.token) on stdout — the same pattern the Jira adapter
-# uses for Server/DC Crowd-SSO instances.
+# Authentication: `cookie` is the only mechanism this adapter implements.
+# Use a script that prints the live session cookies (JSESSIONID +
+# crowd.token_key + atlassian.xsrf.token) on stdout — the same pattern the
+# Jira adapter uses for Server/DC Crowd-SSO instances.
+# `nyd config auth confluence` prints the mechanism, its fields and every
+# provider; `nyd config build confluence` writes the block for you.
 
 url: https://wiki.example.invalid/confluence # base URL incl. context-path
 name: wiki # optional human-readable label
@@ -26,6 +28,21 @@ auth:
         script: /usr/local/bin/get-confluence-cookie.sh
         timeout_secs: 60
         retries: 5
+
+        # When the login needs input the script cannot obtain by itself —
+        # which account, a password, a one-time code — move the script up to
+        # `auth.script` and bind the field with `script-result`: it is then
+        # run once per round and answers either with the values or with a
+        # form it wants asked first, whose answers come back to it on stdin.
+        # The mechanism still declares exactly one field. See the README
+        # ("Script-driven credentials") for a complete script.
+        #
+        # auth:
+        #   mechanism: cookie
+        #   script: /usr/local/bin/confluence-sso-login.sh
+        #   bindings:
+        #     - field: cookie
+        #       provider: { type: script-result }
 
 # Self-signed / internal CAs: flip to true. Defaults to strict
 # verification.

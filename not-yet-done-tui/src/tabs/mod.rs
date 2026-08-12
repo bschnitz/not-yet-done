@@ -5,11 +5,29 @@
 /// parts (a tab without an icon, or with no key hint) are dropped so the
 /// result never carries double spaces.
 pub fn tab_label(icon: &str, key: &str, name: &str) -> String {
-    [icon, key, name]
+    tab_label_with_marker("", icon, key, name)
+}
+
+/// [`tab_label`] with an unread marker in front of the icon — the same
+/// order the tree uses inside the view (marker, then type icon, then the
+/// name), so the two read as one convention. An empty marker (nothing
+/// unread, or the glyph configured away) collapses to plain [`tab_label`].
+pub fn tab_label_with_marker(marker: &str, icon: &str, key: &str, name: &str) -> String {
+    [marker, icon, key, name]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// One entry of the main tab bar: the composed label plus the emphasis the
+/// tab asks for while its view holds unread items.
+pub struct MainTab {
+    pub tab: Tab,
+    pub label: String,
+    /// Style patch layered on top of the bar's normal active/inactive style
+    /// when the tab is unread. `None` = nothing unread, bar style untouched.
+    pub unread: Option<ratatui::style::Style>,
 }
 
 /// Main tab — the top-level navigation. Since the built-in tabs were
@@ -40,51 +58,37 @@ impl Tab {
     }
 }
 
-/// The visible, ordered set of top-level tabs plus their autonumber
-/// state. Built once at startup / config reload from the active
-/// [`TabsConfig`](crate::config::TabsConfig) constellation, or — when no
-/// constellation is configured — from the legacy all-tabs order.
+/// The visible, ordered set of top-level tabs. Built once at startup /
+/// config reload from the [`TabsConfig`](crate::config::TabsConfig)
+/// order, or — when none is configured — from every content tab in slot
+/// order.
 ///
 /// `Tab::Content(idx)` keeps its canonical meaning (an index into
 /// `App::content_views`); the layout only decides *which* tabs are
-/// shown, *in what order*, and *which digit key* selects each. So the
-/// rest of the app keeps switching on `Tab` exactly as before.
+/// shown, *in what order*, and *which digit key* (`1`..`9`, then `0`)
+/// selects each. So the rest of the app keeps switching on `Tab` exactly
+/// as before.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabLayout {
     /// Visible tabs in display / numbering order.
     order: Vec<Tab>,
-    /// Whether autonumber digit keys (`1`..`9`, then `0`) are live. False
-    /// in legacy mode, where the fixed `GlobalAction` keys still apply.
-    autonumber: bool,
 }
 
 impl TabLayout {
-    /// Legacy layout: every content tab in slot order. Autonumber off —
-    /// the fixed `GlobalAction` tab keys (`1`..`6`) stay in charge,
-    /// preserving pre-constellation behaviour.
-    pub fn legacy(content_count: usize) -> Self {
+    /// Every content tab in slot order — the fallback when no explicit
+    /// tab order is configured.
+    pub fn all_tabs(content_count: usize) -> Self {
         let order = (0..content_count).map(Tab::Content).collect();
-        Self {
-            order,
-            autonumber: false,
-        }
+        Self { order }
     }
 
-    /// Constellation layout: exactly the given tabs, in the given order,
-    /// with autonumber digit keys active.
-    pub fn constellation(order: Vec<Tab>) -> Self {
-        Self {
-            order,
-            autonumber: true,
-        }
+    /// Exactly the given tabs, in the given order.
+    pub fn ordered(order: Vec<Tab>) -> Self {
+        Self { order }
     }
 
     pub fn tabs(&self) -> &[Tab] {
         &self.order
-    }
-
-    pub fn autonumber(&self) -> bool {
-        self.autonumber
     }
 
     pub fn contains(&self, tab: Tab) -> bool {
@@ -97,24 +101,23 @@ impl TabLayout {
         self.order.first().copied().unwrap_or(Tab::Content(0))
     }
 
-    /// Digit char that selects `tab`, when autonumber is active and the
-    /// tab sits within the numberable range (`1`..`9`, then `0` for the
-    /// tenth; an eleventh and beyond get none).
+    /// Digit char that selects `tab`, when the tab sits within the
+    /// numberable range (`1`..`9`, then `0` for the tenth; an eleventh
+    /// and beyond get none).
     pub fn digit_for(&self, tab: Tab) -> Option<char> {
-        if !self.autonumber {
-            return None;
-        }
         let idx = self.order.iter().position(|t| *t == tab)?;
         digit_for_index(idx)
     }
 
     /// Resolve a pressed key to a visible tab via the autonumber map.
-    /// Returns `None` outside autonumber mode or for non-digit / out-of-
-    /// range keys, so the caller can fall through to normal dispatch.
+    /// Returns `None` for non-digit / out-of-range keys, so the caller
+    /// can fall through to normal dispatch.
+    ///
+    /// Dispatch now resolves tab switches through the App's effective
+    /// bindings (`tab.key` overrides plus digits), so this positional-only
+    /// lookup is retained for its unit tests and as a layout query.
+    #[allow(dead_code)]
     pub fn tab_for_key(&self, key: &str) -> Option<Tab> {
-        if !self.autonumber {
-            return None;
-        }
         self.order
             .iter()
             .enumerate()
@@ -148,7 +151,7 @@ impl TabLayout {
 
 /// Map a 0-based tab position to its autonumber key: `1`..`9` for the
 /// first nine, `0` for the tenth, nothing beyond.
-fn digit_for_index(idx: usize) -> Option<char> {
+pub(crate) fn digit_for_index(idx: usize) -> Option<char> {
     match idx {
         0..=8 => Some((b'1' + idx as u8) as char),
         9 => Some('0'),
@@ -156,17 +159,17 @@ fn digit_for_index(idx: usize) -> Option<char> {
     }
 }
 
-/// Build a [`TabLayout`] from the active constellation.
+/// Build a [`TabLayout`] from the configured tab order.
 ///
 /// `available` is the full list of selectable tabs as
-/// `(display_name, Tab)` in their natural order (built-ins first, then
-/// content tabs by slot). Resolution:
+/// `(display_name, Tab)` in their natural order (content tabs by slot).
+/// Resolution:
 ///
 ///   * Two tabs sharing a display name → `Err` (hard config error; the
 ///     name can no longer identify a tab uniquely).
-///   * No constellation configured → legacy layout.
-///   * Active constellation missing, or it resolves to zero known tabs →
-///     legacy layout, with the reason returned via `warn` for logging.
+///   * No order configured → all tabs in slot order.
+///   * Configured order resolves to zero known tabs → all tabs in slot
+///     order, with the reason returned via `warn` for logging.
 ///   * Otherwise → the named tabs, in order; names matching no tab are
 ///     skipped (and reported through `warn`).
 pub fn resolve_tab_layout(
@@ -176,52 +179,42 @@ pub fn resolve_tab_layout(
     mut warn: impl FnMut(String),
 ) -> Result<TabLayout, String> {
     // Integrity check first — duplicate names are fatal regardless of
-    // whether any constellation is configured.
+    // whether an explicit order is configured.
     let mut by_name: std::collections::HashMap<&str, Tab> = std::collections::HashMap::new();
     for (name, tab) in available {
         if by_name.insert(name.as_str(), *tab).is_some() {
             return Err(format!(
                 "Two tabs share the name \"{name}\". Tab names must be unique \
-                 (each view's `tab.name`) so a constellation can reference \
-                 them unambiguously. Rename one."
+                 (each view's `tab.name`) so `tabs.order` can reference them \
+                 unambiguously. Rename one."
             ));
         }
     }
 
     if !cfg.is_active() {
-        return Ok(TabLayout::legacy(content_count));
+        return Ok(TabLayout::all_tabs(content_count));
     }
 
-    let Some(names) = cfg.active_set() else {
-        warn(format!(
-            "tab constellation \"{}\" is not defined under `tabs.sets` — \
-             showing all tabs in their default order",
-            cfg.active
-        ));
-        return Ok(TabLayout::legacy(content_count));
-    };
-
     let mut order = Vec::new();
-    for name in names {
+    for name in cfg.order() {
         match by_name.get(name.as_str()) {
             Some(tab) => order.push(*tab),
             None => warn(format!(
-                "tab constellation \"{}\" references unknown tab \"{name}\" — skipped",
-                cfg.active
+                "tabs.order references unknown tab \"{name}\" — skipped"
             )),
         }
     }
 
     if order.is_empty() {
-        warn(format!(
-            "tab constellation \"{}\" resolved to no known tabs — \
-             showing all tabs in their default order",
-            cfg.active
-        ));
-        return Ok(TabLayout::legacy(content_count));
+        warn(
+            "tabs.order resolved to no known tabs — showing all tabs in \
+             their default order"
+                .to_string(),
+        );
+        return Ok(TabLayout::all_tabs(content_count));
     }
 
-    Ok(TabLayout::constellation(order))
+    Ok(TabLayout::ordered(order))
 }
 
 #[cfg(test)]
@@ -239,13 +232,24 @@ mod tab_label_tests {
         assert_eq!(tab_label("✅", "", "Tasks"), "✅ Tasks");
         assert_eq!(tab_label("", "", "Tasks"), "Tasks");
     }
+
+    #[test]
+    fn unread_marker_leads_the_label() {
+        use super::tab_label_with_marker;
+        // Same order as the tree row: marker, then type icon, then the name.
+        assert_eq!(
+            tab_label_with_marker("🔔", "💬", "9", "Stoat"),
+            "🔔 💬 9 Stoat"
+        );
+        // Nothing unread (or the glyph configured away) → the plain label.
+        assert_eq!(tab_label_with_marker("", "💬", "9", "Stoat"), "💬 9 Stoat");
+    }
 }
 
 #[cfg(test)]
 mod tab_layout_tests {
     use super::*;
     use crate::config::TabsConfig;
-    use std::collections::HashMap;
 
     /// 4 content tabs: Trackings, Jira, Taiga, Analytics DB (slots 0..3).
     /// Every tab is a ContentAdapter tab now — there are no built-ins.
@@ -262,28 +266,16 @@ mod tab_layout_tests {
         |_w| {}
     }
 
-    fn cfg_with(active: &str, sets: &[(&str, &[&str])]) -> TabsConfig {
-        let mut map = HashMap::new();
-        for (name, tabs) in sets {
-            map.insert(
-                name.to_string(),
-                crate::config::tabs::TabSet {
-                    icon: None,
-                    label: None,
-                    shortcut: None,
-                    tabs: tabs.iter().map(|s| s.to_string()).collect(),
-                },
-            );
-        }
+    fn cfg_with(order: &[&str]) -> TabsConfig {
         TabsConfig {
-            active: active.to_string(),
-            sets: map,
+            order: order.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn no_constellation_yields_legacy_layout() {
-        let cfg = TabsConfig::default(); // empty sets
+    fn no_order_shows_all_tabs_in_slot_order() {
+        let cfg = TabsConfig::default(); // empty order
         let layout = resolve_tab_layout(&cfg, &available(), 4, no_warn()).unwrap();
         assert_eq!(
             layout.tabs(),
@@ -294,26 +286,21 @@ mod tab_layout_tests {
                 Tab::Content(3)
             ]
         );
-        // Legacy mode: digits stay with the fixed GlobalAction keys.
-        assert!(!layout.autonumber());
-        assert_eq!(layout.digit_for(Tab::Content(0)), None);
-        assert_eq!(layout.tab_for_key("1"), None);
+        // Autonumber is always live now.
+        assert_eq!(layout.digit_for(Tab::Content(0)), Some('1'));
+        assert_eq!(layout.tab_for_key("1"), Some(Tab::Content(0)));
     }
 
     #[test]
-    fn constellation_orders_and_numbers_named_tabs() {
-        let cfg = cfg_with(
-            "default",
-            &[("default", &["Trackings", "Jira", "Analytics DB"])],
-        );
+    fn order_selects_and_numbers_named_tabs() {
+        let cfg = cfg_with(&["Trackings", "Jira", "Analytics DB"]);
         let layout = resolve_tab_layout(&cfg, &available(), 4, no_warn()).unwrap();
         // Trackings=Content(0), Jira=Content(1), Analytics DB=Content(3).
         assert_eq!(
             layout.tabs(),
             &[Tab::Content(0), Tab::Content(1), Tab::Content(3)]
         );
-        assert!(layout.autonumber());
-        // Taiga (Content(2)) is hidden — not in the constellation.
+        // Taiga (Content(2)) is hidden — not in the order.
         assert!(!layout.contains(Tab::Content(2)));
         // Order → digits 1,2,3.
         assert_eq!(layout.digit_for(Tab::Content(0)), Some('1'));
@@ -334,11 +321,10 @@ mod tab_layout_tests {
     }
 
     #[test]
-    fn unknown_name_in_constellation_is_skipped_with_warning() {
-        let cfg = cfg_with("default", &[("default", &["Trackings", "Ghost", "Jira"])]);
+    fn unknown_name_in_order_is_skipped_with_warning() {
+        let cfg = cfg_with(&["Trackings", "Ghost", "Jira"]);
         let mut warnings = Vec::new();
-        let layout =
-            resolve_tab_layout(&cfg, &available(), 4, |w| warnings.push(w)).unwrap();
+        let layout = resolve_tab_layout(&cfg, &available(), 4, |w| warnings.push(w)).unwrap();
         assert_eq!(layout.tabs(), &[Tab::Content(0), Tab::Content(1)]);
         assert!(
             warnings.iter().any(|w| w.contains("Ghost")),
@@ -347,19 +333,17 @@ mod tab_layout_tests {
     }
 
     #[test]
-    fn missing_active_set_falls_back_to_legacy_with_warning() {
-        let cfg = cfg_with("my-corp", &[("default", &["Trackings", "Jira"])]);
+    fn order_of_only_unknown_tabs_falls_back_to_all_with_warning() {
+        let cfg = cfg_with(&["Ghost", "Phantom"]);
         let mut warnings = Vec::new();
-        let layout =
-            resolve_tab_layout(&cfg, &available(), 4, |w| warnings.push(w)).unwrap();
-        assert!(!layout.autonumber(), "fell back to legacy");
-        assert_eq!(layout.tabs().len(), 4);
-        assert!(warnings.iter().any(|w| w.contains("my-corp")));
+        let layout = resolve_tab_layout(&cfg, &available(), 4, |w| warnings.push(w)).unwrap();
+        assert_eq!(layout.tabs().len(), 4, "fell back to all tabs");
+        assert!(warnings.iter().any(|w| w.contains("no known tabs")));
     }
 
     #[test]
     fn next_prev_wrap_within_visible_order() {
-        let cfg = cfg_with("default", &[("default", &["Trackings", "Jira", "Taiga"])]);
+        let cfg = cfg_with(&["Trackings", "Jira", "Taiga"]);
         let layout = resolve_tab_layout(&cfg, &available(), 4, no_warn()).unwrap();
         // Visible order: Content(0), Content(1), Content(2).
         assert_eq!(layout.next(Tab::Content(0)), Tab::Content(1));
@@ -371,26 +355,16 @@ mod tab_layout_tests {
 
     #[test]
     fn tenth_tab_gets_zero_eleventh_gets_nothing() {
-        // 11 tabs in one set; only 1..9 then 0 are numberable.
+        // 11 tabs; only 1..9 then 0 are numberable.
         let names: Vec<String> = (0..11).map(|i| format!("T{i}")).collect();
         let avail: Vec<(String, Tab)> = names
             .iter()
             .enumerate()
             .map(|(i, n)| (n.clone(), Tab::Content(i)))
             .collect();
-        let mut sets = HashMap::new();
-        sets.insert(
-            "default".to_string(),
-            crate::config::tabs::TabSet {
-                icon: None,
-                label: None,
-                shortcut: None,
-                tabs: names.clone(),
-            },
-        );
         let cfg = TabsConfig {
-            active: "default".into(),
-            sets,
+            order: names.clone(),
+            ..Default::default()
         };
         let layout = resolve_tab_layout(&cfg, &avail, 11, no_warn()).unwrap();
         assert_eq!(layout.digit_for(Tab::Content(8)), Some('9'));

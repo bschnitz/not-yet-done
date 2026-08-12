@@ -77,7 +77,9 @@ impl SearchComponent {
         match key {
             "backspace" => {
                 if self.cursor > 0 {
-                    let byte_pos = self.query.char_indices()
+                    let byte_pos = self
+                        .query
+                        .char_indices()
                         .nth(self.cursor - 1)
                         .map(|(i, _)| i)
                         .unwrap_or(0);
@@ -101,7 +103,9 @@ impl SearchComponent {
                 SearchKeyResult::Handled
             }
             ch if ch.chars().count() == 1 && !ch.chars().next().unwrap().is_control() => {
-                let byte_pos = self.query.char_indices()
+                let byte_pos = self
+                    .query
+                    .char_indices()
                     .nth(self.cursor)
                     .map(|(i, _)| i)
                     .unwrap_or(self.query.len());

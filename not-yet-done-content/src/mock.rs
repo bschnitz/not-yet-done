@@ -35,6 +35,10 @@ pub struct MockNodeData {
     pub node_type: NodeType,
     pub metadata: Metadata,
     pub child_types: Vec<NodeType>,
+    /// Columns this node declares for a child type, keyed by its `type_id` —
+    /// the `Child::columns` channel. Absent means "declares none", which is
+    /// what [`MockNodeData::child_type`] leaves behind.
+    pub child_columns: HashMap<String, Vec<ColumnSchema>>,
     pub children: Vec<MockNodeData>,
     pub content_text: Option<String>,
 }
@@ -47,6 +51,7 @@ impl MockNodeData {
             node_type: default_node_type(),
             metadata: Metadata::default(),
             child_types: Vec::new(),
+            child_columns: HashMap::new(),
             children: Vec::new(),
             content_text: None,
         }
@@ -58,6 +63,15 @@ impl MockNodeData {
     }
 
     pub fn child_type(mut self, nt: NodeType) -> Self {
+        self.child_types.push(nt);
+        self
+    }
+
+    /// Declare a child type *and* the columns its lists carry, so a test can
+    /// exercise the declared channel that [`crate::children::columns_for`]
+    /// unions with `describe_columns`.
+    pub fn child_type_with_columns(mut self, nt: NodeType, columns: Vec<ColumnSchema>) -> Self {
+        self.child_columns.insert(nt.type_id.clone(), columns);
         self.child_types.push(nt);
         self
     }
@@ -139,12 +153,16 @@ impl MockAdapterBuilder {
     }
 
     pub fn build(self) -> MockAdapter {
-        let root = self.root.unwrap_or_else(|| MockNodeData::new("root", "Root"));
+        let root = self
+            .root
+            .unwrap_or_else(|| MockNodeData::new("root", "Root"));
         // Flatten the tree into a lookup map
         let mut nodes = HashMap::new();
         flatten_tree(&root, &mut nodes);
 
-        let instance_id = self.instance_id.unwrap_or_else(|| self.adapter_type.clone());
+        let instance_id = self
+            .instance_id
+            .unwrap_or_else(|| self.adapter_type.clone());
         MockAdapter {
             adapter_type: self.adapter_type,
             instance_id,
@@ -214,6 +232,88 @@ impl ContentAdapter for MockAdapter {
             .cloned()
             .unwrap_or_default()
     }
+
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<crate::children::Child<'a>> {
+        // Resolve by id, falling back to the first node of the same *type* when
+        // the id misses (e.g. a `TypeNode` with an empty id). Real adapters key
+        // `childs` on `node_type()` alone; this keeps the mock a valid fixture
+        // for the type-addressed walk that `describe`/`scaffold` stand on.
+        let data = match self.nodes.get(node.id()) {
+            Some(d) => d.clone(),
+            None => match self
+                .nodes
+                .values()
+                .find(|d| d.node_type.type_id == node.node_type().type_id)
+            {
+                Some(d) => d.clone(),
+                None => return Vec::new(),
+            },
+        };
+        data.child_types
+            .iter()
+            .cloned()
+            .map(|nt| {
+                let columns = data
+                    .child_columns
+                    .get(&nt.type_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let data = data.clone();
+                crate::children::Child {
+                    node_type: nt,
+                    columns,
+                    list: Box::new(move |params| Box::pin(async move { mock_list(&data, params) })),
+                }
+            })
+            .collect()
+    }
+}
+
+/// The list-row projection the mock's `childs` fetchers share: `data`'s direct
+/// children of the requested type, paginated.
+fn mock_list(data: &MockNodeData, params: ListParams) -> Result<ListResult> {
+    let page = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: u32::MAX,
+    });
+    let items: Vec<NodeSummary> = data
+        .children
+        .iter()
+        .filter(|c| c.node_type.type_id == params.node_type.type_id)
+        .skip(page.offset as usize)
+        .take(page.limit as usize)
+        .map(|c| NodeSummary {
+            id: c.id.clone(),
+            label: c.label.clone(),
+            node_type: c.node_type.clone(),
+            metadata: c.metadata.clone(),
+            has_children: None,
+        })
+        .collect();
+
+    let total = data
+        .children
+        .iter()
+        .filter(|c| c.node_type.type_id == params.node_type.type_id)
+        .count() as u64;
+
+    let returned = items.len() as u32;
+    let has_next = (page.offset as u64) + (returned as u64) < total;
+    let has_prev = page.offset > 0;
+
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(PageInfo {
+            offset: page.offset,
+            limit: page.limit,
+            total: Some(total),
+            has_next,
+            has_prev,
+        }),
+        batch_download_available: false,
+        downloaded: vec![],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -241,54 +341,6 @@ impl Node for MockNode {
 
     fn metadata(&self) -> &Metadata {
         &self.data.metadata
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        self.data.child_types.clone()
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        let page = params.page.unwrap_or(PageRequest { offset: 0, limit: u32::MAX });
-        let items: Vec<NodeSummary> = self
-            .data
-            .children
-            .iter()
-            .filter(|c| c.node_type.type_id == params.node_type.type_id)
-            .skip(page.offset as usize)
-            .take(page.limit as usize)
-            .map(|c| NodeSummary {
-                id: c.id.clone(),
-                label: c.label.clone(),
-                node_type: c.node_type.clone(),
-                metadata: c.metadata.clone(),
-                has_children: None,
-            })
-            .collect();
-
-        let total = self
-            .data
-            .children
-            .iter()
-            .filter(|c| c.node_type.type_id == params.node_type.type_id)
-            .count() as u64;
-
-        let returned = items.len() as u32;
-        let has_next = (page.offset as u64) + (returned as u64) < total;
-        let has_prev = page.offset > 0;
-
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(PageInfo {
-                offset: page.offset,
-                limit: page.limit,
-                total: Some(total),
-                has_next,
-                has_prev,
-            }),
-            batch_download_available: false,
-            downloaded: vec![],
-        })
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -396,19 +448,28 @@ mod tests {
 
         let root = adapter.root().await.unwrap();
         assert_eq!(root.id(), "root");
-        assert_eq!(root.children_types().len(), 1);
+        assert_eq!(
+            crate::children::child_types(&adapter, root.as_ref()).len(),
+            1
+        );
 
-        let result = root
-            .list(ListParams {
+        let result = crate::children::list(
+            &adapter,
+            root.as_ref(),
+            ListParams {
                 node_type: issue_type(),
                 query: None,
                 sort: vec![],
-                page: Some(PageRequest { offset: 0, limit: 50 }),
+                page: Some(PageRequest {
+                    offset: 0,
+                    limit: 50,
+                }),
                 download: false,
                 group_by: None,
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.page.and_then(|p| p.total), Some(2));
@@ -461,21 +522,28 @@ mod tests {
 
         // Drill into issue via get_by_id
         let issue = adapter.get_by_id("ISS-1").await.unwrap();
-        assert_eq!(issue.children_types().len(), 1);
-        assert_eq!(issue.children_types()[0].type_id, "mock:comment");
+        let issue_child_types = crate::children::child_types(&adapter, issue.as_ref());
+        assert_eq!(issue_child_types.len(), 1);
+        assert_eq!(issue_child_types[0].type_id, "mock:comment");
 
         // List comments
-        let comments = issue
-            .list(ListParams {
+        let comments = crate::children::list(
+            &adapter,
+            issue.as_ref(),
+            ListParams {
                 node_type: comment_type(),
                 query: None,
                 sort: vec![],
-                page: Some(PageRequest { offset: 0, limit: 50 }),
+                page: Some(PageRequest {
+                    offset: 0,
+                    limit: 50,
+                }),
                 download: false,
                 group_by: None,
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(comments.items.len(), 1);
         assert_eq!(comments.items[0].id, "COM-1");
@@ -486,24 +554,29 @@ mod tests {
         let mut root = MockNodeData::new("root", "Root").child_type(issue_type());
         for i in 0..10 {
             root = root.child(
-                MockNodeData::new(format!("ISS-{i}"), format!("Issue {i}"))
-                    .node_type(issue_type()),
+                MockNodeData::new(format!("ISS-{i}"), format!("Issue {i}")).node_type(issue_type()),
             );
         }
         let adapter = MockAdapterBuilder::new("test").node(root).build();
 
         let root = adapter.root().await.unwrap();
-        let result = root
-            .list(ListParams {
+        let result = crate::children::list(
+            &adapter,
+            root.as_ref(),
+            ListParams {
                 node_type: issue_type(),
                 query: None,
                 sort: vec![],
-                page: Some(PageRequest { offset: 3, limit: 2 }),
+                page: Some(PageRequest {
+                    offset: 3,
+                    limit: 2,
+                }),
                 download: false,
                 group_by: None,
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].id, "ISS-3");

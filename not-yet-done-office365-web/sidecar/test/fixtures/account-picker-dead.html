@@ -1,0 +1,15 @@
+<!doctype html>
+<!--
+  Fixture: an account picker whose tile never gets a working click handler — the
+  click is a permanent no-op, so the picker never gives way. Verifies that
+  clickUntilGone gives up after its retries (returns false) instead of hanging.
+  Invented data.
+-->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Pick an account</title></head>
+  <body>
+    <div id="tilesHolder" role="list">
+      <div role="button" data-test-id="user@example.com">user@example.com</div>
+    </div>
+  </body>
+</html>

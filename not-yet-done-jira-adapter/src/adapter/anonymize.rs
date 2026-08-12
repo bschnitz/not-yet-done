@@ -50,7 +50,7 @@ impl Anonymizer for JiraAnonymizer {
             // on comments/attachments) — format-preserving.
             "key" | "issue" => pseudo_issue_key(value),
             // People.
-            "assignee" | "author" | "display_name" => pseudo_person(value),
+            "assignee" | "creator" | "reporter" | "author" | "display_name" => pseudo_person(value),
             "username" => pseudo_username(value),
             "email" => pseudo_email(value),
             // Files.
@@ -60,12 +60,15 @@ impl Anonymizer for JiraAnonymizer {
             "status" => pseudo_status(value),
             // Free text (issue summary; the generic `label`, which is the
             // summary for issues and a person/filename for sub-nodes — all safe
-            // as free text).
-            "summary" | "label" => self.std.scrub_value(key, value),
+            // as free text). `fix_versions` belongs here rather than with the
+            // pass-through enums below: version names are project-authored and
+            // routinely embed a product or customer term.
+            "summary" | "label" | "fix_versions" => self.std.scrub_value(key, value),
             // Structural / addressing — verbatim. (`type`/`priority` are standard
             // enums — "Bug", "Story", "High" — not customer-identifying.)
-            "type" | "priority" | "updated" | "created" | "size"
-            | "mime_type" | "attachments" => value.to_string(),
+            "type" | "priority" | "updated" | "created" | "size" | "mime_type" | "attachments" => {
+                value.to_string()
+            }
             // Unknown future column → safe fallback.
             _ => self.std.scrub_value(key, value),
         }
@@ -86,14 +89,20 @@ mod tests {
         // Display name and username derive consistently.
         assert_eq!(
             a.scrub_value("username", "John Doe"),
-            a.scrub_value("display_name", "John Doe").to_lowercase().replace(' ', ".")
+            a.scrub_value("display_name", "John Doe")
+                .to_lowercase()
+                .replace(' ', ".")
         );
     }
 
     #[test]
     fn structural_fields_pass_through() {
         let a = JiraAnonymizer::default();
-        for (k, v) in [("type", "Bug"), ("priority", "High"), ("updated", "2026-06-22T10:00:00Z")] {
+        for (k, v) in [
+            ("type", "Bug"),
+            ("priority", "High"),
+            ("updated", "2026-06-22T10:00:00Z"),
+        ] {
             assert_eq!(a.scrub_value(k, v), v);
         }
     }
@@ -104,7 +113,10 @@ mod tests {
         // A customised status that embeds a customer term must not survive.
         let s = a.scrub_value("status", "Waiting for ACME");
         assert!(!s.contains("ACME"), "real status term leaked: {s}");
-        assert!(STATUS_POOL.contains(&s.as_str()), "must land in the pool: {s}");
+        assert!(
+            STATUS_POOL.contains(&s.as_str()),
+            "must land in the pool: {s}"
+        );
         // Deterministic: same input → same placeholder.
         assert_eq!(s, a.scrub_value("status", "Waiting for ACME"));
         // Letterless passes through.

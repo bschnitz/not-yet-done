@@ -11,8 +11,14 @@ pub mod cli {
             BackupServiceImpl.create_backup().await
         });
         match result {
-            Ok(path) => { println!("✓ Backup erstellt: {}", path); 0 }
-            Err(e)   => { eprintln!("Error: {e}"); 1 }
+            Ok(path) => {
+                println!("✓ Backup erstellt: {}", path);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -34,7 +40,10 @@ pub mod cli {
                 }
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -52,7 +61,10 @@ pub mod cli {
                 println!("✓ Datenbank wiederhergestellt: {}", path);
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 }

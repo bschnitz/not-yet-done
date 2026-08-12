@@ -8,23 +8,17 @@ use crate::edit_session::{CommitOutcome, EditSession, EditorSpawnContext, Follow
 /// back to the main loop via `commit_tx`. `Reopen` carries the session back
 /// so the App can re-attach it for the next round.
 pub enum CommitMsg {
-    Done { message: Option<String> },
-    Cancelled { message: Option<String> },
-    Reopen { session: Box<dyn EditSession>, content: String },
+    Done {
+        message: Option<String>,
+    },
+    Cancelled {
+        message: Option<String>,
+    },
+    Reopen {
+        session: Box<dyn EditSession>,
+        content: String,
+    },
     FollowUp(FollowUp),
-}
-
-/// Decompose a Postgres table-node id (composite path produced by the
-/// Postgres adapter, e.g. `<db>/schemas/<s>/tables/<t>`) into its three
-/// addressing components. Returns `None` if the path doesn't match the
-/// expected shape.
-fn parse_postgres_table_path(id: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = id.split('/').collect();
-    if parts.len() == 5 && parts[1] == "schemas" && parts[3] == "tables" {
-        Some((parts[0].to_string(), parts[2].to_string(), parts[4].to_string()))
-    } else {
-        None
-    }
 }
 
 use super::App;
@@ -67,7 +61,29 @@ pub enum EditorRequest {
         output_suffix: String,
         child_env: std::collections::HashMap<String, String>,
     },
+    /// A `:w` in the builtin editor pane: the editor stays open and the
+    /// active session's [`EditSession::live_apply`] must run. It is a
+    /// request rather than inline work in `handle_key` because
+    /// `live_apply` is async and can hit the network (a Stoat
+    /// `commit_on_save` compose sends the message right there) — blocking
+    /// the key handler on it would freeze the TUI.
+    BuiltinLiveApply {
+        content: String,
+    },
     None,
+}
+
+impl EditorRequest {
+    /// Whether dispatching this request hands the terminal to a child
+    /// process. The main loop must tear its `EventStream` reader down
+    /// around those — otherwise the reader thread steals the child's
+    /// input — but not around in-process work.
+    pub fn suspends_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Inline { .. } | Self::Launch { .. } | Self::Script { .. }
+        )
+    }
 }
 
 /// How a tracking script interacts with the terminal.
@@ -105,7 +121,10 @@ impl ScriptMode {
     }
 
     pub fn is_interactive(self) -> bool {
-        matches!(self, Self::Interactive | Self::InteractiveCapture | Self::InteractiveCommands)
+        matches!(
+            self,
+            Self::Interactive | Self::InteractiveCapture | Self::InteractiveCommands
+        )
     }
 
     pub fn captures_output(self) -> bool {
@@ -123,7 +142,8 @@ impl ScriptMode {
 pub fn parse_script_mode(content: &str) -> ScriptMode {
     for line in content.lines().take(10) {
         let trimmed = line.trim();
-        let after = trimmed.strip_prefix('#')
+        let after = trimmed
+            .strip_prefix('#')
             .or_else(|| trimmed.strip_prefix("//"))
             .or_else(|| trimmed.strip_prefix("--"))
             .or_else(|| trimmed.strip_prefix(";;"));
@@ -147,7 +167,8 @@ pub fn parse_script_mode(content: &str) -> ScriptMode {
 pub fn parse_script_output_suffix(content: &str) -> String {
     for line in content.lines().take(10) {
         let trimmed = line.trim();
-        let after = trimmed.strip_prefix('#')
+        let after = trimmed
+            .strip_prefix('#')
             .or_else(|| trimmed.strip_prefix("//"))
             .or_else(|| trimmed.strip_prefix("--"))
             .or_else(|| trimmed.strip_prefix(";;"));
@@ -199,14 +220,37 @@ impl App {
         // The dispatch enum demands a `&'static str`; leak a per-session copy.
         let suffix: &'static str = Box::leak(session.suffix().to_string().into_boxed_str());
         let spawn_context = session.spawn_context();
+        // Snapshot the builtin geometry before the profile borrow ends.
+        let builtin = editor.builtin;
+        let height = editor.height.clone();
+        let line_numbers = editor.line_numbers;
+        let label = session.label().to_string();
 
         self.pending_session = Some(session);
         self.last_editor_buffer = Some(content.clone());
 
+        if builtin {
+            // No child process, no temp file: mount the pane and let the
+            // key handler drive it. The session stays pending exactly as
+            // for an external editor.
+            self.mount_builtin_editor(&label, &content, &height, line_numbers);
+            return EditorRequest::None;
+        }
+
         if editor.inline {
-            EditorRequest::Inline { command, content, suffix, spawn_context }
+            EditorRequest::Inline {
+                command,
+                content,
+                suffix,
+                spawn_context,
+            }
         } else if editor.pause_tui {
-            EditorRequest::Launch { command, content, suffix, spawn_context }
+            EditorRequest::Launch {
+                command,
+                content,
+                suffix,
+                spawn_context,
+            }
         } else {
             match not_yet_done_ratatui::open_editor_detached_in(
                 Some(&command),
@@ -215,23 +259,118 @@ impl App {
                 spawn_context.tempfile_dir.as_deref(),
                 spawn_context.tempfile_prefix,
                 &spawn_context.child_env,
+                spawn_context.persistent_file.as_deref(),
             ) {
-                Ok(handle) => { self.detached_editor = Some(handle); }
-                Err(e) => { self.notify_error(format!("Editor error: {e}")); }
+                Ok(handle) => {
+                    self.detached_editor = Some(handle);
+                }
+                Err(e) => {
+                    self.notify_error(format!("Editor error: {e}"));
+                }
             }
             EditorRequest::None
         }
     }
 
-    /// Open the Postgres scripts menu (the new `q` keybind on the
-    /// `tables` subtab). Parses the selected table-node id, lists
-    /// scripts under `<instance_data_dir>/queries/<db>/<schema>/<table>/`,
-    /// and pushes the resulting entries into the content view's popup.
-    pub fn open_postgres_scripts_menu(
+    // -----------------------------------------------------------------------
+    // The builtin editor pane
+    // -----------------------------------------------------------------------
+
+    /// Mount the builtin editor pane for the pending session's buffer.
+    fn mount_builtin_editor(
+        &mut self,
+        label: &str,
+        content: &str,
+        height: &str,
+        line_numbers: bool,
+    ) {
+        self.builtin_editor = Some(crate::components::builtin_editor::BuiltinEditorPane::new(
+            &self.theme,
+            label,
+            content,
+            height,
+            line_numbers,
+        ));
+    }
+
+    /// Feed a key to the mounted builtin editor and act on what it reports.
+    /// Called from [`App::handle_key`] while the pane is open; the pane owns
+    /// every key, so this never falls through to global dispatch.
+    pub(crate) fn handle_builtin_editor_key(&mut self, key: &str) -> EditorRequest {
+        use crate::components::builtin_editor::BuiltinEditorOutcome as Outcome;
+        let Some(pane) = self.builtin_editor.as_mut() else {
+            return EditorRequest::None;
+        };
+        match pane.handle_key(key) {
+            Outcome::Consumed => EditorRequest::None,
+            // `:w` keeps the pane open; the async part happens in the main
+            // loop (see [`EditorRequest::BuiltinLiveApply`]).
+            Outcome::Save(content) => EditorRequest::BuiltinLiveApply { content },
+            Outcome::SaveAndClose(content) => {
+                self.builtin_editor = None;
+                // Same background commit as a closing external editor —
+                // including its cancel detection for an unchanged buffer.
+                self.spawn_session_commit(&content);
+                EditorRequest::None
+            }
+            Outcome::Cancel => {
+                self.builtin_editor = None;
+                self.cancel_pending_edit();
+                EditorRequest::None
+            }
+        }
+    }
+
+    /// Run the active session's `live_apply` for a builtin `:w`, then report
+    /// the outcome on the editor's own status line — the pane is still open
+    /// and covers the notification bar's usual spot in the user's attention.
+    pub async fn apply_builtin_live_save(&mut self, content: &str) {
+        let Some(session) = self.pending_session.as_mut() else {
+            return;
+        };
+        let follow_up = session.live_apply(content).await;
+        if let Some(fu) = follow_up {
+            self.handle_follow_up(fu).await;
+        }
+        if let Some(pane) = self.builtin_editor.as_mut() {
+            pane.set_message("written");
+        }
+    }
+
+    /// Re-mount the builtin pane with a session's validation-error buffer.
+    /// The builtin counterpart of `main::reopen_editor_with_errors`; returns
+    /// `false` when the pending session is not on a builtin profile, so the
+    /// caller falls back to relaunching the external editor.
+    fn reopen_builtin_with(&mut self, content: &str) -> bool {
+        let profile = self.config.editors.resolve(
+            self.pending_session
+                .as_ref()
+                .and_then(|s| s.editor_profile()),
+        );
+        if !profile.builtin {
+            return false;
+        }
+        let height = profile.height.clone();
+        let line_numbers = profile.line_numbers;
+        let label = self
+            .pending_session
+            .as_ref()
+            .map(|s| s.label().to_string())
+            .unwrap_or_default();
+        self.mount_builtin_editor(&label, content, &height, line_numbers);
+        true
+    }
+
+    /// Open the per-node scripts menu (the `q` keybind on a level with
+    /// `node_scripts: true`). Lists the scripts the adapter's
+    /// [`ScriptStore`](not_yet_done_content::ScriptStore) holds for
+    /// `node_id`, pairs them with their bound chords, and pushes the
+    /// entries into the content view's popup.
+    pub fn open_node_scripts_menu(
         &mut self,
         view_index: usize,
         _pane_id: crate::views::content_view::PaneId,
-        table_node_id: String,
+        node_id: String,
     ) -> EditorRequest {
         let Some(adapter) = self
             .content_view(view_index)
@@ -248,23 +387,16 @@ impl App {
             ));
             return EditorRequest::None;
         }
-        let Some((database, schema, table)) = parse_postgres_table_path(&table_node_id) else {
-            self.notify(format!(
-                "Cannot derive (database, schema, table) from '{table_node_id}'"
-            ));
-            return EditorRequest::None;
-        };
-        let scope = crate::app::node_actions::postgres_table_scope(
+        let scope = crate::app::node_actions::node_script_scope(
+            adapter.adapter_type(),
             adapter.instance_id(),
-            &database,
-            &schema,
-            &table,
+            &node_id,
         );
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let (scripts, shortcut_map) = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let scripts = match adapter.script_store() {
-                    Some(store) => store.list_node_scripts(&table_node_id).await,
+                    Some(store) => store.list_node_scripts(&node_id).await,
                     None => Ok(Vec::new()),
                 };
                 let shortcuts: std::collections::HashMap<String, String> = shortcut_repo
@@ -289,7 +421,7 @@ impl App {
             .map(|name| crate::components::query_menu::QueryMenuEntry {
                 shortcut: shortcut_map.get(&name).cloned(),
                 name,
-                // Value field is unused for postgres scripts; keep
+                // Value field is unused for node scripts; keep
                 // non-empty so the popup widget treats the row as
                 // selectable.
                 query: "<file>".to_string(),
@@ -297,21 +429,19 @@ impl App {
             })
             .collect();
         if let Some(cv) = self.content_view_mut(view_index) {
-            cv.open_postgres_scripts_popup(database, schema, table, entries);
+            cv.open_node_scripts_popup(node_id, entries);
         }
         EditorRequest::None
     }
 
-    /// Run a Postgres script for `(db, schema, table, script)`. Reads
-    /// the file, executes the query area via the adapter, and replaces
-    /// the focused pane's items with the result.
-    pub fn run_postgres_script(
+    /// Run the node script `script` belonging to `node_id`. Reads the
+    /// file, executes the query area via the adapter, and replaces the
+    /// focused pane's items with the result.
+    pub fn run_node_script(
         &mut self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
     ) -> EditorRequest {
         let Some(adapter) = self
@@ -324,29 +454,29 @@ impl App {
         };
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let session = crate::edit_session::PostgresQuerySession::open_named(
+                let session = crate::edit_session::AdapterQuerySession::open_named(
                     Arc::clone(&adapter),
-                    database.clone(),
-                    schema.clone(),
-                    table.clone(),
+                    node_id.clone(),
                     script.clone(),
                     view_index,
                     pane_id,
                 )
                 .await;
                 let text = session.template().to_string();
-                let sql = crate::edit_session::postgres_parse_query_area(&text)
+                let sql = crate::edit_session::adapter_parse_query_area(&text)
                     .trim()
                     .to_string();
                 if sql.is_empty() {
                     return Err("query is empty".to_string());
                 }
-                let ctx = not_yet_done_content::CustomQueryContext::new()
-                    .with("database", database.clone())
-                    .with_page(not_yet_done_content::PageRequest {
+                // Routing keys (for Postgres: the target database) come
+                // from the adapter, which knows its own id shape.
+                let ctx = adapter.custom_query_context(&node_id).with_page(
+                    not_yet_done_content::PageRequest {
                         offset: 0,
-                        limit: crate::edit_session::POSTGRES_QUERY_DEFAULT_PAGE_SIZE,
-                    });
+                        limit: crate::edit_session::ADAPTER_QUERY_DEFAULT_PAGE_SIZE,
+                    },
+                );
                 adapter
                     .execute_custom_query(&sql, &ctx)
                     .await
@@ -361,19 +491,14 @@ impl App {
                 let page = out.page;
                 let custom_query = Some(crate::views::content_view::CustomQueryRunState {
                     query: sql,
-                    database,
+                    node_id,
                     // Placeholder — `apply_custom_query_result` patches
                     // `mode` from the pane's live view-config below.
                     mode: crate::config::view_config::PaginationMode::Server,
                     cursor_id: out.cursor_id,
                 });
                 if let Some(cv) = self.content_view_mut(view_index) {
-                    cv.apply_custom_query_result(
-                        pane_id,
-                        items,
-                        page,
-                        custom_query,
-                    );
+                    cv.apply_custom_query_result(pane_id, items, page, custom_query);
                 }
                 self.set_query_error(None);
                 if let Some(s) = status {
@@ -389,16 +514,14 @@ impl App {
         EditorRequest::None
     }
 
-    /// Open the Postgres SQL editor for a named per-table script.
+    /// Open the SQL editor for a named script of `node_id`.
     /// `is_new` is currently informational — the editor writes to the
     /// path either way; missing files yield the default template.
-    pub fn edit_postgres_script(
+    pub fn edit_node_script(
         &mut self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
         _is_new: bool,
     ) -> EditorRequest {
@@ -412,8 +535,8 @@ impl App {
         };
         let session = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                crate::edit_session::PostgresQuerySession::open_named(
-                    adapter, database, schema, table, script, view_index, pane_id,
+                crate::edit_session::AdapterQuerySession::open_named(
+                    adapter, node_id, script, view_index, pane_id,
                 )
                 .await
             })
@@ -421,14 +544,12 @@ impl App {
         self.open_session(Box::new(session))
     }
 
-    /// Remove a Postgres script `.sql` file and its sidecar shortcut.
-    pub fn delete_postgres_script(
+    /// Remove a node script file and its sidecar shortcut.
+    pub fn delete_node_script(
         &mut self,
         view_index: usize,
         _pane_id: crate::views::content_view::PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
     ) {
         let Some(adapter) = self
@@ -439,13 +560,11 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return;
         };
-        let scope = crate::app::node_actions::postgres_table_scope(
+        let scope = crate::app::node_actions::node_script_scope(
+            adapter.adapter_type(),
             adapter.instance_id(),
-            &database,
-            &schema,
-            &table,
+            &node_id,
         );
-        let node_id = format!("{database}/schemas/{schema}/tables/{table}");
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -463,31 +582,27 @@ impl App {
             Err(e) => self.notify_error(format!("Delete failed: {e}")),
         }
         // Drop the cached chord-claim entry so the next keypress on
-        // this table refetches from `query_shortcut` (SQ-8d).
+        // this node refetches from `query_shortcut` (SQ-8d).
         if let Some(cv) = self.content_view_mut(view_index) {
-            cv.postgres_table_shortcuts.remove(&node_id);
+            cv.node_script_shortcuts.remove(&node_id);
         }
     }
 
-    /// Set up shortcut-capture state for a Postgres script. The next
+    /// Set up shortcut-capture state for a node script. The next
     /// non-Esc keypress is bound by [`App::handle_key`]'s capture branch.
-    pub fn prompt_postgres_script_shortcut(
+    pub fn prompt_node_script_shortcut(
         &mut self,
         view_index: usize,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
     ) {
         self.modal_message = Some(format!(
             "Press a shortcut key for script '{}'\n\nEsc to cancel",
             script
         ));
-        self.awaiting_postgres_script_shortcut = Some(crate::app::PostgresScriptCoords {
+        self.awaiting_node_script_shortcut = Some(crate::app::NodeScriptCoords {
             view_index,
-            database,
-            schema,
-            table,
+            node_id,
             script,
         });
     }
@@ -495,12 +610,8 @@ impl App {
     /// Persist a captured key chord into the `query_shortcut` DB table
     /// for the script identified by `coords`. Called after the user
     /// presses a non-Esc, non-conflicting key while
-    /// `awaiting_postgres_script_shortcut` is set.
-    pub fn bind_postgres_script_shortcut(
-        &mut self,
-        coords: crate::app::PostgresScriptCoords,
-        chord: &str,
-    ) {
+    /// `awaiting_node_script_shortcut` is set.
+    pub fn bind_node_script_shortcut(&mut self, coords: crate::app::NodeScriptCoords, chord: &str) {
         let Some(adapter) = self
             .content_view(coords.view_index)
             .and_then(|cv| cv.adapter.as_ref())
@@ -509,18 +620,23 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return;
         };
-        let scope = crate::app::node_actions::postgres_table_scope(
+        let scope = crate::app::node_actions::node_script_scope(
+            adapter.adapter_type(),
             adapter.instance_id(),
-            &coords.database,
-            &coords.schema,
-            &coords.table,
+            &coords.node_id,
         );
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let chord_owned = chord.to_string();
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
+                // Script row — see `App::bind_script_shortcut` on the kind.
                 shortcut_repo
-                    .set(&scope, &coords.script, &chord_owned)
+                    .set(
+                        &scope,
+                        &coords.script,
+                        not_yet_done_content::QueryKind::Saved.as_str(),
+                        &chord_owned,
+                    )
                     .await
             })
         });
@@ -528,22 +644,59 @@ impl App {
             self.notify_error(format!("Failed to persist shortcut: {e}"));
         }
         // Drop the cached chord-claim entry so the next keypress on
-        // this table refetches from `query_shortcut` (SQ-8d).
-        let table_node_id = format!(
-            "{}/schemas/{}/tables/{}",
-            coords.database, coords.schema, coords.table,
-        );
+        // this node refetches from `query_shortcut` (SQ-8d).
         if let Some(cv) = self.content_view_mut(coords.view_index) {
-            cv.postgres_table_shortcuts.remove(&table_node_id);
+            cv.node_script_shortcuts.remove(&coords.node_id);
         }
     }
 
-    /// Open the adapter-native query editor (Postgres SQL editor today).
-    /// Parses the active drill-down's parent node id to derive the
-    /// adapter-specific addressing data, builds a [`PostgresQuerySession`]
-    /// pre-populated with the persisted buffer (or the default
-    /// `SELECT * FROM <schema>.<table>` template), and routes it through
-    /// the standard editor lifecycle.
+    /// Remove the key chord bound to a node script, leaving the script
+    /// file itself in place. Mirrors [`Self::bind_node_script_shortcut`]
+    /// but calls `unset` instead of `set`.
+    pub fn clear_node_script_shortcut(
+        &mut self,
+        view_index: usize,
+        node_id: String,
+        script: String,
+    ) {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            self.notify("No adapter for this view".to_string());
+            return;
+        };
+        let scope = crate::app::node_actions::node_script_scope(
+            adapter.adapter_type(),
+            adapter.instance_id(),
+            &node_id,
+        );
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let script_owned = script.clone();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { shortcut_repo.unset(&scope, &script_owned).await })
+        });
+        if let Err(e) = result {
+            self.notify_error(format!("Failed to clear shortcut: {e}"));
+            return;
+        }
+        // Drop the cached chord-claim entry so the next keypress on
+        // this node refetches from `query_shortcut` (SQ-8d).
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.node_script_shortcuts.remove(&node_id);
+        }
+        self.notify(format!("Cleared shortcut for script '{script}'"));
+    }
+
+    /// Open the adapter-native query editor for the node the active
+    /// drill-down hangs off. Builds an [`AdapterQuerySession`]
+    /// pre-populated with the persisted buffer (or the adapter's default
+    /// template) and routes it through the standard editor lifecycle.
+    ///
+    /// `parent_node_id` stays opaque: the adapter decides where the buffer
+    /// lives and which context the query runs in.
     pub fn open_adapter_query_editor(
         &mut self,
         view_index: usize,
@@ -558,29 +711,110 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return EditorRequest::None;
         };
-        if adapter.adapter_type() != "postgres" {
+        if !adapter.capabilities().supports_node_query_editor {
             self.notify(format!(
-                "Custom-query editor not yet implemented for adapter '{}'",
+                "Custom-query editor not implemented for adapter '{}'",
                 adapter.adapter_type()
             ));
             return EditorRequest::None;
         }
-        let Some((database, schema, table)) = parse_postgres_table_path(&parent_node_id) else {
-            self.notify(format!(
-                "Cannot derive (database, schema, table) from '{parent_node_id}'"
-            ));
-            return EditorRequest::None;
-        };
 
         let session = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                crate::edit_session::PostgresQuerySession::open(
-                    adapter, database, schema, table, view_index, pane_id,
+                crate::edit_session::AdapterQuerySession::open(
+                    adapter,
+                    parent_node_id,
+                    view_index,
+                    pane_id,
                 )
                 .await
             })
         });
         self.open_session(Box::new(session))
+    }
+
+    /// Open the editor for a content view's query body in the language and
+    /// store that `kind` names.
+    ///
+    /// A new extended document starts from the framework's passthrough
+    /// template rather than the view's `query.template`: the latter is a
+    /// single adapter-native query, which is precisely what an extended
+    /// document is not. Creation refuses a name either store already holds —
+    /// the two share one namespace and the menu shows no difference between
+    /// them, so overwriting would destroy a body the user cannot even see.
+    pub fn open_content_query_editor(
+        &mut self,
+        view_index: usize,
+        save_name: Option<String>,
+        is_new: bool,
+        kind: not_yet_done_content::QueryKind,
+    ) -> EditorRequest {
+        use not_yet_done_content::QueryKind;
+
+        if is_new && let Some(name) = save_name.clone() {
+            match self.existing_query_kind(view_index, &name) {
+                Ok(Some(existing)) => {
+                    self.modal_message = Some(format!(
+                        "A query named '{name}' already exists ({existing}).\n\n\
+                         Pick another name, or edit that one from the menu."
+                    ));
+                    return EditorRequest::None;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Not "the name is free": an unreadable store would
+                    // otherwise get a body written over something present.
+                    self.notify_error(format!("Could not check query names: {e}"));
+                    return EditorRequest::None;
+                }
+            }
+        }
+
+        let Some(cv) = self.content_view(view_index) else {
+            return EditorRequest::None;
+        };
+        let language = cv
+            .adapter
+            .as_ref()
+            .map(|a| a.query_language().to_string())
+            .unwrap_or_else(|| "yaml".to_string());
+        let query_text = match (is_new, kind) {
+            (true, QueryKind::Extended) => not_yet_done_extended_query::default_template(&language),
+            (true, QueryKind::Saved) => cv.default_query_text(),
+            (false, _) => cv.current_query_text(),
+        };
+        let suffix = match kind {
+            QueryKind::Extended => not_yet_done_content::EXTENDED_QUERY_SUFFIX.to_string(),
+            QueryKind::Saved => cv.query_body_suffix(),
+        };
+        let session = crate::edit_session::ContentQueryFilterSession::new(
+            view_index, save_name, is_new, query_text, suffix, kind,
+        );
+        self.open_session(Box::new(session))
+    }
+
+    /// Which store already holds `name` for this view's adapter, if any.
+    /// `Ok(None)` when the name is free or the view has no adapter.
+    pub(super) fn existing_query_kind(
+        &self,
+        view_index: usize,
+        name: &str,
+    ) -> Result<Option<not_yet_done_content::QueryKind>, String> {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            return Ok(None);
+        };
+        let name = name.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                not_yet_done_content::existing_query_kind(adapter.as_ref(), &name)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -621,7 +855,7 @@ impl App {
     fn track_buffer_after_process(&mut self, result: &Option<String>) {
         match result {
             Some(buf) => self.last_editor_buffer = Some(buf.clone()),
-            None      => self.last_editor_buffer = None,
+            None => self.last_editor_buffer = None,
         }
     }
 
@@ -634,11 +868,15 @@ impl App {
         let outcome = session.commit(content).await;
         match outcome {
             CommitOutcome::Done { message } => {
-                if let Some(m) = message { self.notify(m); }
+                if let Some(m) = message {
+                    self.notify(m);
+                }
                 None
             }
             CommitOutcome::Cancelled { message } => {
-                if let Some(m) = message { self.notify(m); }
+                if let Some(m) = message {
+                    self.notify(m);
+                }
                 None
             }
             CommitOutcome::Reopen { content } => {
@@ -681,16 +919,40 @@ impl App {
                 self.notify(message);
                 self.reload_content_pane_current_level(view_index, pane_id);
             }
-            FollowUp::ApplyContentFilter { view_index, content, save_name } => {
-                self.apply_content_query_live(&content, view_index, save_name.as_deref());
+            FollowUp::ApplyContentFilter {
+                view_index,
+                content,
+                save_name,
+                kind,
+            } => {
+                self.apply_content_query_live(&content, view_index, save_name.as_deref(), kind);
             }
-            FollowUp::CloseContentQuery { view_index, content, save_name, is_new } => {
-                self.process_content_query_edit(&content, view_index, save_name.as_deref(), is_new);
+            FollowUp::CloseContentQuery {
+                view_index,
+                content,
+                save_name,
+                is_new,
+                kind,
+            } => {
+                self.process_content_query_edit(
+                    &content,
+                    view_index,
+                    save_name.as_deref(),
+                    is_new,
+                    kind,
+                );
             }
             FollowUp::SetQueryError(msg) => {
                 self.set_query_error(Some(msg));
             }
-            FollowUp::ReplaceContentItems { view_index, pane_id, items, status, page, custom_query } => {
+            FollowUp::ReplaceContentItems {
+                view_index,
+                pane_id,
+                items,
+                status,
+                page,
+                custom_query,
+            } => {
                 if let Some(cv) = self.content_view_mut(view_index) {
                     cv.apply_custom_query_result(pane_id, items, page, custom_query);
                 }
@@ -699,20 +961,18 @@ impl App {
                     self.notify(s);
                 }
             }
-            FollowUp::ReloadConfig { path } => {
-                match self.reload_config(&path) {
-                    Ok(msg) => self.notify(msg),
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        self.notify_error(format!(
-                            "Reload {} failed: {err_msg}",
-                            path.display()
-                        ));
-                        self.reopen_config_with_error(path, err_msg);
-                    }
+            FollowUp::ReloadConfig { path } => match self.reload_config(&path) {
+                Ok(msg) => self.notify(msg),
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    self.notify_error(format!("Reload {} failed: {err_msg}", path.display()));
+                    self.reopen_config_with_error(path, err_msg);
                 }
-            }
-            FollowUp::ReloadContentSavedQueries { view_index, message } => {
+            },
+            FollowUp::ReloadContentSavedQueries {
+                view_index,
+                message,
+            } => {
                 self.reload_content_saved_queries(view_index);
                 self.notify(message);
             }
@@ -721,7 +981,9 @@ impl App {
 
     pub fn poll_detached_editor(&mut self) -> Option<String> {
         let editor = self.detached_editor.as_ref()?;
-        if !editor.is_done() { return None; }
+        if !editor.is_done() {
+            return None;
+        }
         let content = editor.read_content().ok();
         editor.cleanup();
         self.detached_editor = None;
@@ -734,15 +996,27 @@ impl App {
     /// session (visible state may have changed); `false` on every
     /// early-out (no detached editor, no change yet, etc.).
     pub async fn poll_live_editor(&mut self) -> bool {
-        if self.detached_editor.is_none() { return false; }
-        if !self.has_pending_edit() { return false; }
+        if self.detached_editor.is_none() {
+            return false;
+        }
+        if !self.has_pending_edit() {
+            return false;
+        }
 
-        let changed = self.detached_editor.as_mut()
+        let changed = self
+            .detached_editor
+            .as_mut()
             .map(|e| e.has_changed())
             .unwrap_or(false);
-        if !changed { return false; }
+        if !changed {
+            return false;
+        }
 
-        let content = match self.detached_editor.as_ref().and_then(|e| e.read_live_content().ok()) {
+        let content = match self
+            .detached_editor
+            .as_ref()
+            .and_then(|e| e.read_live_content().ok())
+        {
             Some(c) => c,
             None => return false,
         };
@@ -766,7 +1040,9 @@ impl App {
     /// background commit (which flips `commit_in_flight` and thus changes
     /// the action bar); `false` when no editor closed this tick.
     pub fn poll_editor_close(&mut self) -> bool {
-        let Some(content) = self.poll_detached_editor() else { return false };
+        let Some(content) = self.poll_detached_editor() else {
+            return false;
+        };
         self.spawn_session_commit(&content);
         true
     }
@@ -791,7 +1067,10 @@ impl App {
             let msg = match outcome {
                 CommitOutcome::Done { message } => CommitMsg::Done { message },
                 CommitOutcome::Cancelled { message } => CommitMsg::Cancelled { message },
-                CommitOutcome::Reopen { content: c } => CommitMsg::Reopen { session, content: c },
+                CommitOutcome::Reopen { content: c } => CommitMsg::Reopen {
+                    session,
+                    content: c,
+                },
                 CommitOutcome::FollowUp(fu) => CommitMsg::FollowUp(fu),
             };
             let _ = tx.send(msg);
@@ -809,18 +1088,27 @@ impl App {
         self.commit_in_flight = false;
         match msg {
             CommitMsg::Done { message } => {
-                if let Some(m) = message { self.notify(m); }
+                if let Some(m) = message {
+                    self.notify(m);
+                }
                 self.last_editor_buffer = None;
                 None
             }
             CommitMsg::Cancelled { message } => {
-                if let Some(m) = message { self.notify(m); }
+                if let Some(m) = message {
+                    self.notify(m);
+                }
                 self.last_editor_buffer = None;
                 None
             }
             CommitMsg::Reopen { session, content } => {
                 self.pending_session = Some(session);
                 self.last_editor_buffer = Some(content.clone());
+                // A builtin session reopens in-process; only an external
+                // one needs the main loop to relaunch a child.
+                if self.reopen_builtin_with(&content) {
+                    return None;
+                }
                 Some(content)
             }
             CommitMsg::FollowUp(fu) => {
@@ -829,29 +1117,5 @@ impl App {
                 None
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_postgres_table_path_extracts_three_parts() {
-        let got = parse_postgres_table_path("mydb/schemas/public/tables/users").unwrap();
-        assert_eq!(got, ("mydb".into(), "public".into(), "users".into()));
-    }
-
-    #[test]
-    fn parse_postgres_table_path_rejects_partial_paths() {
-        assert!(parse_postgres_table_path("mydb").is_none());
-        assert!(parse_postgres_table_path("mydb/schemas/public").is_none());
-        assert!(parse_postgres_table_path("mydb/schemas/public/tables").is_none());
-    }
-
-    #[test]
-    fn parse_postgres_table_path_rejects_wrong_sentinels() {
-        assert!(parse_postgres_table_path("mydb/foo/public/tables/users").is_none());
-        assert!(parse_postgres_table_path("mydb/schemas/public/bar/users").is_none());
     }
 }

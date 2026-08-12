@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use chrono::TimeZone;
 use chrono::{Datelike, NaiveDate};
 use shaku::Component;
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::TimeZone;
 
 use crate::entity::granularity::Granularity;
 use crate::entity::tracking;
@@ -166,16 +166,17 @@ pub struct TrackingServiceImpl {
 
 #[async_trait]
 impl TrackingService for TrackingServiceImpl {
-    async fn start(
-        &self,
-        task_id: Uuid,
-        parallel: bool,
-    ) -> Result<tracking::Model, AppError> {
+    async fn start(&self, task_id: Uuid, parallel: bool) -> Result<tracking::Model, AppError> {
         // Guard: task must exist
         self.task_repository.find_by_id(task_id).await?;
 
         // Guard: task must not already have an active tracking
-        if self.tracking_repository.find_active_for_task(task_id).await?.is_some() {
+        if self
+            .tracking_repository
+            .find_active_for_task(task_id)
+            .await?
+            .is_some()
+        {
             return Err(AppError::TrackingAlreadyActive(task_id));
         }
 
@@ -198,7 +199,8 @@ impl TrackingService for TrackingServiceImpl {
 
         let to_stop = match task_id {
             Some(id) => {
-                let t = self.tracking_repository
+                let t = self
+                    .tracking_repository
                     .find_active_for_task(id)
                     .await?
                     .ok_or(AppError::NoActiveTracking(id))?;
@@ -234,16 +236,15 @@ impl TrackingService for TrackingServiceImpl {
         // `to` is expected to carry the same timezone (same user session).
         let tz = from.timezone;
 
-        let trackings = self.tracking_repository
+        let trackings = self
+            .tracking_repository
             .find_in_range(from.utc, to.utc, task_id)
             .await?;
 
         // Group durations by (local_date, task_id), clamping each tracking to
         // the requested [from, to] window.
-        let mut by_day_task: std::collections::BTreeMap<
-            (NaiveDate, Uuid),
-            chrono::Duration,
-        > = std::collections::BTreeMap::new();
+        let mut by_day_task: std::collections::BTreeMap<(NaiveDate, Uuid), chrono::Duration> =
+            std::collections::BTreeMap::new();
 
         for t in &trackings {
             let start_utc = t.started_at.max(from.utc);
@@ -265,7 +266,9 @@ impl TrackingService for TrackingServiceImpl {
                         local_date.year(),
                         local_date.month(),
                         local_date.day(),
-                        23, 59, 59,
+                        23,
+                        59,
+                        59,
                     )
                     .unwrap();
                 let day_end_utc = day_end_local.to_utc() + chrono::Duration::seconds(1);
@@ -312,7 +315,11 @@ impl TrackingService for TrackingServiceImpl {
                 .fold(chrono::Duration::zero(), |acc, e| acc + e.total_duration);
             total += day_total;
 
-            days.push(DaySummary { date, entries, day_total });
+            days.push(DaySummary {
+                date,
+                entries,
+                day_total,
+            });
         }
 
         Ok(Summary { days, total })
@@ -326,7 +333,8 @@ impl TrackingService for TrackingServiceImpl {
     ) -> Result<MovedTracking, AppError> {
         let now = chrono::Utc::now();
 
-        let tracking = self.tracking_repository
+        let tracking = self
+            .tracking_repository
             .find_by_id(entry_id)
             .await?
             .ok_or(AppError::TrackingNotFound(entry_id))?;
@@ -342,11 +350,17 @@ impl TrackingService for TrackingServiceImpl {
         let candidate_start = match &options.gravity {
             Some(gravity) => {
                 self.find_free_slot(
-                    proposed_start, duration, entry_id, tracking.task_id, gravity,
-                ).await?
+                    proposed_start,
+                    duration,
+                    entry_id,
+                    tracking.task_id,
+                    gravity,
+                )
+                .await?
             }
             None => {
-                let overlapping = self.tracking_repository
+                let overlapping = self
+                    .tracking_repository
                     .find_overlapping(proposed_start, proposed_start + duration, entry_id)
                     .await?;
                 if !options.allow_same_task_overlap
@@ -372,10 +386,18 @@ impl TrackingService for TrackingServiceImpl {
         let old_started_at = tracking.started_at;
         let old_ended_at = tracking.ended_at.unwrap();
 
-        self.tracking_repository.soft_delete_keeping_times(old_id).await?;
+        self.tracking_repository
+            .soft_delete_keeping_times(old_id)
+            .await?;
 
-        let new_tracking = self.tracking_repository
-            .insert_with_end(tracking.task_id, candidate_start, candidate_end, Some(old_id))
+        let new_tracking = self
+            .tracking_repository
+            .insert_with_end(
+                tracking.task_id,
+                candidate_start,
+                candidate_end,
+                Some(old_id),
+            )
             .await?;
 
         Ok(MovedTracking {
@@ -409,12 +431,14 @@ impl TrackingService for TrackingServiceImpl {
             // Date range query.
             let from = options.from.unwrap_or(chrono::DateTime::UNIX_EPOCH);
             let to = options.to.unwrap_or(now);
-            self.tracking_repository.find_in_range(from, to, options.task_id).await?
+            self.tracking_repository
+                .find_in_range(from, to, options.task_id)
+                .await?
         } else if let Some(task_id) = options.task_id {
             // All trackings for a specific task.
-            self.tracking_repository.find_in_range(
-                chrono::DateTime::UNIX_EPOCH, now, Some(task_id),
-            ).await?
+            self.tracking_repository
+                .find_in_range(chrono::DateTime::UNIX_EPOCH, now, Some(task_id))
+                .await?
         } else if options.active_only {
             self.tracking_repository.find_all_active().await?
         } else {
@@ -472,7 +496,8 @@ impl TrackingService for TrackingServiceImpl {
     }
 
     async fn restore_tracking(&self, entry_id: Uuid) -> Result<tracking::Model, AppError> {
-        let tracking = self.tracking_repository
+        let tracking = self
+            .tracking_repository
             .find_by_id(entry_id)
             .await?
             .ok_or(AppError::TrackingNotFound(entry_id))?;
@@ -499,7 +524,8 @@ impl TrackingService for TrackingServiceImpl {
         at: LocalContext,
         second_task_id: Option<Uuid>,
     ) -> Result<SplitTracking, AppError> {
-        let tracking = self.tracking_repository
+        let tracking = self
+            .tracking_repository
             .find_by_id(entry_id)
             .await?
             .ok_or(AppError::TrackingNotFound(entry_id))?;
@@ -519,19 +545,34 @@ impl TrackingService for TrackingServiceImpl {
             self.task_repository.find_by_id(second_task).await?;
         }
 
-        let first_task_desc = self.task_repository.find_by_id(tracking.task_id).await?.description;
+        let first_task_desc = self
+            .task_repository
+            .find_by_id(tracking.task_id)
+            .await?
+            .description;
         let second_task_desc = if second_task == tracking.task_id {
             first_task_desc.clone()
         } else {
-            self.task_repository.find_by_id(second_task).await?.description
+            self.task_repository
+                .find_by_id(second_task)
+                .await?
+                .description
         };
 
         // Soft-delete original.
-        self.tracking_repository.soft_delete_keeping_times(entry_id).await?;
+        self.tracking_repository
+            .soft_delete_keeping_times(entry_id)
+            .await?;
 
         // Create first part: started_at → split_at (always completed).
-        let first = self.tracking_repository
-            .insert_with_end(tracking.task_id, tracking.started_at, split_at, Some(entry_id))
+        let first = self
+            .tracking_repository
+            .insert_with_end(
+                tracking.task_id,
+                tracking.started_at,
+                split_at,
+                Some(entry_id),
+            )
             .await?;
 
         // Create second part: split_at → ended_at (active if original was active).
@@ -541,7 +582,12 @@ impl TrackingService for TrackingServiceImpl {
                 .await?
         } else {
             self.tracking_repository
-                .insert_with_end(second_task, split_at, tracking.ended_at.unwrap(), Some(entry_id))
+                .insert_with_end(
+                    second_task,
+                    split_at,
+                    tracking.ended_at.unwrap(),
+                    Some(entry_id),
+                )
                 .await?
         };
 
@@ -618,7 +664,8 @@ impl TrackingServiceImpl {
             GravityDirection::Start => {
                 let mut candidate = proposed_start;
                 loop {
-                    let overlapping = self.tracking_repository
+                    let overlapping = self
+                        .tracking_repository
                         .find_overlapping(candidate, candidate + duration, exclude_id)
                         .await?;
                     if overlapping.is_empty() {
@@ -627,7 +674,8 @@ impl TrackingServiceImpl {
                     if overlapping.iter().any(|t| t.task_id == task_id) {
                         return Err(AppError::OverlapSameTask);
                     }
-                    candidate = overlapping.iter()
+                    candidate = overlapping
+                        .iter()
                         .filter_map(|t| t.ended_at)
                         .max()
                         .ok_or(AppError::NoFreeSlot)?;
@@ -636,7 +684,8 @@ impl TrackingServiceImpl {
             GravityDirection::End => {
                 let mut candidate_end = proposed_start + duration;
                 loop {
-                    let overlapping = self.tracking_repository
+                    let overlapping = self
+                        .tracking_repository
                         .find_overlapping(candidate_end - duration, candidate_end, exclude_id)
                         .await?;
                     if overlapping.is_empty() {
@@ -645,7 +694,8 @@ impl TrackingServiceImpl {
                     if overlapping.iter().any(|t| t.task_id == task_id) {
                         return Err(AppError::OverlapSameTask);
                     }
-                    candidate_end = overlapping.iter()
+                    candidate_end = overlapping
+                        .iter()
                         .map(|t| t.started_at)
                         .min()
                         .ok_or(AppError::NoFreeSlot)?;

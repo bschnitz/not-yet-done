@@ -1,10 +1,10 @@
 // not-yet-done-task-core/src/repository/task_repository.rs
 
-use sea_orm::prelude::Expr;
 use async_trait::async_trait;
+use sea_orm::prelude::Expr;
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection,
-    EntityTrait, QueryFilter, Set,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
 };
 use shaku::Component;
 use uuid::Uuid;
@@ -60,7 +60,9 @@ pub fn compute_path(id: Uuid, parents: &HashMap<Uuid, Option<Uuid>>) -> String {
     let mut seen = std::collections::HashSet::new();
     seen.insert(id);
     while let Some(pid) = current {
-        if !seen.insert(pid) { break; } // cycle guard
+        if !seen.insert(pid) {
+            break;
+        } // cycle guard
         chain.push(pid);
         current = parents.get(&pid).copied().flatten();
     }
@@ -101,7 +103,11 @@ pub trait TaskRepository: shaku::Interface {
     /// Undo the most recent delete operation by restoring all tasks that share
     /// the latest `deleted_at` timestamp.
     async fn undelete_last(&self) -> Result<usize, AppError>;
-    async fn update_description(&self, id: Uuid, description: String) -> Result<task::Model, AppError>;
+    async fn update_description(
+        &self,
+        id: Uuid,
+        description: String,
+    ) -> Result<task::Model, AppError>;
     async fn update_task(
         &self,
         id: Uuid,
@@ -192,8 +198,14 @@ impl TaskRepository for TaskRepositoryImpl {
         // Compute path: parent's path + own short id.
         let path = if let Some(pid) = parent_id {
             let parent = task::Entity::find_by_id(pid).one(db).await?;
-            let parent_path = parent.and_then(|p| p.path).unwrap_or_else(|| format!("/{}/", short_id(pid)));
-            format!("{}/{}/", parent_path.trim_end_matches('/'), short_id(model.id.clone().unwrap()))
+            let parent_path = parent
+                .and_then(|p| p.path)
+                .unwrap_or_else(|| format!("/{}/", short_id(pid)));
+            format!(
+                "{}/{}/",
+                parent_path.trim_end_matches('/'),
+                short_id(model.id.clone().unwrap())
+            )
         } else {
             format!("/{}/", short_id(model.id.clone().unwrap()))
         };
@@ -206,8 +218,7 @@ impl TaskRepository for TaskRepositoryImpl {
         use sea_orm::QuerySelect;
         let db = self.db.as_ref().expect("DB nicht initialisiert");
 
-        let query = task::Entity::find()
-            .filter(Column::Deleted.eq(false));
+        let query = task::Entity::find().filter(Column::Deleted.eq(false));
 
         if let Some(pid) = project_id {
             use crate::entity::task_project::Column as TpCol;
@@ -340,7 +351,10 @@ impl TaskRepository for TaskRepositoryImpl {
 
         let result = task::Entity::update_many()
             .col_expr(Column::Deleted, Expr::value(false))
-            .col_expr(Column::DeletedAt, Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None))
+            .col_expr(
+                Column::DeletedAt,
+                Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+            )
             .col_expr(Column::UpdatedAt, Expr::value(chrono::Utc::now()))
             .filter(Column::DeletedAt.eq(ts))
             .exec(db)
@@ -349,7 +363,11 @@ impl TaskRepository for TaskRepositoryImpl {
         Ok(result.rows_affected as usize)
     }
 
-    async fn update_description(&self, id: Uuid, description: String) -> Result<task::Model, AppError> {
+    async fn update_description(
+        &self,
+        id: Uuid,
+        description: String,
+    ) -> Result<task::Model, AppError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let task = self.find_by_id(id).await?;
         let mut model: ActiveModel = task.into();
@@ -509,7 +527,8 @@ impl TaskRepository for TaskRepositoryImpl {
     async fn find_tags_by_task_ids(
         &self,
         task_ids: &[Uuid],
-    ) -> Result<std::collections::HashMap<Uuid, Vec<crate::repository::ResolvedTag>>, AppError> {
+    ) -> Result<std::collections::HashMap<Uuid, Vec<crate::repository::ResolvedTag>>, AppError>
+    {
         use crate::entity::{global_tag, project_tag, task_global_tag, task_project_tag};
         use crate::repository::ResolvedTag;
         use std::collections::HashMap;
@@ -525,8 +544,12 @@ impl TaskRepository for TaskRepositoryImpl {
             .all(db)
             .await?;
         if !g_links.is_empty() {
-            let g_ids: Vec<Uuid> =
-                g_links.iter().map(|l| l.global_tag_id).collect::<std::collections::HashSet<_>>().into_iter().collect();
+            let g_ids: Vec<Uuid> = g_links
+                .iter()
+                .map(|l| l.global_tag_id)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
             let g_tags = global_tag::Entity::find()
                 .filter(global_tag::Column::Id.is_in(g_ids))
                 .all(db)
@@ -547,8 +570,12 @@ impl TaskRepository for TaskRepositoryImpl {
             .all(db)
             .await?;
         if !p_links.is_empty() {
-            let p_ids: Vec<Uuid> =
-                p_links.iter().map(|l| l.project_tag_id).collect::<std::collections::HashSet<_>>().into_iter().collect();
+            let p_ids: Vec<Uuid> = p_links
+                .iter()
+                .map(|l| l.project_tag_id)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
             let p_tags = project_tag::Entity::find()
                 .filter(project_tag::Column::Id.is_in(p_ids))
                 .all(db)
@@ -583,10 +610,12 @@ impl TaskRepository for TaskRepositoryImpl {
 
         if options.include_ancestors && !results.is_empty() {
             let db = self.db.as_ref().expect("DB nicht initialisiert");
-            let result_ids: std::collections::HashSet<Uuid> = results.iter().map(|t| t.id).collect();
+            let result_ids: std::collections::HashSet<Uuid> =
+                results.iter().map(|t| t.id).collect();
 
             // Collect all ancestor IDs by walking parent_id chains.
-            let mut ancestor_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+            let mut ancestor_ids: std::collections::HashSet<Uuid> =
+                std::collections::HashSet::new();
             for task in &results {
                 let mut current = task.parent_id;
                 while let Some(pid) = current {
@@ -627,7 +656,10 @@ impl TaskRepository for TaskRepositoryImpl {
 
         // Look up the root to get its path prefix.
         let root = self.find_by_id(root_id).await?;
-        let root_path = root.path.clone().unwrap_or_else(|| format!("/{}/", short_id(root_id)));
+        let root_path = root
+            .path
+            .clone()
+            .unwrap_or_else(|| format!("/{}/", short_id(root_id)));
 
         // Find all tasks whose path starts with the root's path (includes root itself).
         let all: Vec<task::Model> = task::Entity::find()
@@ -643,7 +675,8 @@ impl TaskRepository for TaskRepositoryImpl {
 
         // Build a set of IDs and a parent lookup.
         let id_set: std::collections::HashSet<Uuid> = all.iter().map(|t| t.id).collect();
-        let children: std::collections::HashSet<Uuid> = all.iter()
+        let children: std::collections::HashSet<Uuid> = all
+            .iter()
             .filter_map(|t| t.parent_id)
             .filter(|pid| id_set.contains(pid))
             .collect();
@@ -656,9 +689,7 @@ impl TaskRepository for TaskRepositoryImpl {
             if !is_leaf {
                 continue;
             }
-            let dominated = t.last_tracked_at
-                .map(|lta| lta >= since)
-                .unwrap_or(false);
+            let dominated = t.last_tracked_at.map(|lta| lta >= since).unwrap_or(false);
             if !dominated {
                 continue;
             }
@@ -666,7 +697,9 @@ impl TaskRepository for TaskRepositoryImpl {
             keep.insert(t.id);
             let mut current = t.parent_id;
             while let Some(pid) = current {
-                if !keep.insert(pid) { break; }
+                if !keep.insert(pid) {
+                    break;
+                }
                 current = all.iter().find(|a| a.id == pid).and_then(|a| a.parent_id);
             }
         }
@@ -680,7 +713,12 @@ impl TaskRepository for TaskRepositoryImpl {
 
         for op in ops {
             match op {
-                TaskOp::Insert { description, parent_id, status, priority } => {
+                TaskOp::Insert {
+                    description,
+                    parent_id,
+                    status,
+                    priority,
+                } => {
                     let mut model = ActiveModel {
                         description: Set(description),
                         parent_id: Set(parent_id),
@@ -692,14 +730,31 @@ impl TaskRepository for TaskRepositoryImpl {
                     let task = model.insert(db).await?;
                     results.push(task);
                 }
-                TaskOp::Update { id, description, status, priority, parent_id, deleted } => {
+                TaskOp::Update {
+                    id,
+                    description,
+                    status,
+                    priority,
+                    parent_id,
+                    deleted,
+                } => {
                     let task = self.find_by_id(id).await?;
                     let mut model: ActiveModel = task.into();
-                    if let Some(d) = description { model.description = Set(d); }
-                    if let Some(s) = status { model.status = Set(s); }
-                    if let Some(p) = priority { model.priority = Set(p); }
-                    if let Some(pid) = parent_id { model.parent_id = Set(pid); }
-                    if let Some(del) = deleted { model.deleted = Set(del); }
+                    if let Some(d) = description {
+                        model.description = Set(d);
+                    }
+                    if let Some(s) = status {
+                        model.status = Set(s);
+                    }
+                    if let Some(p) = priority {
+                        model.priority = Set(p);
+                    }
+                    if let Some(pid) = parent_id {
+                        model.parent_id = Set(pid);
+                    }
+                    if let Some(del) = deleted {
+                        model.deleted = Set(del);
+                    }
                     model.updated_at = Set(chrono::Utc::now());
                     let updated = model.update(db).await?;
                     results.push(updated);
@@ -720,9 +775,8 @@ impl TaskRepository for TaskRepositoryImpl {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         // Load all tasks (including deleted) to build the parent map.
         let all: Vec<task::Model> = task::Entity::find().all(db).await?;
-        let parents: HashMap<Uuid, Option<Uuid>> = all.iter()
-            .map(|t| (t.id, t.parent_id))
-            .collect();
+        let parents: HashMap<Uuid, Option<Uuid>> =
+            all.iter().map(|t| (t.id, t.parent_id)).collect();
 
         let mut count = 0;
         for t in &all {
@@ -743,12 +797,15 @@ impl TaskRepository for TaskRepositoryImpl {
 // Private helper methods (not part of the trait).
 impl TaskRepositoryImpl {
     /// Rebuild paths for a task and all its descendants.
-    async fn rebuild_subtree_paths(&self, db: &DatabaseConnection, root_id: Uuid) -> Result<(), AppError> {
+    async fn rebuild_subtree_paths(
+        &self,
+        db: &DatabaseConnection,
+        root_id: Uuid,
+    ) -> Result<(), AppError> {
         // Load all tasks to compute paths.
         let all: Vec<task::Model> = task::Entity::find().all(db).await?;
-        let parents: HashMap<Uuid, Option<Uuid>> = all.iter()
-            .map(|t| (t.id, t.parent_id))
-            .collect();
+        let parents: HashMap<Uuid, Option<Uuid>> =
+            all.iter().map(|t| (t.id, t.parent_id)).collect();
 
         // Find all descendants via BFS.
         let mut to_update = vec![root_id];

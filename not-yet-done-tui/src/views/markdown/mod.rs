@@ -12,5 +12,8 @@
 pub mod render;
 pub mod theme_bridge;
 
-pub use render::{lines_to_widget_lines, render_markdown_lines, StyleMapBuilder};
+pub use render::{
+    StyleMapBuilder, lines_to_widget_lines, lines_to_widget_lines_with_images,
+    render_markdown_lines, render_markdown_lines_with_images,
+};
 pub use theme_bridge::MdTheme;

@@ -46,8 +46,8 @@ mod anonymize;
 mod datetime;
 // Shared `InputSpec::Form` field-map readers for the local adapters'
 // `execute` paths (trackings split/move, projects create/edit/delete).
-mod form;
 pub mod editor_templates;
+mod form;
 pub mod notes;
 pub mod projects;
 pub mod task;
@@ -116,7 +116,17 @@ pub struct CoreHandle {
     /// How many of *this database's* backups to keep (older ones are pruned).
     /// Defaults to 10; overridable via the adapter config's `backup.max_count`.
     backup_max_count: usize,
+    /// Glyph shown in the `tracking`/`tracking_rollup` marker columns for an
+    /// actively-tracked task (and its collapsed ancestors) across the Tasks and
+    /// Trackings adapters. Defaults to `⏱`; overridable via the adapter
+    /// config's `tracking_marker`. Kept as `Arc<str>` so cloning the handle
+    /// into every snapshot stays cheap.
+    tracking_marker: Arc<str>,
 }
+
+/// Default glyph for the active-tracking marker column when the adapter config
+/// does not set `tracking_marker`.
+pub const DEFAULT_TRACKING_MARKER: &str = "⏱";
 
 impl CoreHandle {
     pub fn new(
@@ -140,7 +150,24 @@ impl CoreHandle {
             allow_parallel_tracking,
             backup_dir: not_yet_done_task_core::backup::default_backup_dir(),
             backup_max_count: 10,
+            tracking_marker: Arc::from(DEFAULT_TRACKING_MARKER),
         }
+    }
+
+    /// Override the active-tracking marker glyph. Builder-style so the many
+    /// `CoreHandle::new` call sites (tests included) keep the default `⏱`
+    /// without change. An empty override falls back to the default.
+    pub fn with_tracking_marker(mut self, marker: impl Into<String>) -> Self {
+        let marker = marker.into();
+        if !marker.is_empty() {
+            self.tracking_marker = Arc::from(marker.as_str());
+        }
+        self
+    }
+
+    /// The active-tracking marker glyph for this handle.
+    pub fn tracking_marker(&self) -> Arc<str> {
+        Arc::clone(&self.tracking_marker)
     }
 
     /// Override the backup destination and retention for the `backup` action.
@@ -215,7 +242,7 @@ pub(crate) fn as_domain_event(payload: &HostEvent) -> Option<DomainEvent> {
 /// Config the local Tasks/Trackings adapter factories accept (the tab's
 /// `config_inline` / `config:` YAML). Both fields are optional so the
 /// historic `config_inline: "{}"` keeps working.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, fieldsmith::Buildable)]
 pub struct LocalAdapterConfig {
     /// SeaORM DSN of the database backing this adapter, e.g.
     /// `sqlite:///home/me/.local/share/not_yet_done/tasks.db?mode=rwc`.
@@ -249,11 +276,22 @@ pub struct LocalAdapterConfig {
     /// directory.
     #[serde(default)]
     pub backup: Option<BackupSettings>,
+    /// Glyph shown in the marker column for an actively-tracked task (and its
+    /// collapsed ancestors) in the Tasks and Trackings tabs.
+    ///
+    /// *Why it exists:* the marker was hard-coded to `⏱`, but that base
+    /// codepoint renders as a narrow text-style glyph in some terminals; users
+    /// who want the emoji-presentation clock can set `"⏱️"` (base + U+FE0F
+    /// VS16). Omit it to keep the default `⏱`. An empty string also falls back
+    /// to the default. Note this is the cell *value*, distinct from a column's
+    /// `label:` (the header text).
+    #[serde(default)]
+    pub tracking_marker: Option<String>,
 }
 
 /// Optional `backup:` config block for a local adapter (see
 /// [`LocalAdapterConfig::backup`]).
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, fieldsmith::Buildable)]
 pub struct BackupSettings {
     /// Backup directory. Default: `<data-local>/not_yet_done/backups`.
     #[serde(default)]
@@ -283,13 +321,11 @@ pub use not_yet_done_task_core::bootstrap::default_task_dsn;
 /// the same database share the channel (a mutation in one repaints the
 /// other), tabs on different databases stay isolated.
 pub fn open_core_handle(
-    config: &str,
+    cfg: LocalAdapterConfig,
     ctx: &not_yet_done_content::HostContext,
 ) -> not_yet_done_content::Result<CoreHandle> {
     use not_yet_done_content::ContentError;
 
-    let cfg: LocalAdapterConfig = serde_yaml::from_str(config)
-        .map_err(|e| ContentError::Other(format!("Invalid local-adapter config: {e}").into()))?;
     let dsn = cfg.database.unwrap_or_else(default_task_dsn);
 
     let domain = tokio::task::block_in_place(|| {
@@ -305,7 +341,7 @@ pub fn open_core_handle(
         .unwrap_or_else(not_yet_done_task_core::backup::default_backup_dir);
     let backup_max_count = backup.max_count.unwrap_or(10);
 
-    Ok(CoreHandle::new(
+    let mut handle = CoreHandle::new(
         domain.task_service,
         domain.tracking_repo,
         domain.tracking_service,
@@ -315,7 +351,11 @@ pub fn open_core_handle(
         dsn,
         cfg.allow_parallel.unwrap_or(false),
     )
-    .with_backup(backup_dir, backup_max_count))
+    .with_backup(backup_dir, backup_max_count);
+    if let Some(marker) = cfg.tracking_marker {
+        handle = handle.with_tracking_marker(marker);
+    }
+    Ok(handle)
 }
 
 /// Map a core [`DomainEvent`] to the [`Invalidation`] a local adapter
@@ -425,9 +465,7 @@ mod tests {
         let id = Uuid::nil();
         assert_eq!(
             domain_event_to_invalidation(&DomainEvent::TaskChanged { id }),
-            Some(Invalidation::Node {
-                id: id.to_string()
-            })
+            Some(Invalidation::Node { id: id.to_string() })
         );
     }
 
@@ -482,14 +520,8 @@ mod tests {
     fn publish_row_patches_emits_one_row_invalidation_per_row_in_order() {
         let (inv_tx, mut inv_rx) = broadcast::channel(8);
         publish_row_patches(&inv_tx, [summary("a"), summary("b")]);
-        assert_eq!(
-            inv_rx.try_recv().unwrap(),
-            Invalidation::Row(summary("a"))
-        );
-        assert_eq!(
-            inv_rx.try_recv().unwrap(),
-            Invalidation::Row(summary("b"))
-        );
+        assert_eq!(inv_rx.try_recv().unwrap(), Invalidation::Row(summary("a")));
+        assert_eq!(inv_rx.try_recv().unwrap(), Invalidation::Row(summary("b")));
         // Exactly two — no stray coarse `All`.
         assert!(inv_rx.try_recv().is_err());
     }

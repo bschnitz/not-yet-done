@@ -7,7 +7,7 @@ edition = "2024"
 serde          = { workspace = true }
 serde_yaml     = { workspace = true }
 chrono         = { workspace = true }
-chrono-english = { workspace = true }
+natural-date   = { path = "../natural-date" }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

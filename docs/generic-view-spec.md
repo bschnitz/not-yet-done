@@ -2,108 +2,105 @@
 
 ## Vision
 
-Jeder Haupttab in der TUI wird durch eine deklarative YAML-Datei definiert.
-Die TUI kennt keine Jira-spezifische Logik mehr — sie rendert generische
-"Content Views", die durch einen ContentAdapter mit Daten versorgt werden.
-Tasks und Trackings bleiben native Tabs (eigene DB, eigene Logik).
+Every main tab in the TUI is defined by a declarative YAML file. The TUI no
+longer knows any Jira-specific logic — it renders generic "content views"
+that are fed with data by a ContentAdapter. Tasks and trackings stay native
+tabs (own DB, own logic).
 
 ---
 
-## View-Konfiguration
+## View configuration
 
-Verzeichnis: `~/.config/not_yet_done/views/`
+Directory: `~/.config/not_yet_done/views/`
 
-Jede `.yaml`-Datei = ein Haupttab. Die TUI lädt beim Start alle Dateien
-und erzeugt je einen Tab. Reihenfolge über `order`-Feld oder alphabetisch.
+Each `.yaml` file = one main tab. At startup the TUI loads all files and
+creates one tab per file. The order comes from the `order` field, otherwise
+alphabetical.
 
-Ein Tab = eine Connection. Mehrere Instanzen desselben Adapter-Typs
-(z.B. zwei Jira-Server) = mehrere YAML-Dateien = mehrere Tabs.
+One tab = one connection. Several instances of the same adapter type
+(e.g. two Jira servers) = several YAML files = several tabs.
 
-### Vollständiges Beispiel: `jira.yaml`
+### Complete example: `jira.yaml`
 
 ```yaml
 tab:
   name: Jira
   order: 3
-  icon: 🎫 # optional, für Tab-Bar
+  icon: 🎫 # optional, for the tab bar
 
 adapter:
-  type: jira # registrierter AdapterFactory-Name
-  # Opaker Config-String — Format wird vom Adapter bestimmt.
-  # Kann ein Dateipfad sein (relativ zu views/ oder absolut)...
+  type: jira # registered AdapterFactory name
+  # Opaque config string — the format is determined by the adapter.
+  # It can be a file path (relative to views/ or absolute)...
   config: jira-globex.yaml
-  # ...oder inline als String:
+  # ...or inline as a string:
   # config_inline: |
   #   url: https://jira.example.com
   #   session_id: abc123
 
 views:
-  # Jeder Eintrag ist ein Subtab oder eine navigierbare Ebene.
+  # Every entry is a subtab or a navigable level.
   - name: Tickets
     node_type: jira:issue
-    default: true # dieser Subtab wird beim Tab-Wechsel gezeigt
+    default: true # this subtab is shown when switching to the tab
 
-    # Welche Query beim Laden verwendet wird.
+    # Which query is used on load.
     query:
       default: "assignee = currentUser() ORDER BY updated DESC"
-      editable: true # User kann via : eigene Query eingeben
-      menu_key: q # öffnet das q-Menü mit allen Saved Queries
+      editable: true # the user can enter their own query via :
+      menu_key: q # opens the q menu with all saved queries
 
-      # Anmerkung: Gespeicherte Queries werden hier *nicht* mehr
-      # aufgezählt. Bodies liegen Adapter-seitig als einzelne Dateien
-      # unter `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/`
-      # (siehe SavedQueryStore / FsSavedQueryStore), Keyboard-Shortcuts
-      # in der DB-Tabelle `query_shortcut(scope, name, shortcut)`.
-      # Verwaltung erfolgt zur Laufzeit: `:query new`, `:query edit`,
-      # `:query delete`, sowie Ctrl+f im q-Menü zum Binden eines
-      # Shortcuts.
+      # Note: saved queries are *no longer* enumerated here. Their bodies
+      # live on the adapter side as individual files under
+      # `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/`
+      # (see SavedQueryStore / FsSavedQueryStore), keyboard shortcuts in
+      # the DB table `query_shortcut(scope, name, shortcut)`. Management
+      # happens at runtime: `:query new`, `:query edit`, `:query delete`,
+      # plus Ctrl+f in the q menu to bind a shortcut.
       #
-      # Shortcut-Validierung: Saved-Query-Shortcuts greifen auf der
-      # View-Claim-Ebene und würden jede danach dispatchte Taste
-      # überschatten (z. B. j/k-Navigation). Beim Binden wird der Key
-      # deshalb gegen *alle* im Tab aktiven Bindings geprüft (Globals,
-      # Common-Navigation, Window-Chords inkl. Leader-Präfix, Subtab-
-      # Keys, menu_key, YAML-`actions:`/`shortcuts:`, Chord-Präfixe wie
-      # `z` vor `zg`, andere Saved-Query-Shortcuts) und bei Kollision
-      # mit Nennung des Konflikts abgelehnt. Beim Laden aus der DB
-      # (extern geschriebene oder durch Config-Änderungen veraltete
-      # Rows) erzeugt eine Kollision eine Warnung in der
-      # Notification-Leiste; der Shortcut bleibt aktiv, bis der User
-      # ihn neu bindet.
+      # Shortcut validation: saved-query shortcuts take effect at the
+      # view-claim level and would shadow every key dispatched after them
+      # (e.g. j/k navigation). When binding, the key is therefore checked
+      # against *all* bindings active in the tab (globals, common
+      # navigation, window chords including the leader prefix, subtab
+      # keys, menu_key, YAML `actions:`/`shortcuts:`, chord prefixes such
+      # as `z` in front of `zg`, other saved-query shortcuts) and rejected
+      # on collision, naming the conflict. When loading from the DB
+      # (externally written rows, or rows stale after config changes) a
+      # collision produces a warning in the notification bar; the shortcut
+      # stays active until the user rebinds it.
       #
-      # Default-Query: Im q-Menü markiert `ctrl+t` (Keybinding
-      # `query_menu.set_default`, konfigurierbar in tui.yaml) die
-      # selektierte Saved Query als Default (★ vor dem Namen;
-      # Shortcuts erscheinen als dimmer `[key]`-Suffix). Die Default-
-      # Query wird beim App-Start automatisch angewendet — sie schlägt
-      # das YAML-`query.default` dieses Views (Content-Tabs) bzw. den
-      # Restore des zuletzt aktiven Filters (native Tasks/Trackings).
-      # Warum: das YAML-`default` ist die geteilte, eingecheckte
-      # Vorgabe; die Default-Query ist die persönliche, zur Laufzeit
-      # umsteckbare Wahl ohne Config-Edit. `ctrl+t` auf der aktuellen
-      # Default-Query löscht die Markierung wieder. Persistenz: eine
-      # Settings-Row `default_query:{scope}` pro Scope (Content:
-      # `query_scope` des Tabs; nativ: `task`/`tracking`); verschwindet
-      # die Query aus dem Store, wird der Default beim Start still
-      # übersprungen. Grenze: Queries mit Pflicht-Variablen (`{var}`)
-      # werden beim Start ohne Variablen-Popup roh angewendet.
+      # Default query: in the q menu, `ctrl+t` (keybinding
+      # `query_menu.set_default`, configurable in tui.yaml) marks the
+      # selected saved query as the default (★ in front of the name;
+      # shortcuts appear as a dimmed `[key]` suffix). The default query is
+      # applied automatically at app start — it beats this view's YAML
+      # `query.default` (content tabs) resp. the restore of the last
+      # active filter (native tasks/trackings). Why: the YAML `default` is
+      # the shared, checked-in preset; the default query is the personal
+      # choice, repointable at runtime without a config edit. `ctrl+t` on
+      # the current default query clears the mark again. Persistence: one
+      # settings row `default_query:{scope}` per scope (content: the tab's
+      # `query_scope`; native: `task`/`tracking`); if the query disappears
+      # from the store, the default is silently skipped at start. Limit:
+      # queries with mandatory variables (`{var}`) are applied raw at
+      # start, without the variable popup.
       #
-      # `inherit_default: true` (Default false) stempelt die User-
-      # Default-Query (★) beim Start zusätzlich auf *diesen* Subtab —
-      # der einfache Start-Apply trifft nur die Default-View des Tabs.
-      # Warum opt-in: Geschwister-Views zeigen meist *andere* Daten,
-      # wo dieselbe Query nichts bedeutet (Postgres tables vs.
-      # scripts); Views, die nur eine andere Projektion derselben
-      # Zeilen sind (Trackings normal/condensed/tree), wollen den
-      # Default-Filter dagegen überall (analog zum nativen Tab, der
-      # EINEN Filterzustand über alle Subviews hatte).
+      # `inherit_default: true` (default false) additionally stamps the
+      # user default query (★) onto *this* subtab at start — the plain
+      # start-apply only hits the tab's default view. Why opt-in: sibling
+      # views usually show *different* data where the same query means
+      # nothing (Postgres tables vs. scripts); views that are only another
+      # projection of the same rows (trackings normal/condensed/tree), on
+      # the other hand, want the default filter everywhere (analogous to
+      # the native tab, which had ONE filter state across all subviews).
 
-    # Spalten der Tabelle — welche Metadata-Keys angezeigt werden.
+    # Columns of the table — which metadata keys are displayed.
     columns:
       - key: key
         label: Key
-        style: accent # Referenz auf Theme-Farbe
-        sizing: max # max = so breit wie Inhalt, flex(N) = anteilig
+        style: accent # reference to a theme color
+        sizing: max # max = as wide as the content, flex(N) = proportional
       - key: type
         label: Type
         style: text_med
@@ -118,49 +115,49 @@ views:
         sizing: max
       - key: summary
         label: Summary
-        source: label # "label" = node.label(), sonst metadata key
+        source: label # "label" = node.label(), otherwise a metadata key
         style: text_high
         sizing: flex(1)
 
-    # Preview-Pane Konfiguration
+    # Preview pane configuration
     preview:
       enabled: true
       source: content # "content" = node.content().read_text()
-      split: horizontal # horizontal (links/rechts) oder vertical (oben/unten)
-      ratio: 50 # Prozent für die Preview-Seite
+      split: horizontal # horizontal (left/right) or vertical (top/bottom)
+      ratio: 50 # percent for the preview side
       keybinding: P
 
-    # Aktionen auf selektierten Nodes.
+    # Actions on selected nodes.
     #
-    # `key:` darf eine Einzeltaste (`e`) ODER ein Mehrzeichen-Chord
-    # (`al`, `ay`) sein. Chords funktionieren auf Content-Tabs ohne
-    # weitere Verdrahtung: Der App-Chord-Interceptor kennt zwar nur die
-    # getypten `keybindings.*`-Sektionen, fragt aber zusätzlich die
-    # View-Keymap über `ContentView::yaml_action_chord_prefix` ab — das
-    # erste Zeichen eines Chords wird als Präfix gestasht, das zweite
-    # löst aus. (Node-`shortcuts:` sind dagegen per Definition
-    # einzeichig und nie Chords.)
+    # `key:` may be a single key (`e`) OR a multi-character chord (`al`,
+    # `ay`). Chords work on content tabs without further wiring: the app
+    # chord interceptor only knows the typed `keybindings.*` sections, but
+    # additionally asks the view keymap via
+    # `ContentView::yaml_action_chord_prefix` — the first character of a
+    # chord is stashed as a prefix, the second one fires. (Node
+    # `shortcuts:`, by contrast, are single-character by definition and
+    # never chords.)
     actions:
       - name: Edit
         key: e
-        type: edit # öffnet externen Editor
-        # Was wird editiert? Der Adapter generiert das Template
-        # und parst die Ausgabe (editor_template / parse_editor_output).
-        # Hier nur angeben, WELCHE Felder editierbar sein sollen:
+        type: edit # opens the external editor
+        # What is edited? The adapter generates the template and parses
+        # the output (editor_template / parse_editor_output). Here you
+        # only state WHICH fields should be editable:
         edit:
-          content: true # Content-Body (description)
-          metadata: # Zusätzlich editierbare Metadata-Felder im Template
+          content: true # content body (description)
+          metadata: # additional editable metadata fields in the template
             - summary
 
       - name: Refresh
         key: r
-        type: reload # Liste neu laden
+        type: reload # reload the list
 
       - name: Open in Browser
         key: o
-        type: open_url # öffnet node.metadata("url") im Browser
+        type: open_url # opens node.metadata("url") in the browser
 
-    # Navigation zu Kind-Nodes (z.B. Kommentare eines Tickets)
+    # Navigation to child nodes (e.g. the comments of a ticket)
     children:
       - name: Comments
         key: Enter
@@ -202,13 +199,13 @@ views:
         actions:
           - name: Download
             key: d
-            type: download # node.content().read() → Datei speichern
+            type: download # node.content().read() → save to file
 
-  # Zweiter Subtab: Projekte
+  # Second subtab: projects
   - name: Projects
     node_type: jira:project
     query:
-      default: null # alle Projekte
+      default: null # all projects
       editable: false
     columns:
       - key: key
@@ -222,17 +219,17 @@ views:
     actions:
       - name: Open
         key: Enter
-        type: navigate # wechselt in die Ticket-Liste dieses Projekts
-        navigate_to: Tickets # Name des Views
-        query_template: "project = {key}" # setzt die Query des Ziel-Views
+        type: navigate # switches to the ticket list of this project
+        navigate_to: Tickets # name of the view
+        query_template: "project = {key}" # sets the target view's query
 ```
 
-### Multi-Line-Rows: `row_layout`
+### Multi-line rows: `row_layout`
 
-Standardmäßig rendert eine View ihre Items als **einzeilige** Tabelle: eine
-logische Zeile = eine Terminalzeile, alle `columns` nebeneinander. Mit dem
-optionalen Feld `row_layout` wird eine logische Zeile stattdessen als
-**Stapel mehrerer physischer Zeilen** gerendert (Chat-Layout):
+By default a view renders its items as a **single-line** table: one logical
+row = one terminal line, all `columns` next to each other. With the optional
+field `row_layout` a logical row is instead rendered as a **stack of several
+physical lines** (chat layout):
 
 ```yaml
 columns:
@@ -240,172 +237,168 @@ columns:
   - { key: time, source: time, style: text_dim, sizing: max }
   - { key: content, source: content, markdown: true, sizing: "flex(1)" }
 row_layout:
-  - [author, time] # Zeile 1: Meta (hervorgehoben über die Spalten-`style:`)
-  - [content] # Zeile 2: Nachrichtentext (markdown, mehrzeilig)
-  - [] # Zeile 3: Leerzeile (Spacer)
+  - [author, time] # line 1: meta (emphasized via the columns' `style:`)
+  - [content] # line 2: message text (markdown, multi-line)
+  - [] # line 3: empty line (spacer)
 ```
 
-**Warum:** Eine flache Tabelle aus `Author | Time | Message` ist für
-Chat-/Feed-artige Daten unleserlich, sobald die Nachricht lang ist. Das
-Chat-Layout trennt Metadaten und Inhalt visuell und gibt dem Body die volle
-Breite.
+**Why:** a flat `Author | Time | Message` table is unreadable for chat-/feed-like
+data as soon as the message gets long. The chat layout separates metadata and
+content visually and gives the body the full width.
 
-Regeln und Verhalten:
+Rules and behaviour:
 
-- **Jeder Eintrag** in `row_layout` ist eine physische Zeile und listet die
-  `columns`-Keys auf, die dort (von links nach rechts) gerendert werden. Die
-  Keys müssen in `columns` deklariert sein (sonst harter Validierungsfehler).
-- **Leere Liste `[]`** = Leerzeile/Spacer.
-- **Hervorhebung** läuft rein über die per-Spalten-`style:` (Theme-Referenz,
-  also über `tui.yaml` überschreibbar). Es gibt keine separate Farboption —
-  wer die Meta-Zeile hervorheben will, gibt deren Spalten ein `style:`.
-- **Kopfzeile:** Im Multi-Line-Modus wird der Spaltenkopf unterdrückt.
-- **Selektion:** Bei Auswahl einer Zeile bekommen alle physischen Zeilen den
-  Auswahl-Hintergrund — **außer** der Spacer und jede Zeile, die sich explizit
-  ausklinkt: `- { columns: [foo], highlight_on_select: false }`. (Eine leere
-  Zeile defaultet auf `highlight_on_select: false`, eine nicht-leere auf
-  `true`.)
-- **Einschränkung:** Multi-Line gilt nur für flache Drill-Listen, nicht für
-  Tree-Views. Spalten-Cursor / Horizontal-Scroll und der Jump-Mode (`f`)
-  arbeiten weiterhin nur auf der ersten (primären) Zeile.
+- **Every entry** in `row_layout` is one physical line and lists the `columns`
+  keys rendered there (left to right). The keys must be declared in `columns`
+  (otherwise a hard validation error).
+- **Empty list `[]`** = empty line/spacer.
+- **Emphasis** works purely through the per-column `style:` (a theme
+  reference, hence overridable via `tui.yaml`). There is no separate color
+  option — if you want to emphasize the meta line, give its columns a
+  `style:`.
+- **Header:** in multi-line mode the column header is suppressed.
+- **Selection:** when a row is selected, all physical lines get the selection
+  background — **except** the spacer and every line that explicitly opts out:
+  `- { columns: [foo], highlight_on_select: false }`. (An empty line defaults
+  to `highlight_on_select: false`, a non-empty one to `true`.)
+- **Limitation:** multi-line only applies to flat drill-down lists, not to
+  tree views. Column cursor / horizontal scroll and the jump mode (`f`) still
+  operate on the first (primary) line only.
 
-#### `markdown:` — mehrzeiliger, soft-gewrappter Body
+#### `markdown:` — multi-line, soft-wrapped body
 
-Eine Spalte mit `markdown: true` rendert ihren Wert als **Markdown**: harte
-Zeilenumbrüche _und_ Soft-Wrap an der Pane-Breite, plus Inline-Styling
-(`**fett**`, `*kursiv*`, `` `code` ``), Listen, Überschriften und Blockquotes.
-Gedacht für Chat-/Langtext-Spalten (z. B. der Stoat-Nachrichtenbody).
+A column with `markdown: true` renders its value as **Markdown**: hard line
+breaks _and_ soft wrapping at the pane width, plus inline styling
+(`**bold**`, `*italic*`, `` `code` ``), lists, headings and blockquotes.
+Intended for chat/long-text columns (e.g. the Stoat message body).
 
 ```yaml
 - { key: content, source: content, markdown: true, sizing: "flex(1)" }
 ```
 
-**Warum es das gibt:** Ohne `markdown:` kürzt eine Spalte ihren Wert auf eine
-einzelne (ggf. newline-kollabierte) Zeile — für längere Nachrichten unleserlich.
-`markdown: true` expandiert den Wert stattdessen in so viele physische Zeilen,
-wie der Umbruch braucht; die Zeilenhöhe der Row wächst entsprechend mit.
+**Why it exists:** without `markdown:` a column truncates its value to a
+single (possibly newline-collapsed) line — unreadable for longer messages.
+`markdown: true` instead expands the value into as many physical lines as the
+wrapping needs; the row height grows accordingly.
 
-Regeln:
+Rules:
 
-- **Allein auf ihrer Zeile:** Eine `markdown`-Spalte muss in ihrer
-  `row_layout`-Zeile die **einzige** Spalte sein (`- [content]`). Andernfalls
-  harter Validierungsfehler statt stillem Verwerfen der Nachbarspalten.
-- **Quelle:** In aller Regel `source: content` (oder ein anderes Metadata-Feld),
-  damit der **rohe** Body gelesen wird — nicht das auf eine Zeile kollabierte
-  `label`.
-- **Farben** kommen aus dem Theme (über die Markdown-Theme-Bridge); es gibt
-  keine Hardcodes und nichts pro Spalte zu setzen.
-- **Aktuelle Schnitte:** Die `/`-Suche markiert Treffer **nicht** im
-  gerenderten Body (Filtern/Matching laufen weiter über `label`/Body), und
-  Code-Blöcke bekommen keinen Hintergrund. Syntax-Highlighting ist optional und
-  separat.
-- **Preview-Pane:** Dasselbe Markdown-Rendering gibt es im Preview-Pane über
-  `preview.markdown: true` (siehe `preview:`-Block) — z. B. um den vollen
-  Nachrichtenbody mit `p` schön gerendert zu zeigen.
+- **Alone on its line:** a `markdown` column must be the **only** column in
+  its `row_layout` line (`- [content]`). Otherwise a hard validation error
+  instead of silently dropping the neighbouring columns.
+- **Source:** as a rule `source: content` (or another metadata field), so that
+  the **raw** body is read — not the `label` collapsed onto one line.
+- **Colors** come from the theme (via the markdown theme bridge); there are no
+  hardcodes and nothing to set per column.
+- **Current cuts:** the `/` search does **not** highlight hits in the rendered
+  body (filtering/matching still run over `label`/body), and code blocks get
+  no background. Syntax highlighting is optional and separate.
+- **Preview pane:** the same markdown rendering is available in the preview
+  pane via `preview.markdown: true` (see the `preview:` block) — e.g. to show
+  the full message body nicely rendered with `p`.
 
-#### `sizing:` — Spaltenbreite
+#### `sizing:` — column width
 
-Pro Spalte, default `max`. Bestimmt, wie die Tabellen-Engine die Spaltenbreite
-gegen das Breiten-Budget (= **tatsächliche Pane-Breite zum Render-Zeitpunkt**)
-verteilt:
+Per column, default `max`. Determines how the table engine distributes the
+column width against the width budget (= the **actual pane width at render
+time**):
 
-| `sizing:`       | Verhalten                                                           |
-| --------------- | ------------------------------------------------------------------- |
-| `max`           | so breit wie der breiteste Inhalt (gedeckelt auf den freien Rest)   |
-| `fixed(N)`      | exakt `N` Spalten breit                                             |
-| `flex(N)`       | teilt sich den **Rest** nach Gewicht `N` mit anderen `flex`-Spalten |
-| `fit`           | `min(Inhaltsbreite, freier Rest)` — content-breit, stretcht nicht   |
-| `auto(min,max)` | inhaltsbreit zwischen `min`/`max`; **ignoriert das Budget** (s. u.) |
+| `sizing:`       | Behaviour                                                        |
+| --------------- | ---------------------------------------------------------------- |
+| `max`           | as wide as the widest content (capped at the free remainder)     |
+| `fixed(N)`      | exactly `N` columns wide                                         |
+| `flex(N)`       | shares the **remainder** by weight `N` with other `flex` columns |
+| `fit`           | `min(content width, free remainder)` — content-wide, no stretch  |
+| `auto(min,max)` | content-wide between `min`/`max`; **ignores the budget** (below) |
 
-`flex`-Spalten füllen den nach `max`/`fixed` verbleibenden Platz **bis zur
-Pane-Breite** — sie blähen die Tabelle nicht über die Fläche hinaus. Eine
-`flex`-Spalte darf damit auch **mitten** in der Spaltenliste stehen (z. B. die
-Task-/Description-Spalte): die Spalten dahinter bleiben sichtbar.
+`flex` columns fill the space left over after `max`/`fixed` **up to the pane
+width** — they do not blow the table up beyond the area. A `flex` column may
+therefore also sit in the **middle** of the column list (e.g. the
+task/description column): the columns behind it stay visible.
 
-`fit` ist die **Kombination aus `max` und `flex`** (entspricht CSS
-`fit-content`): die Spalte wird so breit wie ihr Inhalt, aber nie breiter als
-der nach allen `fixed`/`max`/`auto`-Spalten verbleibende Platz —
-`min(Inhaltsbreite, freier Rest)`. Anders als `flex` stretcht sie also **nicht**
-auf die volle Pane-Breite (ist der Inhalt kurz, bleibt die Tabelle schmaler als
-die Fläche), und anders als `max` wird sie **deferred** ausgelegt (erst nach
-allen Fixbreiten-Spalten) — eine `fit`-Spalte in der Mitte verdrängt die
-nachfolgenden Spalten daher nie off-screen. Gedacht z. B. für die Task-Spalte
-der Tasks-Ansicht, die nur so breit sein soll wie der längste sichtbare
-Task-Titel. Stehen mehrere `fit`-Spalten nebeneinander, bedient sich die
-linkeste zuerst; `flex` füllt einen danach noch übrigen Rest. (Historisch
-legte die Engine gegen ein fixes Budget von 300 aus statt gegen die Pane-Breite;
-eine nicht-letzte `flex`-Spalte schob dann die nachfolgenden Spalten off-screen.
-Behoben — die Engine fittet jetzt auf die reale Pane-Breite und re-fittet bei
-Resize / Preview-Toggle.)
+`fit` is the **combination of `max` and `flex`** (equivalent to CSS
+`fit-content`): the column becomes as wide as its content, but never wider
+than the space remaining after all `fixed`/`max`/`auto` columns —
+`min(content width, free remainder)`. Unlike `flex` it therefore does **not**
+stretch to the full pane width (if the content is short, the table stays
+narrower than the area), and unlike `max` it is laid out **deferred** (only
+after all fixed-width columns) — a `fit` column in the middle therefore never
+pushes the following columns off-screen. Intended e.g. for the task column of
+the tasks view, which should only be as wide as the longest visible task
+title. If several `fit` columns sit next to each other, the leftmost helps
+itself first; `flex` fills whatever remains after that. (Historically the
+engine laid out against a fixed budget of 300 instead of against the pane
+width; a non-final `flex` column then pushed the following columns off-screen.
+Fixed — the engine now fits to the real pane width and re-fits on resize /
+preview toggle.)
 
-`auto(min,max)` ist der Sonderfall für Tabellen mit **unbekannter Spaltenzahl**
-(z. B. dynamische Postgres-Rows): solche Spalten ignorieren das Pane-Budget
-bewusst und dürfen die Tabelle breiter als die Fläche machen — dann greift der
-**Horizontal-Scroll** (Spalten-Cursor, nur aktiv mit `column_cursor: true`).
-Für Views mit fester, in die Pane passender Spaltenliste gibt es keinen
-Horizontal-Scroll, weil alle Spalten on-screen liegen.
+`auto(min,max)` is the special case for tables with an **unknown number of
+columns** (e.g. dynamic Postgres rows): such columns deliberately ignore the
+pane budget and may make the table wider than the area — then the
+**horizontal scroll** kicks in (column cursor, only active with
+`column_cursor: true`). Views with a fixed column list that fits into the pane
+have no horizontal scroll, because all columns are on-screen.
 
-#### `kind:` — typisierte Spaltenwerte
+#### `kind:` — typed column values
 
-Eine Spalte deklariert mit `kind:` den **semantischen Typ** ihres Werts. Der
-Adapter liefert weiterhin nur Strings, aber in einer **kanonischen** Form; die
-Tabellen-Engine parst sie und kümmert sich um Formatierung, Ausrichtung und
-Styling. Default ist `text` — jede bestehende (Remote-)Spalte bleibt damit
-unverändert.
+With `kind:` a column declares the **semantic type** of its value. The adapter
+still only delivers strings, but in a **canonical** form; the table engine
+parses them and takes care of formatting, alignment and styling. The default
+is `text` — every existing (remote) column therefore stays unchanged.
 
 ```yaml
-- { key: elapsed, source: elapsed, kind: duration } # rechtsbündig, H:MM:SS
-- { key: started, source: started, kind: datetime } # lokalisiert
-- { key: count, source: count, kind: number } # rechtsbündig
+- { key: elapsed, source: elapsed, kind: duration } # right-aligned, H:MM:SS
+- { key: started, source: started, kind: datetime } # localized
+- { key: count, source: count, kind: number } # right-aligned
 - { key: taskpath, source: taskpath, kind: path, separator: " › " }
 - { key: running, kind: elapsed, elapsed_from: started } # live now − started
 ```
 
-| `kind:`    | Kanonische Eingabe des Adapters      | Anzeige                             | Ausrichtung |
-| ---------- | ------------------------------------ | ----------------------------------- | ----------- |
-| `text`     | beliebig                             | unverändert                         | links       |
-| `number`   | Dezimalzahl (`"42"`)                 | unverändert                         | rechts      |
-| `duration` | Ganzzahl **Sekunden** (`"5400"`)     | `H:MM:SS` (über `format_duration`)  | rechts      |
-| `datetime` | RFC 3339 (`"2026-06-09T08:15:00Z"`)  | lokale Zeitzone, `%Y-%m-%d %H:%M`   | links       |
-| `path`     | `/`-getrennte Segmente (`"/a/b/c"`)  | mit `separator:` verbunden, gestylt | links       |
-| `elapsed`  | _kein eigener Wert_ — liest ein Feld | `now − Feld` als `H:MM:SS`, live    | rechts      |
+| `kind:`    | Canonical adapter input              | Display                           | Alignment |
+| ---------- | ------------------------------------ | --------------------------------- | --------- |
+| `text`     | anything                             | unchanged                         | left      |
+| `number`   | decimal number (`"42"`)              | unchanged                         | right     |
+| `duration` | integer **seconds** (`"5400"`)       | `H:MM:SS` (via `format_duration`) | right     |
+| `datetime` | RFC 3339 (`"2026-06-09T08:15:00Z"`)  | local time zone, `%Y-%m-%d %H:%M` | left      |
+| `path`     | `/`-separated segments (`"/a/b/c"`)  | joined with `separator:`, styled  | left      |
+| `elapsed`  | _no own value_ — reads another field | `now − field` as `H:MM:SS`, live  | right     |
 
-Drei optionale Begleitfelder:
+Three optional companion fields:
 
-- **`format:`** — nur für `datetime`: ein strftime-Muster, das das Default
-  `%Y-%m-%d %H:%M` ersetzt (z. B. `format: "%H:%M"`).
-- **`separator:`** — nur für `path`: das Anzeige-Trennzeichen (Default `/`).
-  Es wird im Theme-Stil `taskpath_separator` (fett) gezeichnet, der Pfad führt
-  immer mit einem Separator (eine Wurzel rendert als reines Trennzeichen).
-- **`elapsed_from:`** — nur für `kind: elapsed`: der Schlüssel des
-  `datetime`-Feldes (RFC 3339), gegen das gerechnet wird; Default ist der
-  eigene `key` der Spalte. Die Spalte hat keinen eigenen Wert, sie rendert
-  `now − <elapsed_from>` als Dauer und wird **bei jedem Repaint-Tick neu
-  berechnet** (kein Refetch) — so tickt z. B. die laufende Zeit eines aktiven
-  Trackings live. Eine Zukunfts-Instant (Uhren-Drift) wird auf `00` geklemmt,
-  ein leeres Feld bleibt leer, ein unparsbarer Wert wird unverändert gezeigt.
+- **`format:`** — only for `datetime`: a strftime pattern replacing the
+  default `%Y-%m-%d %H:%M` (e.g. `format: "%H:%M"`).
+- **`separator:`** — only for `path`: the display separator (default `/`). It
+  is drawn in the theme style `taskpath_separator` (bold), and the path always
+  leads with a separator (a root renders as a bare separator).
+- **`elapsed_from:`** — only for `kind: elapsed`: the key of the `datetime`
+  field (RFC 3339) to compute against; the default is the column's own `key`.
+  The column has no value of its own, it renders `now − <elapsed_from>` as a
+  duration and is **recomputed on every repaint tick** (no refetch) — this is
+  how, for instance, the running time of an active tracking ticks live. An
+  instant in the future (clock drift) is clamped to `00`, an empty field stays
+  empty, and an unparsable value is shown unchanged.
 
-**Warum es das gibt:** Ohne `kind:` müsste jeder Adapter Dauer/Datum/Pfad selbst
-fürs Display vorformatieren — entweder als unausgerichteter Roh-String oder mit
-adapter-spezifischer Layout-Logik, die nicht aggregierbar/sortierbar ist. Mit
-typisierten Spalten bleibt der **maschinenlesbare** Wert die Quelle der Wahrheit
-(Sekunden, RFC 3339, Pfadsegmente), und Ausrichtung, lokalisierte Formatierung
-und das Separator-Styling der Taskpath-Spalte sind ein generisches
-Engine-Feature statt Copy-&-Paste pro Adapter. Der Typ steht bewusst in der
-View-YAML und nicht am `MetadataField` der Adapter, damit Remote-Adapter (Jira,
-Taiga, Postgres, Confluence, Stoat) keine Zeile ändern müssen. `elapsed` ist
-zusätzlich der einzige **zeitabhängige** Typ: sein Wert hängt nur vom
-Anzeige-Zeitpunkt ab, nicht von den geladenen Daten — getrieben durch das
-`Repaint`-Signal des Domain-Event-Bus rendert die Engine die betroffenen Panes
-pro Tick neu, ohne nachzuladen.
+**Why it exists:** without `kind:` every adapter would have to pre-format
+duration/date/path for display itself — either as an unaligned raw string or
+with adapter-specific layout logic that cannot be aggregated or sorted. With
+typed columns the **machine-readable** value stays the source of truth
+(seconds, RFC 3339, path segments), and alignment, localized formatting and
+the separator styling of the taskpath column are a generic engine feature
+instead of copy-and-paste per adapter. The type deliberately lives in the view
+YAML and not on the adapters' `MetadataField`, so that remote adapters (Jira,
+Taiga, Postgres, Confluence, Stoat) need not change a line. `elapsed` is
+additionally the only **time-dependent** type: its value depends only on the
+display time, not on the loaded data — driven by the `Repaint` signal of the
+domain event bus, the engine re-renders the affected panes per tick without
+reloading.
 
-#### `smooth_scroll:` — kontinuierliches zeilenweises Scrollen
+#### `smooth_scroll:` — continuous line-wise scrolling
 
-Steht auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout`),
-default `false`. Mit `smooth_scroll: true` scrollt die Tabelle nicht mehr
-diskret von Eintrag zu Eintrag, sondern **eine physische Zeile pro Schritt**
-über den gesamten Inhalt — der Inhalt „wandert“ kontinuierlich über den
-Bildschirm. Gedacht für lange, mehrzeilige Listen (z. B. den Chat).
+Lives on `ViewDef` **and** `ChildDef` (same level as `row_layout`), default
+`false`. With `smooth_scroll: true` the table no longer scrolls discretely
+from entry to entry, but **one physical line per step** across the whole
+content — the content "travels" continuously across the screen. Intended for
+long, multi-line lists (e.g. the chat).
 
 ```yaml
 - name: messages
@@ -414,53 +407,180 @@ Bildschirm. Gedacht für lange, mehrzeilige Listen (z. B. den Chat).
   row_layout: [...]
 ```
 
-**Warum es das gibt:** Bei mehrzeiligen Rows (Chat: Meta + Body + Spacer)
-springt der diskrete Modus ganze Nachrichtenblöcke rein/raus, was bei langen
-Verläufen ruckelig wirkt. Zeilenweises Scrollen liest sich flüssig.
+**Why it exists:** with multi-line rows (chat: meta + body + spacer) the
+discrete mode jumps whole message blocks in and out, which feels jerky in long
+histories. Line-wise scrolling reads smoothly.
 
-Verhalten:
+Behaviour:
 
-- **Navigation:** ↑/↓ scrollen je eine Zeile; `Ctrl+u`/`Ctrl+d` und
-  PageUp/Down um eine halbe bzw. ganze Pane-Höhe (in Zeilen); `g`/`G` an
-  Anfang/Ende. Bottom-Clamp: man scrollt nicht über das Ende hinaus.
-- **Auswahl (frühe Übergabe in Scrollrichtung):** Der Highlight (und das Ziel
-  von `e`/`d`/`+`/`p`) ist an _eine_ Row gebunden, nicht an eine
-  Bildschirm­position. Scrollen verschiebt nur den Viewport; die hervorgehobene
-  Row bleibt, **solange sie vollständig sichtbar ist**. Der einzige Auslöser
-  für eine Übergabe ist „die aktuell fokussierte Row ist nicht mehr ganz zu
-  sehen": sobald das Scrollen auch nur eine ihrer physischen Zeilen am Rand
-  abschneidet, springt die Auswahl zur **benachbarten** selektierbaren Row in
-  Scrollrichtung (runter → nächste, hoch → vorherige). Die neue Row muss dabei
-  **nicht selbst schon vollständig sichtbar sein** — ist der Nachbar hoch und
-  ragt noch über den gegenüberliegenden Rand hinaus, wird er trotzdem
-  fokussiert (er wird beim Weiterscrollen ganz sichtbar). Es zählt nur, ob die
-  _aktuelle_ Auswahl anfängt zu verschwinden, nie ob die nächste schon passt.
-  (Ist eine einzelne Row höher als der ganze Viewport, sodass nichts ganz
-  hineinpasst, bleibt die Auswahl auf ihr — sie geht nie verloren.) `g`/`G`
-  wählen explizit erste/letzte Row; programmatische Auswahl (Reload, Jump,
-  Suche) scrollt das Ziel _minimal_ in den sichtbaren Bereich.
-- **Cursor-Step, wenn nichts scrollt:** Weil die Auswahl _vom Scrollen_
-  getrieben wird, würde `j`/`k` nichts tun, sobald es nichts zu scrollen gibt —
-  die ganze Liste passt auf den Bildschirm, oder der Viewport sitzt schon am
-  Rand. Damit der virtuelle Cursor trotzdem wandert, springt die Auswahl in
-  diesem Fall zur nächsten/vorherigen selektierbaren Row. Das hält auch die
-  allererste/letzte Nachricht erreichbar, wenn das Scrollen am Ende angekommen
-  ist.
-- **Orthogonal zu `markdown:`/`row_layout:`** — funktioniert auch für
-  einzeilige Tabellen (dort = zeilenweises Scrollen), entfaltet seinen Nutzen
-  aber bei mehrzeiligen Rows.
+- **Navigation:** ↑/↓ scroll one line each; `Ctrl+u`/`Ctrl+d` and PageUp/Down
+  by half resp. a full pane height (in lines); `g`/`G` to start/end. Bottom
+  clamp: you cannot scroll past the end.
+- **Selection (the cursor rides the leading edge):** the highlight (and the
+  target of `e`/`d`/`+`/`p`) is bound to _one_ row, not to a screen position.
+  Scrolling only moves the viewport, but every step also hands the selection
+  **one row onward in the direction of travel as soon as that row can be
+  seen** — down → the next selectable row the moment any of its highlightable
+  lines enters the viewport, up → the previous one. The row you are leaving
+  does _not_ have to disappear first. Only while the neighbour is still
+  off-screen (a row taller than what is left of the viewport) does the
+  selection stay put and the step is pure scrolling.
 
-#### `record_detail:` — Datensatz-Detailansicht im Split (`o`)
+  The trigger is the **neighbour**, not the current row, because the opposite
+  rule made `j` feel dead in a chat: a long message kept the highlight for a
+  dozen keypresses while the next message already sat fully on screen. One step
+  hands over at most one row, so `j`/`k` walk the list entry by entry.
 
-Steht auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `column_cursor`),
-default `false`. Auf einer so markierten **flachen Tabellen-Ebene** öffnet die
-Taste `o` rechts einen gekoppelten Split, der den **aktuell selektierten
-Datensatz transponiert** zeigt: eine Zeile pro Feld, Spalte 1 = Feldname,
-Spalte 2 = Feldwert. Bewegt sich der Cursor in der Quelltabelle, aktualisiert
-sich die Detailansicht automatisch (sie folgt der Auswahl Frame für Frame).
-`o` erneut schließt den Follower wieder; `X` schaltet im Follower den
-Wert-Umbruch um (default aus → Werte einzeilig geclippt; an → lange
-Werte/harte Zeilenumbrüche werden auf Fortsetzungszeilen umbrochen).
+  A line that opts out of the highlight (`highlight_on_select: false`, e.g. the
+  trailing spacer of a chat row) does not count as "can be seen" — otherwise
+  the selection would move to a row whose highlight is nowhere on screen. A
+  page-sized jump (`Ctrl+u`/`Ctrl+d`) can outrun the one-row handover; the
+  selection then re-attaches to the first row still visible. `g`/`G` explicitly
+  select the first/last row; a programmatic selection (reload, jump, search)
+  scrolls the target _minimally_ into view.
+
+- **Cursor step when nothing scrolls:** because the selection is driven _by
+  scrolling_, `j`/`k` would do nothing as soon as there is nothing to scroll —
+  the whole list fits on screen, or the viewport already sits at the edge. So
+  that the virtual cursor still moves, the selection jumps to the next/previous
+  selectable row in that case. This also keeps the very first/last message
+  reachable once scrolling has hit the end.
+- **Orthogonal to `markdown:`/`row_layout:`** — it also works for single-line
+  tables (there = line-wise scrolling), but it pays off with multi-line rows.
+
+#### `card:` — card mode instead of a table
+
+Lives on `ViewDef` **and** `ChildDef` (same level as `row_layout`), optional.
+It unlocks a **second presentation** for this level: a logical row is not
+rendered as a table row but as a **framed card** whose fields sit in a grid of
+`columns:` slots per line.
+
+The **number of card lines is derived** — `fields ÷ columns`, rounded up. Six
+fields with `columns: 3` therefore give a **2×3 card**; there is deliberately
+no `rows:` field that could get out of step with the field list. Surplus slots
+in the last line stay empty so that all cards have the same height.
+
+```yaml
+- name: Tickets
+  node_type: "jira:issue"
+  columns:
+    - { key: key, source: key, label: Key, style: accent }
+    - { key: summary, source: summary, label: Summary }
+    - { key: status, source: status, label: Status, style: secondary }
+    - { key: assignee, source: assignee, label: Assignee }
+    - { key: creator, source: creator, label: Creator }
+    - { key: updated, source: updated, label: Updated, kind: datetime }
+  card:
+    key: C # toggle key (opt-in, no default binding)
+    columns: 3 # three fields next to each other …
+    fields: [key, status, updated, assignee, creator, summary] # … × 6 fields = 2 lines
+    weights: [1, 1, 2] # the third slot gets half the inner width
+    labels: inline # Label: value
+    border: rounded
+    padding: 1
+    gap: 1 # empty line between two cards
+```
+
+**Why it exists:** `row_layout` solves the same problem (table too wide for the
+content), but requires you to write out every physical line with its columns by
+hand — with six fields that means two lists, both of which you have to touch
+when reordering. Card mode needs **one** field list plus **one** number and
+derives the line grid from it; on top of that come borders, labels and a gap
+between the blocks, which `row_layout` does not know. And it is
+**toggleable**: the same level stays reachable as a table instead of
+committing to one presentation when writing the config.
+
+Fields:
+
+| Field           | Default   | Meaning                                                                                                                                |
+| --------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `fields:`       | all       | Fields in reading order, filled into the grid line by line. **Omitted = all columns of the level** in their order.                     |
+| `columns:`      | `1`       | Fields next to each other per card line.                                                                                               |
+| `weights:`      | equal     | Width weights per grid column. Empty = equal shares, otherwise exactly `columns:` entries.                                             |
+| `labels:`       | `inline`  | `none` (values only), `inline` (`Label: value`), `above` (labels on their own line → twice as many lines).                             |
+| `border:`       | `rounded` | `none`, `plain` (square), `rounded`.                                                                                                   |
+| `border_style:` | theme     | Theme color for the border glyphs; without it the slot `card_border`.                                                                  |
+| `label_style:`  | theme     | Theme color for the labels; without it the slot `card_label`.                                                                          |
+| `padding:`      | `1`       | Empty columns between border and content (left and right).                                                                             |
+| `gap:`          | `0`       | Empty lines after each card. They never take the selection background.                                                                 |
+| `separator:`    | `"  "`    | Filler between two grid slots **within** a card line.                                                                                  |
+| `divider:`      | empty     | Separator line **between two cards**: the glyph repeated across the card width (`divider: "─"`). Empty = `gap:` only.                  |
+| `key:`          | —         | Key that toggles the mode on this level. Same forms as any other binding: alternatives (`key: [C, ctrl+d]`) and chords (`key: 'v c'`). |
+| `default:`      | `false`   | The level opens directly in card mode.                                                                                                 |
+
+A `fields` entry is either the bare column key (`- key`) — the label then comes
+from the column's `label:`, otherwise from its `key` — or a map with its own
+label: `- { column: key, label: "Ticket" }`.
+
+**Omitting `fields:` entirely** means "show the whole table": the card takes
+the level's column list in its effective order, `markdown:` columns excluded.
+That is the default, because the alternative — writing out every column key a
+second time — has exactly one failure mode: a column added later shows up in
+the table but is silently missing from the card. An explicit `fields:` list is
+only needed when the card should show **fewer** or **differently ordered**
+fields than the table — e.g. to put long values on the wide slot (`weights:`).
+
+Behaviour:
+
+- **Available, not active.** A `card:` block does not switch the level over, it
+  makes the mode _reachable_. `key:` toggles at runtime, `default: true` starts
+  in card mode.
+- **Opt-in key.** The action `toggle_card_mode` has **no** default binding — on
+  levels without `card:` every key stays free. The key comes from `card.key`
+  (or, if you want it globally, from `keybindings.content.toggle_card_mode`).
+- **Collisions surface at load time.** `card.key` is — like
+  `preview.keybinding` — tracked statically as a claim (`views.<v>.card.key`).
+  A collision with an `actions:` key of the same level is therefore a config
+  error at startup, not a silently lost toggle. The key is also directly
+  editable in the keybinding editor (Ctrl+Y). A chord (`key: 'v c'`) is the
+  convenient way out when all single keys of the level are taken — its prefix
+  has to be free there.
+- **Survives a restart.** The choice is stored **per level** (same level
+  identity as the column overrides: `view:<name>` / `child:<view>/<child>` /
+  `tree:<view>/<chain>`), in the settings store under `card_mode:<tab>`.
+  Switching back to the config default deletes the entry again instead of
+  pinning it.
+- **The status bar** shows the key with the target mode, i.e. `cards` while the
+  table is up and `table` while cards are up.
+- **Flush right edge.** The widths are distributed by weight, the rounding
+  remainder goes to the last grid slot — every card line is exactly equally
+  wide.
+- **Hidden columns drop out.** Hiding a column via the column popup (`c`) also
+  hides it from the card; the grid closes up.
+- **Grouping pauses.** While cards are up, `group_by:` is not applied — the
+  card occupies the whole line block.
+- **`divider:` instead of a border.** `border: none` plus `divider: "─"` is the
+  frameless variant: no box, but a continuous line between two cards. The line
+  takes the place of the **last** `gap:` line — `gap: 1` plus `divider:` is
+  therefore exactly one line instead of an empty line, `gap: 0` gets its line
+  anyway, and no line is drawn after the **last** card. Like the empty lines it
+  does not take the selection background and is drawn in the border color
+  (`card_border` resp. `border_style:`). Not to be confused with `separator:` —
+  that is the filler between two slots _within_ a line.
+
+Limits (v1):
+
+- **Flat levels only.** Tree levels and the `record_detail:` follower pane do
+  not offer the mode.
+- **No `markdown: true` in the grid** — a markdown column expands into
+  arbitrarily many soft-wrapped lines and does not fit into a slot of fixed
+  height (hard validation error).
+- **`sizing:` does not apply inside the card** — the slot widths come from
+  `weights:`.
+- **Cards only stacked**, not side by side (no kanban grid).
+- Column cursor / horizontal scroll and the jump mode (`f`) work, as in
+  multi-line mode, only on the first (primary) line.
+
+#### `record_detail:` — record detail view in a split (`o`)
+
+Lives on `ViewDef` **and** `ChildDef` (same level as `column_cursor`), default
+`false`. On a **flat table level** marked this way, the key `o` opens a coupled
+split on the right showing the **currently selected record transposed**: one
+line per field, column 1 = field name, column 2 = field value. When the cursor
+moves in the source table, the detail view updates automatically (it follows
+the selection frame by frame). `o` again closes the follower; `X` toggles value
+wrapping in the follower (default off → values clipped to a single line; on →
+long values/hard line breaks are wrapped onto continuation lines).
 
 ```yaml
 - name: Rows
@@ -469,682 +589,822 @@ Werte/harte Zeilenumbrüche werden auf Fortsetzungszeilen umbrochen).
   record_detail: true
 ```
 
-**Warum es das gibt:** Postgres-Zeilen (und Skript-Ergebnisse) haben oft sehr
-viele, breite Spalten — einen einzelnen Datensatz über all diese Spalten hinweg
-zu lesen ist in der Zeilenansicht mühsam (man scrollt horizontal). Die
-transponierte Detailansicht stellt _einen_ Record vollständig untereinander dar,
-ohne dass die Tabellenansicht ihr Layout verliert.
+**Why it exists:** Postgres rows (and script results) often have very many,
+wide columns — reading a single record across all those columns is tedious in
+the row view (you scroll horizontally). The transposed detail view shows _one_
+record completely stacked, without the table view losing its layout.
 
-Verhalten / Grenzen:
+Behaviour / limits:
 
-- **Nur flache Ebenen.** Tree-Ebenen sind ausgeschlossen — ein Tree klappt
-  Records ohnehin inline auf, und der Detail-Split zielt auf breite _flache_
-  Zeilen (Postgres-Rows, Skript-Ergebnisse). Ein Follower bietet `o` selbst
-  nicht erneut an.
-- **Read-only (v1).** Die Detailansicht zeigt Werte, editiert sie nicht.
-- **Kein eigener Fetch.** Der Follower ist rein synthetisch aus dem bereits
-  geladenen Quell-Record gebaut; er löst keine zusätzliche Abfrage aus.
-- **Kaskadiert beim Schließen.** Wird die Quell-Pane geschlossen, verschwindet
-  ihr Detail-Follower mit (eigener Backlink, getrennt von gekoppelten Drills).
+- **Flat levels only.** Tree levels are excluded — a tree expands records
+  inline anyway, and the detail split targets wide _flat_ rows (Postgres rows,
+  script results). A follower does not offer `o` again itself.
+- **Read-only (v1).** The detail view shows values, it does not edit them.
+- **No fetch of its own.** The follower is built purely synthetically from the
+  already loaded source record; it triggers no additional query.
+- **Cascades on close.** If the source pane is closed, its detail follower goes
+  with it (own backlink, separate from coupled drilldowns).
 
-#### `window_ops:` — Fenster-/Split-Operationen (`w`-Leader)
+#### `window_ops:` — window/split operations (`w` leader)
 
-Steht auf `ViewDef`, default `false`. Schaltet die über den `w`-Leader
-erreichbaren Fenster-Operationen für diese View frei: `wv` (Split nach rechts),
-`ws` (Split nach unten), `wq` (Pane schließen), `wh`/`wl` (Fokus zur Eltern-/
-Kind-Pane) sowie `w<tag>` (Fokus auf die Pane mit diesem Tag-Buchstaben). Die
-Chords sind über `keybindings.window` konfigurierbar.
+Lives on `ViewDef`, default `false`. It unlocks the window operations reachable
+via the `w` leader for this view: `wv` (split right), `ws` (split down), `wq`
+(close pane), `wh`/`wl` (focus parent/child pane) as well as `w<tag>` (focus
+the pane with that tag letter). The chords are configurable via
+`keybindings.window`.
 
-Bewusst **opt-in**: Auf jeder View ohne `window_ops: true` greift der
-`w`-Leader nicht und `w` bleibt eine freie, gewöhnliche Taste (Subtab-Wechsel,
-Node-Shortcut, …). Aktiviere es nur dort, wo mehrere Panes wirklich Sinn
-ergeben — eine View mit gekoppeltem Child-`split:` (z. B. der Stoat-Chat) oder
-eine mit `record_detail:`-Split (z. B. Postgres-Zeilen).
+Deliberately **opt-in**: on every view without `window_ops: true` the `w`
+leader does not engage and `w` stays a free, ordinary key (subtab switch, node
+shortcut, …). Enable it only where several panes really make sense — a view
+with a coupled child `split:` (e.g. the Stoat chat) or one with a
+`record_detail:` split (e.g. Postgres rows).
 
 ```yaml
 - name: chats
   node_type: "stoat:server"
-  window_ops: true # `w`-Leader (split / close / focus / pane-tag) hier aktiv
+  window_ops: true # `w` leader (split / close / focus / pane tag) active here
 ```
 
-Der Schalter gilt für die ganze View (alle Drilldown-Ebenen dieses Subtabs) —
-er wird nicht pro Child gesetzt.
+The switch applies to the whole view (all drilldown levels of this subtab) — it
+is not set per child.
 
-#### `group_by:` / `aggregates:` — Gruppierung & Summen (M3)
+If `window_ops` is active, the **status bar** lists the chords with their full
+mnemonic (`wv split right`, `ws split down`, `wq close pane`, `wh focus
+parent`, `wl focus child`) — the same treatment as the tree fold chords
+`zm`/`zr`. What is _not_ in the bar is `w<tag>`: the tag letter is assigned by
+the current split layout and is therefore not a fixed binding; it only appears
+in the WINDOW mode display of the action bar while the `w` leader is held.
 
-Stehen auf `ViewDef` **und** `ChildDef` (gleiche Ebene wie `row_layout` /
-`smooth_scroll`), beide optional. Sie schalten den **gruppierten Render-Pfad** der
-einzeiligen Tabelle ein: die gefilterten Einträge werden nach **einem** Schlüssel
-partitioniert, jede Partition bekommt eine **Gruppen-Kopfzeile** mit Zwischensumme,
-und unter der ganzen Tabelle steht eine angepinnte **Gesamtsumme** (Footer).
+#### `group_by:` / `aggregates:` — grouping & totals (M3)
 
-Die Engine-Gruppierung ist bewusst **einstufig**. Feinere „Condensing"-Layouts
-(z. B. Trackings-„Condensed": pro Tag _und_ Task eine summierte Zeile) sind
-**Sache des Adapters**, nicht der Engine — sie gehören zur Datenhaltung und
--Interpretation und lassen sich, wo eine DB darunter liegt, nativ als `GROUP BY`
-erledigen. Der Adapter kondensiert seine Zeilen vorab selbst und liefert eine
-flache Liste, die hier einstufig nach Tag gruppiert wird (s.
-`grouping::condense_cells` als generischen, opt-in nutzbaren Baustein).
+Live on `ViewDef` **and** `ChildDef` (same level as `row_layout` /
+`smooth_scroll`), both optional. They switch on the **grouped render path** of
+the single-line table: the filtered entries are partitioned by **one** key,
+every partition gets a **group header line** with a subtotal, and below the
+whole table sits a pinned **grand total** (footer).
+
+Engine-side grouping is deliberately **single-level**. Finer "condensing"
+layouts (e.g. trackings "condensed": one summed line per day _and_ task) are
+**the adapter's business**, not the engine's — they belong to data storage and
+interpretation and can, where a DB sits underneath, be done natively as
+`GROUP BY`. The adapter condenses its rows up front itself and delivers a flat
+list, which is then grouped single-level by day here (see
+`grouping::condense_cells` as a generic, opt-in building block).
 
 ```yaml
 - name: grouped
   node_type: "tracking"
-  group_by: { column: started, bucket: day, order: desc } # nach Tag, neueste zuerst
+  group_by: { column: started, bucket: day, order: desc } # by day, newest first
   aggregates:
-    - { column: duration, op: sum, total_column: total } # Summe je Tag + Gesamt
+    - { column: duration, op: sum, total_column: total } # per-day sum + grand total
 ```
 
-**`group_by:`** — wonach gruppiert wird. Pflichtfeld `column:` ist ein
-Spalten-`key` (oder ein roher Metadaten-Feldname, falls keine Spalte ihn
-anzeigt). Optionales `bucket:` fasst einen **`kind: datetime`**-Wert zu einem
-Datums-Eimer zusammen, statt nach dem exakten Zeitstempel zu gruppieren:
+**`group_by:`** — what to group by. The mandatory field `column:` is a column
+`key` (or a raw metadata field name if no column displays it). The optional
+`bucket:` collapses a **`kind: datetime`** value into a date bucket instead of
+grouping by the exact timestamp:
 
-| `bucket:` | Label-Format   | Beispiel     |
+| `bucket:` | Label format   | Example      |
 | --------- | -------------- | ------------ |
 | `day`     | `%Y-%m-%d`     | `2026-06-09` |
 | `week`    | `%G-W%V` (ISO) | `2026-W23`   |
 | `month`   | `%Y-%m`        | `2026-06`    |
 | `year`    | `%Y`           | `2026`       |
 
-Ohne `bucket:` wird der Spaltenwert **verbatim** als Gruppenschlüssel benutzt
-(z. B. eine Status- oder Kategorie-Spalte). Die Labels sind bewusst
-**ISO-sortierbar** gewählt, sodass die lexikografische Sortierung der Gruppen
-zugleich die chronologische ist.
+Without `bucket:` the column value is used **verbatim** as the group key (e.g.
+a status or category column). The labels are deliberately chosen to be
+**ISO-sortable**, so that the lexicographic ordering of the groups is at the
+same time the chronological one.
 
-In der **Kopfzeile** wird der ISO-Schlüssel zusätzlich menschenlesbar
-aufbereitet (reines Display — Identität und Sortierung bleiben der
-ISO-Schlüssel): `day` rendert als `W24 2026-06-08 Mon` (ISO-Woche + Wochentag),
-`week` als `W23 2026`; `month`/`year` und Verbatim-Schlüssel bleiben
-unverändert.
+In the **header line** the ISO key is additionally rendered human-readable
+(pure display — identity and sorting stay the ISO key): `day` renders as
+`W24 2026-06-08 Mon` (ISO week + weekday), `week` as `W23 2026`; `month`/`year`
+and verbatim keys stay unchanged.
 
-Optionales `order:` (`asc` Default, `desc`) bestimmt die **Reihenfolge der
-Gruppen** — `desc` zeigt bei Datums-Buckets den neuesten Eimer zuerst (das
-übliche Layout eines Zeit-Logs). Die Zeilen _innerhalb_ einer Gruppe behalten
-unabhängig davon die Adapter-Reihenfolge. `zg` (s. u.) übernimmt das
-konfigurierte `order:` beim Durchschalten.
+The optional `order:` (`asc` default, `desc`) determines the **order of the
+groups** — with date buckets `desc` shows the newest bucket first (the usual
+layout of a time log). The rows _within_ a group keep the adapter order
+regardless. `zg` (below) picks up the configured `order:` when cycling.
 
-**`aggregates:`** — Liste der Spalten, die je Gruppe und gesamt summiert werden.
-Jeder Eintrag hat `column:` (ein Spalten-`key`) und `op:` (aktuell nur `sum`,
-der Default). Summiert wird auf dem **kanonischen** Wert (für `kind: duration`
-also die Sekunden-Zahl); die Summe wird durch denselben typisierten Formatter
-gerendert wie die Datenzellen, eine Dauer-Summe erscheint also wieder als
-`H:MM:SS`. Ohne `aggregates:` entfallen Zwischensummen und Footer — es bleibt
-die reine Gruppierung mit Kopfzeilen.
+**`aggregates:`** — list of the columns that are summed per group and overall.
+Every entry has `column:` (a column `key`) and `op:` (currently only `sum`, the
+default). The sum is computed on the **canonical** value (for `kind: duration`
+therefore on the seconds number); it is rendered by the same typed formatter as
+the data cells, so a duration sum appears as `H:MM:SS` again. Without
+`aggregates:` there are no subtotals and no footer — what remains is plain
+grouping with header lines.
 
-Optionales `total_column:` (ein Spalten-`key`) verlegt die Gruppen-Summe von
-der `──`-Kopfzeile in diese **eigene Spalte**, geschrieben auf die **letzte
-Datenzeile** jeder äußersten Gruppe (und auf den `Σ`-Footer). Das ist das
-klassische Stundenzettel-Layout, bei dem eine „Total"-Spalte jeden Tag
-abschließt — die Kopfzeile bleibt dann ein reines Label. Die Zielspalte wird
-ganz normal als Spalte deklariert (typisch `kind: duration`); solange die
-Gruppierung ausgeschaltet ist (`zg` auf `None`), wird sie **ausgeblendet**,
-weil eine Gruppensumme ohne Gruppen keinen Inhalt hätte.
+The optional `total_column:` (a column `key`) moves the group sum out of the
+`──` header line into this **dedicated column**, written onto the **last data
+line** of every outermost group (and onto the `Σ` footer). This is the classic
+timesheet layout where a "total" column closes off each day — the header line
+then stays a plain label. The target column is declared as an ordinary column
+(typically `kind: duration`); as long as grouping is switched off (`zg` on
+`None`) it is **hidden**, because a group sum without groups would have no
+content.
 
-**Laufzeit-Umschaltung (`cycle_grouping`, Default `zg`):** Die Aktion
-`cycle_grouping` (in `keybindings.yaml` bindbar, Default `zg`) schaltet die
-Gruppierung der aktiven Ebene durch: ungruppiert → `day` → `week` → `month` →
-`year` → ungruppiert. Sie ist nur aktiv, wenn die Ebene überhaupt ein `group_by:`
-konfiguriert hat. Der Umschalt-Status ist View-State (nicht persistiert) und
-überschreibt das konfigurierte `group_by:` nur für die laufende Sitzung.
+**Runtime toggle (`cycle_grouping`, default `zg`):** the action
+`cycle_grouping` (bindable in `keybindings.yaml`, default `zg`) cycles the
+grouping of the active level: ungrouped → `day` → `week` → `month` → `year` →
+ungrouped. It is only active if the level has a `group_by:` configured at all.
+The toggle state is view state (not persisted) and overrides the configured
+`group_by:` only for the running session.
 
-**Direktsprung-Menü (`group_menu`, Default `u`):** Statt durchzuschalten
-öffnet `group_menu` ein kleines Hotkey-Popup über dieselben fünf Zustände —
-`n` No grouping, `d` Day, `w` Week, `m` Month, `y` Year (Pfeile +
-Enter/Space gehen auch, Esc bricht ab). Optik wie das native Grouping-Menü:
-Standard-Popup-Chrome mit Keybinding-Legende unten, `●` markiert den
-aktuellen Zustand, der Hotkey-Buchstabe ist im Label unterstrichen.
-Gleiche Bedingung
-und gleiche Semantik wie `zg` (rotiert nur die äußere Ebene, View-State,
-nicht persistiert) — es ist die Parität zum `u`-Menü des nativen
-Trackings-Tabs. Auf Ebenen ohne `group_by:` bleibt `u` frei für
-YAML-`shortcuts:`.
+**Direct-jump menu (`group_menu`, default `u`):** instead of cycling,
+`group_menu` opens a small hotkey popup over the same five states — `n` no
+grouping, `d` day, `w` week, `m` month, `y` year (arrows + Enter/Space work
+too, Esc cancels). Looks like the native grouping menu: standard popup chrome
+with a keybinding legend at the bottom, `●` marks the current state, the hotkey
+letter is underlined in the label. Same condition and same semantics as `zg`
+(it only rotates the outer level, view state, not persisted) — it is the parity
+with the `u` menu of the native trackings tab. On levels without `group_by:`,
+`u` stays free for YAML `shortcuts:`.
 
-**Gruppen-Reihenfolge kippen (`toggle_group_order`, Default `o`):** Auf einer
-gruppierten Flat-View kippt `o` ausschließlich die **Reihenfolge der Gruppen**
-(z. B. Tages-Buckets neueste-zuerst ⟷ älteste-zuerst) — Granularität
-(`bucket:`) und die Item-Reihenfolge _innerhalb_ der Gruppen bleiben unberührt
-(letztere steuert `S`, siehe unten). Gleiche Gate-Bedingung wie `zg` (die Ebene
-muss ein `group_by:` haben); View-State, nicht persistiert. `o` wird nur
-beansprucht, solange die View keine `record_detail:`-Split anbietet — dort
-behält `o` die Detail-Split-Bedeutung (siehe oben). Die Status-Leiste zeigt die
-aktuelle Richtung an (`order ↓` = absteigend / `order ↑` = aufsteigend).
+**Flip the group order (`toggle_group_order`, default `o`):** on a grouped flat
+view, `o` flips exclusively the **order of the groups** (e.g. day buckets
+newest-first ⟷ oldest-first) — granularity (`bucket:`) and the item order
+_within_ the groups are untouched (the latter is controlled by `S`, see below).
+Same gate condition as `zg` (the level must have a `group_by:`); view state,
+not persisted. `o` is only claimed as long as the view does not offer a
+`record_detail:` split — there `o` keeps its detail-split meaning (see above).
+The status bar shows the current direction (`order ↓` = descending / `order ↑`
+= ascending).
 
-**Item-Sortierung innerhalb der Gruppen (`sort`, Default `S`):** `S` öffnet
-einen zweistufigen Picker (Spalte → Richtung) über die vom Adapter via
-`sortable_columns()` gemeldeten Spalten und sortiert die **einzelnen Items**.
-Die Sortierung ist **adapter-getrieben**: jede sortierbare Spalte deklariert
-eine `SortKind` (`Text` lexikografisch / `Number` numerisch / `DateTime`
-chronologisch), und der Adapter wendet sie über den generischen Helper
-`apply_sort` an — _vor_ einer etwaigen Gruppierung, deren Bucket-Sortierung
-stabil ist, sodass die gewählte Item-Reihenfolge innerhalb jeder Gruppe
-erhalten bleibt. Nicht parsebare Zellen einer typisierten Spalte (leeres
-`ended`, das Literal `running`) sortieren ans Ende. Welche Sortierung
-tatsächlich angewandt wurde, meldet der Adapter über `ListResult::applied_sort`
-zurück (Fußzeilen-Indikator). Adapter, die server-seitig sortieren (Jira via
-JQL `ORDER BY`, Taiga), ignorieren `SortKind` und übersetzen die `SortKey`s in
-ihre Backend-Sprache.
+**Item sorting within the groups (`sort`, default `S`):** `S` opens a two-step
+picker (column → direction) over the columns reported by the adapter via
+`sortable_columns()` and sorts the **individual items**. The sorting is
+**adapter-driven**: every sortable column declares a `SortKind` (`Text`
+lexicographic / `Number` numeric / `DateTime` chronological), and the adapter
+applies it through the generic helper `apply_sort` — _before_ any grouping,
+whose bucket sorting is stable, so that the chosen item order is preserved
+within every group. Unparsable cells of a typed column (empty `ended`, the
+literal `running`) sort to the end. Which sorting was actually applied is
+reported back by the adapter via `ListResult::applied_sort` (footer indicator).
+Adapters that sort server-side (Jira via JQL `ORDER BY`, Taiga) ignore
+`SortKind` and translate the `SortKey`s into their backend language.
 
-> **Einschränkungen.** Der gruppierte Pfad gilt nur für **einzeilige**
-> Tabellen — `group_by:` zusammen mit `row_layout:` (mehrzeilig/Chat) wird
-> ignoriert. Engine-seitige Gruppierung ist außerdem ein Flat-List-Feature;
-> im Tree-Mode gruppiert stattdessen der **Adapter** (siehe nächster
-> Abschnitt) — ohne entsprechende Adapter-Fähigkeit greift `group_by:` im
-> Tree nicht.
+> **Restrictions.** The grouped path only applies to **single-line** tables —
+> `group_by:` together with `row_layout:` (multi-line/chat) is ignored.
+> Engine-side grouping is furthermore a flat-list feature; in tree mode the
+> **adapter** groups instead (see the next section) — without the corresponding
+> adapter capability, `group_by:` has no effect in a tree.
 
-Die Farbe der Gruppen-Kopf- und Footer-Zeilen ist über das Theme konfigurierbar
-(`group_header`, siehe `tui-theme.yaml` / Theme-Referenz).
+The color of the group header and footer lines is configurable via the theme
+(`group_header`, see `tui-theme.yaml` / theme reference).
 
-#### Adapter-seitige Tree-Gruppierung (`group_by_via_adapter`)
+#### Adapter-side tree grouping (`group_by_via_adapter`)
 
-Ein **Tree** kann nicht engine-seitig gruppiert werden: Die Engine lädt lazy
-und kann die Teilbaum-Summen eines einzelnen Buckets nicht selbst falten —
-der Adapter besitzt den Fold (siehe `tree_aggregate:` unten). Deshalb dreht
-sich die Zuständigkeit im Tree um: Die Engine reicht das aktive `group_by:`
-der Pane im Root-`list()`-Aufruf an den Adapter durch
-(`ListParams.group_by`), und der Adapter antwortet mit **einem
-Bucket-Knoten pro Gruppe** als Root-Ebene; jeder Bucket expandiert in einen
-Teilbaum, dessen Werte nur aus den Einträgen _dieses_ Buckets gefaltet sind.
+A **tree** cannot be grouped engine-side: the engine loads lazily and cannot
+fold the subtree sums of an individual bucket itself — the adapter owns the
+fold (see `tree_aggregate:` below). That is why responsibility is inverted in a
+tree: the engine passes the pane's active `group_by:` through to the adapter in
+the root `list()` call (`ListParams.group_by`), and the adapter answers with
+**one bucket node per group** as the root level; every bucket expands into a
+subtree whose values are folded from the entries of _that_ bucket only.
 
 ```yaml
 - name: tree
-  node_type: "tracking:tree-group" # Root-Ebene = Bucket-Knoten des Adapters
+  node_type: "tracking:tree-group" # root level = the adapter's bucket nodes
   tree_label: task
   group_by: { column: started, bucket: day, order: desc }
   children:
     - name: subtasks
-      node_type: "tracking:tree-item" # rekursive Item-Ebene
+      node_type: "tracking:tree-item" # recursive item level
       recursive: true
 ```
 
-- **Capability-Gate.** Der Adapter deklariert `group_by_via_adapter` (siehe
-  `AdapterCapabilities`). Nur dann sind `zg`/`u` im Tree aktiv; ohne die
-  Fähigkeit bleibt ein `group_by:` auf einer Tree-Root-Ebene wirkungslos
-  (gleiche Doppel-Gate-Logik wie `tree_aggregate`).
-- **Umschalten = Reload.** `zg` und das `u`-Menü funktionieren im Tree wie
-  in der Flat-List, aber jeder Wechsel ist ein **Adapter-Reload** (der
-  Adapter muss neu bucketen), kein lokaler Rebuild. Der Status bleibt
-  View-State (nicht persistiert).
-- **„No grouping" = ein Config, zwei Formen.** Schaltet man die Gruppierung
-  aus, liefert der Adapter auf denselben Root-Request den ungebucketeten
-  Baum (Items statt Buckets). Die Chain-Auflösung der Engine matcht
-  **typbasiert**: Mit Buckets greift die Root-`ViewDef`-Ebene
-  (`tracking:tree-group`), ohne Buckets matcht die rekursive
-  Item-`ChildDef` ab Tiefe 0. Es braucht also keine zweite View — aber
-  Spalten/`shortcuts:` der Root-Ebene gelten nur für Bucket-Zeilen
-  (Buckets sind read-only Aggregate; Row-Aktionen gehören auf die
-  Item-Ebene).
-- **Bucket-Identität steckt in der Node-ID.** Derselbe Task kann in
-  mehreren Buckets erscheinen; Knoten unter einem Bucket tragen den
-  Bucket-Scope in ihrer ID, damit `get_by_id` ohne Query-Kontext die
-  richtigen (bucket-gefalteten) Werte rechnen kann. Der Saved-Query-Filter
-  der Pane kommt zusätzlich pro `list()` an
-  (`propagates_query_to_subtree`) und schneidet den Bucket weiter zu.
-- **Konsistente Labels.** Bucket-Keys und -Anzeigelabels kommen aus
-  demselben Modul (`not_yet_done_content::grouping`), das auch die
-  engine-seitige Flat-Gruppierung benutzt — ein Tag heißt im gruppierten
-  Tree exakt so wie in der gruppierten Flat-List.
+- **Capability gate.** The adapter declares `group_by_via_adapter` (see
+  `AdapterCapabilities`). Only then are `zg`/`u` active in a tree; without the
+  capability a `group_by:` on a tree root level has no effect (same double-gate
+  logic as `tree_aggregate`).
+- **Toggling = reload.** `zg` and the `u` menu work in a tree just like in a
+  flat list, but every change is an **adapter reload** (the adapter has to
+  re-bucket), not a local rebuild. The state stays view state (not persisted).
+- **"No grouping" = one config, two shapes.** If you switch grouping off, the
+  adapter answers the same root request with the unbucketed tree (items instead
+  of buckets). The engine's chain resolution matches **by type**: with buckets
+  the root `ViewDef` level applies (`tracking:tree-group`), without buckets the
+  recursive item `ChildDef` matches from depth 0. So no second view is needed —
+  but the root level's columns/`shortcuts:` only apply to bucket rows (buckets
+  are read-only aggregates; row actions belong on the item level).
+- **Bucket identity is part of the node id.** The same task can appear in
+  several buckets; nodes under a bucket carry the bucket scope in their id so
+  that `get_by_id` can compute the right (bucket-folded) values without query
+  context. The pane's saved-query filter additionally arrives per `list()`
+  (`propagates_query_to_subtree`) and narrows the bucket further.
+- **Consistent labels.** Bucket keys and display labels come from the same
+  module (`not_yet_done_content::grouping`) that engine-side flat grouping uses
+  — a day is named exactly the same in a grouped tree as in a grouped flat
+  list.
 
-##### `group_headers:` — Buckets als `── label`-Header-Zeilen
+##### `group_headers:` — buckets as `── label` header lines
 
-Ohne weitere Config sind die Bucket-Knoten **normale Tree-Zeilen**:
-selektierbar, mit den Items eine Einrückungsebene tiefer. Das liest sich
-anders als dieselbe Gruppierung auf einer Flat-List (dort sind Gruppenköpfe
-nicht-selektierbare `── label`-Zeilen ohne Extra-Einrückung). `group_headers:`
-auf der Tree-Root-Ebene stellt die Bucket-Zeilen auf genau dieses
-Header-Rendering um:
+Without further config the bucket nodes are **ordinary tree rows**: selectable,
+with the items one indentation level deeper. That reads differently from the
+same grouping on a flat list (there, group heads are non-selectable `── label`
+lines without extra indentation). `group_headers:` on the tree root level
+switches the bucket rows to exactly that header rendering:
 
 ```yaml
 - name: tree
   node_type: "tracking:tree-group"
   tree_label: task
   group_by: { column: started, bucket: day, order: desc }
-  expand_depth: all # Pflicht in der Praxis, s. u.
+  expand_depth: all # mandatory in practice, see below
   group_headers:
-    total: # optional: Gruppen-Total in eigener Spalte
+    total: # optional: group total in its own column
       key: total
       label: Total
       kind: duration
       style: accent
       sizing: max
-      source: duration # Metadata-Feld des BUCKET-Knotens mit dem Total
+      source: duration # metadata field of the BUCKET node holding the total
 ```
 
-- **Rendering.** Bucket-Zeilen werden `── label`-Zeilen im
-  Gruppen-Header-Style (gleiche Chrome wie die Flat-Gruppierung), **nicht
-  selektierbar**; die Zeilen darunter verlieren die Einrückungsebene des
-  Buckets — der Wald beginnt unter jedem Header bei Einrückung 0.
-- **`total:` (optional).** Eine vollwertige `ColumnDef`, die nur bei aktiver
-  Gruppierung als letzte Spalte erscheint und das Gruppen-Total auf der
-  **letzten** Zeile jeder Gruppe zeigt (das klassische
-  Stundenzettel-Layout — dieselbe Semantik wie `total_column` der
-  Flat-Gruppierung). `source:` benennt das Metadata-Feld des
-  Bucket-Knotens, das das Total trägt (Fallback: `key`). Mit ausgeschalteter
-  Gruppierung verschwindet die Spalte.
-- **`expand_depth` ist praktisch Pflicht:** Header sind nicht selektierbar,
-  ein eingeklappter Bucket ließe sich also per Cursor nie öffnen. Der
-  Validator verlangt `tree_label` + `group_by` auf derselben View.
-- Gilt nur, solange tatsächlich gruppiert wird (Capability + aktives
-  `group_by`); mit „No grouping" rendert der Tree normal.
+- **Rendering.** Bucket rows become `── label` lines in the group header style
+  (same chrome as flat grouping), **not selectable**; the rows below them lose
+  the bucket's indentation level — the forest starts at indentation 0 under
+  every header.
+- **`total:` (optional).** A full `ColumnDef` that appears as the last column
+  only while grouping is active and shows the group total on the **last** line
+  of every group (the classic timesheet layout — same semantics as
+  `total_column` of flat grouping). `source:` names the metadata field of the
+  bucket node carrying the total (fallback: `key`). With grouping switched off
+  the column disappears.
+- **`expand_depth` is practically mandatory:** headers are not selectable, so a
+  collapsed bucket could never be opened by cursor. The validator requires
+  `tree_label` + `group_by` on the same view.
+- Applies only while grouping is actually in effect (capability + active
+  `group_by`); with "no grouping" the tree renders normally.
 
-#### `tree_aggregate:` — Eigen- vs. Summenwert im Tree (M4)
+#### `tree_aggregate:` — own vs. summed value in a tree (M4)
 
-Das Gegenstück zu `group_by:` für den **Tree-Mode**: Eine Spalte kann pro Knoten
-entweder ihren **Eigenwert** (das Feld `key:` der Spalte) oder den vom Adapter
-berechneten **Teilbaum-Summenwert** (`cumulated_field:`) anzeigen — zur Laufzeit
-umschaltbar.
+The counterpart to `group_by:` for **tree mode**: per node, a column can show
+either its **own value** (the column's `key:` field) or the **subtree sum**
+computed by the adapter (`cumulated_field:`) — toggleable at runtime.
 
 ```yaml
 columns:
   - { key: name, source: label }
-  - key: duration # Eigenwert des Knotens (kanonisch: Sekunden)
+  - key: duration # own value of the node (canonical: seconds)
     kind: duration
     tree_aggregate:
-      cumulated_field: duration_cumulated # Adapter liefert die Teilbaum-Summe
-      default: own # own (Standard) | cumulated
+      cumulated_field: duration_cumulated # the adapter delivers the subtree sum
+      default: own # own (default) | cumulated
 ```
 
-- **`cumulated_field:`** (Pflicht) — der Metadaten-Feldschlüssel, unter dem der
-  Adapter den **bereits aufsummierten** Teilbaumwert liefert (kanonisch für die
-  `kind:` der Spalte, z. B. Sekunden bei `kind: duration`). Der Eigenwert kommt
-  weiterhin aus dem `key:` der Spalte.
-- **`default:`** — welcher Wert vor dem ersten Umschalten gezeigt wird: `own`
-  (Standard) oder `cumulated`.
+- **`cumulated_field:`** (mandatory) — the metadata field key under which the
+  adapter delivers the **already summed** subtree value (canonical for the
+  column's `kind:`, e.g. seconds with `kind: duration`). The own value still
+  comes from the column's `key:`.
+- **`default:`** — which value is shown before the first toggle: `own`
+  (default) or `cumulated`.
 
-**Warum adapter-getrieben?** Der Tree wird **lazy** geladen — eingeklappte Äste
-liegen gar nicht im Speicher. Die TUI kann also nicht selbst falten; **nur der
-Adapter** weiß, ob er den vollen Baum hat und einen Teilbaum aufsummieren kann.
-Er liefert beide Werte als Metadatenfelder und deklariert dazu die Fähigkeit
-`supports_tree_aggregation` (siehe `AdapterCapabilities`). Kann er nicht
-kumulieren, lässt er das Feld weg.
+**Why adapter-driven?** The tree is loaded **lazily** — collapsed branches are
+not in memory at all. The TUI therefore cannot fold by itself; **only the
+adapter** knows whether it has the full tree and can sum up a subtree. It
+delivers both values as metadata fields and declares the capability
+`supports_tree_aggregation` for it (see `AdapterCapabilities`). If it cannot
+cumulate, it omits the field.
 
-**Laufzeit-Umschaltung (`toggle_tree_aggregate`, Default `zt`):** Die Aktion
-schaltet **alle** `tree_aggregate`-Spalten der aktiven Ebene zwischen Eigen- und
-Summenwert um. Sie ist nur aktiv, wenn **zwei** Bedingungen erfüllt sind: die
-Ebene (im Tree-Mode) hat überhaupt eine `tree_aggregate`-Spalte **und** der
-Adapter meldet `supports_tree_aggregation`. Meldet er die Fähigkeit nicht (oder
-ist gar kein Adapter gebunden), bleibt die Taste unbelegt und der Toggle ein
-No-op — eine `tree_aggregate:`-Deklaration allein genügt also nicht. Der Status
-ist View-State (nicht persistiert).
+**Runtime toggle (`toggle_tree_aggregate`, default `zt`):** the action toggles
+**all** `tree_aggregate` columns of the active level between own and summed
+value. It is only active if **two** conditions hold: the level (in tree mode)
+has a `tree_aggregate` column at all **and** the adapter reports
+`supports_tree_aggregation`. If it does not report the capability (or no
+adapter is bound at all), the key stays unbound and the toggle is a no-op — a
+`tree_aggregate:` declaration alone is therefore not enough. The state is view
+state (not persisted).
 
-> **Eigen- _und_ Summenwert nebeneinander** braucht keinen neuen Mechanismus —
-> dafür zwei normale Spalten auf die beiden Felder legen (z. B. `key: duration`
-> und `key: duration_cumulated`, beide `kind: duration`).
+> **Own _and_ summed value side by side** needs no new mechanism — just put two
+> ordinary columns on the two fields (e.g. `key: duration` and
+> `key: duration_cumulated`, both `kind: duration`).
 
-> **Einschränkungen.** `tree_aggregate:` greift nur im **Tree-Mode**; in
-> Flat-Listen wird es ignoriert. Spiegelbildlich zu `group_by:`, das
-> engine-seitig nur in Flat-Listen greift (im Tree gruppiert der Adapter,
-> siehe `group_by_via_adapter` oben).
+> **Restrictions.** `tree_aggregate:` only takes effect in **tree mode**; in
+> flat lists it is ignored. Mirror image of `group_by:`, which engine-side only
+> takes effect in flat lists (in a tree the adapter groups, see
+> `group_by_via_adapter` above).
 
-#### `collapsed_source:` — anderes Metadaten-Feld am eingeklappten Knoten
+#### `collapsed_source:` — a different metadata field on a collapsed node
 
-Eine Spalte kann ein **anderes Metadaten-Feld** rendern, solange ihre Zeile ein
-**eingeklappter** Tree-Knoten ist (hat Kinder, ist nicht aufgeklappt). Auf
-aufgeklappten Knoten, Blättern und in Flat-Listen zeigt sie unverändert ihr
-`source:`/`key:`-Feld.
+A column can render a **different metadata field** while its row is a
+**collapsed** tree node (has children, is not expanded). On expanded nodes,
+leaves and in flat lists it shows its `source:`/`key:` field unchanged.
 
 ```yaml
 columns:
   - key: tracking
     label: Tr
-    # Eingeklappter Knoten → zeigt das Roll-up-Feld des Adapters statt des
-    # eigenen `tracking`; aufgeklappt/Blatt/flat → wieder `tracking`.
+    # Collapsed node → shows the adapter's roll-up field instead of the own
+    # `tracking`; expanded/leaf/flat → `tracking` again.
     collapsed_source: tracking_rollup
 ```
 
-**Wofür?** Marker, die ein Zustand _im Teilbaum_ sind und beim Einklappen sonst
-verschwinden würden. Beispiel Tasks-Tree: der `⏱`-Tracking-Marker hängt am
-laufenden Task; klappt man dessen Eltern zu, läge der Marker im verborgenen Ast.
-Der Adapter liefert zusätzlich ein Roll-up-Feld (`tracking_rollup` = `⏱`, wenn
-der Knoten **oder ein Nachfahre** getrackt ist), und `collapsed_source` zeigt es
-genau dann, wenn der Knoten eingeklappt ist — der Marker „bubbelt" sichtbar an
-den zugeklappten Elternknoten.
+**What for?** Markers that are a state _within the subtree_ and would otherwise
+disappear on collapse. Example tasks tree: the `⏱` tracking marker hangs on the
+running task; collapse its parent and the marker would sit in the hidden
+branch. The adapter additionally delivers a roll-up field (`tracking_rollup` =
+`⏱` if the node **or a descendant** is tracked), and `collapsed_source` shows it
+exactly while the node is collapsed — the marker visibly "bubbles" up to the
+collapsed parent.
 
-- **Warum nicht immer hochpropagieren?** Die Engine kennt den **Einklapp-Zustand**
-  (`tree.expanded`), der Adapter nicht; der Adapter kennt den **Teilbaum**, die
-  Engine (lazy geladen) nicht. `collapsed_source` teilt die Zuständigkeit:
-  Adapter faltet das Roll-up-Feld, Engine entscheidet anhand des Einklapp-Zustands,
-  ob Eigen- oder Roll-up-Feld gezeigt wird.
-- **Rein additiv & generisch.** Kein Capability-Gate, keine eigene Aktion — fehlt
-  das Roll-up-Feld in den Metadaten, rendert die Zelle leer (wie jedes fehlende
-  Feld). Beliebig für andere Subtree-Marker wiederverwendbar (Notizen, Links …).
-- **Nur im Tree.** In Flat-Listen gibt es keinen Einklapp-Zustand; dort ist
-  `collapsed_source` inert und die Spalte zeigt immer ihr `source:`/`key:`-Feld.
+- **Why not propagate upwards always?** The engine knows the **collapse state**
+  (`tree.expanded`), the adapter does not; the adapter knows the **subtree**,
+  the engine (lazily loaded) does not. `collapsed_source` splits the
+  responsibility: the adapter folds the roll-up field, the engine decides based
+  on the collapse state whether the own or the roll-up field is shown.
+- **Purely additive & generic.** No capability gate, no dedicated action — if
+  the roll-up field is missing from the metadata, the cell renders empty (like
+  any missing field). Freely reusable for other subtree markers (notes, links …).
+- **Tree only.** In flat lists there is no collapse state; there
+  `collapsed_source` is inert and the column always shows its `source:`/`key:`
+  field.
 
-#### `hidden:` — Spalte per default ausgeblendet, aber konfigurierbar
+#### `hidden:` — column hidden by default, but configurable
 
 ```yaml
 columns:
   - { key: description, source: label, sizing: fit }
-  - { key: tag_names, label: Tags, hidden: true } # da, aber nicht gezeigt
+  - { key: tag_names, label: Tags, hidden: true } # there, but not shown
 ```
 
-Eine Spalte mit `hidden: true` ist Teil der Spaltenliste des Levels, wird aber
-im **Default-Layout nicht gerendert**. Sie taucht im `c`-Spalten-Konfig-Popup
-als verfügbare, **nicht angehakte** Zeile auf — der User kann sie dort
-einblenden. Genau dafür gibt es das Flag: gelegentlich nützliche, aber das
-Standard-Layout zumüllende Spalten (z. B. `tag_names` im Tasks-Tree, das die
-ausgeschriebenen Tag-Namen neben der kompakten Symbol-Spalte zeigt) sollen
-abrufbar sein, ohne immer Platz zu kosten.
+A column with `hidden: true` is part of the level's column list but is **not
+rendered in the default layout**. It shows up in the `c` column-config popup as
+an available, **unchecked** row — the user can reveal it there. That is exactly
+what the flag is for: occasionally useful columns that would clutter the
+standard layout (e.g. `tag_names` in the tasks tree, showing the spelled-out
+tag names next to the compact symbol column) should be retrievable without
+permanently costing space.
 
-- **Default vs. Override.** `hidden:` wirkt nur, solange für das Level **kein**
-  Spalten-Override gesetzt ist. Sobald der User im Popup etwas an-/abwählt,
-  zählt ausschließlich seine Auswahl (ein eingeblendetes `hidden`-Feld bleibt
-  dann sichtbar). Wählt er exakt den Default-Sichtbar-Satz wieder an (versteckte
-  Spalten aus), wird der Override **gelöscht** — sauberer Reset.
-- **Die `tree_label`-Spalte ignoriert `hidden:`** — sie trägt den Baum und ist
-  nie ausblendbar.
-- **Rein additiv.** Default `false`; bestehende Views ohne `hidden:` sind
-  unverändert.
+- **Default vs. override.** `hidden:` only takes effect as long as **no** column
+  override is set for the level. As soon as the user (de)selects something in
+  the popup, only their selection counts (a revealed `hidden` field then stays
+  visible). If they reselect exactly the default-visible set (hidden columns
+  off), the override is **deleted** — a clean reset.
+- **The `tree_label` column ignores `hidden:`** — it carries the tree and can
+  never be hidden.
+- **Purely additive.** Default `false`; existing views without `hidden:` are
+  unchanged.
 
-#### `tree_connector_style:` — Farbe der Connector-Glyphen pro Tree
+#### `tree_connector_style:` — color of the connector glyphs per tree
 
-Im Tree-Mode malt die `tree_label`-Spalte vor das Label einen **Connector-Lauf**:
-die Box-Zeichen `├──`/`└──`/`│` und die Aufklapp-Pfeile `▶`/`▼`. Dieser Lauf wird
-getrennt vom Label eingefärbt — er soll als leise Struktur _hinter_ den Labels
-lesbar sein, nicht mit ihnen konkurrieren.
+In tree mode the `tree_label` column paints a **connector run** in front of the
+label: the box characters `├──`/`└──`/`│` and the expand arrows `▶`/`▼`. This
+run is colored separately from the label — it should be readable as a quiet
+structure _behind_ the labels, not compete with them.
 
 ```yaml
 views:
   - name: tasks
     tree_label: description
-    tree_connector_style: text_dim # optional; sonst Theme-Farbe `tree_connector`
+    tree_connector_style: text_dim # optional; otherwise theme color `tree_connector`
 ```
 
-- Ein Theme-Farbname (`text_dim`, `tree_connector`, `accent`, … — dieselbe
-  Vokabular wie bei einer Spalten-`style:`). Ohne Angabe gilt die globale
-  Theme-Farbe `tree_connector` (`tui.yaml`).
-- Steht **auf dem Wurzel-`ViewDef`** und gilt für den **ganzen Tree** (alle
-  Tiefen) — bewusst _pro Tree_, nicht pro Ebene: ein dichter, tiefer Task-Tree
-  will mattere Connectoren als ein flacher; ein Tree auf farbiger Fläche eine
-  andere Tönung als einer auf dem Basis-Hintergrund. So tunt jede Ansicht den
-  Kontrast unabhängig, statt eine globale Connector-Farbe zu erzwingen.
-- Greift nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung.
+- A theme color name (`text_dim`, `tree_connector`, `accent`, … — the same
+  vocabulary as for a column `style:`). Without it, the global theme color
+  `tree_connector` (`tui.yaml`) applies.
+- Lives **on the root `ViewDef`** and applies to the **whole tree** (all
+  depths) — deliberately _per tree_, not per level: a dense, deep task tree
+  wants duller connectors than a shallow one; a tree on a colored surface wants
+  a different tint than one on the base background. This way every view tunes
+  the contrast independently instead of forcing one global connector color.
+- Only takes effect in **tree mode**; without `tree_label` it has no effect.
 
-#### `tree_lines:` / `tree_markers:` — Linien und Aufklappmarker pro Tree
+#### `tree_lines:` / `tree_markers:` — lines and expand markers per tree
 
-Die beiden Bestandteile des Connector-Laufs sind getrennt konfigurierbar: die
-Box-Linien (`├──`/`└──`/`│`) über `tree_lines`, die Aufklappmarker (`▶`/`▼`)
-über `tree_markers`. Beide stehen — wie `tree_connector_style` — auf dem
-**Wurzel-`ViewDef`** und gelten für den ganzen Tree.
+The two constituents of the connector run are configurable separately: the box
+lines (`├──`/`└──`/`│`) via `tree_lines`, the expand markers (`▶`/`▼`) via
+`tree_markers`. Both live — like `tree_connector_style` — on the **root
+`ViewDef`** and apply to the whole tree.
 
 ```yaml
 views:
   - name: databases
     tree_label: name
-    tree_lines: false # Default true; false = nur Einrückung statt Linien
-    tree_markers: # optional; weglassen = ▶/▼ wie gehabt
-      enabled: true # false versteckt die Marker komplett
-      collapsed: "+" # Default ▶
-      expanded: "-" # Default ▼
+    tree_lines: false # default true; false = indentation only instead of lines
+    tree_markers: # optional; omit = ▶/▼ as before
+      enabled: true # false hides the markers completely
+      collapsed: "+" # default ▶
+      expanded: "-" # default ▼
 ```
 
-- **`tree_lines: false`** ersetzt die Linien durch schlichte Einrückung
-  (zwei Leerzeichen pro Tiefe). Warum: die Linien transportieren
-  Geschwister-/Fortsetzungsstruktur — das lohnt sich auf tiefen, unregelmäßigen
-  Bäumen (Tasks), ist aber visuelles Rauschen auf flachen, regelmäßigen Drills
-  (Datenbank → Schema → Tabelle). Marker und `leaf_glyph` bleiben unberührt.
-- **`tree_markers.enabled: false`** versteckt die Aufklappmarker; die Zeilen
-  bleiben über die üblichen Tasten aufklappbar, nur der visuelle Hinweis
-  entfällt. `collapsed`/`expanded` überschreiben einzeln die Glyphen — z. B.
-  `+`/`-` für einen kompakteren Look oder Nerd-Font-Icons.
-- Beide greifen nur im **Tree-Mode**; ohne `tree_label` ohne Wirkung. Das
-  Blatt-Symbol konfiguriert weiterhin `leaf_glyph` (pro Ebene), die Farbe des
-  gesamten Laufs `tree_connector_style`.
+- **`tree_lines: false`** replaces the lines with plain indentation (two spaces
+  per depth). Why: the lines carry sibling/continuation structure — worth it on
+  deep, irregular trees (tasks), but visual noise on shallow, regular drilldowns
+  (database → schema → table). Markers and `leaf_glyph` are untouched.
+- **`tree_markers.enabled: false`** hides the expand markers; the rows remain
+  expandable with the usual keys, only the visual hint is gone.
+  `collapsed`/`expanded` override the glyphs individually — e.g. `+`/`-` for a
+  more compact look, or Nerd Font icons.
+- Both only take effect in **tree mode**; without `tree_label` they have no
+  effect. The leaf symbol is still configured by `leaf_glyph` (per level), the
+  color of the whole run by `tree_connector_style`.
 
-#### `unread_style:` / `unread_marker:` — Ungelesen-Hervorhebung (Chat-Adapter)
+#### `icon:` — type symbol per level
 
-Chat-Adapter (Stoat) markieren ungelesene Einträge: ein Kanal/eine Kategorie mit
-ungelesenen Nachrichten bekommt im Tree vor dem Label einen **Marker-Glyph** und
-Marker + Name in der Ungelesen-Farbe; die Kopfzeile (Autor/Zeit) einer
-ungelesenen Nachricht in der Nachrichtenliste wird in derselben Farbe gemalt. Der
-Träger ist ein `unread`-Metadatenfeld (`"true"`/leer) am Knoten — der Adapter
-setzt es, die Ansicht malt. Ohne dieses Feld haben beide Optionen keine Wirkung.
+`icon:` lives **per level** (on the root `ViewDef` or on a `ChildDef`) and draws
+a glyph directly in front of the label — on **every** row of that level,
+expandable or not.
+
+```yaml
+children:
+  - name: channels # uncategorized channels …
+    node_type: "stoat:channel"
+    tree_label: name
+    icon: "💬"
+  - name: categories # … and categories share one depth
+    node_type: "stoat:category"
+    tree_label: name
+    icon: "📁"
+```
+
+- Distinction from `leaf_glyph`: that one encodes the **expand state** ("nothing
+  comes below me"), `icon` the **kind** of the row. Two different questions — a
+  level of nothing but expandable rows never gets a `leaf_glyph`, but very much
+  wants a type symbol.
+- It is needed everywhere **two branches share the same depth**: in the Stoat
+  tree, both uncategorized channels and categories hang under the server.
+  Without a symbol a channel reads there exactly like a category — and expanding
+  it surprises you with messages instead of channels.
+- Resolution as with `leaf_glyph`: the glyph of the producing `ChildDef`,
+  otherwise the one of the `ViewDef`, otherwise none. The order in the label
+  cell is `connector · leaf_glyph · unread_marker · icon · label`.
+- An emoji is **two cells wide**; the column width accounts for the rendered
+  width. Only takes effect in **tree mode**.
+
+#### `unread_style:` / `unread_marker:` — unread highlight (chat adapters)
+
+Chat adapters (Stoat) mark unread entries: a channel/category with unread
+messages gets a **marker glyph** in front of the label in the tree, and marker +
+name in the unread color; the header line (author/time) of an unread message in
+the message list is painted in the same color. The carrier is an `unread`
+metadata field (`"true"`/empty) on the node — the adapter sets it, the view
+paints. Without that field both options have no effect.
 
 ```yaml
 views:
   - name: servers
     tree_label: name
-    unread_style: unread # optional; sonst Theme-Farbe `unread`
-    unread_marker: "💬" # optional; Default 💬, "" = nur Farbe, kein Glyph
+    unread_style: unread # optional; otherwise theme color `unread`
+    unread_marker: "💬" # optional; default 💬, "" = color only, no glyph
 ```
 
-- **`unread_style`** — ein Theme-Farbname (`unread`, `accent`, … — dasselbe
-  Vokabular wie bei einer Spalten-`style:`). Ohne Angabe gilt die globale
-  Theme-Farbe `unread` (`tui.yaml`). Warum pro View: die Ungelesen-Betonung
-  konkurriert mit den eigenen Akzenten der Ansicht (Selektion, Fuzzy-Treffer,
-  Gruppen-Header); ein dichter Server-Tree und eine flache Nachrichtenliste
-  wollen sie unterschiedlich stark.
-- **`unread_marker`** — der führende Glyph; Default `💬` (Sprechblase). Ein
-  leerer String unterdrückt den Marker (nur Farbe). Hinweis: ein Emoji-Marker
-  ist **zwei Zellen breit** — die Tree-Einrückung rechnet die gerenderte Breite
-  mit ein. Warum konfigurierbar: Emoji vs. Nerd-Font-Glyph rendern je nach
-  Terminal/Font verschieden; manche bevorzugen einen ruhigen ASCII-Punkt.
-- Der Fuzzy-Treffer-Highlight gewinnt über die Ungelesen-Farbe: bei aktiver
-  Suche bleibt der getroffene Teilstring in der Treffer-Farbe, der Rest des
-  Labels in der Ungelesen-Farbe.
+- **`unread_style`** — a theme color name (`unread`, `accent`, … — the same
+  vocabulary as for a column `style:`). Without it, the global theme color
+  `unread` (`tui.yaml`) applies. Why per view: the unread emphasis competes with
+  the view's own accents (selection, fuzzy hit, group header); a dense server
+  tree and a flat message list want it at different strengths.
+- **`unread_marker`** — the leading glyph; default `💬` (speech bubble). An
+  empty string suppresses the marker (color only). Note: an emoji marker is
+  **two cells wide** — the tree indentation accounts for the rendered width. Why
+  configurable: emoji vs. Nerd Font glyph render differently depending on
+  terminal/font; some prefer a quiet ASCII dot. If a level carries an `icon:`
+  (type symbol), the marker must be a **different** glyph — otherwise the same
+  glyph stands twice next to each other, meaning "unread" once and "is a
+  channel" the other time.
+- The fuzzy hit highlight wins over the unread color: with an active search the
+  matched substring stays in the hit color, the rest of the label in the unread
+  color.
 
-#### `deleted`-Metadatenfeld — soft-gelöschte Zeilen ausgegraut
+#### `tab.unread_marker:` / `tab.unread_style:` — unread in the tab bar
 
-Ein Adapter, der gelöschte Datensätze als Kontext stehen lässt (statt sie hart
-zu entfernen), kann sie **dimmen**: Trägt ein Knoten ein `deleted`-Metadatenfeld
-mit Wert `"true"`, malt die Engine **jede Zelle** der Zeile in der Theme-Farbe
-`text_dim` — die Zeile liest sich als „da, aber inaktiv". Auf segmentierten
-Zellen (Tree-Label, Taskpath) dimmt das den Text, während die strukturellen
-Glyphen (Connector, Separator) ihre eigene Farbe behalten.
+The same `unread` metadata field also surfaces one level up: while **any** row
+in **any** of the view's panes is unread, the view's entry in the tab bar gets
+a marker glyph in front of its icon and its label is emphasised. That is what
+makes a **background** chat tab useful — the tree inside it is not on screen,
+the tab label is.
 
-Das ist ein **reines Styling-Signal ohne View-Konfiguration** (kein Key, keine
-Opt-in-Flag): der Adapter setzt das Feld, die Ansicht dimmt. Es greift in
-**allen** Render-Pfaden — der ungruppierten flachen Liste, dem **gruppierten**
-Flat-View (`── Tag ──`-Header) und dem Tree. Anders als `unread` ist die Farbe
-**nicht** pro View überschreibbar; gelöscht-vs-aktiv soll überall gleich
-aussehen.
+```yaml
+tab:
+  name: Stoat
+  icon: "💬"
+  unread_marker: "🔔" # optional; default = view's `unread_marker`, then 🔔
+  unread_style: [bold] # optional; default = bold
+```
 
-Sichtbar wird eine gelöschte Zeile nur, wenn der Query sie **erfasst** — die
-Adapter laden das volle inkl.-gelöscht-Universum, und der Query ist der
-alleinige Filter (s. „Query = einziger Filter"). Mit dem Default-Query
-(`[deleted, =, false]`) bleibt alles Gelöschte unsichtbar; erst ein Query, der
-gelöschte einschließt, zeigt sie ausgegraut. Tasks und Trackings nutzen
-dasselbe Signal.
+Rendered: `🔔 💬 9 Stoat` — marker, icon, switch key, name, the same order the
+tree uses inside the view.
 
-#### `mark_read_on_reach_end:` — Aktion bei Cursor auf der letzten Zeile
+- **`tab.unread_marker`** — the leading glyph. Unset, it falls back to the
+  view's own `unread_marker` (so tree and tab agree without configuring the
+  glyph twice), and only then to the default `🔔`. Note that this default is a
+  **bell**, not the `💬` the rows fall back to: a tab already carries its own
+  `icon:`, and in a chat view that icon is often the very speech balloon that
+  marks "this is a channel" — the two must not collide. An empty string
+  suppresses the glyph and leaves `tab.unread_style` to carry the signal.
+- **`tab.unread_style`** — how the label itself is emphasised. Three forms:
 
-Ein generischer Engine-Hook auf Drill-Ebene (`children:`): erreicht der Cursor
-**zum ersten Mal** die letzte (unterste) Zeile einer flachen Liste **und** ist
-diese Zeile noch ungelesen, ruft die Engine genau **einmal** die benannte
-Aktion auf dem selektierten Knoten auf.
+  | Form                                              | Effect                           |
+  | ------------------------------------------------- | -------------------------------- |
+  | `unread_style: unread`                            | theme color name, no font change |
+  | `unread_style: [bold]`                            | font modifiers, no recolor       |
+  | `unread_style: { fg: unread, modifiers: [bold] }` | both                             |
+
+  Modifiers: `bold`, `dim`, `italic`, `underlined`, `reversed`, `crossed_out`
+  (how much a terminal honours is up to the terminal). Whatever it resolves to
+  is layered **on top of** the bar's normal active/inactive style, so an
+  omitted part keeps the theme's value. Unset, the label renders **bold** —
+  the one emphasis that reads on both the active tab (already bold and
+  colored) and the inactive one without fighting the bar's palette.
+
+  Why this is its own setting rather than reusing the view-level
+  `unread_style`: that one recolors _rows_, where hue is free to vary; the tab
+  bar paints active/inactive tabs from the theme, so an unread tab usually
+  wants a font change instead of a color.
+
+Only what a pane holds **right now** counts — the tree's loaded nodes in tree
+mode, the current level's items otherwise. A level a pane has drilled away from
+is a frozen snapshot that no invalidation refreshes, so counting it could keep
+the tab lit after everything was read. For a chat view that is also the right
+rule: the tree keeps its own pane through the coupled `split:`, and the server
+rows there already carry the unread state of every channel below them.
+
+### `tab.load_banner` — where this tab says that it is loading
+
+While a tab fetches, a progress line reports what it is doing and for how long
+(`Loading… 40 % (3s)`). Where that line appears is configurable, globally in
+`tui.yaml` and per tab in the view file:
+
+```yaml
+tab:
+  name: Postgres
+  load_banner: global # optional; default = notifications.load_banner (`tab`)
+```
+
+| Value    | Where the line goes                                                    |
+| -------- | ---------------------------------------------------------------------- |
+| `tab`    | on the tab's own banner line — visible only while that tab is in front |
+| `global` | on the bar shared by all tabs, prefixed with the tab's name            |
+| `off`    | nowhere                                                                |
+
+The default is `tab`, and deliberately so: a load resolves by itself, so from
+another tab it is noise. It is the opposite of an MFA prompt, which is global
+because nothing happens until the user answers it. The per-tab override exists
+because the cost of a load is per-tab — a query over a slow tunnel is worth
+watching from elsewhere, a local task list is finished before the line is read.
+
+Two details of the `global` route: the text names its tab, because the shared
+bar cannot say which tab is meant; and several tabs loading at once collapse
+into one counter (`3 tabs loading… (4s)`) rather than one line each, so loads
+never crowd out the messages that need answering. When
+`notifications.alert_enabled` is off, the counter uses the bottom notification
+bar instead of the top strip, exactly as a prominent `notify` action does.
+
+Only the progress line is routed. Errors, retries and login prompts stay in the
+tab they happened in — they name a place the user has to go.
+
+#### The `deleted` metadata field — soft-deleted rows dimmed
+
+An adapter that keeps deleted records around as context (instead of removing
+them hard) can **dim** them: if a node carries a `deleted` metadata field with
+the value `"true"`, the engine paints **every cell** of the row in the theme
+color `text_dim` — the row reads as "there, but inactive". On segmented cells
+(tree label, taskpath) this dims the text while the structural glyphs
+(connector, separator) keep their own color.
+
+This is a **pure styling signal without view configuration** (no key, no opt-in
+flag): the adapter sets the field, the view dims. It takes effect in **all**
+render paths — the ungrouped flat list, the **grouped** flat view (`── day ──`
+headers) and the tree. Unlike `unread`, the color is **not** overridable per
+view; deleted-vs-active should look the same everywhere.
+
+A deleted row only becomes visible if the query **includes** it — the adapters
+load the full including-deleted universe, and the query is the sole filter (see
+"Query = the only filter"). With the default query (`[deleted, =, false]`)
+everything deleted stays invisible; only a query that includes deleted rows
+shows them dimmed. Tasks and trackings use the same signal.
+
+#### `mark_read_on_reach_end:` — action when the cursor hits the last row
+
+A generic engine hook on the drill level (`children:`): when the cursor reaches
+the last (bottom) row of a flat list **for the first time** **and** that row is
+still unread, the engine invokes the named action on the selected node exactly
+**once**.
 
 ```yaml
 children:
   - name: messages
     node_type: "stoat:message"
-    mark_read_on_reach_end: mark-read # Aktions-ID auf dem Nachrichtenknoten
+    mark_read_on_reach_end: mark-read # action id on the message node
 ```
 
-- **Wert** — die `id` einer `invoke_action`, die der Adapter auf dem Zeilen-
-  knoten versteht (bei Stoat ackt `mark-read` den Kanal bis zu dieser Nachricht
-  und merkt sich den Lesestand lokal, worauf der Ungelesen-Marker verschwindet).
-  Fehlt das Feld, ist der Hook aus.
-- **Zwei Gates, damit es ehrlich bleibt:** _Ankunft_ — der Cursor muss neu auf
-  der letzten Zeile landen (nicht schon dort sein), sodass bloßes Öffnen der
-  Liste oder ein Tastendruck am Listenende nichts auslöst. _Ungelesen_ — die
-  Zeile muss das `unread`-Metadatenfeld tragen, damit der Hook nach dem durch
-  das Ack ausgelösten Reload (die Zeile gilt dann als gelesen) nicht erneut
-  feuert. Beides zusammen macht ihn idempotent.
-- **Warum generisch statt adapter-spezifisch:** „Cursor erreicht das Listenende"
-  ist ein reines View-Ereignis (die Engine kennt Selektion und Zeilenzahl), das
-  Acken dagegen eine Adapter-Aktion (nur der Adapter kennt das REST-`ack`). Der
-  Hook verbindet beide über eine Aktions-`id`, ohne dass die Engine den Chat-
-  Begriff „lesen" kennen muss — jeder Adapter kann ihn für ein „bis hierher
-  gesehen"-Semantik nutzen.
-- **Nur im Flat-Modus** (Listen). In Tree-Ansichten ohne klar definiertes
-  „Ende" wird das Feld ignoriert.
+- **Value** — the `id` of an `invoke_action` the adapter understands on the row
+  node (with Stoat, `mark-read` acks the channel up to that message and
+  remembers the read state locally, whereupon the unread marker disappears). If
+  the field is missing, the hook is off.
+- **Two gates to keep it honest:** _arrival_ — the cursor has to newly land on
+  the last row (not already be there), so that merely opening the list or a
+  keypress at the end of the list triggers nothing. _Unread_ — the row has to
+  carry the `unread` metadata field, so that the hook does not fire again after
+  the reload triggered by the ack (the row then counts as read). Together the
+  two make it idempotent.
+- **Why generic instead of adapter-specific:** "cursor reaches the end of the
+  list" is a pure view event (the engine knows the selection and the row count),
+  while acking is an adapter action (only the adapter knows the REST `ack`). The
+  hook connects the two via an action `id` without the engine having to know the
+  chat notion of "reading" — any adapter can use it for a "seen up to here"
+  semantics.
+- **Flat mode only** (lists). In tree views without a clearly defined "end" the
+  field is ignored.
 
-#### `expand_depth:` — initiale Aufklapptiefe pro Tree
+#### `cursor_on_open:` — where the cursor lands when a level is opened
+
+The counterpart of `mark_read_on_reach_end` at the _other_ end of the list: it
+decides which row the cursor sits on when a drill level is **opened**, once its
+items arrive.
+
+```yaml
+children:
+  - name: messages
+    node_type: "stoat:message"
+    cursor_on_open: first_unread # first | last | first_unread
+```
+
+| Value          | Cursor lands on                                                                                           |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
+| _(unset)_      | The first row — what every level did before this option existed.                                          |
+| `first`        | The same, spelled out.                                                                                    |
+| `last`         | The last (bottom) row. On an oldest-first chat page that is the newest message.                           |
+| `first_unread` | The first row whose `unread` metadata field is `"true"`, **anchored at the top edge**; `last` if none is. |
+
+- **Why `first_unread` anchors at the top** rather than scrolling minimally into
+  view: the point of the jump is everything that comes _after_ the target. Parked
+  at the bottom edge the unread run would sit off-screen below the cursor; at the
+  top edge it reads downward, and scrolling on eventually hits
+  `mark_read_on_reach_end`.
+- **Why it falls back to `last`** when nothing is unread: with no catching-up to
+  do, the newest row is what the user opened the channel for.
+- **Only the opening applies it.** A reload of an already-open level — `r`, a
+  live invalidation, an incoming message, a page change — leaves the cursor where
+  the user put it. The placement is armed by the drill and consumed by the first
+  load that brings rows in; a still-empty first page keeps it armed, so a channel
+  that receives its first message while open still gets the jump.
+  A reload re-selects the row **by node id**, not by row index: a feed that
+  renders its newest page moves every row up as soon as one message arrives, so
+  the old index would land on the neighbour. A node that is gone by then falls
+  back to the index.
+- **Same generic hook idea as `mark_read_on_reach_end`:** it reads the `unread`
+  metadata field the adapter already sets for the row highlight, so any
+  chat-/feed-style adapter opts in by naming a value — no frontend code.
+- **Flat drill levels only** (`children:`). Ignored in tree mode, where an
+  expansion is not a fresh list.
+
+#### `expand_depth:` — initial expand depth per tree
 
 ```yaml
 views:
   - name: tasks
     tree_label: description
-    expand_depth: 2 # Tiefe 0 und 1 klappen nach dem Laden automatisch auf
+    expand_depth: 2 # depth 0 and 1 expand automatically after loading
   - name: tree
     tree_label: task
-    expand_depth: all # immer komplett ausgeklappt (z. B. Trackings-Tree)
+    expand_depth: all # always fully expanded (e.g. the trackings tree)
 ```
 
-Lazy geladene Trees starten standardmäßig komplett zugeklappt — richtig für
-teure Remote-Adapter (Postgres, Confluence), falsch für billige In-Memory-
-Forests (Tasks), wo der User sein Arbeitsset sofort sehen will. `expand_depth`
-auf dem **Wurzel-`ViewDef`** klappt nach dem (Neu-)Laden der Root-Liste alle
-Zeilen mit Tiefe `< expand_depth` automatisch auf — `2` zeigt also drei Ebenen
-(Wurzeln, Kinder, Enkel) und spiegelt das native
+Lazily loaded trees start fully collapsed by default — right for expensive
+remote adapters (Postgres, Confluence), wrong for cheap in-memory forests
+(tasks), where the user wants to see their working set immediately.
+`expand_depth` on the **root `ViewDef`** automatically expands all rows with
+depth `< expand_depth` after (re)loading the root list — `2` therefore shows
+three levels (roots, children, grandchildren) and mirrors the native
 `tasks.tree.default_expand_depth`.
 
-- **One-Shot-Kaskade:** Jede Ebene lädt über den normalen Expand-Pfad
-  (dieselben Requests wie ein manuelles Enter). Sobald nichts mehr zu laden
-  ist, deaktiviert sich die Kaskade — manuelles Auf-/Zuklappen wird danach
-  nie überschrieben. Eine neue Saved-Query startet die Kaskade auf dem
-  gefilterten Tree erneut.
-- **Laufzeit-Chords `zm` / `zr`:** In einem Tree-Pane klappt
-  `tree_collapse_all` (Default `zm`) auf genau diese konfigurierte
-  Initialtiefe zurück — ein aufgeklappter Pfad bleibt nur, solange seine
-  Tiefe `< expand_depth` ist; tiefere manuelle Expansionen fallen weg
-  (`expand_depth: 0`/weggelassen → zurück auf die Wurzeln, bisheriges
-  Verhalten). `tree_expand_all` (Default `zr`) ist der Gegenpart: es schärft
-  dieselbe Kaskade mit unbegrenzter Zieltiefe und klappt den ganzen Baum
-  auf, lazy nachladend wie bei `expand_depth: all`. Geladene Children bleiben
-  in beiden Fällen im Cache, ein erneutes Auf-/Zuklappen ist also billig.
-  Beide Chords sind nur auf Tree-Panes registriert (Wurzel-`ViewDef` mit
-  `tree_label`).
-- **`expand_depth: all`:** keine Tiefen-Obergrenze — die Kaskade läuft, bis
-  eine Runde nichts Aufklappbares mehr findet. Für kleine In-Memory-Trees
-  gedacht, die immer komplett offen sein sollen (z. B. der Trackings-Tree,
-  native Parität); auf Remote-Adaptern stattdessen eine Zahl verwenden.
-- **Kosten:** eine Runde Adapter-Calls pro Ebene (Fan-out pro Knoten). Auf
-  Remote-Adaptern klein halten; `0`/weggelassen = aus (Default, bisheriges
-  Verhalten).
-- **Reload erneuert aufgeklappte Ebenen:** Landet ein Root-Reload (die
-  `r`-Reload-Action, ein `Invalidation::All` des Adapters oder der
-  Nach-Mutation-Reload einer Action) in einem Tree-Pane, werden zusätzlich
-  die Children **jedes aufgeklappten** Knotens re-fetcht — dieselben
-  Requests wie ein manuelles Zu-/Aufklappen, die alten Zeilen bleiben bis
-  zum Eintreffen sichtbar (kein Flackern). Ohne das blieben tiefere Ebenen
-  auf dem Stand vor dem Reload (z. B. ein gerade gestartetes Tracking ohne
-  `⏱`-Marker auf einem verschachtelten Task). Aufgeklappte Pfade, die
-  unter einem **zugeklappten** Vorfahren verborgen sind, werden nicht
-  erneuert — sie holen sich frische Daten beim nächsten Aufklappen.
+- **One-shot cascade:** every level loads through the normal expand path (the
+  same requests as a manual Enter). As soon as there is nothing left to load,
+  the cascade disarms itself — manual expanding/collapsing is never overridden
+  afterwards. A new saved query starts the cascade again on the filtered tree.
+- **Runtime chords `zm` / `zr`:** in a tree pane, `tree_collapse_all` (default
+  `zm`) collapses back to exactly this configured initial depth — an expanded
+  path only survives while its depth is `< expand_depth`; deeper manual
+  expansions are dropped (`expand_depth: 0`/omitted → back to the roots, the
+  previous behaviour). `tree_expand_all` (default `zr`) is the counterpart: it
+  arms the same cascade with an unlimited target depth and expands the whole
+  tree, lazily loading as with `expand_depth: all`. Loaded children stay in the
+  cache in both cases, so expanding/collapsing again is cheap. Both chords are
+  only registered on tree panes (root `ViewDef` with `tree_label`).
+- **`expand_depth: all`:** no depth ceiling — the cascade runs until a round
+  finds nothing left to expand. Intended for small in-memory trees that should
+  always be fully open (e.g. the trackings tree, native parity); on remote
+  adapters use a number instead.
+- **Cost:** one round of adapter calls per level (fan-out per node). Keep it
+  small on remote adapters; `0`/omitted = off (default, previous behaviour).
+- **A reload refreshes expanded levels:** if a root reload (the `r` reload
+  action, an `Invalidation::All` from the adapter, or the post-mutation reload
+  of an action) lands in a tree pane, the children of **every expanded** node
+  are additionally re-fetched — the same requests as a manual
+  collapse/expand, with the old rows staying visible until the new ones arrive
+  (no flicker). Without it, deeper levels would stay at their pre-reload state
+  (e.g. a tracking just started, without the `⏱` marker on a nested task).
+  Expanded paths hidden under a **collapsed** ancestor are not refreshed —
+  they fetch fresh data on the next expand.
 
-#### Eager-Subtree (`supports_eager_subtree`) — der ganze Baum in einem Call
+#### Eager subtree (`supports_eager_subtree`) — the whole tree in one call
 
-Die oben beschriebene Kaskade ist korrekt, aber teuer: pro Ebene ein
-Adapter-Fan-out und pro gelandeter Antwort ein Tree-Rebuild. Bei
-`expand_depth: all` über einen tiefen In-Memory-Forest wird das quadratisch
-(O(N²) Rebuilds), weil jeder einzelne Knoten seine Kinder separat anfordert
-und der Baum nach jeder Antwort neu flach gerechnet wird. Für Adapter, deren
-Daten ohnehin komplett im Speicher liegen (Tasks, Trackings), ist das reine
-Verschwendung — sie könnten den ganzen Teilbaum in einem Rutsch liefern.
+The cascade described above is correct, but expensive: one adapter fan-out per
+level, and one tree rebuild per landed response. With `expand_depth: all` over
+a deep in-memory forest this becomes quadratic (O(N²) rebuilds), because every
+single node requests its children separately and the tree is re-flattened after
+every response. For adapters whose data is fully in memory anyway (tasks,
+trackings) this is pure waste — they could deliver the whole subtree in one go.
 
-Dafür gibt es den Vertrags-Zusatz `list_subtree(params, depth)` auf dem `Node`-
-Trait und das Capability-Gate `supports_eager_subtree` auf `AdapterCapabilities`:
+For that there is the contract addition `list_subtree(params, depth)` on the
+`Node` trait and the capability gate `supports_eager_subtree` on
+`AdapterCapabilities`:
 
-- **`list_subtree(params, depth)`** liefert einen rekursiven `Subtree`
-  (`{ items: Vec<SubtreeNode>, page }`, jeder `SubtreeNode` trägt sein
-  `summary` plus seinen eigenen `children: Subtree`). `depth` ist die
-  Ziel-Ebene: `list_subtree(depth)` liefert `depth + 1` sichtbare Ebenen, also
-  exakt die Tiefen `0..=depth`, die die Kaskade erreichen würde. Die
-  **Default-Implementierung** rekursiert über `list()` + `get_child()` (ein
-  Call pro Knoten, identisch zur Kaskade, nur server-seitig gebündelt) — jeder
-  Adapter erbt sie kostenlos. In-Memory-Adapter **überschreiben** sie mit einem
-  reinen Projektions-Walk über ihren Snapshot (kein I/O, ein Durchlauf). Knoten
-  mit `has_children == Some(false)` werden nicht weiter abgestiegen.
-- **`supports_eager_subtree`** schaltet die TUI von der Kaskade auf einen
-  einzigen `list_subtree`-Call um: Sobald die Root-Liste gelandet ist, fragt die
-  Engine — falls `expand_depth` non-zero ist — den ganzen erwarteten Teilbaum
-  (`all` → unbegrenzt, `Levels(n)` → Tiefe `n`) in **einem** Call an und legt ihn
-  in **einem** Pass in den Tree-Cache (`ingest_subtree_level`), gefolgt von
-  **einem** Rebuild. Das Pfad-Schema ist byte-genau das der Kaskade
-  (`parent_path + [node.id]`), damit Selektion, Collapse und Re-Expand
-  ununterscheidbar bleiben.
-- **Warum Gate statt immer:** Remote-Adapter (Jira, Taiga, Postgres,
-  Confluence) melden `supports_eager_subtree: false` und behalten die
-  progressive Kaskade — ein einzelner blockierender Call über viele Ebenen würde
-  die UI einfrieren, während die Kaskade Ebene für Ebene nachlädt und sichtbar
-  Fortschritt zeigt. Eager lohnt nur, wenn der Adapter den Baum ohne Netz-I/O
-  liefern kann.
-- **Fallback:** Schlägt der eager Call fehl, fällt die Engine automatisch auf
-  die Kaskade zurück (`drive_tree_auto_expand`) — der Baum klappt dann eben
-  progressiv auf. Pagination (`… N weitere`) und Live-Row-Patches bleiben
-  unberührt, weil pro Ebene dieselbe `PageInfo` durchgereicht wird und die IDs
-  identisch sind.
+- **`list_subtree(params, depth)`** returns a recursive `Subtree`
+  (`{ items: Vec<SubtreeNode>, page }`, where every `SubtreeNode` carries its
+  `summary` plus its own `children: Subtree`). `depth` is the target level:
+  `list_subtree(depth)` delivers `depth + 1` visible levels, i.e. exactly the
+  depths `0..=depth` the cascade would reach. The **default implementation**
+  recurses via `list()` + `get_child()` (one call per node, identical to the
+  cascade, only bundled server-side) — every adapter inherits it for free.
+  In-memory adapters **override** it with a pure projection walk over their
+  snapshot (no I/O, one pass). Nodes with `has_children == Some(false)` are not
+  descended into.
+- **`supports_eager_subtree`** switches the TUI from the cascade to a single
+  `list_subtree` call: as soon as the root list has landed, the engine — if
+  `expand_depth` is non-zero — requests the whole expected subtree (`all` →
+  unlimited, `Levels(n)` → depth `n`) in **one** call and puts it into the tree
+  cache in **one** pass (`ingest_subtree_level`), followed by **one** rebuild.
+  The path scheme is byte-for-byte the cascade's (`parent_path + [node.id]`), so
+  that selection, collapse and re-expand stay indistinguishable.
+- **Why a gate instead of always:** remote adapters (Jira, Taiga, Postgres,
+  Confluence) report `supports_eager_subtree: false` and keep the progressive
+  cascade — a single blocking call across many levels would freeze the UI, while
+  the cascade loads level by level and shows visible progress. Eager only pays
+  off if the adapter can deliver the tree without network I/O.
+- **Fallback:** if the eager call fails, the engine automatically falls back to
+  the cascade (`drive_tree_auto_expand`) — the tree then simply expands
+  progressively. Pagination (`… N more`) and live row patches are untouched,
+  because the same `PageInfo` is passed through per level and the ids are
+  identical.
 
-#### Tree-Spalten-Vererbung — `columns:` einmal an der Wurzel
+#### Tree column inheritance — `columns:` once at the root
 
-Alle Zeilen eines Trees rendern in **ein** gemeinsames Spaltenraster. Eine
-`ChildDef`, die den Tree fortsetzt (`tree_label` gesetzt) und **keinen**
-eigenen `columns:`-Block deklariert, erbt darum die Spalten der nächsten
-darüberliegenden Ebene, die welche hat. Ein Tree muss seine Spalten also nur
-**einmal an der Wurzel** deklarieren statt sie auf jeder Tiefe identisch zu
-wiederholen (was unweigerlich auseinanderdriftet).
+All rows of a tree render into **one** shared column grid. A `ChildDef` that
+continues the tree (`tree_label` set) and declares **no** `columns:` block of
+its own therefore inherits the columns of the nearest level above it that has
+any. A tree thus only has to declare its columns **once at the root** instead of
+repeating them identically at every depth (which inevitably drifts apart).
 
-Die Vererbung läuft **einmalig direkt nach dem Parse** (`inherit_tree_columns`),
-bevor der Validator und jede Laufzeit-Spaltenabfrage die Config lesen — beide
-sehen also bereits einen vollständig gefüllten Satz und brauchen keine eigene
-Vererbungslogik. Geltungsbereich bewusst eng:
+The inheritance runs **once, directly after the parse**
+(`inherit_tree_columns`), before the validator and any runtime column query read
+the config — both therefore already see a fully populated set and need no
+inheritance logic of their own. The scope is deliberately narrow:
 
-- **Nur Tree-Fortsetzungs-Ebenen erben** (Gate: `tree_label` gesetzt). Ein
-  reiner Drill-Child ohne `tree_label` bleibt leer und behält den
-  Auto-Fallback aus den Item-Metadaten (z. B. die Postgres-Rows-Ebene, siehe
-  unten).
-- **Eine Ebene mit eigenem `columns:` bleibt unangetastet** und wird selbst
-  zur Vererbungsquelle für darunterliegende Fortsetzungs-Ebenen — wer
-  bewusst abweichen will, deklariert eigene Spalten.
-- **Separate Views erben nicht über die View-Grenze** (eine flache
-  Listen-`ViewDef` neben dem Tree bleibt unabhängig und deklariert ihre
-  Spalten selbst).
+- **Only tree-continuing levels inherit** (gate: `tree_label` set). A pure drill
+  child without `tree_label` stays empty and keeps the auto fallback from the
+  item metadata (e.g. the Postgres rows level, see below).
+- **A level with its own `columns:` stays untouched** and itself becomes the
+  inheritance source for continuing levels below it — if you deliberately want
+  to deviate, declare your own columns.
+- **Separate views do not inherit across the view boundary** (a flat list
+  `ViewDef` next to the tree stays independent and declares its columns itself).
 
 ```yaml
 views:
   - name: tasks
     tree_label: description
-    columns: # einmal hier deklariert …
+    columns: # declared here once …
       - { key: status, label: St }
       - { key: description, label: Task, source: label }
     children:
       - name: subtasks
         tree_label: description
         recursive: true
-        # … kein columns: — erbt St/Task von der Wurzel.
+        # … no columns: — inherits St/Task from the root.
 ```
 
-#### Tree-Action-/Shortcut-Vererbung — `inherit:` pro Eintrag
+#### Tree action and shortcut inheritance — `inherit:` per entry
 
-Analog zu den Spalten lassen sich auch `actions:`- und `shortcuts:`-Einträge
-die Tree-Fortsetzungs-Ebenen **hinunter vererben**, damit der rekursive
-Branch sie nicht wortgleich wiederholen muss. Die Vererbung ist **fein
-granular und pro Eintrag opt-in**, nicht alles-oder-nichts:
+Analogous to the columns, `actions:` and `shortcuts:` entries can be inherited
+**down** the tree-continuing levels, so that the recursive branch does not have
+to repeat them verbatim. The inheritance is **fine-grained and opt-in per
+entry**, not all-or-nothing:
 
-- Ein `actions:`-Eintrag wird vererbt, wenn er `inherit: true` trägt.
-- Ein `shortcuts:`-Eintrag wird vererbt, wenn er die ausführliche Form
-  `{ action: <name>, inherit: true }` statt der Kurzform `<key>: <name>`
-  benutzt (siehe [Per-Node-Aktionen](#per-node-aktionen-shortcuts)).
+- An `actions:` entry is inherited if it carries `inherit: true`.
+- A `shortcuts:` entry is inherited if it uses the long form
+  `{ action: <name>, inherit: true }` instead of the short form
+  `<key>: <name>` (see [per-node actions](#per-node-actions-shortcuts)).
 
-Die Vererbung läuft **einmalig direkt nach dem Parse** (`inherit_tree_actions`,
-neben `inherit_tree_columns`), bevor Validator und Laufzeit die Config lesen.
-Geltungsbereich bewusst eng — dieselben drei Regeln wie bei den Spalten plus
-eine **Override-pro-Feld**-Regel:
+The inheritance runs **once, directly after the parse**
+(`inherit_tree_actions`, next to `inherit_tree_columns`), before the validator
+and the runtime read the config. The scope is deliberately narrow — the same
+three rules as for the columns, plus an **override-per-field** rule:
 
-- **Nur Tree-Fortsetzungs-Ebenen erben** (Gate: `tree_label` gesetzt).
-- **Override per Key, pro Feld:** Deklariert die Kind-Ebene denselben Key
-  (Action-`key` bzw. Shortcut-Char) selbst, gewinnt der lokale Eintrag — der
-  geerbte wird für genau diesen Key nicht kopiert. So lässt sich gezielt
-  _eines_ erben und _ein anderes_ überschreiben.
-- **Geerbte Einträge behalten ihre Vererbbarkeit** und kaskadieren weiter
-  nach unten (relevant bei mehr als einer Fortsetzungs-Ebene).
-- **Separate Views erben nicht über die View-Grenze** (eine flache
-  Listen-`ViewDef` neben dem Tree bindet ihre Keys selbst).
-- **Die Single-Level-Suchfamilie wird nie vererbt:** `fuzzy_filter`,
-  `search` und `tree_find` sind von der Vererbung ausgenommen (auch wenn
-  `inherit: true` gesetzt würde), weil der Validator sie ohnehin auf die
-  Tree-Wurzel beschränkt.
+- **Only tree-continuing levels inherit** (gate: `tree_label` set).
+- **Override by key, per field:** if the child level declares the same key
+  (action `key` resp. shortcut char) itself, the local entry wins — the
+  inherited one is not copied for exactly that key. This makes it possible to
+  inherit _one_ thing and override _another_ deliberately.
+- **Inherited entries keep their inheritability** and cascade further down
+  (relevant with more than one continuing level).
+- **Separate views do not inherit across the view boundary** (a flat list
+  `ViewDef` next to the tree binds its keys itself).
+- **The single-level search family is never inherited:** `fuzzy_filter`,
+  `search` and `tree_find` are excluded from inheritance (even if
+  `inherit: true` were set), because the validator restricts them to the tree
+  root anyway.
 
 ```yaml
 views:
@@ -1160,62 +1420,82 @@ views:
           under_selection: true,
           inherit: true,
         }
-      - { name: fuzzy filter, key: f, type: fuzzy_filter } # nicht vererbbar
+      - { name: fuzzy filter, key: f, type: fuzzy_filter } # not inheritable
     shortcuts:
-      d: { action: delete, inherit: true } # vererbt
-      s: toggle-tracking # Kurzform → NICHT vererbt
+      d: { action: delete, inherit: true } # inherited
+      s: toggle-tracking # short form → NOT inherited
     children:
       - name: subtasks
         tree_label: description
         recursive: true
-        # kein actions:/shortcuts: — erbt edit/add + `d` von der Wurzel.
-        # `s` (Kurzform) und `f` (Suchfamilie) werden nicht vererbt.
+        # no actions:/shortcuts: — inherits edit/add + `d` from the root.
+        # `s` (short form) and `f` (search family) are not inherited.
 ```
 
-#### Column-Config-Popup (`c`) — Sichtbarkeit & Reihenfolge zur Laufzeit
+#### Column config popup (`c c`) — visibility & order at runtime
 
-Das Column-Config-Popup (`common.column_config`, Default `c`) funktioniert auf
-Content-Tabs genauso wie auf den nativen Tasks/Trackings-Tabs: Spalten
-ein-/ausblenden (`Space`) und umsortieren (`Ctrl+D`/`Ctrl+F`), angewendet mit
-`Enter`. Es existiert, damit User das Spalten-Layout an ihre Arbeit anpassen
-können, **ohne die View-YAML zu editieren** — die YAML bleibt die geteilte
-Default-Definition, das Popup ist der persönliche Override darüber.
+The column config popup (`common.column_config`, default `c c`) works on content
+tabs exactly as on the native tasks/trackings tabs: show/hide columns (`Space`)
+and reorder them (`Ctrl+D`/`Ctrl+F`), applied with `Enter`. It exists so that
+users can adapt the column layout to their work **without editing the view
+YAML** — the YAML stays the shared default definition, the popup is the personal
+override on top of it.
 
-- **Pro Level konfigurierbar:** Jede Ebene hat ihr eigenes Layout — die
-  Wurzel-View, jede gedrillte Child-Ebene und im Tree-Mode jede
-  `node_type_chain` (Cursor-Zeile entscheidet, welche Ebene konfiguriert
-  wird). Splits derselben Ebene teilen sich das Layout.
-- **Tree-Ebenen mit gleichem Spaltensatz teilen sich einen Override.** Da
-  alle Ebenen eines Trees in **ein** Raster rendern, wäre ein Override pro
-  Tiefe widersinnig: `c` auf der Wurzel würde die Kinder nicht erfassen, und
-  zwei Tiefen könnten auseinanderlaufen. Darum klappt der Override-Key über
-  Tree-Ebenen, die den **identischen** Spaltensatz zeigen, auf die
-  spaltendeklarierende Vorfahr-Ebene zusammen — das ist genau der Fall, den
-  die [Tree-Spalten-Vererbung](#tree-spalten-vererbung--columns-einmal-an-der-wurzel)
-  erzeugt (geerbte Ebene == Wurzel), und es faltet auch jede Rekursionstiefe
-  (alle resolven zur selben `ChildDef`) auf **einen** Key. `c` auf
-  irgendeiner Tiefe konfiguriert damit den ganzen Tree. Eine Ebene, die
-  bewusst **abweichende** `columns:` deklariert, behält ihren eigenen
-  Per-Level-Key und bleibt unabhängig konfigurierbar. (Folge: alte, vor
-  dieser Regel pro Tiefe gespeicherte Overrides eines uniformen Trees passen
-  nicht mehr auf die neuen Keys und werden ignoriert — der Tree zeigt dann
-  wieder den YAML-Default, bis er neu konfiguriert wird.)
-- **Persistenz:** Eine Settings-Row pro Tab (`content_columns:<Tab-Name>`,
-  JSON-Map Level-Key → sichtbare Spalten-Keys in Reihenfolge), geladen beim
-  Start.
-- **Reset-Semantik:** Entspricht die Auswahl wieder exakt der
-  YAML-Reihenfolge, wird der Override entfernt (und bei leerer Map die
-  Settings-Row gelöscht) — ein zurückgesetztes Layout hinterlässt keinen
-  Zustand, der spätere YAML-Änderungen verdecken könnte.
-- **`tree_label`-Spalte ist fix:** Sie trägt den Tree selbst (Connectoren,
-  Einrückung) und kann nicht ausgeblendet werden.
-- **Auto-Fallback-Ebenen** (keine `columns:` in der YAML, Schema aus den
-  Item-Metadaten abgeleitet — z. B. Postgres-Rows) sind nicht konfigurierbar;
-  `c` meldet das per Notification. Es gibt dort keine stabile
-  Spalten-Identität, an der ein Override über Reloads hinweg festmachen
-  könnte.
+- **Configurable per level:** every level has its own layout — the root view,
+  every drilled child level, and in tree mode every `node_type_chain` (the
+  cursor row decides which level is configured). Splits of the same level share
+  the layout.
+- **Tree levels with the same column set share one override.** Since all levels
+  of a tree render into **one** grid, an override per depth would be absurd:
+  `c c` on the root would not cover the children, and two depths could drift apart.
+  The override key therefore collapses across tree levels that show the
+  **identical** column set onto the column-declaring ancestor level — which is
+  exactly the case produced by
+  [tree column inheritance](#tree-column-inheritance--columns-once-at-the-root)
+  (inherited level == root), and it also folds every recursion depth (all
+  resolve to the same `ChildDef`) onto **one** key. `c c` at any depth therefore
+  configures the whole tree. A level that deliberately declares **deviating**
+  `columns:` keeps its own per-level key and stays independently configurable.
+  (Consequence: old overrides of a uniform tree, stored per depth before this
+  rule, no longer fit the new keys and are ignored — the tree then shows the
+  YAML default again until it is reconfigured.)
+- **Persistence:** one settings row per tab (`content_columns:<tab name>`, a
+  JSON map level key → visible column keys in order), loaded at startup.
+- **Reset semantics:** if the selection matches the YAML order exactly again,
+  the override is removed (and with an empty map the settings row is deleted) —
+  a reset layout leaves behind no state that could mask later YAML changes.
+- **The `tree_label` column is fixed:** it carries the tree itself (connectors,
+  indentation) and cannot be hidden.
+- **Auto-fallback levels** (no `columns:` in the YAML, the schema derived from
+  the item metadata — e.g. Postgres rows) are not configurable; `c c` reports
+  that via a notification. There is no stable column identity there that an
+  override could pin to across reloads.
 
-### Zweites Beispiel: `confluence.yaml`
+#### Sort menu (`c s`) — the whole sort spec in one list
+
+The sort menu (`common.sort_menu`, default `c s`) lists **every** sortable
+column of the active level: the ones currently sorted first, in sort order and
+with their direction, the unsorted ones below. It is the second UI path onto the
+same state the sort-hint mode (`common.sort_mode`, default `S`) edits — both
+write through one commit function, so a sort built with `S` reads back in the
+menu and vice versa.
+
+- **Keys:** the list navigation keys (`common.list_prev`/`list_next`, by default
+  `k`/`j`) move the cursor, `Ctrl+K`/`Ctrl+J` move the selected entry within the
+  sorted block, `a` sorts ascending, `d` descending, `0` takes the column out of
+  the sort again. `Enter` applies, `Esc` discards.
+- **Sorted entries stay a prefix of the list.** That is what makes the list
+  readable as the sort spec (rank 1, 2, 3 …), and it is why `a`/`d` on an
+  unsorted column appends it to the sorted block — the same "append" the
+  hint mode performs — while `0` drops it back into its natural column position.
+  An unsorted entry has no rank, so `Ctrl+K`/`Ctrl+J` do nothing on it.
+- **Nothing is applied while the menu is open.** For adapter-side sorts every
+  keystroke would otherwise cost a reload; the menu is a draft that `Enter`
+  commits (and only then, if the spec actually changed, reloads and persists).
+- Levels that expose no sortable columns say so via a notification instead of
+  opening an empty popup — the same gate `S` uses.
+
+### Second example: `confluence.yaml`
 
 ```yaml
 tab:
@@ -1268,15 +1548,15 @@ views:
             type: create
 ```
 
-### Beispiel: Adapter-Config `jira-globex.yaml`
+### Example: adapter config `jira-globex.yaml`
 
-Die Adapter-Config ist adapter-spezifisch. Für Jira z.B.:
+The adapter config is adapter-specific. For Jira, for example:
 
 ```yaml
 url: https://jira.example.com
 session_id: "JSESSIONID=abc123; atlassian.xsrf.token=..."
 
-# Adapter-internes Caching (optional, Defaults im Adapter)
+# Adapter-internal caching (optional, defaults live in the adapter)
 cache:
   labels:
     enabled: true
@@ -1286,21 +1566,21 @@ cache:
     ttl: 3600
 ```
 
-Das Caching ist Adapter-intern — der Adapter braucht es, um z.B.
-Labels/Users für Autocomplete im Editor-Template bereitstellen zu können.
-Die generische View-YAML weiß nichts davon.
+The caching is adapter-internal — the adapter needs it in order to provide e.g.
+labels/users for autocomplete in the editor template. The generic view YAML
+knows nothing about it.
 
 ---
 
-## Adapter-Konstruktion
+## Adapter construction
 
-### Aktuell (Jira-spezifisch)
+### Current (Jira-specific)
 
 ```rust
 JiraAdapter::from_connection(&JiraConnection) -> Result<JiraAdapter>
 ```
 
-### Generisch (über AdapterFactory)
+### Generic (via AdapterFactory)
 
 ```rust
 pub trait AdapterFactory: Send + Sync {
@@ -1309,49 +1589,49 @@ pub trait AdapterFactory: Send + Sync {
 }
 ```
 
-Die TUI:
+The TUI:
 
-1. Liest `adapter.type` aus der View-YAML → z.B. `"jira"`
-2. Findet die registrierte `AdapterFactory` für diesen Typ
-3. Liest `adapter.config` (Dateiinhalt) oder `adapter.config_inline`
-4. Ruft `factory.create(config_string)` auf
-5. Erhält einen `Box<dyn ContentAdapter>`
+1. Reads `adapter.type` from the view YAML → e.g. `"jira"`
+2. Finds the registered `AdapterFactory` for that type
+3. Reads `adapter.config` (file content) or `adapter.config_inline`
+4. Calls `factory.create(config_string)`
+5. Receives a `Box<dyn ContentAdapter>`
 
-Der Adapter parst den Config-String intern — kann YAML, JSON, TOML,
-Connection-String oder was auch immer sein.
+The adapter parses the config string internally — it can be YAML, JSON, TOML, a
+connection string or whatever else.
 
 ---
 
 ## Caching
 
-### Verantwortung: Adapter-intern
+### Responsibility: adapter-internal
 
-Caching ist **komplett Adapter-intern**. Die TUI weiß nichts davon.
+Caching is **entirely adapter-internal**. The TUI knows nothing about it.
 
-**Warum?** Der Adapter braucht gecachte Daten für seine eigene Logik:
+**Why?** The adapter needs cached data for its own logic:
 
-- Editor-Templates mit Autocomplete-Hints (Labels, Users, Status-Werte)
-- Schema-Discovery (welche Felder gibt es?)
-- Vermeidung redundanter API-Calls bei schnellen list/get_by_id-Folgen
+- Editor templates with autocomplete hints (labels, users, status values)
+- Schema discovery (which fields exist?)
+- Avoiding redundant API calls on quick list/get_by_id sequences
 
-### Schnittstelle zur TUI
+### Interface towards the TUI
 
-Die TUI braucht keinen expliziten Cache-Zugriff. Stattdessen liefert der
-Adapter die gecachten Daten implizit über die bestehenden Trait-Methoden:
+The TUI needs no explicit cache access. Instead the adapter delivers the cached
+data implicitly through the existing trait methods:
 
-- `editor_template()` enthält bereits die Autocomplete-Hints aus dem Cache
-- `schema()` liefert Felder inkl. `allowed_values` aus dem Cache
-- `list()` kann intern cachen, die TUI merkt es nicht
+- `editor_template()` already contains the autocomplete hints from the cache
+- `schema()` delivers fields including `allowed_values` from the cache
+- `list()` can cache internally, the TUI does not notice
 
-Einzige TUI-Interaktion: ein generisches "Refresh" könnte
-`adapter.invalidate_all()` aufrufen, falls der Adapter es anbietet.
+The only TUI interaction: a generic "refresh" could call
+`adapter.invalidate_all()` if the adapter offers it.
 
-### Adapter-interne Implementierung
+### Adapter-internal implementation
 
-Jeder Adapter entscheidet selbst über seine Cache-Strategie. Z.B.:
+Every adapter decides on its own cache strategy. For example:
 
 ```rust
-// Im JiraAdapter intern
+// Internal to JiraAdapter
 struct JiraCache {
     labels: Option<(Vec<String>, Instant)>,   // (data, loaded_at)
     users: Option<(Vec<JiraUser>, Instant)>,
@@ -1359,42 +1639,42 @@ struct JiraCache {
 }
 
 impl JiraCache {
-    fn labels(&self) -> Option<&[String]> { /* prüft TTL */ }
+    fn labels(&self) -> Option<&[String]> { /* checks the TTL */ }
     async fn ensure_labels(&mut self, client: &JiraClient) -> &[String] { /* lazy load */ }
 }
 ```
 
-Konfigurierbar über die adapter-eigene Config (z.B. `cache.labels.ttl`
-in `jira-globex.yaml`), nicht über die View-YAML.
+Configurable through the adapter's own config (e.g. `cache.labels.ttl` in
+`jira-globex.yaml`), not through the view YAML.
 
 ---
 
-## Editor-Templates
+## Editor templates
 
 ### Problem
 
-Aktuell baut die TUI das Editor-Template manuell zusammen
-(`"# KEY: summary\n\ndescription"`). Das ist Jira-spezifisch.
+Currently the TUI assembles the editor template by hand
+(`"# KEY: summary\n\ndescription"`). That is Jira-specific.
 
-### Lösung: Adapter gibt Templates vor
+### Solution: the adapter supplies the templates
 
-Erweiterung des `Node`-Traits (nicht `Content`, da auch Metadata-Felder
-einbezogen werden):
+An extension of the `Node` trait (not `Content`, since metadata fields are
+involved too):
 
 ```rust
 #[async_trait]
 pub trait Node: Send + Sync {
-    // ... bestehende Methoden ...
+    // ... existing methods ...
 
-    /// Template für den externen Editor generieren.
-    /// Enthält editierbare Felder + Content-Body in einem
-    /// für den Benutzer lesbaren Format.
-    /// `editable_fields`: welche Metadata-Keys editierbar sein sollen
-    /// (aus der View-YAML actions.edit.metadata).
+    /// Generate the template for the external editor.
+    /// Contains the editable fields + the content body in a format
+    /// readable for the user.
+    /// `editable_fields`: which metadata keys should be editable
+    /// (from the view YAML actions.edit.metadata).
     async fn editor_template(&self, editable_fields: &[String]) -> Result<String>;
 
-    /// Editor-Ausgabe parsen → (metadata_changes, new_content_body).
-    /// Gibt einen Fehler zurück wenn das Format ungültig ist.
+    /// Parse the editor output → (metadata_changes, new_content_body).
+    /// Returns an error if the format is invalid.
     fn parse_editor_output(
         &self,
         text: &str,
@@ -1402,7 +1682,7 @@ pub trait Node: Send + Sync {
 }
 ```
 
-### Beispiel: Jira Issue Template
+### Example: Jira issue template
 
 ```
 # PROJ-202
@@ -1416,16 +1696,16 @@ assignee: jane.doe           # available: jane.doe, john.smith, ...
 Login timeout occurs after 30 seconds on iOS devices...
 ```
 
-Der Adapter generiert dieses Template und weiß auch wie er es zurück-parst:
+The adapter generates this template and also knows how to parse it back:
 
-- Zeilen mit `#` am Anfang = Kommentare (read-only Info)
-- `key: value` Zeilen vor der Trennlinie = editierbare Metadata
-- Alles nach der Trennlinie = Content-Body
+- Lines starting with `#` = comments (read-only info)
+- `key: value` lines before the separator = editable metadata
+- Everything after the separator = the content body
 
-Die `# available:` Hints kommen aus dem adapter-internen Cache. Die TUI
-muss sich darum nicht kümmern.
+The `# available:` hints come from the adapter-internal cache. The TUI does not
+have to care.
 
-### Beispiel: Confluence Page Template
+### Example: Confluence page template
 
 ```
 # Space: DEV | Last modified: 2024-03-15
@@ -1438,89 +1718,87 @@ labels: architecture, adr
 ...
 ```
 
-### Generischer Editor-Flow in der TUI
+### Generic editor flow in the TUI
 
 ```
-1. TUI ruft node.editor_template(editable_fields) auf
-   → Adapter generiert Template (mit Autocomplete-Hints aus Cache)
-2. TUI öffnet externen Editor mit dem Template
-3. User editiert und speichert
-4. TUI ruft node.parse_editor_output(text) auf
-   → Adapter parst zurück: (metadata_changes, new_content)
-5. TUI ruft node.update_metadata(changes, version) und/oder
-   node.content_mut().write(content, version) auf
+1. The TUI calls node.editor_template(editable_fields)
+   → the adapter generates the template (with autocomplete hints from its cache)
+2. The TUI opens the external editor with the template
+3. The user edits and saves
+4. The TUI calls node.parse_editor_output(text)
+   → the adapter parses it back: (metadata_changes, new_content)
+5. The TUI calls node.update_metadata(changes, version) and/or
+   node.content_mut().write(content, version)
 ```
 
-Die TUI kennt das Template-Format nicht — der Adapter ist dafür zuständig.
+The TUI does not know the template format — the adapter is responsible for it.
 
 ---
 
-## Navigation: Breadcrumbs & Zurück
+## Navigation: breadcrumbs & going back
 
-Wenn der User in Kind-Nodes navigiert (Ticket → Comments), braucht die TUI
-einen Navigations-Stack:
+When the user navigates into child nodes (ticket → comments), the TUI needs a
+navigation stack:
 
 ```
 Jira > Tickets > PROJ-202 > Comments
 ```
 
-### Implementierung
+### Implementation
 
 ```rust
 struct ContentView {
     adapter: Arc<dyn ContentAdapter>,
-    view_config: ViewConfig,          // aus der YAML
-    nav_stack: Vec<NavFrame>,         // Breadcrumb-Stack
+    view_config: ViewConfig,          // from the YAML
+    nav_stack: Vec<NavFrame>,         // breadcrumb stack
 }
 
 struct NavFrame {
-    node_id: String,                  // ID des Parent-Nodes
-    node_label: String,               // für Breadcrumb-Anzeige
-    view_def: ChildViewDef,           // column/action Config
-    scroll_position: usize,           // für Restore beim Zurückgehen
+    node_id: String,                  // id of the parent node
+    node_label: String,               // for the breadcrumb display
+    view_def: ChildViewDef,           // column/action config
+    scroll_position: usize,           // for restore when going back
     selected_index: usize,
 }
 ```
 
-- `Enter` / konfigurierter Key → push Frame, Liste der Kind-Nodes laden
-- `Esc` / `Backspace` → pop Frame, zurück zur Elternliste
-- Breadcrumb wird in der Tab-Bar oder als eigene Zeile angezeigt
+- `Enter` / the configured key → push a frame, load the list of child nodes
+- `Esc` / `Backspace` → pop the frame, back to the parent list
+- The breadcrumb is shown in the tab bar or as a line of its own
 
-### Jump-Mode (`jump_mode`, Default `J`)
+### Jump mode (`jump_mode`, default `J`)
 
-Vimium-artiger Direkt-Sprung über die sichtbaren Zeilen — Parität zum
-nativen Tasks-Tab (dort auf `p`). Die Aktion `jump_mode` ist in
-`keybindings.yaml` unter `content:` bindbar; Default ist `J` (großes J),
-damit der Adapter-Tab `p` für ein `paste`/`paste-move`-Shortcut frei
-behält (der native Tab nutzt weiterhin `p` über `common.jump_mode`).
+A Vimium-style direct jump across the visible rows — parity with the native
+tasks tab (`p` there). The action `jump_mode` is bindable in
+`keybindings.yaml` under `content:`; the default is `J` (capital J), so that
+the adapter tab keeps `p` free for a `paste`/`paste-move` shortcut (the native
+tab still uses `p` via `common.jump_mode`).
 
-Ablauf:
+Flow:
 
-1. `J` öffnet den Sprung-Overlay (Phase 1).
-2. Ein beliebiges Zeichen tippen → jede sichtbare Zeile, die das Zeichen
-   enthält, bekommt ein Label (Phase 2). Gibt es nur einen Treffer,
-   springt der Cursor sofort dorthin; bei keinem Treffer schließt der
-   Overlay.
-3. Das Label tippen → der Cursor springt in die zugehörige Zeile.
-   `Esc` bricht jederzeit ab.
+1. `J` opens the jump overlay (phase 1).
+2. Type any character → every visible row containing that character gets a
+   label (phase 2). If there is only one hit, the cursor jumps there
+   immediately; with no hit the overlay closes.
+3. Type the label → the cursor jumps to the corresponding row. `Esc` cancels at
+   any time.
 
-Das Label-Alphabet stammt aus `navigation.jump_chars` (geteilt mit dem
-nativen Tab). Der Sprung wirkt nur auf das fokussierte Pane; in Splits
-gilt er für das gerade aktive Pane.
+The label alphabet comes from `navigation.jump_chars` (shared with the native
+tab). The jump only affects the focused pane; in splits it applies to the
+currently active pane.
 
-### Link-Hop (`link_hop`, opt-in)
+### Link hop (`link_hop`, opt-in)
 
-Vimium-artige Link-Auswahl: die konfigurierte Taste (üblich `f`) labelt jeden
-im fokussierten Pane sichtbaren Link; das Label tippen öffnet die zugehörige
-URL im Browser. Nützlich vor allem in markdown-gerenderten Panes (z. B.
-Stoat-Chat).
+Vimium-style link selection: the configured key (usually `f`) labels every link
+visible in the focused pane; typing the label opens the corresponding URL in the
+browser. Useful above all in markdown-rendered panes (e.g. the Stoat chat).
 
-**Opt-in pro View/Child** — es gibt _keinen_ eingebauten Default. Link-Hop
-wird nur dort geclaimt, wo eine Bindung vorliegt: entweder auf einer View bzw.
-einem Child über `keybindings: { link_hop: f }`, oder global über
-`keybindings.content.link_hop` in der `tui.yaml`. Ohne Bindung bleibt die
-Taste frei. So lässt sich Link-Hop gezielt genau auf den Panes anbieten, die
-tatsächlich Links tragen (z. B. der Messages-Pane des Stoat-Chats):
+**Opt-in per view/child** — there is _no_ built-in default. Link hop is only
+claimed where a binding exists: either on a view resp. a child via
+`keybindings: { link_hop: f }`, or globally via `keybindings.content.link_hop`
+in `tui.yaml`. Without a binding the key stays free. This way link hop can be
+offered exactly on the panes that actually carry links (e.g. the messages pane
+of the Stoat chat):
 
 ```yaml
 children:
@@ -1529,23 +1807,22 @@ children:
     keybindings: { link_hop: f }
 ```
 
-Erkannt werden zwei Link-Formen aus dem Zeilentext:
+Two link forms are recognized in the row text:
 
-- **nackte URLs** — `https://example.com/x`
-- **Markdown-Links** — `[text](url)`; gelabelt wird der angezeigte
-  `text`, geöffnet die `url` (der Markdown-Renderer zeigt nur den Text an,
-  die URL wird aus dem Rohtext rekonstruiert).
+- **bare URLs** — `https://example.com/x`
+- **markdown links** — `[text](url)`; the displayed `text` is labelled, the
+  `url` is opened (the markdown renderer only shows the text, the URL is
+  reconstructed from the raw text).
 
-Ablauf: `f` labelt alle sichtbaren Links; Label tippen → die URL wird mit
-dem konfigurierten Opener geöffnet (`Esc` bricht ab; gibt es keinen Link,
-erscheint ein Hinweis). Der Overlay teilt sich Label-Alphabet
-(`navigation.jump_chars`) und Bedienlogik mit dem Jump-Mode.
+Flow: `f` labels all visible links; type the label → the URL is opened with the
+configured opener (`Esc` cancels; if there is no link, a hint appears). The
+overlay shares its label alphabet (`navigation.jump_chars`) and its interaction
+logic with the jump mode.
 
-Der Opener ist über `navigation.link_opener` konfigurierbar (Default
-`xdg-open`); der String wird an Whitespace getrennt, die URL als letztes
-Argument angehängt — so funktionieren auch Flags, z. B.
-`firefox --new-tab`. Der Prozess wird abgekoppelt (eigene Prozessgruppe,
-`/dev/null`-Stdio) gestartet, damit die TUI nie auf den Browser blockiert.
+The opener is configurable via `navigation.link_opener` (default `xdg-open`);
+the string is split at whitespace and the URL appended as the last argument — so
+flags work too, e.g. `firefox --new-tab`. The process is started detached (own
+process group, `/dev/null` stdio), so the TUI never blocks on the browser.
 
 ```yaml
 navigation:
@@ -1555,14 +1832,14 @@ navigation:
 
 ---
 
-## Per-Node-Aktionen (`shortcuts:`)
+## Per-node actions (`shortcuts:`)
 
-Neben den `actions:`-Einträgen einer View (Refresh, Filter, Search,
-…) können einzelne Nodes _eigene_ Aktionen anbieten — z. B. eine
-TableNode bietet `edit_sql`, eine DbScriptNode bietet `execute`,
-`edit`, `delete`. Diese werden vom Adapter via
-[`Node::actions()`](../not-yet-done-content/src/lib.rs)
-ausgewiesen und vom YAML über die `shortcuts:`-Map an Tasten gebunden.
+Besides the `actions:` entries of a view (refresh, filter, search, …),
+individual nodes can offer _their own_ actions — e.g. a TableNode offers
+`edit_sql`, a DbScriptNode offers `execute`, `edit`, `delete`. They are
+advertised by the adapter via
+[`Node::actions()`](../not-yet-done-content/src/lib.rs) and bound to keys from
+the YAML through the `shortcuts:` map.
 
 ```yaml
 children:
@@ -1574,132 +1851,126 @@ children:
       d: delete # → Node::invoke_action("delete", …)
 ```
 
-Eine `shortcuts:`-Map gibt es sowohl auf der View-Ebene
-(`ViewDef.shortcuts`) als auch auf jeder `ChildDef`. Der TUI-Resolver
-wählt den tiefsten passenden Match entlang der `node_type`-Kette;
-greift keiner, fällt er auf die View-Ebene zurück.
+A `shortcuts:` map exists both on the view level (`ViewDef.shortcuts`) and on
+every `ChildDef`. The TUI resolver picks the deepest matching entry along the
+`node_type` chain; if none applies, it falls back to the view level.
 
-Aktions-Werte können mit dem Prefix `parent:` versehen werden — der
-Resolver feuert dann gegen den unmittelbaren Eltern-Node, nicht
-gegen den selektierten. Beispiel:
+Action values can be prefixed with `parent:` — the resolver then fires against
+the immediate parent node instead of the selected one. Example:
 
 ```yaml
 - name: Rows
   node_type: "postgres:row"
   shortcuts:
-    Q: "parent:edit_sql" # → wirkt auf den zugrundeliegenden Table-Node
+    Q: "parent:edit_sql" # → acts on the underlying table node
 ```
 
-Ein Shortcut-Wert kennt **zwei Formen**: die Kurzform `<key>: <action>`
-(oben) und die ausführliche Map-Form `<key>: { action: <action>, inherit:
-<bool> }`. Beide binden denselben Action-Namen; die Map-Form trägt
-zusätzlich das `inherit`-Flag (Default `false`), das den Shortcut die
-Tree-Fortsetzungs-Ebenen hinunter vererbt (siehe
-[Tree-Action-/Shortcut-Vererbung](#tree-action-shortcut-vererbung--inherit-pro-eintrag)).
-Der `parent:`-Prefix funktioniert in beiden Formen.
+A shortcut value has **two forms**: the short form `<key>: <action>` (above)
+and the explicit map form `<key>: { action: <action>, inherit: <bool> }`. Both
+bind the same action name; the map form additionally carries the `inherit` flag
+(default `false`), which inherits the shortcut down the tree-continuing levels
+(see
+[tree action and shortcut inheritance](#tree-action-and-shortcut-inheritance--inherit-per-entry)).
+The `parent:` prefix works in both forms.
 
 ```yaml
 shortcuts:
-  d: delete # Kurzform — nur auf dieser Ebene
-  s: { action: toggle-tracking, inherit: true } # erbt nach unten
+  d: delete # short form — this level only
+  s: { action: toggle-tracking, inherit: true } # inherits downwards
 ```
 
-**`under_selection` auf `type: create`-Actions:** Standardmäßig legt eine
-`create`-Action das neue Kind im aktuell gedrillten Container an (Wurzel →
-Top-Level, in einen Task gedrillt → dessen Kind). Mit `under_selection:
-true` wird stattdessen die **markierte Zeile** zum Ziel-Parent — in einem
-Tree nistet der Create damit unter dem Cursor, ohne vorher hineinzudrillen.
-Ist nichts selektiert (leerer Tree), löst die Engine den Parent auf den
-Adapter-Root auf, sodass beide Fälle zu einem Top-Level-Create werden. So
-realisiert der Tasks-Tab `a` (Kind der Selektion / Top-Level via Adapter-ID
-`add`) und `A` (Sibling via Adapter-ID `add-sibling`).
+**`under_selection` on `type: create` actions:** by default a `create` action
+creates the new child in the currently drilled container (root → top level,
+drilled into a task → its child). With `under_selection: true` the **marked
+row** becomes the target parent instead — in a tree the create thus nests under
+the cursor without drilling in first. If nothing is selected (empty tree), the
+engine resolves the parent to the adapter root, so that both cases become a
+top-level create. This is how the tasks tab implements `a` (child of the
+selection / top level via the adapter id `add`) and `A` (sibling via the adapter
+id `add-sibling`).
 
-**`on_container` auf `type: custom`-Actions:** Eine Aktion, die auf der
-**ganzen Liste/Ebene** wirkt (statt auf einer Zeile), wird als `actions:`-
-Eintrag mit `on_container: true` deklariert — nicht als `parent:`-Shortcut.
-Der Unterschied ist Sichtbarkeit und Erreichbarkeit am flachen Wurzel-Level:
-ein `parent:`-Shortcut löst sein Ziel aus dem Nav-Stack auf, der am noch
-nicht hineingedrillten Root **leer** ist → der Hint verschwindet und die
-Taste tut nichts. Eine `on_container`-Action baut ihren Hint dagegen
-**statisch** aus der Config (ist also immer sichtbar) und dispatcht gegen
-`adapter.root()` über den `invoke_action`-Pfad (nicht die Popup-/`execute`-
-Schiene). So ist der zurückgegebene `ActionDispatch` — z. B. ein `Confirm`
-— wirksam. Heute nutzt nur `type: custom` dieses Flag; Beispiel: der
-Trackings-Tab `A restore all` (stellt die gelöschten Trackings **im aktiven
-Query** wieder her — siehe Set-Scoping unten —, fragt vorher per `(y/n)`
-nach). Der Adapter-Action-Name kommt aus dem `id:`-Feld, das der Wurzel-Node
-in `invoke_action` behandelt.
+**`on_container` on `type: custom` actions:** an action that acts on the
+**whole list/level** (instead of on a row) is declared as an `actions:` entry
+with `on_container: true` — not as a `parent:` shortcut. The difference is
+visibility and reachability at the flat root level: a `parent:` shortcut
+resolves its target from the nav stack, which at the not-yet-drilled-into root
+is **empty** → the hint disappears and the key does nothing. An `on_container`
+action, by contrast, builds its hint **statically** from the config (so it is
+always visible) and dispatches against `adapter.root()` via the `invoke_action`
+path (not the popup/`execute` track). This way the returned `ActionDispatch` —
+e.g. a `Confirm` — is effective. Today only `type: custom` uses this flag;
+example: the trackings tab's `A restore all` (restores the deleted trackings
+**within the active query** — see set scoping below — asking for confirmation
+via `(y/n)` first). The adapter action name comes from the `id:` field that the
+root node handles in `invoke_action`.
 
 ```yaml
 actions:
   - name: restore all
     key: A
     type: custom
-    id: restore-all # Node::invoke_action("restore-all", …) auf adapter.root()
+    id: restore-all # Node::invoke_action("restore-all", …) on adapter.root()
     on_container: true
 ```
 
-Was `Node::invoke_action(name, ctx)` zurückgibt, beschreibt das
-[`ActionDispatch`](../not-yet-done-content/src/lib.rs)-Enum
-(`OpenEditor`, `ExecuteQuery`, `CreateChild`, `DeleteSelf`, `Reload`,
-`Confirm`, `Noop`, `Error`). Die TUI übersetzt das in den passenden
-View-Flow — ein Editor öffnet sich, eine Query landet in einem paginierten
-Result-Pane, ein Delete spawnt einen Confirm-Popup. `Confirm { prompt }` ist
-der **generische** Bestätigungs-Mechanismus: der Adapter gibt ihn beim
-ersten Aufruf zurück (wenn `ActionContext.confirmed == false`), die TUI
-zeigt den `(y/n)`-Prompt, und auf „y" wird dieselbe Aktion am selben Node
-mit `confirmed: true` erneut invoked — dann führt der Adapter die (oft
-irreversible) Arbeit aus. Anders als `DeleteSelf` (dessen Confirm-/Execute-
-Split im Delete-Plumbing der TUI lebt) kann sich so **jede** Aktion hinter
-einer Bestätigung absichern, und der Adapter formuliert den Text, weil nur
-er weiß, was die Aktion anrichtet (z. B. wie viele Nachfolge-Intervalle ein
-Restore purged).
+What `Node::invoke_action(name, ctx)` returns is described by the
+[`ActionDispatch`](../not-yet-done-content/src/lib.rs) enum (`OpenEditor`,
+`ExecuteQuery`, `CreateChild`, `DeleteSelf`, `Reload`, `Confirm`, `Noop`,
+`Error`). The TUI translates that into the matching view flow — an editor
+opens, a query lands in a paginated result pane, a delete spawns a confirm
+popup. `Reload` refetches the pane at the level it currently shows — a drilled
+pane re-lists its child level under the same parent, never the root view. `Confirm { prompt }` is the **generic** confirmation mechanism: the
+adapter returns it on the first call (when `ActionContext.confirmed == false`),
+the TUI shows the `(y/n)` prompt, and on "y" the same action is invoked again on
+the same node with `confirmed: true` — then the adapter does the (often
+irreversible) work. Unlike `DeleteSelf` (whose confirm/execute split lives in
+the TUI's delete plumbing), **any** action can thus guard itself behind a
+confirmation, and the adapter phrases the text, because only it knows what the
+action does (e.g. how many follow-up intervals a restore purges).
 
-#### Set-scoping: mengen­wirksame Aktionen folgen dem aktiven Query
+#### Set scoping: set-wide actions follow the active query
 
-**Vertrag:** Jede Aktion, die auf **mehr als den aufrufenden Knoten** wirkt
-— eine Container-/listenweite Aktion (`restore-all`), ein Bulk-Delete, eine
-Aggregat-Operation — MUSS auf die **sichtbare Menge** des Panes scopen, nie
-auf das gesamte (inkl. gelöschter Zeilen geladene) Universum des Adapters.
+**Contract:** every action that acts on **more than the calling node** — a
+container/list-wide action (`restore-all`), a bulk delete, an aggregate
+operation — MUST scope to the **visible set** of the pane, never to the
+adapter's entire (including-deleted) loaded universe.
 
-Der Kanal dafür ist `ActionContext.query: Option<String>`: die TUI legt den
-**aktiven Query-Text des Panes** hinein — exakt denselben Filter-String, den
-sie dem Adapter ohnehin bei jedem `list()` über `LoadParams.query` reicht.
-Der Adapter löst die sichtbare Menge daraus selbst neu auf (z. B. via
-`find_filtered`), genau wie beim Listen-Load. Das ist **kein** Zurückfüttern
-gerenderter Inhalte (keine Id-Liste, keine Tabellenzeilen) — nur die
-_Identität_ des aktiven Filters, die der Adapter ohnehin kennt. `None`/leer
-heißt „kein Filter" → die ganze Liste ist im Scope (= was das Pane zeigt).
+The channel for that is `ActionContext.query: Option<String>`: the TUI puts the
+pane's **active query text** in there — exactly the same filter string it passes
+to the adapter on every `list()` via `LoadParams.query` anyway. The adapter
+re-resolves the visible set from it itself (e.g. via `find_filtered`), just like
+on a list load. This is **not** feeding rendered content back (no id list, no
+table rows) — only the _identity_ of the active filter, which the adapter knows
+anyway. `None`/empty means "no filter" → the whole list is in scope (= what the
+pane shows).
 
-Damit ist der Query der **einzige** Hebel: Gelöschte erreicht eine
-`restore-all` nur, wenn der Query sie sichtbar macht (der Query ist der
-alleinige Filter, ein `deleted=false` ist nirgends eingebacken — siehe
-„Query = einziger Filter"). Will der Nutzer alle gelöschten wiederherstellen,
-nimmt er sie in den Query auf, statt dass eine Aktion am Filter vorbei die
-ganze DB anfasst.
+The query is therefore the **only** lever: a `restore-all` reaches deleted rows
+only if the query makes them visible (the query is the sole filter, a
+`deleted=false` is baked in nowhere — see "query = the only filter"). If the
+user wants to restore all deleted rows, they include them in the query, instead
+of an action touching the whole DB past the filter.
 
-Einzel-Knoten-Aktionen (eine Zeile löschen/restoren, Toggle) ignorieren
-`ctx.query` — ihr Ziel ist bereits der aufrufende Knoten. Natürliche
-Grenze: `task.undelete` (Tasks-Tab) stellt den **zuletzt gelöschten** Task
-wieder her — ein Undo-Schritt, keine Mengen­operation; es scopt bewusst nicht
-über den Query, weil es per Definition genau einen, den jüngsten, betrifft.
+Single-node actions (deleting/restoring one row, a toggle) ignore `ctx.query` —
+their target already is the calling node. A natural boundary: `task.undelete`
+(tasks tab) restores the **most recently deleted** task — an undo step, not a
+set operation; it deliberately does not scope over the query, because by
+definition it concerns exactly one, the latest.
 
-Validator (start-time): leere Action-IDs werden abgelehnt; ein
-`shortcuts:`-Key, der bereits von einem `actions:`-Eintrag der
-gleichen View belegt ist, ebenfalls.
+Validator (start time): empty action ids are rejected; so is a `shortcuts:` key
+already claimed by an `actions:` entry of the same view.
 
-### Strukturierte Eingabe-Formulare (`InputSpec::Form`, M6/E5)
+### Structured input forms (`InputSpec::Form`, M6/E5)
 
-Eine Action kann statt eines externen Editors (`InputSpec::Editor`) ein
-**generisches Formular** im Terminal anfordern. Der Adapter deklariert
-die Felder im Action-Deskriptor; die TUI rendert sie generisch (Text-,
-Select- und Toggle-Widget aus `ratatui_form_widgets`), sammelt die
-Werte und liefert sie über `ActionInput::Form(HashMap<String,String>)`
-an `Node::execute` zurück. Es gibt **kein** YAML hierfür — die
-Feldstruktur ist Adapter-Wissen, nicht View-Konfiguration.
+Instead of an external editor (`InputSpec::Editor`), an action can request a
+**generic form** in the terminal. The adapter declares the fields in the action
+descriptor; the TUI renders them generically (text, select, toggle and datetime
+field, via the spec-driven form driver from `not-yet-done-ratatui`), collects
+the values and hands them back to `Node::execute` via
+`ActionInput::Form(HashMap<String,String>)`. There is **no** YAML for this — the
+field structure is adapter knowledge, not view configuration.
 
 ```rust
-// im Adapter, in Node::actions():
+// in the adapter, in Node::actions():
 NodeAction::new(
     "edit",
     "Edit",
@@ -1714,119 +1985,122 @@ NodeAction::new(
 )
 ```
 
-Feldtypen (`FormFieldKind`):
+Field types (`FormFieldKind`):
 
-| Kind     | Widget               | Wert in `ActionInput::Form`        |
-| -------- | -------------------- | ---------------------------------- |
-| `Text`   | einzeiliges Textfeld | freier String                      |
-| `Select` | horizontale Auswahl  | gewählter `allowed_values`-Eintrag |
-| `Toggle` | An/Aus               | `"true"` / `"false"`               |
+| Kind     | Widget               | Value in `ActionInput::Form`      |
+| -------- | -------------------- | --------------------------------- |
+| `Text`   | single-line text box | free string                       |
+| `Select` | horizontal choice    | the chosen `allowed_values` entry |
+| `Toggle` | on/off               | `"true"` / `"false"`              |
 
-Pro Feld:
+Per field:
 
-- **`required`** (Default: `text`/`select` = true, `toggle` = false) —
-  die TUI blockiert das Absenden, solange ein Pflichtfeld leer ist, und
-  zeigt einen Hinweis in der Popup-Fußzeile.
-- **`default`** — statischer Initialwert. Für ein Edit-Formular
-  überschreibt der Adapter ihn pro Feld über **`Node::form_prep(action_id)`**
-  (liefert eine `HashMap<key → Initialwert>`; fehlende Keys fallen auf
-  `default` zurück). Der Default-Trait gibt eine leere Map zurück — das
-  passt für ein reines Anlege-Formular.
+- **`required`** (default: `text`/`select` = true, `toggle` = false) — the TUI
+  blocks submission while a mandatory field is empty and shows a hint in the
+  popup footer.
+- **`default`** — a static initial value. For an edit form the adapter overrides
+  it per field via **`Node::form_prep(action_id)`** (returns a
+  `HashMap<key → initial value>`; missing keys fall back to `default`). The
+  default trait implementation returns an empty map — right for a pure create
+  form.
+- **`masked`** (default: false, `Text` only) — renders the value as bullets
+  instead of its characters. For passwords, API tokens and anything else that
+  must not stand readable on a shared screen; the adapter still receives the
+  clear text in `ActionInput::Form`. Masking is deliberately a display-only
+  decision, so no adapter has to treat a secret field differently on the way
+  back.
 
-Bedienung im Popup: `tab`/`↑`/`↓` wechselt das Feld, `←`/`→` bewegt den
-Cursor (Text) bzw. die Auswahl (Select), `space` wählt die Option unter
-dem Cursor bzw. kippt den Toggle, `enter` sendet ab, `esc` bricht ab.
+Handling in the popup: `tab`/`↑`/`↓` switches the field, `←`/`→` moves the
+cursor (text) resp. the choice (select), `space` picks the option under the
+cursor resp. flips the toggle, `enter` submits, `esc` cancels.
 
-Warum ein Formular statt eines Editor-Templates: für kleine, klar
-typisierte Eingaben (Status-Auswahl, Boolean-Flag, kurzer Titel) ist ein
-strukturiertes Popup schneller und fehlerärmer als ein YAML-Buffer im
-`$EDITOR`. Für lange Freitexte (Issue-Body, Wiki-Seite) bleibt
-`InputSpec::Editor` die richtige Wahl. Beide Wege sind uniform über alle
-Adapter nutzbar.
+Why a form instead of an editor template: for small, clearly typed inputs
+(status choice, boolean flag, short title) a structured popup is faster and less
+error-prone than a YAML buffer in `$EDITOR`. For long free text (issue body,
+wiki page) `InputSpec::Editor` remains the right choice. Both ways are usable
+uniformly across all adapters.
 
-### Markieren & Verschieben (`mark-move` / `paste-move`, M7/E6)
+### Marking & moving (`mark-move` / `paste-move`, M7/E6)
 
-Strukturelle Verschiebungen (einen Task umhängen, eine Seite in einen
-anderen Knoten ziehen) laufen über ein generisches **Move-Clipboard**.
-Zwei Standard-Action-Namen bilden das Vokabular:
+Structural moves (re-parenting a task, dragging a page into another node) run
+through a generic **move clipboard**. Two standard action names form the
+vocabulary:
 
-- **`mark-move`** — merkt sich den aktuellen Knoten als Verschiebe-Quelle.
-  Reine Frontend-Session-State; der Adapter gibt `ActionDispatch::Noop`
-  zurück (er muss die Action nur in `Node::actions()` listen, damit das
-  Keybinding/Hint-Greift). Die TUI zeigt die markierte Quelle als
-  Indikator in der Status-Bar (`move: <label>`), bis Paste oder `esc`.
-- **`paste-move`** — die TUI ruft `Node::invoke_action("paste-move", ctx)`
-  auf dem **Ziel**-Knoten auf, wobei `ctx.marked` die markierte Quelle
-  trägt (`ActionContext.marked: Option<MarkedNode>`). **Der Adapter führt
-  den Move aus** (Reparent/Relocate) und gibt `ActionDispatch::Reload`
-  zurück; die TUI lädt das Ziel-Pane neu und leert das Clipboard.
+- **`mark-move`** — remembers the current node as the move source. Pure frontend
+  session state; the adapter returns `ActionDispatch::Noop` (it only has to list
+  the action in `Node::actions()` so that the keybinding/hint takes effect). The
+  TUI shows the marked source as an indicator in the status bar
+  (`move: <label>`) until paste or `esc`.
+- **`paste-move`** — the TUI calls `Node::invoke_action("paste-move", ctx)` on
+  the **target** node, with `ctx.marked` carrying the marked source
+  (`ActionContext.marked: Option<MarkedNode>`). **The adapter performs the
+  move** (reparent/relocate) and returns `ActionDispatch::Reload`; the TUI
+  reloads the target pane and clears the clipboard.
 
 ```rust
-// im Adapter, in Node::invoke_action():
+// in the adapter, in Node::invoke_action():
 async fn invoke_action(&self, name: &str, ctx: &ActionContext)
     -> Result<ActionDispatch> {
     match name {
-        "mark-move" => Ok(ActionDispatch::Noop), // Clipboard ist Frontend-State
+        "mark-move" => Ok(ActionDispatch::Noop), // the clipboard is frontend state
         "paste-move" => match &ctx.marked {
             Some(src) => {
-                // src.node_id / src.node_type prüfen, dann verschieben …
+                // check src.node_id / src.node_type, then move …
                 self.reparent(&src.node_id, self.id()).await?;
                 Ok(ActionDispatch::Reload)
             }
-            None => Ok(ActionDispatch::Error("nichts markiert".into())),
+            None => Ok(ActionDispatch::Error("nothing marked".into())),
         },
         _ => Ok(ActionDispatch::Noop),
     }
 }
 ```
 
-`MarkedNode` trägt `node_id` (Adapter-lokale id, wie von `get_by_id`
-akzeptiert), `node_type` (damit das Ziel inkompatible Typen ablehnen kann)
-und `label` (für den Indikator). Die Move-Semantik liegt vollständig im
-Adapter — er allein kennt seine Hierarchie und Restriktionen; die TUI
-hält nur das Clipboard und reicht es beim Paste durch.
+`MarkedNode` carries `node_id` (the adapter-local id, as accepted by
+`get_by_id`), `node_type` (so that the target can reject incompatible types) and
+`label` (for the indicator). The move semantics live entirely in the adapter —
+it alone knows its hierarchy and restrictions; the TUI only holds the clipboard
+and passes it through on paste.
 
-Warum ein generischer Mechanismus statt bespoke Cut/Paste pro View: der
-native Tasks-Tree, die Link-Funktion und die DB-Skript-Ordner trugen
-bisher je eigene Mark/Paste-Pfade. Mit `ActionContext.marked` +
-`mark-move`/`paste-move` profitiert jeder Adapter (ab A1 der TaskAdapter)
-vom selben Clipboard, ohne TUI-Code anzufassen.
+Why a generic mechanism instead of bespoke cut/paste per view: the native tasks
+tree, the link feature and the DB script folders each used to carry their own
+mark/paste paths. With `ActionContext.marked` + `mark-move`/`paste-move` every
+adapter (from A1, the TaskAdapter, onwards) profits from the same clipboard
+without touching TUI code.
 
-## Pagination-Modi (`pagination:`)
+## Pagination modes (`pagination:`)
 
-Jede ChildDef kann ihren Pagination-Mode konfigurieren:
+Every ChildDef can configure its pagination mode:
 
 ```yaml
 - name: Rows
   node_type: "postgres:row"
   pagination:
-    mode: server # oder: cursor
+    mode: server # or: cursor
     page_size: 100
 ```
 
-- **`server`** — der Adapter zieht eine `PageRequest { offset, limit }`
-  und wickelt den Pull über `LIMIT`/`OFFSET` ab (oder vergleichbare
-  serverseitige Pagination). Geeignet, wenn `ORDER BY` / Stabilität
-  über Page-Grenzen hinweg gefordert ist.
+- **`server`** — the adapter pulls a `PageRequest { offset, limit }` and handles
+  the fetch via `LIMIT`/`OFFSET` (or comparable server-side pagination).
+  Suitable when `ORDER BY` / stability across page boundaries is required.
 
-- **`cursor`** — der Adapter hält einen serverseitigen Cursor (Postgres:
-  `DECLARE … CURSOR FOR …` in einer offenen TX) über die Lebensdauer
-  des Result-Panes. `>`/`<` rufen `FETCH FORWARD N` / re-open. Hinweise:
-  - Multi-Statement-Bodies (z. B. `CREATE TEMP TABLE … ; SELECT …`)
-    sind unterstützt — alle nicht-SELECTs laufen als Prelude in der
-    selben TX, der finale SELECT wird zum Cursor.
-  - `ORDER BY` ist **nicht** automatisch — Reihenfolge entspricht dem
-    Cursor-Plan. Wer stabile Reihenfolge braucht, schreibt sie ins
-    Statement.
-  - Backward-Navigation (`<`) re-öffnet den Cursor (NO SCROLL).
-  - Pane-Close emittiert `CloseAdapterCursor`, die TX wird beendet.
-    Bei `query_timeout_secs`-Timeout wird der gesamte Connection-Pool
-    aufgeräumt; aktive Cursor sterben mit, Pane zeigt "cursor lost".
+- **`cursor`** — the adapter holds a server-side cursor (Postgres:
+  `DECLARE … CURSOR FOR …` in an open TX) for the lifetime of the result pane.
+  `>`/`<` call `FETCH FORWARD N` / re-open. Notes:
+  - Multi-statement bodies (e.g. `CREATE TEMP TABLE … ; SELECT …`) are
+    supported — all non-SELECTs run as a prelude in the same TX, the final
+    SELECT becomes the cursor.
+  - `ORDER BY` is **not** automatic — the order follows the cursor plan. If you
+    need a stable order, write it into the statement.
+  - Backward navigation (`<`) re-opens the cursor (NO SCROLL).
+  - Closing the pane emits `CloseAdapterCursor` and the TX is ended. On a
+    `query_timeout_secs` timeout the entire connection pool is torn down; active
+    cursors die with it and the pane shows "cursor lost".
 
-## Edit-in-Place (`editor_in_place:`)
+## Edit in place (`editor_in_place:`)
 
-Eine ChildDef kann opten, Editor-Tempfiles **im Zielverzeichnis** statt
-in `$TMPDIR` anzulegen:
+A ChildDef can opt to create editor temp files **in the target directory**
+instead of in `$TMPDIR`:
 
 ```yaml
 - name: DB Script
@@ -1836,125 +2110,118 @@ in `$TMPDIR` anzulegen:
     e: edit
 ```
 
-**Wann sinnvoll**: wenn ein externer Editor / Language Server
-Konfigurations- oder Projektkontext aus dem Pfad der geöffneten Datei
-herleitet — z. B. `postgres-language-server.jsonc` neben dem Skript,
-`.editorconfig`, `.clang-format`, `pyrightconfig.json`. Solche Tools
-walken üblicherweise von der Datei nach oben, finden in `$TMPDIR`
-aber nichts.
+**When it makes sense**: when an external editor / language server derives
+configuration or project context from the path of the opened file — e.g.
+`postgres-language-server.jsonc` next to the script, `.editorconfig`,
+`.clang-format`, `pyrightconfig.json`. Such tools usually walk upwards from the
+file and find nothing in `$TMPDIR`.
 
-**Wie es funktioniert**: Die TUI legt das Tempfile mit dem
-festen Prefix `.nyd_tmp_` und einer zufälligen Komponente direkt
-unter `<instance_data_dir>/db_scripts/<db>/…/` an (also im selben
-Verzeichnis wie das persistente Skript). Beim `:w` liest die TUI
-den Buffer, strippt Editor-Only-Marker (Banner, Completion-Line)
-und schreibt aufs reale Ziel. Anschließend wird das Tempfile
-entfernt; das passiert auch wenn der Editor mit Fehler beendet wird,
-weil die `NamedTempFile`-Drop-Logik dafür sorgt.
+**How it works**: the TUI creates the temp file with the fixed prefix
+`.nyd_tmp_` and a random component directly under
+`<instance_data_dir>/db_scripts/<db>/…/` (i.e. in the same directory as the
+persistent script). On `:w` the TUI reads the buffer, strips editor-only markers
+(banner, completion line) and writes to the real target. Afterwards the temp
+file is removed; that also happens when the editor exits with an error, because
+the `NamedTempFile` drop logic takes care of it.
 
-**Aufräum-Garantie**: Bei einem Crash der TUI mitten in einer
-Editor-Session können `.nyd_tmp_*`-Dateien zurückbleiben. Sie sind
-durch den Prefix klar als TUI-Artefakte erkennbar; löschen ist
-gefahrlos.
+**Cleanup guarantee**: if the TUI crashes in the middle of an editor session,
+`.nyd_tmp_*` files can be left behind. The prefix marks them clearly as TUI
+artifacts; deleting them is safe.
 
-**Default**: `false`. Andere Sessions (Tasks/Trackings/Filter) liegen
-weiterhin in `$TMPDIR` — der Flag betrifft nur den Editor-Pfad der
-ChildDef, auf der er gesetzt ist (aktuell genutzt vom Postgres-Adapter
-für DB Scripts).
+**Default**: `false`. Other sessions (tasks/trackings/filter) still live in
+`$TMPDIR` — the flag only affects the editor path of the ChildDef it is set on
+(currently used by the Postgres adapter for DB scripts).
 
-## Adapter-Child-Process-Environment
+## Adapter child process environment
 
-Adapter können beim Start eines Kindprozesses (Editor _oder_ Skript)
-zusätzliche Environment-Variablen mitschicken. Konfiguration gibt es
-keine — das Feature ist eine **Trait-Erweiterung des Adapters**:
+Adapters can pass additional environment variables when starting a child process
+(editor _or_ script). There is no configuration for it — the feature is a
+**trait extension of the adapter**:
 
 ```rust
 fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String>
 ```
 
-**Wozu**: Der `postgres-language-server` (Editor-LSP für SQL) braucht
-für jede Form von Completion eine echte Datenbankverbindung. Ein TUI-
-Nutzer hat aber Tunnel-Port + Passwort _nur in der TUI_ — Hand-Pflege
-einer `postgres-language-server.jsonc` mit Klartext-Passwort wäre eine
-Verletzung der „keine echten Customer-Daten in/neben dem Repo"-Regel
-und der dynamische Tunnel-Port wandert mit jedem Reconnect.
+**What for**: the `postgres-language-server` (the editor LSP for SQL) needs a
+real database connection for any form of completion. A TUI user, however, has
+the tunnel port + password _only in the TUI_ — hand-maintaining a
+`postgres-language-server.jsonc` with a plaintext password would violate the "no
+real customer data in/next to the repo" rule, and the dynamic tunnel port moves
+with every reconnect.
 
-Der Postgres-Adapter beantwortet `child_process_env` mit:
+The Postgres adapter answers `child_process_env` with:
 
-| Variable     | Quelle                                                    |
-| ------------ | --------------------------------------------------------- |
-| `PGHOST`     | `TransportConnection::host` (`127.0.0.1` bei SSH-Tunnel)  |
-| `PGPORT`     | dynamischer Tunnel-Port aus der live Verbindung           |
-| `PGUSER`     | `postgres.user` aus `postgres-adapter.yaml`               |
-| `PGPASSWORD` | resolved Passwort (z. B. aus `pass`), zur Laufzeit im RAM |
-| `PGDATABASE` | zweites Segment der NodeRef (Fallback `admin_database`)   |
-| `PGSSLMODE`  | spiegelt `postgres.sslmode`                               |
+| Variable     | Source                                                        |
+| ------------ | ------------------------------------------------------------- |
+| `PGHOST`     | `TransportConnection::host` (`127.0.0.1` with an SSH tunnel)  |
+| `PGPORT`     | the dynamic tunnel port from the live connection              |
+| `PGUSER`     | `postgres.user` from `postgres-adapter.yaml`                  |
+| `PGPASSWORD` | the resolved password (e.g. from `pass`), in RAM at runtime   |
+| `PGDATABASE` | the second segment of the NodeRef (fallback `admin_database`) |
+| `PGSSLMODE`  | mirrors `postgres.sslmode`                                    |
 
-Solange die Adapter-Verbindung noch nicht offen ist, liefert die
-Funktion eine leere Map (kein erzwungener Connect aus dem Sync-Path).
+As long as the adapter connection is not yet open, the function returns an empty
+map (no forced connect from the sync path).
 
-**TUI-Seite**: Die Variablen werden über
-[`EditorSpawnContext`](#editor-spawn-context) bzw. die Skript-Spawn-
-Pfade in `app/script.rs` per `Command::envs(map)` weitergereicht. Die
-TUI kennt die Inhalte nicht — sie kopiert nur. Das ist die saubere
-Architektur-Grenze: **Connection-Details bleiben beim Adapter**, die
-TUI ist daten-/credential-agnostisch.
+**TUI side**: the variables are passed on via
+[`EditorSpawnContext`](#editor-spawn-context) resp. the script spawn paths in
+`app/script.rs` through `Command::envs(map)`. The TUI does not know the contents
+— it only copies them. That is the clean architectural boundary: **connection
+details stay with the adapter**, the TUI is data-/credential-agnostic.
 
-**Für andere Adapter**: Jira/Taiga implementieren das Default
-(leere Map). Wenn ein zukünftiger Adapter eigene CLI-Tools per
-`:script`/Editor anfahren möchte, kann er denselben Hook nutzen — z. B.
-ein `git-jira`-Plugin mit `JIRA_HOST`/`JIRA_TOKEN`.
+**For other adapters**: Jira/Taiga implement the default (an empty map). If a
+future adapter wants to drive its own CLI tools via `:script`/editor, it can use
+the same hook — e.g. a `git-jira` plugin with `JIRA_HOST`/`JIRA_TOKEN`.
 
-**Lifecycle**: Snapshot zum Spawn-Zeitpunkt. Reconnects ändern den
-Port; bereits laufende Editor-Kinder behalten ihr altes Env (geht
-schief, wenn der Reconnect _während_ einer LSP-Session passiert —
-in der Praxis selten genug, dass kein Refresh-Mechanismus existiert).
+**Lifecycle**: a snapshot at spawn time. Reconnects change the port; already
+running editor children keep their old env (which goes wrong if the reconnect
+happens _during_ an LSP session — rare enough in practice that no refresh
+mechanism exists).
 
-<a id="editor-spawn-context"></a>**EditorSpawnContext**: Die TUI bündelt
-Editor-Spawn-Knöpfe (Tempfile-Pfad/-Prefix für Edit-in-Place + Child-
-Env) in einer Struct, die `EditSession::spawn_context()` liefert.
-Neue Spawn-Time-Knöpfe (z. B. cwd, ulimit) lassen sich damit ergänzen,
-ohne jede Session und jeden Dispatch-Aufruf anzufassen.
+<a id="editor-spawn-context"></a>**EditorSpawnContext**: the TUI bundles the
+editor spawn knobs (temp file path/prefix for edit-in-place + child env) in a
+struct returned by `EditSession::spawn_context()`. New spawn-time knobs (e.g.
+cwd, ulimit) can be added there without touching every session and every
+dispatch call.
 
-## Action-Typen
+## Action types
 
-Die View-YAML kennt folgende generische Action-Typen:
+The view YAML knows the following generic action types:
 
-| Typ            | Beschreibung                                     | Action Bar |
-| -------------- | ------------------------------------------------ | ---------- |
-| `fuzzy_filter` | Fuzzy-Suche über konfigurierbare Felder          | ✅ (modal) |
-| `edit`         | Editor-Template vom Adapter, externer Editor     | ✅ (modal) |
-| `create`       | Neuen Kind-Node erstellen (Schema vom Adapter)   | ✅ (modal) |
-| `query_edit`   | Query im Editor bearbeiten                       | ✅ (modal) |
-| `reload`       | Liste neu laden                                  | ❌         |
-| `navigate`     | In Kind-Node-Ebene wechseln                      | ❌         |
-| `open_url`     | URL aus Metadata im Browser öffnen               | ❌         |
-| `download`     | `node.content().read()` → in Datei speichern     | ❌         |
-| `script`       | Externes Script mit Node-JSON auf stdin starten  | ❌         |
-| `tag`          | Tag-Verwaltungs-Menü für den selektierten Task   | ✅ (modal) |
-| `custom`       | Adapter-spezifische Aktion (via `custom_action`) | ❌         |
-| `delete`       | Node löschen (mit Bestätigung)                   | ❌         |
+| Type           | Description                                       | Action bar |
+| -------------- | ------------------------------------------------- | ---------- |
+| `fuzzy_filter` | fuzzy search over configurable fields             | ✅ (modal) |
+| `edit`         | editor template from the adapter, external editor | ✅ (modal) |
+| `create`       | create a new child node (schema from the adapter) | ✅ (modal) |
+| `query_edit`   | edit the query in the editor                      | ✅ (modal) |
+| `reload`       | reload the list                                   | ❌         |
+| `navigate`     | switch into the child node level                  | ❌         |
+| `open_url`     | open a URL from the metadata in the browser       | ❌         |
+| `download`     | `node.content().read()` → save to a file          | ❌         |
+| `script`       | start an external script with node JSON on stdin  | ❌         |
+| `tag`          | tag management menu for the selected task         | ✅ (modal) |
+| `custom`       | adapter-specific action (via `custom_action`)     | ❌         |
+| `delete`       | delete the node (with confirmation)               | ❌         |
 
-### Action Bar vs. Status Bar
+### Action bar vs. status bar
 
-Actions werden in zwei Bars angezeigt:
+Actions are shown in two bars:
 
-- **Action Bar** (oben): Actions mit persistentem/modalem Zustand. Diese
-  übernehmen die Eingabe (Fuzzy-Filter-Eingabefeld) oder zeigen an, dass ein
-  Editor gerade offen ist. Typen: `fuzzy_filter`, `edit`, `create`, `query_edit`.
-  Zukünftig auch: custom scripts mit laufendem Prozess.
+- **Action bar** (top): actions with persistent/modal state. They take over the
+  input (the fuzzy filter input field) or indicate that an editor is currently
+  open. Types: `fuzzy_filter`, `edit`, `create`, `query_edit`. In the future
+  also: custom scripts with a running process.
 
-- **Status Bar** (unten): Fire-and-forget Actions die sofort ausgeführt werden
-  und keinen anhaltenden Zustand haben. Typen: `reload`, `navigate`, `custom`,
-  `open_url`, `download`.
+- **Status bar** (bottom): fire-and-forget actions that execute immediately and
+  have no lasting state. Types: `reload`, `navigate`, `custom`, `open_url`,
+  `download`.
 
-Jede Action hat ein optionales `hide_from_bar: true` Flag, um den Default zu
-überschreiben (z.B. eine edit-Action aus der Action Bar ausblenden).
+Every action has an optional `hide_from_bar: true` flag to override the default
+(e.g. to hide an edit action from the action bar).
 
-### Editor-Profil pro Action (`editor:`)
+### Editor profile per action (`editor:`)
 
-`edit`- und `create`-Actions können optional ein **benanntes Editor-Profil**
-wählen:
+`edit` and `create` actions can optionally choose a **named editor profile**:
 
 ```yaml
 actions:
@@ -1962,18 +2229,25 @@ actions:
   - { name: edit, key: e, type: edit, id: edit_message, editor: compose-below }
 ```
 
-`editor:` referenziert einen Schlüssel unter dem Top-Level-Block `editors:`
-in `tui.yaml` (ein Profil aus `command`/`inline`/`pause_tui`/…). Fehlt das
-Feld, wird das Profil `default` verwendet. Ein unbekannter Profilname ist ein
-**harter Validierungsfehler** beim Config-Laden.
+`editor:` references a key under the top-level block `editors:` in `tui.yaml` (a
+profile of `command`/`inline`/`pause_tui`/…). If the field is missing, the
+profile `default` is used. An unknown profile name is a **hard validation
+error** when loading the config.
 
-Wozu: verschiedene Actions wollen verschiedene Editor-Geometrien — z.B. ein
-Chat-Compose in einem schmalen Terminal-Split unten statt im vollen vsplit.
-Da der Editor immer ein Fremdprozess ist (kein PTY-Embedding in ein TUI-Pane),
-wird die Geometrie über das `command` des Profils vom Terminal realisiert.
-Siehe `editors:` in der `tui.yaml`-Doku.
+What for: different actions want different editor geometries — e.g. a chat
+compose in a narrow terminal split at the bottom instead of in the full vsplit.
+With an **external** editor this is a foreign process (no PTY embedding into a
+TUI pane), so the geometry is realized by the terminal via the profile's
+`command`.
 
-### Anwenden bei jedem Speichern (`commit_on_save`)
+Alternatively a profile sets `builtin: true`: then editing happens in a pane of
+the TUI itself (a modal Vim-like editor from the crate `vimrealm`), without a
+child process and without a temp file; `height: "30%"` determines the pane
+height. Both are interchangeable per action — switching one `editor:` field is
+enough, and the real `$EDITOR` remains selectable at any time. See `editors:` in
+the `tui.yaml` docs.
+
+### Apply on every save (`commit_on_save`)
 
 ```yaml
 actions:
@@ -1987,25 +2261,24 @@ actions:
     }
 ```
 
-Standardmäßig wird eine `edit`/`create`-Action erst beim **Schließen** des
-Editors angewendet. Mit `commit_on_save: true` greift sie bei **jedem
-Speichern (`:w`)**, während der Editor offen bleibt — gebaut für Chat-Compose:
+By default an `edit`/`create` action is applied only when the editor **closes**.
+With `commit_on_save: true` it takes effect on **every save (`:w`)** while the
+editor stays open — built for chat compose:
 
-- Das erste `:w` führt die Action aus (z.B. Nachricht senden).
-- Erzeugt sie einen neuen Node (`ActionOutcome::Navigate`), schaltet die
-  Session auf dessen Editor-Action um; jedes weitere `:w` **editiert** diesen
-  Node in-place (z.B. die gerade gesendete Nachricht).
-- Speichern ohne Änderung seit dem letzten Anwenden — auch mehrfaches `:w`
-  hintereinander und das finale Schließen — ist ein No-op. Es wird also nie
-  doppelt gesendet.
+- The first `:w` executes the action (e.g. sends the message).
+- If it produces a new node (`ActionOutcome::Navigate`), the session switches to
+  that node's edit action; every further `:w` **edits** that node in place (e.g.
+  the message just sent).
+- Saving without a change since the last apply — including several `:w` in a row
+  and the final close — is a no-op. Nothing is ever sent twice.
 
-Voraussetzung: ein **detached** Editor-Profil (`inline: false`), damit
-Zwischen-Speicherungen überhaupt beobachtbar sind (der Launch-/Detached-Pfad
-überwacht die mtime der Temp-Datei). Default `false` — das Flag nur dort
-setzen, wo dieses Verhalten gewollt ist; bei einem Jira-Ticket-Edit würde es
-auf jedes `:w` einen halbfertigen Body pushen.
+Prerequisite: a **detached** editor profile (`inline: false`), so that
+intermediate saves are observable at all (the launch/detached path watches the
+mtime of the temp file). Default `false` — only set the flag where this
+behaviour is wanted; on a Jira ticket edit it would push a half-finished body on
+every `:w`.
 
-### Fuzzy Filter
+### Fuzzy filter
 
 ```yaml
 actions:
@@ -2014,126 +2287,121 @@ actions:
     type: fuzzy_filter
     fuzzy_filter:
       fields:
-        [key, summary] # optional — nur diese Felder durchsuchen
-        # leer/absent = alle Felder + label
+        [key, summary] # optional — search only these fields
+        # empty/absent = all fields + label
 ```
 
-Der Fuzzy Filter filtert die aktuelle Liste live. In der Action Bar erscheint
-ein Eingabefeld. `fields` erlaubt die Einschränkung auf bestimmte Metadata-Keys.
-Der Spezialwert `label` sucht im Node-Label (meist der Titel/Summary).
+The fuzzy filter filters the current list live. An input field appears in the
+action bar. `fields` allows restricting it to specific metadata keys. The
+special value `label` searches the node label (usually the title/summary).
 
-**Im Tree-Mode filtert er per Pfad-Pruning über _alle_ Ebenen:** ein Knoten
-bleibt sichtbar, wenn er selbst matcht **oder** einen matchenden Nachfahren
-hat. So tauchen Treffer samt ihrer Vorfahren-Kette auf, während nicht-
-matchende Geschwister-Teilbäume verschwinden. Ein tief verschachtelter
-Treffer wird also gefunden und über seine Eltern sichtbar gemacht — auch
-wenn die `fuzzy_filter`-Action nur auf der Wurzel-View deklariert ist
-(sie dient dort nur als Schalter, der den Filter scharf macht).
+**In tree mode it filters by path pruning across _all_ levels:** a node stays
+visible if it matches itself **or** has a matching descendant. Hits thus show up
+together with their ancestor chain, while non-matching sibling subtrees
+disappear. A deeply nested hit is therefore found and made visible through its
+parents — even if the `fuzzy_filter` action is only declared on the root view
+(where it merely serves as the switch that arms the filter).
 
-**Eager-Trees laden beim Öffnen des Filters den ganzen Teilbaum:** Auf
-Adaptern mit `supports_eager_subtree` (lokale Tasks/Trackings) zieht das
-Öffnen des Filters einmalig den kompletten Baum (`list_subtree(u32::MAX)`)
-nach und klappt ihn auf. So matchen auch Knoten in eingeklappten oder noch
-nicht paginierten Ästen — das „der Filter sieht den ganzen Wald"-Verhalten
-des nativen Tabs. Der Aufklapp-Zustand vor dem Filter wird gestasht und
-beim Leeren des Filters wiederhergestellt (der Baum klappt exakt in seine
-vorherige Form zurück). Auf Remote-Trees ohne diese Capability bleibt die
-Suche auf die aktuell geladenen/aufgeklappten Knoten beschränkt: ein
-Treffer in einem ungeladenen Ast wird erst sichtbar, wenn dieser Ast
-geladen ist.
+**Eager trees load the whole subtree when the filter opens:** on adapters with
+`supports_eager_subtree` (local tasks/trackings), opening the filter pulls the
+complete tree once (`list_subtree(u32::MAX)`) and expands it. This way nodes in
+collapsed or not-yet-paginated branches match too — the "the filter sees the
+whole forest" behaviour of the native tab. The expand state before the filter is
+stashed and restored when the filter is cleared (the tree collapses back into
+exactly its previous shape). On remote trees without that capability, the search
+stays limited to the currently loaded/expanded nodes: a hit in an unloaded
+branch only becomes visible once that branch is loaded.
 
-**Der matchende Teilstring wird hervorgehoben** (Parität zum nativen
-Tasks-Tab): Im Tree-Mode werden die getroffenen Runs im **Label** der
-`tree_label`-Spalte in der Theme-`accent`-Farbe (fett) gezeichnet — der
-Box-Connector behält seine eigene `tree_connector`-Farbe. Im Flat-Mode
-bekommen die durchsuchten Spalten (`fields`, bzw. alle bei leerer Liste)
-ihre Treffer-Runs ebenfalls in `accent`. Jeder Whitespace-getrennte Token
-wird einzeln gematcht; die getroffenen Zeichen-Indizes werden vereinigt und
-zu zusammenhängenden Bereichen verschmolzen. Matcht ein Token nicht im
-Label/in der Spalte (die Zeile überlebte den Filter über ein anderes Feld),
-bleibt dort nichts markiert.
+**The matching substring is highlighted** (parity with the native tasks tab): in
+tree mode the matched runs in the **label** of the `tree_label` column are drawn
+in the theme `accent` color (bold) — the box connector keeps its own
+`tree_connector` color. In flat mode the searched columns (`fields`, resp. all
+of them with an empty list) get their hit runs in `accent` as well. Every
+whitespace-separated token is matched individually; the matched character
+indices are unioned and merged into contiguous ranges. If a token does not match
+in the label/column (the row survived the filter through another field), nothing
+is marked there.
 
-### Script Actions (`type: script`)
+### Script actions (`type: script`)
 
 ```yaml
 actions:
   - name: script
     key: x
-    type: script # öffnet das Script-Menü; Scripts liegen unter
+    type: script # opens the script menu; scripts live under
     #   <data>/not_yet_done/scripts/<tab>/<view-node-type…>/
 ```
 
-Eine `script`-Action sammelt die Scripts aus dem für Tab + View-Ebene
-konventionellen Verzeichnis und übergibt sie als Auswahlmenü. Das gewählte
-Script wird als Fremdprozess gestartet und bekommt ein **JSON auf stdin**.
-Mutierende Scripts (non-interactive) lösen danach einen Pane-Reload aus.
+A `script` action collects the scripts from the directory conventional for tab +
+view level and offers them as a selection menu. The chosen script is started as
+a foreign process and gets a **JSON on stdin**. Mutating scripts
+(non-interactive) trigger a pane reload afterwards.
 
-**`scope:` — was das Script auf stdin bekommt.** Default ist `node`:
+**`scope:` — what the script gets on stdin.** The default is `node`:
 
 ```yaml
 - { name: script, key: x, type: script } # scope: node (default)
 ```
 
-| `scope`        | stdin-JSON                                                                                                                                           |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — der **eine** selektierte Knoten                                                                |
-| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **alle** aktuell gefilterten Zeilen-IDs + die Datumsgrenzen der aktiven Query  |
-| `table`        | `{"rows": [{id, label, fields:{…}}, …], "query": …, "selected_index": …, "selected_field": …}` — die **ganze angezeigte Tabelle** mit Cursor-Kontext |
+| `scope`        | stdin JSON                                                                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — the **one** selected node                                                                        |
+| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **all** currently filtered row ids + the date bounds of the active query         |
+| `table`        | `{"rows": [{id, label, fields:{…}}, …], "query": …, "selected_index": …, "selected_field": …}` — the **whole displayed table** with the cursor context |
 
 ```yaml
 - { name: script, key: x, type: script, scope: filtered_set }
 ```
 
-`scope: filtered_set` ist für **Batch-/Aggregat-Scripts** gedacht, die über
-die ganze sichtbare Liste laufen (z. B. ein Stundenreport über den gefilterten
-Zeitraum). Die Engine sammelt:
+`scope: filtered_set` is intended for **batch/aggregate scripts** that run over
+the whole visible list (e.g. an hours report over the filtered period). The
+engine collects:
 
-- **`tracking_ids`** — alle IDs, die der User gerade sieht: bei aktivem
-  Fuzzy-Filter exakt die Treffermenge, sonst die komplette query-gefilterte
-  Liste der Pane.
-- **`filter_min_date` / `filter_max_date`** — die Datums-Untergrenze/-Obergrenze
-  der aktiven gespeicherten Query (relative Angaben wie `last month` sind zum
-  Lauf-Zeitpunkt aufgelöst, RFC3339; ohne Grenze `null`).
+- **`tracking_ids`** — all ids the user currently sees: with an active fuzzy
+  filter exactly the hit set, otherwise the complete query-filtered list of the
+  pane.
+- **`filter_min_date` / `filter_max_date`** — the lower/upper date bound of the
+  active saved query (relative specifications such as `last month` are resolved
+  at run time, RFC 3339; `null` if there is no bound).
 
-Der stdin-Schlüssel heißt aus Backcompat-Gründen `tracking_ids` — der
-Engine-Pfad selbst ist generisch, sodass die historischen Trackings-Scripts
-(`daily_report.py`, `hours_report.py`, …) unverändert über den
-Adapter-Tab laufen.
+For backwards compatibility the stdin key is named `tracking_ids` — the engine
+path itself is generic, so that the historical trackings scripts
+(`daily_report.py`, `hours_report.py`, …) run unchanged through the adapter tab.
 
 ```yaml
 - { name: script, key: x, type: script, scope: table, default_field: name }
 ```
 
-`scope: table` reicht die **ganze aktuell angezeigte Tabelle samt
-Cursor-Kontext** weiter — gedacht für Scripts, die auf einer Zeile/Zelle
-operieren und dabei die Nachbarzeilen oder den Query sehen wollen. Funktioniert
-auf jeder Content-Tabelle, auch auf dem transponierten Record-Detail-Split
-(`o`), wo jede „Zeile" ein Feld/Wert-Paar des Datensatzes ist — damit deckt
-**ein** Scope sowohl „kompletter Datensatz + selektiertes Feld" (Detail) als
-auch „alle Zeilen + Query + Cursor" (Liste) ab. Die Engine sammelt:
+`scope: table` passes on the **whole currently displayed table together with the
+cursor context** — intended for scripts that operate on a row/cell while wanting
+to see the neighbouring rows or the query. It works on every content table,
+including the transposed record detail split (`o`), where every "row" is a
+field/value pair of the record — so **one** scope covers both "complete record +
+selected field" (detail) and "all rows + query + cursor" (list). The engine
+collects:
 
-- **`rows`** — jede sichtbare Zeile als `{id, label, fields:{…}}` (dieselbe
-  Form wie ein einzelner `node`), in Anzeige-Reihenfolge; bei aktivem
-  Fuzzy-Filter exakt die Treffermenge.
-- **`query`** — der aktive Query-Text der Pane (`null`, wenn keiner anliegt,
-  z. B. im Detail-Split).
-- **`selected_index`** — Index der Cursor-Zeile in `rows`.
-- **`selected_field`** — der Spalten-Key unter dem Spalten-Cursor; ist der
-  Spalten-Cursor aus, greift das konfigurierte **`default_field`** der Action
-  (sonst `null`).
+- **`rows`** — every visible row as `{id, label, fields:{…}}` (the same shape as
+  a single `node`), in display order; with an active fuzzy filter exactly the
+  hit set.
+- **`query`** — the pane's active query text (`null` if there is none, e.g. in
+  the detail split).
+- **`selected_index`** — the index of the cursor row in `rows`.
+- **`selected_field`** — the column key under the column cursor; if the column
+  cursor is off, the action's configured **`default_field`** applies (otherwise
+  `null`).
 
-**Script-Shortcuts (`ctrl+s` im Menü).** Wie im Query-Menü lässt sich im
-Script-Menü einem Script per **`ctrl+s`** eine Taste zuweisen. Der erfasste
-Chord wird in der DB-Tabelle `query_shortcut(scope, name, shortcut)` unter dem
-Scope `script:<tab>/<view-node-type…>` (gleiche Ableitung wie das
-Script-Verzeichnis) für den Dateinamen abgelegt. Liegt der Fokus danach auf
-einer Ebene, die eine `type: script`-Action anbietet, startet der Chord das
-Script direkt — genau so, als hätte man das Menü geöffnet und auf dem Eintrag
-Enter gedrückt (gleicher `scope:`/`default_field`-Kontext). Der Chord wird
-gegen alle in seinem Tab aktiven Tasten geprüft (inkl. Chord-Präfixe) und bei
-Kollision abgelehnt. Belegte Shortcuts erscheinen im Menü als `[chord]`-Suffix.
+**Script shortcuts (`ctrl+s` in the menu).** As in the query menu, a key can be
+assigned to a script in the script menu via **`ctrl+s`**. The captured chord is
+stored in the DB table `query_shortcut(scope, name, shortcut)` under the scope
+`script:<tab>/<view-node-type…>` (the same derivation as the script directory)
+for the file name. If the focus afterwards sits on a level offering a
+`type: script` action, the chord starts the script directly — exactly as if the
+menu had been opened and Enter pressed on the entry (same `scope:`/
+`default_field` context). The chord is checked against all keys active in its
+tab (including chord prefixes) and rejected on collision. Assigned shortcuts
+appear in the menu as a `[chord]` suffix.
 
-### Tag-Verwaltung (`type: tag`)
+### Tag management (`type: tag`)
 
 ```yaml
 actions:
@@ -2142,37 +2410,35 @@ actions:
     type: tag
 ```
 
-Eine `tag`-Action öffnet das **globale Tag-Verwaltungs-Menü** (`:tag`),
-angeheftet an den aktuell selektierten Knoten der Pane. Es ist dasselbe
-Menü wie auf dem nativen Tasks-Tab — der Action-Typ verdrahtet es generisch
-an jeden Content-/Adapter-Tab:
+A `tag` action opens the **global tag management menu** (`:tag`), attached to
+the pane's currently selected node. It is the same menu as on the native tasks
+tab — the action type wires it generically into any content/adapter tab:
 
-- **Enter** auf einem Tag: weist es dem Task zu / entfernt es (Toggle). Der
-  Ist-Zustand wird beim Öffnen frisch geladen, nicht aus einem Cache.
-- **Name tippen + Enter**: legt einen neuen Tag an und weist ihn dem Task zu.
-- **ctrl+e**: öffnet das YAML-Formular eines Tags (Symbol / Name / Farbe).
-- **ctrl+d**: löscht den Tag (von allen Tasks).
+- **Enter** on a tag: assigns it to the task / removes it (toggle). The current
+  state is loaded freshly when opening, not from a cache.
+- **Type a name + Enter**: creates a new tag and assigns it to the task.
+- **ctrl+e**: opens the YAML form of a tag (symbol / name / color).
+- **ctrl+d**: deletes the tag (from all tasks).
 
-Nach jeder Änderung wird die Pane neu geladen, sodass die `tag_symbols`- /
-`tag_names`-Spalten den neuen Stand zeigen.
+After every change the pane is reloaded, so that the `tag_symbols` / `tag_names`
+columns show the new state.
 
-Tags sind ein Task-Konzept: Der selektierte Knoten muss eine Task-ID tragen
-(der `tasks`-Adapter liefert die nackte UUID als Node-ID). Auf einem Knoten
-ohne Task-ID quittiert das Menü mit einer Notiz statt zu öffnen.
+Tags are a task concept: the selected node has to carry a task id (the `tasks`
+adapter delivers the bare UUID as the node id). On a node without a task id the
+menu answers with a note instead of opening.
 
-Konvention: Shortcut **`T` (shift+t)**, weil `t` auf dem Tasks-Tab den
-Tree-/List-View-Wechsel belegt. Im Tree mit `inherit: true` deklarieren,
-damit die Action auf jeder Subtask-Ebene greift.
+Convention: shortcut **`T` (shift+t)**, because `t` on the tasks tab is taken by
+the tree/list view switch. In a tree, declare it with `inherit: true` so that
+the action takes effect on every subtask level.
 
-> **Status:** `type: tag` hing am host-seitigen `tag_service` und war die
-> Altlast, die mit dem DB-Split abgebaut wird (C5). **Togglen _und_
-> Anlegen/Umbenennen/Löschen** sind jetzt vollständig auf den
-> adapter-getriebenen `type: option_menu` migriert (siehe unten, Felder
-> `toggle`/`create`/`rename`/`delete`) — der Tasks-Tab nutzt ausschließlich
-> `option_menu`. `type: tag` und das Cmdline-`:tag`-Menü sind damit nur noch
-> für Hosts ohne migrierten Adapter relevant.
+> **Status:** `type: tag` hung on the host-side `tag_service` and was the legacy
+> burden being dismantled with the DB split (C5). **Toggling _and_
+> creating/renaming/deleting** are now fully migrated to the adapter-driven
+> `type: option_menu` (see below, fields `toggle`/`create`/`rename`/`delete`) —
+> the tasks tab uses `option_menu` exclusively. `type: tag` and the cmdline
+> `:tag` menu are therefore only relevant for hosts without a migrated adapter.
 
-### Option-Menü (`type: option_menu`)
+### Option menu (`type: option_menu`)
 
 ```yaml
 actions:
@@ -2180,74 +2446,72 @@ actions:
     key: T
     type: option_menu
     option_menu:
-      source: tags # Schlüssel für `list_values` auf dem Adapter
-      marker: tag_ids # verstecktes Knoten-Feld mit den gesetzten Werten
-      toggle: toggle-tag # Adapter-Action, die auf Enter feuert
-      create: create-tag # optional: ctrl+n legt einen Eintrag an (fragt Text)
-      rename: rename-tag # optional: ctrl+e benennt den fokussierten um
-      delete: delete-tag # optional: ctrl+d löscht ihn (y/n-Confirm)
-      title: Tags # Popup-Titel (optional; Default = Action-Name)
+      source: tags # key for `list_values` on the adapter
+      marker: tag_ids # hidden node field holding the set values
+      toggle: toggle-tag # adapter action that fires on Enter
+      create: create-tag # optional: ctrl+n creates an entry (asks for text)
+      rename: rename-tag # optional: ctrl+e renames the focused one
+      delete: delete-tag # optional: ctrl+d deletes it (y/n confirm)
+      title: Tags # popup title (optional; default = the action name)
 ```
 
-Ein **host-seitiges, adapter-agnostisches** Auswahl-Menü, das Werte am
-selektierten Knoten togglet (z. B. Tags). **Warum es existiert:** Eine an eine
-GUI-Form (Picker, Formular) gekoppelte Action zwingt den Adapter, die
-Host-Oberfläche zu kennen. Statt dessen liefert der Adapter eine flache Liste
-wählbarer Werte über `list_values(source)` und nimmt den gewählten Wert über
-ein normales `invoke_action` (`ActionContext.value`) entgegen — das Menü selbst
-ist reine Host-Logik und steht in der Config. So weiß der Adapter nichts vom
-Menü, und derselbe Action-Typ bedient Tags, Status-Sets, Label u. Ä. ohne neue
-Vertrags-Form.
+A **host-side, adapter-agnostic** selection menu that toggles values on the
+selected node (e.g. tags). **Why it exists:** an action coupled to a GUI form
+(picker, form) forces the adapter to know the host surface. Instead the adapter
+delivers a flat list of selectable values via `list_values(source)` and receives
+the chosen value through an ordinary `invoke_action` (`ActionContext.value`) —
+the menu itself is pure host logic and lives in the config. This way the adapter
+knows nothing about the menu, and the same action type serves tags, status sets,
+labels and the like without a new contract shape.
 
-Ablauf:
+Flow:
 
-- Beim Öffnen lädt der Host die Optionen via `list_values(source)` und liest
-  die aktuell gesetzten Werte aus dem `marker`-Metadatenfeld des Knotens
-  (kommaseparierte stabile IDs). Gesetzte Optionen werden mit **★** markiert.
-- **Enter** auf einer Option: feuert die `toggle`-Action mit dem gewählten Wert
-  in `ActionContext.value`. Der Adapter entscheidet selbst assign-vs-unassign
-  anhand der Ist-Zugehörigkeit und gibt einen `ActionDispatch` zurück (Unsinns-
-  Werte kommen als `ActionDispatch::Error` zurück).
-- Das Popup **bleibt offen** (Mehrfach-Toggle); der ★-Marker kippt sofort live,
-  während die Pane im Hintergrund neu lädt.
-- **Verwalten der Werteliste** (optional, je nach gesetztem Feld):
-  - **`create`** (Default `ctrl+n`): öffnet einen Inline-Text-Prompt. Enter
-    feuert die `create`-Action mit dem eingegebenen Namen in
-    `ActionContext.text` (kein `value`); leerer Text bricht ab.
-  - **`rename`** (Default `ctrl+e`): öffnet denselben Prompt, vorbefüllt mit dem
-    Label der fokussierten Option. Enter feuert die `rename`-Action mit der
-    stabilen ID der Option in `ActionContext.value` **und** dem neuen Namen in
+- When opening, the host loads the options via `list_values(source)` and reads
+  the currently set values from the node's `marker` metadata field (comma-
+  separated stable ids). Set options are marked with **★**.
+- **Enter** on an option: fires the `toggle` action with the chosen value in
+  `ActionContext.value`. The adapter decides assign-vs-unassign itself based on
+  the actual membership and returns an `ActionDispatch` (nonsense values come
+  back as `ActionDispatch::Error`).
+- The popup **stays open** (multi-toggle); the ★ marker flips live immediately
+  while the pane reloads in the background.
+- **Managing the value list** (optional, depending on which field is set):
+  - **`create`** (default `ctrl+n`): opens an inline text prompt. Enter fires
+    the `create` action with the entered name in `ActionContext.text` (no
+    `value`); empty text cancels.
+  - **`rename`** (default `ctrl+e`): opens the same prompt, pre-filled with the
+    label of the focused option. Enter fires the `rename` action with the
+    option's stable id in `ActionContext.value` **and** the new name in
     `ActionContext.text`.
-  - **`delete`** (Default `ctrl+d`): zeigt einen Inline-`(y/n)`-Confirm. `y`
-    feuert die `delete`-Action mit der ID der fokussierten Option in
-    `ActionContext.value`; `n`/Esc bricht ab.
-  - Diese Verben sind **reine Daten-Operationen auf der Werteliste** (nicht am
-    Knoten) — der selektierte Knoten ist nur das Dispatch-Vehikel. Nach Erfolg
-    lädt das Menü die Optionsliste neu (Prompt schließt, Popup bleibt offen);
-    eine `ActionDispatch::Error`-Rückgabe wird als Hinweis angezeigt, ohne das
-    Menü zu schließen.
-- **Esc** schließt.
+  - **`delete`** (default `ctrl+d`): shows an inline `(y/n)` confirm. `y` fires
+    the `delete` action with the focused option's id in `ActionContext.value`;
+    `n`/Esc cancels.
+  - These verbs are **pure data operations on the value list** (not on the
+    node) — the selected node is only the dispatch vehicle. On success the menu
+    reloads the option list (the prompt closes, the popup stays open); an
+    `ActionDispatch::Error` return is shown as a hint without closing the menu.
+- **Esc** closes.
 
-Felder:
+Fields:
 
-| Feld     | Pflicht | Bedeutung                                                                 |
-| -------- | ------- | ------------------------------------------------------------------------- |
-| `source` | ja      | Schlüssel an `list_values(source)`; mappt auf `Vec<ValueOption>`.         |
-| `marker` | ja      | Verstecktes Knoten-Feld mit den gesetzten Werten (z. B. `tag_ids`).       |
-| `toggle` | ja      | Adapter-Action-ID, die auf Enter mit dem Wert aufgerufen wird.            |
-| `create` | nein    | Adapter-Action-ID für „anlegen" (ctrl+n; Name → `ActionContext.text`).    |
-| `rename` | nein    | Adapter-Action-ID für „umbenennen" (ctrl+e; id → `value`, Name → `text`). |
-| `delete` | nein    | Adapter-Action-ID für „löschen" (ctrl+d, y/n-Confirm; id → `value`).      |
-| `title`  | nein    | Popup-Titel; Default = Name der Action.                                   |
+| Field    | Required | Meaning                                                               |
+| -------- | -------- | --------------------------------------------------------------------- |
+| `source` | yes      | Key passed to `list_values(source)`; maps to `Vec<ValueOption>`.      |
+| `marker` | yes      | Hidden node field with the set values (e.g. `tag_ids`).               |
+| `toggle` | yes      | Adapter action id called with the value on Enter.                     |
+| `create` | no       | Adapter action id for "create" (ctrl+n; name → `ActionContext.text`). |
+| `rename` | no       | Adapter action id for "rename" (ctrl+e; id → `value`, name → `text`). |
+| `delete` | no       | Adapter action id for "delete" (ctrl+d, y/n confirm; id → `value`).   |
+| `title`  | no       | Popup title; default = the action's name.                             |
 
-Tastenbindungen teilt sich das Menü mit dem Tag-Menü (`tag_menu`-Section:
-Toggle / Create / Edit / Delete / Next / Prev / Close), weil die Menü-Form
-identisch ist. Ein `create`/`rename`/`delete`-Feld ohne gesetzte Action lässt
-die jeweilige Taste inaktiv.
+The menu shares its key bindings with the tag menu (`tag_menu` section: toggle /
+create / edit / delete / next / prev / close), because the menu shape is
+identical. A `create`/`rename`/`delete` field without an action set leaves the
+respective key inactive.
 
-### Custom Actions
+### Custom actions
 
-Adapter registrieren eigene Aktionen:
+Adapters register their own actions:
 
 ```rust
 pub trait ContentAdapter: Send + Sync {
@@ -2264,46 +2528,46 @@ pub trait ContentAdapter: Send + Sync {
 pub struct CustomAction {
     pub id: String,
     pub label: String,
-    pub needs_input: bool,            // z.B. Transition braucht Ziel-Status
-    pub allowed_values: Option<Vec<String>>,  // für Popup/Dropdown
+    pub needs_input: bool,            // e.g. a transition needs a target status
+    pub allowed_values: Option<Vec<String>>,  // for a popup/dropdown
 }
 ```
 
-Beispiel in der YAML:
+Example in the YAML:
 
 ```yaml
 actions:
   - name: Transition
     key: t
     type: custom
-    custom_action: transition # → Popup mit allowed_values
+    custom_action: transition # → popup with allowed_values
   - name: Assign
     key: a
     type: custom
-    custom_action: assign # → Popup mit User-Liste
+    custom_action: assign # → popup with the user list
 ```
 
 ---
 
-## Offene Fragen & Schwierigkeiten
+## Open questions & difficulties
 
-### 1. Async & Ladezeiten
+### 1. Async & loading times
 
-Problem: `list()` für Labels/Users kann Sekunden dauern (Jira fan-out).
-Die TUI darf nicht blockieren.
+Problem: `list()` for labels/users can take seconds (Jira fan-out). The TUI must
+not block.
 
-**Vorschlag**:
+**Proposal**:
 
-- Alle Adapter-Aufrufe grundsätzlich async über den bestehenden LoadMsg-Channel
-- TUI zeigt "Loading..." Indikator
-- Adapter-interner Cache macht die meisten Folge-Aufrufe instant
+- All adapter calls async on principle, through the existing LoadMsg channel
+- The TUI shows a "Loading..." indicator
+- The adapter-internal cache makes most follow-up calls instant
 
-### 2. Schema-Discovery
+### 2. Schema discovery
 
-Wenn ein User `type: create` konfiguriert, muss die TUI wissen welche Felder
-beim Erstellen angegeben werden können. Aktuell nicht im ContentAdapter.
+When a user configures `type: create`, the TUI has to know which fields can be
+given at creation time. Currently not in the ContentAdapter.
 
-**Vorschlag**: Node-Typ liefert Schema-Info:
+**Proposal**: the node type delivers schema info:
 
 ```rust
 pub trait ContentAdapter: Send + Sync {
@@ -2321,116 +2585,126 @@ pub struct FieldSchema {
 
 pub enum FieldType {
     Text,
-    Select,         // Dropdown, allowed_values kommen vom Adapter/Cache
-    MultiSelect,    // z.B. Labels
+    Select,         // dropdown, allowed_values come from the adapter/cache
+    MultiSelect,    // e.g. labels
     Date,
-    User,           // Autocomplete aus cached Users
+    User,           // autocomplete from cached users
 }
 ```
 
-### 3. Dynamische vs. Statische Spalten
+### 3. Dynamic vs. static columns
 
-Die YAML definiert feste Spalten. Aber manche Adapter haben dynamische Felder
-(Jira Custom Fields, DB-Spalten). Zwei Optionen:
+The YAML defines fixed columns. But some adapters have dynamic fields (Jira
+custom fields, DB columns). Two options:
 
-a) YAML definiert alles explizit → User muss Custom Fields kennen
-b) `columns: auto` → Adapter liefert die Spalten basierend auf dem ersten
-Result-Set
+a) The YAML defines everything explicitly → the user has to know the custom
+fields
+b) `columns: auto` → the adapter delivers the columns based on the first result
+set
 
-**Vorschlag**: Beides unterstützen. `auto` als Default, explizite
-Konfiguration überschreibt.
+**Proposal**: support both. `auto` as the default, an explicit configuration
+overrides it.
 
-### 4. Bulk-Aktionen
+### 4. Bulk actions
 
-Mehrere Nodes selektieren und gleichzeitig bearbeiten (z.B. 5 Tickets
-transitionieren). Braucht Multi-Select in der Tabelle.
+Selecting several nodes and editing them at once (e.g. transitioning 5 tickets).
+Needs multi-select in the table.
 
-**Vorschlag**: Erstmal out-of-scope, aber das Datenmodell sollte es nicht
-verhindern. `actions` könnten ein `bulk: true` Flag bekommen.
+**Proposal**: out of scope for now, but the data model should not prevent it.
+`actions` could get a `bulk: true` flag.
 
-### 5. Abhängigkeit Tasks ↔ Content-Views
+### 5. Dependency tasks ↔ content views
 
-Tasks/Trackings sind native Tabs mit eigener DB-Logik. Aber es gibt
-Querverbindungen:
+Tasks/trackings are native tabs with their own DB logic. But there are cross
+connections:
 
-- Task mit Jira-Ticket verlinken
-- Tracking automatisch stoppen wenn Jira-Ticket transitioniert wird
+- Link a task to a Jira ticket
+- Stop a tracking automatically when a Jira ticket is transitioned
 
-**Vorschlag**: Erstmal unabhängig lassen. Spätere Integration über ein
-Event-System oder Hooks möglich.
+**Proposal**: keep them independent for now. Later integration is possible via
+an event system or hooks.
 
-### 6. Hot-Reload der View-Konfiguration
+### 6. Hot reload of the view configuration
 
-Wenn der User eine YAML ändert, soll sich der Tab sofort aktualisieren
-(ohne Neustart). Braucht File-Watch auf das views/-Verzeichnis.
+When the user changes a YAML, the tab should update immediately (without a
+restart). Needs a file watch on the views/ directory.
 
-**Vorschlag**: Nice-to-have. Erstmal nur beim Start laden. Refresh via
-`:reload-views` Command.
+**Proposal**: nice to have. For now load only at startup. Refresh via a
+`:reload-views` command.
 
 ---
 
-## Implementierungsplan
+## Implementation plan
 
-### Phase 1: Traits erweitern (`not-yet-done-content`) ✅
+### Phase 1: extend the traits (`not-yet-done-content`) ✅
 
-Erweitere das Content-Trait-Crate um die fehlenden Abstraktionen.
-App bleibt lauffähig — nur neue Trait-Methoden mit Default-Impls.
+Extend the content trait crate with the missing abstractions. The app stays
+runnable — only new trait methods with default impls.
 
-- [x] `editor_template()` und `parse_editor_output()` auf `Node` Trait
-- [x] `custom_actions()` und `execute_action()` auf `ContentAdapter`
-- [x] `FieldSchema`, `FieldType`, `CustomAction`, `EditorOutput` Typen
-- [x] `schema()` auf `ContentAdapter`
+- [x] `editor_template()` and `parse_editor_output()` on the `Node` trait
+- [x] `custom_actions()` and `execute_action()` on `ContentAdapter`
+- [x] `FieldSchema`, `FieldType`, `CustomAction`, `EditorOutput` types
+- [x] `schema()` on `ContentAdapter`
 
-### Phase 2: JiraAdapter auf Config-String umstellen ✅
+### Phase 2: switch the JiraAdapter to a config string ✅
 
-Generische Konstruktion über `AdapterFactory`. JiraAdapter erhält
-internen Cache für Labels/Users (für Templates/Autocomplete).
+Generic construction via `AdapterFactory`. The JiraAdapter gets an internal
+cache for labels/users (for templates/autocomplete).
 
-- [x] `JiraAdapterFactory` implementieren (`create(config_string)`)
-- [x] Config-Parsing aus YAML-String (url, auth, cache settings)
-- [x] Interner Cache mit TTL (Labels, Users) — in `JiraRoot`, shared via `Arc<Mutex<JiraCache>>`
-- [x] `from_connection()` bleibt als Convenience
+- [x] Implement `JiraAdapterFactory` (`create(config_string)`)
+- [x] Config parsing from a YAML string (url, auth, cache settings)
+- [x] Internal cache with TTL (labels, users) — in `JiraRoot`, shared via
+      `Arc<Mutex<JiraCache>>`
+- [x] `from_connection()` stays as a convenience
 
-### Phase 3: Editor-Templates im JiraAdapter ✅
+### Phase 3: editor templates in the JiraAdapter ✅
 
-Adapter generiert und parst Editor-Templates. TUI-Code wird generisch.
+The adapter generates and parses editor templates. The TUI code becomes generic.
 
-- [x] `editor_template()` auf `JiraIssueNode` — mit Autocomplete-Hints aus Cache
-- [x] `parse_editor_output()` auf `JiraIssueNode`
-- [x] TUI `editor.rs`: generischer `ContentEdit` EditorAction + `process_content_edit()`
-- [x] TUI `mod.rs`: `OpenJiraTicketEditor` nutzt `editor_template()` statt hartcodiertem Template
-- Alter `JiraTicketEdit` Pfad noch vorhanden als Legacy-Fallback
+- [x] `editor_template()` on `JiraIssueNode` — with autocomplete hints from the
+      cache
+- [x] `parse_editor_output()` on `JiraIssueNode`
+- [x] TUI `editor.rs`: generic `ContentEdit` EditorAction +
+      `process_content_edit()`
+- [x] TUI `mod.rs`: `OpenJiraTicketEditor` uses `editor_template()` instead of a
+      hardcoded template
+- The old `JiraTicketEdit` path is still present as a legacy fallback
 
-### Phase 4: ViewConfig YAML-Parser ✅
+### Phase 4: ViewConfig YAML parser ✅
 
-Deklarative View-Konfiguration laden und parsen.
+Load and parse the declarative view configuration.
 
-- [x] Rust-Structs für YAML-Struktur (TabConfig, ViewDef, ColumnDef, ActionDef, ChildDef, PreviewConfig, QueryConfig, EditConfig, SavedQuery)
-- [x] `load_views()`: `~/.config/not_yet_done/views/*.yaml` laden
-- [x] AdapterFactory-Registry (HashMap<String, Box<dyn AdapterFactory>>)
-- [x] Adapter-Instanzen aus Config-String erstellen (inline oder Dateireferenz)
+- [x] Rust structs for the YAML structure (TabConfig, ViewDef, ColumnDef,
+      ActionDef, ChildDef, PreviewConfig, QueryConfig, EditConfig, SavedQuery)
+- [x] `load_views()`: load `~/.config/not_yet_done/views/*.yaml`
+- [x] AdapterFactory registry (HashMap<String, Box<dyn AdapterFactory>>)
+- [x] Create adapter instances from the config string (inline or file reference)
 
-### Phase 5: ContentView Komponente 🔧 (in Arbeit)
+### Phase 5: ContentView component 🔧 (in progress)
 
-Generische TUI-Komponente die JiraView ersetzt.
+The generic TUI component that replaces JiraView.
 
-- [x] `ContentView` Struct mit `ViewFileConfig` + `Arc<dyn ContentAdapter>` — Skeleton erstellt
-- [x] Tabelle aus `ColumnDef` + `NodeSummary` Metadata aufbauen
-- [x] Preview-Pane aus `PreviewConfig`
-- [x] Keybindings aus `ActionDef` (config-driven actions)
-- [ ] **App-Integration: `Tab::Jira` → `Tab::Content(usize)`, `jira_view` → `content_views: Vec<ContentView>`**
-      Großer koordinierter Umbau über ~6 Dateien: mod.rs, editor.rs, render.rs, tab_bar.rs, tabs/mod.rs, jira_view.rs.
-      Empfohlener Ansatz: erst mechanische 1:1 Migration, dann YAML-Loading.
-- [ ] Generischer Action-Handler (edit, create, delete, reload, download, open_url, custom)
-- [ ] Saved Queries / Favorites aus `QueryConfig`
-- [ ] App: dynamische Tab-Erzeugung aus geladenen ViewConfigs
-- [ ] JiraView + Legacy JiraTicketEdit Pfad entfernen
+- [x] `ContentView` struct with `ViewFileConfig` + `Arc<dyn ContentAdapter>` —
+      skeleton created
+- [x] Build the table from `ColumnDef` + `NodeSummary` metadata
+- [x] Preview pane from `PreviewConfig`
+- [x] Keybindings from `ActionDef` (config-driven actions)
+- [ ] **App integration: `Tab::Jira` → `Tab::Content(usize)`, `jira_view` →
+      `content_views: Vec<ContentView>`**
+      A large coordinated rebuild across ~6 files: mod.rs, editor.rs, render.rs,
+      tab_bar.rs, tabs/mod.rs, jira_view.rs. Recommended approach: first a
+      mechanical 1:1 migration, then the YAML loading.
+- [ ] Generic action handler (edit, create, delete, reload, download, open_url,
+      custom)
+- [ ] Saved queries / favorites from `QueryConfig`
+- [ ] App: dynamic tab creation from the loaded ViewConfigs
+- [ ] Remove JiraView + the legacy JiraTicketEdit path
 
-### Phase 6: NavStack & Children ⬜
+### Phase 6: NavStack & children ⬜
 
-Breadcrumb-Navigation für verschachtelte Node-Typen.
+Breadcrumb navigation for nested node types.
 
-- [ ] `NavFrame` Struct (node_id, label, view_def, scroll_pos, selected_idx)
-- [ ] Push/Pop Logik mit Scroll-Position-Restore
-- [ ] Breadcrumb-Rendering (Zeile über der Tabelle oder in Tab-Bar)
-- [ ] `ChildDef` aus YAML → automatisch Enter-Keybinding für Navigation
+- [ ] `NavFrame` struct (node_id, label, view_def, scroll_pos, selected_idx)
+- [ ] Push/pop logic with scroll position restore
+- [ ] Breadcrumb rendering (a line above the table or in the tab bar)
+- [ ] `ChildDef` from the YAML → an automatic Enter keybinding for navigation

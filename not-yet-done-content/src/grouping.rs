@@ -233,7 +233,10 @@ mod tests {
             bucket_display_label("2026-06", Some(GroupBucket::Month)),
             "2026-06"
         );
-        assert_eq!(bucket_display_label("2026", Some(GroupBucket::Year)), "2026");
+        assert_eq!(
+            bucket_display_label("2026", Some(GroupBucket::Year)),
+            "2026"
+        );
         assert_eq!(bucket_display_label("alpha", None), "alpha");
     }
 
@@ -266,7 +269,11 @@ mod tests {
         // A caller that pre-sorts its rows must see that order reflected in
         // each cell's members — this is how `S` orders rows within a group.
         let day = local_noon("2026-06-09");
-        let rows = vec![(day.as_str(), "z"), (day.as_str(), "a"), (day.as_str(), "z")];
+        let rows = vec![
+            (day.as_str(), "z"),
+            (day.as_str(), "a"),
+            (day.as_str(), "z"),
+        ];
         let cells = condense_cells(rows, Some(GroupBucket::Day));
         assert_eq!(cells.len(), 2);
         assert_eq!(cells[0].inner_key, "z");

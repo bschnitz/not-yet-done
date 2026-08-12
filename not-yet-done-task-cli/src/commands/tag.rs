@@ -16,22 +16,38 @@ pub mod cli {
     ) -> u8 {
         let result: Result<String, not_yet_done_task_core::error::AppError> =
             crate::run_async(|module| async move {
-                use shaku::HasComponent;
                 use not_yet_done_task_core::repository::TagStyle;
                 use not_yet_done_task_core::service::TagService;
+                use shaku::HasComponent;
                 let service: &dyn TagService = module.resolve_ref();
-                let style = TagStyle { fg_color: fg, bg_color: bg, symbol };
+                let style = TagStyle {
+                    fg_color: fg,
+                    bg_color: bg,
+                    symbol,
+                };
                 if let Some(proj) = project {
                     let tag = service.add_project_tag(name, style, proj).await?;
-                    Ok(format!("✓ Project tag created: [project-tag:{}] {}", tag.id, tag.name))
+                    Ok(format!(
+                        "✓ Project tag created: [project-tag:{}] {}",
+                        tag.id, tag.name
+                    ))
                 } else {
                     let tag = service.add_global(name, style).await?;
-                    Ok(format!("✓ Global tag created: [global-tag:{}] {}", tag.id, tag.name))
+                    Ok(format!(
+                        "✓ Global tag created: [global-tag:{}] {}",
+                        tag.id, tag.name
+                    ))
                 }
             });
         match result {
-            Ok(msg) => { println!("{msg}"); 0 }
-            Err(e)  => { eprintln!("Error: {e}"); 1 }
+            Ok(msg) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -43,41 +59,90 @@ pub mod cli {
     ) -> u8 {
         let result: Result<Vec<String>, not_yet_done_task_core::error::AppError> =
             crate::run_async(|module| async move {
-                use shaku::HasComponent;
                 use not_yet_done_task_core::service::{TagItem, TagService};
+                use shaku::HasComponent;
                 let service: &dyn TagService = module.resolve_ref();
 
                 if let Some(proj) = project {
                     let tags = service.list_by_project(proj).await?;
-                    Ok(tags.into_iter()
-                        .map(|t| format!("[project-tag:{}] {}{}",
-                            t.id, t.name,
-                            fmt_style(t.fg_color.as_deref(), t.bg_color.as_deref(), t.symbol.as_deref())))
+                    Ok(tags
+                        .into_iter()
+                        .map(|t| {
+                            format!(
+                                "[project-tag:{}] {}{}",
+                                t.id,
+                                t.name,
+                                fmt_style(
+                                    t.fg_color.as_deref(),
+                                    t.bg_color.as_deref(),
+                                    t.symbol.as_deref()
+                                )
+                            )
+                        })
                         .collect())
                 } else if global {
                     let tags = service.list_global().await?;
-                    Ok(tags.into_iter()
-                        .map(|t| format!("[global-tag:{}] {}{}",
-                            t.id, t.name,
-                            fmt_style(t.fg_color.as_deref(), t.bg_color.as_deref(), t.symbol.as_deref())))
+                    Ok(tags
+                        .into_iter()
+                        .map(|t| {
+                            format!(
+                                "[global-tag:{}] {}{}",
+                                t.id,
+                                t.name,
+                                fmt_style(
+                                    t.fg_color.as_deref(),
+                                    t.bg_color.as_deref(),
+                                    t.symbol.as_deref()
+                                )
+                            )
+                        })
                         .collect())
                 } else {
                     let items = service.list_all().await?;
-                    Ok(items.into_iter().map(|item| match item {
-                        TagItem::Global(t) => format!("[global-tag:{}] {}{}",
-                            t.id, t.name,
-                            fmt_style(t.fg_color.as_deref(), t.bg_color.as_deref(), t.symbol.as_deref())),
-                        TagItem::Project { tag: t, project_name } =>
-                            format!("[project-tag:{}] {} (project: {}){}",
-                                t.id, t.name, project_name,
-                                fmt_style(t.fg_color.as_deref(), t.bg_color.as_deref(), t.symbol.as_deref())),
-                    }).collect())
+                    Ok(items
+                        .into_iter()
+                        .map(|item| match item {
+                            TagItem::Global(t) => format!(
+                                "[global-tag:{}] {}{}",
+                                t.id,
+                                t.name,
+                                fmt_style(
+                                    t.fg_color.as_deref(),
+                                    t.bg_color.as_deref(),
+                                    t.symbol.as_deref()
+                                )
+                            ),
+                            TagItem::Project {
+                                tag: t,
+                                project_name,
+                            } => format!(
+                                "[project-tag:{}] {} (project: {}){}",
+                                t.id,
+                                t.name,
+                                project_name,
+                                fmt_style(
+                                    t.fg_color.as_deref(),
+                                    t.bg_color.as_deref(),
+                                    t.symbol.as_deref()
+                                )
+                            ),
+                        })
+                        .collect())
                 }
             });
         match result {
-            Ok(lines) if lines.is_empty() => { println!("No tags found."); 0 }
-            Ok(lines) => { lines.iter().for_each(|l| println!("{l}")); 0 }
-            Err(e)    => { eprintln!("Error: {e}"); 1 }
+            Ok(lines) if lines.is_empty() => {
+                println!("No tags found.");
+                0
+            }
+            Ok(lines) => {
+                lines.iter().for_each(|l| println!("{l}"));
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -99,26 +164,34 @@ pub mod cli {
     ) -> u8 {
         let result: Result<String, not_yet_done_task_core::error::AppError> =
             crate::run_async(|module| async move {
-                use shaku::HasComponent;
                 use not_yet_done_task_core::repository::TagStylePatch;
                 use not_yet_done_task_core::service::{TagItem, TagService};
+                use shaku::HasComponent;
                 let service: &dyn TagService = module.resolve_ref();
                 let patch = TagStylePatch {
                     fg_color: fg.map(empty_to_none),
                     bg_color: bg.map(empty_to_none),
-                    symbol:   symbol.map(empty_to_none),
+                    symbol: symbol.map(empty_to_none),
                 };
                 let item = service.edit(id, name, patch).await?;
                 Ok(match item {
-                    TagItem::Global(t) =>
-                        format!("✓ Tag updated: [global-tag:{}] {}", t.id, t.name),
-                    TagItem::Project { tag: t, .. } =>
-                        format!("✓ Tag updated: [project-tag:{}] {}", t.id, t.name),
+                    TagItem::Global(t) => {
+                        format!("✓ Tag updated: [global-tag:{}] {}", t.id, t.name)
+                    }
+                    TagItem::Project { tag: t, .. } => {
+                        format!("✓ Tag updated: [project-tag:{}] {}", t.id, t.name)
+                    }
                 })
             });
         match result {
-            Ok(msg) => { println!("{msg}"); 0 }
-            Err(e)  => { eprintln!("Error: {e}"); 1 }
+            Ok(msg) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -138,13 +211,19 @@ pub mod cli {
         loop {
             let edited = match open_editor_inline(&content) {
                 Ok(s) => s,
-                Err(e) => { eprintln!("Error: editor failed: {e}"); return 1; }
+                Err(e) => {
+                    eprintln!("Error: editor failed: {e}");
+                    return 1;
+                }
             };
             match parse_draft(&edited) {
                 Ok(draft) => {
                     let name = match normalize(draft.name) {
                         Some(n) => n,
-                        None => { println!("Aborted (empty name)."); return 0; }
+                        None => {
+                            println!("Aborted (empty name).");
+                            return 0;
+                        }
                     };
                     let style = TagStyleArgs {
                         fg: normalize(draft.fg_color),
@@ -154,8 +233,11 @@ pub mod cli {
                     let project = normalize(draft.project);
                     let res = create_tag(name, style, project);
                     return match res {
-                        Ok(msg) => { println!("{msg}"); 0 }
-                        Err(e)  => {
+                        Ok(msg) => {
+                            println!("{msg}");
+                            0
+                        }
+                        Err(e) => {
                             content = annotate_error(&edited, &e.to_string());
                             continue;
                         }
@@ -179,14 +261,20 @@ pub mod cli {
         #[arg(help = "Tag ID (global-tag:<uuid> or project-tag:<uuid>)")] id: String,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::TagService;
+            use shaku::HasComponent;
             let service: &dyn TagService = module.resolve_ref();
             service.delete(id).await
         });
         match result {
-            Ok(()) => { println!("✓ Tag deleted."); 0 }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Ok(()) => {
+                println!("✓ Tag deleted.");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -199,8 +287,15 @@ pub mod cli {
             sym.map(|s| format!("sym={s}")),
             fg.map(|c| format!("fg={c}")),
             bg.map(|c| format!("bg={c}")),
-        ].into_iter().flatten().collect();
-        if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) }
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        }
     }
 
     // ── `tag new` helpers ───────────────────────────────────────────
@@ -255,9 +350,9 @@ pub mod cli {
         project: Option<String>,
     ) -> Result<String, not_yet_done_task_core::error::AppError> {
         crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::repository::TagStyle;
             use not_yet_done_task_core::service::TagService;
+            use shaku::HasComponent;
             let service: &dyn TagService = module.resolve_ref();
             let s = TagStyle {
                 fg_color: style.fg,

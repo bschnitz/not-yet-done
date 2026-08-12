@@ -20,6 +20,8 @@ chrono     = { workspace = true }
 dirs       = { workspace = true }
 
 not-yet-done-content = { path = "../not-yet-done-content" }
+not-yet-done-custom-columns = { path = "../not-yet-done-custom-columns" }
+not-yet-done-scripts = { path = "../not-yet-done-scripts" }
 
 # Every adapter the host knows how to construct. Adding an adapter to the
 # product means adding it here (and to `factories()`), once — all front-ends
@@ -28,6 +30,9 @@ not-yet-done-jira-adapter       = { path = "../not-yet-done-jira-adapter" }
 not-yet-done-kimai-adapter      = { path = "../not-yet-done-kimai-adapter" }
 not-yet-done-taiga-adapter      = { path = "../not-yet-done-taiga-adapter" }
 not-yet-done-postgres-adapter   = { path = "../not-yet-done-postgres-adapter" }
+not-yet-done-sqlite-adapter     = { path = "../not-yet-done-sqlite-adapter" }
 not-yet-done-confluence-adapter = { path = "../not-yet-done-confluence-adapter" }
 not-yet-done-stoat-adapter      = { path = "../not-yet-done-stoat-adapter" }
 not-yet-done-local-adapter      = { path = "../not-yet-done-local-adapter" }
+not-yet-done-calendar-adapter   = { path = "../not-yet-done-calendar-adapter" }
+not-yet-done-workflow           = { path = "../not-yet-done-workflow" }

@@ -4,6 +4,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::action::ActionChains;
+use crate::active_surface::ActiveSurface;
+use not_yet_done_macros::AllVariants;
 
 // ---------------------------------------------------------------------------
 // KeyBinding
@@ -51,8 +53,19 @@ fn is_chord_string(s: &str) -> bool {
     }
     if matches!(
         s,
-        "enter" | "esc" | "tab" | "backspace" | "delete" | "up" | "down"
-            | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
+        "enter"
+            | "esc"
+            | "tab"
+            | "backspace"
+            | "delete"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
     ) {
         return false;
     }
@@ -60,6 +73,38 @@ fn is_chord_string(s: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Parse one binding string into its ordered list of canonical **step**
+/// tokens. A binding is a sequence of steps; each step is one atomic key
+/// press, optionally modifier-prefixed (`ctrl+k`). Three surface forms are
+/// accepted so both the modern interactive editor and legacy configs parse
+/// to the same internal shape:
+///
+/// * **space-separated** — `"ctrl+k l"` → `["ctrl+k", "l"]`. The modern form
+///   the editor writes; the only form that can carry modifiers on a step
+///   past the first. A literal space step is written with the `space` alias
+///   (`"ctrl+k space"`), never a bare double space, so splitting on ASCII
+///   space is unambiguous.
+/// * **legacy concatenation** of single printable chars — `"zr"` → `["z",
+///   "r"]` (see [`is_chord_string`]).
+/// * **single atomic token** — `"a"`, `"ctrl+shift+a"`, `"f12"`, `"enter"`,
+///   `"space"` → one step.
+///
+/// Every step is canonicalized (`space` alias → `" "`).
+pub fn binding_steps(s: &str) -> Vec<String> {
+    if s.contains(' ') {
+        return s
+            .split(' ')
+            .filter(|p| !p.is_empty())
+            .map(canonicalize_key)
+            .collect();
+    }
+    let canon = canonicalize_key(s);
+    if is_chord_string(&canon) {
+        return canon.chars().map(|c| c.to_string()).collect();
+    }
+    vec![canon]
 }
 
 impl KeyBinding {
@@ -71,30 +116,56 @@ impl KeyBinding {
         Self(keys.into_iter().map(|s| s.into()).collect())
     }
 
-    /// Check if the given key string matches any of the configured bindings.
-    pub fn matches(&self, key: &str) -> bool {
-        let canon = canonicalize_key(key);
-        self.0.iter().any(|k| canonicalize_key(k) == canon)
+    /// Step lists of every alternative this binding holds.
+    pub fn step_lists(&self) -> Vec<Vec<String>> {
+        self.0.iter().map(|s| binding_steps(s)).collect()
     }
 
-    /// Check if pending+key matches any chord binding.
-    pub fn matches_chord(&self, pending: &str, key: &str) -> bool {
-        let chord = canonicalize_key(&format!("{pending}{key}"));
-        self.0.iter().any(|k| canonicalize_key(k) == chord)
+    /// Whether a fully-pressed sequence of canonical step tokens exactly
+    /// equals one of the bound alternatives. This is the single entry point
+    /// the dispatcher uses to decide "does this completed key sequence fire
+    /// the action?" — single keys are just a one-element sequence.
+    pub fn matches_sequence(&self, pressed: &[String]) -> bool {
+        self.0.iter().any(|s| binding_steps(s) == pressed)
     }
 
-    /// Check if `key` is a prefix of any *chord* binding (multi-key
-    /// sequence of single printable chars). Atomic named keys like
-    /// `"f12"` or `"ctrl+x"` are deliberately excluded so a single `f`
-    /// isn't misread as the start of an `f12` chord.
-    pub fn is_prefix(&self, key: &str) -> bool {
-        let canon_key = canonicalize_key(key);
-        self.0.iter().any(|k| {
-            let canon = canonicalize_key(k);
-            is_chord_string(&canon)
-                && canon.len() > canon_key.len()
-                && canon.starts_with(&canon_key)
+    /// Whether `pressed` is a **strict** prefix of some alternative — more
+    /// keys are still needed to complete it, so the dispatcher should keep
+    /// the sequence pending. A binding that equals `pressed` is *not* a
+    /// prefix (nothing left to wait for).
+    pub fn is_sequence_prefix(&self, pressed: &[String]) -> bool {
+        self.0.iter().any(|s| {
+            let steps = binding_steps(s);
+            steps.len() > pressed.len() && steps[..pressed.len()] == *pressed
         })
+    }
+
+    /// Check whether `key` matches any bound alternative. `key` is the
+    /// pressed sequence in surface form — normally a single key, but the
+    /// legacy concatenation dispatcher also passes an accumulated chord
+    /// string (`"glm"`); both are parsed into steps first, so a multi-step
+    /// binding fires only on the fully-pressed sequence, never a lone key.
+    pub fn matches(&self, key: &str) -> bool {
+        self.matches_sequence(&binding_steps(key))
+    }
+
+    /// Check if `pending`+`key` completes a chord binding. `pending` is the
+    /// accumulated sequence in either surface form (legacy concatenation or
+    /// space-separated); it is parsed into steps before appending `key`.
+    pub fn matches_chord(&self, pending: &str, key: &str) -> bool {
+        let mut seq = binding_steps(pending);
+        seq.push(canonicalize_key(key));
+        self.matches_sequence(&seq)
+    }
+
+    /// Check if `key` is a **strict** prefix of any multi-step binding.
+    /// `key` is a pressed sequence in surface form (a single key, or an
+    /// accumulated chord string like `"gl"`). Atomic named keys like
+    /// `"f12"` or a lone `"ctrl+x"` are single-step, so they are never a
+    /// prefix — a single `f`/`c` isn't misread as the start of a longer
+    /// chord.
+    pub fn is_prefix(&self, key: &str) -> bool {
+        self.is_sequence_prefix(&binding_steps(key))
     }
 
     /// Display label listing every bound key, e.g. `[backspace/h]`.
@@ -122,6 +193,18 @@ impl KeyBinding {
     }
 }
 
+impl From<&str> for KeyBinding {
+    fn from(s: &str) -> Self {
+        KeyBinding(vec![s.to_string()])
+    }
+}
+
+impl From<String> for KeyBinding {
+    fn from(s: String) -> Self {
+        KeyBinding(vec![s])
+    }
+}
+
 impl Serialize for KeyBinding {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         if self.0.len() == 1 {
@@ -146,6 +229,23 @@ impl<'de> Deserialize<'de> for KeyBinding {
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<KeyBinding, E> {
+                Ok(KeyBinding(vec![v.to_string()]))
+            }
+
+            // A bare scalar key like `1` parses as a YAML integer, and a
+            // `key: yes`/`key: true` as a bool. Coerce them back to their
+            // string form so a single unquoted digit/word can never break the
+            // owning view. The writer quotes these (see `yaml_edit`), so this
+            // is the reader-side safety net for hand-edited or legacy configs.
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<KeyBinding, E> {
+                Ok(KeyBinding(vec![v.to_string()]))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<KeyBinding, E> {
+                Ok(KeyBinding(vec![v.to_string()]))
+            }
+
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<KeyBinding, E> {
                 Ok(KeyBinding(vec![v.to_string()]))
             }
 
@@ -186,22 +286,26 @@ macro_rules! impl_string_serde {
 // GlobalAction
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum GlobalAction {
     Quit,
-    TabJira,
-    TabTaiga,
-    TabPostgres,
-    TabConfluence,
     TabNext,
     TabPrev,
+    /// Cycle to the next subtab (view) within the active tab, wrapping
+    /// around. Mirrors [`TabNext`](Self::TabNext) one level down; a no-op on
+    /// tabs with a single view.
+    SubtabNext,
+    /// Cycle to the previous subtab (view) within the active tab, wrapping.
+    SubtabPrev,
     DismissNotifications,
+    /// Open the notification log — every message both bars have shown this
+    /// session, timestamped and merged chronologically — read-only in the
+    /// editor. The counterpart to a short bar
+    /// (`notifications.max_messages`): messages the bar pushed out, and
+    /// messages already dismissed with [`DismissNotifications`](Self::DismissNotifications),
+    /// stay readable here.
+    ShowNotifications,
     ShowLastError,
-    /// Open the tab-set switch popup. The popup lists the configured
-    /// constellations (with their icons); pressing a set's `shortcut`
-    /// key — or selecting it and hitting Enter — switches the active
-    /// constellation and rebuilds the tab layout.
-    TabSetPopup,
     /// Capture the current selection's [`NodeRef`] into the app-wide
     /// link-mark slot. Cleared by Esc or overwritten by another Mark.
     LinkMark,
@@ -221,21 +325,30 @@ pub enum GlobalAction {
     /// terminals collapse Ctrl+I onto Tab unless kitty's
     /// DISAMBIGUATE_ESCAPE_CODES is active (it is here, when supported).
     LinkJumpForward,
+    /// Open the shortcut menu — a list of every configured keyboard
+    /// shortcut (name → keys). Opens scoped to the current context by
+    /// default; a toggle inside the popup expands it to every tab.
+    ShortcutMenu,
+    /// Toggle fullscreen mode — hide all chrome bars (tab bar, the view's
+    /// action/shortcut bar and the bottom status bar) so the content view
+    /// fills the terminal. Message bars (alerts, notifications, inline
+    /// query errors) stay visible. Toggling again restores the chrome.
+    ToggleFullscreen,
 }
 
 impl GlobalAction {
     fn as_str(&self) -> &'static str {
         match self {
             GlobalAction::Quit => "quit",
-            GlobalAction::TabJira => "tab_jira",
-            GlobalAction::TabTaiga => "tab_taiga",
-            GlobalAction::TabPostgres => "tab_postgres",
-            GlobalAction::TabConfluence => "tab_confluence",
+            GlobalAction::ShortcutMenu => "shortcut_menu",
+            GlobalAction::ToggleFullscreen => "toggle_fullscreen",
             GlobalAction::TabNext => "tab_next",
             GlobalAction::TabPrev => "tab_prev",
+            GlobalAction::SubtabNext => "subtab_next",
+            GlobalAction::SubtabPrev => "subtab_prev",
             GlobalAction::DismissNotifications => "dismiss_notifications",
+            GlobalAction::ShowNotifications => "show_notifications",
             GlobalAction::ShowLastError => "show_last_error",
-            GlobalAction::TabSetPopup => "tab_set_popup",
             GlobalAction::LinkMark => "link_mark",
             GlobalAction::LinkPaste => "link_paste",
             GlobalAction::LinkOpenPopup => "link_open_popup",
@@ -256,15 +369,15 @@ impl FromStr for GlobalAction {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "quit" => Ok(GlobalAction::Quit),
-            "tab_jira" => Ok(GlobalAction::TabJira),
-            "tab_taiga" => Ok(GlobalAction::TabTaiga),
-            "tab_postgres" => Ok(GlobalAction::TabPostgres),
-            "tab_confluence" => Ok(GlobalAction::TabConfluence),
+            "shortcut_menu" => Ok(GlobalAction::ShortcutMenu),
+            "toggle_fullscreen" => Ok(GlobalAction::ToggleFullscreen),
             "tab_next" => Ok(GlobalAction::TabNext),
             "tab_prev" => Ok(GlobalAction::TabPrev),
+            "subtab_next" => Ok(GlobalAction::SubtabNext),
+            "subtab_prev" => Ok(GlobalAction::SubtabPrev),
             "dismiss_notifications" => Ok(GlobalAction::DismissNotifications),
+            "show_notifications" => Ok(GlobalAction::ShowNotifications),
             "show_last_error" => Ok(GlobalAction::ShowLastError),
-            "tab_set_popup" => Ok(GlobalAction::TabSetPopup),
             "link_mark" => Ok(GlobalAction::LinkMark),
             "link_paste" => Ok(GlobalAction::LinkPaste),
             "link_open_popup" => Ok(GlobalAction::LinkOpenPopup),
@@ -278,10 +391,115 @@ impl FromStr for GlobalAction {
 impl_string_serde!(GlobalAction);
 
 // ---------------------------------------------------------------------------
+// BarPlacement — where a global action surfaces in the permanent chrome
+// ---------------------------------------------------------------------------
+
+/// Which permanent bar (if any) a [`GlobalAction`] belongs in.
+///
+/// This is the compile-time guarantee the shortcut-visibility work is built
+/// around: [`GlobalAction::placement`] matches every variant with **no `_`
+/// arm**, so adding a new global action without deciding where it surfaces is
+/// a compile error — nothing can silently fall through the cracks the way
+/// `shortcut_menu` once did (bound, but shown in no permanent bar).
+///
+/// The bar builders then *iterate* [`GlobalAction::ALL`] and read this, so a
+/// newly classified action appears in its bar automatically, gated only on
+/// having a binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BarPlacement {
+    /// Fire-and-forget: rendered in the bottom status bar under `label`.
+    /// Actions sharing a label are grouped (their keys joined with `/`).
+    Status { label: &'static str },
+    /// Momentarily activatable: rendered in a top bar under `label` and lit
+    /// up while `surface` is the active surface.
+    Active {
+        label: &'static str,
+        surface: ActiveSurface,
+    },
+    /// Reachable only via the shortcut menu — deliberately not in any
+    /// permanent bar (too niche or too numerous to earn a slot).
+    MenuOnly,
+}
+
+impl GlobalAction {
+    /// Where this action surfaces in the permanent chrome. Exhaustive by
+    /// design — see [`BarPlacement`]. Do **not** add a `_` arm: a new
+    /// variant must be classified here explicitly.
+    pub fn placement(&self) -> BarPlacement {
+        use GlobalAction::*;
+        match self {
+            Quit => BarPlacement::Status { label: "quit" },
+            TabNext | TabPrev => BarPlacement::Status {
+                label: "cycle tabs",
+            },
+            ShortcutMenu => BarPlacement::Active {
+                label: "menu",
+                surface: ActiveSurface::ShortcutMenu,
+            },
+            // Reachable from the shortcut menu; no permanent-bar slot.
+            SubtabNext | SubtabPrev | DismissNotifications | ShowNotifications | ShowLastError
+            | LinkMark | LinkPaste | LinkOpenPopup | LinkJumpBack | LinkJumpForward
+            | ToggleFullscreen => BarPlacement::MenuOnly,
+        }
+    }
+}
+
+/// Build the bottom status-bar hints for every [`GlobalAction`] classified as
+/// [`BarPlacement::Status`], in declaration order, grouping actions that share
+/// a label (their keys joined with `/`) and skipping any action with no
+/// binding. Iterating [`GlobalAction::ALL`] plus the exhaustive
+/// [`GlobalAction::placement`] is what guarantees a newly status-placed global
+/// shows up here automatically, with no hand-maintained list.
+pub fn global_status_hints(gkb: &KeyBindingSection<GlobalAction>) -> Vec<(String, String)> {
+    // (description/label, joined keys) preserving first-seen label order.
+    let mut groups: Vec<(&'static str, Vec<String>)> = Vec::new();
+    for action in GlobalAction::ALL {
+        let BarPlacement::Status { label } = action.placement() else {
+            continue;
+        };
+        let Some(binding) = gkb.get(action) else {
+            continue;
+        };
+        let key = binding.display_label();
+        match groups.iter_mut().find(|(l, _)| *l == label) {
+            Some((_, keys)) => keys.push(key),
+            None => groups.push((label, vec![key])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(label, keys)| (keys.join("/"), label.to_string()))
+        .collect()
+}
+
+/// Build the top action-bar hints for every [`GlobalAction`] classified as
+/// [`BarPlacement::Active`] and currently bound, as `(action, key_label,
+/// desc)`. The caller resolves each action's `active` flag — only the App
+/// knows whether e.g. the shortcut-menu popup is open — and turns these into
+/// `ActionHint`s appended to the content action bar. Like
+/// [`global_status_hints`], iterating [`GlobalAction::ALL`] plus the
+/// exhaustive [`GlobalAction::placement`] keeps this driftless: a newly
+/// `Active`-placed global surfaces here automatically.
+pub fn global_active_hints(
+    gkb: &KeyBindingSection<GlobalAction>,
+) -> Vec<(GlobalAction, String, String)> {
+    GlobalAction::ALL
+        .iter()
+        .filter_map(|action| {
+            let BarPlacement::Active { label, .. } = action.placement() else {
+                return None;
+            };
+            let binding = gkb.get(action)?;
+            Some((action.clone(), binding.display_label(), label.to_string()))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // CommonAction — shared between Tasks and Trackings tabs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum CommonAction {
     ListNext,
     ListPrev,
@@ -301,12 +519,16 @@ pub enum CommonAction {
     SavedFilterSelect,
     FormFilter,
     ColumnConfig,
-    TrackingToggle,
     FormClose,
     FavoriteToggle,
     CommandLineOpen,
     JumpMode,
     SortMode,
+    /// Open the sort menu: the whole sort spec as one list (sorted columns
+    /// first, in sort order, with their direction). A second UI path onto
+    /// the same state [`Self::SortMode`] edits column-by-column — both
+    /// end in `App::commit_sort`.
+    SortMenu,
     /// Move the optional column cursor one cell to the left. Only takes
     /// effect in views that opt in via `column_cursor: true`.
     ColumnLeft,
@@ -335,12 +557,12 @@ impl CommonAction {
             Self::SavedFilterSelect => "saved_filter_select",
             Self::FormFilter => "form_filter",
             Self::ColumnConfig => "column_config",
-            Self::TrackingToggle => "tracking_toggle",
             Self::FormClose => "form_close",
             Self::FavoriteToggle => "favorite_toggle",
             Self::CommandLineOpen => "command_line_open",
             Self::JumpMode => "jump_mode",
             Self::SortMode => "sort_mode",
+            Self::SortMenu => "sort_menu",
             Self::ColumnLeft => "column_left",
             Self::ColumnRight => "column_right",
         }
@@ -377,12 +599,12 @@ impl FromStr for CommonAction {
             "column_right" => Ok(Self::ColumnRight),
             "form_filter" => Ok(Self::FormFilter),
             "column_config" => Ok(Self::ColumnConfig),
-            "tracking_toggle" => Ok(Self::TrackingToggle),
             "form_close" => Ok(Self::FormClose),
             "favorite_toggle" => Ok(Self::FavoriteToggle),
             "command_line_open" => Ok(Self::CommandLineOpen),
             "jump_mode" => Ok(Self::JumpMode),
             "sort_mode" => Ok(Self::SortMode),
+            "sort_menu" => Ok(Self::SortMenu),
             other => Err(format!("unknown common action: {}", other)),
         }
     }
@@ -394,7 +616,7 @@ impl_string_serde!(CommonAction);
 // ContentAction — generic ContentView keybindings (Jira/Taiga/…)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum ContentAction {
     Back,
     Open,
@@ -411,9 +633,10 @@ pub enum ContentAction {
     /// cursor up to that parent). No-op at depth 0 on a collapsed
     /// node. Only registered on tree-mode panes (`tree_label` set on
     /// the root view). Bound to `backspace` (a navigation gesture) so it
-    /// never competes with [`CommonAction::ColumnConfig`] on `c` — fold is
-    /// navigation and carries no action-bar entry; `c` must always open the
-    /// column-config popup, including on tree panes.
+    /// never competes with the `c` leader — fold is navigation and carries
+    /// no action-bar entry, while `c` must stay free to open the table
+    /// menus ([`CommonAction::ColumnConfig`] on `c c`,
+    /// [`CommonAction::SortMenu`] on `c s`), including on tree panes.
     TreeCollapse,
     /// Collapse every expanded node in a tree-mode pane back to the
     /// root listing. Mirrors the Tasks tab's `zm` chord. Only registered
@@ -490,6 +713,13 @@ pub enum ContentAction {
     /// they are. Registered only on panes whose active columns declare a
     /// `long_source`; a no-op elsewhere. Defaults to `v`.
     ToggleLongText,
+    /// Toggle card mode on a level that declares a `card:` block: every row
+    /// re-renders as a framed card whose fields sit in a grid of
+    /// `card.columns` slots per line, instead of one table line. The choice
+    /// is remembered per level and survives a restart. Not bound by default
+    /// — a level names its own key via `card.key`, so no key is stolen from
+    /// views without card mode.
+    ToggleCardMode,
 }
 
 impl ContentAction {
@@ -513,6 +743,7 @@ impl ContentAction {
             Self::ToggleDetailWrap => "toggle_detail_wrap",
             Self::LinkHop => "link_hop",
             Self::ToggleLongText => "toggle_long_text",
+            Self::ToggleCardMode => "toggle_card_mode",
         }
     }
 }
@@ -544,6 +775,8 @@ impl FromStr for ContentAction {
             "toggle_record_detail" => Ok(Self::ToggleRecordDetail),
             "toggle_detail_wrap" => Ok(Self::ToggleDetailWrap),
             "link_hop" => Ok(Self::LinkHop),
+            "toggle_long_text" => Ok(Self::ToggleLongText),
+            "toggle_card_mode" => Ok(Self::ToggleCardMode),
             other => Err(format!("unknown content action: {}", other)),
         }
     }
@@ -555,7 +788,7 @@ impl_string_serde!(ContentAction);
 // WindowAction — split-pane window operations (typically Ctrl-w prefixed)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum WindowAction {
     /// Split the focused pane horizontally — new pane on the right.
     SplitRight,
@@ -612,7 +845,7 @@ impl_string_serde!(WindowAction);
 // QueryMenuAction — query menu popup keybindings
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum QueryMenuAction {
     Select,
     Next,
@@ -620,6 +853,9 @@ pub enum QueryMenuAction {
     Edit,
     Delete,
     EditShortcut,
+    /// Remove the keyboard shortcut bound to the selected entry, leaving
+    /// the query itself untouched.
+    ClearShortcut,
     /// Toggle the selected entry as the default query — applied
     /// automatically on app start.
     SetDefault,
@@ -635,6 +871,7 @@ impl QueryMenuAction {
             Self::Edit => "edit",
             Self::Delete => "delete",
             Self::EditShortcut => "edit_shortcut",
+            Self::ClearShortcut => "clear_shortcut",
             Self::SetDefault => "set_default",
             Self::Close => "close",
         }
@@ -657,6 +894,7 @@ impl FromStr for QueryMenuAction {
             "edit" => Ok(Self::Edit),
             "delete" => Ok(Self::Delete),
             "edit_shortcut" => Ok(Self::EditShortcut),
+            "clear_shortcut" => Ok(Self::ClearShortcut),
             "set_default" => Ok(Self::SetDefault),
             "close" => Ok(Self::Close),
             other => Err(format!("unknown query_menu action: {}", other)),
@@ -670,7 +908,7 @@ impl_string_serde!(QueryMenuAction);
 // TagMenuAction — tag menu popup keybindings
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum TagMenuAction {
     /// Enter — on a selected entry: toggle assignment to the currently
     /// selected task (assign if not assigned, unassign if already
@@ -730,7 +968,7 @@ impl_string_serde!(TagMenuAction);
 // ScriptMenuAction — `:script` fuzzy menu popup keybindings
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum ScriptMenuAction {
     /// Enter — on a selected entry: run the script; on a typed name with
     /// no match (or `+name` prefix): open the editor on a new script file
@@ -796,7 +1034,7 @@ impl_string_serde!(ScriptMenuAction);
 // everywhere.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum PopupAction {
     /// Move list selection down.
     Next,
@@ -848,7 +1086,7 @@ impl_string_serde!(PopupAction);
 // FormAction
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, AllVariants)]
 pub enum FormAction {
     Next,
     Prev,
@@ -928,15 +1166,22 @@ where
 
 impl<'de, A> Deserialize<'de> for KeyBindingSection<A>
 where
-    A: Eq + std::hash::Hash + Deserialize<'de>,
+    A: Eq + std::hash::Hash + FromStr,
     KeyBindingSection<A>: Default,
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let user_bindings = HashMap::<A, KeyBinding>::deserialize(deserializer)?;
+        // Parse keys as raw strings first, then resolve each to an action
+        // via `FromStr`. Unknown action names are skipped rather than
+        // failing the whole config — this keeps a user's `tui.yaml` loading
+        // even when it still binds an action that has since been removed
+        // (e.g. `tracking_toggle`).
+        let raw = HashMap::<String, KeyBinding>::deserialize(deserializer)?;
         // Start from defaults, then override with user-provided bindings.
         let mut merged = Self::default();
-        for (action, binding) in user_bindings {
-            merged.bindings.insert(action, binding);
+        for (name, binding) in raw {
+            if let Ok(action) = A::from_str(&name) {
+                merged.bindings.insert(action, binding);
+            }
         }
         Ok(merged)
     }
@@ -946,20 +1191,20 @@ impl Default for KeyBindingSection<GlobalAction> {
     fn default() -> Self {
         let mut m = HashMap::new();
         m.insert(GlobalAction::Quit, KeyBinding::new("ctrl+c"));
-        m.insert(GlobalAction::TabJira, KeyBinding::new("3"));
-        m.insert(GlobalAction::TabTaiga, KeyBinding::new("4"));
-        m.insert(GlobalAction::TabPostgres, KeyBinding::new("5"));
-        m.insert(GlobalAction::TabConfluence, KeyBinding::new("6"));
+        m.insert(GlobalAction::ShortcutMenu, KeyBinding::new("ctrl+y"));
+        m.insert(GlobalAction::ToggleFullscreen, KeyBinding::new("f11"));
         m.insert(GlobalAction::TabNext, KeyBinding::new("tab"));
         m.insert(GlobalAction::TabPrev, KeyBinding::new("shift+tab"));
+        m.insert(GlobalAction::SubtabNext, KeyBinding::new("]"));
+        m.insert(GlobalAction::SubtabPrev, KeyBinding::new("["));
         // `Z` (capital) so the tasks-tree chords `zr`/`zm` are reachable —
         // a single-key binding that's a prefix of a chord shadows the
         // chord at the dispatcher level. Lower-case `z` would also be
         // unambiguous given the prefix-detector, but conflicts with
         // chord-prefix detection. Also exposed via `:dismiss-notifications`.
         m.insert(GlobalAction::DismissNotifications, KeyBinding::new("Z"));
+        m.insert(GlobalAction::ShowNotifications, KeyBinding::new("f10"));
         m.insert(GlobalAction::ShowLastError, KeyBinding::new("f12"));
-        m.insert(GlobalAction::TabSetPopup, KeyBinding::new("ctrl+x"));
         m.insert(GlobalAction::LinkMark, KeyBinding::new("glm"));
         m.insert(GlobalAction::LinkPaste, KeyBinding::new("glp"));
         m.insert(GlobalAction::LinkOpenPopup, KeyBinding::new("glo"));
@@ -974,7 +1219,10 @@ impl Default for KeyBindingSection<CommonAction> {
         let mut m = HashMap::new();
         m.insert(CommonAction::ListNext, KeyBinding::multi(vec!["down", "j"]));
         m.insert(CommonAction::ListPrev, KeyBinding::multi(vec!["up", "k"]));
-        m.insert(CommonAction::ListFirst, KeyBinding::multi(vec!["home", "gg"]));
+        m.insert(
+            CommonAction::ListFirst,
+            KeyBinding::multi(vec!["home", "gg"]),
+        );
         m.insert(CommonAction::ListLast, KeyBinding::multi(vec!["end", "G"]));
         m.insert(CommonAction::ScrollHalfUp, KeyBinding::new("ctrl+u"));
         m.insert(CommonAction::ScrollHalfDown, KeyBinding::new("ctrl+d"));
@@ -988,12 +1236,15 @@ impl Default for KeyBindingSection<CommonAction> {
         m.insert(CommonAction::SearchNext, KeyBinding::new("n"));
         m.insert(CommonAction::SearchPrev, KeyBinding::new("N"));
         m.insert(CommonAction::SavedFilterSelect, KeyBinding::new("q"));
-        m.insert(CommonAction::ColumnConfig, KeyBinding::new("c"));
-        m.insert(CommonAction::TrackingToggle, KeyBinding::new("s"));
+        // Column config and sort menu share the `c` leader: both configure
+        // *how the table reads*, and the chord keeps single-key `c` free on
+        // views that want it.
+        m.insert(CommonAction::ColumnConfig, KeyBinding::new("c c"));
         m.insert(CommonAction::FormClose, KeyBinding::new("esc"));
         m.insert(CommonAction::CommandLineOpen, KeyBinding::new(":"));
         m.insert(CommonAction::JumpMode, KeyBinding::new("p"));
         m.insert(CommonAction::SortMode, KeyBinding::new("S"));
+        m.insert(CommonAction::SortMenu, KeyBinding::new("c s"));
         // ColumnLeft / ColumnRight have no default: they are auto-claimed
         // as `h`/`l` only at leaves with `column_cursor: true` and are
         // suppressed everywhere else. See keymap.rs / content_view.rs.
@@ -1036,6 +1287,10 @@ impl Default for KeyBindingSection<ContentAction> {
         // on itself or a child (`keybindings: { link_hop: f }`); with no
         // binding present the claim is never filed and `f` stays free.
         m.insert(ContentAction::ToggleLongText, KeyBinding::new("v"));
+        // `ToggleCardMode` is intentionally NOT bound by default: card mode
+        // is opt-in per level and names its own key in the view config
+        // (`card: { key: C }`). A global binding here would claim the key on
+        // every view, including the ones without a `card:` block.
         Self { bindings: m }
     }
 }
@@ -1064,6 +1319,7 @@ impl Default for KeyBindingSection<QueryMenuAction> {
         m.insert(QueryMenuAction::Edit, KeyBinding::new("ctrl+e"));
         m.insert(QueryMenuAction::Delete, KeyBinding::new("ctrl+d"));
         m.insert(QueryMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
+        m.insert(QueryMenuAction::ClearShortcut, KeyBinding::new("ctrl+x"));
         m.insert(QueryMenuAction::SetDefault, KeyBinding::new("ctrl+t"));
         m.insert(QueryMenuAction::Close, KeyBinding::new("esc"));
         Self { bindings: m }
@@ -1235,6 +1491,127 @@ pub struct KeyBindingConfig {
 mod tests {
     use super::*;
 
+    fn steps(s: &str) -> Vec<String> {
+        binding_steps(s)
+    }
+
+    #[test]
+    fn all_variants_is_complete_and_roundtrips() {
+        // `#[derive(AllVariants)]` must list every variant, in declaration
+        // order, and each entry must round-trip through Display/FromStr. This
+        // guards the compile-time-complete iteration the bar builders rely on:
+        // a new variant that forgets its as_str/FromStr arm fails here.
+        macro_rules! check {
+            ($ty:ty, $count:expr) => {{
+                let all = <$ty>::ALL;
+                assert_eq!(all.len(), $count, concat!(stringify!($ty), "::ALL length"));
+                for v in all {
+                    let s = v.to_string();
+                    let back: $ty = s.parse().expect("variant must parse back");
+                    assert_eq!(&back, v, "round-trip for {s}");
+                }
+            }};
+        }
+        check!(GlobalAction, 15);
+        check!(CommonAction, 26);
+        check!(ContentAction, 19);
+        check!(WindowAction, 5);
+        check!(QueryMenuAction, 9);
+        check!(TagMenuAction, 7);
+        check!(ScriptMenuAction, 7);
+        check!(PopupAction, 5);
+        check!(FormAction, 4);
+    }
+
+    #[test]
+    fn binding_steps_parses_all_three_surface_forms() {
+        // Single atomic tokens → one step.
+        assert_eq!(steps("a"), vec!["a"]);
+        assert_eq!(steps("ctrl+shift+a"), vec!["ctrl+shift+a"]);
+        assert_eq!(steps("f12"), vec!["f12"]);
+        assert_eq!(steps("enter"), vec!["enter"]);
+        // Legacy concatenation of single printable chars → per-char steps.
+        assert_eq!(steps("zr"), vec!["z", "r"]);
+        assert_eq!(steps("glm"), vec!["g", "l", "m"]);
+        // Modern space-separated form → per-token steps, modifiers preserved.
+        assert_eq!(steps("ctrl+k l"), vec!["ctrl+k", "l"]);
+        assert_eq!(steps("g ctrl+d"), vec!["g", "ctrl+d"]);
+        // The `space` alias canonicalizes to a literal space, in any position.
+        assert_eq!(steps("space"), vec![" "]);
+        assert_eq!(steps("ctrl+k space"), vec!["ctrl+k", " "]);
+    }
+
+    #[test]
+    fn deserialize_coerces_scalar_int_and_bool_to_string() {
+        // A bare digit (a tab-switch positional key written unquoted) must not
+        // break the owning view — it deserializes as the string key "1".
+        let kb: KeyBinding = serde_yaml::from_str("1").unwrap();
+        assert!(kb.matches("1"));
+        // YAML 1.1 bool-like scalars coerce too.
+        let kb: KeyBinding = serde_yaml::from_str("true").unwrap();
+        assert!(kb.matches("true"));
+        // Ordinary string and list forms are unaffected.
+        let kb: KeyBinding = serde_yaml::from_str("ctrl+k").unwrap();
+        assert!(kb.matches("ctrl+k"));
+        let kb: KeyBinding = serde_yaml::from_str("[a, \"ctrl+k l\"]").unwrap();
+        assert!(kb.matches("a"));
+        assert!(kb.matches_chord("ctrl+k", "l"));
+    }
+
+    #[test]
+    fn section_deserialize_skips_unknown_action_names() {
+        // A `tui.yaml` that still binds a since-removed action (here the
+        // retired `tracking_toggle`) must load anyway: the unknown key is
+        // dropped, known keys still override the defaults.
+        let section: KeyBindingSection<CommonAction> =
+            serde_yaml::from_str("tracking_toggle: s\ncolumn_config: x\n").unwrap();
+        // Unknown action never materializes (there is no variant for it).
+        // Known override took effect over the default `c`.
+        assert!(
+            section
+                .get(&CommonAction::ColumnConfig)
+                .unwrap()
+                .matches("x")
+        );
+        // Untouched defaults remain intact.
+        assert!(
+            section
+                .get(&CommonAction::FormClose)
+                .unwrap()
+                .matches("esc")
+        );
+    }
+
+    #[test]
+    fn matches_sequence_needs_exact_completed_steps() {
+        let kb = KeyBinding::new("ctrl+k l");
+        assert!(kb.matches_sequence(&["ctrl+k".into(), "l".into()]));
+        // Partial sequence does not match — it is only a prefix.
+        assert!(!kb.matches_sequence(&["ctrl+k".into()]));
+        assert!(kb.is_sequence_prefix(&["ctrl+k".into()]));
+        // Wrong first step neither matches nor is a prefix.
+        assert!(!kb.is_sequence_prefix(&["ctrl+j".into()]));
+    }
+
+    #[test]
+    fn modifier_bearing_chord_completes_via_matches_chord() {
+        let kb = KeyBinding::new("ctrl+k l");
+        // pending is the leader step, key is the final step.
+        assert!(kb.matches_chord("ctrl+k", "l"));
+        assert!(!kb.matches_chord("ctrl+k", "j"));
+    }
+
+    #[test]
+    fn list_form_is_alternatives_space_form_is_sequence() {
+        // A YAML list: any single alternative fires.
+        let alts = KeyBinding::multi(vec!["a", "ctrl+k l"]);
+        assert!(alts.matches("a"));
+        assert!(alts.matches_chord("ctrl+k", "l"));
+        assert!(alts.is_prefix("ctrl+k"));
+        // `a` alone is not a prefix (it is a complete alternative).
+        assert!(!alts.is_prefix("a"));
+    }
+
     #[test]
     fn is_prefix_treats_zr_as_chord_prefix_for_z() {
         let kb = KeyBinding::new("zR");
@@ -1268,15 +1645,29 @@ mod tests {
 
     #[test]
     fn is_prefix_rejects_named_keys_as_chord_prefixes() {
-        for name in ["enter", "esc", "tab", "backspace", "delete",
-                     "up", "down", "left", "right",
-                     "home", "end", "pageup", "pagedown"] {
+        for name in [
+            "enter",
+            "esc",
+            "tab",
+            "backspace",
+            "delete",
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+        ] {
             let kb = KeyBinding::new(name);
             // First char of the name must not be treated as a chord
             // prefix — that would break single-key bindings like `e`/`u`.
             let first: String = name.chars().take(1).collect();
-            assert!(!kb.is_prefix(&first),
-                "named key `{name}` was mis-detected as chord prefix for `{first}`");
+            assert!(
+                !kb.is_prefix(&first),
+                "named key `{name}` was mis-detected as chord prefix for `{first}`"
+            );
         }
     }
 
@@ -1284,5 +1675,45 @@ mod tests {
     fn is_prefix_does_not_match_length_one_binding_against_itself() {
         let kb = KeyBinding::new("z");
         assert!(!kb.is_prefix("z"));
+    }
+
+    #[test]
+    fn empty_binding_never_matches_and_is_no_prefix() {
+        // The interactive editor writes a deliberately-disabled binding as
+        // an empty list (`quit: []`). An empty binding must be inert at
+        // every dispatch entry point — it fires nothing and starts no chord.
+        let kb = KeyBinding(Vec::new());
+        assert!(!kb.matches("ctrl+c"));
+        assert!(!kb.matches("a"));
+        assert!(!kb.matches_sequence(&[]));
+        assert!(!kb.matches_chord("ctrl+k", "l"));
+        assert!(!kb.is_prefix("g"));
+        assert!(!kb.is_sequence_prefix(&["g".to_string()]));
+        assert!(kb.step_lists().is_empty());
+    }
+
+    #[test]
+    fn empty_list_overrides_a_builtin_default_but_leaves_others_intact() {
+        // `quit: []` in tui.yaml must *override* the built-in `ctrl+c`
+        // default with an empty (disabled) binding — not be ignored, and
+        // not wipe the sibling defaults in the same section.
+        let cfg: KeyBindingConfig = serde_yaml::from_str("global:\n  quit: []\n").unwrap();
+
+        // The override is present and empty (so dispatch is dead).
+        let quit = cfg
+            .global
+            .get(&GlobalAction::Quit)
+            .expect("quit key survives the merge, present-but-empty");
+        assert!(quit.0.is_empty(), "quit must be disabled, got {quit:?}");
+        assert!(!quit.matches("ctrl+c"));
+
+        // Untouched sibling defaults are preserved by the merge.
+        assert_eq!(
+            cfg.global
+                .get(&GlobalAction::ShortcutMenu)
+                .map(|b| b.matches("ctrl+y")),
+            Some(true),
+            "non-overridden defaults must remain"
+        );
     }
 }

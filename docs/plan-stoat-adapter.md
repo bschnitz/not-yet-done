@@ -588,13 +588,13 @@ Pro Phase mitpflegen (sonst Change unvollständig):
 
 Revolt kodiert Erwähnungen im Body als `<@USERID>`. Ziel: in der Liste lesbare
 `@username` zeigen, und beim Editieren dieselbe Autocomplete-/Roundtrip-Mechanik
-wie bei Jira/Taiga (`@uu-slug` + CACHE-Section). Aufgesetzt auf die geteilte
+wie bei Jira/Taiga (`@uu_slug` + CACHE-Section). Aufgesetzt auf die geteilte
 `not_yet_done_content::slug::SlugTable`.
 
 **Warum zwei Render-Formen?** Anzeige und Editor wollen Unterschiedliches:
 
 - **Anzeige** (read-only, Liste/Preview): `<@ID>` → `@username` — lesbar.
-- **Editor** (roundtrip): `<@ID>` ↔ `@uu-username` — slug-basiert, plus
+- **Editor** (roundtrip): `<@ID>` ↔ `@uu_username` — slug-basiert, plus
   CACHE-Section; beim Speichern zurück nach `<@ID>` für die Wire-API.
 
 **Datenquelle = server-scoped Member-Cache.** Completions dürfen nur Mitglieder
@@ -613,7 +613,7 @@ des Servers anbieten, zu dem der Channel gehört:
 
 - `user_table(map)` — `SlugTable` mit `slug_source = username`, `original = id`.
 - `render_display(text, map)` — `<@ID>` → `@username` (unbekannt: roh).
-- `render_slugs(text, table)` / `parse_slugs(text, table)` — `<@ID>` ↔ `@uu-…`
+- `render_slugs(text, table)` / `parse_slugs(text, table)` — `<@ID>` ↔ `@uu_…`
   (Wortgrenzen-sicher; unbekannter Slug → `Err(slug)`).
 - `cache_section(table)` / `strip_cache_section(text)` — CACHE-Block am
   Buffer-Ende, vor dem Parsen abgeschnitten.

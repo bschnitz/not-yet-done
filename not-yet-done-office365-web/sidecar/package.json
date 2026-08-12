@@ -1,0 +1,17 @@
+{
+  "name": "not-yet-done-office365-web-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright sidecar for the not-yet-done Office 365 web session wrapper. Drives a persistent headless browser and answers a newline-delimited JSON protocol on stdin/stdout.",
+  "bin": {
+    "nyd-office365-sidecar": "index.js"
+  },
+  "scripts": {
+    "postinstall-hint": "npx playwright install chromium",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

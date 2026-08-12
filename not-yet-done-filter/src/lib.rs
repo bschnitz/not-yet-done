@@ -7,6 +7,8 @@
 //! - [`FilterExpr`] and friends — the parsed filter AST ([`expr`]).
 //! - [`query_filter`] — parsing a saved-query YAML document into a
 //!   [`FilterExpr`] plus options, with relative-date resolution.
+//! - [`eval`] — evaluating a [`FilterExpr`] against rows that are already in
+//!   memory, for row sources that have no `WHERE` clause to push down to.
 //! - [`extract_date_bounds`] / [`DateBounds`] — pulling concrete date
 //!   ranges out of a [`FilterExpr`] ([`date_range`]).
 //!
@@ -26,8 +28,10 @@
 //! ```
 
 mod date_range;
+pub mod eval;
 mod expr;
 pub mod query_filter;
 
-pub use date_range::{extract_date_bounds, DateBounds};
+pub use date_range::{DateBounds, extract_date_bounds};
+pub use eval::{Field, RowFields};
 pub use expr::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};

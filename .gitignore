@@ -16,3 +16,10 @@ todo.md
 
 # Privacy-cleanup working area (candidate lists, status, plan — never committed)
 /cleanup/
+
+# Playwright MCP scratch output (may contain live session data — never commit)
+.playwright-mcp/
+
+# Ad-hoc screenshots dropped in the repo root (e.g. Azure app-registration
+# API-permission captures) — contain live tenant data, never commit.
+/*.png

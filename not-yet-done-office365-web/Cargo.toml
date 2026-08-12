@@ -1,0 +1,32 @@
+[package]
+name = "not-yet-done-office365-web"
+version = "0.1.0"
+edition = "2024"
+
+# A wrapper around an authenticated Office 365 *web* session, driven through a
+# headless browser (Playwright) that runs as an out-of-process sidecar. It
+# exposes typed, app-agnostic APIs for the Office 365 web surfaces (calendar
+# now; mail/contacts/files later) and knows nothing about this workspace's
+# adapters or DTOs — so any consumer can use it.
+#
+# Sessions are shared by account key through a process-global registry: two
+# consumers (e.g. a calendar backend and a future mail backend) asking for the
+# same key get the SAME browser session — one interactive MFA login serves them
+# all. A different key (or none) yields a separate session.
+#
+# The browser lives entirely behind the sidecar (see `sidecar/`); the Rust side
+# only speaks a small newline-delimited JSON protocol over the child's
+# stdin/stdout, keeping the browser-automation stack out of the workspace.
+
+[dependencies]
+chrono     = { workspace = true, features = ["serde"] }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Used for the sidecar process-lifecycle guarantees: start it in its own
+# process group, signal the whole group (node + browser) on teardown, watch a
+# parent-death pipe, and reap a stale browser profile lock.
+libc = "0.2"

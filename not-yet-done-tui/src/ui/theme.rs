@@ -103,6 +103,16 @@ impl Theme {
         self.cfg.unread.to_ratatui()
     }
 
+    // ── Card mode ────────────────────────────────────────────────────────
+    /// Frame glyphs around a card in card mode.
+    pub fn card_border(&self) -> Color {
+        self.cfg.card_border.to_ratatui()
+    }
+    /// Field labels inside a card.
+    pub fn card_label(&self) -> Color {
+        self.cfg.card_label.to_ratatui()
+    }
+
     // ── Tab bar ─────────────────────────────────────────────────────────
     pub fn tab_active(&self) -> Color {
         self.cfg.tab_active.to_ratatui()
@@ -128,5 +138,123 @@ impl Theme {
     }
     pub fn form_bg(&self) -> Color {
         self.cfg.form_bg.to_ratatui()
+    }
+
+    // ── Spec-form popup palette (each role overridable, else app-theme) ──────
+    /// Focused label / prefix / cursor accent. Falls back to [`Self::primary`].
+    pub fn form_accent(&self) -> Color {
+        self.override_or(self.cfg.form.accent.as_ref(), || self.primary())
+    }
+    /// Unfocused label colour. Falls back to [`Self::text_dim`].
+    pub fn form_label_idle(&self) -> Color {
+        self.override_or(self.cfg.form.label_idle.as_ref(), || self.text_dim())
+    }
+    /// Focused input text. Falls back to [`Self::text_high`].
+    pub fn form_text(&self) -> Color {
+        self.override_or(self.cfg.form.text.as_ref(), || self.text_high())
+    }
+    /// Unfocused input text / option text. Falls back to [`Self::text_med`].
+    pub fn form_text_idle(&self) -> Color {
+        self.override_or(self.cfg.form.text_idle.as_ref(), || self.text_med())
+    }
+    /// Placeholder text. Falls back to [`Self::text_dim`].
+    pub fn form_placeholder(&self) -> Color {
+        self.override_or(self.cfg.form.placeholder.as_ref(), || self.text_dim())
+    }
+    /// Picked option / checked toggle marker. Falls back to [`Self::success`].
+    pub fn form_selected(&self) -> Color {
+        self.override_or(self.cfg.form.selected.as_ref(), || self.success())
+    }
+    /// Footer / preview hint text. Falls back to [`Self::text_dim`].
+    pub fn form_hint(&self) -> Color {
+        self.override_or(self.cfg.form.hint.as_ref(), || self.text_dim())
+    }
+    /// Error text. Falls back to [`Self::error`].
+    pub fn form_error(&self) -> Color {
+        self.override_or(self.cfg.form.error.as_ref(), || self.error())
+    }
+    /// Fill behind the focused field (the bar). `None` → no bar (the default).
+    pub fn form_field_bg(&self) -> Option<Color> {
+        self.cfg.form.field_bg.as_ref().map(|c| c.to_ratatui())
+    }
+    /// Fill behind unfocused fields. Usually `None`.
+    pub fn form_field_bg_idle(&self) -> Option<Color> {
+        self.cfg.form.field_bg_idle.as_ref().map(|c| c.to_ratatui())
+    }
+    /// Fill behind the floating panel (the `event_form` look). Falls back to
+    /// [`Self::form_bg`] so a panel always has a solid backdrop.
+    pub fn form_panel_bg(&self) -> Option<Color> {
+        Some(
+            self.cfg
+                .form
+                .panel_bg
+                .as_ref()
+                .map(|c| c.to_ratatui())
+                .unwrap_or_else(|| self.form_bg()),
+        )
+    }
+
+    // ── Built-in vim editor pane (each role overridable, else app-theme) ────
+    /// Background of the pane and the surface the other roles sit on. Falls
+    /// back to [`Self::surface`].
+    pub fn vim_bg(&self) -> Color {
+        self.override_or(self.cfg.vim.bg.as_ref(), || self.surface())
+    }
+    /// Buffer text. Falls back to [`Self::text_high`].
+    pub fn vim_text(&self) -> Color {
+        self.override_or(self.cfg.vim.text.as_ref(), || self.text_high())
+    }
+    /// The character under the block cursor. `None` → draw it reversed.
+    pub fn vim_cursor(&self) -> Option<Color> {
+        self.cfg.vim.cursor.as_ref().map(|c| c.to_ratatui())
+    }
+    /// The block cursor itself. `None` → draw it reversed.
+    pub fn vim_cursor_bg(&self) -> Option<Color> {
+        self.cfg.vim.cursor_bg.as_ref().map(|c| c.to_ratatui())
+    }
+    /// Line-number gutter. Falls back to [`Self::text_dim`].
+    pub fn vim_gutter(&self) -> Color {
+        self.override_or(self.cfg.vim.gutter.as_ref(), || self.text_dim())
+    }
+    /// Mode indicator. Falls back to [`Self::accent`].
+    pub fn vim_mode(&self) -> Color {
+        self.override_or(self.cfg.vim.mode.as_ref(), || self.accent())
+    }
+    /// Status line. Falls back to [`Self::text_med`].
+    pub fn vim_status(&self) -> Color {
+        self.override_or(self.cfg.vim.status.as_ref(), || self.text_med())
+    }
+    /// Command line and its messages. Falls back to [`Self::primary`].
+    pub fn vim_command_line(&self) -> Color {
+        self.override_or(self.cfg.vim.command_line.as_ref(), || self.primary())
+    }
+    /// Text inside a selection. Falls back to [`Self::text_high`].
+    pub fn vim_selection(&self) -> Color {
+        self.override_or(self.cfg.vim.selection.as_ref(), || self.text_high())
+    }
+    /// Fill behind a selection. Falls back to [`Self::focused_bg`].
+    pub fn vim_selection_bg(&self) -> Color {
+        self.override_or(self.cfg.vim.selection_bg.as_ref(), || self.focused_bg())
+    }
+
+    /// Resolve an optional per-role override, else compute the app-theme
+    /// fallback lazily.
+    fn override_or(
+        &self,
+        override_color: Option<&crate::config::color::HexColor>,
+        fallback: impl Fn() -> Color,
+    ) -> Color {
+        match override_color {
+            Some(c) => c.to_ratatui(),
+            None => fallback(),
+        }
+    }
+
+    // ── Alert bar ────────────────────────────────────────────────────────
+    pub fn alert_fg(&self) -> Color {
+        self.cfg.alert_fg.to_ratatui()
+    }
+    pub fn alert_bg(&self) -> Color {
+        self.cfg.alert_bg.to_ratatui()
     }
 }

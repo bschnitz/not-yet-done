@@ -18,14 +18,12 @@
 
 use std::sync::Arc;
 
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use tuirealm::component::Component;
 
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
-use crate::config::keybindings::{
-    KeyBindingSection, KeyIconMap, PopupAction, ScriptMenuAction,
-};
+use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction, ScriptMenuAction};
 use crate::ui::theme::Theme;
 
 /// One row in the menu. `path` is the absolute script-file path used
@@ -46,17 +44,31 @@ pub enum ScriptMenuMessage {
     Handled,
     Closed,
     /// Enter on a selected entry — run the script.
-    Run { path: String, label: String },
+    Run {
+        path: String,
+        label: String,
+    },
     /// Ctrl+E on a selected entry — open the script in the editor.
-    Edit { path: String, label: String },
+    Edit {
+        path: String,
+        label: String,
+    },
     /// Ctrl+S on a selected entry — prompt for a key chord to bind to it.
-    EditShortcut { path: String, label: String },
+    EditShortcut {
+        path: String,
+        label: String,
+    },
     /// Ctrl+D on a selected entry — delete the script file.
-    Delete { path: String, label: String },
+    Delete {
+        path: String,
+        label: String,
+    },
     /// Typed name (or `+name`) + Enter with no fuzzy-selected entry —
     /// create a new script file under the context's scripts dir using
     /// `name` as the filename.
-    CreateNew { name: String },
+    CreateNew {
+        name: String,
+    },
 }
 
 pub struct ScriptMenuComponent {
@@ -78,36 +90,31 @@ impl ScriptMenuComponent {
         }
     }
 
-    pub fn with_popup_kb(
-        mut self,
-        kb: KeyBindingSection<PopupAction>,
-        icons: KeyIconMap,
-    ) -> Self {
+    pub fn with_popup_kb(mut self, kb: KeyBindingSection<PopupAction>, icons: KeyIconMap) -> Self {
         self.popup_kb = Some(kb);
         self.key_icons = Some(icons);
         self
     }
 
-    pub fn is_open(&self) -> bool { self.popup.is_some() }
+    pub fn is_open(&self) -> bool {
+        self.popup.is_some()
+    }
 
-    pub fn close(&mut self) { self.popup = None; }
+    pub fn close(&mut self) {
+        self.popup = None;
+    }
 
-    pub fn open(
-        &mut self,
-        entries: &[ScriptMenuEntry],
-        kb: &KeyBindingSection<ScriptMenuAction>,
-    ) {
-        let items: Vec<PopupItem> = entries.iter().map(|e| PopupItem {
-            label: e.label.clone(),
-            value: e.path.clone(),
-            suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
-            ..Default::default()
-        }).collect();
-        let mut popup = SearchablePopup::new(
-            Arc::clone(&self.theme),
-            self.title.clone(),
-            items,
-        );
+    pub fn open(&mut self, entries: &[ScriptMenuEntry], kb: &KeyBindingSection<ScriptMenuAction>) {
+        let items: Vec<PopupItem> = entries
+            .iter()
+            .map(|e| PopupItem {
+                label: e.label.clone(),
+                value: e.path.clone(),
+                suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
+                ..Default::default()
+            })
+            .collect();
+        let mut popup = SearchablePopup::new(Arc::clone(&self.theme), self.title.clone(), items);
         if let (Some(pkb), Some(icons)) = (self.popup_kb.clone(), self.key_icons.clone()) {
             popup = popup.with_popup_kb(pkb, icons);
         }
@@ -126,13 +133,21 @@ impl ScriptMenuComponent {
         key: &str,
         kb: &KeyBindingSection<ScriptMenuAction>,
     ) -> ScriptMenuMessage {
-        if self.popup.is_none() { return ScriptMenuMessage::Unhandled; }
+        if self.popup.is_none() {
+            return ScriptMenuMessage::Unhandled;
+        }
 
-        if kb.get(&ScriptMenuAction::Close).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::Close)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup = None;
             return ScriptMenuMessage::Closed;
         }
-        if kb.get(&ScriptMenuAction::Run).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::Run)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             let typed = popup.query_text().trim().to_string();
 
@@ -142,7 +157,9 @@ impl ScriptMenuComponent {
             if let Some(rest) = typed.strip_prefix('+') {
                 let name = rest.trim().to_string();
                 self.popup = None;
-                if name.is_empty() { return ScriptMenuMessage::Closed; }
+                if name.is_empty() {
+                    return ScriptMenuMessage::Closed;
+                }
                 return ScriptMenuMessage::CreateNew { name };
             }
 
@@ -156,10 +173,15 @@ impl ScriptMenuComponent {
             }
 
             self.popup = None;
-            if typed.is_empty() { return ScriptMenuMessage::Closed; }
+            if typed.is_empty() {
+                return ScriptMenuMessage::Closed;
+            }
             return ScriptMenuMessage::CreateNew { name: typed };
         }
-        if kb.get(&ScriptMenuAction::Edit).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::Edit)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
                 let msg = ScriptMenuMessage::Edit {
@@ -171,7 +193,10 @@ impl ScriptMenuComponent {
             }
             return ScriptMenuMessage::Handled;
         }
-        if kb.get(&ScriptMenuAction::EditShortcut).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::EditShortcut)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
                 let msg = ScriptMenuMessage::EditShortcut {
@@ -183,15 +208,24 @@ impl ScriptMenuComponent {
             }
             return ScriptMenuMessage::Handled;
         }
-        if kb.get(&ScriptMenuAction::Next).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::Next)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup.as_mut().unwrap().select_next();
             return ScriptMenuMessage::Handled;
         }
-        if kb.get(&ScriptMenuAction::Prev).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::Prev)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup.as_mut().unwrap().select_prev();
             return ScriptMenuMessage::Handled;
         }
-        if kb.get(&ScriptMenuAction::Delete).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&ScriptMenuAction::Delete)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
                 let msg = ScriptMenuMessage::Delete {
@@ -237,8 +271,16 @@ mod tests {
 
     fn entries() -> Vec<ScriptMenuEntry> {
         vec![
-            ScriptMenuEntry { path: "/x/alpha.py".into(), label: "alpha.py".into(), shortcut: None },
-            ScriptMenuEntry { path: "/x/beta.py".into(), label: "beta.py".into(), shortcut: Some("1".into()) },
+            ScriptMenuEntry {
+                path: "/x/alpha.py".into(),
+                label: "alpha.py".into(),
+                shortcut: None,
+            },
+            ScriptMenuEntry {
+                path: "/x/beta.py".into(),
+                label: "beta.py".into(),
+                shortcut: Some("1".into()),
+            },
         ]
     }
 
@@ -294,7 +336,12 @@ mod tests {
             menu.handle_key(&c.to_string(), &kb);
         }
         let msg = menu.handle_key("enter", &kb);
-        assert_eq!(msg, ScriptMenuMessage::CreateNew { name: "alpha".into() });
+        assert_eq!(
+            msg,
+            ScriptMenuMessage::CreateNew {
+                name: "alpha".into()
+            }
+        );
     }
 
     #[test]
@@ -303,7 +350,9 @@ mod tests {
         let kb = make_kb();
         menu.open(&entries(), &kb);
         let msg = menu.handle_key("ctrl+s", &kb);
-        assert!(matches!(msg, ScriptMenuMessage::EditShortcut { ref path, .. } if path == "/x/alpha.py"));
+        assert!(
+            matches!(msg, ScriptMenuMessage::EditShortcut { ref path, .. } if path == "/x/alpha.py")
+        );
         assert!(!menu.is_open());
     }
 

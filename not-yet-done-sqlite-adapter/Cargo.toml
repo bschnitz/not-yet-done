@@ -1,0 +1,30 @@
+[package]
+name = "not-yet-done-sqlite-adapter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
+dirs        = { workspace = true }
+globset     = { workspace = true }
+# For `TryStreamExt` over sqlx's `fetch_many` stream — the only way to see
+# a multi-statement script's per-statement results (rows *and* row counts).
+futures     = { workspace = true }
+not-yet-done-content  = { path = "../not-yet-done-content" }
+not-yet-done-sql-core = { path = "../not-yet-done-sql-core" }
+# `sqlite` (not `sqlite-unbundled`) so the adapter never depends on a
+# system libsqlite3. sqlx 0.9 and libsqlite3-sys are already in the lock
+# file via sea-orm, so this unifies rather than adding a second sqlite3.
+sqlx = { version = "0.9", default-features = false, features = [
+    "sqlite",
+    "runtime-tokio",
+] }
+
+[dev-dependencies]
+tokio      = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile   = { workspace = true }

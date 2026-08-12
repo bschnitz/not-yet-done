@@ -8,12 +8,13 @@
 use std::time::Duration;
 
 use not_yet_done_content::http_log;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, COOKIE, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 mod attachments;
 mod comments;
 mod create;
+mod links;
 mod search;
 mod transitions;
 mod users;
@@ -22,6 +23,7 @@ mod watchers;
 pub use attachments::JiraAttachment;
 pub use comments::JiraComment;
 pub use create::CreateIssueFields;
+pub use links::JiraLinkType;
 pub use search::{JiraIssueDetail, JiraTicket};
 pub use transitions::JiraTransition;
 pub use users::JiraUser;
@@ -94,9 +96,9 @@ struct MyselfResponse {
 /// Persistable Jira auth session — what the auth orchestrator writes
 /// into its session blob and reads back on cache hit. One of the two
 /// shapes is populated depending on the configured mechanism: `cookie`
-/// for `AuthMechanism::Cookie`, `email`+`token` for
-/// `AuthMechanism::BasicAuth`. The bridge picks the right `JiraClient`
-/// constructor argument set from whichever fields are present.
+/// for the `cookie` mechanism, `email`+`token` for `basic-auth`. The
+/// bridge picks the right `JiraClient` constructor argument set from
+/// whichever fields are present.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct JiraSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,9 +123,33 @@ pub struct JiraClient {
     pub(super) base_url: String,
     pub(super) http: reqwest::Client,
     myself: tokio::sync::OnceCell<MyselfData>,
+    /// Set when the server rejects this client's session; read by the auth
+    /// bridge, which then throws the client away and logs in again.
+    rejection: http_log::AuthRejection,
 }
 
 impl JiraClient {
+    /// [`http_log::check_status`] for this client. Every REST call in the
+    /// submodules goes through here rather than the free function, so a
+    /// rejected session is noticed where it happens instead of being
+    /// re-reported on every later call (see [`JiraClient::auth_rejected`]).
+    pub(super) async fn check_status(
+        &self,
+        method: &str,
+        url: &str,
+        resp: reqwest::Response,
+    ) -> Result<reqwest::Response, String> {
+        self.rejection.check_status(method, url, resp).await
+    }
+
+    /// Whether the server has rejected this client's session — an expired
+    /// cookie, a revoked token, or an SSO deployment bouncing the API call
+    /// into its login flow. The auth bridge drops a client that reports
+    /// `true`.
+    pub fn auth_rejected(&self) -> bool {
+        self.rejection.is_rejected()
+    }
+
     /// Build a client from explicit parameters.
     pub fn new(
         url: &str,
@@ -141,15 +167,19 @@ impl JiraClient {
             } else {
                 format!("JSESSIONID={session_id}")
             };
-            headers.insert(COOKIE, HeaderValue::from_str(&cookie)
-                .map_err(|e| format!("Invalid cookie: {e}"))?);
+            headers.insert(
+                COOKIE,
+                HeaderValue::from_str(&cookie).map_err(|e| format!("Invalid cookie: {e}"))?,
+            );
         } else if let (Some(email), Some(token)) = (email, token) {
             use base64::Engine;
             let credentials = format!("{email}:{token}");
             let encoded = base64::engine::general_purpose::STANDARD.encode(&credentials);
             let auth = format!("Basic {encoded}");
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth)
-                .map_err(|e| format!("Invalid auth header: {e}"))?);
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&auth).map_err(|e| format!("Invalid auth header: {e}"))?,
+            );
         } else {
             return Err("No authentication configured".into());
         }
@@ -159,6 +189,7 @@ impl JiraClient {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .danger_accept_invalid_certs(accept_invalid_certs)
+            .redirect(http_log::api_redirect_policy())
             .timeout(HTTP_TIMEOUT)
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -167,6 +198,7 @@ impl JiraClient {
             base_url,
             http,
             myself: tokio::sync::OnceCell::new(),
+            rejection: http_log::AuthRejection::new(),
         })
     }
 
@@ -198,7 +230,7 @@ impl JiraClient {
                     .send()
                     .await
                     .map_err(|e| http_log::network_error("GET", &url, e))?;
-                let resp = http_log::check_status("GET", &url, resp).await?;
+                let resp = self.check_status("GET", &url, resp).await?;
 
                 let body_text = resp
                     .text()

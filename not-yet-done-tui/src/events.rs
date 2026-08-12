@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
@@ -77,22 +77,25 @@ pub fn key_event_to_string(key: KeyEvent) -> String {
                 c.to_string()
             }
         }
-        KeyCode::Enter     => "enter".to_string(),
-        KeyCode::Esc       => "esc".to_string(),
-        KeyCode::Tab       => "tab".to_string(),
-        KeyCode::BackTab   => { parts.push("shift"); "tab".to_string() }
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Esc => "esc".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::BackTab => {
+            parts.push("shift");
+            "tab".to_string()
+        }
         KeyCode::Backspace => "backspace".to_string(),
-        KeyCode::Delete    => "delete".to_string(),
-        KeyCode::Up        => "up".to_string(),
-        KeyCode::Down      => "down".to_string(),
-        KeyCode::Left      => "left".to_string(),
-        KeyCode::Right     => "right".to_string(),
-        KeyCode::Home      => "home".to_string(),
-        KeyCode::End       => "end".to_string(),
-        KeyCode::PageUp    => "pageup".to_string(),
-        KeyCode::PageDown  => "pagedown".to_string(),
-        KeyCode::F(n)      => format!("f{}", n),
-        _                  => "unknown".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        KeyCode::F(n) => format!("f{}", n),
+        _ => "unknown".to_string(),
     };
 
     if parts.is_empty() {
@@ -139,7 +142,10 @@ pub fn key_string_to_tuirealm(key: &str) -> Option<tuirealm::event::KeyEvent> {
         "pageup" => Key::PageUp,
         "pagedown" => Key::PageDown,
         "space" => Key::Char(' '),
-        s if s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+        // Function keys `f1`..`f12` — needs at least one digit, else a bare
+        // `f` would match here, fail to parse, and drop the whole key (a plain
+        // letter must fall through to the char arm below).
+        s if s.len() > 1 && s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
             s[1..].parse::<u8>().ok().map(Key::Function)?
         }
         s => {
@@ -156,7 +162,10 @@ pub fn key_string_to_tuirealm(key: &str) -> Option<tuirealm::event::KeyEvent> {
             Key::Char(c)
         }
     };
-    Some(TuiKeyEvent { code, modifiers: mods })
+    Some(TuiKeyEvent {
+        code,
+        modifiers: mods,
+    })
 }
 
 /// Map a crossterm [`Event`] delivered by the async `EventStream` to the
@@ -192,5 +201,34 @@ fn debug_log_key(key: &KeyEvent, emitted: &str) {
         .open("/tmp/nyd-keys.log")
     {
         let _ = writeln!(f, "{:?} {:?} -> {}", key.modifiers, key.code, emitted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_string_to_tuirealm;
+    use tuirealm::event::{Key, KeyModifiers};
+
+    #[test]
+    fn bare_f_maps_to_a_char_not_a_dropped_function_key() {
+        // Regression: `"f"` used to match the `f1`..`f12` arm (empty digit
+        // suffix parses `all(is_ascii_digit)` vacuously true), fail to parse,
+        // and drop the whole key — so `f` never reached a text input (e.g. the
+        // shortcut-menu search).
+        let ev = key_string_to_tuirealm("f").expect("f must decode");
+        assert_eq!(ev.code, Key::Char('f'));
+        assert_eq!(ev.modifiers, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn function_keys_still_decode() {
+        assert_eq!(
+            key_string_to_tuirealm("f1").map(|e| e.code),
+            Some(Key::Function(1))
+        );
+        assert_eq!(
+            key_string_to_tuirealm("f12").map(|e| e.code),
+            Some(Key::Function(12))
+        );
     }
 }

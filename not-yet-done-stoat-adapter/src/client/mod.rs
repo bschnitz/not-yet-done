@@ -11,6 +11,7 @@ pub mod members;
 pub mod messages;
 pub mod structure;
 pub mod sync;
+pub mod uploads;
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -41,7 +42,6 @@ pub struct StoatClient {
     base_url: String,
     http: HttpClient,
     token: String,
-    #[allow(dead_code)]
     user_id: String,
     /// Autumn (file server) base URL, discovered lazily from `GET /api/`
     /// on the first `discover_ws_url` (i.e. at connect). Empty/unset until
@@ -77,6 +77,12 @@ impl StoatClient {
     /// The session token, for handing to the gateway.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// Id of the logged-in user. Gateway events carry the acting user, so
+    /// events caused by someone else can be told apart from our own.
+    pub fn user_id(&self) -> &str {
+        &self.user_id
     }
 
     fn auth_headers(&self) -> Result<HeaderMap, String> {

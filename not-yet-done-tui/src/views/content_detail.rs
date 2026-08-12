@@ -71,8 +71,19 @@ fn detail_column(key: &str, label: &str, sizing: String, style: Option<&str>) ->
     }
 }
 
+/// One resolved field of the transposed record: the label shown in the field
+/// column and the (already formatted) value shown in the value column. The
+/// caller ([`super::content_view::ContentView::sync_detail_panes`]) builds
+/// these from the *source table's* columns so the follower mirrors the row
+/// view exactly — same selection, order, labels and `source: label` handling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailField {
+    pub label: String,
+    pub value: String,
+}
+
 /// Transpose a source record into the synthetic items the flat render path
-/// consumes: one row per source metadata field, in source order. Each item's
+/// consumes: one row per resolved [`DetailField`], in order. Each item's
 /// metadata carries exactly the two keys [`FIELD_KEY`] / [`VALUE_KEY`] that
 /// [`detail_columns`] read.
 ///
@@ -82,20 +93,15 @@ fn detail_column(key: &str, label: &str, sizing: String, style: Option<&str>) ->
 /// the field cell blank — so the whole value is visible. With `wrap` false the
 /// value stays on a single line (embedded newlines collapsed to spaces) and
 /// the engine clips it to the column.
-pub fn detail_items(summary: &NodeSummary, wrap: bool, value_width: usize) -> Vec<NodeSummary> {
+pub fn detail_items(fields: &[DetailField], wrap: bool, value_width: usize) -> Vec<NodeSummary> {
     let mut items = Vec::new();
-    for (idx, field) in summary.metadata.fields.iter().enumerate() {
-        let label = if field.display_label.is_empty() {
-            field.key.clone()
-        } else {
-            field.display_label.clone()
-        };
+    for (idx, field) in fields.iter().enumerate() {
         for (seg_idx, seg) in value_segments(&field.value, wrap, value_width)
             .into_iter()
             .enumerate()
         {
             let field_cell = if seg_idx == 0 {
-                label.clone()
+                field.label.clone()
             } else {
                 String::new()
             };
@@ -137,20 +143,12 @@ fn value_segments(value: &str, wrap: bool, width: usize) -> Vec<String> {
     out
 }
 
-/// Longest field *label* (display label, or key as fallback) in a record,
-/// in characters — the measure that sizes the field-name column.
-fn field_label_width(summary: &NodeSummary) -> usize {
-    summary
-        .metadata
-        .fields
+/// Longest field *label* in a record, in characters — the measure that sizes
+/// the field-name column.
+fn field_label_width(fields: &[DetailField]) -> usize {
+    fields
         .iter()
-        .map(|f| {
-            if f.display_label.is_empty() {
-                f.key.chars().count()
-            } else {
-                f.display_label.chars().count()
-            }
-        })
+        .map(|f| f.label.chars().count())
         .max()
         .unwrap_or(FIELD_COL_MIN)
 }
@@ -160,14 +158,16 @@ fn field_label_width(summary: &NodeSummary) -> usize {
 /// back to [`DEFAULT_RENDER_WIDTH`] before the pane has been drawn, and never
 /// drops below [`MIN_VALUE_WIDTH`]. Only consulted with wrap on; with wrap off
 /// the engine clips and the width is irrelevant.
-pub fn value_width(render_width: usize, summary: &NodeSummary) -> usize {
+pub fn value_width(render_width: usize, fields: &[DetailField]) -> usize {
     let total = if render_width == 0 {
         DEFAULT_RENDER_WIDTH
     } else {
         render_width
     };
-    let field = field_label_width(summary).clamp(FIELD_COL_MIN, FIELD_COL_MAX);
-    total.saturating_sub(field + COLUMN_GAP).max(MIN_VALUE_WIDTH)
+    let field = field_label_width(fields).clamp(FIELD_COL_MIN, FIELD_COL_MAX);
+    total
+        .saturating_sub(field + COLUMN_GAP)
+        .max(MIN_VALUE_WIDTH)
 }
 
 fn detail_row(id: String, field: String, value: String) -> NodeSummary {
@@ -211,23 +211,10 @@ fn detail_node_type() -> NodeType {
 mod tests {
     use super::*;
 
-    fn field(key: &str, label: &str, value: &str) -> MetadataField {
-        MetadataField {
-            key: key.to_string(),
+    fn field(label: &str, value: &str) -> DetailField {
+        DetailField {
+            label: label.to_string(),
             value: value.to_string(),
-            display_label: label.to_string(),
-            editable: false,
-            allowed_values: None,
-        }
-    }
-
-    fn summary(fields: Vec<MetadataField>) -> NodeSummary {
-        NodeSummary {
-            id: "row1".to_string(),
-            label: "Row 1".to_string(),
-            node_type: detail_node_type(),
-            metadata: Metadata { fields },
-            has_children: Some(false),
         }
     }
 
@@ -262,11 +249,8 @@ mod tests {
 
     #[test]
     fn items_transpose_one_row_per_field() {
-        let s = summary(vec![
-            field("name", "Name", "alice"),
-            field("age", "Age", "30"),
-        ]);
-        let items = detail_items(&s, false, 40);
+        let fields = vec![field("Name", "alice"), field("Age", "30")];
+        let items = detail_items(&fields, false, 40);
         assert_eq!(items.len(), 2);
         assert_eq!(cell(&items[0], FIELD_KEY), "Name");
         assert_eq!(cell(&items[0], VALUE_KEY), "alice");
@@ -275,24 +259,26 @@ mod tests {
     }
 
     #[test]
-    fn items_fall_back_to_key_when_label_empty() {
-        let s = summary(vec![field("raw_key", "", "v")]);
-        let items = detail_items(&s, false, 40);
+    fn items_use_label_verbatim() {
+        // The caller resolves the label (YAML label, else column key); the
+        // transposer renders it as-is.
+        let fields = vec![field("raw_key", "v")];
+        let items = detail_items(&fields, false, 40);
         assert_eq!(cell(&items[0], FIELD_KEY), "raw_key");
     }
 
     #[test]
     fn no_wrap_flattens_newlines_to_single_row() {
-        let s = summary(vec![field("body", "Body", "line1\nline2")]);
-        let items = detail_items(&s, false, 40);
+        let fields = vec![field("Body", "line1\nline2")];
+        let items = detail_items(&fields, false, 40);
         assert_eq!(items.len(), 1);
         assert_eq!(cell(&items[0], VALUE_KEY), "line1 line2");
     }
 
     #[test]
     fn wrap_splits_long_value_into_continuation_rows() {
-        let s = summary(vec![field("body", "Body", "abcdefghij")]);
-        let items = detail_items(&s, true, 4);
+        let fields = vec![field("Body", "abcdefghij")];
+        let items = detail_items(&fields, true, 4);
         // 10 chars / width 4 → 3 segments.
         assert_eq!(items.len(), 3);
         assert_eq!(cell(&items[0], FIELD_KEY), "Body");
@@ -305,8 +291,8 @@ mod tests {
 
     #[test]
     fn wrap_preserves_hard_line_breaks() {
-        let s = summary(vec![field("body", "Body", "ab\ncd")]);
-        let items = detail_items(&s, true, 40);
+        let fields = vec![field("Body", "ab\ncd")];
+        let items = detail_items(&fields, true, 40);
         assert_eq!(items.len(), 2);
         assert_eq!(cell(&items[0], VALUE_KEY), "ab");
         assert_eq!(cell(&items[1], VALUE_KEY), "cd");
@@ -315,29 +301,29 @@ mod tests {
 
     #[test]
     fn empty_record_yields_no_items() {
-        let s = summary(vec![]);
-        assert!(detail_items(&s, false, 40).is_empty());
+        let fields: Vec<DetailField> = vec![];
+        assert!(detail_items(&fields, false, 40).is_empty());
     }
 
     #[test]
     fn value_width_subtracts_field_column_and_gap() {
         // Field label "Name" (4) is below the floor (8) → field col = 8.
         // value = 40 - 8 - 3 = 29.
-        let s = summary(vec![field("name", "Name", "x")]);
-        assert_eq!(value_width(40, &s), 29);
+        let fields = vec![field("Name", "x")];
+        assert_eq!(value_width(40, &fields), 29);
     }
 
     #[test]
     fn value_width_uses_default_before_first_draw() {
-        let s = summary(vec![field("name", "Name", "x")]);
+        let fields = vec![field("Name", "x")];
         // render width 0 → DEFAULT_RENDER_WIDTH (80): 80 - 8 - 3 = 69.
-        assert_eq!(value_width(0, &s), 69);
+        assert_eq!(value_width(0, &fields), 69);
     }
 
     #[test]
     fn value_width_has_floor_on_narrow_pane() {
-        let s = summary(vec![field("name", "Name", "x")]);
+        let fields = vec![field("Name", "x")];
         // 10 - 8 - 3 would underflow → clamped to MIN_VALUE_WIDTH.
-        assert_eq!(value_width(10, &s), MIN_VALUE_WIDTH);
+        assert_eq!(value_width(10, &fields), MIN_VALUE_WIDTH);
     }
 }

@@ -1,14 +1,13 @@
 //! App-wide stable reference to a node.
 //!
-//! Used by the link feature so that every node — across content adapters
-//! (Jira, Taiga, Postgres) *and* the legacy Tasks/Trackings tabs — can be
-//! addressed uniformly. The first segment names the top-level tab; the
-//! remainder is opaque to the app layer and routed down through the tab
-//! or adapter, which alone knows its internal ID scheme.
+//! Used by the link feature so that every node of every content adapter
+//! can be addressed uniformly. Refs built by the host follow
+//! `<adapter_type>/<instance_id>/<node_id>`, where the node id keeps its
+//! own separators and stays opaque above the adapter — which alone knows
+//! its internal ID scheme.
 //!
 //! Examples:
-//! - `tasks/a1b2c3d4-e5f6-7890-abcd-ef0123456789`
-//! - `tracking/9f8e7d6c-...`
+//! - `tasks/local/a1b2c3d4-e5f6-7890-abcd-ef0123456789`
 //! - `jira/prod/PROJ-123`
 //! - `jira/prod/PROJ-123/comment/abc`
 //! - `taiga/main/task:123`

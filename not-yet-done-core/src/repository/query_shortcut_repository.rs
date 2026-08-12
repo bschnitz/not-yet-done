@@ -27,17 +27,20 @@ use crate::error::CoreError;
 pub trait QueryShortcutRepository: shaku::Interface {
     /// All `(name, shortcut)` pairs registered for `scope`. Order is
     /// unspecified — callers should sort if they want stable UI.
-    async fn list_by_scope(
-        &self,
-        scope: &str,
-    ) -> Result<Vec<query_shortcut::Model>, CoreError>;
+    async fn list_by_scope(&self, scope: &str) -> Result<Vec<query_shortcut::Model>, CoreError>;
 
     /// Set or replace the shortcut for `(scope, name)`. Upsert — no
     /// distinction between "create" and "update".
+    ///
+    /// `kind` is the store that owns the body (`saved` | `extended`) and is
+    /// rewritten on update: a name is unique across both stores, so if the
+    /// caller now reports a different kind, the old entry is gone and this
+    /// row would otherwise point at a store that no longer holds it.
     async fn set(
         &self,
         scope: &str,
         name: &str,
+        kind: &str,
         shortcut: &str,
     ) -> Result<query_shortcut::Model, CoreError>;
 
@@ -48,12 +51,7 @@ pub trait QueryShortcutRepository: shaku::Interface {
     /// Rename the query referenced by all shortcuts under `scope`. Used
     /// when the user renames a saved query via the menu — the body
     /// moves on the filesystem, the shortcut row tracks the new name.
-    async fn rename(
-        &self,
-        scope: &str,
-        old_name: &str,
-        new_name: &str,
-    ) -> Result<(), CoreError>;
+    async fn rename(&self, scope: &str, old_name: &str, new_name: &str) -> Result<(), CoreError>;
 }
 
 #[derive(Component)]
@@ -65,10 +63,7 @@ pub struct QueryShortcutRepositoryImpl {
 
 #[async_trait]
 impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
-    async fn list_by_scope(
-        &self,
-        scope: &str,
-    ) -> Result<Vec<query_shortcut::Model>, CoreError> {
+    async fn list_by_scope(&self, scope: &str) -> Result<Vec<query_shortcut::Model>, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))
@@ -80,6 +75,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         &self,
         scope: &str,
         name: &str,
+        kind: &str,
         shortcut: &str,
     ) -> Result<query_shortcut::Model, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
@@ -91,11 +87,13 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         if let Some(model) = existing {
             let mut active: ActiveModel = model.into();
             active.shortcut = Set(shortcut.to_string());
+            active.kind = Set(kind.to_string());
             return Ok(active.update(db).await?);
         }
         let model = ActiveModel {
             scope: Set(scope.to_string()),
             name: Set(name.to_string()),
+            kind: Set(kind.to_string()),
             shortcut: Set(shortcut.to_string()),
             ..ActiveModel::new()
         };
@@ -112,12 +110,7 @@ impl QueryShortcutRepository for QueryShortcutRepositoryImpl {
         Ok(())
     }
 
-    async fn rename(
-        &self,
-        scope: &str,
-        old_name: &str,
-        new_name: &str,
-    ) -> Result<(), CoreError> {
+    async fn rename(&self, scope: &str, old_name: &str, new_name: &str) -> Result<(), CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let row = query_shortcut::Entity::find()
             .filter(query_shortcut::Column::Scope.eq(scope))

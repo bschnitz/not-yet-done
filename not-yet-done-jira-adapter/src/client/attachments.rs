@@ -54,7 +54,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -70,10 +70,7 @@ impl JiraClient {
             .map(|a| JiraAttachment {
                 id: a.id,
                 filename: a.filename.unwrap_or_default(),
-                author: a
-                    .author
-                    .and_then(|a| a.display_name)
-                    .unwrap_or_default(),
+                author: a.author.and_then(|a| a.display_name).unwrap_or_default(),
                 created: a.created.unwrap_or_default(),
                 size: a.size.unwrap_or(0),
                 mime_type: a.mime_type.unwrap_or_default(),
@@ -94,7 +91,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("DELETE", &url, e))?;
-        http_log::check_status("DELETE", &url, resp).await?;
+        self.check_status("DELETE", &url, resp).await?;
         Ok(())
     }
 
@@ -109,7 +106,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", content_url, e))?;
-        let resp = http_log::check_status("GET", content_url, resp).await?;
+        let resp = self.check_status("GET", content_url, resp).await?;
 
         resp.bytes()
             .await

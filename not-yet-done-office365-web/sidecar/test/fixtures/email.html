@@ -1,0 +1,25 @@
+<!doctype html>
+<!--
+  Fixture: the email/username entry screen.
+  Mirrors the real AAD markup — the email (#i0116) AND password (#i0118) inputs
+  both exist in the DOM; only the email is visible at this stage. All data is
+  invented; no real tenant/account appears anywhere in these fixtures.
+-->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Sign in</title></head>
+  <body>
+    <h1>Sign in</h1>
+    <form>
+      <input
+        type="email"
+        id="i0116"
+        name="loginfmt"
+        placeholder="Email, phone, or Skype"
+        aria-label="Enter your email, phone, or Skype." />
+      <!-- present but hidden until the next step; classifier must ignore it -->
+      <input type="password" id="i0118" name="passwd" style="display: none" />
+      <input type="button" id="idBtn_Back" value="Back" />
+      <input type="submit" id="idSIButton9" value="Next" />
+    </form>
+  </body>
+</html>

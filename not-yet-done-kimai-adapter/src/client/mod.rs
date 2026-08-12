@@ -176,10 +176,7 @@ impl KimaiClient {
     /// listing until a short page; a 404 past page 1 also counts as the end
     /// (some Kimai versions 404 on out-of-range pages instead of returning
     /// an empty array).
-    pub async fn timesheets_since(
-        &self,
-        begin_local: &str,
-    ) -> Result<Vec<KimaiTimesheet>, String> {
+    pub async fn timesheets_since(&self, begin_local: &str) -> Result<Vec<KimaiTimesheet>, String> {
         let url = format!("{}/api/timesheets", self.base_url);
         let size = PAGE_SIZE.to_string();
         let mut out: Vec<KimaiTimesheet> = Vec::new();

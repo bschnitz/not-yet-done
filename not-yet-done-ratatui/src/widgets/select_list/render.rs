@@ -34,10 +34,21 @@ pub struct SelectListItem<'a> {
 
 /// Renders the SelectList and returns the terminal cursor position (if the
 /// filter input is visible and focused).
-pub fn render(buf: &mut Buffer, area: Rect, data: &RenderData, list: &SelectList) -> Option<Position> {
-    if area.height == 0 || area.width == 0 { return None; }
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    data: &RenderData,
+    list: &SelectList,
+) -> Option<Position> {
+    if area.height == 0 || area.width == 0 {
+        return None;
+    }
 
-    let style = if data.focused { &list.active_style } else { &list.inactive_style };
+    let style = if data.focused {
+        &list.active_style
+    } else {
+        &list.inactive_style
+    };
     let marker = &list.marker;
 
     let mut y = area.top();
@@ -48,7 +59,9 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &RenderData, list: &SelectList
 
     // Filter row.
     if data.show_filter {
-        if y >= area.bottom() { return None; }
+        if y >= area.bottom() {
+            return None;
+        }
         cursor_pos = render_filter_row(buf, left, y, right, data, style, list.cursor_on_empty);
         y += 1;
     }
@@ -60,13 +73,17 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &RenderData, list: &SelectList
         area.bottom().saturating_sub(y) as usize
     };
 
-    let visible_items: Vec<&SelectListItem> = data.items.iter()
+    let visible_items: Vec<&SelectListItem> = data
+        .items
+        .iter()
         .skip(data.scroll_offset)
         .take(items_height)
         .collect();
 
     for (i, item) in visible_items.iter().enumerate() {
-        if y >= area.bottom() { break; }
+        if y >= area.bottom() {
+            break;
+        }
         let list_idx = data.scroll_offset + i;
         let is_cursor = list_idx == data.cursor;
         render_item_row(buf, left, y, right, item, is_cursor, marker, style);
@@ -83,8 +100,12 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &RenderData, list: &SelectList
 
 /// Renders the filter row and returns the terminal cursor position.
 fn render_filter_row(
-    buf: &mut Buffer, left: u16, y: u16, right: u16,
-    data: &RenderData, style: &super::style::SelectListStyle,
+    buf: &mut Buffer,
+    left: u16,
+    y: u16,
+    right: u16,
+    data: &RenderData,
+    style: &super::style::SelectListStyle,
     cursor_on_empty: bool,
 ) -> Option<Position> {
     let input_style = style.resolved_style(ST::FilterInput);
@@ -107,7 +128,11 @@ fn render_filter_row(
 
     let chars: Vec<char> = data.filter_query.chars().collect();
     let max_w = right.saturating_sub(text_x) as usize;
-    let view_start = if data.filter_cursor >= max_w { data.filter_cursor + 1 - max_w } else { 0 };
+    let view_start = if data.filter_cursor >= max_w {
+        data.filter_cursor + 1 - max_w
+    } else {
+        0
+    };
 
     if chars.is_empty() {
         // Placeholder text — uses placeholder_color over the input bg
@@ -120,18 +145,26 @@ fn render_filter_row(
         };
         let mut x = text_x;
         for ch in placeholder.chars() {
-            if x >= right { break; }
+            if x >= right {
+                break;
+            }
             if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
                 cell.set_char(ch);
                 cell.set_style(ph_style);
             }
             x += 1;
         }
-        if cursor_on_empty { Some(Position::new(text_x, y)) } else { None }
+        if cursor_on_empty {
+            Some(Position::new(text_x, y))
+        } else {
+            None
+        }
     } else {
         let mut x = text_x;
         for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
-            if screen_idx >= max_w || x >= right { break; }
+            if screen_idx >= max_w || x >= right {
+                break;
+            }
             if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
                 cell.set_char(chars[char_idx]);
                 cell.set_style(input_style);
@@ -150,8 +183,12 @@ fn render_filter_row(
 }
 
 fn render_item_row(
-    buf: &mut Buffer, left: u16, y: u16, right: u16,
-    item: &SelectListItem, is_cursor: bool,
+    buf: &mut Buffer,
+    left: u16,
+    y: u16,
+    right: u16,
+    item: &SelectListItem,
+    is_cursor: bool,
     marker: &crate::widgets::common::types::SelectionMarker,
     style: &super::style::SelectListStyle,
 ) {
@@ -205,7 +242,14 @@ fn render_item_row(
     let mut x = left;
 
     // Marker.
-    write_str_styled(buf, &mut x, y, marker.text(item.selected), item_style, highlight_right);
+    write_str_styled(
+        buf,
+        &mut x,
+        y,
+        marker.text(item.selected),
+        item_style,
+        highlight_right,
+    );
 
     // Icon.
     if let Some(icon) = item.icon {
@@ -218,8 +262,12 @@ fn render_item_row(
 }
 
 fn render_footer_row(
-    buf: &mut Buffer, left: u16, y: u16, right: u16,
-    data: &RenderData, style: &super::style::SelectListStyle,
+    buf: &mut Buffer,
+    left: u16,
+    y: u16,
+    right: u16,
+    data: &RenderData,
+    style: &super::style::SelectListStyle,
 ) {
     let fs = style.resolved_style(ST::Footer);
     // Fill the entire row with the Footer bg first so the highlight
@@ -239,7 +287,9 @@ fn render_footer_row(
 fn write_str(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style, max_x: u16) {
     let mut cx = x;
     for ch in text.chars() {
-        if cx >= max_x { break; }
+        if cx >= max_x {
+            break;
+        }
         if let Some(cell) = buf.cell_mut(Position::new(cx, y)) {
             cell.set_char(ch);
             cell.set_style(style);
@@ -250,7 +300,9 @@ fn write_str(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style, max_x: 
 
 fn write_str_styled(buf: &mut Buffer, x: &mut u16, y: u16, text: &str, style: Style, max_x: u16) {
     for ch in text.chars() {
-        if *x >= max_x { break; }
+        if *x >= max_x {
+            break;
+        }
         if let Some(cell) = buf.cell_mut(Position::new(*x, y)) {
             cell.set_char(ch);
             cell.set_style(style);

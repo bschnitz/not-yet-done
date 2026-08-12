@@ -11,7 +11,9 @@
 //! recursive `Leaf | Branch` structure. `active_subtab` selects the
 //! tree; the tree's own `focus` selects the focused leaf.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use ratatui::Frame;
@@ -28,16 +30,18 @@ use not_yet_done_ratatui::{
     TableWidgetRow,
 };
 use not_yet_done_table::{
-    CellAlignment, CellContent, ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer,
-    PlanRow, Row as TRow, RowTemplate, StyledSpan, TableConfig, compute_multiline_table,
-    compute_table, fit_aligned, group,
+    CardBorder, CardField, CardLabels, CardSpanKind, CardSpec, CellAlignment, CellContent,
+    ColStrategy, ColumnId as TColumnId, LineTemplate, MixedColSizer, PlanRow, Row as TRow,
+    RowTemplate, StyledSpan, TableConfig, compute_cards, compute_multiline_table, compute_table,
+    fit_aligned, group,
 };
 
 use not_yet_done_content::{
     AdapterStatus, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo, PageRequest,
-    SortDirection, SortKey, Subtree, TreeFindHit,
+    QueryKind, SortDirection, SortKey, Subtree, TreeFindHit,
 };
 
+use crate::active_surface::ActiveSurface;
 use crate::components::action_bar::{ActionBarComponent, ActionHint};
 use crate::components::cmdline::CmdlineComponent;
 use crate::components::data_table::DataTable;
@@ -48,33 +52,65 @@ use crate::config::keybindings::{
     CommonAction, ContentAction, KeyBinding, KeyBindingConfig, KeyBindingSection, KeyIconMap,
     QueryMenuAction, WindowAction,
 };
+use crate::config::tui_config::LoadBannerRoute;
 use crate::config::view_config::{
-    ActionDef, AggregateDef, ChildDef, ColumnDef, ColumnKind, DateBucket, ExpandDepth, GroupBy,
-    GroupHeadersDef, GroupOrder, LineLayout, PaginationMode, PreviewConfig, SplitDirection,
+    ActionDef, AggregateDef, CardBorderMode, CardConfig, CardLabelMode, ChildDef, ColumnDef,
+    ColumnKind, CursorOnOpen, DateBucket, ExpandDepth, GroupBy, GroupHeadersDef, GroupOrder,
+    LineLayout, PaginationMode, PreviewConfig, ReminderConfig, SplitDirection,
     TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
 use crate::ui::theme::Theme;
-use crate::views::column_format::{format_elapsed_since, format_typed_value};
+use crate::views::column_format::{
+    column_kind_from_value_type, format_elapsed_since, format_typed_value,
+    value_type_from_column_kind,
+};
 use crate::views::content_action_hints::{
-    ActionBarHint, ActiveSource, HintBar, ShortcutHint, nav_hint_for_source,
+    ActionBarHint, HintBar, ShortcutHint, nav_hint_for_source, window_nav_hint,
 };
 use crate::views::content_detail;
 use crate::views::content_tree::{
-    TreeLevel, TreeState, child_def_for_type_chain, effective_child_children,
+    TreeLevel, TreeState, child_def_for_type_chain, effective_child_children, icon_opt_for_chain,
     leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
     tree_level_children_for_chain, tree_level_for_chain, tree_self_at_depth,
 };
 use crate::views::group_aggregate::{
     agg_value, bucket_display_label, group_label, to_group_bucket,
 };
-use crate::views::markdown::{StyleMapBuilder, lines_to_widget_lines, render_markdown_lines};
+use crate::views::images::ImageStore;
+use crate::views::markdown::{
+    StyleMapBuilder, lines_to_widget_lines_with_images, render_markdown_lines,
+    render_markdown_lines_with_images,
+};
 use crate::views::{
     BarHint, CmdlineKeyResult, CmdlineState, HasCmdline, PaginatedView, SearchKeyResult,
     SearchState, Searchable, SortableView, SubViewMessage, ViewRequest,
 };
 
 // ── Navigation stack ─────────────────────────────────────────────────
+
+/// Walk a view's declared tree, emitting `(view_name, child_name_path,
+/// node_type)` for the level itself and every descendant. Mirrors the
+/// recursion in `keymap::collect_node_shortcuts` so the levels line up with
+/// the `NodeShortcut` child paths used for binding.
+fn collect_declared_levels(
+    view_name: &str,
+    child_path: &[String],
+    node_type: &str,
+    children: &[ChildDef],
+    out: &mut Vec<(String, Vec<String>, String)>,
+) {
+    out.push((
+        view_name.to_string(),
+        child_path.to_vec(),
+        node_type.to_string(),
+    ));
+    for child in children {
+        let mut path = child_path.to_vec();
+        path.push(child.name.clone());
+        collect_declared_levels(view_name, &path, &child.node_type, &child.children, out);
+    }
+}
 
 /// Snapshot of a previous navigation level (pushed when drilling down).
 struct NavFrame {
@@ -152,6 +188,11 @@ enum SearchMode {
 pub struct LoadRequest {
     pub node_type_id: String,
     pub query: Option<String>,
+    /// How `query` is to be run: handed to the adapter as-is (`Saved`), or
+    /// parsed and executed as an extended-query document (`Extended`). The
+    /// loader must not render an extended document itself — each branch is
+    /// rendered separately, with the same bindings.
+    pub kind: QueryKind,
     pub sort: Vec<SortKey>,
     pub page: Option<PageRequest>,
     /// Variable bindings to substitute into `query` via
@@ -161,17 +202,21 @@ pub struct LoadRequest {
 }
 
 /// State remembered when a pane is showing the result of a custom
-/// adapter query (e.g. raw SQL via the Postgres Q-editor). Lets
-/// next/prev-page keys re-execute the same query with a new offset
-/// instead of falling back to `list()`. Cleared on any non-custom
-/// item load (drill, back, regular reload).
+/// adapter query (e.g. raw SQL via the Q-editor). Lets next/prev-page
+/// keys re-execute the same query with a new offset instead of falling
+/// back to `list()`. Cleared on any non-custom item load (drill, back,
+/// regular reload).
 #[derive(Clone, Debug)]
 pub struct CustomQueryRunState {
     /// SQL/query text exactly as the user wrote it (no LIMIT/OFFSET
     /// wrap — the adapter applies its own pagination wrap).
     pub query: String,
-    /// Adapter-specific context (postgres: target database name).
-    pub database: String,
+    /// Node the query was issued against, in the adapter's own id form.
+    /// Carried opaquely; the re-execution path hands it back to
+    /// [`ContentAdapter::custom_query_context`](not_yet_done_content::ContentAdapter::custom_query_context)
+    /// so the adapter re-derives its own routing keys (for Postgres: the
+    /// target database).
+    pub node_id: String,
     /// Pagination strategy for follow-up `>` / `<` keys. Resolved
     /// from the active view's `pagination.mode` when the result
     /// lands (see [`ContentView::apply_custom_query_result`]).
@@ -190,13 +235,17 @@ pub struct CustomQueryRunState {
 }
 
 /// A saved query made available to a content view. Body comes from
-/// the adapter-managed `SavedQueryStore` (filesystem); shortcut comes
+/// one of the two adapter-managed stores (filesystem); shortcut comes
 /// from the DB `query_shortcut` table.
 #[derive(Debug, Clone)]
 pub struct MergedSavedQuery {
     pub name: String,
     pub query: String,
     pub shortcut: Option<String>,
+    /// Which store the body came from — the only thing that tells an extended
+    /// document from an adapter-native query, since names are unique across
+    /// both stores and the user is not meant to tell them apart.
+    pub kind: QueryKind,
 }
 
 // ── ContentPane ──────────────────────────────────────────────────────
@@ -289,6 +338,16 @@ pub struct TreeFindState {
     /// cursor snaps back to the hit on every drill. `next`/`prev` and
     /// a fresh `tree_find_complete` re-arm by clearing this flag.
     pub settled: bool,
+    /// Ancestor `parent_path`s the walk has already force-refreshed this
+    /// hit because they were cached+loaded but did **not** contain the
+    /// expected child — the classic "a sibling was just created (e.g. by
+    /// an external `nyd-t task add`) but this level's cache predates it"
+    /// case. Re-fetching the level once (fresh `list`, replacing the stale
+    /// slot) surfaces the new child; this set bounds it to a single retry
+    /// per level so a genuinely-absent id degrades to `NotInTree` instead
+    /// of looping. Cleared whenever the walk targets a new hit
+    /// (`tree_find_complete` / `next` / `prev`).
+    pub refreshed_paths: std::collections::HashSet<Vec<String>>,
 }
 
 /// Per-drill state for one navigation context. A pane shows one
@@ -314,6 +373,12 @@ pub struct ContentPane {
     nav_stack: Vec<NavFrame>,
     /// When drilled into a child, this holds the ChildDef config.
     active_child: Option<ChildDef>,
+    /// The drilled-into level's `cursor_on_open` placement, armed by
+    /// [`Self::drill_down_prepare`] and consumed by the first
+    /// [`Self::set_items`] that brings rows in. Pending rather than applied
+    /// at drill time because the drill only *clears* the pane — the items the
+    /// cursor should land on arrive one async load later.
+    pending_cursor_on_open: Option<CursorOnOpen>,
 
     /// Active query override (set by editor or saved query selection).
     /// Holds the **raw** string; if the adapter understands inline
@@ -325,6 +390,12 @@ pub struct ContentPane {
     /// Variable bindings for the active query. Empty when the query
     /// has no variables (or the adapter doesn't support them).
     active_query_vars: std::collections::HashMap<String, String>,
+    /// Which language [`Self::active_query`] is written in: the adapter's own
+    /// (`Saved`) or an extended-query Markdown document (`Extended`). It rides
+    /// with the body rather than being derived from it — a document is only
+    /// recognisable by where it was loaded from, and guessing from the text
+    /// would make a `yaml`-adapter's query indistinguishable from a spec fence.
+    active_query_kind: QueryKind,
 
     // Preview pane
     preview_open: bool,
@@ -353,6 +424,13 @@ pub struct ContentPane {
     search_prev_key: String,
     /// What pressing Enter in the search bar should do.
     search_mode: SearchMode,
+    /// Query rendered by the last accepted adapter text search
+    /// ([`SearchMode::Adapter`]). Kept so the action bar can keep the
+    /// `text_search` hint lit for as long as the pane still shows that
+    /// search — comparing against [`Self::active_query`] means any other
+    /// query (saved query, default query, editor) clears the state on its
+    /// own, with no reset call to forget.
+    text_search_query: Option<String>,
 
     // ── Sort + pagination state ─────────────────────────────────────
     /// Sort the user has requested. Empty = let the adapter pick.
@@ -365,7 +443,7 @@ pub struct ContentPane {
     last_page_info: Option<PageInfo>,
     /// Sortable columns advertised by the adapter for the active node
     /// type at the time of the last load.
-    last_sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+    last_columns: Vec<not_yet_done_content::ColumnSchema>,
 
     /// When the pane is showing the result of an adapter-native custom
     /// query (e.g. raw SQL from the Postgres Q-editor), this holds the
@@ -492,6 +570,26 @@ pub struct ContentPane {
     /// expand-to-hit walk. Cleared by [`Self::take_pending_tree_find`].
     pub pending_tree_find: Option<String>,
 
+    /// Reload fold-preservation signal for eager trees
+    /// (`supports_eager_subtree`). `set_items` sets this to `true` on a
+    /// *reload* (`was_loaded`) and leaves it `false` on the first load.
+    /// The following [`ingest_subtree_level`] reads it: on first load it
+    /// force-expands the whole eager subtree (the initial `expand_depth`
+    /// shape); on reload it leaves `expanded` untouched so the user's
+    /// collapse/expand choices survive re-reading the DB. Consumed (reset
+    /// to `false`) by [`ContentView::apply_subtree`].
+    eager_reload_preserve_expansion: bool,
+
+    /// Node id the cursor sat on when a reload began, captured by
+    /// `set_items` (reload only). After the eager subtree lands,
+    /// [`ContentView::apply_subtree`] re-anchors the cursor onto this node
+    /// via [`Self::focus_item_by_id`] so a reload keeps the selection on
+    /// the same task rather than the same row index (which drifts when
+    /// external rows are added/removed above it). Falls back to the
+    /// clamped row when the node is gone (e.g. deleted). Taken (cleared)
+    /// on use.
+    eager_reload_reanchor_id: Option<String>,
+
     /// Runtime override of the level's configured `group_by` (M3). The
     /// `cycle_grouping` action rotates the date-bucket granularity through
     /// this field without touching the YAML default:
@@ -527,6 +625,22 @@ pub struct ContentPane {
     /// uniformly across splits.
     column_overrides: std::collections::HashMap<String, Vec<String>>,
 
+    /// Card mode per level (the `card.key` toggle). Keyed exactly like
+    /// [`Self::column_overrides`], holding the user's explicit choice for
+    /// that level; a level without an entry follows its `card.default`.
+    /// Mirrored from the owning [`ContentView`] like the column overrides,
+    /// and persisted by the App, so a toggled mode survives a restart.
+    card_mode_overrides: std::collections::HashMap<String, bool>,
+
+    /// Columns the adapter *describes* per node type
+    /// ([`ContentAdapter::describe_columns`]), keyed by `node_type.type_id`.
+    /// The owning [`ContentView`] fetches these on load and mirrors them into
+    /// every pane. Their `value_type` is authoritative for rendering: a
+    /// described column overrides the matching YAML column's `kind`, so a
+    /// backend-owned column (custom columns) is typed correctly without the
+    /// view YAML having to restate `kind:`. Empty until the first fetch lands.
+    column_schema: std::collections::HashMap<String, Vec<not_yet_done_content::ColumnSchema>>,
+
     /// Capabilities of the owning view's adapter, snapshotted once at pane
     /// construction (the adapter is fixed for a `ContentView`'s lifetime).
     /// Lets pane-local logic gate UI affordances on what the adapter can
@@ -536,6 +650,17 @@ pub struct ContentPane {
     /// affordance. This is the generic capability-gating path: future
     /// affordances read the relevant flag here rather than re-deriving it.
     capabilities: not_yet_done_content::AdapterCapabilities,
+
+    /// Inline pictures for this pane's `markdown: true` bodies: the decoded
+    /// cache, the download wish-list and the terminal-protocol objects.
+    /// Shared with `table` (which paints through it) via `Rc`, and borrowed
+    /// by [`Self::rebuild_table`] while it renders markdown.
+    ///
+    /// Per pane, not per view: a pane is one scroll position over one list,
+    /// so its pictures die with it. Two panes on the same chat download twice
+    /// — an acceptable price for not threading a shared store through the
+    /// dozen places that build a pane.
+    images: Rc<RefCell<ImageStore>>,
 }
 
 // ── Pane tree ────────────────────────────────────────────────────────
@@ -965,14 +1090,11 @@ impl PaneTree {
 pub enum QueryMenuMode {
     /// Default: DB-backed saved-query picker (Jira / Taiga / Tasks).
     SavedQueries,
-    /// Postgres `.sql` scripts persisted under
-    /// `<instance_data_dir>/queries/<db>/<schema>/<table>/`. The
-    /// tuple identifies the table the menu was opened for.
-    PostgresScripts {
-        database: String,
-        schema: String,
-        table: String,
-    },
+    /// Per-node scripts held by the adapter's
+    /// [`ScriptStore`](not_yet_done_content::ScriptStore), for a level
+    /// with `node_scripts: true`. Carries the owning node's id in the
+    /// adapter's own form — the view never parses it.
+    NodeScripts { node_id: String },
 }
 
 pub struct ContentView {
@@ -999,12 +1121,40 @@ pub struct ContentView {
     column_config_active: bool,
     /// A detached script is running (App-owned `detached_script`).
     script_active: bool,
+    /// App-global action-bar hints (the `BarPlacement::Active` globals, e.g.
+    /// the shortcut menu) pushed in once per frame via [`sync_action_bar`].
+    /// These belong in the action bar with the activatable shortcuts, but are
+    /// owned by the App (their key binding and active state live on `App`, not
+    /// a content view), so the view only stores and appends them — it never
+    /// resolves their `active` flag. Appended after the view's own hints.
+    global_action_hints: Vec<ActionHint>,
     /// Command-line component, driven by `:`. Tab-global — operates
     /// on the active pane.
     pub cmdline: CmdlineComponent,
     pub tab_name: String,
     pub tab_icon: String,
     pub tab_order: i32,
+    /// Per-tab switch-key override from the view file's `tab.key`. `None`
+    /// falls back to the positional autonumber digit; `Some` with an empty
+    /// list means the tab-switch key is disabled. See [`Self::tab_key_override`].
+    pub tab_key: Option<crate::config::keybindings::KeyBinding>,
+    /// `tab.unread_marker` from the view file — the glyph the tab bar puts
+    /// in front of this tab's label while the view holds unread items.
+    /// `None` falls back to the view's own `unread_marker`.
+    tab_unread_marker: Option<String>,
+    /// `tab.unread_style` from the view file — how the tab's label itself is
+    /// emphasised while unread. `None` renders it bold.
+    tab_unread_style: Option<crate::config::view_config::TabUnreadStyle>,
+    /// `tab.load_banner` from the view file — this tab's override for where
+    /// its load banner goes. Kept next to the resolved value so a config
+    /// reload can re-resolve without re-reading the YAML.
+    tab_load_banner: Option<LoadBannerRoute>,
+    /// Where this tab's load banner goes: the `tab.load_banner` override when
+    /// it has one, else `notifications.load_banner`, filled in by App via
+    /// [`Self::set_load_banner_default`]. The banner line below draws a `Busy`
+    /// state only while this is [`LoadBannerRoute::Tab`]; the other two routes
+    /// are the App's business, which owns the cross-tab surface.
+    load_banner_route: LoadBannerRoute,
     /// Tab id within the App's `content_views` vector. Set by App
     /// after construction. Used as the `view_index` field on the
     /// outgoing `ViewRequest`s.
@@ -1092,6 +1242,13 @@ pub struct ContentView {
     /// the user must trigger a `reload` action to populate the pane.
     pub manual_connect: bool,
 
+    /// Per-tab reminder handling, mirrored from `ViewFileConfig.reminder`.
+    /// When present and `enabled`, the App subscribes to this tab's adapter
+    /// reminder stream and runs `command` for each fired reminder. `None` →
+    /// the tab ignores reminders entirely (no subscription). The adapter
+    /// owns *when* a reminder fires; this decides *whether* and *what runs*.
+    pub reminder: Option<ReminderConfig>,
+
     /// Set once any pane in this view has completed a load without an
     /// error — i.e. the (single, shared) adapter connection has been
     /// established. After that, switching to a sibling subtab auto-loads
@@ -1119,21 +1276,22 @@ pub struct ContentView {
     /// overwrites a stale one.
     pending_mark_read: Option<ViewRequest>,
 
-    /// Lazy cache of Postgres per-table script shortcuts, keyed by the
-    /// adapter-internal table node id (e.g. `live/schemas/public/tables/users`)
-    /// and holding `(script_name, key_chord)` pairs (SQ-8d). Populated
-    /// by the App when a Postgres table comes into focus and consulted
-    /// by [`build_view_claims`] to register global apply-on-chord
-    /// handlers symmetric to Jira/Taiga saved-query shortcuts. Cleared
-    /// on bind / delete via [`Self::invalidate_postgres_table_shortcuts`].
-    pub postgres_table_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Lazy cache of per-node script shortcuts, keyed by the
+    /// adapter-internal node id (for Postgres e.g.
+    /// `live/schemas/public/tables/users`) and holding
+    /// `(script_name, key_chord)` pairs (SQ-8d). Populated by the App when
+    /// a script-owning node comes into focus and consulted by
+    /// [`build_view_claims`] to register global apply-on-chord handlers
+    /// symmetric to Jira/Taiga saved-query shortcuts. Cleared on bind /
+    /// delete via [`Self::invalidate_node_script_shortcuts`].
+    pub node_script_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
 
     /// Lazy cache of `:script`-menu shortcuts, keyed by the focused level's
     /// script scope (`script:<tab>/<view_path…>`) and holding
     /// `(script_name, key_chord)` pairs. Populated by the App when a level
     /// that offers a `type: script` action comes into focus and consulted by
     /// [`build_view_claims`] to register apply-on-chord handlers symmetric to
-    /// [`Self::postgres_table_shortcuts`]. Cleared on bind via
+    /// [`Self::node_script_shortcuts`]. Cleared on bind via
     /// `App::bind_script_shortcut`.
     pub script_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
 
@@ -1144,11 +1302,29 @@ pub struct ContentView {
     /// JSON settings row per tab.
     column_overrides: std::collections::HashMap<String, Vec<String>>,
 
+    /// Source of truth for the per-level card-mode choice (`card.key`),
+    /// keyed like [`Self::column_overrides`]. Mirrored into every pane and
+    /// persisted by the App as one JSON settings row per tab, so the mode a
+    /// user toggled is still there after a restart.
+    card_mode_overrides: std::collections::HashMap<String, bool>,
+
     /// Alphabet for vimium-style jump-mode labels (`content.jump_mode`,
     /// default `J`). Set once by the App from `navigation.jump_chars`.
     /// Applied to the focused pane's table at jump-open time, so panes
     /// created later by splits/drills pick it up without extra wiring.
     nav_chars: Vec<char>,
+}
+
+/// A `source: custom` column as the front-end knows it: the key it renders
+/// under, a human label, and the canonical `value_type` derived from the
+/// view YAML's `kind:`. Feeds the `edit-cells` [`InputSpec::ColumnForm`] so
+/// the TUI can offer a typed editor over columns that may not yet exist in
+/// the store (type-on-first-write). See [`ContentPane::custom_column_fields`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomColumnField {
+    pub key: String,
+    pub label: String,
+    pub value_type: String,
 }
 
 impl ContentPane {
@@ -1162,18 +1338,29 @@ impl ContentPane {
         tree_enabled: bool,
         capabilities: not_yet_done_content::AdapterCapabilities,
     ) -> Self {
+        // The pane's picture store doubles as its table's painter — the
+        // table only knows *where* a picture goes, the store knows how to
+        // draw one. Wired here so every pane, however it was created,
+        // renders inline images.
+        let images = Rc::new(RefCell::new(ImageStore::new()));
+        let mut table = DataTable::new();
+        table.set_image_painter(images.clone());
+
         Self {
             view_def_index,
             theme,
-            table: DataTable::new(),
+            table,
+            images,
             items: Vec::new(),
             fetch_error: None,
             filtered_indices: Vec::new(),
             nav_stack: Vec::new(),
             active_child: None,
+            pending_cursor_on_open: None,
             active_query: None,
             active_query_name: None,
             active_query_vars: std::collections::HashMap::new(),
+            active_query_kind: QueryKind::Saved,
             preview_open: false,
             preview_description: String::new(),
             preview_key: String::new(),
@@ -1187,11 +1374,12 @@ impl ContentPane {
             search_next_key: "n".to_string(),
             search_prev_key: "N".to_string(),
             search_mode: SearchMode::Local,
+            text_search_query: None,
             current_sort: Vec::new(),
             current_page: None,
             last_applied_sort: Vec::new(),
             last_page_info: None,
-            last_sortable_columns: Vec::new(),
+            last_columns: Vec::new(),
             active_custom_query: None,
             last_col_widths: Vec::new(),
             built_table_width: 0,
@@ -1212,11 +1400,43 @@ impl ContentPane {
             tree_filter_expand_stash: None,
             tree_find: None,
             pending_tree_find: None,
+            eager_reload_preserve_expansion: false,
+            eager_reload_reanchor_id: None,
             group_by_override: None,
             tree_aggregate_override: None,
             column_overrides: std::collections::HashMap::new(),
+            card_mode_overrides: std::collections::HashMap::new(),
+            column_schema: std::collections::HashMap::new(),
             capabilities,
         }
+    }
+
+    // ── Inline images ────────────────────────────────────────────────
+
+    /// URLs the last markdown render wanted but didn't have yet, marked
+    /// in-flight so a rebuild in between doesn't request them twice. The App
+    /// drains this after every rebuild and fetches through the view's adapter
+    /// — only the adapter knows how to authenticate against its host.
+    pub fn take_wanted_images(&mut self) -> Vec<String> {
+        self.images.borrow_mut().take_wanted()
+    }
+
+    /// Hand in what the download produced. `None` means it failed (or the
+    /// bytes weren't a picture) and the URL is retired. Returns `true` when
+    /// the table should be rebuilt so the picture gets its lines.
+    pub fn insert_decoded_image(
+        &mut self,
+        url: &str,
+        image: Option<crate::views::images::DecodedImage>,
+    ) -> bool {
+        self.images.borrow_mut().insert_decoded(url, image)
+    }
+
+    /// The terminal cell size the store decodes against, and the configured
+    /// height cap — the App needs both to downscale off-thread.
+    pub fn image_decode_params(&self) -> (u16, (u16, u16)) {
+        let store = self.images.borrow();
+        (store.max_height(), store.font_size())
     }
 
     // ── Tree-find lifecycle (CT-5) ───────────────────────────────────
@@ -1241,6 +1461,7 @@ impl ContentPane {
             loading: true,
             truncated: false,
             settled: false,
+            refreshed_paths: std::collections::HashSet::new(),
         });
     }
 
@@ -1267,6 +1488,7 @@ impl ContentPane {
             state.loading = false;
             state.truncated = truncated;
             state.settled = false;
+            state.refreshed_paths.clear();
         }
     }
 
@@ -1297,6 +1519,7 @@ impl ContentPane {
         }
         state.current = (state.current + 1) % state.hits.len();
         state.settled = false;
+        state.refreshed_paths.clear();
         state.hits.get(state.current)
     }
 
@@ -1313,6 +1536,7 @@ impl ContentPane {
             state.current - 1
         };
         state.settled = false;
+        state.refreshed_paths.clear();
         state.hits.get(state.current)
     }
 
@@ -1329,6 +1553,20 @@ impl ContentPane {
     /// of the local `/`-search match list.
     pub fn tree_find_active(&self) -> bool {
         self.tree_find.is_some()
+    }
+
+    /// `true` while the search input is open in adapter (`text_search`) mode
+    /// — the user is typing a term that will be rendered into a query.
+    pub fn text_search_input_open(&self) -> bool {
+        self.search.active() && matches!(self.search_mode, SearchMode::Adapter { .. })
+    }
+
+    /// `true` while the pane still shows the result of the last accepted
+    /// adapter text search, i.e. the query that search rendered is still the
+    /// active one. Any other query (saved, default, hand-edited) replaces
+    /// `active_query` and thereby ends the state — nothing has to reset it.
+    pub fn text_search_applied(&self) -> bool {
+        self.text_search_query.is_some() && self.text_search_query == self.active_query
     }
 
     /// CT-7: locate the visible-table row of a hit's leaf node, only
@@ -1368,7 +1606,39 @@ impl ContentPane {
         pane_id: PaneId,
         view_defs: &[ViewDef],
     ) -> SubViewMessage {
-        match self.advance_tree_find(view_index, pane_id, view_defs) {
+        if std::env::var_os("NYD_DEBUG_TREEFIND").is_some() {
+            let (cur, total, path, settled) = self
+                .tree_find
+                .as_ref()
+                .and_then(|s| {
+                    s.hits
+                        .get(s.current)
+                        .map(|h| (s.current, s.hits.len(), h.path.clone(), s.settled))
+                })
+                .unwrap_or((0, 0, Vec::new(), false));
+            treefind_walk_trace(format!(
+                "step hit={cur}/{total} settled={settled} path={path:?}"
+            ));
+        }
+        let advance = self.advance_tree_find(view_index, pane_id, view_defs);
+        if std::env::var_os("NYD_DEBUG_TREEFIND").is_some() {
+            let variant = match &advance {
+                TreeFindAdvance::Ready(row) => format!("Ready(row={row})"),
+                TreeFindAdvance::Waiting => "Waiting".to_string(),
+                TreeFindAdvance::Idle => "Idle".to_string(),
+                TreeFindAdvance::NeedRootLoad => "NeedRootLoad".to_string(),
+                TreeFindAdvance::NeedTreeExpand {
+                    parent_path,
+                    parent_node_id,
+                    ..
+                } => {
+                    format!("NeedTreeExpand(parent_path={parent_path:?} parent={parent_node_id})")
+                }
+                TreeFindAdvance::NotInTree(r) => format!("NotInTree({r})"),
+            };
+            treefind_walk_trace(format!("outcome={variant}"));
+        }
+        match advance {
             TreeFindAdvance::Ready(_) | TreeFindAdvance::Waiting | TreeFindAdvance::Idle => {
                 SubViewMessage::SelectionChanged(None)
             }
@@ -1467,9 +1737,26 @@ impl ContentPane {
         // cached/loaded yields the next dispatch step.
         for d in 0..path.len() {
             let parent_path: Vec<String> = path[..d].to_vec();
-            let tree = self.tree.as_ref().expect("checked above");
-            match tree.cache.get(&parent_path) {
-                None => {
+            // Probe the cache slot into an owned verdict so the immutable
+            // borrow of `self.tree` ends before we may mutate
+            // `self.tree_find` (the stale-level refresh below).
+            enum Slot {
+                Missing,
+                Loading,
+                LoadedHas,
+                LoadedMissing,
+            }
+            let slot = {
+                let tree = self.tree.as_ref().expect("checked above");
+                match tree.cache.get(&parent_path) {
+                    None => Slot::Missing,
+                    Some(e) if !e.loaded => Slot::Loading,
+                    Some(e) if e.children.iter().any(|c| c.id == path[d]) => Slot::LoadedHas,
+                    Some(_) => Slot::LoadedMissing,
+                }
+            };
+            match slot {
+                Slot::Missing => {
                     if d == 0 {
                         return TreeFindAdvance::NeedRootLoad;
                     }
@@ -1492,18 +1779,44 @@ impl ContentPane {
                         page_size: 50,
                     };
                 }
-                Some(entry) if !entry.loaded => return TreeFindAdvance::Waiting,
-                Some(entry) => {
-                    if !entry.children.iter().any(|c| c.id == path[d]) {
-                        // CT-9 hint: typical cause is pagination cap
-                        // or a stale cache — re-reload usually fixes
-                        // it. We report `NotInTree` so the App can
-                        // surface a clear message.
-                        return TreeFindAdvance::NotInTree(format!(
-                            "Hit's ancestor '{}' at depth {d} not in loaded children",
-                            path[d],
-                        ));
+                Slot::Loading => return TreeFindAdvance::Waiting,
+                Slot::LoadedHas => {}
+                Slot::LoadedMissing => {
+                    // Cached + loaded, but the expected child is absent.
+                    // The classic cause is a stale level: a sibling was
+                    // created after this level was last fetched — notably
+                    // an external `nyd-t task add` (goto_task.py) whose new
+                    // node isn't in this pane's lazily-expanded cache (the
+                    // eager reload only renews up to `expand_depth`). Re-fetch
+                    // the level ONCE (replacing the stale slot) so the new
+                    // child surfaces; `refreshed_paths` bounds it to a single
+                    // retry so a genuinely-absent id still degrades to
+                    // `NotInTree` instead of looping.
+                    let already = self
+                        .tree_find
+                        .as_ref()
+                        .map(|s| s.refreshed_paths.contains(&parent_path))
+                        .unwrap_or(true);
+                    if !already {
+                        if let Some(state) = self.tree_find.as_mut() {
+                            state.refreshed_paths.insert(parent_path.clone());
+                        }
+                        if d == 0 {
+                            return TreeFindAdvance::NeedRootLoad;
+                        }
+                        if let Some(child_def) = tree_self_at_depth(&view_def, d) {
+                            return TreeFindAdvance::NeedTreeExpand {
+                                parent_path,
+                                parent_node_id: path[d - 1].clone(),
+                                child_node_type: child_def.node_type.clone(),
+                                page_size: 50,
+                            };
+                        }
                     }
+                    return TreeFindAdvance::NotInTree(format!(
+                        "Hit's ancestor '{}' at depth {d} not in loaded children",
+                        path[d],
+                    ));
                 }
             }
         }
@@ -1674,7 +1987,7 @@ impl ContentPane {
     /// adapter's `actions_for_type()` lookup. Returns one
     /// [`ShortcutHint`] per resolvable entry (unknown node_type or
     /// action_id → drop silently), carrying the adapter's `placement`
-    /// and the [`ActiveSource`] derived from the action's `id` + input
+    /// and the [`ActiveSurface`] derived from the action's `id` + input
     /// shape. Caller splits by placement for the action / status bars.
     ///
     /// Synchronous: the adapter is required to answer without I/O
@@ -1714,7 +2027,6 @@ impl ContentPane {
                 out.push(ShortcutHint {
                     key: key.to_string(),
                     label: action.label.clone(),
-                    placement: action.placement,
                     source,
                 });
             }
@@ -1779,6 +2091,23 @@ impl ContentPane {
     /// Resolve this tree's connector color: the active view's per-view
     /// `tree_connector_style` (a theme color name) if set, else the global
     /// theme `tree_connector`. Used to fill [`TREE_CONNECTOR_STYLE_ID`].
+    /// Whether this pane's current level holds an unread row — the tree's
+    /// loaded nodes in tree mode, the plain item list otherwise. Feeds
+    /// [`ContentView::has_unread`]; see there for why only the current level
+    /// counts.
+    fn has_unread(&self) -> bool {
+        match self.tree.as_ref() {
+            Some(tree) => tree
+                .entries
+                .iter()
+                .any(|e| metadata_field_value(&e.node, "unread") == "true"),
+            None => self
+                .items
+                .iter()
+                .any(|it| metadata_field_value(it, "unread") == "true"),
+        }
+    }
+
     fn tree_connector_color(&self, view_defs: &[ViewDef], t: &Theme) -> ratatui::style::Color {
         self.view_def(view_defs)
             .and_then(|vd| vd.tree_connector_style.as_deref())
@@ -1887,6 +2216,7 @@ impl ContentPane {
                 // the default layout (keeping the tree-label column).
                 cols.retain(|c| column_shown_by_default(c, tree_label.as_deref()));
             }
+            self.merge_described_kinds(&mut cols);
             return cols;
         }
         let configured: &[ColumnDef] = if let Some(ref child) = self.active_child {
@@ -1920,6 +2250,7 @@ impl ContentPane {
             if !total_targets.is_empty() && self.current_levels(view_defs).is_empty() {
                 cols.retain(|c| !total_targets.contains(&c.key));
             }
+            self.merge_described_kinds(&mut cols);
             return cols;
         }
         // Auto-fallback: derive one ColumnDef per metadata field of the
@@ -1948,6 +2279,25 @@ impl ContentPane {
                 elapsed_from: None,
                 tree_aggregate: None,
                 hidden: false,
+            })
+            .collect()
+    }
+
+    /// The `source: custom` columns configured for the pane's active level, as
+    /// typed [`CustomColumnField`]s. This is the front-end's own view of the
+    /// lib-owned custom-column set: the `edit-cells` [`InputSpec::ColumnForm`]
+    /// builds its fields from here (not from the backend schema), so a column
+    /// that has never been stored still gets an input, and its YAML `kind:`
+    /// supplies the `value_type` the TUI sends on submit — letting the store
+    /// bootstrap the column on first write (type-on-first-write).
+    pub fn custom_column_fields(&self, view_defs: &[ViewDef]) -> Vec<CustomColumnField> {
+        self.current_columns(view_defs)
+            .into_iter()
+            .filter(|c| c.source.as_deref() == Some("custom"))
+            .map(|c| CustomColumnField {
+                label: c.label.clone().unwrap_or_else(|| c.key.clone()),
+                value_type: value_type_from_column_kind(c.kind).to_string(),
+                key: c.key,
             })
             .collect()
     }
@@ -1995,6 +2345,39 @@ impl ContentPane {
         self.column_overrides = overrides;
     }
 
+    /// Replace this pane's described-column schema for one node type (fetched
+    /// by the owning view on load).
+    fn set_column_schema(
+        &mut self,
+        node_type: String,
+        schema: Vec<not_yet_done_content::ColumnSchema>,
+    ) {
+        self.column_schema.insert(node_type, schema);
+    }
+
+    /// Override each column's `kind` with the backend-described `value_type`
+    /// for a matching key. Custom-column keys are unique per column, so a flat
+    /// lookup across every cached node type is enough (and covers tree levels
+    /// whose node type isn't the one in `self.items`). YAML stays the source of
+    /// truth for width/order/visibility; only the type is taken from the
+    /// backend. Unknown/`text` types leave the YAML `kind` untouched.
+    fn merge_described_kinds(&self, cols: &mut [ColumnDef]) {
+        if self.column_schema.is_empty() {
+            return;
+        }
+        for col in cols.iter_mut() {
+            if let Some(kind) = self
+                .column_schema
+                .values()
+                .flatten()
+                .find(|s| s.key == col.key)
+                .and_then(|s| column_kind_from_value_type(&s.value_type))
+            {
+                col.kind = kind;
+            }
+        }
+    }
+
     /// The active level's **raw** configured columns — the YAML truth the
     /// column-config popup edits, before any user override is applied —
     /// plus the tree-label key in tree mode (that column is not hideable).
@@ -2033,6 +2416,111 @@ impl ContentPane {
         } else {
             self.view_def(view_defs)
                 .and_then(|vd| vd.row_layout.clone())
+        }
+    }
+
+    /// The active level's `card:` block, if it declares one. Read from the
+    /// same level as [`current_row_layout`](Self::current_row_layout) and with
+    /// the same restriction: tree levels and the record-detail follower pane
+    /// have no card mode (v1 targets flat lists).
+    fn current_card(&self, view_defs: &[ViewDef]) -> Option<CardConfig> {
+        if self.is_detail_pane() || self.tree.is_some() {
+            return None;
+        }
+        if let Some(ref child) = self.active_child {
+            child.card.clone()
+        } else {
+            self.view_def(view_defs).and_then(|vd| vd.card.clone())
+        }
+    }
+
+    /// Whether card mode is *available* here — the active level declares a
+    /// `card:` block. Gates the toggle key and its status-bar hint, so the
+    /// configured key stays free on every level without cards.
+    fn card_available(&self, view_defs: &[ViewDef]) -> bool {
+        self.current_card(view_defs).is_some()
+    }
+
+    /// Whether the active level renders as cards *right now*: it declares a
+    /// `card:` block and either the user's stored per-level choice or (absent
+    /// that) the block's `default:` says so.
+    fn card_mode_active(&self, view_defs: &[ViewDef]) -> bool {
+        let Some(card) = self.current_card(view_defs) else {
+            return false;
+        };
+        self.column_level_key(view_defs)
+            .and_then(|k| self.card_mode_overrides.get(&k).copied())
+            .unwrap_or(card.default)
+    }
+
+    /// The key that toggles card mode on this level: the level's own
+    /// `card.key`, else a global `content.toggle_card_mode` binding if the
+    /// user set one. `None` → the mode is only reachable via `card.default`.
+    fn card_toggle_binding(
+        &self,
+        view_defs: &[ViewDef],
+        content_kb: &KeyBindingSection<ContentAction>,
+    ) -> Option<KeyBinding> {
+        self.current_card(view_defs)?
+            .key
+            .clone()
+            .or_else(|| content_kb.get(&ContentAction::ToggleCardMode).cloned())
+    }
+
+    /// Mirror the owning view's card-mode map into this pane (same contract
+    /// as [`set_column_overrides`](Self::set_column_overrides)).
+    fn set_card_mode_overrides(&mut self, overrides: std::collections::HashMap<String, bool>) {
+        self.card_mode_overrides = overrides;
+    }
+
+    /// Translate the level's `card:` config into a layout spec for the table
+    /// engine, resolving each field's label (explicit `label:` → the column's
+    /// `label:` → its key).
+    ///
+    /// Fields whose column isn't in `columns` are dropped: `columns` is the
+    /// *visible* set, so hiding a column in the column-config popup (`c`)
+    /// also removes it from the card instead of leaving an empty slot.
+    fn card_spec(&self, card: &CardConfig, columns: &[ColumnDef]) -> CardSpec {
+        let label_of =
+            |col: &ColumnDef| -> String { col.label.clone().unwrap_or_else(|| col.key.clone()) };
+        // An omitted `fields:` means "every column of this level", in the
+        // effective column order — so the card tracks the table rather than
+        // repeating its column list. `markdown:` columns drop out either way:
+        // they expand into N soft-wrapped lines and have no fixed-height slot.
+        let fields: Vec<CardField> = if card.fields.is_empty() {
+            columns
+                .iter()
+                .filter(|c| !c.markdown)
+                .map(|c| CardField::new(c.key.clone(), label_of(c)))
+                .collect()
+        } else {
+            card.fields
+                .iter()
+                .filter_map(|f| {
+                    let col = columns.iter().find(|c| c.key == f.column)?;
+                    let label = f.label.clone().unwrap_or_else(|| label_of(col));
+                    Some(CardField::new(f.column.clone(), label))
+                })
+                .collect()
+        };
+        CardSpec {
+            fields,
+            columns: card.columns.max(1),
+            weights: card.weights.clone(),
+            labels: match card.labels {
+                CardLabelMode::None => CardLabels::None,
+                CardLabelMode::Inline => CardLabels::Inline,
+                CardLabelMode::Above => CardLabels::Above,
+            },
+            border: match card.border {
+                CardBorderMode::None => CardBorder::None,
+                CardBorderMode::Plain => CardBorder::Plain,
+                CardBorderMode::Rounded => CardBorder::Rounded,
+            },
+            padding: card.padding,
+            gap: card.gap,
+            separator: card.separator.clone(),
+            divider: card.divider.clone(),
         }
     }
 
@@ -3363,15 +3851,14 @@ impl ContentPane {
         // (read from the total column's `source` metadata field, falling
         // back to its `key`). The classic time-sheet layout, matching the
         // flat grouping's `total_column` semantics.
-        let closing_totals: std::collections::HashMap<usize, String> = match total_col_idx
-            .and_then(|ci| columns.get(ci))
-        {
-            Some(tc) if headers_active => {
-                let field = tc.source.as_deref().unwrap_or(&tc.key);
-                let mut map = std::collections::HashMap::new();
-                let mut bucket_total: Option<String> = None;
-                let mut last_item_row: Option<usize> = None;
-                let close =
+        let closing_totals: std::collections::HashMap<usize, String> =
+            match total_col_idx.and_then(|ci| columns.get(ci)) {
+                Some(tc) if headers_active => {
+                    let field = tc.source.as_deref().unwrap_or(&tc.key);
+                    let mut map = std::collections::HashMap::new();
+                    let mut bucket_total: Option<String> = None;
+                    let mut last_item_row: Option<usize> = None;
+                    let close =
                     |total: &Option<String>,
                      row: Option<usize>,
                      map: &mut std::collections::HashMap<usize, String>| {
@@ -3379,23 +3866,23 @@ impl ContentPane {
                             map.insert(r, t.clone());
                         }
                     };
-                for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
-                    let Some(e) = tree.entries.get(eidx) else {
-                        continue;
-                    };
-                    if e.depth == 0 {
-                        close(&bucket_total, last_item_row, &mut map);
-                        bucket_total = Some(metadata_field_value(&e.node, field).to_string());
-                        last_item_row = None;
-                    } else {
-                        last_item_row = Some(row_idx);
+                    for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
+                        let Some(e) = tree.entries.get(eidx) else {
+                            continue;
+                        };
+                        if e.depth == 0 {
+                            close(&bucket_total, last_item_row, &mut map);
+                            bucket_total = Some(metadata_field_value(&e.node, field).to_string());
+                            last_item_row = None;
+                        } else {
+                            last_item_row = Some(row_idx);
+                        }
                     }
+                    close(&bucket_total, last_item_row, &mut map);
+                    map
                 }
-                close(&bucket_total, last_item_row, &mut map);
-                map
-            }
-            _ => std::collections::HashMap::new(),
-        };
+                _ => std::collections::HashMap::new(),
+            };
 
         self.tree_visible_indices
             .iter()
@@ -3499,8 +3986,21 @@ impl ContentPane {
                         } else {
                             format!("{marker} ")
                         };
+                        // Type icon of the row's own level (`icon:`), drawn
+                        // last before the label — independent of the expand
+                        // state, so two branches sharing one depth (Stoat:
+                        // uncategorized channels next to categories) stay
+                        // distinguishable. Sits after the unread marker so
+                        // that marker keeps its leading slot.
+                        let icon = self
+                            .view_def(view_defs)
+                            .and_then(|vd| icon_opt_for_chain(vd, &entry.node_type_chain))
+                            .filter(|g| !g.is_empty())
+                            .map(|g| format!("{g} "))
+                            .unwrap_or_default();
                         let connector_chars = connector.chars().count();
-                        let text = format!("{connector}{leaf}{marker_prefix}{}", entry.node.label);
+                        let text =
+                            format!("{connector}{leaf}{marker_prefix}{icon}{}", entry.node.label);
                         let mut spans: Vec<StyledSpan> = Vec::new();
                         if connector_chars > 0 {
                             spans.push(StyledSpan {
@@ -3512,13 +4012,14 @@ impl ContentPane {
                         // the matched runs in the *label* so the filtered
                         // substring stands out. Ranges are computed against the
                         // bare label and shifted past the connector + leaf glyph
-                        // (+ unread marker) into the full-cell coordinate; the
-                        // engine projects / clamps them through truncation like
-                        // any span.
+                        // (+ unread marker + type icon) into the full-cell
+                        // coordinate; the engine projects / clamps them through
+                        // truncation like any span.
                         if !self.table.filter_text.is_empty() {
                             let prefix_chars = connector_chars
                                 + leaf.chars().count()
-                                + marker_prefix.chars().count();
+                                + marker_prefix.chars().count()
+                                + icon.chars().count();
                             for r in fuzzy_label_ranges(&entry.node.label, &self.table.filter_text)
                             {
                                 spans.push(StyledSpan {
@@ -3640,7 +4141,9 @@ impl ContentPane {
                 if !GLOBAL.contains(&action.action_type.as_str()) {
                     continue;
                 }
-                if out.iter().any(|a| a.key == action.key) {
+                // Dedup by key; keyless (event-only) actions are never in
+                // this GLOBAL search family, so a None key can't collide.
+                if action.key.is_some() && out.iter().any(|a| a.key == action.key) {
                     continue;
                 }
                 out.push(action);
@@ -3786,6 +4289,47 @@ impl ContentPane {
         }
         if let Some(ac) = &self.active_child {
             path.push(ac.node_type.clone());
+        }
+        path
+    }
+
+    /// Child *names* from the root down to the current drilldown level (the
+    /// root itself contributes nothing). Mirrors
+    /// [`Self::view_path_node_types`] but keys on `ChildDef` names, matching
+    /// the identity that `KeySource::NodeShortcut` records — so the shortcut
+    /// menu can select the node shortcuts (`shortcuts:`) that apply here.
+    pub fn current_child_name_path(&self) -> Vec<String> {
+        let mut path: Vec<String> = Vec::new();
+        for frame in self.nav_stack.iter().skip(1) {
+            if let Some(ac) = &frame.active_child {
+                path.push(ac.name.clone());
+            }
+        }
+        if let Some(ac) = &self.active_child {
+            path.push(ac.name.clone());
+        }
+        path
+    }
+
+    /// Node-type path used to derive this view's *script* scope (script
+    /// directory + DB shortcut scope). Identical to
+    /// [`Self::view_path_node_types`] except that when the active root
+    /// ViewDef declares `script_source: <name>`, the root segment is
+    /// replaced by the referenced sibling view's `node_type` — so two
+    /// views can share one script source (see `ViewDef::script_source`).
+    /// An unknown / self-referential name is a silent no-op. Drilled child
+    /// levels always keep their own node_types. Do NOT use this for
+    /// node-identity purposes — only for script scoping.
+    pub fn script_scope_path(&self, view_defs: &[ViewDef]) -> Vec<String> {
+        let mut path = self.view_path_node_types(view_defs);
+        if let Some(vd) = self.view_def(view_defs) {
+            if let Some(name) = vd.script_source.as_deref() {
+                if let Some(src) = view_defs.iter().find(|v| v.name == name) {
+                    if let Some(root) = path.first_mut() {
+                        *root = src.node_type.clone();
+                    }
+                }
+            }
         }
         path
     }
@@ -4018,6 +4562,9 @@ impl ContentPane {
 
         let node_type_id = child_def.node_type.clone();
         self.active_child = Some(child_def.clone());
+        // Arm the level's initial cursor placement; the load that follows
+        // applies it (see `pending_cursor_on_open`).
+        self.pending_cursor_on_open = child_def.cursor_on_open;
 
         self.preview_open = false;
         self.preview_scroll = 0;
@@ -4267,10 +4814,16 @@ impl ContentPane {
 
     pub fn root_load_request(&self, view_defs: &[ViewDef]) -> Option<LoadRequest> {
         let view_def = self.view_def(view_defs)?;
-        let query = self
-            .active_query
-            .clone()
-            .or_else(|| view_def.query.as_ref().and_then(|q| q.default.clone()));
+        // The view's configured default is a literal body in the adapter's own
+        // language; only an active query can be an extended document, so the
+        // kind travels with `active_query` and not with the fallback.
+        let (query, kind) = match self.active_query.clone() {
+            Some(q) => (Some(q), self.active_query_kind),
+            None => (
+                view_def.query.as_ref().and_then(|q| q.default.clone()),
+                QueryKind::Saved,
+            ),
+        };
         let page = self.current_page.or_else(|| {
             view_def.pagination.as_ref().and_then(|p| match p.mode {
                 PaginationMode::Server | PaginationMode::Cursor => Some(PageRequest {
@@ -4283,6 +4836,7 @@ impl ContentPane {
         Some(LoadRequest {
             node_type_id: view_def.node_type.clone(),
             query,
+            kind,
             sort: self.current_sort.clone(),
             page,
             vars: self.active_query_vars.clone(),
@@ -4452,7 +5006,7 @@ impl ContentPane {
     pub fn default_query_text(&self, view_defs: &[ViewDef]) -> String {
         self.view_def(view_defs)
             .and_then(|vd| vd.query.as_ref())
-            .and_then(|q| q.default.clone())
+            .and_then(|q| q.template.clone().or_else(|| q.default.clone()))
             .unwrap_or_default()
     }
 
@@ -4464,14 +5018,12 @@ impl ContentPane {
     }
 
     pub fn set_query(&mut self, query: String, name: Option<String>) {
-        self.active_query = Some(query);
-        self.active_query_name = name;
-        self.active_query_vars.clear();
-        // A new query invalidates any expanded subtree (loaded under the
-        // old query): re-derive the tree from the upcoming root reload.
-        if let Some(tree) = self.tree.as_mut() {
-            tree.clear_for_new_query();
-        }
+        self.set_query_of_kind(
+            query,
+            name,
+            std::collections::HashMap::new(),
+            QueryKind::Saved,
+        );
     }
 
     /// Variant of [`set_query`] that also stores variable bindings to
@@ -4483,10 +5035,26 @@ impl ContentPane {
         name: Option<String>,
         vars: std::collections::HashMap<String, String>,
     ) {
+        self.set_query_of_kind(query, name, vars, QueryKind::Saved);
+    }
+
+    /// The one place the active query is replaced. The two variants above are
+    /// the adapter-native case, which is every caller that types or edits a
+    /// query body; `Extended` comes only from applying a document loaded out
+    /// of the extended store.
+    pub fn set_query_of_kind(
+        &mut self,
+        query: String,
+        name: Option<String>,
+        vars: std::collections::HashMap<String, String>,
+        kind: QueryKind,
+    ) {
         self.active_query = Some(query);
         self.active_query_name = name;
         self.active_query_vars = vars;
-        // See `set_query`: a query change resets the tree expansion.
+        self.active_query_kind = kind;
+        // A new query invalidates any expanded subtree (loaded under the
+        // old query): re-derive the tree from the upcoming root reload.
         if let Some(tree) = self.tree.as_mut() {
             tree.clear_for_new_query();
         }
@@ -4502,11 +5070,38 @@ impl ContentPane {
         items: Vec<NodeSummary>,
         applied_sort: Vec<SortKey>,
         page: Option<PageInfo>,
-        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        columns: Vec<not_yet_done_content::ColumnSchema>,
         error: Option<String>,
         view_defs: &[ViewDef],
     ) {
         let was_loaded = self.loaded;
+        // Reload of a flat pane: remember which node the cursor sits on so it
+        // can be re-selected below. The table alone only restores the previous
+        // row *index*, which points at a different node as soon as the page
+        // shifts — a feed that renders its newest page (chat messages) moves
+        // every row up as soon as one message arrives. Captured before
+        // `self.items` is replaced. Tree panes use `eager_reload_reanchor_id`.
+        let flat_reanchor_id = if was_loaded && self.tree.is_none() {
+            self.selected_item_id().map(str::to_string)
+        } else {
+            None
+        };
+        // Reload (not first load): preserve the eager tree's fold state and
+        // remember the cursor's node so `apply_subtree` can re-anchor it.
+        // Capture the selected node id *before* `self.items`/entries are
+        // rebuilt below — `tree_entry_at_row` still maps against the
+        // pre-reload tree here. On the first load there is nothing to
+        // preserve or re-anchor.
+        if was_loaded {
+            self.eager_reload_preserve_expansion = true;
+            self.eager_reload_reanchor_id = self
+                .tree_entry_at_row(self.table.selected_row())
+                .filter(|e| !e.is_more_placeholder)
+                .map(|e| e.node.id.clone());
+        } else {
+            self.eager_reload_preserve_expansion = false;
+            self.eager_reload_reanchor_id = None;
+        }
         self.fetch_error = error;
         // Final result lands — clear the in-flight retry banner. On
         // success the pane shows fresh data; on exhausted retries the
@@ -4515,7 +5110,7 @@ impl ContentPane {
         self.items = items;
         self.last_applied_sort = applied_sort;
         self.last_page_info = page;
-        self.last_sortable_columns = sortable_columns;
+        self.last_columns = columns;
         self.loaded = true;
         // Tree mode: the freshly-loaded list is the depth-0 children.
         // Feed them into the cache + re-flatten so the renderer has
@@ -4553,6 +5148,65 @@ impl ContentPane {
             }
         }
         self.rebuild_table(view_defs);
+        // After the rebuild: `filtered_indices` now describes the display
+        // order both the re-anchor and the placement index into. A node that
+        // is gone (deleted, paged out) leaves the restored index alone.
+        if let Some(id) = flat_reanchor_id {
+            self.focus_item_by_id(&id);
+        }
+        // An armed placement wins over the re-anchor: it is only armed while
+        // the level is being opened, and an open has no cursor to preserve.
+        self.apply_cursor_on_open();
+    }
+
+    /// Apply — and clear — a `cursor_on_open` placement armed by
+    /// [`Self::drill_down_prepare`]. Nothing armed leaves the cursor on row 0,
+    /// which is what every level without the opt-in has always done.
+    ///
+    /// A still-empty first page keeps the placement armed instead of burning
+    /// it: an empty channel that receives its first message should still put
+    /// the cursor there, and the alternative (consume it now) would silently
+    /// do nothing at all.
+    fn apply_cursor_on_open(&mut self) {
+        let Some(placement) = self.pending_cursor_on_open else {
+            return;
+        };
+        // Tree mode drives its own cursor (expansion, not a fresh list) — the
+        // hook is a flat-level notion, exactly like `mark_read_on_reach_end`.
+        if self.tree.is_some() {
+            self.pending_cursor_on_open = None;
+            return;
+        }
+        let rows = self.filtered_indices.len();
+        if rows == 0 {
+            return;
+        }
+        self.pending_cursor_on_open = None;
+        let target = match placement {
+            CursorOnOpen::First => Some(0),
+            CursorOnOpen::Last => None,
+            CursorOnOpen::FirstUnread => self.first_unread_row(),
+        };
+        match target {
+            // Anchored at the top edge, so what follows the target — the rest
+            // of the unread run — is what fills the pane below it.
+            Some(row) => self.table.set_selected_at_top(row),
+            // `last`, and `first_unread` with nothing unread (see
+            // [`CursorOnOpen::FirstUnread`]): the newest row at the bottom
+            // edge, which is where `set_selected` scrolls it.
+            None => self.table.set_selected(rows - 1),
+        }
+    }
+
+    /// Display-order row index of the first row carrying an `unread`
+    /// metadata field of `"true"`. Flat panes only: rows map back to `items`
+    /// through `filtered_indices`, exactly like [`Self::selected_item`].
+    fn first_unread_row(&self) -> Option<usize> {
+        self.filtered_indices.iter().position(|&i| {
+            self.items
+                .get(i)
+                .is_some_and(|it| metadata_field_value(it, "unread") == "true")
+        })
     }
 
     pub fn rebuild_table(&mut self, view_defs: &[ViewDef]) {
@@ -4700,7 +5354,10 @@ impl ContentPane {
             // layout. Builds group-header rows + per-group totals + a pinned
             // grand-total footer here and returns — the plain row list below
             // is skipped entirely.
-            if self.current_row_layout(view_defs).is_none() {
+            // Card mode owns the whole row block (frame + grid), so group
+            // headers and totals have nowhere to render — grouping stays off
+            // while cards are on, exactly like under a multi-line layout.
+            if self.current_row_layout(view_defs).is_none() && !self.card_mode_active(view_defs) {
                 let levels = self.current_levels(view_defs);
                 if !levels.is_empty() {
                     let aggregates = self.current_aggregates(view_defs);
@@ -4799,6 +5456,34 @@ impl ContentPane {
         self.table
             .set_smooth_scroll(self.current_smooth_scroll(view_defs));
 
+        // Card mode: each row becomes a framed card whose fields sit in a
+        // grid of `card.columns` slots per line. Checked before `row_layout`
+        // — a level may declare both, and the card toggle is the explicit
+        // user choice, so it wins while it is on. No column header (the
+        // labels live inside the card).
+        if let Some(card) = self
+            .current_card(view_defs)
+            .filter(|_| self.card_mode_active(view_defs))
+        {
+            let spec = self.card_spec(&card, &columns);
+            let (rows, style_map) =
+                build_card_widget_rows(&data_rows, &columns, &card, &spec, config.max_width, t);
+            self.last_col_widths = Vec::new();
+            self.table.set_data(
+                rows,
+                vec![],
+                vec![],
+                vec![],
+                ColumnStyles::default(),
+                build_content_table_style(t),
+                style_map,
+                // Card spans already carry their own padding and inter-slot
+                // separator, so the table must not insert one between cells.
+                "",
+            );
+            return;
+        }
+
         // Multi-line (chat) layout: render each row as a stack of physical
         // lines per `row_layout` instead of one table row. No column header,
         // and the column cursor / horizontal scroll are unused here.
@@ -4817,6 +5502,9 @@ impl ContentPane {
                 })
                 .collect();
             let unread_color = self.unread_color(view_defs, t);
+            // The store is borrowed only for the build: the table's painter
+            // holds the same `Rc` and borrows it again at draw time.
+            let images = Rc::clone(&self.images);
             let (rows, style_map) = build_multiline_widget_rows(
                 &data_rows,
                 &columns,
@@ -4826,6 +5514,7 @@ impl ContentPane {
                 t,
                 &unread_rows,
                 unread_color,
+                &mut images.borrow_mut(),
             );
             self.last_col_widths = Vec::new();
             self.table.set_data(
@@ -5026,9 +5715,7 @@ impl ContentPane {
                         .get(ri)
                         .and_then(|&i| self.items.get(i))
                     {
-                        Some(item) => {
-                            expand_long_text_row(row, item, &columns, &col_widths)
-                        }
+                        Some(item) => expand_long_text_row(row, item, &columns, &col_widths),
                         None => row,
                     }
                 } else {
@@ -5055,7 +5742,7 @@ impl ContentPane {
     // ── Bar hints ────────────────────────────────────────────────────
 
     /// Build the action-bar hints for the current chain position. Each
-    /// hint carries its [`ActiveSource`] (derived at build time from the
+    /// hint carries its [`ActiveSurface`] (derived at build time from the
     /// action's type / id), so the view's resolver — not the renderer —
     /// decides active-ness. The structural contract holds: every entry here
     /// has a source, so nothing fire-and-forget reaches the top bar.
@@ -5070,6 +5757,10 @@ impl ContentPane {
         use crate::views::content_action_hints::source_for_action_type;
         let mut hints: Vec<ActionBarHint> = Vec::new();
         for action in self.current_actions(view_defs) {
+            // Event-only actions (no key) never appear in the action bar.
+            let Some(key) = action.primary_key().map(str::to_string) else {
+                continue;
+            };
             if action.shows_in_action_bar() {
                 // A `custom` action forced into the bar (`in_action_bar`) is a
                 // modal menu→editor flow keyed on its stable id, not one of the
@@ -5077,39 +5768,30 @@ impl ContentPane {
                 // mapping from `source_for_action_type`.
                 let source = match (action.action_type.as_str(), &action.id) {
                     ("custom", Some(id)) if action.in_action_bar => {
-                        ActiveSource::ContentAction(id.clone())
+                        ActiveSurface::ContentAction(id.clone())
                     }
                     _ => source_for_action_type(&action.action_type, &action.name),
                 };
-                hints.push(ActionBarHint::new(
-                    action.key.clone(),
-                    action.name.clone(),
-                    source,
-                ));
+                hints.push(ActionBarHint::new(key, action.name.clone(), source));
             }
         }
-        // SH: YAML `shortcuts:` entries whose adapter action declares
-        // `placement: ActionBar`. Unknown adapter or unknown node_type →
-        // drop silently. Deduplicate against the `actions:`-derived entries
-        // above to avoid double-display when the user binds both `actions:`
-        // and `shortcuts:` to the same key (rare but possible). An
-        // action-bar entry with no derivable source is an adapter bug
-        // (asserted); in release it stays visible but never lights up.
+        // SH: YAML `shortcuts:` entries whose adapter action is *activatable*
+        // — i.e. a bar placement is derived (`source` is `Some`). Placement
+        // is a TUI concern derived from the action's InputSpec + id, not
+        // declared by the adapter: an action that opens an editor/form/picker
+        // (or is delete / toggle-tracking / mark-move) can light up, so it
+        // belongs here; a fire-and-forget action has no source and drops to
+        // the status bar below. Unknown adapter / node_type → dropped in
+        // `collect_shortcut_hints`. Deduplicate against the `actions:`-derived
+        // entries above to avoid double-display when the user binds both
+        // `actions:` and `shortcuts:` to the same key.
         for sh in self.collect_shortcut_hints(view_defs, adapter) {
-            if sh.placement != not_yet_done_content::HintPlacement::ActionBar {
+            let Some(source) = sh.source else {
                 continue;
-            }
+            };
             if hints.iter().any(|h| h.key == sh.key) {
                 continue;
             }
-            let source = sh.source.unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "shortcut '{}' is action-bar placed but has no ActiveSource",
-                    sh.label
-                );
-                ActiveSource::Editor(sh.label.clone())
-            });
             hints.push(ActionBarHint::new(sh.key, sh.label, source));
         }
         if self.nav_stack.is_empty() {
@@ -5118,7 +5800,7 @@ impl ContentPane {
                     hints.push(ActionBarHint::new(
                         mk.to_string(),
                         "queries",
-                        ActiveSource::QueryMenu,
+                        ActiveSurface::QueryMenu,
                     ));
                 }
             }
@@ -5128,7 +5810,7 @@ impl ContentPane {
                 hints.push(ActionBarHint::new(
                     content_kb.hint_label(&ContentAction::EditQuery, key_icons),
                     "edit query",
-                    ActiveSource::Editor("edit query".to_string()),
+                    ActiveSurface::Editor("edit query".to_string()),
                 ));
             }
         }
@@ -5197,14 +5879,19 @@ impl ContentPane {
         }
         for action in self.current_actions(view_defs) {
             if !action.shows_in_action_bar() {
-                hints.push((action.key.clone(), action.name.clone()));
+                // Event-only actions (no key) have no status-bar hint.
+                if let Some(key) = action.primary_key() {
+                    hints.push((key.to_string(), action.name.clone()));
+                }
             }
         }
-        // SH: YAML `shortcuts:` entries whose adapter action declares
-        // `placement: StatusBar`. Mirror of the action-bar branch
-        // above, with the same dedup-against-existing-key guard.
+        // SH: YAML `shortcuts:` entries whose adapter action is
+        // fire-and-forget — no derivable active source, so it renders in the
+        // status bar (mirror of the action-bar branch above, which claims the
+        // activatable `Some(source)` entries). Same dedup-against-existing-key
+        // guard.
         for sh in self.collect_shortcut_hints(view_defs, adapter) {
-            if sh.placement != not_yet_done_content::HintPlacement::StatusBar {
+            if sh.source.is_some() {
                 continue;
             }
             if hints.iter().any(|(k, _)| k == &sh.key) {
@@ -5278,10 +5965,10 @@ impl ContentPane {
                 }),
                 PaginationMode::Server | PaginationMode::All => None,
             };
-            return SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+            return SubViewMessage::Request(ViewRequest::RunAdapterQuery {
                 view_index,
                 pane_id,
-                database: cq.database,
+                node_id: cq.node_id,
                 query: cq.query,
                 page: req,
                 cursor,
@@ -5304,10 +5991,10 @@ impl ContentPane {
                 PaginationMode::Cursor => Some(CursorIntent::Open),
                 PaginationMode::Server | PaginationMode::All => None,
             };
-            return SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+            return SubViewMessage::Request(ViewRequest::RunAdapterQuery {
                 view_index,
                 pane_id,
-                database: cq.database,
+                node_id: cq.node_id,
                 query: cq.query,
                 page: req,
                 cursor,
@@ -5478,7 +6165,7 @@ impl ContentPane {
 
         // Tree smart-collapse — only on tree-mode panes (root has
         // `tree_label`). Defaults to `backspace` (a navigation gesture) so
-        // it never shadows `c`/ColumnConfig; `strip_reserved` keeps it out
+        // it never shadows the `c` leader; `strip_reserved` keeps it out
         // of the way if column_cursor ever co-exists with a tree leaf.
         if self.tree.is_some() {
             if let Some(b) = content_kb
@@ -5680,12 +6367,27 @@ impl ContentPane {
         // `dispatch_claim`) picks the right backend at press time:
         // tree-find wins when active. Otherwise n/N stays free for
         // an action binding.
+        // Identity for the routable sources below. Dispatch ignores it (the
+        // `YamlAction` / `PaneSearchJump` arms match on name/direction only),
+        // but the shortcut menu surfaces these claims as *bindable* rows in
+        // the context scope, and the editor's write path resolves the view
+        // file from `view` — a blank one yields "No config file found for
+        // view ''". So carry the real view name + drilldown child path.
+        let source_view = self
+            .view_def(view_defs)
+            .map(|vd| vd.name.clone())
+            .unwrap_or_default();
+        let source_child_path = self.current_child_name_path();
+
         let tree_find_has_hits = self.tree_find.as_ref().is_some_and(|s| !s.hits.is_empty());
         if !self.search.matches().is_empty() || tree_find_has_hits {
             km.push(KeyClaim::handler(
                 KeyBinding::new(self.search_next_key.clone()),
                 scope.clone(),
                 KeySource::PaneSearchJump {
+                    view: source_view.clone(),
+                    child_path: source_child_path.clone(),
+                    action: String::new(),
                     direction: SearchJump::Next,
                 },
             ));
@@ -5693,19 +6395,26 @@ impl ContentPane {
                 KeyBinding::new(self.search_prev_key.clone()),
                 scope.clone(),
                 KeySource::PaneSearchJump {
+                    view: source_view.clone(),
+                    child_path: source_child_path.clone(),
+                    action: String::new(),
                     direction: SearchJump::Prev,
                 },
             ));
         }
 
-        // YAML actions for the active level.
+        // YAML actions for the active level. Event-only actions (no key)
+        // claim no key — they run only via the rule engine.
         for action in self.current_actions(view_defs) {
+            let Some(binding) = action.key.clone() else {
+                continue;
+            };
             km.push(KeyClaim::handler(
-                KeyBinding::new(action.key.clone()),
+                binding,
                 scope.clone(),
                 KeySource::YamlAction {
-                    view: String::new(),
-                    child_path: Vec::new(),
+                    view: source_view.clone(),
+                    child_path: source_child_path.clone(),
                     name: action.name.clone(),
                 },
             ));
@@ -5802,6 +6511,9 @@ impl ContentPane {
                     pane_id,
                     save_name: None,
                     is_new: false,
+                    // Editing what the pane is running: an extended pane
+                    // opens on its document, not on a native query body.
+                    kind: self.active_query_kind,
                 },
             )),
             KeySource::Content(ContentAction::TreeCollapse) => {
@@ -5865,7 +6577,7 @@ impl ContentPane {
                 self.table.scroll_half_page(true);
                 Some(SubViewMessage::SelectionChanged(None))
             }
-            KeySource::PaneSearchJump { direction } => {
+            KeySource::PaneSearchJump { direction, .. } => {
                 // CT-7: tree-find wins over local /-search when its
                 // cache is live. The walker handles cursor bumping +
                 // lazy expansion (it may dispatch ExpandTreeNode
@@ -5931,8 +6643,7 @@ impl ContentPane {
                     .chain(it.metadata.fields.iter().map(|f| f.value.as_str()))
             })
             .collect();
-        let targets =
-            crate::views::link_extract::extract_links_from(fragments.iter().copied());
+        let targets = crate::views::link_extract::extract_links_from(fragments.iter().copied());
         if targets.is_empty() {
             return SubViewMessage::Request(ViewRequest::Notify("No links on screen".to_string()));
         }
@@ -6065,7 +6776,11 @@ impl ContentPane {
                 self.search.clear();
                 self.search_mode = SearchMode::Local;
                 let query = render_text_search(template, &q);
-                self.set_query(query, None);
+                self.set_query(query.clone(), None);
+                // Remember what this search produced: the pane keeps showing
+                // its result after the input closes, and the action bar keeps
+                // the hint lit for as long as it does.
+                self.text_search_query = Some(query);
                 return SubViewMessage::Request(ViewRequest::SpawnContentLoad {
                     view_index,
                     pane_id,
@@ -6184,6 +6899,7 @@ impl ContentPane {
                         pane_id,
                         save_name: None,
                         is_new: false,
+                        kind: self.active_query_kind,
                     });
                 }
             }
@@ -6193,7 +6909,11 @@ impl ContentPane {
                 // copies, deleted parents, …). Drop tree_find so
                 // the user gets clean n/N + status hints again.
                 self.tree_find_clear();
-                return SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                // A user-initiated reload is a *hard* refresh: abort any
+                // in-flight adapter load and drop caches before re-listing, so
+                // `r` always fetches fresh (a warm cache would otherwise just
+                // re-serve the same rows).
+                return SubViewMessage::Request(ViewRequest::ForceReloadContent {
                     view_index,
                     pane_id,
                 });
@@ -6384,6 +7104,55 @@ impl ContentPane {
 }
 
 impl ContentView {
+    /// Names of the actions this view binds to bus `topic` via its
+    /// `event_actions:` list, across every `view_defs` entry (subtab). Used by
+    /// the App's rule engine to route a [`BusEvent`] to the right action(s)
+    /// regardless of which tab or subtab is currently active.
+    ///
+    /// [`BusEvent`]: not_yet_done_content::BusEvent
+    pub fn event_action_targets(&self, topic: &str) -> Vec<String> {
+        self.view_defs
+            .iter()
+            .flat_map(|vd| vd.event_actions.iter())
+            .filter(|b| b.on == topic)
+            .map(|b| b.run.clone())
+            .collect()
+    }
+
+    /// Look up an action by `name` across every `view_defs` entry's own
+    /// actions (cursor-independent — event actions may be keyless and sit on
+    /// any level). Returns a clone so the caller can inspect it without holding
+    /// a borrow on the view.
+    pub fn find_action_by_name(&self, name: &str) -> Option<ActionDef> {
+        self.view_defs
+            .iter()
+            .flat_map(|vd| vd.actions.iter())
+            .find(|a| a.name == name)
+            .cloned()
+    }
+
+    /// Run the action named `name` in response to a bus event. Unlike the key
+    /// path this carries **no cursor context**: it looks the action up by name
+    /// across every `view_defs` entry's own actions (event-only actions have no
+    /// key and need not sit on the active level), so e.g. an MFA notify fires
+    /// no matter what row or subtab is focused. Returns
+    /// [`SubViewMessage::Unhandled`] when no such action exists.
+    pub fn dispatch_event_action(&mut self, name: &str) -> SubViewMessage {
+        let view_index = self.view_index;
+        let pane_id = self.active_pane_id();
+        let view_defs = self.view_defs.clone();
+        let Some(action) = view_defs
+            .iter()
+            .flat_map(|vd| vd.actions.iter())
+            .find(|a| a.name == name)
+            .cloned()
+        else {
+            return SubViewMessage::Unhandled;
+        };
+        self.active_pane_mut()
+            .execute_action(&action, view_index, pane_id, &view_defs)
+    }
+
     pub fn new(
         theme: Arc<Theme>,
         config: &ViewFileConfig,
@@ -6469,11 +7238,19 @@ impl ContentView {
             confirm_active: false,
             column_config_active: false,
             script_active: false,
+            global_action_hints: Vec::new(),
             theme,
             cmdline: CmdlineComponent::new(),
             tab_name: config.tab.name.clone(),
             tab_icon: config.tab.icon.clone().unwrap_or_default(),
             tab_order: config.tab.order,
+            tab_key: config.tab.key.clone(),
+            tab_unread_marker: config.tab.unread_marker.clone(),
+            tab_unread_style: config.tab.unread_style.clone(),
+            tab_load_banner: config.tab.load_banner,
+            // Without an override this is the config default; App replaces it
+            // with the user's `notifications.load_banner` when it wires the view.
+            load_banner_route: config.tab.load_banner.unwrap_or_default(),
             view_index: 0, // set by App after construction
             adapter,
             view_defs: config.views.clone(),
@@ -6498,12 +7275,14 @@ impl ContentView {
             header_overlay: crate::components::sort_header::HeaderOverlay::default(),
             source_path: None,
             manual_connect: config.adapter.manual_connect,
+            reminder: config.reminder.clone(),
             connected_once: false,
             pending_cursor_closes: Vec::new(),
             pending_mark_read: None,
-            postgres_table_shortcuts: std::collections::HashMap::new(),
+            node_script_shortcuts: std::collections::HashMap::new(),
             script_shortcuts: std::collections::HashMap::new(),
             column_overrides: std::collections::HashMap::new(),
+            card_mode_overrides: std::collections::HashMap::new(),
             nav_chars: Vec::new(),
         };
         cv.sync_action_bar_hints();
@@ -6538,6 +7317,19 @@ impl ContentView {
         self.pane_trees[self.active_subtab].focus
     }
 
+    /// The pagination mode a pane's current level declares (see
+    /// [`ContentPane::resolve_pagination_mode`]). The App side needs it
+    /// *before* the first custom query runs — only a level configured for
+    /// cursor pagination may ask an adapter to open a cursor, and not every
+    /// backend has one. Falls back to [`PaginationMode::Server`] for an
+    /// unknown pane, which is the mode every adapter supports.
+    pub fn pane_pagination_mode(&self, id: PaneId) -> PaginationMode {
+        let view_defs = self.view_defs.clone();
+        self.find_pane(id)
+            .map(|pane| pane.resolve_pagination_mode(&view_defs))
+            .unwrap_or(PaginationMode::Server)
+    }
+
     /// Walk every pane tree and return the leaf with the given id, if any.
     pub fn find_pane(&self, id: PaneId) -> Option<&ContentPane> {
         self.pane_trees
@@ -6553,6 +7345,26 @@ impl ContentView {
             tree.root.collect_leaf_ids(&mut ids);
         }
         ids
+    }
+
+    /// Rebuild one specific pane's table, focused or not. Used for
+    /// out-of-band results that concern a single pane — an inline picture
+    /// finishing its download. An unknown id (pane closed meanwhile) is a
+    /// no-op.
+    ///
+    /// The disjoint-field access mirrors [`Self::drive_tree_find`]: the
+    /// borrow checker only sees `&self.view_defs` and `&mut self.pane_trees`
+    /// as disjoint through direct field projection, not through
+    /// [`Self::find_pane_mut`].
+    pub fn rebuild_pane_table(&mut self, id: PaneId) {
+        let view_defs = &self.view_defs;
+        let pane = self
+            .pane_trees
+            .iter_mut()
+            .find_map(|tree| tree.root.find_leaf_mut(id).map(|leaf| &mut leaf.pane));
+        if let Some(pane) = pane {
+            pane.rebuild_table(view_defs);
+        }
     }
 
     /// Mutable variant of [`find_pane`].
@@ -6600,6 +7412,7 @@ impl ContentView {
         confirm_active: bool,
         column_config_active: bool,
         script_active: bool,
+        global_action_hints: Vec<ActionHint>,
     ) {
         // Store the cross-cutting active state so the hint builder can
         // resolve each hint's `active` flag (the bar no longer special-cases
@@ -6612,6 +7425,10 @@ impl ContentView {
         self.confirm_active = confirm_active;
         self.column_config_active = column_config_active;
         self.script_active = script_active;
+        // App-global hints (shortcut menu, …) are appended by
+        // `action_bar_hints`; store them first so that path — and the lighter
+        // `sync_action_bar_hints` refresh — both include them.
+        self.global_action_hints = global_action_hints;
 
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
@@ -6623,6 +7440,24 @@ impl ContentView {
             .iter()
             .filter_map(|sq| sq.shortcut.as_ref().map(|s| (sq.name.clone(), s.clone())))
             .collect();
+        // Script shortcuts (`:script`-menu chords and, on Postgres, per-table
+        // script chords) already dispatch via the claims registered in
+        // `build_view_claims`, but — unlike saved-query favorites — never had
+        // a bar entry. Surface them as their own bar group (rendered with a
+        // separator only when non-empty) so a bound script chord is
+        // discoverable, not just its underlying menu key. Same scopes as the
+        // claim registration so what shows is exactly what dispatches.
+        let mut script_favs: Vec<(String, String)> = Vec::new();
+        if let Some(scope) = self.focused_script_scope() {
+            if let Some(entries) = self.script_shortcuts.get(&scope) {
+                script_favs.extend(entries.iter().cloned());
+            }
+        }
+        if let Some(node_id) = self.target_node_script_node_id() {
+            if let Some(entries) = self.node_script_shortcuts.get(&node_id) {
+                script_favs.extend(entries.iter().cloned());
+            }
+        }
         let (fuzzy_active, fuzzy_query, fuzzy_cursor) = {
             let p = self.active_pane();
             (
@@ -6653,6 +7488,7 @@ impl ContentView {
         self.action_bar.set_mode_label(mode_label);
         self.action_bar.set_active_filter_name(active_filter_name);
         self.action_bar.set_favorites(favs);
+        self.action_bar.set_script_favorites(script_favs);
         self.action_bar
             .set_fuzzy(fuzzy_active, &fuzzy_query, fuzzy_cursor);
         self.action_bar.set_search(
@@ -6730,31 +7566,48 @@ impl ContentView {
         Ok(())
     }
 
-    /// True when the items currently shown in the active pane are
-    /// `postgres:table` nodes — either at the flat `tables` subtab
-    /// root, or drilled into a schema. Used to decide whether
-    /// `q` (scripts menu) and `Q` (SQL editor) should be claimed.
-    fn displays_postgres_tables(&self) -> bool {
-        let pane = self.active_pane();
-        match pane.active_child.as_ref() {
-            Some(child) => child.node_type == "postgres:table",
+    /// True when the level whose items the active pane currently shows
+    /// declares `node_scripts: true` — i.e. those rows own per-node
+    /// scripts. Used to decide whether `q` (scripts menu) and `Q` (SQL
+    /// editor) should be claimed.
+    fn displays_node_scripts(&self) -> bool {
+        match self.active_pane().active_child.as_ref() {
+            Some(child) => child.node_scripts,
             None => self
                 .active_view_def()
-                .map(|vd| vd.node_type == "postgres:table")
+                .map(|vd| vd.node_scripts)
                 .unwrap_or(false),
         }
     }
 
-    /// Postgres-table node id targeted by `q` (scripts menu) in the
-    /// active pane. `selected_item_id()` when the displayed items are
-    /// tables; `parent_node_id()` when we've drilled into a table and
-    /// are looking at its rows (detected by the active child's
-    /// `node_type == "postgres:row"`).
-    pub fn target_postgres_table_node_id(&self) -> Option<String> {
+    /// True when the level *one step up* declares `node_scripts: true` —
+    /// we drilled out of a script-owning row (e.g. into a table's rows),
+    /// so `parent_node_id()` addresses the script owner. Reads the
+    /// stashed `active_child` of the top nav frame, falling back to the
+    /// root ViewDef for a frame pushed from the root level.
+    fn parent_displays_node_scripts(&self) -> bool {
+        let Some(frame) = self.active_pane().nav_stack.last() else {
+            return false;
+        };
+        match frame.active_child.as_ref() {
+            Some(child) => child.node_scripts,
+            None => self
+                .active_view_def()
+                .map(|vd| vd.node_scripts)
+                .unwrap_or(false),
+        }
+    }
+
+    /// Node id that `q` (scripts menu) and `Q` (SQL editor) act on in the
+    /// active pane. `selected_item_id()` when the displayed rows own the
+    /// scripts themselves; `parent_node_id()` when we've drilled one level
+    /// deeper (e.g. from a table into its rows). `None` when neither level
+    /// declares `node_scripts: true`.
+    pub fn target_node_script_node_id(&self) -> Option<String> {
         let pane = self.active_pane();
-        if self.displays_postgres_tables() {
+        if self.displays_node_scripts() {
             pane.selected_item_id().map(str::to_string)
-        } else if pane.current_child_node_type() == Some("postgres:row") {
+        } else if self.parent_displays_node_scripts() {
             pane.parent_node_id().map(str::to_string)
         } else {
             None
@@ -6769,9 +7622,11 @@ impl ContentView {
             .iter()
             .enumerate()
             .map(|(i, vd)| {
-                let label = match vd.key.as_deref() {
-                    Some(k) => format!("{} {}", vd.name, k),
-                    None => vd.name.clone(),
+                let label = match &vd.key {
+                    Some(k) if !k.0.is_empty() => {
+                        format!("{} {}", vd.name, k.0.join("/"))
+                    }
+                    _ => vd.name.clone(),
                 };
                 (label, i == active)
             })
@@ -6986,6 +7841,7 @@ impl ContentView {
             ContentAction::ToggleLongText => self
                 .active_pane_mut()
                 .try_toggle_long_text(&view_defs, view_index, pane_id),
+            ContentAction::ToggleCardMode => self.toggle_card_mode(),
         };
         if let SubViewMessage::ContentDrill {
             item_id,
@@ -7075,9 +7931,12 @@ impl ContentView {
             p.active_query = source.active_query.clone();
             p.active_query_name = source.active_query_name.clone();
             p.active_query_vars = source.active_query_vars.clone();
+            p.active_query_kind = source.active_query_kind;
+            p.text_search_query = source.text_search_query.clone();
             p.current_sort = source.current_sort.clone();
             p.current_page = source.current_page;
             p.set_column_overrides(self.column_overrides.clone());
+            p.set_card_mode_overrides(self.card_mode_overrides.clone());
             p
         };
         let tree = &mut self.pane_trees[self.active_subtab];
@@ -7214,6 +8073,8 @@ impl ContentView {
                     p.active_query = source.active_query.clone();
                     p.active_query_name = source.active_query_name.clone();
                     p.active_query_vars = source.active_query_vars.clone();
+                    p.active_query_kind = source.active_query_kind;
+                    p.text_search_query = source.text_search_query.clone();
                     p.current_sort = source.current_sort.clone();
                     p.current_page = source.current_page;
                     // Mirror the source's level + items so back-nav from
@@ -7221,6 +8082,7 @@ impl ContentView {
                     p.active_child = source.active_child.clone();
                     p.items = source.items.clone();
                     p.set_column_overrides(self.column_overrides.clone());
+                    p.set_card_mode_overrides(self.card_mode_overrides.clone());
                     p
                 };
                 let child_node_type =
@@ -7247,31 +8109,25 @@ impl ContentView {
         }
     }
 
-    /// Mirror Enter-on-table for a Postgres script run: figure out the
-    /// right pane (split-allocated Rows child, or in-place if we're
-    /// already inside a Rows pane) and emit `RunPostgresScript` against
-    /// it. Without this, the script result would land in the source
-    /// pane (e.g. the flat tables list) whose columns can't display
-    /// dynamic `qrow:*` items, leaving an empty-looking pane.
-    fn dispatch_postgres_script_apply(
-        &mut self,
-        database: String,
-        schema: String,
-        table: String,
-        script: String,
-    ) -> SubViewMessage {
+    /// Mirror Enter-on-row for a node-script run: figure out the right
+    /// pane (split-allocated result child, or in-place if we're already
+    /// inside one) and emit `RunNodeScript` against it. Without this, the
+    /// script result would land in the source pane (e.g. the flat tables
+    /// list) whose columns can't display dynamic `qrow:*` items, leaving
+    /// an empty-looking pane.
+    ///
+    /// The breadcrumb label is the node id's last path segment — a table
+    /// name for Postgres, and the readable tail for any other adapter
+    /// whose ids are `/`-joined paths. Ids without a `/` label as-is.
+    fn dispatch_node_script_apply(&mut self, node_id: String, script: String) -> SubViewMessage {
         let view_index = self.view_index;
         let view_defs = self.view_defs.clone();
-        let table_node_id = format!("{database}/schemas/{schema}/tables/{table}");
-        let table_label = table.clone();
-        let target_pane_id =
-            self.split_for_query_into_child(&table_node_id, &table_label, &view_defs);
-        SubViewMessage::Request(ViewRequest::RunPostgresScript {
+        let label = node_id.rsplit('/').next().unwrap_or(&node_id).to_string();
+        let target_pane_id = self.split_for_query_into_child(&node_id, &label, &view_defs);
+        SubViewMessage::Request(ViewRequest::RunNodeScript {
             view_index,
             pane_id: target_pane_id,
-            database,
-            schema,
-            table,
+            node_id,
             script,
         })
     }
@@ -7299,8 +8155,8 @@ impl ContentView {
     /// the result replaces items in place.
     fn split_for_query_into_child(
         &mut self,
-        table_node_id: &str,
-        table_label: &str,
+        node_id: &str,
+        node_label: &str,
         view_defs: &[ViewDef],
     ) -> PaneId {
         let children = self.active_pane().current_children(view_defs).to_vec();
@@ -7308,12 +8164,8 @@ impl ContentView {
             return self.active_pane_id();
         };
         let Some(split_def) = child_def.split.clone() else {
-            self.active_pane_mut().drill_down_prepare(
-                table_node_id,
-                table_label,
-                &child_def,
-                view_defs,
-            );
+            self.active_pane_mut()
+                .drill_down_prepare(node_id, node_label, &child_def, view_defs);
             return self.active_pane_id();
         };
         // Reuse an existing coupled child pane if one is alive for the
@@ -7329,7 +8181,7 @@ impl ContentView {
                 });
             if let Some((_, child_pane_id)) = linked {
                 if let Some(child) = self.find_pane_mut(child_pane_id) {
-                    child.drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
+                    child.drill_down_prepare(node_id, node_label, &child_def, view_defs);
                 }
                 return child_pane_id;
             }
@@ -7363,14 +8215,17 @@ impl ContentView {
             p.active_query = source.active_query.clone();
             p.active_query_name = source.active_query_name.clone();
             p.active_query_vars = source.active_query_vars.clone();
+            p.active_query_kind = source.active_query_kind;
+            p.text_search_query = source.text_search_query.clone();
             p.current_sort = source.current_sort.clone();
             p.current_page = source.current_page;
             p.active_child = source.active_child.clone();
             p.items = source.items.clone();
             p.set_column_overrides(self.column_overrides.clone());
+            p.set_card_mode_overrides(self.card_mode_overrides.clone());
             p
         };
-        new_pane.drill_down_prepare(table_node_id, table_label, &child_def, view_defs);
+        new_pane.drill_down_prepare(node_id, node_label, &child_def, view_defs);
         let tree = &mut self.pane_trees[self.active_subtab];
         tree.split_focus(orientation, branch_ratio, side, new_pane_id, new_pane);
         tree.assign_tag(new_pane_id, &self.pane_tag_alphabet);
@@ -7468,18 +8323,10 @@ impl ContentView {
                 // Same for the record-detail backlinks: a survivor that
                 // pointed at (or followed) a just-closed pane must drop the
                 // reference so a later toggle doesn't chase a dead pane.
-                if leaf
-                    .pane
-                    .detail_child
-                    .is_some_and(|c| closed.contains(&c))
-                {
+                if leaf.pane.detail_child.is_some_and(|c| closed.contains(&c)) {
                     leaf.pane.detail_child = None;
                 }
-                if leaf
-                    .pane
-                    .detail_source
-                    .is_some_and(|s| closed.contains(&s))
-                {
+                if leaf.pane.detail_source.is_some_and(|s| closed.contains(&s)) {
                     leaf.pane.detail_source = None;
                 }
             }
@@ -7532,8 +8379,7 @@ impl ContentView {
         let follower = {
             let theme = Arc::clone(&self.theme);
             let source = self.active_pane();
-            let mut p =
-                ContentPane::new(theme, view_def_index, false, source.capabilities.clone());
+            let mut p = ContentPane::new(theme, view_def_index, false, source.capabilities.clone());
             p.detail_source = Some(focus_id);
             p.detail_wrap = false;
             // Mirror the source's drill level so the follower resolves the
@@ -7625,20 +8471,37 @@ impl ContentView {
     fn sync_detail_panes(&mut self) {
         let active_subtab = self.active_subtab;
         let mut ids = Vec::new();
-        self.pane_trees[active_subtab].root.collect_leaf_ids(&mut ids);
+        self.pane_trees[active_subtab]
+            .root
+            .collect_leaf_ids(&mut ids);
         let pairs: Vec<(PaneId, PaneId)> = ids
             .into_iter()
-            .filter_map(|id| self.find_pane(id).and_then(|p| p.detail_source).map(|s| (id, s)))
+            .filter_map(|id| {
+                self.find_pane(id)
+                    .and_then(|p| p.detail_source)
+                    .map(|s| (id, s))
+            })
             .collect();
         if pairs.is_empty() {
             return;
         }
         let view_defs = self.view_defs.clone();
         let overlay = self.header_overlay.clone();
+        let now = chrono::Local::now();
         for (follower_id, source_id) in pairs {
             let current = self
                 .find_pane(source_id)
                 .and_then(|p| p.selected_item().cloned());
+            // Mirror the source table's configured columns (selection, order,
+            // labels, `source: label`) so the detail follower matches the row
+            // view exactly. Postgres and other dynamic-schema views have no
+            // configured columns; `current_columns` then auto-derives one per
+            // record field, so the follower still shows the whole record as
+            // before this change.
+            let columns = self
+                .find_pane(source_id)
+                .map(|p| p.current_columns(&view_defs))
+                .unwrap_or_default();
             let Some(follower) = self.find_pane_mut(follower_id) else {
                 continue;
             };
@@ -7650,9 +8513,24 @@ impl ContentView {
             let wrap = follower.detail_wrap;
             follower.items = match current {
                 Some(ref s) => {
+                    // Same label + value resolution as the row view:
+                    // `cell_content_for` applies `source: label` and typed
+                    // (date/duration) formatting; the label falls back to the
+                    // column key only when no YAML label is set.
+                    let fields: Vec<content_detail::DetailField> = columns
+                        .iter()
+                        .map(|col| content_detail::DetailField {
+                            label: col
+                                .label
+                                .clone()
+                                .filter(|l| !l.is_empty())
+                                .unwrap_or_else(|| col.key.clone()),
+                            value: cell_content_for(s, col, now).text,
+                        })
+                        .collect();
                     let width = follower.table.last_render_width() as usize;
-                    let value_width = content_detail::value_width(width, s);
-                    content_detail::detail_items(s, wrap, value_width)
+                    let value_width = content_detail::value_width(width, &fields);
+                    content_detail::detail_items(&fields, wrap, value_width)
                 }
                 None => Vec::new(),
             };
@@ -7742,14 +8620,35 @@ impl ContentView {
         self.active_pane_mut().set_query(query, name);
     }
 
+    /// [`set_query`] for a body whose store is known — what the query
+    /// editor hands back, since it was opened for one kind or the other.
+    /// Bindings are empty: an edited body is applied as written.
+    pub fn set_query_of_kind(&mut self, query: String, name: Option<String>, kind: QueryKind) {
+        self.active_pane_mut().set_query_of_kind(
+            query,
+            name,
+            std::collections::HashMap::new(),
+            kind,
+        );
+    }
+
     /// Stamp the tab's user-set default saved query onto the active pane
     /// (the default view, as the plain startup apply always did) *and*
     /// onto every pane whose view opts in via `query.inherit_default` —
     /// subtabs that are projections of the same rows, where the default
     /// filter should follow the user. Runs once at startup, before any
     /// pane has loaded.
-    pub fn apply_default_query(&mut self, query: String, name: Option<String>) {
-        self.set_query(query.clone(), name.clone());
+    ///
+    /// `kind` travels with the body because an extended document is a legal
+    /// default: what distinguishes it from an adapter-native query is the
+    /// store it came from, which nothing downstream can recover from the text.
+    pub fn apply_default_query(&mut self, query: String, name: Option<String>, kind: QueryKind) {
+        self.active_pane_mut().set_query_of_kind(
+            query.clone(),
+            name.clone(),
+            std::collections::HashMap::new(),
+            kind,
+        );
         let view_defs = self.view_defs.clone();
         let active = self.active_pane_id();
         for tree in &mut self.pane_trees {
@@ -7763,7 +8662,12 @@ impl ContentView {
                     .map(|q| q.inherit_default)
                     .unwrap_or(false);
                 if inherits {
-                    leaf.pane.set_query(query.clone(), name.clone());
+                    leaf.pane.set_query_of_kind(
+                        query.clone(),
+                        name.clone(),
+                        std::collections::HashMap::new(),
+                        kind,
+                    );
                 }
             });
         }
@@ -7789,9 +8693,10 @@ impl ContentView {
         query: String,
         name: Option<String>,
         vars: std::collections::HashMap<String, String>,
+        kind: QueryKind,
     ) {
         if let Some(pane) = self.find_pane_mut(pane_id) {
-            pane.set_query_with_vars(query, name, vars);
+            pane.set_query_of_kind(query, name, vars, kind);
         }
     }
 
@@ -7825,23 +8730,13 @@ impl ContentView {
         self.query_menu.open(&entries, &self.query_menu_kb);
     }
 
-    /// Open the Postgres-specific scripts menu for the given table.
-    /// Called by the App after it has listed `.sql` files in the
-    /// per-table directory. The `query` field on each entry is unused
-    /// for the script menu but kept non-empty so the popup widget
-    /// treats the row as selectable.
-    pub fn open_postgres_scripts_popup(
-        &mut self,
-        database: String,
-        schema: String,
-        table: String,
-        entries: Vec<QueryMenuEntry>,
-    ) {
-        self.query_menu_mode = QueryMenuMode::PostgresScripts {
-            database,
-            schema,
-            table,
-        };
+    /// Open the per-node scripts menu for `node_id`. Called by the App
+    /// after it has listed the node's scripts via the adapter's script
+    /// store. The `query` field on each entry is unused for the script
+    /// menu but kept non-empty so the popup widget treats the row as
+    /// selectable.
+    pub fn open_node_scripts_popup(&mut self, node_id: String, entries: Vec<QueryMenuEntry>) {
+        self.query_menu_mode = QueryMenuMode::NodeScripts { node_id };
         // Scripts are files, not queries — no default-query semantics.
         self.query_menu
             .open_without_default(&entries, &self.query_menu_kb);
@@ -7864,24 +8759,34 @@ impl ContentView {
             | (_, QueryMenuMessage::Closed) => noop,
 
             // ── Saved queries (existing behaviour) ────────────────────
-            (QueryMenuMode::SavedQueries, QueryMenuMessage::Apply { name, query }) => Some(
-                SubViewMessage::Request(ViewRequest::ApplyContentSavedQuery {
-                    view_index,
-                    pane_id,
-                    query,
-                    name,
-                }),
-            ),
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::Apply { name, query }) => {
+                let kind = self.query_kind_of(&name);
+                Some(SubViewMessage::Request(
+                    ViewRequest::ApplyContentSavedQuery {
+                        view_index,
+                        pane_id,
+                        query,
+                        name,
+                        kind,
+                    },
+                ))
+            }
             (QueryMenuMode::SavedQueries, QueryMenuMessage::EditExisting { name, query }) => {
+                // Stamped, not applied: the editor opens on this body. The
+                // kind still has to follow it, or a pane that last ran an
+                // extended document would keep claiming so for a native body.
+                let kind = self.query_kind_of(&name);
                 let pane = self.active_pane_mut();
                 pane.active_query = Some(query);
                 pane.active_query_name = Some(name.clone());
+                pane.active_query_kind = kind;
                 Some(SubViewMessage::Request(
                     ViewRequest::OpenContentQueryEditor {
                         view_index,
                         pane_id,
                         save_name: Some(name),
                         is_new: false,
+                        kind,
                     },
                 ))
             }
@@ -7904,12 +8809,23 @@ impl ContentView {
                     },
                 ))
             }
-            (QueryMenuMode::SavedQueries, QueryMenuMessage::CreateNew { name }) => Some(
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::ClearShortcut { name }) => {
+                let scope = self.query_scope.clone();
+                Some(SubViewMessage::Request(
+                    ViewRequest::ClearContentQueryShortcut {
+                        view_index,
+                        scope,
+                        name,
+                    },
+                ))
+            }
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::CreateNew { name, kind }) => Some(
                 SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
                     view_index,
                     pane_id,
                     save_name: Some(name),
                     is_new: true,
+                    kind,
                 }),
             ),
             (QueryMenuMode::SavedQueries, QueryMenuMessage::SetDefault { name }) => Some(
@@ -7917,81 +8833,63 @@ impl ContentView {
             ),
             // Unreachable — the scripts popup opens via
             // `open_without_default`, which never emits SetDefault.
-            (QueryMenuMode::PostgresScripts { .. }, QueryMenuMessage::SetDefault { .. }) => noop,
+            (QueryMenuMode::NodeScripts { .. }, QueryMenuMessage::SetDefault { .. }) => noop,
 
-            // ── Postgres table scripts (new) ──────────────────────────
+            // ── Per-node scripts ──────────────────────────────────────
+            (QueryMenuMode::NodeScripts { node_id }, QueryMenuMessage::Apply { name, .. }) => {
+                Some(self.dispatch_node_script_apply(node_id, name))
+            }
             (
-                QueryMenuMode::PostgresScripts {
-                    database,
-                    schema,
-                    table,
-                },
-                QueryMenuMessage::Apply { name, .. },
-            ) => Some(self.dispatch_postgres_script_apply(database, schema, table, name)),
-            (
-                QueryMenuMode::PostgresScripts {
-                    database,
-                    schema,
-                    table,
-                },
+                QueryMenuMode::NodeScripts { node_id },
                 QueryMenuMessage::EditExisting { name, .. },
-            ) => Some(SubViewMessage::Request(ViewRequest::EditPostgresScript {
+            ) => Some(SubViewMessage::Request(ViewRequest::EditNodeScript {
                 view_index,
                 pane_id,
-                database,
-                schema,
-                table,
+                node_id,
                 script: name,
                 is_new: false,
             })),
-            (
-                QueryMenuMode::PostgresScripts {
-                    database,
-                    schema,
-                    table,
-                },
-                QueryMenuMessage::Delete { name },
-            ) => Some(SubViewMessage::Request(ViewRequest::DeletePostgresScript {
-                view_index,
-                pane_id,
-                database,
-                schema,
-                table,
-                script: name,
-            })),
-            (
-                QueryMenuMode::PostgresScripts {
-                    database,
-                    schema,
-                    table,
-                },
-                QueryMenuMessage::EditShortcut { name, .. },
-            ) => Some(SubViewMessage::Request(
-                ViewRequest::PromptPostgresScriptShortcut {
+            (QueryMenuMode::NodeScripts { node_id }, QueryMenuMessage::Delete { name }) => {
+                Some(SubViewMessage::Request(ViewRequest::DeleteNodeScript {
                     view_index,
                     pane_id,
-                    database,
-                    schema,
-                    table,
+                    node_id,
+                    script: name,
+                }))
+            }
+            (
+                QueryMenuMode::NodeScripts { node_id },
+                QueryMenuMessage::EditShortcut { name, .. },
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::PromptNodeScriptShortcut {
+                    view_index,
+                    pane_id,
+                    node_id,
                     script: name,
                 },
             )),
-            (
-                QueryMenuMode::PostgresScripts {
-                    database,
-                    schema,
-                    table,
-                },
-                QueryMenuMessage::CreateNew { name },
-            ) => Some(SubViewMessage::Request(ViewRequest::EditPostgresScript {
-                view_index,
-                pane_id,
-                database,
-                schema,
-                table,
-                script: name,
-                is_new: true,
-            })),
+            (QueryMenuMode::NodeScripts { node_id }, QueryMenuMessage::ClearShortcut { name }) => {
+                Some(SubViewMessage::Request(
+                    ViewRequest::ClearNodeScriptShortcut {
+                        view_index,
+                        pane_id,
+                        node_id,
+                        script: name,
+                    },
+                ))
+            }
+            // Scripts are files in one store; the kind the menu offers for
+            // query bodies means nothing here, but a typed `+` prefix is
+            // still stripped, which is what the script menu does too.
+            (QueryMenuMode::NodeScripts { node_id }, QueryMenuMessage::CreateNew { name, .. }) => {
+                Some(SubViewMessage::Request(ViewRequest::EditNodeScript {
+                    view_index,
+                    pane_id,
+                    node_id,
+                    script: name,
+                    is_new: true,
+                }))
+            }
         }
     }
 
@@ -8113,10 +9011,20 @@ impl ContentView {
     /// shortcut could be run there) or the view has no adapter. Computed
     /// identically at bind time (from the [`ScriptContext`]) and claim-
     /// registration time so the two always agree.
+    /// Editor file suffix for this tab's query body (syntax highlighting),
+    /// from the adapter's declared query language. Falls back to `.yaml` (the
+    /// FilterExpr DSL) when no adapter is attached.
+    pub fn query_body_suffix(&self) -> String {
+        self.adapter
+            .as_ref()
+            .map(|a| a.query_body_suffix().to_string())
+            .unwrap_or_else(|| ".yaml".to_string())
+    }
+
     pub fn focused_script_scope(&self) -> Option<String> {
         self.active_script_action()?;
         let tab = self.adapter.as_ref()?.adapter_type().to_string();
-        let view_path = self.active_pane().view_path_node_types(&self.view_defs);
+        let view_path = self.active_pane().script_scope_path(&self.view_defs);
         Some(format!("script:{tab}/{}", view_path.join("/")))
     }
 
@@ -8146,18 +9054,24 @@ impl ContentView {
         )
     }
 
-    /// Apply DB-loaded saved queries (body + optional shortcut). Body
-    /// will move to adapter-managed `SavedQueryStore` in SQ-4; for now
-    /// this still reads `saved_query` rows via the legacy repository.
-    pub fn merge_saved_queries(&mut self, db_models: Vec<(String, String, Option<String>)>) {
-        self.db_saved_queries = db_models
-            .into_iter()
-            .map(|(name, query, shortcut)| MergedSavedQuery {
-                name,
-                query,
-                shortcut,
-            })
-            .collect();
+    /// Apply the queries loaded for this view: bodies from the adapter's two
+    /// stores, shortcuts from the `query_shortcut` table. Both kinds live in
+    /// one list on purpose — the menu shows them together and the user is not
+    /// meant to have to know which store a name came from.
+    pub fn merge_saved_queries(&mut self, queries: Vec<MergedSavedQuery>) {
+        self.db_saved_queries = queries;
+    }
+
+    /// Which store `name` was loaded from. The menu carries only the name and
+    /// the body, so the kind is looked up here rather than threaded through
+    /// the popup. An unknown name is adapter-native: that is what a body
+    /// typed into the query editor is.
+    pub fn query_kind_of(&self, name: &str) -> QueryKind {
+        self.db_saved_queries
+            .iter()
+            .find(|q| q.name == name)
+            .map(|q| q.kind)
+            .unwrap_or(QueryKind::Saved)
     }
 
     /// Apply loaded items to the active pane (used by tests and code
@@ -8167,11 +9081,11 @@ impl ContentView {
         items: Vec<NodeSummary>,
         applied_sort: Vec<SortKey>,
         page: Option<PageInfo>,
-        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        columns: Vec<not_yet_done_content::ColumnSchema>,
         error: Option<String>,
     ) {
         let pane_id = self.active_pane_id();
-        self.set_items_for_pane(pane_id, items, applied_sort, page, sortable_columns, error);
+        self.set_items_for_pane(pane_id, items, applied_sort, page, columns, error);
     }
 
     /// Apply the result of a custom adapter query (e.g. raw SQL from
@@ -8293,14 +9207,26 @@ impl ContentView {
         let view_defs = self.view_defs.clone();
         let tree = &mut self.pane_trees[tree_idx];
         if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
+            // Consume the reload signals set by `set_items`. On a reload we
+            // preserve the existing `expanded` set (the user's fold choices)
+            // instead of force-expanding the whole subtree, and we re-anchor
+            // the cursor onto the node it sat on before.
+            let preserve = std::mem::take(&mut leaf.pane.eager_reload_preserve_expansion);
+            let reanchor = leaf.pane.eager_reload_reanchor_id.take();
             let Some(state) = leaf.pane.tree.as_mut() else {
                 return;
             };
-            ingest_subtree_level(state, parent_path, subtree);
+            ingest_subtree_level(state, parent_path, subtree, preserve);
             if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
                 state.rebuild_entries(vd);
             }
             leaf.pane.rebuild_table(&view_defs);
+            // Re-anchor onto the previously-selected node (deleted nodes are
+            // gone from the fresh tree, so this simply fails and the clamped
+            // row stands).
+            if let Some(id) = reanchor {
+                leaf.pane.focus_item_by_id(&id);
+            }
             // The whole expanded shape arrived at once, so the per-node
             // expand cascade has nothing left to drive for this pane.
             if let Some(state) = leaf.pane.tree.as_mut() {
@@ -8351,7 +9277,10 @@ impl ContentView {
                 if present {
                     // Replace the bucket's whole re-folded subtree under its
                     // own path; sibling buckets' cache slots stay as they are.
-                    ingest_subtree_level(state, vec![header.id.clone()], subtree);
+                    // `false` keeps the pre-existing force-expand within the
+                    // refreshed bucket (this is the tracking-toggle splice, not
+                    // the `r` reload path).
+                    ingest_subtree_level(state, vec![header.id.clone()], subtree, false);
                     if let Some(vd) = view_defs.get(leaf.pane.view_def_index) {
                         state.rebuild_entries(vd);
                     }
@@ -8466,7 +9395,7 @@ impl ContentView {
         items: Vec<NodeSummary>,
         applied_sort: Vec<SortKey>,
         page: Option<PageInfo>,
-        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        columns: Vec<not_yet_done_content::ColumnSchema>,
         error: Option<String>,
     ) {
         // ContentPane::set_items needs &[ViewDef] for rebuild_table. Two
@@ -8490,14 +9419,8 @@ impl ContentView {
         let view_defs = &self.view_defs;
         let tree = &mut self.pane_trees[tree_idx];
         if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
-            leaf.pane.set_items(
-                items,
-                applied_sort,
-                page,
-                sortable_columns,
-                error,
-                view_defs,
-            );
+            leaf.pane
+                .set_items(items, applied_sort, page, columns, error, view_defs);
         }
         self.sync_action_bar_hints();
     }
@@ -8593,6 +9516,41 @@ impl ContentView {
         matches!(self.auth_status, AdapterStatus::Busy { .. })
     }
 
+    /// Apply the global `notifications.load_banner` to this tab, unless its
+    /// view file overrode it. Called by App when it wires the view, because
+    /// [`Self::new`] sees only the view file and not the TUI config.
+    pub fn set_load_banner_default(&mut self, global: LoadBannerRoute) {
+        self.load_banner_route = self.tab_load_banner.unwrap_or(global);
+    }
+
+    /// Where this tab's load banner goes. The App asks before deciding
+    /// whether to put the tab on the global surface.
+    pub fn load_banner_route(&self) -> LoadBannerRoute {
+        self.load_banner_route
+    }
+
+    /// This tab's load banner for the *global* surface, or `None` when the
+    /// tab is not loading or does not route there. The text carries no tab
+    /// name — the caller adds it, since only it knows whether the surface
+    /// needs the attribution.
+    pub fn global_load_banner(&self) -> Option<LoadBanner> {
+        if self.load_banner_route != LoadBannerRoute::Global {
+            return None;
+        }
+        match &self.auth_status {
+            AdapterStatus::Busy {
+                label,
+                started_at_unix_ms,
+                timeout_secs,
+                progress,
+            } => Some(LoadBanner {
+                text: busy_banner(label, *started_at_unix_ms, *timeout_secs, *progress),
+                started_at_unix_ms: *started_at_unix_ms,
+            }),
+            _ => None,
+        }
+    }
+
     pub fn set_adapter_init_error(&mut self, err: String) {
         self.adapter_init_error = Some(err);
     }
@@ -8606,28 +9564,40 @@ impl ContentView {
     /// (combined with adapter Busy countdown when both apply), bare
     /// adapter Busy, `manual_connect` not-yet-loaded hint, sticky
     /// `fetch_error`.
+    ///
+    /// Only the `Busy` part is routable ([`ContentView::load_banner_route`]) —
+    /// everything else here is a state the user must act on *in this tab*, so
+    /// it is always drawn locally.
     fn auth_status_banner(&self) -> Option<String> {
         if let Some(err) = &self.adapter_init_error {
             return Some(format!("Configuration error: {err}"));
         }
         match &self.auth_status {
-            AdapterStatus::Connecting {
-                retry,
-                max_retries,
-                timeout_secs,
-            } => Some(format!(
-                "Connecting… ({retry}/{max_retries}) Timeout: {timeout_secs}s"
-            )),
+            // Shared with the CLI's progress line so the wording cannot drift.
+            AdapterStatus::Connecting { .. } | AdapterStatus::Failed { .. } => {
+                self.auth_status.banner_text()
+            }
             AdapterStatus::NeedsCreds { .. } => {
                 Some("Login required (press the action key to enter credentials)".into())
             }
-            AdapterStatus::Failed { reason } => Some(format!("Connection failed: {reason}")),
+            // Busy routed away from this tab (`global` / `off`): the progress
+            // line is not ours to draw. A retry is not progress but a fault the
+            // user may need to locate, so it stays here on either route.
+            AdapterStatus::Busy { .. } if self.load_banner_route != LoadBannerRoute::Tab => {
+                self.active_pane().retry_state.as_ref().map(|rs| {
+                    format!(
+                        "Retrying ({}/{}): {}",
+                        rs.attempt, rs.max_attempts, rs.last_error
+                    )
+                })
+            }
             AdapterStatus::Busy {
                 label,
                 started_at_unix_ms,
                 timeout_secs,
+                progress,
             } => {
-                let busy = busy_banner(label, *started_at_unix_ms, *timeout_secs);
+                let busy = busy_banner(label, *started_at_unix_ms, *timeout_secs, *progress);
                 Some(match self.active_pane().retry_state.as_ref() {
                     Some(rs) => format!(
                         "Retrying ({}/{}) — {busy}: {}",
@@ -8678,7 +9648,7 @@ impl ContentView {
             vd.actions
                 .iter()
                 .find(|a| a.action_type == "reload")
-                .map(|a| a.key.clone())
+                .and_then(|a| a.primary_key().map(str::to_string))
         });
         Some(match reload_key {
             Some(k) => format!("Auto-connect disabled — press `{k}` to connect"),
@@ -8879,6 +9849,29 @@ impl ContentView {
         }
     }
 
+    /// Record the columns the adapter *described* for one node type
+    /// ([`ContentAdapter::describe_columns`], fetched by the load pipeline),
+    /// mirroring them into every pane so already-loaded tables re-render with
+    /// the backend-authoritative column types. All panes share the view's one
+    /// adapter, so a node type's schema is valid for every pane.
+    pub fn record_column_schema(
+        &mut self,
+        node_type: String,
+        schema: Vec<not_yet_done_content::ColumnSchema>,
+    ) {
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        for tree in self.pane_trees.iter_mut() {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                leaf.pane
+                    .set_column_schema(node_type.clone(), schema.clone());
+                if leaf.pane.loaded {
+                    leaf.pane.rebuild_table_with(view_defs, &overlay);
+                }
+            });
+        }
+    }
+
     /// Data for the column-config popup on the active pane's current
     /// level: `(currently visible keys in order, all configurable
     /// columns)`. `None` when the level has no YAML-configured columns
@@ -8942,6 +9935,68 @@ impl ContentView {
         }
         self.distribute_column_overrides();
         true
+    }
+
+    // ── Card mode (`card.key`) ───────────────────────────────────────
+
+    /// The persistable per-level card-mode map (level key → on/off). The App
+    /// serializes it as one JSON settings row per tab.
+    pub fn card_mode_overrides(&self) -> &std::collections::HashMap<String, bool> {
+        &self.card_mode_overrides
+    }
+
+    /// Replace the card-mode map (startup load from settings) and mirror it
+    /// into every pane, rebuilding loaded tables so they re-render in the
+    /// stored mode. This is what makes a toggled card mode survive a restart.
+    pub fn set_card_mode_overrides(&mut self, overrides: std::collections::HashMap<String, bool>) {
+        self.card_mode_overrides = overrides;
+        self.distribute_card_mode_overrides();
+    }
+
+    fn distribute_card_mode_overrides(&mut self) {
+        let view_defs = &self.view_defs;
+        let overlay = self.header_overlay.clone();
+        let overrides = self.card_mode_overrides.clone();
+        for tree in self.pane_trees.iter_mut() {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                leaf.pane.set_card_mode_overrides(overrides.clone());
+                if leaf.pane.loaded {
+                    leaf.pane.rebuild_table_with(view_defs, &overlay);
+                }
+            });
+        }
+    }
+
+    /// Flip card mode on the focused pane's level and ask the App to persist
+    /// the choice. Owned by the view (not the pane) because the map is
+    /// view-level state mirrored across splits, just like the column
+    /// overrides. A no-op — key left unhandled — when the level declares no
+    /// `card:` block or has no stable level key to remember it under.
+    fn toggle_card_mode(&mut self) -> SubViewMessage {
+        let pane = self.active_pane();
+        if !pane.card_available(&self.view_defs) {
+            return SubViewMessage::Unhandled;
+        }
+        let Some(key) = pane.column_level_key(&self.view_defs) else {
+            return SubViewMessage::Unhandled;
+        };
+        let default = pane
+            .current_card(&self.view_defs)
+            .map(|c| c.default)
+            .unwrap_or(false);
+        let next = !pane.card_mode_active(&self.view_defs);
+        // Back at the configured default → drop the entry, so a full round
+        // trip leaves no stale row behind (same clean-reset rule as the
+        // column overrides).
+        if next == default {
+            self.card_mode_overrides.remove(&key);
+        } else {
+            self.card_mode_overrides.insert(key, next);
+        }
+        self.distribute_card_mode_overrides();
+        SubViewMessage::Request(ViewRequest::PersistCardMode {
+            view_index: self.view_index,
+        })
     }
 
     // ── Key handling ─────────────────────────────────────────────────
@@ -9132,9 +10187,12 @@ impl ContentView {
         // key conflicts between subtab keys and drilled-level actions
         // because subtab claims are pushed into every leaf's KeyMap.
         for vd in &self.view_defs {
-            if let Some(k) = vd.key.as_deref() {
+            if let Some(k) = &vd.key {
+                if k.0.is_empty() {
+                    continue;
+                }
                 km.push(KeyClaim::handler(
-                    KeyBinding::new(k.to_string()),
+                    k.clone(),
                     scope.clone(),
                     KeySource::YamlSubtab {
                         view: vd.name.clone(),
@@ -9211,7 +10269,7 @@ impl ContentView {
             }
         }
 
-        if let Some(table_node_id) = self.target_postgres_table_node_id() {
+        if let Some(node_id) = self.target_node_script_node_id() {
             if let Some(b) = self.content_kb.get(&ContentAction::OpenScriptsMenu) {
                 km.push(KeyClaim::handler(
                     b.clone(),
@@ -9223,13 +10281,13 @@ impl ContentView {
             // SavedQueryShortcut path above, but data lives in a
             // separate cache populated by the App when this table
             // comes into focus.
-            if let Some(entries) = self.postgres_table_shortcuts.get(&table_node_id) {
+            if let Some(entries) = self.node_script_shortcuts.get(&node_id) {
                 for (script, chord) in entries {
                     km.push(KeyClaim::handler(
                         KeyBinding::new(chord.clone()),
                         scope.clone(),
-                        KeySource::PostgresTableScriptShortcut {
-                            table_node_id: table_node_id.clone(),
+                        KeySource::NodeScriptShortcut {
+                            node_id: node_id.clone(),
                             script: script.clone(),
                         },
                     ));
@@ -9296,6 +10354,17 @@ impl ContentView {
                     ));
                 }
             }
+            // Card mode: claimed only on a level that declares `card:`, under
+            // the key that level names (`card.key`). Nothing is claimed
+            // elsewhere, so the key stays free on every other view. Handled at
+            // view level because the mode map is view-level state.
+            if let Some(b) = pane.card_toggle_binding(&self.view_defs, &self.content_kb) {
+                km.push(KeyClaim::handler(
+                    b,
+                    scope.clone(),
+                    KeySource::Content(ContentAction::ToggleCardMode),
+                ));
+            }
         }
 
         km
@@ -9328,6 +10397,361 @@ impl ContentView {
             .iter()
             .chain(view_claims.claims.iter())
             .any(|c| c.key.is_prefix(key))
+    }
+
+    /// Live keymap the dispatcher currently consults for the focused pane:
+    /// the pane's per-level claims unioned with the view-level (tab) claims.
+    /// Feeds the shortcut menu's *context* scope, so it lists exactly the
+    /// keys that would fire right now.
+    pub fn context_keymap(&self) -> KeyMap {
+        let pane = &self.pane_trees[self.active_subtab].focused_leaf().pane;
+        let mut km = pane.build_claims(&self.view_defs, &self.common_kb, &self.content_kb);
+        for claim in self.build_view_claims().claims {
+            km.push(claim);
+        }
+        km
+    }
+
+    /// The tab-switch key override configured in this view file's
+    /// `tab.key`, if any. `None` means the tab uses its positional
+    /// autonumber digit; `Some` with an empty list means it is disabled.
+    pub fn tab_key_override(&self) -> Option<&crate::config::keybindings::KeyBinding> {
+        self.tab_key.as_ref()
+    }
+
+    /// Whether this view currently shows anything unread — any row, in any
+    /// of its panes, whose adapter marked it with `unread = "true"`. Drives
+    /// the tab bar's unread marker + emphasis.
+    ///
+    /// Only what a pane holds **right now** counts: the tree's loaded nodes
+    /// in tree mode, the current level's items otherwise. A level a pane has
+    /// drilled away from is a frozen snapshot that no invalidation refreshes,
+    /// so counting it could keep the tab lit after the messages were read.
+    /// For a chat view that is the right rule anyway — the tree keeps its own
+    /// pane through the coupled `split:`, and the server rows there carry the
+    /// unread state of every channel below them.
+    ///
+    /// Recomputed per frame rather than cached: it is a `find` over the
+    /// nodes' metadata, cheap next to the render it feeds, and the alternative
+    /// (invalidating a cache from every path that touches items) is exactly
+    /// the bookkeeping that goes stale.
+    pub fn has_unread(&self) -> bool {
+        self.all_pane_ids()
+            .into_iter()
+            .filter_map(|id| self.find_pane(id))
+            .any(|pane| pane.has_unread())
+    }
+
+    /// The glyph the tab bar puts in front of this tab's label while the view
+    /// is unread: `tab.unread_marker` when set, else the view's own
+    /// `unread_marker` (first view def that sets one — the tab is one file, so
+    /// its subtabs share the cue), else [`DEFAULT_TAB_UNREAD_MARKER`] (`🔔`).
+    /// May be empty, which suppresses the glyph and leaves the emphasis to
+    /// carry the signal.
+    pub fn unread_tab_marker(&self) -> &str {
+        if let Some(marker) = self.tab_unread_marker.as_deref() {
+            return marker;
+        }
+        self.view_defs
+            .iter()
+            .find_map(|vd| vd.unread_marker.as_deref())
+            .unwrap_or(DEFAULT_TAB_UNREAD_MARKER)
+    }
+
+    /// The style patch the tab bar layers over this tab's normal label style
+    /// while the view is unread. Unconfigured → bold, nothing else; the
+    /// bar's active/inactive colors stay untouched unless `tab.unread_style`
+    /// names one.
+    pub fn unread_tab_style(&self) -> ratatui::style::Style {
+        use ratatui::style::{Modifier, Style};
+        let Some(cfg) = self.tab_unread_style.as_ref() else {
+            return Style::default().add_modifier(Modifier::BOLD);
+        };
+        let style = Style::default().add_modifier(cfg.modifiers());
+        match cfg.fg() {
+            Some(name) => style.fg(resolve_theme_color(&self.theme, name)),
+            None => style,
+        }
+    }
+
+    /// Human-readable scope label for the focused pane's current level,
+    /// e.g. `jira` at the root or `jira › comments` when drilled in. The
+    /// root node type stands in for the tab itself and is dropped.
+    pub fn context_scope_label(&self) -> String {
+        let pane = &self.pane_trees[self.active_subtab].focused_leaf().pane;
+        let child: Vec<String> = pane
+            .view_path_node_types(&self.view_defs)
+            .into_iter()
+            .skip(1)
+            .collect();
+        crate::keymap::leaf_scope_label(&self.tab_name, &child)
+    }
+
+    /// Shortcut-menu rows for the focused pane's current level: the live
+    /// keymap projected to rows, plus the keyless actions available here.
+    /// Keyless actions run via the action menu (not a key) and so are not in
+    /// the keymap; they are appended with an empty keys column so the menu
+    /// is a complete inventory of what the level offers.
+    pub fn context_shortcut_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
+        let label = self.context_scope_label();
+        let mut rows = crate::keymap::shortcut_rows(&self.context_keymap(), &label);
+        let pane = &self.pane_trees[self.active_subtab].focused_leaf().pane;
+        let mut seen: std::collections::HashSet<String> =
+            rows.iter().map(|r| r.name.clone()).collect();
+
+        // Node `shortcuts:` (e.g. `s: toggle-tracking`) dispatch through the
+        // node-action path, not the pane's live keymap, so the projection
+        // above misses them. Append the ones that apply at the current level:
+        // a shortcut defined at child-name path `P` is live at `P` and every
+        // level below it, with the nearest definition winning per key. These
+        // carry a real `NodeShortcut` source, so they stay editable.
+        let view_name = pane
+            .view_def(&self.view_defs)
+            .map(|vd| vd.name.clone())
+            .unwrap_or_default();
+        let current = pane.current_child_name_path();
+        let mut by_key: std::collections::HashMap<String, crate::keymap::KeyClaim> =
+            std::collections::HashMap::new();
+        for claim in crate::keymap::node_shortcut_claims(&self.tab_name, &self.view_defs) {
+            let KeySource::NodeShortcut {
+                view,
+                child_path,
+                key,
+                ..
+            } = &claim.source
+            else {
+                continue;
+            };
+            // Only this focused subtab's view, and only ancestor-or-self
+            // levels (child_path a prefix of the current drilldown path).
+            if *view != view_name {
+                continue;
+            }
+            if child_path.len() > current.len() || current[..child_path.len()] != child_path[..] {
+                continue;
+            }
+            match by_key.get(key) {
+                Some(existing)
+                    if matches!(
+                        &existing.source,
+                        KeySource::NodeShortcut { child_path: cp, .. } if cp.len() >= child_path.len()
+                    ) => {}
+                _ => {
+                    by_key.insert(key.clone(), claim.clone());
+                }
+            }
+        }
+        for claim in by_key.into_values() {
+            let name = claim.source.action_name();
+            if seen.insert(name.clone()) {
+                rows.push(crate::keymap::ShortcutRow {
+                    name,
+                    keys: claim.key.0.join(" / "),
+                    scope: label.clone(),
+                    source: Some(claim.source.clone()),
+                    key_scope: Some(claim.scope.clone()),
+                });
+            }
+        }
+
+        // Adapter-declared actions are the source of truth for what the
+        // focused node can do — the YAML `shortcuts:` map above only *binds
+        // keys* to a subset of them. Enumerate the adapter's actions for the
+        // current level's node type and surface any that no shortcut binds yet
+        // as keyless, bindable rows (a `NodeShortcut` source with an empty
+        // key). This is why an adapter action like `toggle-tracking` now shows
+        // up — and can be bound — even in a tab whose view file never mentions
+        // it. Bound ones were already emitted above and dedup out by name.
+        if let (Some(adapter), Some(node_type)) = (
+            self.adapter.as_deref(),
+            pane.selected_target_node_type(&self.view_defs),
+        ) {
+            let nt = not_yet_done_content::NodeType {
+                type_id: node_type,
+                mime_type: String::new(),
+                syntax: None,
+                file_extension: String::new(),
+                display_name: String::new(),
+            };
+            for action in adapter.actions_for_type(&nt) {
+                if not_yet_done_content::describe::is_builtin(&action.id) {
+                    continue;
+                }
+                let source = KeySource::NodeShortcut {
+                    view: view_name.clone(),
+                    child_path: current.clone(),
+                    key: String::new(),
+                    action: action.id.clone(),
+                };
+                let name = source.action_name();
+                if seen.insert(name.clone()) {
+                    rows.push(crate::keymap::ShortcutRow {
+                        name,
+                        keys: String::new(),
+                        scope: label.clone(),
+                        source: Some(source),
+                        key_scope: Some(crate::keymap::node_shortcut_scope(
+                            &self.tab_name,
+                            &current,
+                        )),
+                    });
+                }
+            }
+        }
+
+        for action in pane.current_actions(&self.view_defs) {
+            if action.key.is_none() && seen.insert(action.name.clone()) {
+                rows.push(crate::keymap::ShortcutRow {
+                    name: action.name.clone(),
+                    keys: String::new(),
+                    scope: label.clone(),
+                    // Menu-only actions appended here (not projected as keymap
+                    // claims) carry no claim source; the keymap already emits
+                    // keyless YAML actions with a routable source, so these
+                    // extras stay read-only rather than risk a wrong path.
+                    source: None,
+                    key_scope: None,
+                });
+            }
+        }
+        rows
+    }
+
+    /// Every node-shortcut row across *all* declared levels of this view's
+    /// tree: the keys already bound in the `shortcuts:` maps *and* the
+    /// adapter-declared actions that nothing binds yet (keyless, bindable).
+    ///
+    /// The shortcut menu's "All tabs" / "Unbound" scopes call this so an
+    /// unbound adapter action (e.g. `toggle-tracking`) is listed — and can be
+    /// bound — from any tab, not just the focused drilldown level. It mirrors
+    /// the node-shortcut portion of [`Self::context_shortcut_rows`] but walks
+    /// the whole declared tree instead of the single focused level, keying the
+    /// adapter lookup off each level's *configured* `node_type` (no live
+    /// selection needed).
+    pub fn all_node_shortcut_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
+        let mut rows = Vec::new();
+        // Node shortcuts are declared per subtab (view) *and* per drill level,
+        // so a tab with several subtabs (e.g. Trackings' `trackings` /
+        // `condensed` / `tree`) exposes the same adapter action — say
+        // `toggle-tracking` — once per subtab, each independently bindable.
+        // The display scope only carried tab + child path, so those rows
+        // collapsed to one under dedup and the `subtasks` drill level gave no
+        // hint which subtab it belonged to. When the tab has more than one
+        // subtab, fold the subtab name into the scope path so every subtab
+        // gets its own labelled, bindable row (`Trackings › tree › subtasks`).
+        let multi_subtab = self.view_defs.len() > 1;
+        let scope_label = |view: &str, child_path: &[String]| -> String {
+            if multi_subtab {
+                let mut parts = Vec::with_capacity(child_path.len() + 1);
+                parts.push(view.to_string());
+                parts.extend(child_path.iter().cloned());
+                crate::keymap::leaf_scope_label(&self.tab_name, &parts)
+            } else {
+                crate::keymap::leaf_scope_label(&self.tab_name, child_path)
+            }
+        };
+        // Keys already bound in the `shortcuts:` maps, at every level. These
+        // dispatch through the node-action path, so `build_leaf_maps_for`
+        // (the pane keymap) never emits them — we add them here.
+        let mut bound: std::collections::HashSet<(String, Vec<String>, String)> =
+            std::collections::HashSet::new();
+        for claim in crate::keymap::node_shortcut_claims(&self.tab_name, &self.view_defs) {
+            let KeySource::NodeShortcut {
+                view,
+                child_path,
+                action,
+                ..
+            } = &claim.source
+            else {
+                continue;
+            };
+            bound.insert((view.clone(), child_path.clone(), action.clone()));
+            rows.push(crate::keymap::ShortcutRow {
+                name: claim.source.action_name(),
+                keys: claim.key.0.join(" / "),
+                scope: scope_label(view, child_path),
+                source: Some(claim.source.clone()),
+                key_scope: Some(claim.scope.clone()),
+            });
+        }
+
+        // Adapter-declared actions that no shortcut binds yet, at every level.
+        let Some(adapter) = self.adapter.as_deref() else {
+            return rows;
+        };
+        let mut levels: Vec<(String, Vec<String>, String)> = Vec::new();
+        for view in &self.view_defs {
+            collect_declared_levels(
+                &view.name,
+                &[],
+                &view.node_type,
+                &view.children,
+                &mut levels,
+            );
+        }
+        for (view_name, child_path, node_type) in levels {
+            let nt = not_yet_done_content::NodeType {
+                type_id: node_type,
+                mime_type: String::new(),
+                syntax: None,
+                file_extension: String::new(),
+                display_name: String::new(),
+            };
+            for action in adapter.actions_for_type(&nt) {
+                if not_yet_done_content::describe::is_builtin(&action.id) {
+                    continue;
+                }
+                if bound.contains(&(view_name.clone(), child_path.clone(), action.id.clone())) {
+                    continue;
+                }
+                let source = KeySource::NodeShortcut {
+                    view: view_name.clone(),
+                    child_path: child_path.clone(),
+                    key: String::new(),
+                    action: action.id.clone(),
+                };
+                rows.push(crate::keymap::ShortcutRow {
+                    name: source.action_name(),
+                    keys: String::new(),
+                    scope: scope_label(&view_name, &child_path),
+                    source: Some(source),
+                    key_scope: Some(crate::keymap::node_shortcut_scope(
+                        &self.tab_name,
+                        &child_path,
+                    )),
+                });
+            }
+        }
+        rows
+    }
+
+    /// Cycle the active subtab forward (`forward = true`) or backward,
+    /// wrapping around. Mirrors the per-view YAML switch key
+    /// ([`dispatch_view_claim`](Self::dispatch_view_claim)'s `YamlSubtab`
+    /// branch): it changes `active_subtab` and, when the destination pane has
+    /// never been populated, asks the app to spawn its load (respecting
+    /// `manual_connect`). Returns `None` — a no-op — when the tab has fewer
+    /// than two subtabs.
+    pub fn cycle_subtab(&mut self, forward: bool) -> Option<SubViewMessage> {
+        let n = self.view_defs.len();
+        if n < 2 {
+            return None;
+        }
+        let target = if forward {
+            (self.active_subtab + 1) % n
+        } else {
+            (self.active_subtab + n - 1) % n
+        };
+        let needs_load = self.switch_to_view(target);
+        if needs_load && (!self.manual_connect || self.connected_once) {
+            let pane_id = self.active_pane_id();
+            Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                view_index: self.view_index,
+                pane_id,
+            }))
+        } else {
+            Some(SubViewMessage::SelectionChanged(None))
+        }
     }
 
     fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
@@ -9371,6 +10795,7 @@ impl ContentView {
                         pane_id,
                         query: sq.query,
                         name: sq.name,
+                        kind: sq.kind,
                     },
                 ))
             }
@@ -9381,21 +10806,15 @@ impl ContentView {
             KeySource::Content(ContentAction::OpenScriptsMenu) => {
                 let view_index = self.view_index;
                 let pane_id = self.active_pane_id();
-                let table_node_id = self.target_postgres_table_node_id()?;
-                Some(SubViewMessage::Request(
-                    ViewRequest::OpenPostgresScriptsMenu {
-                        view_index,
-                        pane_id,
-                        table_node_id,
-                    },
-                ))
+                let node_id = self.target_node_script_node_id()?;
+                Some(SubViewMessage::Request(ViewRequest::OpenNodeScriptsMenu {
+                    view_index,
+                    pane_id,
+                    node_id,
+                }))
             }
-            KeySource::PostgresTableScriptShortcut {
-                table_node_id,
-                script,
-            } => {
-                let (db, schema, table) = parse_postgres_table_node_id(table_node_id)?;
-                Some(self.dispatch_postgres_script_apply(db, schema, table, script.clone()))
+            KeySource::NodeScriptShortcut { node_id, script } => {
+                Some(self.dispatch_node_script_apply(node_id.clone(), script.clone()))
             }
             KeySource::ScriptShortcut { name, .. } => {
                 let view_index = self.view_index;
@@ -9419,11 +10838,10 @@ impl ContentView {
                 let view_defs = self.view_defs.clone();
                 let view_index = self.view_index;
                 let pane_id = self.active_pane_id();
-                Some(self.active_pane_mut().try_toggle_group_order(
-                    &view_defs,
-                    view_index,
-                    pane_id,
-                ))
+                Some(
+                    self.active_pane_mut()
+                        .try_toggle_group_order(&view_defs, view_index, pane_id),
+                )
             }
             KeySource::Content(ContentAction::ToggleLongText) => {
                 // View-level dispatch of the pane toggle (like ToggleDetailWrap
@@ -9438,11 +10856,12 @@ impl ContentView {
                         .try_toggle_long_text(&view_defs, view_index, pane_id),
                 )
             }
+            KeySource::Content(ContentAction::ToggleCardMode) => Some(self.toggle_card_mode()),
             _ => None,
         }
     }
 
-    fn active_view_name(&self) -> String {
+    pub(crate) fn active_view_name(&self) -> String {
         self.view_defs
             .get(self.active_subtab)
             .map(|vd| vd.name.clone())
@@ -9472,8 +10891,8 @@ impl ContentView {
         // Per-node-action shortcut hints (e.g. `Q sql`) are not yet
         // surfaced here; the bindings work via the async shortcut
         // dispatcher in `ContentPane::try_node_action_shortcut`. Reuses the
-        // shared `query_menu` popup, hence `ActiveSource::QueryMenu`.
-        if self.target_postgres_table_node_id().is_some() {
+        // shared `query_menu` popup, hence `ActiveSurface::QueryMenu`.
+        if self.target_node_script_node_id().is_some() {
             let q_key = self
                 .content_kb
                 .hint_label(&ContentAction::OpenScriptsMenu, &self.key_icons);
@@ -9481,7 +10900,7 @@ impl ContentView {
                 hints.push(ActionBarHint::new(
                     q_key,
                     "queries",
-                    ActiveSource::QueryMenu,
+                    ActiveSurface::QueryMenu,
                 ));
             }
         }
@@ -9492,7 +10911,7 @@ impl ContentView {
                 .content_kb
                 .hint_label(&ContentAction::GroupMenu, &self.key_icons);
             if !hints.iter().any(|h| h.key == u_key) {
-                hints.push(ActionBarHint::new(u_key, "group", ActiveSource::GroupMenu));
+                hints.push(ActionBarHint::new(u_key, "group", ActiveSurface::GroupMenu));
             }
         }
         // Column-config hint — `c` opens the generic column-config popup
@@ -9506,7 +10925,7 @@ impl ContentView {
                 hints.push(ActionBarHint::new(
                     c_key,
                     "columns",
-                    ActiveSource::ColumnConfig,
+                    ActiveSurface::ColumnConfig,
                 ));
             }
         }
@@ -9516,13 +10935,13 @@ impl ContentView {
             .content_kb
             .hint_label(&ContentAction::JumpMode, &self.key_icons);
         if !hints.iter().any(|h| h.key == jump_key) {
-            hints.push(ActionBarHint::new(jump_key, "jump", ActiveSource::Jump));
+            hints.push(ActionBarHint::new(jump_key, "jump", ActiveSurface::Jump));
         }
 
-        // Resolve each hint's `active` flag from its build-time `ActiveSource`
+        // Resolve each hint's `active` flag from its build-time `ActiveSurface`
         // against live UI state — the single resolver replaces the old
         // per-description string matching.
-        hints
+        let mut resolved: Vec<ActionHint> = hints
             .into_iter()
             .map(|h| {
                 let active = self.resolve_active(&h.source);
@@ -9532,41 +10951,66 @@ impl ContentView {
                     active,
                 }
             })
-            .collect()
+            .collect();
+        // App-global activatable hints (the shortcut menu today) belong here
+        // with the rest of the activatable shortcuts, not in the tab bar.
+        // Their `active` flag is resolved by the App (which owns the surface)
+        // before it hands them in, so the view just appends them, skipping any
+        // key already claimed by a view hint.
+        for gh in &self.global_action_hints {
+            if resolved.iter().any(|h| h.key == gh.key) {
+                continue;
+            }
+            resolved.push(gh.clone());
+        }
+        resolved
     }
 
-    /// Resolve whether an action-bar hint with the given [`ActiveSource`] is
+    /// Resolve whether an action-bar hint with the given [`ActiveSurface`] is
     /// currently active, reading live UI state (popups open, modes armed,
     /// editor focused). The cross-cutting App-owned flags
     /// (`active_editor` / `tracking_active` / `cut_active` /
     /// `column_config_active` / `confirm_active` / `script_active`) are
     /// pushed in once per frame by [`Self::sync_action_bar`]; the rest live
     /// on this view or its focused pane.
-    fn resolve_active(&self, source: &ActiveSource) -> bool {
+    fn resolve_active(&self, source: &ActiveSurface) -> bool {
         match source {
-            ActiveSource::Editor(label) => self.active_editor.as_deref() == Some(label.as_str()),
-            ActiveSource::Confirm => self.confirm_active,
-            ActiveSource::QueryMenu => self.query_menu.is_open(),
-            ActiveSource::GroupMenu => self.group_menu.is_open(),
-            ActiveSource::ColumnConfig => self.column_config_active,
-            ActiveSource::Fuzzy => self.active_pane().table.fuzzy_active,
-            ActiveSource::Search => {
+            ActiveSurface::Editor(label) => self.active_editor.as_deref() == Some(label.as_str()),
+            ActiveSurface::Confirm => self.confirm_active,
+            ActiveSurface::QueryMenu => self.query_menu.is_open(),
+            ActiveSurface::GroupMenu => self.group_menu.is_open(),
+            ActiveSurface::ColumnConfig => self.column_config_active,
+            ActiveSurface::Fuzzy => self.active_pane().table.fuzzy_active,
+            ActiveSurface::Search => {
+                // Local `/`-search and tree-find only. The adapter text search
+                // borrows the same input widget, so exclude its mode here —
+                // otherwise `/` would light up while an `f s` term is typed.
                 let pane = self.active_pane();
-                pane.search.active() || pane.tree_find_active()
+                (pane.search.active() && !pane.text_search_input_open()) || pane.tree_find_active()
             }
-            ActiveSource::Jump => self.active_pane().table.jump_active(),
-            ActiveSource::Tracking => self.tracking_active,
-            ActiveSource::MarkMove => self.cut_active,
-            ActiveSource::Script => self.script_active,
-            ActiveSource::ContentAction(id) => {
+            ActiveSurface::TextSearch => {
+                let pane = self.active_pane();
+                pane.text_search_input_open() || pane.text_search_applied()
+            }
+            ActiveSurface::Jump => self.active_pane().table.jump_active(),
+            ActiveSurface::Tracking => self.tracking_active,
+            ActiveSurface::MarkMove => self.cut_active,
+            ActiveSurface::Script => self.script_active,
+            ActiveSurface::ContentAction(id) => {
                 // Lit while the target picker popup for this action is open, or
                 // the editor it opened is focused (its action id equals `id` or
                 // is prefixed `"<id>:"`, so `convert` covers `convert:userstory`).
                 self.content_action_popup_id.as_deref() == Some(id.as_str())
-                    || self.content_editor_action_id.as_deref().is_some_and(|eid| {
-                        eid == id || eid.starts_with(&format!("{id}:"))
-                    })
+                    || self
+                        .content_editor_action_id
+                        .as_deref()
+                        .is_some_and(|eid| eid == id || eid.starts_with(&format!("{id}:")))
             }
+            // App-native surfaces are owned by `App`, never by a content view,
+            // and are never carried on a content action-bar hint. From within a
+            // view they are definitionally inactive. Kept as an explicit arm
+            // (no wildcard) so a new app-native surface forces a decision here.
+            ActiveSurface::ShortcutMenu => false,
         }
     }
 
@@ -9575,21 +11019,24 @@ impl ContentView {
     /// reminder when the active subtab has more than one pane.
     fn window_mode_hints(&self) -> Vec<ActionHint> {
         // Window-leader chord prompts — momentary key hints, never "active".
+        // Iterating `WindowAction::ALL` (rather than the binding map) fixes the
+        // order to the enum's declaration order and makes a newly added window
+        // action show up here on its own. Labels come from the shared
+        // `window_nav_hint`, so this prompt and the always-on status-bar
+        // listing can never disagree.
         let mut hints: Vec<ActionHint> = Vec::new();
-        for (action, binding) in &self.window_kb.bindings {
+        for action in WindowAction::ALL {
+            let Some(binding) = self.window_kb.get(action) else {
+                continue;
+            };
             let Some(last) = binding.0.first().and_then(|s| s.chars().last()) else {
                 continue;
             };
-            let label = match action {
-                WindowAction::SplitRight => "split right",
-                WindowAction::SplitDown => "split down",
-                WindowAction::Close => "close pane",
-                WindowAction::FocusParent => "focus parent",
-                WindowAction::FocusChild => "focus child",
-            };
-            hints.push(ActionHint::new(last.to_string(), label));
+            hints.push(ActionHint::new(
+                last.to_string(),
+                window_nav_hint(action).label,
+            ));
         }
-        hints.sort_by(|a, b| a.desc.cmp(&b.desc));
         let tree = &self.pane_trees[self.active_subtab];
         if tree.pane_tags.len() > 1 {
             let mut tags: Vec<char> = tree.pane_tags.values().copied().collect();
@@ -9625,7 +11072,11 @@ impl ContentView {
         let detail_in_play = pane.detail_child.is_some() || pane.is_detail_pane();
         if can_open || detail_in_play {
             if let Some(b) = self.content_kb.get(&ContentAction::ToggleRecordDetail) {
-                let label = if detail_in_play { "close detail" } else { "detail" };
+                let label = if detail_in_play {
+                    "close detail"
+                } else {
+                    "detail"
+                };
                 hints.push((b.hint_label(&self.key_icons), label.to_string()));
             }
         }
@@ -9661,6 +11112,48 @@ impl ContentView {
                 hints.push((b.hint_label(&self.key_icons), label.to_string()));
             }
         }
+        // Card-mode toggle — same gate and key as the view-level claim. The
+        // label names the mode the key switches *to*, so the bar reads as the
+        // action rather than the state.
+        if let Some(b) = pane.card_toggle_binding(&self.view_defs, &self.content_kb) {
+            let label = if pane.card_mode_active(&self.view_defs) {
+                "table"
+            } else {
+                "cards"
+            };
+            hints.push((b.hint_label(&self.key_icons), label.to_string()));
+        }
+        // Window/split chords (`wv` / `ws` / `wq` / `wh` / `wl` by default),
+        // listed with their full chord just like the tree-fold chords. Until
+        // now they only surfaced *after* the leader was already pressed (the
+        // WINDOW-mode action bar), so there was nothing to discover them from.
+        //
+        // The gate is the one `handle_window_chord` uses — the active view's
+        // `window_ops: true` — so the bar lists a chord exactly when that
+        // chord would fire. They live in the status bar because splitting or
+        // refocusing a pane arms no mode and opens no popup, so they can never
+        // light up (see the action-bar contract in `content_action_hints`).
+        //
+        // Deliberately absent: `w<tag>` pane-tag switching. Its resolution key
+        // is a per-pane letter handed out by the current split layout, not a
+        // stable binding, so it stays in the WINDOW-mode action bar, which
+        // shows the live tags.
+        if self
+            .active_view_def()
+            .map(|v| v.window_ops)
+            .unwrap_or(false)
+        {
+            for action in WindowAction::ALL {
+                let Some(b) = self.window_kb.get(action) else {
+                    continue;
+                };
+                let key = b.hint_label(&self.key_icons);
+                if hints.iter().any(|(k, _)| k == &key) {
+                    continue;
+                }
+                hints.push((key, window_nav_hint(action).label.to_string()));
+            }
+        }
         hints
     }
 }
@@ -9668,8 +11161,8 @@ impl ContentView {
 // ── SortableView / PaginatedView ─────────────────────────────────────
 
 impl SortableView for ContentView {
-    fn sortable_columns(&self) -> Vec<not_yet_done_content::SortableColumn> {
-        self.active_pane().last_sortable_columns.clone()
+    fn columns(&self) -> Vec<not_yet_done_content::ColumnSchema> {
+        self.active_pane().last_columns.clone()
     }
 
     fn current_sort(&self) -> &[SortKey] {
@@ -10005,6 +11498,13 @@ const DELETED_STYLE_ID: usize = 6;
 /// message" cue. Emoji are two terminal cells wide; the tree-label builder
 /// accounts for the rendered width when prefixing it.
 const DEFAULT_UNREAD_MARKER: &str = "💬";
+
+/// Default leading marker glyph for an unread **tab** label when neither
+/// `tab.unread_marker` nor the view's `unread_marker` is set. `🔔` (bell)
+/// rather than the row default: a tab already carries its own `icon:`, and
+/// a speech balloon there would compete with the very glyph chat views use
+/// to mark "this is a channel".
+const DEFAULT_TAB_UNREAD_MARKER: &str = "🔔";
 
 /// Split an already-fitted tree-label cell into a styled connector segment +
 /// plain label. The first `connector_chars` characters (the `├──`/`└──`/`│`
@@ -10525,7 +12025,10 @@ fn build_grouped_table(
     let mut tagged: Vec<(usize, String)> = order
         .iter()
         .map(|&i| {
-            let key = group_label(raw_value_by_key(&items[i], columns, &spec.column), spec.bucket);
+            let key = group_label(
+                raw_value_by_key(&items[i], columns, &spec.column),
+                spec.bucket,
+            );
             (i, key)
         })
         .collect();
@@ -10710,7 +12213,12 @@ fn build_grouped_table(
                     .is_some_and(|it| metadata_field_value(it, "deleted") == "true");
                 let row = item_widget_row(cr, columns, deleted);
                 let row = if long {
-                    expand_long_text_row(row, &items[data_filtered[next_data]], columns, &col_widths)
+                    expand_long_text_row(
+                        row,
+                        &items[data_filtered[next_data]],
+                        columns,
+                        &col_widths,
+                    )
                 } else {
                     row
                 };
@@ -10818,27 +12326,6 @@ fn looks_like_issue_key(s: &str) -> bool {
         && suffix.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Parse the adapter-internal Postgres table node id form
-/// `<database>/schemas/<schema>/tables/<table>` back into its three
-/// segments. Returns `None` for any other shape so callers can detect
-/// mismatches against an evolving id layout instead of silently
-/// dispatching with wrong data. Mirrors the format produced in
-/// [`ContentView::dispatch_postgres_script_apply`].
-pub(crate) fn parse_postgres_table_node_id(node_id: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = node_id.split('/').collect();
-    if parts.len() != 5 || parts[1] != "schemas" || parts[3] != "tables" {
-        return None;
-    }
-    if parts[0].is_empty() || parts[2].is_empty() || parts[4].is_empty() {
-        return None;
-    }
-    Some((
-        parts[0].to_string(),
-        parts[2].to_string(),
-        parts[4].to_string(),
-    ))
-}
-
 const DEFAULT_AUTO_MIN: usize = 5;
 const DEFAULT_AUTO_MAX: usize = 11;
 
@@ -10894,6 +12381,27 @@ fn parse_sizing(s: &str) -> ColStrategy {
     ColStrategy::Max
 }
 
+/// Opt-in tree-find walk tracing (`NYD_DEBUG_TREEFIND=1`), sharing the TUI
+/// pipeline log written by the App and the Tasks adapter. Emits the hit path
+/// and the walk outcome so a live "created task not visible" occurrence pins
+/// whether the expand-to-hit walk stalls (`NeedTreeExpand` never completing),
+/// reports `NotInTree` (filter / pagination excludes the branch), or lands
+/// `Ready` on a row the user still can't see.
+pub(crate) fn treefind_walk_trace(detail: impl std::fmt::Display) {
+    if std::env::var_os("NYD_DEBUG_TREEFIND").is_none() {
+        return;
+    }
+    let path = std::env::temp_dir().join("nyd-treefind-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "[treefind] walk: {detail}");
+    }
+}
+
 /// Recursively lay an eager [`Subtree`] level into the pane's tree cache:
 /// cache this level's children under `parent_path`, then for every node that
 /// carries children mark its own path `expanded` and recurse. Pure cache
@@ -10902,7 +12410,12 @@ fn parse_sizing(s: &str) -> ColStrategy {
 /// identical to the cascade's (`flatten_into`): a node's children live at
 /// `parent_path + [node.id]`, so a subtree laid down here and a subtree built
 /// by the cascade are indistinguishable to selection / collapse.
-fn ingest_subtree_level(state: &mut TreeState, parent_path: Vec<String>, subtree: Subtree) {
+fn ingest_subtree_level(
+    state: &mut TreeState,
+    parent_path: Vec<String>,
+    subtree: Subtree,
+    preserve_expansion: bool,
+) {
     let next_page = next_page_after(subtree.page);
     let summaries: Vec<NodeSummary> = subtree.items.iter().map(|n| n.summary.clone()).collect();
     state.set_cached_children(parent_path.clone(), summaries, next_page);
@@ -10925,8 +12438,16 @@ fn ingest_subtree_level(state: &mut TreeState, parent_path: Vec<String>, subtree
             }
             continue;
         }
-        state.expanded.insert(own_path.clone());
-        ingest_subtree_level(state, own_path, node.children);
+        // First load: force-expand to build the initial `expand_depth`
+        // shape. Reload (`preserve_expansion`): leave `expanded` untouched so
+        // the node keeps whatever fold state the user gave it — a collapsed
+        // branch stays collapsed even though its (now-fresh) children are
+        // still cached beneath it. Either way recurse to renew the deeper
+        // cache levels.
+        if !preserve_expansion {
+            state.expanded.insert(own_path.clone());
+        }
+        ingest_subtree_level(state, own_path, node.children, preserve_expansion);
     }
 }
 
@@ -11004,16 +12525,63 @@ fn format_page_footer(info: PageInfo, applied_sort: &[SortKey]) -> String {
 /// `timeout_secs == 0` means "no configured timeout" — show elapsed only.
 /// If the wall-clock has somehow gone backwards (`now < started_at`) we
 /// clamp elapsed to 0 instead of showing a giant negative.
-fn busy_banner(label: &str, started_at_unix_ms: u64, timeout_secs: u64) -> String {
+///
+/// `progress` is an optional completion estimate in `[0, 1]` for incremental
+/// loads; when present it renders as a percentage (`"Loading… 45 % (12s)"`).
+/// The adapter reports the raw fraction — the percentage lives here, in the
+/// frontend.
+/// One tab's load banner, handed to the App for the global surface
+/// ([`ContentView::global_load_banner`]). `started_at_unix_ms` travels with the
+/// text because several tabs loading at once are shown as one line, whose
+/// elapsed counter runs from the oldest of them.
+pub struct LoadBanner {
+    pub text: String,
+    pub started_at_unix_ms: u64,
+}
+
+/// The one line that stands for *several* tabs loading at once, e.g.
+/// `"3 tabs loading… (4s)"`.
+///
+/// Collapsing rather than listing keeps the global bar from filling with
+/// counters and pushing out the message the user actually has to answer — the
+/// bar's line cap would otherwise bind exactly when the app is busiest. The
+/// individual labels are dropped on purpose: what the user needs from another
+/// tab is "something is still running", and the tab-local banner has the
+/// detail for whoever switches over.
+///
+/// Elapsed runs from the *oldest* start, so the number never jumps backwards
+/// when a fast tab finishes and the group shrinks.
+pub fn collapsed_load_banner(count: usize, oldest_started_at_unix_ms: u64) -> String {
+    format!(
+        "{count} tabs loading… ({}s)",
+        elapsed_secs(oldest_started_at_unix_ms)
+    )
+}
+
+/// Whole seconds since a wall-clock instant, clamped at 0 if the clock has
+/// gone backwards (NTP step, suspend) — a giant number would read as a bug.
+fn elapsed_secs(started_at_unix_ms: u64) -> u64 {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(started_at_unix_ms);
-    let elapsed_secs = now_ms.saturating_sub(started_at_unix_ms) / 1000;
+    now_ms.saturating_sub(started_at_unix_ms) / 1000
+}
+
+fn busy_banner(
+    label: &str,
+    started_at_unix_ms: u64,
+    timeout_secs: u64,
+    progress: Option<f32>,
+) -> String {
+    let elapsed_secs = elapsed_secs(started_at_unix_ms);
+    let pct = progress
+        .map(|f| format!(" {} %", (f.clamp(0.0, 1.0) * 100.0).round() as u32))
+        .unwrap_or_default();
     if timeout_secs == 0 {
-        format!("{label}… ({elapsed_secs}s)")
+        format!("{label}…{pct} ({elapsed_secs}s)")
     } else {
-        format!("{label}… ({elapsed_secs}s/{timeout_secs}s)")
+        format!("{label}…{pct} ({elapsed_secs}s/{timeout_secs}s)")
     }
 }
 
@@ -11109,6 +12677,10 @@ fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
         // The dedicated unread accent, so a view's `unread_style` can point
         // back at the global default (or any view at it explicitly).
         "unread" => t.unread(),
+        // Card-mode slots, so a level's `card.border_style` /
+        // `card.label_style` can name the global default explicitly.
+        "card_border" => t.card_border(),
+        "card_label" => t.card_label(),
         _ => t.text_med(),
     }
 }
@@ -11222,6 +12794,110 @@ fn build_header_row(
     TableWidgetRow::new(cells).not_selectable()
 }
 
+/// Build the widget rows for card mode.
+///
+/// [`compute_cards`] does the layout: it derives the card's line stack from
+/// `fields / columns`, distributes the pane width over the grid slots, and
+/// returns each physical line as a list of typed spans (frame glyph, chrome
+/// filler, label, value). This function only turns spans into widget cells
+/// and picks each one's style slot — frame glyphs in the card-border color,
+/// labels in the card-label color, a value in its own column's `style:`.
+///
+/// Every span becomes its own cell because the widget lays cells out
+/// sequentially; the caller therefore renders the table with an empty
+/// separator (the spans already carry padding and inter-slot filler). One
+/// cell per span is also what keeps fuzzy-match highlights alive: a widget
+/// cell can carry highlights *or* pre-styled segments, never both.
+fn build_card_widget_rows(
+    data_rows: &[TRow<u32>],
+    columns: &[ColumnDef],
+    card: &CardConfig,
+    spec: &CardSpec,
+    max_width: usize,
+    t: &Theme,
+) -> (Vec<TableWidgetRow>, StyleMap) {
+    // One style slot per declared column (fg from `style:`, else `text_med`),
+    // so a value keeps the color it has in table mode.
+    let mut styles: Vec<Style> = Vec::with_capacity(columns.len() + 2);
+    let mut style_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for col in columns {
+        let color = col
+            .style
+            .as_deref()
+            .map(|s| resolve_theme_color(t, s))
+            .unwrap_or(t.text_med());
+        style_idx.insert(col.key.as_str(), styles.len());
+        styles.push(Style::default().fg(color));
+    }
+    let border_color = card
+        .border_style
+        .as_deref()
+        .map(|s| resolve_theme_color(t, s))
+        .unwrap_or(t.card_border());
+    let border_id = styles.len();
+    styles.push(Style::default().fg(border_color));
+    let label_color = card
+        .label_style
+        .as_deref()
+        .map(|s| resolve_theme_color(t, s))
+        .unwrap_or(t.card_label());
+    let label_id = styles.len();
+    styles.push(Style::default().fg(label_color));
+
+    let computed = compute_cards(data_rows, spec, max_width);
+    let rows: Vec<TableWidgetRow> = computed
+        .cards
+        .into_iter()
+        .map(|card_out| {
+            let lines: Vec<TableWidgetLine> = card_out
+                .lines
+                .into_iter()
+                .map(|line| {
+                    let cells: Vec<TableWidgetCell> = line
+                        .spans
+                        .into_iter()
+                        .map(|span| {
+                            let cell = TableWidgetCell::with_highlights(span.text, span.highlights);
+                            match span.kind {
+                                CardSpanKind::Border => cell.with_style(border_id),
+                                CardSpanKind::Label => cell.with_style(label_id),
+                                CardSpanKind::Value => {
+                                    // The span's field index points into the
+                                    // spec, whose fields carry the column key.
+                                    match span
+                                        .field
+                                        .and_then(|i| spec.fields.get(i))
+                                        .and_then(|f| style_idx.get(f.column.0.as_str()))
+                                    {
+                                        Some(id) => cell.with_style(*id),
+                                        None => cell,
+                                    }
+                                }
+                                // Padding / filler is blank space — no color
+                                // to apply, so it stays on the row's base style.
+                                CardSpanKind::Chrome => cell,
+                            }
+                        })
+                        .collect();
+                    TableWidgetLine {
+                        cells,
+                        highlight_on_select: line.highlight_on_select,
+                        image: None,
+                    }
+                })
+                .collect();
+            let row = TableWidgetRow::multiline(lines);
+            if card_out.selectable {
+                row
+            } else {
+                row.not_selectable()
+            }
+        })
+        .collect();
+
+    (rows, StyleMap::new(styles))
+}
+
 /// Build the widget rows for a multi-line (chat) layout.
 ///
 /// Each [`LineLayout`] entry becomes one physical line of every row; an empty
@@ -11244,6 +12920,7 @@ fn build_multiline_widget_rows(
     t: &Theme,
     unread_rows: &[bool],
     unread_color: ratatui::style::Color,
+    images: &mut ImageStore,
 ) -> (Vec<TableWidgetRow>, StyleMap) {
     // One style slot per declared column (fg from `style:` or `text_med`),
     // keyed by column name so any line can look its column's slot up.
@@ -11323,9 +13000,14 @@ fn build_multiline_widget_rows(
                         .and_then(|r| r.cells.get(&TColumnId::new(md_key)))
                         .map(|c| c.text.as_str())
                         .unwrap_or("");
-                    let md_lines = render_markdown_lines(body, width, t);
-                    let widget_lines =
-                        lines_to_widget_lines(md_lines, &mut builder, cl.highlight_on_select);
+                    let (md_lines, image_refs) =
+                        render_markdown_lines_with_images(body, width, t, images);
+                    let widget_lines = lines_to_widget_lines_with_images(
+                        md_lines,
+                        image_refs,
+                        &mut builder,
+                        cl.highlight_on_select,
+                    );
                     if widget_lines.is_empty() {
                         // Empty body: keep one (empty) line so the row's shape
                         // stays stable rather than collapsing the body block.
@@ -11363,6 +13045,7 @@ fn build_multiline_widget_rows(
                 lines.push(TableWidgetLine {
                     cells,
                     highlight_on_select: cl.highlight_on_select,
+                    image: None,
                 });
             }
             let row = TableWidgetRow::multiline(lines);
@@ -11512,6 +13195,8 @@ mod tests {
             &theme,
             &[],
             theme.unread(),
+            // No terminal, no pictures: markdown images stay fallback text.
+            &mut ImageStore::disabled(),
         );
 
         assert_eq!(rows.len(), 1);
@@ -11610,6 +13295,8 @@ mod tests {
             &theme,
             &[],
             theme.unread(),
+            // No terminal, no pictures: markdown images stay fallback text.
+            &mut ImageStore::disabled(),
         );
 
         assert_eq!(rows.len(), 1);
@@ -11640,54 +13327,6 @@ mod tests {
         }
         // Last line is still the spacer.
         assert!(row.lines.last().unwrap().cells.is_empty());
-    }
-
-    #[test]
-    fn parse_postgres_table_node_id_accepts_canonical_form() {
-        assert_eq!(
-            parse_postgres_table_node_id("live/schemas/public/tables/users"),
-            Some(("live".into(), "public".into(), "users".into())),
-        );
-    }
-
-    #[test]
-    fn parse_postgres_table_node_id_rejects_wrong_markers() {
-        assert_eq!(
-            parse_postgres_table_node_id("live/x/public/tables/users"),
-            None
-        );
-        assert_eq!(
-            parse_postgres_table_node_id("live/schemas/public/y/users"),
-            None
-        );
-    }
-
-    #[test]
-    fn parse_postgres_table_node_id_rejects_arity_mismatch() {
-        assert_eq!(
-            parse_postgres_table_node_id("live/schemas/public/tables"),
-            None
-        );
-        assert_eq!(
-            parse_postgres_table_node_id("live/schemas/public/tables/users/extra"),
-            None,
-        );
-    }
-
-    #[test]
-    fn parse_postgres_table_node_id_rejects_empty_segments() {
-        assert_eq!(
-            parse_postgres_table_node_id("/schemas/public/tables/users"),
-            None
-        );
-        assert_eq!(
-            parse_postgres_table_node_id("live/schemas//tables/users"),
-            None
-        );
-        assert_eq!(
-            parse_postgres_table_node_id("live/schemas/public/tables/"),
-            None
-        );
     }
 
     #[test]
@@ -11779,10 +13418,15 @@ mod tests {
 
     fn test_config_with_children() -> ViewFileConfig {
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -11792,6 +13436,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "issues".into(),
@@ -11846,7 +13491,7 @@ mod tests {
                 }),
                 actions: vec![ActionDef {
                     name: "edit".into(),
-                    key: "e".into(),
+                    key: Some("e".into()),
                     action_type: "edit".into(),
                     id: None,
                     node_id_from: None,
@@ -11866,8 +13511,14 @@ mod tests {
                     on_container: false,
                     option_menu: None,
                     force: false,
+                    message: None,
+                    prominent: false,
+                    form: None,
+                    emit: None,
+                    on_event: None,
                 }],
                 children: vec![ChildDef {
+                    card: None,
                     row_layout: None,
                     smooth_scroll: false,
                     name: "Comments".into(),
@@ -11897,25 +13548,31 @@ mod tests {
                     action_chains: Default::default(),
                     column_cursor: false,
                     record_detail: false,
+                    node_scripts: false,
                     tree_label: None,
                     shortcuts: HashMap::new(),
                     enter_action: None,
                     recursive: false,
                     editor_in_place: false,
                     leaf_glyph: None,
+                    icon: None,
                     group_by: None,
                     aggregates: Vec::new(),
                     mark_read_on_reach_end: None,
+                    cursor_on_open: None,
                 }],
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -11925,6 +13582,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -11995,12 +13653,311 @@ mod tests {
     }
 
     #[test]
+    fn described_column_type_overrides_yaml_kind() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // The backend describes `summary` as a duration; the YAML leaves it
+        // the default text kind. The described type must win for rendering,
+        // while an undescribed column keeps its YAML kind.
+        view.record_column_schema(
+            "any".into(),
+            vec![not_yet_done_content::ColumnSchema {
+                label: None,
+                ..not_yet_done_content::ColumnSchema::new("summary", "").typed("duration")
+            }],
+        );
+        let cols = view.active_pane().current_columns(&view.view_defs);
+        assert_eq!(
+            cols.iter().find(|c| c.key == "summary").unwrap().kind,
+            ColumnKind::Duration
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "key").unwrap().kind,
+            ColumnKind::Text
+        );
+    }
+
+    #[test]
     fn current_actions_at_root() {
         let config = test_config_with_children();
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let actions = view.active_pane().current_actions(&view.view_defs);
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].key, "e");
+        assert_eq!(actions[0].primary_key(), Some("e"));
+    }
+
+    #[test]
+    fn context_shortcut_rows_include_node_shortcuts() {
+        // A per-node `shortcuts:` entry (e.g. `s: toggle-tracking`) dispatches
+        // through the node-action path, not the pane keymap — it must still be
+        // surfaced (and stay editable) in the shortcut menu's context scope.
+        let mut config = test_config_with_children();
+        config.views[0].shortcuts.insert(
+            's',
+            crate::config::view_config::ShortcutDef::Action("toggle-tracking".into()),
+        );
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let rows = view.context_shortcut_rows();
+        let row = rows
+            .iter()
+            .find(|r| {
+                matches!(
+                    &r.source,
+                    Some(crate::keymap::KeySource::NodeShortcut { action, .. })
+                        if action == "toggle-tracking"
+                )
+            })
+            .expect("node shortcut 's' should appear in the context menu");
+        assert_eq!(row.keys, "s");
+    }
+
+    #[test]
+    fn context_shortcut_rows_surface_unbound_adapter_actions() {
+        // The adapter — not the YAML — is the source of truth for what a node
+        // can do. An adapter action with *no* `shortcuts:` binding must still
+        // appear in the context menu as a keyless, bindable row, so the user
+        // can assign it a key. Built-in framework actions (e.g. `help`) are
+        // excluded — they are not per-node shortcuts.
+        let config = test_config_with_children(); // root node_type: mock:issue
+        let adapter: Arc<dyn not_yet_done_content::ContentAdapter> = Arc::new(test_adapter(&[(
+            "mock:issue",
+            vec![
+                make_action("toggle-tracking", "Toggle Tracking", InputSpec::None),
+                make_action("help", "Help", InputSpec::None),
+            ],
+        )]));
+        let view = ContentView::new(
+            test_theme(),
+            &config,
+            Some(adapter),
+            &KeyBindingConfig::default(),
+        );
+        let rows = view.context_shortcut_rows();
+
+        let row = rows
+            .iter()
+            .find(|r| {
+                matches!(
+                    &r.source,
+                    Some(crate::keymap::KeySource::NodeShortcut { action, .. })
+                        if action == "toggle-tracking"
+                )
+            })
+            .expect("unbound adapter action should appear as a bindable row");
+        assert_eq!(row.keys, "", "an unbound action shows no key");
+        assert!(
+            row.key_scope.is_some(),
+            "it must carry an editable scope so Ctrl+N can bind it"
+        );
+
+        assert!(
+            !rows.iter().any(|r| matches!(
+                &r.source,
+                Some(crate::keymap::KeySource::NodeShortcut { action, .. }) if action == "help"
+            )),
+            "built-in framework actions must not surface as per-node shortcuts"
+        );
+    }
+
+    #[test]
+    fn keyless_yaml_action_carries_a_routable_view() {
+        // Regression: a YAML action declared with `key: []` (an *empty* binding
+        // — deserializes to `Some(vec![])`, not `None`, e.g. Jira's "free
+        // text") still reaches the pane keymap and surfaces in the context
+        // scope as a bindable row. Its `YamlAction` source used to carry a
+        // blank `view`, so binding it a key failed with "No config file found
+        // for view ''". The runtime keymap must carry the real view name.
+        let mut config = test_config_with_children();
+        let mut keyless = config.views[0].actions[0].clone();
+        keyless.name = "free text".into();
+        keyless.key = Some(KeyBinding(vec![]));
+        config.views[0].actions.push(keyless);
+
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let rows = view.context_shortcut_rows();
+        let row = rows
+            .iter()
+            .find(|r| {
+                matches!(
+                    &r.source,
+                    Some(crate::keymap::KeySource::YamlAction { name, .. })
+                        if name == "free text"
+                )
+            })
+            .expect("keyless YAML action should surface as a bindable context row");
+        let Some(crate::keymap::KeySource::YamlAction { view, .. }) = &row.source else {
+            unreachable!("matched above");
+        };
+        assert_eq!(
+            view, "issues",
+            "the keyless action must carry a routable view, not ''"
+        );
+    }
+
+    #[test]
+    fn all_node_shortcut_rows_span_every_declared_level() {
+        // The "All tabs" / "Unbound" scopes must list unbound adapter actions
+        // from *every* declared level, not just the focused one — walking the
+        // configured node_types (root `mock:issue`, child `mock:comment`)
+        // rather than the live selection. A bound `shortcuts:` key surfaces
+        // with its key; the same action stops appearing as a keyless row.
+        let mut config = test_config_with_children();
+        config.views[0].shortcuts.insert(
+            's',
+            crate::config::view_config::ShortcutDef::Action("toggle-tracking".into()),
+        );
+        let adapter: Arc<dyn not_yet_done_content::ContentAdapter> = Arc::new(test_adapter(&[
+            (
+                "mock:issue",
+                vec![
+                    make_action("toggle-tracking", "Toggle Tracking", InputSpec::None),
+                    make_action("help", "Help", InputSpec::None),
+                ],
+            ),
+            (
+                "mock:comment",
+                vec![make_action("resolve", "Resolve", InputSpec::None)],
+            ),
+        ]));
+        let view = ContentView::new(
+            test_theme(),
+            &config,
+            Some(adapter),
+            &KeyBindingConfig::default(),
+        );
+        let rows = view.all_node_shortcut_rows();
+
+        // The root's bound `toggle-tracking` shows its key, at root scope, and
+        // is *not* duplicated as an unbound row.
+        let bound: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                matches!(
+                    &r.source,
+                    Some(crate::keymap::KeySource::NodeShortcut { action, child_path, .. })
+                        if action == "toggle-tracking" && child_path.is_empty()
+                )
+            })
+            .collect();
+        assert_eq!(bound.len(), 1, "bound action appears once, not twice");
+        assert_eq!(bound[0].keys, "s");
+
+        // The child level's `resolve` is surfaced unbound and bindable, at the
+        // child's scope with the child in its path.
+        let child = rows
+            .iter()
+            .find(|r| {
+                matches!(
+                    &r.source,
+                    Some(crate::keymap::KeySource::NodeShortcut { action, child_path, .. })
+                        if action == "resolve" && !child_path.is_empty()
+                )
+            })
+            .expect("child-level adapter action should appear from the whole tree");
+        assert_eq!(child.keys, "");
+        assert!(child.key_scope.is_some());
+
+        // Built-ins never surface.
+        assert!(!rows.iter().any(|r| matches!(
+            &r.source,
+            Some(crate::keymap::KeySource::NodeShortcut { action, .. }) if action == "help"
+        )));
+    }
+
+    #[test]
+    fn all_node_shortcut_rows_label_each_subtab_distinctly() {
+        // A tab with several subtabs exposes the same adapter action once per
+        // subtab (Trackings' `trackings` / `condensed` / `tree` each carry
+        // `toggle-tracking`). Each must be its own row, labelled with the
+        // subtab so it stays bindable on its own — not collapsed under dedup
+        // into a single ambiguous entry.
+        let mut config = test_config_with_children();
+        config.views[0].name = "issues".into();
+        config.views[0].node_type = "mock:issue".into();
+        config.views[0].children = vec![];
+        let mut second = config.views[0].clone();
+        second.name = "condensed".into();
+        second.node_type = "mock:track".into();
+        second.default = false;
+        config.views.push(second);
+
+        let adapter: Arc<dyn not_yet_done_content::ContentAdapter> = Arc::new(test_adapter(&[
+            (
+                "mock:issue",
+                vec![make_action(
+                    "toggle-tracking",
+                    "Toggle Tracking",
+                    InputSpec::None,
+                )],
+            ),
+            (
+                "mock:track",
+                vec![make_action(
+                    "toggle-tracking",
+                    "Toggle Tracking",
+                    InputSpec::None,
+                )],
+            ),
+        ]));
+        let view = ContentView::new(
+            test_theme(),
+            &config,
+            Some(adapter),
+            &KeyBindingConfig::default(),
+        );
+
+        let rows = view.all_node_shortcut_rows();
+        let scopes: Vec<&str> = rows
+            .iter()
+            .filter(|r| {
+                matches!(
+                    &r.source,
+                    Some(crate::keymap::KeySource::NodeShortcut { action, .. })
+                        if action == "toggle-tracking"
+                )
+            })
+            .map(|r| r.scope.as_str())
+            .collect();
+        assert!(scopes.contains(&"Test › issues"), "got {scopes:?}");
+        assert!(scopes.contains(&"Test › condensed"), "got {scopes:?}");
+        assert_eq!(
+            scopes.len(),
+            2,
+            "one bindable row per subtab, none collapsed: {scopes:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_subtab_wraps_across_subtabs() {
+        // `]` / `[` cycle subtabs like the main-tab switch cycles tabs.
+        let mut config = test_config_with_children();
+        config.views[0].name = "issues".into();
+        let mut second = config.views[0].clone();
+        second.name = "condensed".into();
+        second.default = false;
+        config.views.push(second);
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.active_subtab, 0);
+
+        assert!(view.cycle_subtab(true).is_some());
+        assert_eq!(view.active_subtab, 1);
+        // Forward from the last subtab wraps back to the first.
+        assert!(view.cycle_subtab(true).is_some());
+        assert_eq!(view.active_subtab, 0);
+        // Backward from the first subtab wraps to the last.
+        assert!(view.cycle_subtab(false).is_some());
+        assert_eq!(view.active_subtab, 1);
+    }
+
+    #[test]
+    fn cycle_subtab_is_noop_with_a_single_subtab() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.view_defs.len(), 1);
+        assert!(view.cycle_subtab(true).is_none());
+        assert!(view.cycle_subtab(false).is_none());
+        assert_eq!(view.active_subtab, 0);
     }
 
     #[test]
@@ -12022,7 +13979,7 @@ mod tests {
         // Mirror stoat.yaml: a multi-char chord action on the root view.
         view.view_defs[0].actions.push(ActionDef {
             name: "new channel".into(),
-            key: "al".into(),
+            key: Some("al".into()),
             action_type: "custom".into(),
             id: Some("create_channel".into()),
             node_id_from: None,
@@ -12042,6 +13999,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         // `a` begins the `al` chord → detected as a prefix …
         assert!(view.yaml_action_chord_prefix("a"));
@@ -12075,15 +14037,108 @@ mod tests {
         assert!(view.active_pane().fetch_error.is_none());
     }
 
+    /// An `unread` metadata field as the chat adapters emit it: `"true"`
+    /// when unread, empty when read.
+    fn unread_meta(value: &str) -> not_yet_done_content::MetadataField {
+        not_yet_done_content::MetadataField {
+            key: "unread".into(),
+            value: value.into(),
+            display_label: "Unread".into(),
+            editable: false,
+            allowed_values: None,
+        }
+    }
+
+    #[test]
+    fn has_unread_follows_the_rows_unread_metadata() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        // Rows without the field at all (every non-chat adapter) never light
+        // the tab.
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        assert!(!view.has_unread());
+
+        let mut items = mock_issues();
+        items[1].metadata.fields.push(unread_meta("true"));
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+        assert!(view.has_unread(), "one unread row is enough");
+
+        // Reading it (the adapter re-emits the field empty) clears the tab.
+        let mut items = mock_issues();
+        items[1].metadata.fields.push(unread_meta(""));
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+        assert!(!view.has_unread());
+    }
+
+    #[test]
+    fn unread_tab_marker_falls_back_from_tab_to_view_to_default() {
+        // Neither level configures one → the bell, NOT the rows' default
+        // speech balloon (which doubles as a channel-type icon in chat views).
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.unread_tab_marker(), DEFAULT_TAB_UNREAD_MARKER);
+        assert_ne!(DEFAULT_TAB_UNREAD_MARKER, DEFAULT_UNREAD_MARKER);
+
+        // The view's own marker still wins over that default, so tree and tab
+        // agree without configuring the glyph twice.
+        let mut config = test_config_with_children();
+        config.views[0].unread_marker = Some("•".into());
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.unread_tab_marker(), "•");
+
+        // `tab.unread_marker` wins over it — including an explicit empty
+        // string, which suppresses the glyph.
+        config.tab.unread_marker = Some(String::new());
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(view.unread_tab_marker(), "");
+    }
+
+    #[test]
+    fn unread_tab_style_defaults_to_bold_only() {
+        use crate::config::view_config::{TabUnreadStyle, TextModifier};
+        use ratatui::style::Modifier;
+
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let style = view.unread_tab_style();
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            style.fg.is_none(),
+            "no color by default — the bar keeps its own palette"
+        );
+
+        // A bare color name recolors without touching the font …
+        let mut config = test_config_with_children();
+        config.tab.unread_style = Some(TabUnreadStyle::Color("accent".into()));
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let style = view.unread_tab_style();
+        assert!(style.add_modifier.is_empty());
+        assert!(style.fg.is_some());
+
+        // … and a bare modifier list does the opposite.
+        config.tab.unread_style = Some(TabUnreadStyle::Modifiers(vec![TextModifier::Italic]));
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let style = view.unread_tab_style();
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+        assert!(!style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.fg.is_none());
+    }
+
     /// Flat (root-level) view with `smooth_scroll: true` and a 2-line
     /// `row_layout` (body + spacer) — a minimal stand-in for the chat
     /// message list.
     fn smooth_chat_config() -> ViewFileConfig {
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Chat".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -12093,6 +14148,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: Some(vec![
                     LineLayout {
                         columns: vec!["body".into()],
@@ -12133,11 +14189,14 @@ mod tests {
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -12147,6 +14206,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -12290,6 +14350,7 @@ mod tests {
         root.row_layout = None;
         root.smooth_scroll = false;
         root.children = vec![ChildDef {
+            card: None,
             row_layout: Some(vec![
                 LineLayout {
                     columns: vec!["body".into()],
@@ -12332,15 +14393,18 @@ mod tests {
             action_chains: Default::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: None,
             shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             mark_read_on_reach_end: None,
+            cursor_on_open: None,
         }];
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
@@ -12570,10 +14634,15 @@ mod tests {
 
     fn test_config_with_tree() -> ViewFileConfig {
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -12583,6 +14652,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "databases".into(),
@@ -12610,6 +14680,7 @@ mod tests {
                 preview: None,
                 actions: vec![],
                 children: vec![ChildDef {
+                    card: None,
                     row_layout: None,
                     smooth_scroll: false,
                     name: "Schemas".into(),
@@ -12639,25 +14710,31 @@ mod tests {
                     action_chains: Default::default(),
                     column_cursor: false,
                     record_detail: false,
+                    node_scripts: false,
                     tree_label: Some("name".into()),
                     shortcuts: HashMap::new(),
                     enter_action: None,
                     recursive: false,
                     editor_in_place: false,
                     leaf_glyph: None,
+                    icon: None,
                     group_by: None,
                     aggregates: Vec::new(),
                     mark_read_on_reach_end: None,
+                    cursor_on_open: None,
                 }],
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -12667,6 +14744,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -12762,6 +14840,7 @@ mod tests {
         children: Vec<ChildDef>,
     ) -> ChildDef {
         ChildDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: name.into(),
@@ -12776,15 +14855,18 @@ mod tests {
             action_chains: Default::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: tree_label.map(String::from),
             shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             mark_read_on_reach_end: None,
+            cursor_on_open: None,
         }
     }
 
@@ -12831,10 +14913,15 @@ mod tests {
             vec![chan],
         );
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Chat".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -12844,6 +14931,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "servers".into(),
@@ -12860,11 +14948,14 @@ mod tests {
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -12874,6 +14965,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -12993,10 +15085,15 @@ mod tests {
         );
         child.recursive = true;
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Tasks".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -13006,6 +15103,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "tasks".into(),
@@ -13022,11 +15120,14 @@ mod tests {
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -13036,6 +15137,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -13295,6 +15397,172 @@ mod tests {
         assert_eq!(label(1), "└── ▶ 💬 Child", "child: {:?}", label(1));
     }
 
+    /// A flat message list with `count` rows, unread from index
+    /// `unread_from` on (`None` = everything read).
+    fn unread_messages(count: usize, unread_from: Option<usize>) -> Vec<NodeSummary> {
+        use not_yet_done_content::{Metadata, MetadataField};
+        (0..count)
+            .map(|i| {
+                let mut n = tnode(&format!("m{i}"), &format!("m{i}"), "mock:msg");
+                if unread_from.is_some_and(|from| i >= from) {
+                    n.metadata = Metadata {
+                        fields: vec![MetadataField {
+                            key: "unread".into(),
+                            value: "true".into(),
+                            display_label: "Unread".into(),
+                            editable: false,
+                            allowed_values: None,
+                        }],
+                    };
+                }
+                n
+            })
+            .collect()
+    }
+
+    /// Drill into a flat `messages` level configured with `placement`, land
+    /// `count` rows on it (unread from `unread_from`) and report where the
+    /// cursor ended up.
+    fn open_messages_level(
+        placement: Option<CursorOnOpen>,
+        count: usize,
+        unread_from: Option<usize>,
+    ) -> usize {
+        let config = heterogeneous_uneven_tree_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = view.view_defs.clone();
+        let mut child = hchild("messages", "mock:msg", None, vec![hcol("name")], vec![]);
+        child.cursor_on_open = placement;
+        let pane = view.active_pane_mut();
+        pane.tree = None; // flat list, not tree mode
+        pane.drill_down_prepare("c1", "Channel", &child, &view_defs);
+        pane.set_items(
+            unread_messages(count, unread_from),
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+            &view_defs,
+        );
+        pane.table.selected_row()
+    }
+
+    #[test]
+    fn cursor_on_open_first_unread_opens_on_the_oldest_unread_row() {
+        // Opening a chat should start reading where the user left off, not at
+        // the top of the loaded page. The placement is armed by the drill and
+        // applied by the load that follows it.
+        assert_eq!(
+            open_messages_level(Some(CursorOnOpen::FirstUnread), 5, Some(3)),
+            3,
+            "cursor on the first of the unread rows"
+        );
+        assert_eq!(
+            open_messages_level(Some(CursorOnOpen::FirstUnread), 5, Some(0)),
+            0,
+            "everything unread → the oldest one"
+        );
+        // Nothing unread: no catching-up to do, so the newest row is what the
+        // user came for (documented on `CursorOnOpen::FirstUnread`).
+        assert_eq!(
+            open_messages_level(Some(CursorOnOpen::FirstUnread), 5, None),
+            4,
+            "all read → the newest row"
+        );
+        // The other placements, and the unconfigured default.
+        assert_eq!(open_messages_level(Some(CursorOnOpen::Last), 5, Some(3)), 4);
+        assert_eq!(
+            open_messages_level(Some(CursorOnOpen::First), 5, Some(3)),
+            0
+        );
+        assert_eq!(
+            open_messages_level(None, 5, Some(3)),
+            0,
+            "no opt-in → the historical first row"
+        );
+        // An empty page has nothing to place the cursor on — and must not
+        // panic on the `rows - 1` arithmetic.
+        assert_eq!(
+            open_messages_level(Some(CursorOnOpen::FirstUnread), 0, None),
+            0
+        );
+    }
+
+    #[test]
+    fn cursor_on_open_applies_to_the_open_not_to_later_reloads() {
+        // The placement belongs to *opening* the level. A refresh, a live
+        // invalidation or an incoming message re-runs `set_items` — none of
+        // them may yank the cursor away from where the user scrolled to.
+        let config = heterogeneous_uneven_tree_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = view.view_defs.clone();
+        let mut child = hchild("messages", "mock:msg", None, vec![hcol("name")], vec![]);
+        child.cursor_on_open = Some(CursorOnOpen::FirstUnread);
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        pane.drill_down_prepare("c1", "Channel", &child, &view_defs);
+
+        let load = |pane: &mut ContentPane| {
+            pane.set_items(
+                unread_messages(5, Some(3)),
+                Vec::new(),
+                None,
+                Vec::new(),
+                None,
+                &view_defs,
+            );
+        };
+        load(pane);
+        assert_eq!(pane.table.selected_row(), 3, "opened on the first unread");
+
+        // User scrolls back into the history, then a reload lands.
+        pane.table.set_selected(1);
+        load(pane);
+        assert_eq!(
+            pane.table.selected_row(),
+            1,
+            "reload keeps the user's cursor"
+        );
+    }
+
+    #[test]
+    fn reload_re_selects_the_same_node_after_the_page_shifted() {
+        // A flat feed renders its newest page: one incoming message slides the
+        // whole window up by a row. Restoring the cursor by row index would
+        // land on the neighbour, so the reload re-selects by node id.
+        let config = heterogeneous_uneven_tree_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = view.view_defs.clone();
+        let child = hchild("messages", "mock:msg", None, vec![hcol("name")], vec![]);
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        pane.drill_down_prepare("c1", "Channel", &child, &view_defs);
+
+        let page = |from: usize| -> Vec<NodeSummary> {
+            (from..from + 5)
+                .map(|i| tnode(&format!("m{i}"), &format!("m{i}"), "mock:msg"))
+                .collect()
+        };
+        let load = |pane: &mut ContentPane, from: usize| {
+            pane.set_items(page(from), Vec::new(), None, Vec::new(), None, &view_defs);
+        };
+
+        load(pane, 0); // m0..m4
+        pane.table.set_selected(2); // m2
+        load(pane, 1); // m1..m5 — everything moved up one row
+        assert_eq!(
+            pane.selected_item_id(),
+            Some("m2"),
+            "cursor stays on the same message"
+        );
+        assert_eq!(pane.table.selected_row(), 1, "which is now one row higher");
+
+        // The selected node is gone (paged out): nothing to re-anchor to, so
+        // the table's own index restore stands.
+        load(pane, 9); // m9..m13
+        assert_eq!(pane.table.selected_row(), 1, "index fallback");
+    }
+
     #[test]
     fn mark_read_on_reach_end_queues_only_on_fresh_arrival_at_unread_last() {
         use not_yet_done_content::{Metadata, MetadataField};
@@ -13377,8 +15645,7 @@ mod tests {
         // sees: the whole loaded (query-filtered) list when no fuzzy filter is
         // active, the matched subset when it is — empty matches yield no ids.
         let config = uniform_recursive_config();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let pane = view.active_pane_mut();
         pane.tree = None;
         pane.items = vec![
@@ -13618,10 +15885,15 @@ mod tests {
             hidden: false,
         };
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Worklog".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -13631,6 +15903,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "tasks".into(),
@@ -13647,11 +15920,14 @@ mod tests {
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: Some("name".into()),
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -13661,6 +15937,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -13935,7 +16212,7 @@ mod tests {
         };
 
         let mut eager = TreeState::new();
-        ingest_subtree_level(&mut eager, Vec::new(), subtree);
+        ingest_subtree_level(&mut eager, Vec::new(), subtree, false);
 
         // Cache key = full id-chain from root, identical to flatten_into.
         assert_eq!(
@@ -14058,12 +16335,16 @@ mod tests {
             items: vec![sub_node_hc(
                 "P",
                 Some(true),
-                vec![sub_node_hc("C", Some(true), vec![sub_node_hc("GC", Some(false), vec![])])],
+                vec![sub_node_hc(
+                    "C",
+                    Some(true),
+                    vec![sub_node_hc("GC", Some(false), vec![])],
+                )],
             )],
             page: None,
         };
         let mut state = TreeState::new();
-        ingest_subtree_level(&mut state, Vec::new(), first);
+        ingest_subtree_level(&mut state, Vec::new(), first, false);
         // Pre-condition: C's children are cached and C is expanded.
         assert_eq!(
             state.cache[&vec!["P".to_string(), "C".to_string()]]
@@ -14073,7 +16354,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["GC".to_string()],
         );
-        assert!(state.expanded.contains(&vec!["P".to_string(), "C".to_string()]));
+        assert!(
+            state
+                .expanded
+                .contains(&vec!["P".to_string(), "C".to_string()])
+        );
 
         // Reload after GC was deleted: C is now a genuine leaf.
         let reloaded = Subtree {
@@ -14084,7 +16369,7 @@ mod tests {
             )],
             page: None,
         };
-        ingest_subtree_level(&mut state, Vec::new(), reloaded);
+        ingest_subtree_level(&mut state, Vec::new(), reloaded, false);
 
         // The stale GC row is gone: C's cache slot is now empty, and C is no
         // longer treated as expanded.
@@ -14095,7 +16380,9 @@ mod tests {
             "emptied leaf must have its cached children cleared",
         );
         assert!(
-            !state.expanded.contains(&vec!["P".to_string(), "C".to_string()]),
+            !state
+                .expanded
+                .contains(&vec!["P".to_string(), "C".to_string()]),
             "emptied leaf must be dropped from `expanded`",
         );
     }
@@ -14116,7 +16403,7 @@ mod tests {
             items: vec![sub_node_hc("F", Some(true), vec![])],
             page: None,
         };
-        ingest_subtree_level(&mut state, Vec::new(), shallow);
+        ingest_subtree_level(&mut state, Vec::new(), shallow, false);
 
         assert_eq!(
             state.cache[&vec!["F".to_string()]]
@@ -14128,6 +16415,79 @@ mod tests {
             "frontier node's lazily-loaded children must survive a shallow reload",
         );
         assert!(state.expanded.contains(&vec!["F".to_string()]));
+    }
+
+    /// Reload fold preservation (`r` on an eager Tasks/Trackings tree): the
+    /// first load (`preserve == false`) force-expands to build the initial
+    /// shape; after the user collapses a branch, a reload
+    /// (`preserve == true`) must (a) leave that branch collapsed, (b) keep the
+    /// still-expanded branches expanded, (c) refresh cached children (external
+    /// edits show), and (d) surface externally-added siblings — collapsed,
+    /// since they were never in `expanded`.
+    #[test]
+    fn ingest_subtree_reload_preserves_fold_state() {
+        // First load: root → A → {A1(leaf)}, B → {B1(leaf)} — force-expanded.
+        let first = Subtree {
+            items: vec![
+                sub_node("A", vec![sub_node("A1", vec![])]),
+                sub_node("B", vec![sub_node("B1", vec![])]),
+            ],
+            page: None,
+        };
+        let mut state = TreeState::new();
+        ingest_subtree_level(&mut state, Vec::new(), first, false);
+        assert!(state.expanded.contains(&vec!["A".to_string()]));
+        assert!(state.expanded.contains(&vec!["B".to_string()]));
+
+        // User collapses A.
+        state.expanded.remove(&vec!["A".to_string()]);
+
+        // Reload: A still has its child (renamed externally), B unchanged, and
+        // a new top-level node C (externally added) with a child C1.
+        let reloaded = Subtree {
+            items: vec![
+                sub_node("A", vec![sub_node("A1", vec![])]),
+                sub_node("B", vec![sub_node("B1", vec![])]),
+                sub_node("C", vec![sub_node("C1", vec![])]),
+            ],
+            page: None,
+        };
+        ingest_subtree_level(&mut state, Vec::new(), reloaded, true);
+
+        // (a) A stays collapsed — the reload did not re-expand it.
+        assert!(
+            !state.expanded.contains(&vec!["A".to_string()]),
+            "reload must not re-expand a branch the user collapsed",
+        );
+        // (b) B stays expanded.
+        assert!(
+            state.expanded.contains(&vec!["B".to_string()]),
+            "reload must keep an already-expanded branch expanded",
+        );
+        // (c) A's children are still cached beneath it (fresh), ready for a
+        // zero-round-trip re-expand.
+        assert_eq!(
+            state.cache[&vec!["A".to_string()]]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["A1".to_string()],
+        );
+        // (d) The externally-added C is present but collapsed (never in
+        // `expanded`), even though its child arrived in the eager payload.
+        assert_eq!(
+            state.cache[&Vec::<String>::new()]
+                .children
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        assert!(
+            !state.expanded.contains(&vec!["C".to_string()]),
+            "an externally-added node must appear collapsed on reload",
+        );
     }
 
     /// M9 now-bucket refresh: `reload_now_bucket` swaps one bucket's header
@@ -14506,7 +16866,7 @@ mod tests {
     fn test_config_with_tree_filter_at(depth: usize) -> ViewFileConfig {
         let filter_action = crate::config::view_config::ActionDef {
             name: "filter".into(),
-            key: "f".into(),
+            key: Some("f".into()),
             action_type: "fuzzy_filter".into(),
             id: None,
             node_id_from: None,
@@ -14528,6 +16888,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         };
         let mut config = test_config_with_tree();
         match depth {
@@ -14857,6 +17222,7 @@ mod tests {
         // test_config_with_tree gives databases(tree) → Schemas(tree).
         // Add a "Rows" leaf as Schemas' only child, with split: right.
         config.views[0].children[0].children.push(ChildDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: "Rows".into(),
@@ -14890,15 +17256,18 @@ mod tests {
             action_chains: Default::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: None,
             shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             mark_read_on_reach_end: None,
+            cursor_on_open: None,
         });
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
@@ -14959,6 +17328,7 @@ mod tests {
         // set and entries) when leaving the leaf.
         let mut config = test_config_with_tree();
         config.views[0].children[0].children.push(ChildDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: "Rows".into(),
@@ -14988,15 +17358,18 @@ mod tests {
             action_chains: Default::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: None,
             shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             mark_read_on_reach_end: None,
+            cursor_on_open: None,
         });
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
@@ -15075,7 +17448,7 @@ mod tests {
         // Root view: edit + global fuzzy_filter.
         config.views[0].actions.push(ActionDef {
             name: "edit".into(),
-            key: "e".into(),
+            key: Some("e".into()),
             action_type: "edit".into(),
             id: None,
             node_id_from: None,
@@ -15095,10 +17468,15 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         config.views[0].actions.push(ActionDef {
             name: "filter".into(),
-            key: "f".into(),
+            key: Some("f".into()),
             action_type: "fuzzy_filter".into(),
             id: None,
             node_id_from: None,
@@ -15120,12 +17498,17 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         // Root view: tree_find (`/`). Like fuzzy_filter it is declared only
         // here yet must reach every cursor depth (it is in the GLOBAL set).
         config.views[0].actions.push(ActionDef {
             name: "treefind".into(),
-            key: "/".into(),
+            key: Some("/".into()),
             action_type: "tree_find".into(),
             id: None,
             node_id_from: None,
@@ -15145,11 +17528,16 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
             name: "inspect".into(),
-            key: "i".into(),
+            key: Some("i".into()),
             action_type: "custom".into(),
             id: Some("inspect_schema".into()),
             node_id_from: None,
@@ -15169,6 +17557,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         config
     }
@@ -15242,7 +17635,7 @@ mod tests {
         // level's should win.
         config.views[0].actions.push(ActionDef {
             name: "root_x".into(),
-            key: "x".into(),
+            key: Some("x".into()),
             action_type: "custom".into(),
             id: Some("root_x".into()),
             node_id_from: None,
@@ -15262,13 +17655,18 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         // root_x is NOT a global type, so without the dedup rule it
         // wouldn't show up at depth 1 anyway. Use search (global) to
         // force the collision path: same key "x" exists at child.
         config.views[0].actions.push(ActionDef {
             name: "root_search".into(),
-            key: "x".into(),
+            key: Some("x".into()),
             action_type: "search".into(),
             id: None,
             node_id_from: None,
@@ -15292,10 +17690,15 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         config.views[0].children[0].actions.push(ActionDef {
             name: "child_x".into(),
-            key: "x".into(),
+            key: Some("x".into()),
             action_type: "custom".into(),
             id: Some("child_x".into()),
             node_id_from: None,
@@ -15315,6 +17718,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
@@ -15396,12 +17804,27 @@ mod tests {
         assert!(scopes[0].lookup("ctrl+x").is_some());
     }
 
+    /// A saved (not extended) query as the reload hands them to the view.
+    fn merged_query(name: &str, query: &str, shortcut: Option<&str>) -> MergedSavedQuery {
+        MergedSavedQuery {
+            name: name.into(),
+            query: query.into(),
+            shortcut: shortcut.map(str::to_string),
+            kind: QueryKind::Saved,
+        }
+    }
+
     fn test_config_with_query() -> ViewFileConfig {
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -15411,6 +17834,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "issues".into(),
@@ -15420,6 +17844,7 @@ mod tests {
                 key: None,
                 query: Some(QueryConfig {
                     default: Some("assignee = me".into()),
+                    template: None,
                     editable: true,
                     menu_key: Some("q".into()),
                     inherit_default: false,
@@ -15447,11 +17872,14 @@ mod tests {
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: HashMap::new(),
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -15461,6 +17889,7 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
@@ -15681,11 +18110,32 @@ mod tests {
             Some(info),
             Some(CustomQueryRunState {
                 query: "SELECT 1".into(),
-                database: "db".into(),
+                node_id: "db/schemas/public/tables/t".into(),
                 // Placeholder — apply_custom_query_result patches it.
                 mode: PaginationMode::Server,
                 cursor_id,
             }),
+        );
+    }
+
+    /// The App side reads a pane's mode before the first query runs, to
+    /// decide whether the adapter may be asked for a cursor at all. An
+    /// unknown pane falls back to the mode every adapter supports.
+    #[test]
+    fn pane_pagination_mode_comes_from_the_view_config() {
+        let config = test_config_with_cursor_pagination();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert_eq!(
+            view.pane_pagination_mode(view.active_pane_id()),
+            PaginationMode::Cursor
+        );
+        assert_eq!(view.pane_pagination_mode(9999), PaginationMode::Server);
+
+        let plain = test_config_with_query();
+        let view = ContentView::new(test_theme(), &plain, None, &KeyBindingConfig::default());
+        assert_eq!(
+            view.pane_pagination_mode(view.active_pane_id()),
+            PaginationMode::Server
         );
     }
 
@@ -15712,7 +18162,7 @@ mod tests {
         let pane_id = view.active_pane_id();
         let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
         match msg {
-            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+            SubViewMessage::Request(ViewRequest::RunAdapterQuery {
                 cursor: Some(CursorIntent::Continue { cursor_id }),
                 ..
             }) => assert_eq!(cursor_id, "c1"),
@@ -15730,7 +18180,7 @@ mod tests {
         let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
         assert!(matches!(
             msg,
-            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+            SubViewMessage::Request(ViewRequest::RunAdapterQuery {
                 cursor: Some(CursorIntent::Open),
                 ..
             })
@@ -15747,7 +18197,7 @@ mod tests {
         let msg = view.active_pane_mut().try_prev_page(view_index, pane_id);
         assert!(matches!(
             msg,
-            SubViewMessage::Request(ViewRequest::RunPostgresQuery {
+            SubViewMessage::Request(ViewRequest::RunAdapterQuery {
                 cursor: Some(CursorIntent::Open),
                 ..
             })
@@ -15808,11 +18258,34 @@ mod tests {
 
     // ── Record-detail split (`record_detail: true`) ──────────────────
 
+    /// Minimal column def for the record-detail tests.
+    fn col(key: &str, label: &str) -> ColumnDef {
+        ColumnDef {
+            key: key.into(),
+            label: Some(label.into()),
+            source: None,
+            style: None,
+            sizing: "max".into(),
+            markdown: false,
+            kind: ColumnKind::Text,
+            format: None,
+            separator: None,
+            elapsed_from: None,
+            tree_aggregate: None,
+            hidden: false,
+            collapsed_source: None,
+            long_source: None,
+        }
+    }
+
     /// `test_config_with_query` with the root view opted into the
-    /// record-detail split.
+    /// record-detail split. The follower mirrors the view's columns, so the
+    /// view is given the record's two fields (the order + labels the
+    /// transpose is asserted against).
     fn record_detail_config() -> ViewFileConfig {
         let mut config = test_config_with_query();
         config.views[0].record_detail = true;
+        config.views[0].columns = vec![col("name", "Name"), col("status", "Status")];
         config
     }
 
@@ -15919,12 +18392,79 @@ mod tests {
         view.rebuild_table();
         let follower = view.find_pane(follower_id).unwrap();
         assert_eq!(follower.items.len(), 2);
-        assert_eq!(follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY), "Name");
-        assert_eq!(follower_cell(&view, follower_id, 0, content_detail::VALUE_KEY), "a-name");
-        assert_eq!(follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY), "Status");
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY),
+            "Name"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::VALUE_KEY),
+            "a-name"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY),
+            "Status"
+        );
         assert_eq!(
             follower_cell(&view, follower_id, 1, content_detail::VALUE_KEY),
             "a-status"
+        );
+    }
+
+    #[test]
+    fn sync_detail_panes_follows_column_config() {
+        // A relabelled, reordered subset: the follower shows exactly these
+        // columns (State before the name field, with custom labels), proving
+        // it follows the column config rather than the raw record fields.
+        let mut config = record_detail_config();
+        config.views[0].columns = vec![col("status", "State"), col("name", "Full name")];
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+        view.toggle_record_detail();
+        let follower_id = view.find_pane(source_id).unwrap().detail_child.unwrap();
+
+        view.rebuild_table();
+        assert_eq!(view.find_pane(follower_id).unwrap().items.len(), 2);
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY),
+            "State"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::VALUE_KEY),
+            "a-status"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY),
+            "Full name"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::VALUE_KEY),
+            "a-name"
+        );
+    }
+
+    #[test]
+    fn sync_detail_panes_without_columns_shows_all_fields() {
+        // No configured columns (postgres and other dynamic-schema views):
+        // `current_columns` auto-derives one per record field, so the follower
+        // still shows the whole record — unchanged from before this feature.
+        let mut config = record_detail_config();
+        config.views[0].columns = vec![];
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+        view.toggle_record_detail();
+        let follower_id = view.find_pane(source_id).unwrap().detail_child.unwrap();
+
+        view.rebuild_table();
+        assert_eq!(view.find_pane(follower_id).unwrap().items.len(), 2);
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY),
+            "Name"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY),
+            "Status"
         );
     }
 
@@ -15970,7 +18510,7 @@ mod tests {
             Some(info),
             Some(CustomQueryRunState {
                 query: "SELECT 1".into(),
-                database: "db".into(),
+                node_id: "db/schemas/public/tables/t".into(),
                 mode: PaginationMode::Server,
                 cursor_id: None,
             }),
@@ -15979,7 +18519,7 @@ mod tests {
         let msg = view.active_pane_mut().try_next_page(view_index, pane_id);
         assert!(matches!(
             msg,
-            SubViewMessage::Request(ViewRequest::RunPostgresQuery { cursor: None, .. })
+            SubViewMessage::Request(ViewRequest::RunAdapterQuery { cursor: None, .. })
         ));
     }
 
@@ -16029,6 +18569,45 @@ mod tests {
     }
 
     #[test]
+    fn text_search_hint_stays_lit_while_its_query_is_shown() {
+        // The `text_search` hint must light up while the term is typed *and*
+        // for as long as the pane still shows what the search produced — the
+        // local `/`-search hint must stay dark throughout.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = config.views.clone();
+        let pane_id = view.active_pane_id();
+        {
+            let pane = view.active_pane_mut();
+            pane.search_mode = SearchMode::Adapter {
+                template: "queries:\n  - { type: task, q: \"<input>\" }".into(),
+                prompt: None,
+            };
+            pane.search.open();
+        }
+        assert!(view.resolve_active(&ActiveSurface::TextSearch));
+        assert!(!view.resolve_active(&ActiveSurface::Search));
+
+        for key in ["1", "1", "2", "enter"] {
+            view.active_pane_mut()
+                .handle_search_key(key, 0, pane_id, &view_defs);
+        }
+        assert!(
+            view.resolve_active(&ActiveSurface::TextSearch),
+            "hint must stay lit after the input closes — the result is still on screen"
+        );
+        assert!(!view.resolve_active(&ActiveSurface::Search));
+        assert_eq!(
+            view.active_pane().active_query.as_deref(),
+            Some("queries:\n  - { type: task, q: \"112\" }")
+        );
+
+        // Any other query ends the search — no explicit reset needed.
+        view.set_query("assignee = me".into(), None);
+        assert!(!view.resolve_active(&ActiveSurface::TextSearch));
+    }
+
+    #[test]
     fn apply_default_query_stamps_inheriting_subtab_panes() {
         // The startup default-query apply stamps the active (default
         // view) pane plus every subtab opting in via
@@ -16046,7 +18625,11 @@ mod tests {
         config.views.push(plain);
 
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.apply_default_query("type = Bug".into(), Some("My Bugs".into()));
+        view.apply_default_query(
+            "type = Bug".into(),
+            Some("My Bugs".into()),
+            QueryKind::Saved,
+        );
 
         assert_eq!(
             view.active_pane().active_query.as_deref(),
@@ -16084,6 +18667,47 @@ mod tests {
     }
 
     #[test]
+    fn an_extended_query_keeps_its_kind_from_the_store_to_the_load_request() {
+        // Nothing about the body says which store it came from, so the kind
+        // has to survive every hop — merge, menu lookup, stamp, load — or the
+        // loader hands a Markdown document straight to the adapter.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.merge_saved_queries(vec![
+            merged_query("Native", "type = Bug", None),
+            MergedSavedQuery {
+                name: "Combined".into(),
+                query: "```yaml\nquery: type = Bug\n```\n".into(),
+                shortcut: None,
+                kind: QueryKind::Extended,
+            },
+        ]);
+        assert_eq!(view.query_kind_of("Combined"), QueryKind::Extended);
+        assert_eq!(view.query_kind_of("Native"), QueryKind::Saved);
+        assert_eq!(
+            view.query_kind_of("typed into the editor"),
+            QueryKind::Saved,
+            "a body with no entry in either store is adapter-native"
+        );
+
+        let pane_id = view.active_pane_id();
+        view.set_query_for_pane_with_vars(
+            pane_id,
+            "```yaml\nquery: type = Bug\n```\n".into(),
+            Some("Combined".into()),
+            std::collections::HashMap::new(),
+            QueryKind::Extended,
+        );
+        let req = view.root_load_request().expect("load request");
+        assert_eq!(req.kind, QueryKind::Extended);
+
+        // Clearing back to the view's YAML default drops the kind with it —
+        // that default is always a literal query in the adapter's language.
+        view.set_query("type = Bug".into(), None);
+        assert_eq!(view.root_load_request().unwrap().kind, QueryKind::Saved);
+    }
+
+    #[test]
     fn is_query_editable_from_config() {
         let config = test_config_with_query();
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
@@ -16104,11 +18728,7 @@ mod tests {
         // with the right query/name.
         let config = test_config_with_query();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.merge_saved_queries(vec![(
-            "My Bugs".into(),
-            "type = Bug".into(),
-            Some("1".into()),
-        )]);
+        view.merge_saved_queries(vec![merged_query("My Bugs", "type = Bug", Some("1"))]);
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
         let msg = view.handle_key("1");
         match msg {
@@ -16128,7 +18748,7 @@ mod tests {
         // so the App can toggle + persist the per-scope default.
         let config = test_config_with_query();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.merge_saved_queries(vec![("My Bugs".into(), "type = Bug".into(), None)]);
+        view.merge_saved_queries(vec![merged_query("My Bugs", "type = Bug", None)]);
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
         view.open_query_popup();
         let msg = view.handle_query_popup_key("ctrl+t");
@@ -16139,6 +18759,60 @@ mod tests {
             other => panic!("Expected SetDefaultContentQuery, got {other:?}"),
         }
         assert!(!view.has_query_popup());
+    }
+
+    #[test]
+    fn a_double_plus_name_opens_the_editor_for_a_new_extended_query() {
+        // The kind is decided when the entry is created — there is no
+        // entry to look it up from yet, and the body the user is about to
+        // write is what will tell the two apart.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.merge_saved_queries(vec![merged_query("My Bugs", "type = Bug", None)]);
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.open_query_popup();
+        for c in "++Combined".chars() {
+            view.handle_query_popup_key(&c.to_string());
+        }
+        match view.handle_query_popup_key("enter") {
+            Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+                save_name,
+                is_new,
+                kind,
+                ..
+            })) => {
+                assert_eq!(save_name.as_deref(), Some("Combined"));
+                assert!(is_new);
+                assert_eq!(kind, QueryKind::Extended);
+            }
+            other => panic!("Expected OpenContentQueryEditor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn editing_an_extended_entry_opens_the_editor_on_its_own_kind() {
+        // ctrl+e stamps the body onto the pane and opens the editor; both
+        // have to hear that this is a document, or it is saved back into
+        // the wrong store in the wrong language.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.merge_saved_queries(vec![MergedSavedQuery {
+            kind: QueryKind::Extended,
+            ..merged_query("Combined", "```yaml\nquery-ref: a\n```\n", None)
+        }]);
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.open_query_popup();
+        match view.handle_query_popup_key("ctrl+e") {
+            Some(SubViewMessage::Request(ViewRequest::OpenContentQueryEditor {
+                kind,
+                is_new,
+                ..
+            })) => {
+                assert_eq!(kind, QueryKind::Extended);
+                assert!(!is_new);
+            }
+            other => panic!("Expected OpenContentQueryEditor, got {other:?}"),
+        }
     }
 
     #[test]
@@ -16161,7 +18835,7 @@ mod tests {
         let mut config = test_config_with_children();
         config.views[0].actions.push(ActionDef {
             name: "script".into(),
-            key: "x".into(),
+            key: Some("x".into()),
             action_type: "script".into(),
             id: None,
             node_id_from: None,
@@ -16181,6 +18855,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
@@ -16199,7 +18878,7 @@ mod tests {
         let mut config = test_config_with_children();
         config.views[0].actions.push(ActionDef {
             name: "add child".into(),
-            key: "A".into(),
+            key: Some("A".into()),
             action_type: "create".into(),
             id: Some("add".into()),
             node_id_from: None,
@@ -16219,6 +18898,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let issues = mock_issues();
@@ -16243,7 +18927,7 @@ mod tests {
         let mut config = test_config_with_children();
         config.views[0].actions.push(ActionDef {
             name: "script".into(),
-            key: "x".into(),
+            key: Some("x".into()),
             action_type: "script".into(),
             id: None,
             node_id_from: None,
@@ -16263,6 +18947,11 @@ mod tests {
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         });
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let hints = view.action_bar_hints();
@@ -16287,8 +18976,8 @@ mod tests {
         );
 
         view.merge_saved_queries(vec![
-            ("My Bugs".into(), "type = Bug".into(), Some("1".into())),
-            ("Sprint".into(), "sprint in open".into(), Some("2".into())),
+            merged_query("My Bugs", "type = Bug", Some("1")),
+            merged_query("Sprint", "sprint in open", Some("2")),
         ]);
         let favs: Vec<(&str, &str)> = view
             .db_saved_queries
@@ -16335,7 +19024,10 @@ mod tests {
             Vec::new(),
             None,
         );
-        assert!(view.active_pane().tree.is_some(), "fixture must be tree mode");
+        assert!(
+            view.active_pane().tree.is_some(),
+            "fixture must be tree mode"
+        );
 
         let hints = view.status_bar_hints();
         assert!(
@@ -16349,6 +19041,53 @@ mod tests {
         assert!(
             hints.iter().any(|(_, v)| v == "collapse"),
             "expected smart-collapse hint, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hints_list_window_chords_when_view_opts_in() {
+        // `w*` used to be invisible until the leader was already pressed. On a
+        // `window_ops: true` view every window chord now sits in the status
+        // bar with its full chord, exactly as `zm`/`zr` do.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.view_defs[0].window_ops = true;
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let hints = view.status_bar_hints();
+        for (key, label) in [
+            ("wv", "split right"),
+            ("ws", "split down"),
+            ("wq", "close pane"),
+            ("wh", "focus parent"),
+            ("wl", "focus child"),
+        ] {
+            assert!(
+                hints.iter().any(|(k, v)| k == key && v == label),
+                "expected [{key}] {label}, got: {hints:?}"
+            );
+        }
+        // The pane-tag switch (`w<tag>`) is layout-derived, not a binding —
+        // it must stay out of the bar and live only in the WINDOW-mode prompt.
+        assert!(
+            !hints.iter().any(|(_, v)| v == "switch pane"),
+            "pane-tag switch must not reach the status bar, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hints_omit_window_chords_without_window_ops() {
+        // Window ops are opt-in per view; where the leader never engages the
+        // bar must not advertise the chords.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(!view.view_defs[0].window_ops, "fixture must default to off");
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let hints = view.status_bar_hints();
+        assert!(
+            !hints.iter().any(|(k, _)| k.starts_with('w')),
+            "no window chord may show without window_ops, got: {hints:?}"
         );
     }
 
@@ -16370,6 +19109,7 @@ mod tests {
             label: "Running query".into(),
             started_at_unix_ms: 0,
             timeout_secs: 7,
+            progress: None,
         });
         assert!(
             view.is_busy(),
@@ -16387,6 +19127,107 @@ mod tests {
         );
         view.set_auth_status(AdapterStatus::Ready);
         assert!(!view.is_busy());
+    }
+
+    #[test]
+    fn busy_banner_renders_progress_as_percentage() {
+        // No progress → no percentage, just elapsed.
+        let plain = busy_banner("Loading calendar", 0, 0, None);
+        assert!(!plain.contains('%'), "no progress → no %, got: {plain}");
+
+        // A fraction renders as a rounded whole percent between label and timer.
+        let with = busy_banner("Loading calendar", 0, 0, Some(0.5));
+        assert!(with.contains("50 %"), "expected '50 %', got: {with}");
+
+        // Out-of-range fractions are clamped, not shown raw.
+        assert!(busy_banner("x", 0, 0, Some(1.5)).contains("100 %"));
+        assert!(busy_banner("x", 0, 0, Some(-0.3)).contains("0 %"));
+    }
+
+    /// Helper: a view that is loading, routed as given.
+    fn busy_view(route: LoadBannerRoute) -> ContentView {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_load_banner_default(route);
+        view.set_auth_status(AdapterStatus::Busy {
+            label: "Loading".into(),
+            started_at_unix_ms: 0,
+            timeout_secs: 0,
+            progress: None,
+        });
+        view
+    }
+
+    #[test]
+    fn the_tab_route_keeps_the_load_banner_on_the_tabs_own_line() {
+        let view = busy_view(LoadBannerRoute::Tab);
+        assert!(
+            view.auth_status_banner()
+                .is_some_and(|b| b.contains("Loading")),
+            "the default route draws the counter locally"
+        );
+        assert!(
+            view.global_load_banner().is_none(),
+            "and hands nothing to the global surface"
+        );
+    }
+
+    #[test]
+    fn routing_a_load_banner_away_takes_it_off_the_tabs_line() {
+        for route in [LoadBannerRoute::Global, LoadBannerRoute::Off] {
+            let view = busy_view(route);
+            assert!(
+                view.auth_status_banner().is_none(),
+                "{route:?} must not also draw the counter in the tab"
+            );
+        }
+        // Only `global` offers it to the App; `off` means nowhere at all.
+        assert!(
+            busy_view(LoadBannerRoute::Global)
+                .global_load_banner()
+                .is_some()
+        );
+        assert!(
+            busy_view(LoadBannerRoute::Off)
+                .global_load_banner()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_tab_override_beats_the_global_default() {
+        let mut config = test_config_with_children();
+        config.tab.load_banner = Some(LoadBannerRoute::Global);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // App applies the global setting to every view, override or not.
+        view.set_load_banner_default(LoadBannerRoute::Off);
+        assert_eq!(view.load_banner_route(), LoadBannerRoute::Global);
+    }
+
+    #[test]
+    fn a_retry_stays_in_its_tab_even_while_the_load_banner_is_routed_away() {
+        let mut view = busy_view(LoadBannerRoute::Global);
+        view.active_pane_mut().retry_state = Some(RetryState {
+            attempt: 2,
+            max_attempts: 5,
+            last_error: "connection reset".into(),
+        });
+        let banner = view
+            .auth_status_banner()
+            .expect("a retry is a fault, not progress — it belongs where it happened");
+        assert!(banner.contains("(2/5)"), "got: {banner}");
+        assert!(banner.contains("connection reset"), "got: {banner}");
+        assert!(
+            !banner.contains("Loading"),
+            "the routed-away counter must not sneak back in: {banner}"
+        );
+    }
+
+    #[test]
+    fn several_loading_tabs_collapse_into_one_counter() {
+        let line = collapsed_load_banner(3, 0);
+        assert!(line.starts_with("3 tabs loading…"), "got: {line}");
+        assert!(line.contains('s'), "elapsed seconds expected, got: {line}");
     }
 
     #[test]
@@ -16482,7 +19323,7 @@ mod tests {
         if let Some(k) = reload_key {
             config.views[0].actions.push(ActionDef {
                 name: "refresh".into(),
-                key: k.into(),
+                key: Some(k.into()),
                 action_type: "reload".into(),
                 id: None,
                 node_id_from: None,
@@ -16502,6 +19343,11 @@ mod tests {
                 on_container: false,
                 option_menu: None,
                 force: false,
+                message: None,
+                prominent: false,
+                form: None,
+                emit: None,
+                on_event: None,
             });
         }
         config
@@ -16542,7 +19388,7 @@ mod tests {
 
     // ── Shortcut Hints (SH-1..SH-7) ─────────────────────────────────
 
-    use not_yet_done_content::{HintPlacement, InputSpec, NodeAction};
+    use not_yet_done_content::{InputSpec, NodeAction};
 
     fn shortcut_config_flat(
         view_shortcuts: HashMap<char, String>,
@@ -16557,10 +19403,15 @@ mod tests {
             .map(|(k, v)| (k, ShortcutDef::Action(v)))
             .collect();
         ViewFileConfig {
+            reminder: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
                 icon: None,
+                key: None,
+                unread_marker: None,
+                unread_style: None,
+                load_banner: None,
             },
             adapter: AdapterConfig {
                 adapter_type: "mock".into(),
@@ -16570,6 +19421,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "issues".into(),
@@ -16597,6 +19449,7 @@ mod tests {
                 preview: None,
                 actions: vec![],
                 children: vec![ChildDef {
+                    card: None,
                     row_layout: None,
                     smooth_scroll: false,
                     name: "Comments".into(),
@@ -16626,25 +19479,31 @@ mod tests {
                     action_chains: Default::default(),
                     column_cursor: false,
                     record_detail: false,
+                    node_scripts: false,
                     tree_label: None,
                     shortcuts: child_shortcuts,
                     enter_action: None,
                     recursive: false,
                     editor_in_place: false,
                     leaf_glyph: None,
+                    icon: None,
                     group_by: None,
                     aggregates: Vec::new(),
                     mark_read_on_reach_end: None,
+                    cursor_on_open: None,
                 }],
                 pagination: None,
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: None,
                 retries: 0,
                 script_template: None,
+                script_source: None,
                 shortcuts: view_shortcuts,
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 tree_connector_style: None,
@@ -16654,12 +19513,17 @@ mod tests {
                 tree_markers: None,
                 expand_depth: None,
                 group_headers: None,
+                event_actions: Vec::new(),
             }],
         }
     }
 
-    fn make_action(id: &str, label: &str, placement: HintPlacement) -> NodeAction {
-        NodeAction::new(id, label, InputSpec::None).with_placement(placement)
+    /// Build a test action. The `input` shape drives everything the bar
+    /// builders now derive: an activatable spec (Editor/Form/Picker/…) makes
+    /// the hint action-bar-placed, `InputSpec::None` (with a non-whitelisted
+    /// id) makes it status-bar-placed.
+    fn make_action(id: &str, label: &str, input: InputSpec) -> NodeAction {
+        NodeAction::new(id, label, input)
     }
 
     #[test]
@@ -16740,6 +19604,13 @@ mod tests {
         fn actions_for_type(&self, nt: &not_yet_done_content::NodeType) -> Vec<NodeAction> {
             self.actions.get(&nt.type_id).cloned().unwrap_or_default()
         }
+        fn childs<'a>(
+            &'a self,
+            _node: &'a dyn not_yet_done_content::Node,
+        ) -> Vec<not_yet_done_content::Child<'a>> {
+            // Stub: the shortcut-hint tests never list children.
+            Vec::new()
+        }
     }
 
     fn test_adapter(map: &[(&str, Vec<NodeAction>)]) -> ShortcutTestAdapter {
@@ -16751,7 +19622,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_shortcut_hints_emits_adapter_action_label_and_placement() {
+    fn collect_shortcut_hints_emits_adapter_action_label_and_source() {
         let mut sc = HashMap::new();
         sc.insert('a', "do_alpha".to_string());
         sc.insert('s', "do_sigma".to_string());
@@ -16762,9 +19633,11 @@ mod tests {
         let adapter = test_adapter(&[(
             "mock:issue",
             vec![
-                make_action("do_alpha", "Alpha", HintPlacement::ActionBar),
-                make_action("do_sigma", "Sigma", HintPlacement::StatusBar),
-                make_action("ignored", "Unused", HintPlacement::ActionBar),
+                // Editor input → activatable → carries a source (action bar).
+                make_action("do_alpha", "Alpha", InputSpec::Editor),
+                // No input, non-whitelisted id → no source (status bar).
+                make_action("do_sigma", "Sigma", InputSpec::None),
+                make_action("ignored", "Unused", InputSpec::Editor),
             ],
         )]);
 
@@ -16775,10 +19648,13 @@ mod tests {
         assert_eq!(hints.len(), 2, "exactly the two configured shortcuts");
         assert_eq!(hints[0].key, "a");
         assert_eq!(hints[0].label, "Alpha");
-        assert_eq!(hints[0].placement, HintPlacement::ActionBar);
+        assert!(hints[0].source.is_some(), "editor action is activatable");
         assert_eq!(hints[1].key, "s");
         assert_eq!(hints[1].label, "Sigma");
-        assert_eq!(hints[1].placement, HintPlacement::StatusBar);
+        assert!(
+            hints[1].source.is_none(),
+            "fire-and-forget action has no source"
+        );
     }
 
     #[test]
@@ -16794,7 +19670,7 @@ mod tests {
 
         let adapter = test_adapter(&[(
             "mock:issue",
-            vec![make_action("delete", "Delete", HintPlacement::StatusBar)],
+            vec![make_action("delete", "Delete", InputSpec::None)],
         )]);
 
         let hints = view
@@ -16843,11 +19719,7 @@ mod tests {
         // action under the parent type.
         let adapter = test_adapter(&[(
             "mock:issue",
-            vec![make_action(
-                "promote",
-                "Promote Parent",
-                HintPlacement::ActionBar,
-            )],
+            vec![make_action("promote", "Promote Parent", InputSpec::Editor)],
         )]);
 
         let hints = view
@@ -16856,7 +19728,6 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].key, "p");
         assert_eq!(hints[0].label, "Promote Parent");
-        assert_eq!(hints[0].placement, HintPlacement::ActionBar);
     }
 
     // ── CT-5: TreeFindState lifecycle ────────────────────────────────
@@ -17739,7 +20610,8 @@ views:
             );
             tree.expanded.insert(vec!["work".into()]);
             tree.expanded.insert(vec!["work".into(), "h".into()]);
-            tree.expanded.insert(vec!["work".into(), "h".into(), "g".into()]);
+            tree.expanded
+                .insert(vec!["work".into(), "h".into(), "g".into()]);
             tree.rebuild_entries(&view_defs[0]);
         }
         view.active_pane_mut().rebuild_table(&view_defs);
@@ -17816,8 +20688,18 @@ views:
             );
         }
         // Ceiling reached: `g` (depth 2) is NOT expanded and the cascade is disarmed.
-        assert!(view.pending_auto_expand_requests(view_index, pane_id).is_empty());
-        assert!(!view.active_pane().tree.as_ref().unwrap().auto_expand_pending);
+        assert!(
+            view.pending_auto_expand_requests(view_index, pane_id)
+                .is_empty()
+        );
+        assert!(
+            !view
+                .active_pane()
+                .tree
+                .as_ref()
+                .unwrap()
+                .auto_expand_pending
+        );
 
         // `zr`: arm expand-all and ask the App to drive the cascade.
         match view
@@ -17841,10 +20723,7 @@ views:
 
         // Pump: `g`, which sat at the old depth-2 ceiling, now expands.
         let reqs = view.pending_auto_expand_requests(view_index, pane_id);
-        let ViewRequest::ExpandTreeNode {
-            parent_node_id, ..
-        } = &reqs[0]
-        else {
+        let ViewRequest::ExpandTreeNode { parent_node_id, .. } = &reqs[0] else {
             panic!("expected ExpandTreeNode, got {:?}", reqs[0]);
         };
         assert_eq!(
@@ -18076,6 +20955,7 @@ views:
         // Mirrors confluence.yaml's spaces tree (one space root that
         // recurses through pages).
         ViewDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: "tree-view".into(),
@@ -18103,6 +20983,7 @@ views:
             preview: None,
             actions: vec![],
             children: vec![ChildDef {
+                card: None,
                 row_layout: None,
                 smooth_scroll: false,
                 name: "pages".into(),
@@ -18132,25 +21013,31 @@ views:
                 action_chains: Default::default(),
                 column_cursor: false,
                 record_detail: false,
+                node_scripts: false,
                 tree_label: Some("label".into()),
                 shortcuts: HashMap::new(),
                 enter_action: None,
                 recursive: true,
                 editor_in_place: false,
                 leaf_glyph: None,
+                icon: None,
                 group_by: None,
                 aggregates: Vec::new(),
                 mark_read_on_reach_end: None,
+                cursor_on_open: None,
             }],
             pagination: None,
             action_chains: Default::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: Some("label".into()),
             retries: 0,
             script_template: None,
+            script_source: None,
             shortcuts: HashMap::new(),
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             tree_connector_style: None,
@@ -18160,6 +21047,7 @@ views:
             tree_markers: None,
             expand_depth: None,
             group_headers: None,
+            event_actions: Vec::new(),
         }
     }
 
@@ -18233,7 +21121,7 @@ views:
     }
 
     #[test]
-    fn advance_tree_find_reports_not_in_tree_when_ancestor_missing() {
+    fn advance_tree_find_refreshes_once_then_reports_not_in_tree_when_ancestor_missing() {
         let mut pane = empty_pane();
         let vds = vec![tree_view_def()];
         pane.tree_find_begin("q".into());
@@ -18244,9 +21132,17 @@ views:
             vec![space_node("OTHER", "Other")],
             None,
         );
+        // A loaded-but-stale level is re-fetched once (it may be missing the
+        // hit only because the cache predates a cross-process insert).
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::NeedRootLoad => {}
+            other => panic!("expected NeedRootLoad (refresh), got {other:?}"),
+        }
+        // Once that refresh budget is spent, a still-missing ancestor is
+        // reported as genuinely absent instead of looping forever.
         match pane.advance_tree_find(0, 0, &vds) {
             TreeFindAdvance::NotInTree(_) => {}
-            other => panic!("expected NotInTree, got {other:?}"),
+            other => panic!("expected NotInTree after refresh, got {other:?}"),
         }
     }
 
@@ -18730,7 +21626,11 @@ views:
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.dispatch_content_action(ContentAction::GroupMenu);
         view.handle_key("n"); // No grouping
-        assert!(view.active_pane().current_group_by(&view.view_defs).is_none());
+        assert!(
+            view.active_pane()
+                .current_group_by(&view.view_defs)
+                .is_none()
+        );
 
         let msg = view.dispatch_content_action(ContentAction::ToggleGroupOrder);
         assert!(matches!(msg, SubViewMessage::Unhandled));
@@ -18769,6 +21669,70 @@ views:
         assert_eq!(
             pane.current_group_by(&view_defs).and_then(|gb| gb.bucket),
             Some(DateBucket::Day)
+        );
+    }
+
+    // ── Shared script source (`script_source`) ───────────────────────
+
+    fn two_view_config(bookmarks_source: Option<&str>) -> ViewFileConfig {
+        let src = bookmarks_source
+            .map(|s| format!("    script_source: {s}\n"))
+            .unwrap_or_default();
+        let yaml = format!(
+            "tab:\n  name: Jira\n  order: 0\nadapter:\n  type: jira\nviews:\n  - name: tickets\n    node_type: jira:issue\n    default: true\n  - name: bookmarks\n    node_type: jira:bookmark\n    key: m\n{src}"
+        );
+        serde_yaml::from_str(&yaml).expect("yaml parses")
+    }
+
+    #[test]
+    fn script_scope_path_swaps_root_for_referenced_source() {
+        let view_defs = two_view_config(Some("tickets")).views;
+        let caps = not_yet_done_content::AdapterCapabilities::default();
+
+        // tickets (index 0) has no `script_source` → own scope.
+        let tickets = ContentPane::new(test_theme(), 0, false, caps.clone());
+        assert_eq!(tickets.view_path_node_types(&view_defs), vec!["jira:issue"]);
+        assert_eq!(tickets.script_scope_path(&view_defs), vec!["jira:issue"]);
+
+        // bookmarks (index 1) keeps its own identity path, but its script
+        // scope borrows tickets' root node_type — so both share scripts.
+        let bookmarks = ContentPane::new(test_theme(), 1, false, caps);
+        assert_eq!(
+            bookmarks.view_path_node_types(&view_defs),
+            vec!["jira:bookmark"]
+        );
+        assert_eq!(bookmarks.script_scope_path(&view_defs), vec!["jira:issue"]);
+    }
+
+    #[test]
+    fn script_scope_path_unknown_source_falls_back_to_self() {
+        // A name matching no sibling view is a silent no-op (validation
+        // catches the typo separately); the scope stays the view's own.
+        let view_defs = two_view_config(Some("nope")).views;
+        let bookmarks = ContentPane::new(
+            test_theme(),
+            1,
+            false,
+            not_yet_done_content::AdapterCapabilities::default(),
+        );
+        assert_eq!(
+            bookmarks.script_scope_path(&view_defs),
+            vec!["jira:bookmark"]
+        );
+    }
+
+    #[test]
+    fn script_scope_path_without_source_equals_view_path() {
+        let view_defs = two_view_config(None).views;
+        let bookmarks = ContentPane::new(
+            test_theme(),
+            1,
+            false,
+            not_yet_done_content::AdapterCapabilities::default(),
+        );
+        assert_eq!(
+            bookmarks.script_scope_path(&view_defs),
+            bookmarks.view_path_node_types(&view_defs)
         );
     }
 
@@ -19160,8 +22124,7 @@ views:
         // which never claims `v`, and nothing happens.
         let mut config = test_config_with_group_by();
         config.views[0].columns[1].long_source = Some("description".into());
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
 
         assert!(!view.active_pane().long_text);
         let msg = view.handle_key("v");
@@ -19177,11 +22140,242 @@ views:
         // No column opts in → `v` stays free (Unhandled) and the flag never
         // flips, so the key remains available to other views.
         let config = test_config_with_group_by();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let msg = view.handle_key("v");
         assert!(matches!(msg, SubViewMessage::Unhandled));
         assert!(!view.active_pane().long_text);
+    }
+
+    /// A `card:` block over the two columns of the test view: `key` and
+    /// `summary` side by side, toggled with `C`.
+    fn card_config(columns: usize, default_on: bool) -> CardConfig {
+        CardConfig {
+            fields: vec![
+                CardFieldDef {
+                    column: "key".into(),
+                    label: None,
+                },
+                CardFieldDef {
+                    column: "summary".into(),
+                    label: Some("Title".into()),
+                },
+            ],
+            columns,
+            weights: Vec::new(),
+            labels: CardLabelMode::Inline,
+            border: CardBorderMode::Rounded,
+            border_style: None,
+            label_style: None,
+            padding: 1,
+            gap: 0,
+            separator: "  ".to_string(),
+            divider: String::new(),
+            key: Some(KeyBinding::new("C")),
+            default: default_on,
+        }
+    }
+
+    #[test]
+    fn card_key_toggles_mode_and_asks_the_app_to_persist() {
+        let mut config = test_config_with_children();
+        config.views[0].card = Some(card_config(2, false));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        assert!(!view.active_pane().card_mode_active(&view.view_defs));
+        let msg = view.handle_key("C");
+        assert!(
+            matches!(
+                msg,
+                SubViewMessage::Request(ViewRequest::PersistCardMode { .. })
+            ),
+            "the toggle must ask the App to write the choice so it survives a restart"
+        );
+        assert!(view.active_pane().card_mode_active(&view.view_defs));
+        assert_eq!(
+            view.card_mode_overrides().get("view:issues").copied(),
+            Some(true)
+        );
+
+        // Back to the configured default → the entry is dropped, so nothing
+        // stale is persisted after a full round trip.
+        view.handle_key("C");
+        assert!(!view.active_pane().card_mode_active(&view.view_defs));
+        assert!(view.card_mode_overrides().is_empty());
+    }
+
+    #[test]
+    fn card_key_stays_free_without_a_card_block() {
+        // No `card:` on the level → `C` is never claimed and stays available
+        // to other views (same contract as `v` without `long_source`).
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(matches!(view.handle_key("C"), SubViewMessage::Unhandled));
+        assert!(view.card_mode_overrides().is_empty());
+    }
+
+    #[test]
+    fn card_default_true_opens_in_card_mode_and_toggles_off() {
+        let mut config = test_config_with_children();
+        config.views[0].card = Some(card_config(2, true));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        assert!(view.active_pane().card_mode_active(&view.view_defs));
+        view.handle_key("C");
+        assert!(!view.active_pane().card_mode_active(&view.view_defs));
+        // Deviating from the default is what gets stored.
+        assert_eq!(
+            view.card_mode_overrides().get("view:issues").copied(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn stored_card_mode_is_restored_like_a_restart() {
+        // What `App::load_card_mode_for` does at startup: push the persisted
+        // map in, and the level renders as cards without any key press.
+        let mut config = test_config_with_children();
+        config.views[0].card = Some(card_config(2, false));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(!view.active_pane().card_mode_active(&view.view_defs));
+
+        let mut stored = std::collections::HashMap::new();
+        stored.insert("view:issues".to_string(), true);
+        view.set_card_mode_overrides(stored);
+        assert!(view.active_pane().card_mode_active(&view.view_defs));
+    }
+
+    #[test]
+    fn card_hint_names_the_mode_the_key_switches_to() {
+        let mut config = test_config_with_children();
+        config.views[0].card = Some(card_config(2, false));
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let has = |v: &ContentView, label: &str| {
+            v.status_bar_hints().into_iter().any(|(_, d)| d == label)
+        };
+        assert!(has(&view, "cards"), "table mode offers switching to cards");
+        view.handle_key("C");
+        assert!(has(&view, "table"), "card mode offers switching back");
+    }
+
+    #[test]
+    fn card_spec_drops_fields_whose_column_is_hidden() {
+        // `columns` is the *visible* set, so hiding a column in the
+        // column-config popup also takes it out of the card instead of
+        // leaving an empty slot behind.
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let card = card_config(2, false);
+        let visible = vec![config.views[0].columns[0].clone()];
+        let spec = view.active_pane().card_spec(&card, &visible);
+        assert_eq!(spec.fields.len(), 1);
+        assert_eq!(spec.fields[0].column.0, "key");
+        // The label falls back to the column's own `label:`.
+        assert_eq!(spec.fields[0].label, "Key");
+    }
+
+    #[test]
+    fn card_spec_without_fields_uses_every_visible_column() {
+        // The common case: `card:` with no `fields:` shows the whole table,
+        // in the effective column order — no second list to keep in sync.
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut card = card_config(2, false);
+        card.fields.clear();
+        let spec = view
+            .active_pane()
+            .card_spec(&card, &config.views[0].columns);
+        assert_eq!(spec.fields.len(), 2);
+        assert_eq!(spec.fields[0].column.0, "key");
+        assert_eq!(spec.fields[1].column.0, "summary");
+        // Labels come from the columns; one without `label:` falls back to
+        // its key.
+        assert_eq!(spec.fields[0].label, "Key");
+        assert_eq!(spec.fields[1].label, "summary");
+    }
+
+    #[test]
+    fn card_spec_without_fields_skips_markdown_columns() {
+        // A `markdown:` column soft-wraps into N lines, so it has no
+        // fixed-height grid slot — an explicit `fields:` entry is rejected at
+        // config load, and the implicit "all columns" list drops it here.
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut card = card_config(2, false);
+        card.fields.clear();
+        let mut columns = config.views[0].columns.clone();
+        columns[1].markdown = true;
+        let spec = view.active_pane().card_spec(&card, &columns);
+        assert_eq!(spec.fields.len(), 1);
+        assert_eq!(spec.fields[0].column.0, "key");
+    }
+
+    #[test]
+    fn card_spec_prefers_the_fields_own_label() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let card = card_config(2, false);
+        let spec = view
+            .active_pane()
+            .card_spec(&card, &config.views[0].columns);
+        assert_eq!(spec.fields[1].label, "Title");
+        assert_eq!(spec.columns, 2);
+    }
+
+    #[test]
+    fn card_widget_rows_style_border_label_and_value_separately() {
+        let config = test_config_with_children();
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let card = card_config(2, false);
+        let spec = view
+            .active_pane()
+            .card_spec(&card, &config.views[0].columns);
+        let rows = vec![
+            TRow::new(0u32)
+                .cell("key", "ABC-1")
+                .cell("summary", "First"),
+            TRow::new(1u32)
+                .cell("key", "ABC-2")
+                .cell("summary", "Second"),
+        ];
+        let t = test_theme();
+        let (widget_rows, _map) =
+            build_card_widget_rows(&rows, &config.views[0].columns, &card, &spec, 60, &t);
+
+        assert_eq!(widget_rows.len(), 2, "one card per row");
+        // Rounded frame: top, one content line (two fields at columns: 2),
+        // bottom.
+        let first = &widget_rows[0];
+        assert_eq!(first.lines.len(), 3);
+        assert!(first.selectable);
+        // The frame line is one span, and every line is exactly as wide as
+        // the card — that is what keeps the right edge aligned.
+        let width = |line: &TableWidgetLine| -> usize {
+            line.cells
+                .iter()
+                .map(|c| c.text.chars().count())
+                .sum::<usize>()
+        };
+        assert_eq!(width(&first.lines[0]), 60);
+        assert_eq!(width(&first.lines[1]), 60);
+        assert_eq!(width(&first.lines[2]), 60);
+        // Content line: the label and its value are separate cells, so they
+        // can carry different styles.
+        let text: String = first.lines[1]
+            .cells
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(text.contains("Key: ABC-1"), "got: {text:?}");
+        assert!(text.contains("Title: First"), "got: {text:?}");
+        // Border and label cells get their own style slots, and they differ.
+        let border_style = first.lines[0].cells[0].style_id;
+        let label_style = first.lines[1]
+            .cells
+            .iter()
+            .find(|c| c.text.starts_with("Key:"))
+            .and_then(|c| c.style_id);
+        assert!(border_style.is_some());
+        assert_ne!(border_style, label_style);
     }
 
     #[test]
@@ -19190,8 +22384,7 @@ views:
         // the single-key path, which needs an explicit arm. Configured order
         // is Asc; `o` flips it to Desc, preserving the bucket.
         let config = test_config_with_group_by();
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
 
         let msg = view.handle_key("o");
         assert!(matches!(msg, SubViewMessage::SelectionChanged(None)));
@@ -19204,16 +22397,20 @@ views:
     }
 }
 
-
 /// Create a hardcoded Jira view config (used when no YAML file exists).
 /// Will be replaced by YAML loading in Phase 6.
 pub fn default_jira_view_config() -> ViewFileConfig {
     use crate::config::view_config::*;
     ViewFileConfig {
+        reminder: None,
         tab: TabConfig {
             name: "Jira".to_string(),
             order: 3,
             icon: Some("󰌃".to_string()),
+            key: None,
+            unread_marker: None,
+            unread_style: None,
+            load_banner: None,
         },
         adapter: AdapterConfig {
             adapter_type: "jira".to_string(),
@@ -19223,6 +22420,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             manual_connect: false,
         },
         views: vec![ViewDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: "tickets".to_string(),
@@ -19326,7 +22524,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             actions: vec![
                 ActionDef {
                     name: "edit".to_string(),
-                    key: "e".to_string(),
+                    key: Some("e".into()),
                     action_type: "edit".to_string(),
                     id: Some("edit_full".into()),
                     node_id_from: None,
@@ -19346,10 +22544,15 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     on_container: false,
                     option_menu: None,
                     force: false,
+                    message: None,
+                    prominent: false,
+                    form: None,
+                    emit: None,
+                    on_event: None,
                 },
                 ActionDef {
                     name: "refresh".to_string(),
-                    key: "r".to_string(),
+                    key: Some("r".into()),
                     action_type: "reload".to_string(),
                     id: None,
                     node_id_from: None,
@@ -19369,6 +22572,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     on_container: false,
                     option_menu: None,
                     force: false,
+                    message: None,
+                    prominent: false,
+                    form: None,
+                    emit: None,
+                    on_event: None,
                 },
             ],
             children: vec![],
@@ -19376,11 +22584,14 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             action_chains: Default::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: None,
             retries: 0,
             script_template: None,
+            script_source: None,
             shortcuts: HashMap::new(),
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             tree_connector_style: None,
@@ -19390,6 +22601,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             tree_markers: None,
             expand_depth: None,
             group_headers: None,
+            event_actions: Vec::new(),
         }],
     }
 }

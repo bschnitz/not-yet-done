@@ -80,7 +80,9 @@ pub async fn merge_statuses(
             }
             let mut am = model.clone().into_active_model();
             am.name = Set(s.name.clone());
-            am.update(&txn).await.map_err(|e| format!("update status: {e}"))?;
+            am.update(&txn)
+                .await
+                .map_err(|e| format!("update status: {e}"))?;
         } else {
             let am = taiga_project_status::ActiveModel {
                 connection_id: Set(scope_id),
@@ -90,7 +92,9 @@ pub async fn merge_statuses(
                 name: Set(s.name.clone()),
                 ..taiga_project_status::ActiveModel::new()
             };
-            am.insert(&txn).await.map_err(|e| format!("insert status: {e}"))?;
+            am.insert(&txn)
+                .await
+                .map_err(|e| format!("insert status: {e}"))?;
         }
     }
     txn.commit().await.map_err(|e| format!("commit txn: {e}"))
@@ -145,7 +149,9 @@ pub async fn merge_members(
             let mut am = model.clone().into_active_model();
             am.username = Set(u.username.clone());
             am.full_name = Set(u.full_name.clone());
-            am.update(&txn).await.map_err(|e| format!("update member: {e}"))?;
+            am.update(&txn)
+                .await
+                .map_err(|e| format!("update member: {e}"))?;
         } else {
             let am = taiga_project_member::ActiveModel {
                 connection_id: Set(scope_id),
@@ -155,7 +161,9 @@ pub async fn merge_members(
                 full_name: Set(u.full_name.clone()),
                 ..taiga_project_member::ActiveModel::new()
             };
-            am.insert(&txn).await.map_err(|e| format!("insert member: {e}"))?;
+            am.insert(&txn)
+                .await
+                .map_err(|e| format!("insert member: {e}"))?;
         }
     }
     txn.commit().await.map_err(|e| format!("commit txn: {e}"))
@@ -202,7 +210,9 @@ pub async fn merge_tags(
             name: Set(name.clone()),
             ..taiga_project_tag::ActiveModel::new()
         };
-        am.insert(&txn).await.map_err(|e| format!("insert tag: {e}"))?;
+        am.insert(&txn)
+            .await
+            .map_err(|e| format!("insert tag: {e}"))?;
     }
     txn.commit().await.map_err(|e| format!("commit txn: {e}"))
 }

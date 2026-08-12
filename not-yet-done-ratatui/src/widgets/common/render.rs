@@ -34,7 +34,11 @@ pub fn render_prefixed_line(
     }
 
     // Prefix.
-    let prefix = if highlight_cursor { PREFIX_CURSOR } else { PREFIX };
+    let prefix = if highlight_cursor {
+        PREFIX_CURSOR
+    } else {
+        PREFIX
+    };
     let mut px = x;
     for ch in prefix.chars() {
         if let Some(cell) = buf.cell_mut((px, y)) {

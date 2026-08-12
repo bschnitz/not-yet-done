@@ -1,18 +1,21 @@
 //! Adapter YAML config: auth strategy (via the unified [`AuthSpec`]),
-//! endpoint, optional DB override. CF-2a slice — `auth` is parsed but not
-//! yet wired (the bridge lands in CF-2b).
+//! endpoint, optional DB override. Which mechanisms this adapter
+//! implements, and which fields each needs, is published from
+//! `adapter::auth_bridge::MECHANISMS` and listed by
+//! `nyd config auth confluence`.
 //!
 //! `manual_connect` is a view-level flag (`AdapterConfig.manual_connect`
 //! in the TUI's view config), not part of the adapter's own YAML — same
 //! shape as Jira/Taiga.
 
+use fieldsmith::Buildable;
 use serde::Deserialize;
 
 use not_yet_done_content::AuthSpec;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Buildable, Debug)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConfluenceConfig {
+pub struct ConfluenceConfig {
     pub(crate) url: String,
     #[serde(default)]
     pub(crate) name: Option<String>,
@@ -43,16 +46,28 @@ pub(crate) struct ConfluenceConfig {
     pub(crate) space_keys: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Buildable, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DbConfig {
+pub struct DbConfig {
     pub(crate) url: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use not_yet_done_content::{AuthMechanism, CredentialProvider, SessionCachePolicy};
+    use crate::adapter::auth_bridge::MECHANISMS;
+    use not_yet_done_content::{CredentialProvider, SessionCachePolicy};
+
+    /// The example under `docs/examples/views/` is the first thing a user
+    /// copies, so it has to parse and validate like any real config.
+    #[test]
+    fn the_shipped_example_config_parses() {
+        let yaml = include_str!("../../docs/examples/views/confluence-adapter.yaml");
+        let cfg: ConfluenceConfig = serde_yaml::from_str(yaml).expect("example parses");
+        cfg.auth
+            .validate_against(MECHANISMS)
+            .expect("example is a valid spec");
+    }
 
     #[test]
     fn parses_cookie_via_command_provider() {
@@ -69,8 +84,8 @@ auth:
         retries: 5
 "#;
         let cfg: ConfluenceConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid spec");
-        assert_eq!(cfg.auth.mechanism, AuthMechanism::Cookie);
+        cfg.auth.validate_against(MECHANISMS).expect("valid spec");
+        assert_eq!(cfg.auth.mechanism, "cookie");
         assert_eq!(cfg.auth.bindings.len(), 1);
         match &cfg.auth.bindings[0].provider {
             CredentialProvider::Command {
@@ -102,7 +117,7 @@ auth:
       provider: { type: literal, value: "JSESSIONID=synthetic" }
 "#;
         let cfg: ConfluenceConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid spec");
+        cfg.auth.validate_against(MECHANISMS).expect("valid spec");
         assert!(cfg.accept_invalid_certs);
         let db = cfg.db.expect("db present");
         assert!(db.url.contains("/tmp/confluence-test.sqlite"));
@@ -132,7 +147,7 @@ space_keys:
   - BETA
 "#;
         let cfg: ConfluenceConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid spec");
+        cfg.auth.validate_against(MECHANISMS).expect("valid spec");
         let keys = cfg.space_keys.expect("space_keys present");
         assert_eq!(keys, vec!["ALPHA".to_string(), "BETA".to_string()]);
     }
@@ -166,5 +181,32 @@ foo: bar
             .err()
             .expect("must reject unknown top-level field");
         assert!(err.to_string().contains("foo"), "error mentions foo: {err}");
+    }
+
+    /// The config parses fine on its own — what rejects it is the
+    /// adapter's mechanism table, so a mechanism this adapter never
+    /// implements fails at build time instead of at first login.
+    #[test]
+    fn rejects_a_mechanism_this_adapter_does_not_implement() {
+        let yaml = r#"
+url: https://wiki.example.invalid
+auth:
+  mechanism: basic-auth
+  bindings:
+    - field: username
+      provider: { type: literal, value: alice }
+    - field: token
+      provider: { type: prompt }
+"#;
+        let cfg: ConfluenceConfig = serde_yaml::from_str(yaml).expect("parses");
+        let err = cfg
+            .auth
+            .validate_against(MECHANISMS)
+            .expect_err("mechanism is not implemented here");
+        assert!(
+            err.contains("basic-auth"),
+            "names the rejected mechanism: {err}"
+        );
+        assert!(err.contains("cookie"), "names a supported one: {err}");
     }
 }

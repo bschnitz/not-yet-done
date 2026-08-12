@@ -14,7 +14,10 @@ pub struct ErrorViewSession {
 
 impl ErrorViewSession {
     pub fn new(content: String, scope: SessionScope) -> Self {
-        Self { template: content, scope }
+        Self {
+            template: content,
+            scope,
+        }
     }
 }
 

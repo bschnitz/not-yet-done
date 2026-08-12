@@ -81,9 +81,7 @@ tracking: {}
 
 ## Description:
 {}"#,
-        task.priority,
-        is_tracked,
-        task.description,
+        task.priority, is_tracked, task.description,
     )
 }
 
@@ -227,7 +225,11 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
 
 /// Parse the editor file content for an edit operation.
 /// Returns only the fields that changed compared to the original task.
-pub fn parse_edit_task(content: &str, template: &str, original: &Task) -> ParseResult<ParsedEditTask> {
+pub fn parse_edit_task(
+    content: &str,
+    template: &str,
+    original: &Task,
+) -> ParseResult<ParsedEditTask> {
     if content.trim() == template.trim() {
         return ParseResult::Aborted;
     }
@@ -338,8 +340,11 @@ pub fn parse_edit_task(content: &str, template: &str, original: &Task) -> ParseR
     let priority = parsed_priority.filter(|p| *p != original.priority);
 
     // If nothing changed at all, treat as abort.
-    if description.is_none() && status.is_none() && priority.is_none()
-        && parsed_parent.is_none() && parsed_tracking.is_none()
+    if description.is_none()
+        && status.is_none()
+        && priority.is_none()
+        && parsed_parent.is_none()
+        && parsed_tracking.is_none()
     {
         return ParseResult::Aborted;
     }
@@ -636,7 +641,10 @@ mod tests {
 
     #[test]
     fn parse_kv_with_inline_comment() {
-        assert_eq!(parse_kv("status: todo # a comment"), Some(("status", "todo")));
+        assert_eq!(
+            parse_kv("status: todo # a comment"),
+            Some(("status", "todo"))
+        );
     }
 
     #[test]
@@ -707,7 +715,10 @@ mod tests {
     #[test]
     fn render_with_errors_adds_banner() {
         let content = "---\nstatus: bogus\n---\n\n## Description:\nText\n";
-        let errors = vec![FieldError { field: "status", message: "invalid".into() }];
+        let errors = vec![FieldError {
+            field: "status",
+            message: "invalid".into(),
+        }];
         let rendered = render_with_errors(content, &errors);
         assert!(rendered.starts_with("<!-- ⚠ ERRORS"));
         assert!(rendered.contains("status: invalid"));
@@ -716,7 +727,10 @@ mod tests {
     #[test]
     fn render_with_errors_inline_error() {
         let content = "---\nstatus: bogus\n---\n\n## Description:\nText\n";
-        let errors = vec![FieldError { field: "status", message: "bad value".into() }];
+        let errors = vec![FieldError {
+            field: "status",
+            message: "bad value".into(),
+        }];
         let rendered = render_with_errors(content, &errors);
         assert!(rendered.contains("# ⚠ bad value"));
     }
@@ -724,7 +738,10 @@ mod tests {
     #[test]
     fn render_with_errors_description_error() {
         let content = "---\n---\n\n## Description:\n";
-        let errors = vec![FieldError { field: "description", message: "empty".into() }];
+        let errors = vec![FieldError {
+            field: "description",
+            message: "empty".into(),
+        }];
         let rendered = render_with_errors(content, &errors);
         assert!(rendered.contains("<!-- ⚠ empty -->"));
     }

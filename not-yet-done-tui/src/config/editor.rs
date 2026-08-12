@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // EditorConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for **one** external-editor profile used by the TUI.
+/// Configuration for **one** editor profile used by the TUI.
 ///
 /// Profiles are defined under the top-level [`EditorsConfig`] (`editors:`)
 /// block — see its docs for the `default` + named-profile layout. A single
@@ -31,6 +31,25 @@ use serde::{Deserialize, Serialize};
 /// `pause_tui` (default `false`): when `true` and `inline` is `false`,
 /// ratatui is briefly paused while the launch command executes.  Required
 /// for commands like `kitty @` that need clean terminal access.
+///
+/// # The builtin editor
+///
+/// `builtin: true` ignores `command` entirely and edits in a pane of the
+/// TUI itself, driven by the in-process modal editor from the `vimrealm`
+/// crate. No child process, no temp file, no terminal hand-over:
+///
+/// ```yaml
+/// editors:
+///   compose-builtin:
+///     builtin: true
+///     height: "30%"       # of the terminal; a bare number means rows
+///     line_numbers: false
+/// ```
+///
+/// It is a *per-profile* choice, so the same action set can be pointed at
+/// the builtin editor or at a real `$EDITOR` by changing one `editor:`
+/// field in a view config. `inline`, `pause_tui` and `command` have no
+/// meaning while `builtin` is set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorConfig {
     #[serde(default = "default_command")]
@@ -44,6 +63,24 @@ pub struct EditorConfig {
 
     #[serde(default = "default_indent")]
     pub indent: usize,
+
+    /// Edit in a TUI pane instead of spawning `command`. See the type docs.
+    #[serde(default)]
+    pub builtin: bool,
+
+    /// Height of the builtin editor's pane: `"30%"` of the terminal, or a
+    /// bare row count (`"12"`). Ignored unless [`Self::builtin`] is set.
+    #[serde(default = "default_height")]
+    pub height: String,
+
+    /// Show a line-number gutter in the builtin editor. Off by default —
+    /// a compose pane rarely wants one, a YAML edit does.
+    #[serde(default)]
+    pub line_numbers: bool,
+}
+
+fn default_height() -> String {
+    "40%".to_string()
 }
 
 fn default_indent() -> usize {
@@ -69,6 +106,9 @@ impl Default for EditorConfig {
             inline: default_inline(),
             pause_tui: default_pause_tui(),
             indent: default_indent(),
+            builtin: false,
+            height: default_height(),
+            line_numbers: false,
         }
     }
 }
@@ -91,13 +131,19 @@ impl Default for EditorConfig {
 ///     command: "kitty @ launch --location=hsplit sh -c '{env}nvim {file}; mv {file} {file}.done'"
 ///     inline: false
 ///     pause_tui: true
+///   compose-builtin:    # the in-process modal editor, no child process
+///     builtin: true
+///     height: "30%"
 /// ```
 ///
 /// Why named profiles: different tasks want different editor geometries (a
 /// short chat compose fits a slim split below; a long ticket edit wants a
-/// full vsplit). The editor is always a *separate process* (your `$EDITOR`,
-/// e.g. via Kitty) — a TUI pane cannot host it (no PTY embedding) — so the
-/// split is realised by the *terminal*, configured in `command`.
+/// full vsplit). For an external editor the split is realised by the
+/// *terminal* (a TUI pane cannot host another program — no PTY embedding),
+/// so its geometry lives in `command`; the builtin editor is a pane of this
+/// TUI and sizes itself from `height`. The two are interchangeable per
+/// action, which is the point: an action can be moved to the builtin editor
+/// and back by editing its `editor:` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorsConfig {
     /// Profile used whenever an action does not name one. Mandatory.
@@ -165,7 +211,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.default.command, "a");
-        let named = cfg.named.get("compose-below").expect("named profile present");
+        let named = cfg
+            .named
+            .get("compose-below")
+            .expect("named profile present");
         assert_eq!(named.command, "b");
         assert!(named.pause_tui);
     }
@@ -190,9 +239,25 @@ mod tests {
     }
 
     #[test]
+    fn builtin_is_opt_in_and_carries_its_own_geometry() {
+        let cfg: EditorsConfig = serde_yaml::from_str(
+            "default:\n  command: \"nvim {file}\"\ncompose-builtin:\n  builtin: true\n  height: \"30%\"\n  line_numbers: true",
+        )
+        .unwrap();
+        assert!(!cfg.default.builtin, "an external profile stays external");
+        assert_eq!(
+            cfg.default.height, "40%",
+            "height defaults even when unused"
+        );
+        let builtin = cfg.resolve(Some("compose-builtin"));
+        assert!(builtin.builtin);
+        assert_eq!(builtin.height, "30%");
+        assert!(builtin.line_numbers);
+    }
+
+    #[test]
     fn contains_and_profile_names() {
-        let cfg: EditorsConfig =
-            serde_yaml::from_str("default: {}\nzeta: {}\nalpha: {}").unwrap();
+        let cfg: EditorsConfig = serde_yaml::from_str("default: {}\nzeta: {}\nalpha: {}").unwrap();
         assert!(cfg.contains("default"));
         assert!(cfg.contains("alpha"));
         assert!(!cfg.contains("nope"));

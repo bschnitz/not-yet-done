@@ -34,7 +34,8 @@ pub mod cli {
                 println!(
                     "✓ Tracking started: [{}] started at {}",
                     tracking.id,
-                    tracking.started_at
+                    tracking
+                        .started_at
                         .with_timezone(&chrono::Local)
                         .format("%Y-%m-%d %H:%M:%S")
                 );
@@ -51,7 +52,10 @@ pub mod cli {
     /// trackings if no task ID is given.
     #[command(about = "Stop the active tracking for a task, or all active trackings")]
     pub fn stop(
-        #[arg(long, help = "Task ID to stop tracking for (stops all active trackings if omitted)")]
+        #[arg(
+            long,
+            help = "Task ID to stop tracking for (stops all active trackings if omitted)"
+        )]
         task_id: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
@@ -78,10 +82,12 @@ pub mod cli {
                         "✓ Tracking stopped: [{}] {} | {} → {}",
                         s.tracking.id,
                         s.task_description,
-                        s.tracking.started_at
+                        s.tracking
+                            .started_at
                             .with_timezone(&chrono::Local)
                             .format("%Y-%m-%d %H:%M"),
-                        s.tracking.ended_at
+                        s.tracking
+                            .ended_at
                             .unwrap()
                             .with_timezone(&chrono::Local)
                             .format("%Y-%m-%d %H:%M"),
@@ -115,8 +121,7 @@ pub mod cli {
             help = "End date/time (e.g. '2026-03-22', 'today'), defaults to today"
         )]
         to: Option<crate::datetime::LocalDateTime>,
-        #[arg(long, help = "Filter by task ID")]
-        task_id: Option<String>,
+        #[arg(long, help = "Filter by task ID")] task_id: Option<String>,
     ) -> u8 {
         use chrono::{Local, TimeZone};
 
@@ -125,9 +130,7 @@ pub mod cli {
 
         let from_ctx = from.map(|d| d.into()).unwrap_or_else(|| {
             let utc = Local
-                .from_local_datetime(
-                    &now.date_naive().and_hms_opt(0, 0, 0).unwrap(),
-                )
+                .from_local_datetime(&now.date_naive().and_hms_opt(0, 0, 0).unwrap())
                 .single()
                 .unwrap()
                 .to_utc();
@@ -136,9 +139,7 @@ pub mod cli {
 
         let to_ctx = to.map(|d| d.into()).unwrap_or_else(|| {
             let utc = Local
-                .from_local_datetime(
-                    &now.date_naive().and_hms_opt(23, 59, 59).unwrap(),
-                )
+                .from_local_datetime(&now.date_naive().and_hms_opt(23, 59, 59).unwrap())
                 .single()
                 .unwrap()
                 .to_utc();
@@ -181,7 +182,9 @@ pub mod cli {
                 );
 
                 // Determine column width from all task descriptions across all days
-                let max_desc_len = summary.days.iter()
+                let max_desc_len = summary
+                    .days
+                    .iter()
                     .flat_map(|d| d.entries.iter())
                     .map(|e| e.task_description.len())
                     .max()
@@ -242,10 +245,7 @@ pub mod cli {
     /// Examples:
     ///   nyd-t trackrestore <id>
     #[command(about = "Restore a soft-deleted tracking entry")]
-    pub fn restore(
-        #[arg(help = "Tracking entry ID to restore")]
-        entry_id: String,
-    ) -> u8 {
+    pub fn restore(#[arg(help = "Tracking entry ID to restore")] entry_id: String) -> u8 {
         use sea_orm::prelude::Uuid;
 
         let entry_id = match Uuid::parse_str(&entry_id) {
@@ -268,11 +268,16 @@ pub mod cli {
                 println!(
                     "✓ Tracking restored: [{}] {} → {}",
                     tracking.id,
-                    tracking.started_at
+                    tracking
+                        .started_at
                         .with_timezone(&chrono::Local)
                         .format("%Y-%m-%d %H:%M"),
-                    tracking.ended_at
-                        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                    tracking
+                        .ended_at
+                        .map(|dt| dt
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string())
                         .unwrap_or_else(|| "running".to_string()),
                 );
                 0
@@ -295,12 +300,10 @@ pub mod cli {
     ///   nyd-t tracksplit <id> "yesterday 14:00" --task <other-task-id>
     #[command(about = "Split a tracking entry into two parts at a given time point")]
     pub fn split(
-        #[arg(help = "Tracking entry ID to split")]
-        entry_id: String,
+        #[arg(help = "Tracking entry ID to split")] entry_id: String,
         #[arg(help = "Time point to split at (e.g. '10:30', 'yesterday 14:00')")]
         at: crate::datetime::LocalDateTime,
-        #[arg(long, help = "Assign the second part to a different task")]
-        task: Option<String>,
+        #[arg(long, help = "Assign the second part to a different task")] task: Option<String>,
     ) -> u8 {
         use sea_orm::prelude::Uuid;
 
@@ -329,14 +332,18 @@ pub mod cli {
             use not_yet_done_task_core::service::TrackingService;
             use shaku::HasComponent;
             let service: &dyn TrackingService = module.resolve_ref();
-            service.split_tracking(entry_id, at_ctx, second_task_id).await
+            service
+                .split_tracking(entry_id, at_ctx, second_task_id)
+                .await
         });
 
         match result {
             Ok(split) => {
                 use chrono::Local;
                 let fmt = |dt: chrono::DateTime<chrono::Utc>| {
-                    dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+                    dt.with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
                 };
                 let fmt_opt = |dt: Option<chrono::DateTime<chrono::Utc>>| {
                     dt.map(|d| fmt(d)).unwrap_or_else(|| "running".to_string())
@@ -380,26 +387,25 @@ pub mod cli {
     ///   nyd-t trackmove <id> "2026-03-20" --allow-overlap --allow-future
     #[command(about = "Move a tracking entry to a new start time (gravity/offset options)")]
     pub fn r#move(
-        #[arg(help = "Tracking entry ID to move")]
-        entry_id: String,
+        #[arg(help = "Tracking entry ID to move")] entry_id: String,
         #[arg(help = "New start time (e.g. 'yesterday 9am', '2026-03-22', 'today 14:00')")]
         start: crate::datetime::LocalDateTime,
-        #[arg(long, help = "Allow overlap with other tasks' trackings")]
-        allow_overlap: bool,
+        #[arg(long, help = "Allow overlap with other tasks' trackings")] allow_overlap: bool,
         #[arg(long, help = "Allow overlap with same task's trackings")]
         allow_same_task_overlap: bool,
-        #[arg(long, help = "Allow moving the tracking into the future")]
-        allow_future: bool,
+        #[arg(long, help = "Allow moving the tracking into the future")] allow_future: bool,
         #[arg(
             long,
             value_parser = ["start", "end"],
             help = "Snap to boundary and find next free slot ('start' = forward, 'end' = backward)"
         )]
         gravity: Option<String>,
-        #[arg(long, help = "Offset to apply after gravity (e.g. +1h, -30min, +2days)")]
+        #[arg(
+            long,
+            help = "Offset to apply after gravity (e.g. +1h, -30min, +2days)"
+        )]
         offset: Option<crate::offset::LocalOffset>,
-        #[arg(long, help = "Output result as JSON (for scripting)")]
-        json: bool,
+        #[arg(long, help = "Output result as JSON (for scripting)")] json: bool,
     ) -> u8 {
         use not_yet_done_task_core::entity::granularity::Granularity;
         use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
@@ -419,9 +425,9 @@ pub mod cli {
             _ => None,
         };
 
-        let granularity = gravity_dir.as_ref().map(|_| {
-            Granularity::from_original(&start.original)
-        });
+        let granularity = gravity_dir
+            .as_ref()
+            .map(|_| Granularity::from_original(&start.original));
 
         let options = MoveOptions {
             allow_overlap,
@@ -450,8 +456,10 @@ pub mod cli {
                     };
                     println!(
                         "{{\"old_id\":\"{}\",\"new_id\":\"{}\",\"new_started_at\":\"{}\",\"new_ended_at\":\"{}\"}}",
-                        moved.old_id, moved.new_id,
-                        fmt(moved.new_started_at), fmt(moved.new_ended_at),
+                        moved.old_id,
+                        moved.new_id,
+                        fmt(moved.new_started_at),
+                        fmt(moved.new_ended_at),
                     );
                 } else {
                     use chrono::Local;
@@ -460,20 +468,24 @@ pub mod cli {
                     println!(
                         "  Old:   [{}] {} → {}",
                         moved.old_id,
-                        moved.old_started_at
+                        moved
+                            .old_started_at
                             .with_timezone(&Local)
                             .format("%Y-%m-%d %H:%M"),
-                        moved.old_ended_at
+                        moved
+                            .old_ended_at
                             .with_timezone(&Local)
                             .format("%Y-%m-%d %H:%M"),
                     );
                     println!(
                         "  New:   [{}] {} → {}",
                         moved.new_id,
-                        moved.new_started_at
+                        moved
+                            .new_started_at
                             .with_timezone(&Local)
                             .format("%Y-%m-%d %H:%M"),
-                        moved.new_ended_at
+                        moved
+                            .new_ended_at
                             .with_timezone(&Local)
                             .format("%Y-%m-%d %H:%M"),
                     );
@@ -500,27 +512,28 @@ pub mod cli {
     ///   nyd-t trackexport --active-only --pretty
     #[command(about = "Export trackings as JSON (each joined with its task), for scripting")]
     pub fn export(
-        #[arg(help = "Tracking IDs to export (exports all if omitted)")]
-        ids: Vec<String>,
-        #[arg(long, help = "Start date/time filter (e.g. '2026-03-01', 'last monday')")]
+        #[arg(help = "Tracking IDs to export (exports all if omitted)")] ids: Vec<String>,
+        #[arg(
+            long,
+            help = "Start date/time filter (e.g. '2026-03-01', 'last monday')"
+        )]
         from: Option<crate::datetime::LocalDateTime>,
-        #[arg(long, help = "End date/time filter (e.g. '2026-03-22', 'today')")]
-        to: Option<crate::datetime::LocalDateTime>,
-        #[arg(long, help = "Filter by task ID")]
-        task_id: Option<String>,
-        #[arg(long, help = "Only export active (running) trackings")]
-        active_only: bool,
+        #[arg(long, help = "End date/time filter (e.g. '2026-03-22', 'today')")] to: Option<
+            crate::datetime::LocalDateTime,
+        >,
+        #[arg(long, help = "Filter by task ID")] task_id: Option<String>,
+        #[arg(long, help = "Only export active (running) trackings")] active_only: bool,
         #[arg(long, value_parser = ["asc", "desc"], help = "Sort by started_at (asc or desc)")]
         sort_by_started_at: Option<String>,
-        #[arg(long, help = "Pretty-print the JSON output")]
-        pretty: bool,
+        #[arg(long, help = "Pretty-print the JSON output")] pretty: bool,
     ) -> u8 {
         use not_yet_done_task_core::service::{ExportOptions, SortDirection};
         use sea_orm::prelude::Uuid;
         use serde::Serialize;
 
         // Parse IDs.
-        let parsed_ids: Vec<Uuid> = match ids.iter()
+        let parsed_ids: Vec<Uuid> = match ids
+            .iter()
             .map(|s| Uuid::parse_str(s).map_err(|_| s.clone()))
             .collect::<Result<Vec<_>, _>>()
         {
@@ -602,8 +615,9 @@ pub mod cli {
                     dt.to_rfc3339_opts(SecondsFormat::Nanos, true)
                 };
 
-                let export: Vec<ExportEntry> = entries.into_iter().map(|e| {
-                    ExportEntry {
+                let export: Vec<ExportEntry> = entries
+                    .into_iter()
+                    .map(|e| ExportEntry {
                         tracking: TrackingJson {
                             id: e.tracking.id.to_string(),
                             task_id: e.tracking.task_id.to_string(),
@@ -625,8 +639,8 @@ pub mod cli {
                             updated_at: fmt(e.task.updated_at),
                             last_tracked_at: e.task.last_tracked_at.map(fmt),
                         },
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 let json_str = if pretty {
                     serde_json::to_string_pretty(&export)
@@ -635,8 +649,14 @@ pub mod cli {
                 };
 
                 match json_str {
-                    Ok(s) => { println!("{s}"); 0 }
-                    Err(e) => { eprintln!("Error serializing JSON: {e}"); 1 }
+                    Ok(s) => {
+                        println!("{s}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("Error serializing JSON: {e}");
+                        1
+                    }
                 }
             }
             Err(e) => {

@@ -61,7 +61,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -74,10 +74,9 @@ impl JiraClient {
             .transitions
             .into_iter()
             .map(|t| {
-                let (to_status_id, to_status) = t
-                    .to
-                    .map(|s| (s.id.unwrap_or_default(), s.name.unwrap_or_default()))
-                    .unwrap_or_default();
+                let (to_status_id, to_status) =
+                    t.to.map(|s| (s.id.unwrap_or_default(), s.name.unwrap_or_default()))
+                        .unwrap_or_default();
                 let required_fields: Vec<String> = t
                     .fields
                     .unwrap_or_default()
@@ -102,10 +101,7 @@ impl JiraClient {
 
     /// Execute a transition on an issue.
     pub async fn do_transition(&self, key: &str, transition_id: &str) -> Result<(), String> {
-        let url = format!(
-            "{}/rest/api/2/issue/{}/transitions",
-            self.base_url, key
-        );
+        let url = format!("{}/rest/api/2/issue/{}/transitions", self.base_url, key);
 
         let body = serde_json::json!({
             "transition": { "id": transition_id }
@@ -119,7 +115,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        http_log::check_status("POST", &url, resp).await?;
+        self.check_status("POST", &url, resp).await?;
 
         Ok(())
     }

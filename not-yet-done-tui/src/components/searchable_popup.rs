@@ -2,21 +2,21 @@
 //!
 //! Used for saved filter selection, script picker, etc.
 
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
-use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
-use std::sync::Arc;
+use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction};
 use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
 use crate::ui::theme::Theme;
-use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction};
+use std::sync::Arc;
 
 /// A single item in the searchable list.
 #[derive(Default)]
@@ -86,18 +86,16 @@ impl SearchablePopup {
     /// Attach the popup-intrinsic keybindings + icon map. After this call,
     /// `handle_key` will route `Next/Prev/Backspace/Cursor*` through them
     /// and the hint bar auto-prepends the navigation hints.
-    pub fn with_popup_kb(
-        mut self,
-        kb: KeyBindingSection<PopupAction>,
-        icons: KeyIconMap,
-    ) -> Self {
+    pub fn with_popup_kb(mut self, kb: KeyBindingSection<PopupAction>, icons: KeyIconMap) -> Self {
         self.popup_kb = Some(kb);
         self.key_icons = Some(icons);
         self
     }
 
     pub fn insert_char(&mut self, c: char) {
-        let byte_pos = self.query.char_indices()
+        let byte_pos = self
+            .query
+            .char_indices()
             .nth(self.cursor)
             .map(|(i, _)| i)
             .unwrap_or(self.query.len());
@@ -107,8 +105,12 @@ impl SearchablePopup {
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 || self.query.is_empty() { return; }
-        let byte_pos = self.query.char_indices()
+        if self.cursor == 0 || self.query.is_empty() {
+            return;
+        }
+        let byte_pos = self
+            .query
+            .char_indices()
             .nth(self.cursor - 1)
             .map(|(i, _)| i)
             .unwrap_or(0);
@@ -118,12 +120,16 @@ impl SearchablePopup {
     }
 
     pub fn cursor_left(&mut self) {
-        if self.cursor > 0 { self.cursor -= 1; }
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
     }
 
     pub fn cursor_right(&mut self) {
         let max = self.query.chars().count();
-        if self.cursor < max { self.cursor += 1; }
+        if self.cursor < max {
+            self.cursor += 1;
+        }
     }
 
     pub fn select_next(&mut self) {
@@ -191,15 +197,24 @@ impl SearchablePopup {
                 self.select_prev();
                 return PopupKeyOutcome::Handled;
             }
-            if kb.get(&PopupAction::Backspace).is_some_and(|b| b.matches(key)) {
+            if kb
+                .get(&PopupAction::Backspace)
+                .is_some_and(|b| b.matches(key))
+            {
                 self.backspace();
                 return PopupKeyOutcome::Handled;
             }
-            if kb.get(&PopupAction::CursorLeft).is_some_and(|b| b.matches(key)) {
+            if kb
+                .get(&PopupAction::CursorLeft)
+                .is_some_and(|b| b.matches(key))
+            {
                 self.cursor_left();
                 return PopupKeyOutcome::Handled;
             }
-            if kb.get(&PopupAction::CursorRight).is_some_and(|b| b.matches(key)) {
+            if kb
+                .get(&PopupAction::CursorRight)
+                .is_some_and(|b| b.matches(key))
+            {
                 self.cursor_right();
                 return PopupKeyOutcome::Handled;
             }
@@ -208,11 +223,26 @@ impl SearchablePopup {
             // with_popup_kb (and by all unit tests that exercise the
             // popup without a kb).
             match key {
-                "down" => { self.select_next(); return PopupKeyOutcome::Handled; }
-                "up" => { self.select_prev(); return PopupKeyOutcome::Handled; }
-                "backspace" => { self.backspace(); return PopupKeyOutcome::Handled; }
-                "left" => { self.cursor_left(); return PopupKeyOutcome::Handled; }
-                "right" => { self.cursor_right(); return PopupKeyOutcome::Handled; }
+                "down" => {
+                    self.select_next();
+                    return PopupKeyOutcome::Handled;
+                }
+                "up" => {
+                    self.select_prev();
+                    return PopupKeyOutcome::Handled;
+                }
+                "backspace" => {
+                    self.backspace();
+                    return PopupKeyOutcome::Handled;
+                }
+                "left" => {
+                    self.cursor_left();
+                    return PopupKeyOutcome::Handled;
+                }
+                "right" => {
+                    self.cursor_right();
+                    return PopupKeyOutcome::Handled;
+                }
                 _ => {}
             }
         }
@@ -250,7 +280,10 @@ impl SearchablePopup {
 
     fn apply_filter(&mut self) {
         let q = self.query.to_lowercase();
-        self.filtered = self.items.iter().enumerate()
+        self.filtered = self
+            .items
+            .iter()
+            .enumerate()
             .filter(|(_, item)| q.is_empty() || item.label.to_lowercase().contains(&q))
             .map(|(i, _)| i)
             .collect();
@@ -272,7 +305,9 @@ impl Component for SearchablePopup {
             .map(|(k, d)| (k.as_str(), d.as_str()))
             .collect();
 
-        let popup_w = (area.width * 50 / 100).max(30).min(area.width.saturating_sub(4));
+        let popup_w = (area.width * 50 / 100)
+            .max(30)
+            .min(area.width.saturating_sub(4));
         let hints_h = if all_hints.is_empty() {
             0u16
         } else {
@@ -284,7 +319,9 @@ impl Component for SearchablePopup {
         // Shared popup chrome — same frame + hint bar as the column
         // config popup, so all pickers look alike.
         let inner = render_popup_frame(frame, area, t, &self.title, popup_w, popup_h);
-        if inner.height == 0 || inner.width == 0 { return; }
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
 
         let input_y = inner.y;
         let input_bg = t.surface();
@@ -304,7 +341,9 @@ impl Component for SearchablePopup {
             let prefix = " 󰈲 ";
             let mut px = inner.left();
             for ch in prefix.chars() {
-                if px >= inner.right() { break; }
+                if px >= inner.right() {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut(Position::new(px, input_y)) {
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(t.accent()).bg(input_bg));
@@ -315,10 +354,16 @@ impl Component for SearchablePopup {
             let text_start_x = px;
             let max_w = inner.right().saturating_sub(text_start_x) as usize;
             let chars: Vec<char> = self.query.chars().collect();
-            let view_start = if self.cursor >= max_w { self.cursor + 1 - max_w } else { 0 };
+            let view_start = if self.cursor >= max_w {
+                self.cursor + 1 - max_w
+            } else {
+                0
+            };
 
             for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
-                if screen_idx >= max_w { break; }
+                if screen_idx >= max_w {
+                    break;
+                }
                 let cx = text_start_x + screen_idx as u16;
                 let ch = chars[char_idx];
                 let style = Style::default().fg(t.text_high()).bg(input_bg);
@@ -331,7 +376,11 @@ impl Component for SearchablePopup {
             cursor_pos = if !chars.is_empty() {
                 let screen_pos = self.cursor.saturating_sub(view_start);
                 let cx = text_start_x + screen_pos as u16;
-                if cx < inner.right() { Some(Position::new(cx, input_y)) } else { None }
+                if cx < inner.right() {
+                    Some(Position::new(cx, input_y))
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -344,7 +393,9 @@ impl Component for SearchablePopup {
             let any_marked = self.items.iter().any(|i| i.marked);
 
             for (i, &item_idx) in self.filtered.iter().enumerate() {
-                if i as u16 >= list_h { break; }
+                if i as u16 >= list_h {
+                    break;
+                }
                 let item = &self.items[item_idx];
                 let is_selected = i == self.selected;
                 let bg = if is_selected { t.surface_2() } else { t.bg() };
@@ -357,10 +408,7 @@ impl Component for SearchablePopup {
                     }
                 }
 
-                let mut spans: Vec<Span> = vec![Span::styled(
-                    " ",
-                    Style::default().bg(bg),
-                )];
+                let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default().bg(bg))];
                 if any_marked {
                     let (glyph, style) = if item.marked {
                         ("★ ", Style::default().fg(t.accent()).bg(bg))
@@ -399,10 +447,16 @@ impl Component for SearchablePopup {
         }
     }
 
-    fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> { None }
+    fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> {
+        None
+    }
     fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
-    fn state(&self) -> State { State::Single(StateValue::String(self.query.clone())) }
-    fn perform(&mut self, _cmd: Cmd) -> CmdResult { CmdResult::NoChange }
+    fn state(&self) -> State {
+        State::Single(StateValue::String(self.query.clone()))
+    }
+    fn perform(&mut self, _cmd: Cmd) -> CmdResult {
+        CmdResult::NoChange
+    }
 }
 
 #[cfg(test)]
@@ -411,9 +465,21 @@ mod tests {
 
     fn items() -> Vec<PopupItem> {
         vec![
-            PopupItem { label: "all tasks".into(), value: "{}".into(), ..Default::default() },
-            PopupItem { label: "high priority".into(), value: "{}".into(), ..Default::default() },
-            PopupItem { label: "done tasks".into(), value: "{}".into(), ..Default::default() },
+            PopupItem {
+                label: "all tasks".into(),
+                value: "{}".into(),
+                ..Default::default()
+            },
+            PopupItem {
+                label: "high priority".into(),
+                value: "{}".into(),
+                ..Default::default()
+            },
+            PopupItem {
+                label: "done tasks".into(),
+                value: "{}".into(),
+                ..Default::default()
+            },
         ]
     }
 
@@ -514,9 +580,7 @@ mod tests {
         ];
         let mut popup = SearchablePopup::new(theme(), "Test", items);
         let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
-        terminal
-            .draw(|f| popup.view(f, f.area()))
-            .unwrap();
+        terminal.draw(|f| popup.view(f, f.area())).unwrap();
         let buf = terminal.backend().buffer().clone();
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("★ starred"), "marker missing: {text}");

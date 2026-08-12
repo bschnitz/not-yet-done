@@ -1,0 +1,548 @@
+# Example SQLite tab (view spec).
+#
+# The `sqlite` adapter browses local database files as a tree:
+#   database (one per file) → tables → table → rows.
+# One level flatter than the Postgres tab, because SQLite has no schema
+# namespace. Which files appear is decided by the `sources:` globs in the
+# referenced adapter config (see sqlite-adapter.yaml) — there is no server
+# catalogue to discover.
+#
+# The row level is a wide, flat table, so the same tools that make the
+# Postgres tab usable apply here: the coupled record-detail split (`o`)
+# and the window/split operations (`w` leader).
+#
+# Tables also own SQL scripts (`node_scripts:` below): `Q` opens the query
+# editor for the selected table, `q` its scripts menu. Scripts are stored
+# per table under the adapter's data directory and run against that table's
+# database file. Multi-statement scripts work; only a single `SELECT` gets
+# paginated (the wrapper cannot page a script whose prelude has to re-run).
+#
+# `Views` is a sibling branch of `Tables` and behaves the same way — a view
+# is queryable and has rows — plus one thing a table has not: its whole
+# content is the `CREATE VIEW` statement, so `E` opens that statement in the
+# editor and saving replaces the view. Writing needs `read_only: false` in
+# the adapter config.
+#
+# Beside those, each database carries a `Scripts` branch: free-standing
+# `.sql` files in nestable folders, created (`a`/`A`) and run (`X` or Enter)
+# from the tree. Unlike the per-table scripts above, those belong to the database
+# file as a whole — a join across several tables has no single owner.
+#
+# Both of those are SQL run by the adapter. The third kind is not SQL at
+# all: `x` on a row level opens the ordinary **view scripts** (`type:
+# script`), the same mechanism every other tab uses — an executable that
+# receives the displayed rows as JSON on stdin and may do whatever it likes
+# with them (export, plot, push somewhere). Those live outside the database
+# under `scripts/<tab>/<node_type…>/`.
+
+tab:
+  name: SQLite
+  order: 6
+  icon: "🗃"
+
+adapter:
+  type: sqlite
+  config: sqlite-adapter.yaml
+  # `manual_connect` defaults to true (nothing connects until you press the
+  # reload key). A local SQLite file is cheap to open and never logs in, so
+  # this tab opts back into loading at startup.
+  manual_connect: false
+
+views:
+  # ── Tree view: database → tables → rows ────────────────────────────────
+  - name: databases
+    key: d
+    node_type: "sqlite:database"
+    default: true
+    # Enable the `w` window-leader chords (wv/ws split, wq close, wh/wl
+    # focus parent/child). Needed to move focus into the coupled row
+    # split below; opt-in because `w` stays an ordinary key without it.
+    window_ops: true
+    tree_label: name
+    # No ├──/└── guide lines in the drill — the expand markers (▶/▼) stay.
+    tree_lines: false
+
+    columns:
+      - key: name
+        label: Name
+        style: accent
+        sizing: max
+      - key: size
+        label: Size
+        sizing: max
+      - key: path
+        label: Path
+        sizing: "flex(1)"
+
+    actions:
+      # Re-matches the `sources:` globs, so a database file created since
+      # the tab was opened appears here.
+      - name: refresh
+        key: r
+        type: reload
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name, path]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [name, path]
+      # View scripts for a whole database file. The default scope (`node`)
+      # hands over only the selected database as {"node": {id, label,
+      # fields}}; `fields.path` is what a script about the file itself needs
+      # (dump, vacuum, backup, import). Its directory is
+      # `scripts/sqlite/sqlite_database/` — one segment, because this is the
+      # root level; the row scripts further down add a second segment.
+      - name: script
+        key: x
+        type: script
+        # Cascade down every tree level (Tables, Table, Views, View, and the
+        # Scripts branch) instead of repeating the block at each depth. A
+        # level's `actions:` apply only to that level, and only levels with
+        # `tree_label` are tree levels at all — without `inherit` the key
+        # would work on the database row and nowhere below it. All levels
+        # share one directory, because the scripts path comes from the
+        # *pane's* view path, not from the cursor's depth in the tree; a
+        # script tells its targets apart via `node.node_type`.
+        inherit: true
+
+    children:
+      # A "Tables" group node the user expands to see the individual
+      # tables. The adapter always returns this single virtual entry
+      # (node_type sqlite:tables, plural), so the branch is visible before
+      # anything has loaded. Views are the `Views` branch below, not here:
+      # they are their own node type because only they can be edited.
+      - name: Tables
+        node_type: "sqlite:tables"
+        tree_label: name
+        columns:
+          - key: name
+            label: Name
+            style: accent
+            sizing: max
+        children:
+          - name: Table
+            node_type: "sqlite:table"
+            tree_label: name
+            # These rows own per-table SQL scripts: `Q` opens the query
+            # editor for the selected table, `q` its scripts menu. The keys
+            # stay live one level deeper (inside `Rows`) and then still
+            # address this table. Nothing about SQLite is hardcoded in the
+            # host — this flag is what turns the keys on.
+            node_scripts: true
+            shortcuts:
+              Q: edit_sql
+            columns:
+              - key: name
+                label: Name
+                style: accent
+                sizing: max
+              # Empty unless the database has been ANALYZEd — SQLite keeps
+              # no live row statistics, and a COUNT(*) per table on every
+              # listing would be far too expensive to be worth it.
+              - key: estimated_rows
+                label: "Rows (est.)"
+                sizing: max
+            children:
+              # Flat, wide row list — the record-detail target. `o` opens
+              # a coupled follower to the right transposing the selected
+              # row into a field/value table (needs window_ops to focus
+              # into it).
+              - name: Rows
+                node_type: "sqlite:row"
+                shortcuts:
+                  Q: "parent:edit_sql"
+                split:
+                  direction: right
+                  ratio: 0.8
+                  coupled: true
+                pagination:
+                  mode: server
+                  page_size: 100
+                column_cursor: true
+                record_detail: true
+                # View scripts, same mechanism as on any other tab: `x`
+                # opens the script menu of this level. `scope: table` hands
+                # the script the whole displayed page plus cursor context —
+                #   {rows:[{id,label,fields}…], query,
+                #    selected_index, selected_field}
+                # — where selected_field follows the column cursor. The same
+                # action serves the coupled record-detail split, in which
+                # each row is a field/value pair.
+                #
+                # The script directory is derived from the level's node
+                # types (`scripts/<tab>/<root>/<level>/`), so it is
+                # `sqlite/sqlite_database/sqlite_row/` — shared with the
+                # Views branch below, because rows there are `sqlite:row`
+                # too. One set of row scripts for the whole tab.
+                actions:
+                  - name: script
+                    key: x
+                    type: script
+                    scope: table
+                  # The row editor. Like the view definition above it has to
+                  # be an `actions:` entry with `type: edit` — a `shortcuts:`
+                  # line dispatches through `invoke_action`, which cannot
+                  # open an editor.
+                  #
+                  # The buffer is the row as YAML, one `column: value` per
+                  # cell; saving builds an UPDATE from the columns that
+                  # actually changed and runs nothing else. It needs
+                  # `read_only: false` in sqlite-adapter.yaml.
+                  #
+                  # The row is addressed by the key values as they were when
+                  # the editor opened — its primary key, or SQLite's implicit
+                  # rowid when the table has none — not by the offset in the
+                  # tree, so a page that shifted underneath cannot redirect
+                  # the write. If the statement is refused (a constraint, a
+                  # type, a trigger), the editor reopens with the reason
+                  # *and* the built UPDATE on top; the text is never lost.
+                  # BLOB cells are shown as comments and refuse to be
+                  # written: what the table renders is a description of the
+                  # bytes, not the bytes.
+                  - name: row
+                    key: e
+                    type: edit
+                    id: edit_row
+                keybindings:
+                  back: null
+                # `ctrl+n`/`ctrl+p`: step the parent table cursor and
+                # re-open, keeping the coupled row pane focused — walk
+                # rows without leaving the follower.
+                action_chains:
+                  "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+                  "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+      # Sibling branch of Tables: the database's views. Same shape as the
+      # Table level (rows, per-node scripts, coupled record split) — a view
+      # is queryable exactly like a table — with one addition below.
+      - name: Views
+        node_type: "sqlite:views"
+        tree_label: name
+        columns:
+          - key: name
+            label: Name
+            style: accent
+            sizing: max
+        children:
+          - name: View
+            node_type: "sqlite:view"
+            tree_label: name
+            node_scripts: true
+            shortcuts:
+              Q: edit_sql
+            # The definition editor. It has to be an `actions:` entry with
+            # `type: edit`, NOT a `shortcuts:` line: a shortcut dispatches
+            # through `invoke_action`, which cannot open an editor, and the
+            # host answers such a binding with an error. `id:` names the
+            # adapter action; without it the entry would mean `edit_full`.
+            #
+            # Saving replaces the view (drop + create in one transaction),
+            # so it needs `read_only: false` in sqlite-adapter.yaml. A
+            # rejected definition — a renamed view, a second statement, a
+            # misspelled table — comes back in the editor with the reason
+            # on top instead of being lost.
+            actions:
+              - name: definition
+                key: E
+                type: edit
+                id: edit_view
+            columns:
+              - key: name
+                label: Name
+                style: accent
+                sizing: max
+            children:
+              - name: Rows
+                node_type: "sqlite:row"
+                shortcuts:
+                  Q: "parent:edit_sql"
+                split:
+                  direction: right
+                  ratio: 0.8
+                  coupled: true
+                pagination:
+                  mode: server
+                  page_size: 100
+                column_cursor: true
+                record_detail: true
+                # Same `x` as under Table, and literally the same scripts:
+                # both levels are `sqlite:row`, so both read the directory
+                # `sqlite/sqlite_database/sqlite_row/`.
+                #
+                # No `e` here on purpose: a view has no key of its own to
+                # address a single row by, so the adapter refuses the editor
+                # ("… is a view — edit the row in the underlying table
+                # instead"). Binding it would only put a key in the action
+                # bar that always ends in that message.
+                actions:
+                  - name: script
+                    key: x
+                    type: script
+                    scope: table
+                keybindings:
+                  back: null
+                action_chains:
+                  "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+                  "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+      # Third tree branch under a database (parallel to Tables and Views): a
+      # "Scripts" group node for stored `.sql` files under the adapter's
+      # db-scripts directory. Always visible even when empty, so there's a
+      # stable cursor target for `add-script` (a) / `add-dir` (A). Same
+      # branch the Postgres tab has — it comes from the shared sql-core
+      # crate, only the node-type prefix differs.
+      - name: Scripts
+        node_type: "sqlite:db_scripts"
+        tree_label: name
+        shortcuts:
+          a: add-script
+          A: add-dir
+        columns:
+          - key: name
+            label: Name
+            style: accent
+            sizing: max
+        children:
+          # Recursive folder branch. `recursive: true` makes this ChildDef
+          # an implicit member of its own `children:`, so folders can nest
+          # arbitrarily deep. Group/dir nodes list dirs first, then scripts.
+          - name: DB Script Dir
+            node_type: "sqlite:db_script_dir"
+            tree_label: name
+            recursive: true
+            shortcuts:
+              a: add-script
+              A: add-dir
+              r: rename
+              M: move       # adapter-executed move (prompts for target folder)
+              d: delete-dir
+            columns:
+              - key: name
+                label: Name
+                style: accent
+                sizing: max
+            children:
+              - name: DB Script
+                node_type: "sqlite:db_script"
+                tree_label: script
+                enter_action: execute
+                # `edit` (e) opens the tempfile *inside* the real db-scripts
+                # directory (with a `.nyd_tmp_` prefix) so a SQL language
+                # server discovers sibling config by walking up from the
+                # buffer path — instead of editing in $TMPDIR with no context.
+                editor_in_place: true
+                shortcuts:
+                  # `X`, not `x`: the row levels bind `x` to the view
+                  # scripts (see `type: script` above), and that binding
+                  # wins tab-wide. Enter runs the script as well
+                  # (`enter_action`), so the shifted key is the rare path.
+                  X: execute
+                  e: edit
+                  r: rename
+                  M: move
+                  d: delete
+                columns:
+                  - key: script
+                    label: Script
+                    style: accent
+                    sizing: max
+                children:
+                  - name: DB Script Result
+                    node_type: "sqlite:db_script_result"
+                    split:
+                      direction: right
+                      ratio: 0.8
+                      coupled: true
+                    # `server`, not `cursor` as in the Postgres tab: SQLite
+                    # has no server-side cursor, and the adapter rejects the
+                    # intent rather than pretending. Paging re-runs the
+                    # statement with a higher OFFSET, which costs a local
+                    # page scan instead of a round trip.
+                    pagination:
+                      mode: server
+                      page_size: 100
+                    column_cursor: true
+                    record_detail: true
+                    keybindings:
+                      back: null
+          # Flat-root scripts (files directly under the db-scripts dir,
+          # not in a folder), fanned out in parallel with DB Script Dir.
+          - name: DB Script
+            node_type: "sqlite:db_script"
+            tree_label: script
+            enter_action: execute
+            editor_in_place: true
+            shortcuts:
+              X: execute
+              e: edit
+              r: rename
+              M: move
+              d: delete
+            columns:
+              - key: script
+                label: Script
+                style: accent
+                sizing: max
+            children:
+              # Result pane for `x` (execute). Synthetic node_type — the
+              # adapter never lists nodes of this type; the entry only
+              # anchors the split + pagination config for the auto-opened
+              # result pane.
+              - name: DB Script Result
+                node_type: "sqlite:db_script_result"
+                split:
+                  direction: right
+                  ratio: 0.8
+                  coupled: true
+                pagination:
+                  mode: server
+                  page_size: 100
+                column_cursor: true
+                record_detail: true
+                keybindings:
+                  back: null
+
+  # ── Flat view: every table across every configured file ────────────────
+  - name: tables
+    key: t
+    node_type: "sqlite:table"
+    window_ops: true
+    # Flat table list — same per-table script ownership as the `Table`
+    # level inside the `databases` tree. See `node_scripts:` there.
+    node_scripts: true
+    # Share the `databases` view's script source, so the `x` scripts on the
+    # row level below are the *same files* as in the tree. Without this the
+    # directory would be derived from this view's own root node type
+    # (`sqlite/sqlite_table/sqlite_row/`) and you would maintain two copies
+    # of every row script. Only the root segment is swapped.
+    script_source: databases
+    shortcuts:
+      Q: edit_sql
+
+    columns:
+      - key: name
+        label: Name
+        style: accent
+        sizing: max
+      - key: database
+        label: Database
+        sizing: max
+      - key: estimated_rows
+        label: "Rows (est.)"
+        sizing: max
+
+    actions:
+      - name: refresh
+        key: r
+        type: reload
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name, database]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [name, database]
+
+    children:
+      - name: Rows
+        node_type: "sqlite:row"
+        shortcuts:
+          Q: "parent:edit_sql"
+        split:
+          direction: right
+          ratio: 0.8
+          coupled: true
+        pagination:
+          mode: server
+          page_size: 100
+        column_cursor: true
+        record_detail: true
+        actions:
+          - name: script
+            key: x
+            type: script
+            scope: table
+          # Same row editor as in the tree — see the `Rows` level under
+          # `Table` there for what saving does.
+          - name: row
+            key: e
+            type: edit
+            id: edit_row
+        keybindings:
+          back: null
+        action_chains:
+          "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+          "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+  # ── Flat view: every view across every configured file ─────────────────
+  # The counterpart to `tables`, and the quickest way to reach a definition:
+  # `E` edits the selected view without drilling through its database.
+  - name: views
+    key: v
+    node_type: "sqlite:view"
+    window_ops: true
+    node_scripts: true
+    # Same shared script source as the flat `tables` view — see there.
+    script_source: databases
+    shortcuts:
+      Q: edit_sql
+    actions:
+      - name: definition
+        key: E
+        type: edit
+        id: edit_view
+      - name: refresh
+        key: r
+        type: reload
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name, database]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [name, database]
+
+    columns:
+      - key: name
+        label: Name
+        style: accent
+        sizing: max
+      - key: database
+        label: Database
+        sizing: max
+
+    children:
+      - name: Rows
+        node_type: "sqlite:row"
+        shortcuts:
+          Q: "parent:edit_sql"
+        split:
+          direction: right
+          ratio: 0.8
+          coupled: true
+        pagination:
+          mode: server
+          page_size: 100
+        column_cursor: true
+        record_detail: true
+        # No `e`: these are a view's rows — see the tree's `Views` branch.
+        actions:
+          - name: script
+            key: x
+            type: script
+            scope: table
+        keybindings:
+          back: null
+        action_chains:
+          "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+          "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]

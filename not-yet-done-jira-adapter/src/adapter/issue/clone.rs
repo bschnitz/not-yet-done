@@ -14,7 +14,7 @@ use crate::client::{CreateIssueFields, JiraIssueDetail};
 
 use super::JiraIssueNode;
 use super::markers::{BODY_MARKER, CACHE_MARKER, EDITABLE_MARKER};
-use super::slugs::{build_slug_tables, resolve_slugs_inplace};
+use super::slugs::{build_slug_tables, canonicalize_labels_via_jira, resolve_slugs_inplace};
 use super::template::{FieldError, Parsed3b};
 
 fn clone_fields() -> Vec<String> {
@@ -40,6 +40,7 @@ impl JiraIssueNode {
             // No version semantics — create has no optimistic-lock token.
             version: String::new(),
             suffix: ".jira".into(),
+            file_path: None,
         })
     }
 
@@ -57,6 +58,7 @@ impl JiraIssueNode {
         };
 
         let tables = build_slug_tables(&self.cache);
+        canonicalize_labels_via_jira(&self.client, &self.cache, &tables, &mut parsed).await;
         let mut errors = self.validate_3b(&parsed, &editable_fields);
         resolve_slugs_inplace(&mut parsed, &tables, &mut errors);
         if !errors.is_empty() {
@@ -122,7 +124,10 @@ impl JiraIssueNode {
         out.push_str(EDITABLE_MARKER);
         out.push('\n');
 
-        out.push_str(&format!("project: {}\n", project_key_from_issue_key(&detail.key)));
+        out.push_str(&format!(
+            "project: {}\n",
+            project_key_from_issue_key(&detail.key)
+        ));
         out.push_str(&format!("type: {}\n", detail.issue_type));
         out.push_str(&format!("priority: {}\n", detail.priority));
 
@@ -140,16 +145,8 @@ impl JiraIssueNode {
 /// `resolve_slugs_inplace` has translated `ll-…`/`uu-…` slugs back to
 /// original Jira names.
 fn extract_clone_inputs(parsed: &Parsed3b) -> (String, String, Vec<String>) {
-    let summary = parsed
-        .editable
-        .get("summary")
-        .cloned()
-        .unwrap_or_default();
-    let assignee_key = parsed
-        .editable
-        .get("assignee")
-        .cloned()
-        .unwrap_or_default();
+    let summary = parsed.editable.get("summary").cloned().unwrap_or_default();
+    let assignee_key = parsed.editable.get("assignee").cloned().unwrap_or_default();
     let labels = parsed
         .editable
         .get("labels")

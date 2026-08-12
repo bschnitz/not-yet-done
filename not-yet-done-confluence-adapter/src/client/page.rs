@@ -399,13 +399,13 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()
             .await
             .map_err(|e| format!("Failed to read response: {e}"))?;
-        let wire: PageDetailWire = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse page detail: {e}"))?;
+        let wire: PageDetailWire =
+            serde_json::from_str(&body).map_err(|e| format!("Failed to parse page detail: {e}"))?;
         Ok(PageDetail {
             id: wire.id,
             title: wire.title,
@@ -539,7 +539,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        let resp = http_log::check_status("POST", &url, resp).await?;
+        let resp = self.check_status("POST", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -598,7 +598,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", url, e))?;
-        let resp = http_log::check_status("GET", url, resp).await?;
+        let resp = self.check_status("GET", url, resp).await?;
         let body = resp
             .text()
             .await

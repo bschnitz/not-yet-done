@@ -4,18 +4,17 @@
 //! scroll state, row-to-UUID mapping, pending focus restoration, and fuzzy
 //! filter state. Used for both task views and tracking views.
 
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use uuid::Uuid;
 
 use tuirealm::command::{Cmd, CmdResult, Direction, Position};
-use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
 use not_yet_done_ratatui::{
-    Table as TableWidget, TableWidgetRow,
-    TableStyle, ColumnStyles, StyleMap,
+    ColumnStyles, StyleMap, Table as TableWidget, TableStyle, TableWidgetRow,
 };
 
 pub struct DataTable {
@@ -122,8 +121,7 @@ impl DataTable {
         style_map: StyleMap,
         separator: &str,
     ) {
-        let restore_id = self.pending_focus_id.take()
-            .or_else(|| self.selected_id());
+        let restore_id = self.pending_focus_id.take().or_else(|| self.selected_id());
         let prev_idx = self.table.selected_row();
 
         self.table.set_rows(rows);
@@ -169,6 +167,14 @@ impl DataTable {
     /// Set selected row index programmatically.
     pub fn set_selected(&mut self, row: usize) {
         self.table.set_selected(row);
+    }
+
+    /// Set the selected row *and* pull it to the top edge of the viewport,
+    /// instead of scrolling it minimally into view. For jumps whose point is
+    /// what comes **after** the target — e.g. landing on the first unread
+    /// chat message with the rest of the unread run below it.
+    pub fn set_selected_at_top(&mut self, row: usize) {
+        self.table.set_selected_at_top(row);
     }
 
     /// Currently selected column. `None` = column-cursor feature off.
@@ -224,6 +230,16 @@ impl DataTable {
         self.table.set_smooth_scroll(enabled);
     }
 
+    /// Install the painter that draws the inline pictures this table has
+    /// reserved lines for (see `TableWidgetLine::image`). Set once at pane
+    /// construction; without it the reserved lines simply stay blank.
+    pub fn set_image_painter(
+        &mut self,
+        painter: std::rc::Rc<std::cell::RefCell<dyn not_yet_done_ratatui::ImagePainter>>,
+    ) {
+        self.table.set_image_painter(painter);
+    }
+
     /// Scroll by half a viewport (`down` = towards the end). The step unit
     /// (physical lines vs whole rows) follows the smooth-scroll mode.
     pub fn scroll_half_page(&mut self, down: bool) {
@@ -238,8 +254,10 @@ impl DataTable {
     /// Handle a navigation command. Returns true if handled.
     pub fn handle_nav(&mut self, cmd: Cmd) -> bool {
         match cmd {
-            Cmd::Move(Direction::Up) | Cmd::Move(Direction::Down)
-            | Cmd::GoTo(Position::Begin) | Cmd::GoTo(Position::End) => {
+            Cmd::Move(Direction::Up)
+            | Cmd::Move(Direction::Down)
+            | Cmd::GoTo(Position::Begin)
+            | Cmd::GoTo(Position::End) => {
                 self.table.perform(cmd);
                 true
             }
@@ -260,8 +278,11 @@ impl DataTable {
     }
 
     pub fn fuzzy_insert(&mut self, c: char) {
-        let byte_pos = self.fuzzy_query.char_indices()
-            .nth(self.fuzzy_cursor).map(|(i, _)| i)
+        let byte_pos = self
+            .fuzzy_query
+            .char_indices()
+            .nth(self.fuzzy_cursor)
+            .map(|(i, _)| i)
             .unwrap_or(self.fuzzy_query.len());
         self.fuzzy_query.insert(byte_pos, c);
         self.fuzzy_cursor += 1;
@@ -269,9 +290,14 @@ impl DataTable {
     }
 
     pub fn fuzzy_backspace(&mut self) {
-        if self.fuzzy_cursor == 0 || self.fuzzy_query.is_empty() { return; }
-        let byte_pos = self.fuzzy_query.char_indices()
-            .nth(self.fuzzy_cursor - 1).map(|(i, _)| i)
+        if self.fuzzy_cursor == 0 || self.fuzzy_query.is_empty() {
+            return;
+        }
+        let byte_pos = self
+            .fuzzy_query
+            .char_indices()
+            .nth(self.fuzzy_cursor - 1)
+            .map(|(i, _)| i)
             .unwrap_or(0);
         self.fuzzy_query.remove(byte_pos);
         self.fuzzy_cursor -= 1;
@@ -279,12 +305,16 @@ impl DataTable {
     }
 
     pub fn fuzzy_cursor_left(&mut self) {
-        if self.fuzzy_cursor > 0 { self.fuzzy_cursor -= 1; }
+        if self.fuzzy_cursor > 0 {
+            self.fuzzy_cursor -= 1;
+        }
     }
 
     pub fn fuzzy_cursor_right(&mut self) {
         let max = self.fuzzy_query.chars().count();
-        if self.fuzzy_cursor < max { self.fuzzy_cursor += 1; }
+        if self.fuzzy_cursor < max {
+            self.fuzzy_cursor += 1;
+        }
     }
 }
 

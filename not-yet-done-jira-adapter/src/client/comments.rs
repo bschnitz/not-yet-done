@@ -45,7 +45,12 @@ struct RawComment {
 fn raw_comment_to_public(raw: RawComment) -> JiraComment {
     let (author, author_key) = raw
         .author
-        .map(|a| (a.display_name.unwrap_or_default(), a.name.unwrap_or_default()))
+        .map(|a| {
+            (
+                a.display_name.unwrap_or_default(),
+                a.name.unwrap_or_default(),
+            )
+        })
         .unwrap_or_default();
     JiraComment {
         id: raw.id,
@@ -60,10 +65,7 @@ fn raw_comment_to_public(raw: RawComment) -> JiraComment {
 impl JiraClient {
     /// Fetch comments for an issue.
     pub async fn get_comments(&self, key: &str) -> Result<Vec<JiraComment>, String> {
-        let url = format!(
-            "{}/rest/api/2/issue/{}?fields=comment",
-            self.base_url, key
-        );
+        let url = format!("{}/rest/api/2/issue/{}?fields=comment", self.base_url, key);
 
         http_log::log_request("GET", &url);
         let resp = self
@@ -72,7 +74,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -81,21 +83,14 @@ impl JiraClient {
         let data: CommentIssueResponse = serde_json::from_str(&body_text)
             .map_err(|e| format!("Failed to parse comments: {e}"))?;
 
-        let comments = data
-            .fields
-            .comment
-            .map(|c| c.comments)
-            .unwrap_or_default();
+        let comments = data.fields.comment.map(|c| c.comments).unwrap_or_default();
 
         Ok(comments.into_iter().map(raw_comment_to_public).collect())
     }
 
     /// Add a new comment to an issue. Returns the created comment.
     pub async fn add_comment(&self, key: &str, body: &str) -> Result<JiraComment, String> {
-        let url = format!(
-            "{}/rest/api/2/issue/{}/comment",
-            self.base_url, key
-        );
+        let url = format!("{}/rest/api/2/issue/{}/comment", self.base_url, key);
 
         let payload = serde_json::json!({ "body": body });
 
@@ -107,7 +102,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        let resp = http_log::check_status("POST", &url, resp).await?;
+        let resp = self.check_status("POST", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -141,7 +136,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("PUT", &url, e))?;
-        let resp = http_log::check_status("PUT", &url, resp).await?;
+        let resp = self.check_status("PUT", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -154,11 +149,7 @@ impl JiraClient {
     }
 
     /// Delete a comment from an issue.
-    pub async fn delete_comment(
-        &self,
-        key: &str,
-        comment_id: &str,
-    ) -> Result<(), String> {
+    pub async fn delete_comment(&self, key: &str, comment_id: &str) -> Result<(), String> {
         let url = format!(
             "{}/rest/api/2/issue/{}/comment/{}",
             self.base_url, key, comment_id
@@ -171,7 +162,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("DELETE", &url, e))?;
-        http_log::check_status("DELETE", &url, resp).await?;
+        self.check_status("DELETE", &url, resp).await?;
 
         Ok(())
     }

@@ -90,9 +90,7 @@ pub async fn start(hops: Vec<SshHop>, target: Endpoint) -> Result<Tunnel, Transp
 /// Build the SSH chain hop-by-hop. Hop 0 connects via TCP; hop N>0
 /// runs `connect_stream` over a `direct-tcpip` channel of hop N-1
 /// targeting hop N's `host:port`.
-async fn open_chain(
-    hops: &[SshHop],
-) -> Result<Vec<Arc<Handle<ClientHandler>>>, TransportError> {
+async fn open_chain(hops: &[SshHop]) -> Result<Vec<Arc<Handle<ClientHandler>>>, TransportError> {
     let config = Arc::new(client::Config {
         // russh defaults pick sensible window sizes / kex preferences.
         ..client::Config::default()
@@ -108,10 +106,7 @@ async fn open_chain(
     )
     .await
     .map_err(|e| {
-        TransportError::SshConnect(format!(
-            "hop #0 ({}:{}) — {e}",
-            hops[0].host, hops[0].port
-        ))
+        TransportError::SshConnect(format!("hop #0 ({}:{}) — {e}", hops[0].host, hops[0].port))
     })?;
     authenticate(&mut handle, &hops[0], 0).await?;
     chain.push(Arc::new(handle));
@@ -125,28 +120,17 @@ async fn open_chain(
             .last()
             .expect("chain has at least one entry by induction");
         let channel = prev
-            .channel_open_direct_tcpip(
-                hop.host.clone(),
-                hop.port as u32,
-                "127.0.0.1",
-                0,
-            )
+            .channel_open_direct_tcpip(hop.host.clone(), hop.port as u32, "127.0.0.1", 0)
             .await
             .map_err(|e| {
-                TransportError::Channel(format!(
-                    "open hop #{i} ({}:{}): {e}",
-                    hop.host, hop.port
-                ))
+                TransportError::Channel(format!("open hop #{i} ({}:{}): {e}", hop.host, hop.port))
             })?;
         let stream = channel.into_stream();
 
         let mut next = client::connect_stream(Arc::clone(&config), stream, ClientHandler)
             .await
             .map_err(|e| {
-                TransportError::SshConnect(format!(
-                    "hop #{i} ({}:{}) — {e}",
-                    hop.host, hop.port
-                ))
+                TransportError::SshConnect(format!("hop #{i} ({}:{}) — {e}", hop.host, hop.port))
             })?;
         authenticate(&mut next, hop, i).await?;
         chain.push(Arc::new(next));
@@ -196,9 +180,7 @@ async fn authenticate(
             let hash_alg = handle
                 .best_supported_rsa_hash()
                 .await
-                .map_err(|e| {
-                    TransportError::SshAuth(tag(format!("query rsa hash alg: {e}")))
-                })?
+                .map_err(|e| TransportError::SshAuth(tag(format!("query rsa hash alg: {e}"))))?
                 .flatten();
             let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
             handle
@@ -221,9 +203,7 @@ async fn authenticate(
             let hash_alg = handle
                 .best_supported_rsa_hash()
                 .await
-                .map_err(|e| {
-                    TransportError::SshAuth(tag(format!("query rsa hash alg: {e}")))
-                })?
+                .map_err(|e| TransportError::SshAuth(tag(format!("query rsa hash alg: {e}"))))?
                 .flatten();
             let mut last = AuthResult::Failure {
                 remaining_methods: MethodSet::empty(),

@@ -12,8 +12,8 @@
 //! left behind by removed code paths.
 
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection,
-    EntityTrait, IntoActiveModel, QueryFilter, Set, TransactionTrait,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, Set, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -26,10 +26,7 @@ pub fn scope_id_for_url(url: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, url.as_bytes())
 }
 
-pub async fn load_labels(
-    db: &DatabaseConnection,
-    scope_id: Uuid,
-) -> Result<Vec<String>, String> {
+pub async fn load_labels(db: &DatabaseConnection, scope_id: Uuid) -> Result<Vec<String>, String> {
     jira_label::Entity::find()
         .filter(jira_label::Column::ConnectionId.eq(scope_id))
         .all(db)
@@ -38,10 +35,7 @@ pub async fn load_labels(
         .map_err(|e| format!("load_labels: {e}"))
 }
 
-pub async fn load_users(
-    db: &DatabaseConnection,
-    scope_id: Uuid,
-) -> Result<Vec<JiraUser>, String> {
+pub async fn load_users(db: &DatabaseConnection, scope_id: Uuid) -> Result<Vec<JiraUser>, String> {
     jira_user::Entity::find()
         .filter(jira_user::Column::ConnectionId.eq(scope_id))
         .all(db)
@@ -88,7 +82,10 @@ pub async fn merge_labels(
             name: Set(name.clone()),
             ..jira_label::ActiveModel::new()
         };
-        model.insert(&txn).await.map_err(|e| format!("insert label: {e}"))?;
+        model
+            .insert(&txn)
+            .await
+            .map_err(|e| format!("insert label: {e}"))?;
     }
 
     txn.commit().await.map_err(|e| format!("commit txn: {e}"))
@@ -107,15 +104,14 @@ pub async fn merge_users(
     }
     let txn = db.begin().await.map_err(|e| format!("begin txn: {e}"))?;
 
-    let existing: std::collections::HashMap<String, jira_user::Model> =
-        jira_user::Entity::find()
-            .filter(jira_user::Column::ConnectionId.eq(scope_id))
-            .all(&txn)
-            .await
-            .map_err(|e| format!("load existing users: {e}"))?
-            .into_iter()
-            .map(|m| (m.username.clone(), m))
-            .collect();
+    let existing: std::collections::HashMap<String, jira_user::Model> = jira_user::Entity::find()
+        .filter(jira_user::Column::ConnectionId.eq(scope_id))
+        .all(&txn)
+        .await
+        .map_err(|e| format!("load existing users: {e}"))?
+        .into_iter()
+        .map(|m| (m.username.clone(), m))
+        .collect();
 
     for u in users {
         if u.name.is_empty() {
@@ -127,7 +123,9 @@ pub async fn merge_users(
             am.display_name = Set(u.display_name.clone());
             am.normalized = Set(normalized);
             am.email = Set(u.email_address.clone());
-            am.update(&txn).await.map_err(|e| format!("update user: {e}"))?;
+            am.update(&txn)
+                .await
+                .map_err(|e| format!("update user: {e}"))?;
         } else {
             let model = jira_user::ActiveModel {
                 connection_id: Set(scope_id),
@@ -137,7 +135,10 @@ pub async fn merge_users(
                 email: Set(u.email_address.clone()),
                 ..jira_user::ActiveModel::new()
             };
-            model.insert(&txn).await.map_err(|e| format!("insert user: {e}"))?;
+            model
+                .insert(&txn)
+                .await
+                .map_err(|e| format!("insert user: {e}"))?;
         }
     }
 

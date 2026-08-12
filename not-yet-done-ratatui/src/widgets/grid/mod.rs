@@ -7,10 +7,10 @@ pub mod keymap;
 pub mod state;
 
 pub use border::{
-    BorderChars, BorderPos, CellGroup, GapPos, TextAnchor,
     BORDER_DASHED, BORDER_DASHED_EXTENDED, BORDER_DOTTED, BORDER_DOTTED_EXTENDED,
     BORDER_DOUBLE_EXTENDED, BORDER_ROUNDED, BORDER_ROUNDED_EXTENDED, BORDER_SIMPLE,
-    BORDER_SIMPLE_EXTENDED, BORDER_THICK_EXTENDED,
+    BORDER_SIMPLE_EXTENDED, BORDER_THICK_EXTENDED, BorderChars, BorderPos, CellGroup, GapPos,
+    TextAnchor,
 };
 pub use keymap::GridKeymap;
 pub use state::GridEvent;
@@ -259,7 +259,6 @@ impl Grid {
         self.global_style = style;
         self
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -285,20 +284,32 @@ impl Grid {
     pub fn set_gap(&mut self, pos: GapPos) {
         match pos {
             GapPos::Grid => {
-                for g in &mut self.v_gaps { g.has_gap = true; }
-                for g in &mut self.h_gaps { g.has_gap = true; }
+                for g in &mut self.v_gaps {
+                    g.has_gap = true;
+                }
+                for g in &mut self.h_gaps {
+                    g.has_gap = true;
+                }
             }
             GapPos::AfterCol(i) => {
-                if let Some(g) = self.v_gaps.get_mut(i) { g.has_gap = true; }
+                if let Some(g) = self.v_gaps.get_mut(i) {
+                    g.has_gap = true;
+                }
             }
             GapPos::BeforeCol(i) if i > 0 => {
-                if let Some(g) = self.v_gaps.get_mut(i - 1) { g.has_gap = true; }
+                if let Some(g) = self.v_gaps.get_mut(i - 1) {
+                    g.has_gap = true;
+                }
             }
             GapPos::AfterRow(i) => {
-                if let Some(g) = self.h_gaps.get_mut(i) { g.has_gap = true; }
+                if let Some(g) = self.h_gaps.get_mut(i) {
+                    g.has_gap = true;
+                }
             }
             GapPos::BeforeRow(i) if i > 0 => {
-                if let Some(g) = self.h_gaps.get_mut(i - 1) { g.has_gap = true; }
+                if let Some(g) = self.h_gaps.get_mut(i - 1) {
+                    g.has_gap = true;
+                }
             }
             _ => {}
         }
@@ -308,20 +319,32 @@ impl Grid {
     pub fn remove_gap(&mut self, pos: GapPos) {
         match pos {
             GapPos::Grid => {
-                for g in &mut self.v_gaps { *g = ColGapConfig::default(); }
-                for g in &mut self.h_gaps { *g = RowGapConfig::default(); }
+                for g in &mut self.v_gaps {
+                    *g = ColGapConfig::default();
+                }
+                for g in &mut self.h_gaps {
+                    *g = RowGapConfig::default();
+                }
             }
             GapPos::AfterCol(i) => {
-                if let Some(g) = self.v_gaps.get_mut(i) { *g = ColGapConfig::default(); }
+                if let Some(g) = self.v_gaps.get_mut(i) {
+                    *g = ColGapConfig::default();
+                }
             }
             GapPos::BeforeCol(i) if i > 0 => {
-                if let Some(g) = self.v_gaps.get_mut(i - 1) { *g = ColGapConfig::default(); }
+                if let Some(g) = self.v_gaps.get_mut(i - 1) {
+                    *g = ColGapConfig::default();
+                }
             }
             GapPos::AfterRow(i) => {
-                if let Some(g) = self.h_gaps.get_mut(i) { *g = RowGapConfig::default(); }
+                if let Some(g) = self.h_gaps.get_mut(i) {
+                    *g = RowGapConfig::default();
+                }
             }
             GapPos::BeforeRow(i) if i > 0 => {
-                if let Some(g) = self.h_gaps.get_mut(i - 1) { *g = RowGapConfig::default(); }
+                if let Some(g) = self.h_gaps.get_mut(i - 1) {
+                    *g = RowGapConfig::default();
+                }
             }
             _ => {}
         }
@@ -333,7 +356,9 @@ impl Grid {
     pub fn set_border(&mut self, pos: BorderPos, chars: &'static BorderChars) {
         let rows = self.rows;
         let cols = self.cols;
-        let Some(norm) = pos.normalise(rows, cols) else { return };
+        let Some(norm) = pos.normalise(rows, cols) else {
+            return;
+        };
         match norm {
             NormalisedPos::Outer => {
                 self.outer.enabled = true;
@@ -342,33 +367,69 @@ impl Grid {
             NormalisedPos::VGap(i) => {
                 if let Some(g) = self.v_gaps.get_mut(i) {
                     g.has_gap = true;
-                    g.full = Some(BorderEntry { chars, style: None, text: None });
+                    g.full = Some(BorderEntry {
+                        chars,
+                        style: None,
+                        text: None,
+                    });
                 }
             }
             NormalisedPos::HGap(i) => {
                 if let Some(g) = self.h_gaps.get_mut(i) {
                     g.has_gap = true;
-                    g.full = Some(BorderEntry { chars, style: None, text: None });
+                    g.full = Some(BorderEntry {
+                        chars,
+                        style: None,
+                        text: None,
+                    });
                 }
             }
-            NormalisedPos::VGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::VGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.v_gaps.get_mut(gap_idx) {
                     g.has_gap = true;
                     // Replace existing span for same range, otherwise push.
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.chars = chars;
                     } else {
-                        g.spans.push(SpannedBorderEntry { start, end, chars, style: None, text: None });
+                        g.spans.push(SpannedBorderEntry {
+                            start,
+                            end,
+                            chars,
+                            style: None,
+                            text: None,
+                        });
                     }
                 }
             }
-            NormalisedPos::HGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::HGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.h_gaps.get_mut(gap_idx) {
                     g.has_gap = true;
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.chars = chars;
                     } else {
-                        g.spans.push(SpannedBorderEntry { start, end, chars, style: None, text: None });
+                        g.spans.push(SpannedBorderEntry {
+                            start,
+                            end,
+                            chars,
+                            style: None,
+                            text: None,
+                        });
                     }
                 }
             }
@@ -379,23 +440,37 @@ impl Grid {
     pub fn remove_border(&mut self, pos: BorderPos) {
         let rows = self.rows;
         let cols = self.cols;
-        let Some(norm) = pos.normalise(rows, cols) else { return };
+        let Some(norm) = pos.normalise(rows, cols) else {
+            return;
+        };
         match norm {
             NormalisedPos::Outer => {
                 self.outer.chars = None;
             }
             NormalisedPos::VGap(i) => {
-                if let Some(g) = self.v_gaps.get_mut(i) { g.full = None; }
+                if let Some(g) = self.v_gaps.get_mut(i) {
+                    g.full = None;
+                }
             }
             NormalisedPos::HGap(i) => {
-                if let Some(g) = self.h_gaps.get_mut(i) { g.full = None; }
+                if let Some(g) = self.h_gaps.get_mut(i) {
+                    g.full = None;
+                }
             }
-            NormalisedPos::VGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::VGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.v_gaps.get_mut(gap_idx) {
                     g.spans.retain(|s| !(s.start == start && s.end == end));
                 }
             }
-            NormalisedPos::HGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::HGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.h_gaps.get_mut(gap_idx) {
                     g.spans.retain(|s| !(s.start == start && s.end == end));
                 }
@@ -407,32 +482,54 @@ impl Grid {
     pub fn set_border_style(&mut self, pos: BorderPos, style: Style) {
         let rows = self.rows;
         let cols = self.cols;
-        let Some(norm) = pos.normalise(rows, cols) else { return };
+        let Some(norm) = pos.normalise(rows, cols) else {
+            return;
+        };
         match norm {
             NormalisedPos::Outer => {
                 self.outer.style = Some(style);
             }
             NormalisedPos::VGap(i) => {
                 if let Some(g) = self.v_gaps.get_mut(i) {
-                    if let Some(b) = &mut g.full { b.style = Some(style); }
+                    if let Some(b) = &mut g.full {
+                        b.style = Some(style);
+                    }
                     // Also set as gap default when no border is set yet.
                 }
             }
             NormalisedPos::HGap(i) => {
                 if let Some(g) = self.h_gaps.get_mut(i) {
-                    if let Some(b) = &mut g.full { b.style = Some(style); }
+                    if let Some(b) = &mut g.full {
+                        b.style = Some(style);
+                    }
                 }
             }
-            NormalisedPos::VGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::VGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.v_gaps.get_mut(gap_idx) {
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.style = Some(style);
                     }
                 }
             }
-            NormalisedPos::HGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::HGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.h_gaps.get_mut(gap_idx) {
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.style = Some(style);
                     }
                 }
@@ -450,32 +547,58 @@ impl Grid {
     ) {
         let rows = self.rows;
         let cols = self.cols;
-        let Some(norm) = pos.normalise(rows, cols) else { return };
-        let gt = GapText { anchor, offset, text: text.into() };
+        let Some(norm) = pos.normalise(rows, cols) else {
+            return;
+        };
+        let gt = GapText {
+            anchor,
+            offset,
+            text: text.into(),
+        };
         match norm {
             NormalisedPos::Outer => {
                 self.outer.text = Some(gt);
             }
             NormalisedPos::VGap(i) => {
                 if let Some(g) = self.v_gaps.get_mut(i) {
-                    if let Some(b) = &mut g.full { b.text = Some(gt); }
+                    if let Some(b) = &mut g.full {
+                        b.text = Some(gt);
+                    }
                 }
             }
             NormalisedPos::HGap(i) => {
                 if let Some(g) = self.h_gaps.get_mut(i) {
-                    if let Some(b) = &mut g.full { b.text = Some(gt); }
+                    if let Some(b) = &mut g.full {
+                        b.text = Some(gt);
+                    }
                 }
             }
-            NormalisedPos::VGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::VGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.v_gaps.get_mut(gap_idx) {
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.text = Some(gt);
                     }
                 }
             }
-            NormalisedPos::HGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::HGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.h_gaps.get_mut(gap_idx) {
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.text = Some(gt);
                     }
                 }
@@ -487,29 +610,53 @@ impl Grid {
     pub fn remove_border_text(&mut self, pos: BorderPos) {
         let rows = self.rows;
         let cols = self.cols;
-        let Some(norm) = pos.normalise(rows, cols) else { return };
+        let Some(norm) = pos.normalise(rows, cols) else {
+            return;
+        };
         match norm {
-            NormalisedPos::Outer => { self.outer.text = None; }
+            NormalisedPos::Outer => {
+                self.outer.text = None;
+            }
             NormalisedPos::VGap(i) => {
                 if let Some(g) = self.v_gaps.get_mut(i) {
-                    if let Some(b) = &mut g.full { b.text = None; }
+                    if let Some(b) = &mut g.full {
+                        b.text = None;
+                    }
                 }
             }
             NormalisedPos::HGap(i) => {
                 if let Some(g) = self.h_gaps.get_mut(i) {
-                    if let Some(b) = &mut g.full { b.text = None; }
+                    if let Some(b) = &mut g.full {
+                        b.text = None;
+                    }
                 }
             }
-            NormalisedPos::VGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::VGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.v_gaps.get_mut(gap_idx) {
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.text = None;
                     }
                 }
             }
-            NormalisedPos::HGapSpanned { gap_idx, start, end } => {
+            NormalisedPos::HGapSpanned {
+                gap_idx,
+                start,
+                end,
+            } => {
                 if let Some(g) = self.h_gaps.get_mut(gap_idx) {
-                    if let Some(span) = g.spans.iter_mut().find(|s| s.start == start && s.end == end) {
+                    if let Some(span) = g
+                        .spans
+                        .iter_mut()
+                        .find(|s| s.start == start && s.end == end)
+                    {
                         span.text = None;
                     }
                 }
@@ -577,12 +724,24 @@ impl Grid {
 
     // --- keymap convenience setters ---
 
-    pub fn set_key_next(&mut self, key: KeyEvent) { self.keymap.next_cell = Some(key); }
-    pub fn set_key_prev(&mut self, key: KeyEvent) { self.keymap.prev_cell = Some(key); }
-    pub fn set_key_next_row(&mut self, key: KeyEvent) { self.keymap.next_in_row = Some(key); }
-    pub fn set_key_prev_row(&mut self, key: KeyEvent) { self.keymap.prev_in_row = Some(key); }
-    pub fn set_key_next_col(&mut self, key: KeyEvent) { self.keymap.next_in_col = Some(key); }
-    pub fn set_key_prev_col(&mut self, key: KeyEvent) { self.keymap.prev_in_col = Some(key); }
+    pub fn set_key_next(&mut self, key: KeyEvent) {
+        self.keymap.next_cell = Some(key);
+    }
+    pub fn set_key_prev(&mut self, key: KeyEvent) {
+        self.keymap.prev_cell = Some(key);
+    }
+    pub fn set_key_next_row(&mut self, key: KeyEvent) {
+        self.keymap.next_in_row = Some(key);
+    }
+    pub fn set_key_prev_row(&mut self, key: KeyEvent) {
+        self.keymap.prev_in_row = Some(key);
+    }
+    pub fn set_key_next_col(&mut self, key: KeyEvent) {
+        self.keymap.next_in_col = Some(key);
+    }
+    pub fn set_key_prev_col(&mut self, key: KeyEvent) {
+        self.keymap.prev_in_col = Some(key);
+    }
 
     // --- focus query ---
 
@@ -660,21 +819,47 @@ impl Grid {
     fn cell_group_to_def(&self, group: CellGroup) -> GroupDef {
         match group {
             CellGroup::Row(r) => GroupDef {
-                first_row: r, last_row: r,
-                first_col: 0, last_col: self.cols.saturating_sub(1),
+                first_row: r,
+                last_row: r,
+                first_col: 0,
+                last_col: self.cols.saturating_sub(1),
             },
             CellGroup::Col(c) => GroupDef {
-                first_row: 0, last_row: self.rows.saturating_sub(1),
-                first_col: c, last_col: c,
+                first_row: 0,
+                last_row: self.rows.saturating_sub(1),
+                first_col: c,
+                last_col: c,
             },
-            CellGroup::ColSpan { row, first_col, last_col } => GroupDef {
-                first_row: row, last_row: row, first_col, last_col,
+            CellGroup::ColSpan {
+                row,
+                first_col,
+                last_col,
+            } => GroupDef {
+                first_row: row,
+                last_row: row,
+                first_col,
+                last_col,
             },
-            CellGroup::RowSpan { col, first_row, last_row } => GroupDef {
-                first_row, last_row, first_col: col, last_col: col,
+            CellGroup::RowSpan {
+                col,
+                first_row,
+                last_row,
+            } => GroupDef {
+                first_row,
+                last_row,
+                first_col: col,
+                last_col: col,
             },
-            CellGroup::Span { first_row, first_col, last_row, last_col } => GroupDef {
-                first_row, first_col, last_row, last_col,
+            CellGroup::Span {
+                first_row,
+                first_col,
+                last_row,
+                last_col,
+            } => GroupDef {
+                first_row,
+                first_col,
+                last_row,
+                last_col,
             },
         }
     }
@@ -757,8 +942,11 @@ impl Grid {
             .position(|&p| p == anchor)
             .or_else(|| {
                 // anchor may be inside a group — find the group's nav entry
-                self.group_for(anchor.0, anchor.1)
-                    .and_then(|g| positions.iter().position(|&p| p == (g.first_row, g.first_col)))
+                self.group_for(anchor.0, anchor.1).and_then(|g| {
+                    positions
+                        .iter()
+                        .position(|&p| p == (g.first_row, g.first_col))
+                })
             })
             .unwrap_or(0);
 

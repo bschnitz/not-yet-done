@@ -1,25 +1,24 @@
 //! Adapter credentials popup — generic login form for any adapter that
 //! reports `AdapterStatus::NeedsCreds`.
 //!
-//! Renders a stack of `TextFieldWidget`s (one per `AuthField`), supports
-//! Tab/Shift+Tab/Up/Down focus navigation, and emits a value map on
-//! Enter. The popup stays open in a `submitting`/`error` state while the
-//! adapter performs the login round-trip; the App calls `close()` once
-//! the adapter status flips to `Ready`, or `set_error()` on failure.
+//! The fields, their navigation and their rendering are the shared form
+//! driver's ([`ContentFormPopup`]), so a login looks and behaves like every
+//! other form in the app; a masked field is a plain text field the driver
+//! bullets out. What stays here is what a login has and a content form does
+//! not: the view it belongs to, the in-flight `submitting` state during the
+//! adapter's round-trip, and the identity check that decides whether a second
+//! `NeedsCreds` is the same question again or a new one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
+use ratatui::layout::Rect;
 
-use ratatui_form_widgets::{TextFieldStyle, TextFieldWidget};
+use not_yet_done_content::{AuthField, FormFieldSpec};
+use not_yet_done_ratatui::{FormNotice, FormOptions};
 
-use not_yet_done_content::AuthField;
-
-use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
+use crate::components::content_form_popup::{ContentFormEvent, ContentFormPopup};
 use crate::ui::theme::Theme;
 
 pub enum CredsKeyOutcome {
@@ -30,22 +29,17 @@ pub enum CredsKeyOutcome {
     Submit { values: HashMap<String, String> },
     /// User cancelled (Esc). App closes the popup.
     Cancel,
-    /// Key not consumed.
-    Pass,
 }
 
 pub struct AdapterCredsPopup {
-    theme: Arc<Theme>,
+    form: ContentFormPopup,
     title: String,
     /// View index this popup is bound to, so the App can route the
     /// submitted values to the right adapter.
     view_index: usize,
+    /// Kept verbatim for [`shows`](Self::shows) — the driver owns the widgets,
+    /// not the question they were built from.
     fields: Vec<AuthField>,
-    /// Live values, indexed by `fields`.
-    values: Vec<String>,
-    /// Cursor position (in chars) per field.
-    cursor_pos: Vec<usize>,
-    focused: usize,
     submitting: bool,
     error: Option<String>,
     open: bool,
@@ -58,21 +52,36 @@ impl AdapterCredsPopup {
         view_index: usize,
         fields: Vec<AuthField>,
     ) -> Self {
-        let values: Vec<String> = fields
+        let specs: Vec<FormFieldSpec> = fields.iter().map(to_form_field).collect();
+        let prefill: HashMap<String, String> = fields
             .iter()
-            .map(|f| f.prefill.clone().unwrap_or_default())
+            .filter_map(|f| f.prefill.clone().map(|v| (f.name.clone(), v)))
             .collect();
-        let cursor_pos: Vec<usize> = values.iter().map(|v| v.chars().count()).collect();
-        // Focus the first empty field; otherwise field 0.
-        let focused = values.iter().position(|v| v.is_empty()).unwrap_or(0);
+
+        let mut form = ContentFormPopup::new(
+            title.clone(),
+            specs,
+            &prefill,
+            &theme,
+            &FormOptions {
+                // The centred, content-sized panel: a login is two fields, and
+                // the classic chrome would blow it up to the full overlay area.
+                field_bar: true,
+                submit_label: Some("Log in".to_string()),
+                ..FormOptions::default()
+            },
+        );
+        // Open on the first field the user still has to fill — a prefilled
+        // username in front of an empty password must not cost a Tab.
+        if let Some(f) = fields.iter().find(|f| f.prefill.is_none()) {
+            form.focus_field(&f.name);
+        }
+
         Self {
-            theme,
+            form,
             title,
             view_index,
             fields,
-            values,
-            cursor_pos,
-            focused,
             submitting: false,
             error: None,
             open: true,
@@ -92,8 +101,19 @@ impl AdapterCredsPopup {
     }
 
     pub fn set_error(&mut self, msg: String) {
+        self.form.set_notice(Some(FormNotice::Alert(msg.clone())));
         self.error = Some(msg);
         self.submitting = false;
+    }
+
+    /// Whether this popup already shows exactly that form.
+    ///
+    /// A credential script asks in rounds, so a second `NeedsCreds` may
+    /// arrive while a popup is open. Only an identical form may be
+    /// swallowed as a repeat — a different question, or the same one with
+    /// "that passphrase was rejected" attached, has to replace it.
+    pub fn shows(&self, title: &str, fields: &[AuthField], error: Option<&str>) -> bool {
+        self.title == title && self.fields == fields && self.error.as_deref() == error
     }
 
     pub fn handle_key(&mut self, key: &str) -> CredsKeyOutcome {
@@ -104,78 +124,16 @@ impl AdapterCredsPopup {
             }
             return CredsKeyOutcome::Consumed;
         }
-        match key {
-            "esc" => CredsKeyOutcome::Cancel,
-            "tab" | "down" => {
-                self.focused = (self.focused + 1) % self.fields.len();
-                CredsKeyOutcome::Consumed
-            }
-            "shift+tab" | "up" => {
-                self.focused = if self.focused == 0 {
-                    self.fields.len() - 1
-                } else {
-                    self.focused - 1
-                };
-                CredsKeyOutcome::Consumed
-            }
-            "enter" => {
-                // Submit only when all required fields have content.
-                if self.values.iter().any(|v| v.trim().is_empty()) {
-                    self.error = Some("All fields are required".into());
-                    return CredsKeyOutcome::Consumed;
-                }
-                let mut map = HashMap::with_capacity(self.fields.len());
-                for (f, v) in self.fields.iter().zip(self.values.iter()) {
-                    map.insert(f.name.clone(), v.clone());
-                }
+        match self.form.handle_key(key) {
+            ContentFormEvent::Cancelled => CredsKeyOutcome::Cancel,
+            ContentFormEvent::Submitted(values) => {
                 self.submitting = true;
                 self.error = None;
-                CredsKeyOutcome::Submit { values: map }
+                self.form
+                    .set_notice(Some(FormNotice::Info("Submitting…".to_string())));
+                CredsKeyOutcome::Submit { values }
             }
-            "backspace" => {
-                let pos = self.cursor_pos[self.focused];
-                if pos > 0 {
-                    let mut chars: Vec<char> = self.values[self.focused].chars().collect();
-                    chars.remove(pos - 1);
-                    self.values[self.focused] = chars.into_iter().collect();
-                    self.cursor_pos[self.focused] -= 1;
-                }
-                CredsKeyOutcome::Consumed
-            }
-            "left" => {
-                if self.cursor_pos[self.focused] > 0 {
-                    self.cursor_pos[self.focused] -= 1;
-                }
-                CredsKeyOutcome::Consumed
-            }
-            "right" => {
-                let len = self.values[self.focused].chars().count();
-                if self.cursor_pos[self.focused] < len {
-                    self.cursor_pos[self.focused] += 1;
-                }
-                CredsKeyOutcome::Consumed
-            }
-            "home" => {
-                self.cursor_pos[self.focused] = 0;
-                CredsKeyOutcome::Consumed
-            }
-            "end" => {
-                self.cursor_pos[self.focused] = self.values[self.focused].chars().count();
-                CredsKeyOutcome::Consumed
-            }
-            other => {
-                // Insert printable single chars (skip modifier-prefixed bindings).
-                if let Some(c) = single_char(other) {
-                    let pos = self.cursor_pos[self.focused];
-                    let mut chars: Vec<char> = self.values[self.focused].chars().collect();
-                    chars.insert(pos, c);
-                    self.values[self.focused] = chars.into_iter().collect();
-                    self.cursor_pos[self.focused] += 1;
-                    CredsKeyOutcome::Consumed
-                } else {
-                    CredsKeyOutcome::Pass
-                }
-            }
+            ContentFormEvent::Consumed => CredsKeyOutcome::Consumed,
         }
     }
 
@@ -183,116 +141,97 @@ impl AdapterCredsPopup {
         if !self.open {
             return;
         }
-        let t = Arc::clone(&self.theme);
-        let popup_w: u16 = 56;
-
-        let hints: Vec<(&str, &str)> = if self.submitting {
-            vec![("Esc", "cancel")]
-        } else {
-            vec![
-                ("Tab", "next"),
-                ("S-Tab", "prev"),
-                ("Enter", "submit"),
-                ("Esc", "close"),
-            ]
-        };
-        let hints_h = hints_height(&hints, popup_w.saturating_sub(2));
-        // 2 rows per field + status row + hints + padding.
-        let body_rows = self.fields.len() as u16 * 2 + 2;
-        let popup_h = body_rows + hints_h + 2;
-
-        let inner = render_popup_frame(frame, area, &t, &self.title, popup_w, popup_h);
-        if inner.height == 0 || inner.width == 0 {
-            return;
-        }
-
-        let style = TextFieldStyle {
-            label_focused: t.primary(),
-            label_idle: t.text_dim(),
-            input_focused: t.text_high(),
-            input_idle: t.text_med(),
-            cursor_fg: t.bg(),
-            cursor_bg: t.primary(),
-            error_fg: t.error(),
-            placeholder_fg: t.text_dim(),
-            input_bg: t.surface(),
-            focused_bg: t.focused_bg(),
-        };
-
-        let mut y = inner.y;
-        let buf = frame.buffer_mut();
-        for (i, field) in self.fields.iter().enumerate() {
-            let display_value: String = if field.masked {
-                "•".repeat(self.values[i].chars().count())
-            } else {
-                self.values[i].clone()
-            };
-            let cursor = if i == self.focused {
-                Some(self.cursor_pos[i])
-            } else {
-                None
-            };
-            let widget = TextFieldWidget {
-                label: &field.label,
-                value: &display_value,
-                placeholder: "",
-                error: None,
-                focused: i == self.focused,
-                cursor_pos: cursor,
-                style,
-            };
-            let area_field = Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 2,
-            };
-            y = widget.render_and_next_y(area_field, buf);
-        }
-
-        // Status line: error or submitting indicator.
-        let status_text = if self.submitting {
-            Some(("Submitting…", t.text_med()))
-        } else {
-            self.error.as_deref().map(|e| (e, t.error()))
-        };
-        if let Some((text, fg)) = status_text {
-            let max = inner.width.saturating_sub(2) as usize;
-            let truncated: String = text.chars().take(max).collect();
-            let span = Span::styled(
-                truncated,
-                Style::default().fg(fg).add_modifier(Modifier::ITALIC),
-            );
-            let row_y = y + 1;
-            if row_y < inner.bottom().saturating_sub(hints_h) {
-                let mut x = inner.x + 1;
-                for ch in span.content.chars() {
-                    if x >= inner.right() {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut(Position::new(x, row_y)) {
-                        cell.set_char(ch);
-                        cell.set_style(span.style);
-                    }
-                    x += 1;
-                }
-            }
-        }
-
-        render_hints_bar(frame, inner, &t, &hints, hints_h);
+        self.form.render(frame, area);
     }
 }
 
-/// Map a key string to a single printable char (e.g. "a", "Z", " ", "ä").
-/// Returns `None` for modifier-prefixed bindings ("ctrl+s") or named keys.
-fn single_char(key: &str) -> Option<char> {
-    let mut chars = key.chars();
-    let c = chars.next()?;
-    if chars.next().is_some() {
-        return None;
+/// One credential field as a form field. A field the config binds is never
+/// optional; a script's own form may declare inputs it can do without.
+fn to_form_field(f: &AuthField) -> FormFieldSpec {
+    let mut spec = FormFieldSpec::text(f.name.clone(), f.label.clone());
+    if f.optional {
+        spec = spec.optional();
     }
-    if c.is_control() {
-        return None;
+    if f.masked {
+        spec = spec.masked();
     }
-    Some(c)
+    spec
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(name: &str, optional: bool) -> AuthField {
+        AuthField {
+            name: name.into(),
+            label: format!("{name} label"),
+            masked: false,
+            optional,
+            prefill: None,
+        }
+    }
+
+    fn popup(fields: Vec<AuthField>) -> AdapterCredsPopup {
+        let theme = Arc::new(Theme::new(crate::config::ThemeConfig::default()));
+        AdapterCredsPopup::new(theme, "Login".into(), 0, fields)
+    }
+
+    fn type_str(p: &mut AdapterCredsPopup, text: &str) {
+        for c in text.chars() {
+            p.handle_key(&c.to_string());
+        }
+    }
+
+    /// The credential form is also how a credential script's own form is
+    /// rendered, and a script may declare an input it can do without.
+    #[test]
+    fn an_optional_field_may_stay_empty() {
+        let mut p = popup(vec![field("password", false), field("otp", true)]);
+        type_str(&mut p, "secret");
+        match p.handle_key("enter") {
+            CredsKeyOutcome::Submit { values } => {
+                assert_eq!(values["password"], "secret");
+                assert_eq!(values["otp"], "");
+            }
+            _ => panic!("an empty optional field must not block the submit"),
+        }
+    }
+
+    #[test]
+    fn a_missing_required_field_blocks_the_submit() {
+        let mut p = popup(vec![field("password", false), field("otp", true)]);
+        assert!(
+            matches!(p.handle_key("enter"), CredsKeyOutcome::Consumed),
+            "an empty required field must not submit"
+        );
+    }
+
+    /// While a login is in flight the form is inert — except for Esc, which
+    /// has to reach the App: the adapter is waiting on the answer and holds
+    /// the auth lock until it is told the form is gone.
+    #[test]
+    fn a_login_in_flight_swallows_everything_but_escape() {
+        let mut p = popup(vec![field("password", false)]);
+        type_str(&mut p, "secret");
+        assert!(matches!(
+            p.handle_key("enter"),
+            CredsKeyOutcome::Submit { .. }
+        ));
+        assert!(matches!(p.handle_key("x"), CredsKeyOutcome::Consumed));
+        assert!(matches!(p.handle_key("esc"), CredsKeyOutcome::Cancel));
+    }
+
+    /// A repeat of the very same question may be swallowed; the same question
+    /// carrying a rejection is a new one and must replace the popup.
+    #[test]
+    fn an_error_makes_the_same_question_a_different_one() {
+        let fields = vec![field("passphrase", false)];
+        let mut p = popup(fields.clone());
+        assert!(p.shows("Login", &fields, None));
+
+        p.set_error("wrong passphrase".into());
+        assert!(!p.shows("Login", &fields, None));
+        assert!(p.shows("Login", &fields, Some("wrong passphrase")));
+    }
 }

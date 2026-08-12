@@ -6,10 +6,10 @@ use tuirealm::props::{AttrValue, Attribute, PropPayload, PropValue, QueryResult}
 use tuirealm::state::{State, StateValue};
 
 use super::{
+    keymap::SelectListKeymap,
     render::{RenderData, SelectListItem as RenderItem, render},
     state::SelectListEvent,
     style::SelectListStyle,
-    keymap::SelectListKeymap,
 };
 
 /// Custom attribute key for reading/writing the selected indices.
@@ -381,16 +381,24 @@ impl SelectList {
     }
 
     fn filter_cursor_left(&mut self) {
-        if self.filter_cursor == 0 { return; }
+        if self.filter_cursor == 0 {
+            return;
+        }
         let mut pos = self.filter_cursor - 1;
-        while !self.filter_query.is_char_boundary(pos) { pos -= 1; }
+        while !self.filter_query.is_char_boundary(pos) {
+            pos -= 1;
+        }
         self.filter_cursor = pos;
     }
 
     fn filter_cursor_right(&mut self) {
-        if self.filter_cursor >= self.filter_query.len() { return; }
+        if self.filter_cursor >= self.filter_query.len() {
+            return;
+        }
         let mut pos = self.filter_cursor + 1;
-        while pos <= self.filter_query.len() && !self.filter_query.is_char_boundary(pos) { pos += 1; }
+        while pos <= self.filter_query.len() && !self.filter_query.is_char_boundary(pos) {
+            pos += 1;
+        }
         self.filter_cursor = pos;
     }
 }
@@ -648,8 +656,8 @@ mod tests {
 
     #[test]
     fn fuzzy_matches_subsequence() {
-        let mut list = list_with(vec!["alpha", "beta", "gamma"])
-            .with_filter_mode(FilterMode::Fuzzy);
+        let mut list =
+            list_with(vec!["alpha", "beta", "gamma"]).with_filter_mode(FilterMode::Fuzzy);
         list.filter_push_char('g');
         list.filter_push_char('m');
         // "gamma" matches the subsequence g..m..a, alpha/beta do not.
@@ -658,8 +666,8 @@ mod tests {
 
     #[test]
     fn fuzzy_ranks_better_match_first() {
-        let mut list = list_with(vec!["file_picker", "picker", "pickled"])
-            .with_filter_mode(FilterMode::Fuzzy);
+        let mut list =
+            list_with(vec!["file_picker", "picker", "pickled"]).with_filter_mode(FilterMode::Fuzzy);
         list.filter_push_char('p');
         list.filter_push_char('i');
         list.filter_push_char('c');
@@ -671,8 +679,7 @@ mod tests {
 
     #[test]
     fn fuzzy_empty_query_shows_all_in_original_order() {
-        let list = list_with(vec!["alpha", "beta", "gamma"])
-            .with_filter_mode(FilterMode::Fuzzy);
+        let list = list_with(vec!["alpha", "beta", "gamma"]).with_filter_mode(FilterMode::Fuzzy);
         assert_eq!(list.filtered_indices, vec![0, 1, 2]);
     }
 }

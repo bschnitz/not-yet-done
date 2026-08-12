@@ -7,11 +7,11 @@
 //! "Fix the YAML and restart" hint.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use crate::app::{App, ContentSlot};
@@ -66,6 +66,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, slot_idx: usize) {
         Style::default().fg(theme.text_med()),
     )));
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(block);
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(block);
     frame.render_widget(paragraph, chunks[1]);
 }

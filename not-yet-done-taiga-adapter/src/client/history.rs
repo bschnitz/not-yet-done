@@ -47,17 +47,16 @@ pub async fn fetch_comments(
     let headers = client.auth_headers()?;
     http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || client.http.get(&url).headers(headers.clone()))
+        .send_retrying("GET", &url, || {
+            client.http.get(&url).headers(headers.clone())
+        })
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     let raw: Vec<serde_json::Value> = resp
         .json()
         .await
         .map_err(|e| format!("history parse: {e}"))?;
-    Ok(raw
-        .into_iter()
-        .filter_map(parse_comment)
-        .collect())
+    Ok(raw.into_iter().filter_map(parse_comment).collect())
 }
 
 fn parse_comment(entry: serde_json::Value) -> Option<TaigaComment> {
@@ -96,5 +95,11 @@ fn parse_comment(entry: serde_json::Value) -> Option<TaigaComment> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    Some(TaigaComment { id, author, author_username, created, body })
+    Some(TaigaComment {
+        id,
+        author,
+        author_username,
+        created,
+        body,
+    })
 }

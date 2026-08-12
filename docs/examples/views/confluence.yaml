@@ -75,7 +75,8 @@ adapter:
   # Suppress automatic root listing on startup + on subtab switch. Useful
   # when the cookie-extracting command pops a browser auth dialog and you
   # don't want it firing every time the TUI launches. Press `r` (reload)
-  # to fetch when you're ready.
+  # to fetch when you're ready. This is the default; it is written out
+  # because it matters most for this adapter.
   manual_connect: true
 
 views:

@@ -413,6 +413,91 @@ pub struct AdapterCapabilities {
 }
 ```
 
+### AdapterStatus — reporting the connection
+
+`subscribe_status()` publishes what the adapter is doing right now: `Idle`,
+`Connecting`, `NeedsCreds`, `Ready`, `Failed`, `Busy`. Frontends render it —
+the TUI as a banner plus a credential form, the CLI as a stderr line plus a
+terminal prompt (`AdapterStatus::banner_text()` provides the shared wording).
+
+Two rules make the status usable by a frontend that cannot ask twice:
+
+- **Announce a background connect synchronously.** An adapter whose listings
+  come from a connection it builds in the background (Stoat: the gateway
+  socket) must publish `Connecting` _before_ spawning that work, not from
+  inside the spawned task. Its listings project an empty snapshot until the
+  connection stands, so a frontend has to be able to tell "connecting, ask
+  again in a moment" from "idle, nothing is happening" the moment the call
+  returns. Left on `Idle` the two are indistinguishable, and the CLI prints an
+  empty list and exits 0 — which reads as "there is nothing there".
+- **Ask through `NeedsCreds`, never silently.** Credentials that no configured
+  provider can supply are requested via `NeedsCreds` and answered through
+  `submit_credentials`. A frontend that cannot ask (no terminal) reports that
+  and fails the command; it never substitutes an empty result.
+
+Adapters that authenticate synchronously inside their calls need none of this:
+the default `subscribe_status()` reports `Ready` forever.
+
+### Authentication — the adapter publishes its mechanisms
+
+An **authentication mechanism** is what the adapter speaks against its remote
+API (`cookie`, `basic-auth`, `password-login`, `bearer-token`, …). Which
+mechanisms exist and which input fields each one needs is **the adapter's**
+knowledge, not the core crate's. The adapter publishes it as a static table
+from its factory:
+
+```rust
+trait TypedAdapterFactory {
+    /// Mechanisms this adapter implements. Empty = no authentication,
+    /// which is the default and covers the local adapters.
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] { &[] }
+}
+
+pub struct MechanismSpec {
+    pub id: &'static str,      // wire id used in YAML (`mechanism: cookie`), kebab-case
+    pub label: &'static str,   // display name for the config wizard
+    pub doc: &'static str,     // one line: when to pick this mechanism
+    pub fields: &'static [AuthFieldSpec],
+}
+
+pub struct AuthFieldSpec {
+    pub name: &'static str,    // key in the resolved credential map, `- field:` in YAML
+    pub label: &'static str,   // prompt label — declared, not guessed from the spelling
+    pub masked: bool,          // masked input — declared, not guessed from the spelling
+    pub required: bool,        // `false` may be omitted from the config entirely
+}
+```
+
+Three obligations follow from that table:
+
+- **Validate at build time.** The factory calls
+  `cfg.auth.validate_against(self.auth_mechanisms())` inside `build()`. An
+  unknown mechanism id, a missing binding for a required field, a duplicate
+  binding, or a binding for a field the mechanism does not declare is rejected
+  right there — with the ids _this_ adapter supports in the message. A
+  mechanism the adapter cannot speak therefore fails when the config is read,
+  not at the first login attempt.
+- **Match on `&str` in the login path.** `AuthSpec.mechanism` is a plain
+  string, so the bridge's `run_login` matches on `spec.mechanism.as_str()`. The
+  `other =>` arm stays as a defensive assertion for a spec built in code; a
+  config can no longer reach it.
+- **Declare labels and masking.** A field that is masked or labelled by
+  convention (`password`, `token`, `cookie` → masked) works, but the descriptor
+  is what makes it correct: Stoat's `password-login` calls its `username` field
+  "E-mail address" because that is what the server wants there.
+
+Because the table is the single source, `nyd config auth <type>` and the
+`nyd config build <type>` wizard render it directly and cannot drift from what
+the adapter accepts. Adding a mechanism never touches `not-yet-done-content`.
+
+What the core crate _does_ keep is the machinery below the mechanism: the
+`CredentialProvider` enum (where a value comes from — literal, prompt, env,
+file, command, script-result, keyring), the orchestrator's resolve / prompt /
+cache state machine, the session-cache policies, and the `NeedsCreds` contract
+above. An adapter never reads a provider; it receives a resolved map keyed by
+its own field names. User-facing documentation of the YAML block lives in the
+README ("Authentication").
+
 ### ConflictError
 
 ```rust
@@ -535,6 +620,21 @@ timestamp of the whole node is sufficient.
      in-process Tasks/Trackings adapters use this — keyed by their database
      DSN — so a tracking toggle in one tab repaints the other; remote
      adapters that need no coordination simply ignore `ctx`.
+
+7. **Built-in `help` action (framework-synthesised)** — every level of every
+   adapter carries a `help` action that documents the current level, without
+   any adapter declaring it. It lives in `not_yet_done_content::describe`:
+   `level_actions(adapter, node)` returns the adapter/node actions **plus** the
+   synthetic `help`, and `render_level(adapter, node, is_root)` produces the
+   documentation as Markdown purely from the public protocol — the node's
+   `node_type` / `actions` / `children_types` / `sortable_columns`, and (at the
+   tree root only) `capabilities`. No adapter code, no downcast, no frontend
+   coupling: a frontend calls `is_builtin(id)` / `run_builtin(..)` to handle
+   the action and decides only how to display the Markdown (the CLI renders it
+   to the terminal with `termimad` on a TTY, raw otherwise). Only the current
+   level is documented — child types are listed by name; descend and run `help`
+   again for their level. This is the reference example of a _framework-level_
+   action: shared, DRY, and adapter-agnostic by construction.
 
 ---
 

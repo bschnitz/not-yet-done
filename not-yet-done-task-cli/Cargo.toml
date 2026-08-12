@@ -22,9 +22,8 @@ anyhow         = { workspace = true }
 tusks          = "2.1"
 chrono         = { workspace = true }
 # Natural-language date parsing for `track` time arguments
-# (e.g. "yesterday 14:00", "last monday").
-chrono-english = { workspace = true }
-dateparser     = { workspace = true }
+# (e.g. "yesterday 14:00", "last monday", "in 2 hours", "eod").
+natural-date   = { path = "../natural-date" }
 serde          = { workspace = true }
 # Domain-shaped JSON output for `track export` / `task tree` (consumed by the
 # Python report/equalize scripts).

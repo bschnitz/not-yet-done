@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection,
-    EntityTrait, QueryFilter, Set, Condition
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
 };
 use shaku::Component;
 use uuid::Uuid;
 
 use crate::entity::tracking::{self, ActiveModel};
 use crate::error::AppError;
-use crate::filter::{FilterExpr, ColumnRegistry};
+use crate::filter::{ColumnRegistry, FilterExpr};
 
 #[async_trait]
 pub trait TrackingRepository: shaku::Interface {
@@ -81,7 +81,10 @@ pub trait TrackingRepository: shaku::Interface {
     async fn undelete(&self, id: Uuid) -> Result<(), AppError>;
 
     /// Find all trackings (including deleted) that have the given predecessor_id.
-    async fn find_by_predecessor(&self, predecessor_id: Uuid) -> Result<Vec<tracking::Model>, AppError>;
+    async fn find_by_predecessor(
+        &self,
+        predecessor_id: Uuid,
+    ) -> Result<Vec<tracking::Model>, AppError>;
 
     /// Hard-delete a tracking from the database.
     async fn hard_delete(&self, id: Uuid) -> Result<(), AppError>;
@@ -230,7 +233,8 @@ impl TrackingRepository for TrackingRepositoryImpl {
     async fn soft_delete_keeping_times(&self, id: Uuid) -> Result<(), AppError> {
         let db = self.db.as_ref().expect("DB not initialized");
         let tracking = tracking::Entity::find_by_id(id)
-            .one(db).await?
+            .one(db)
+            .await?
             .ok_or(AppError::TrackingNotFound(id))?;
         let mut model: tracking::ActiveModel = tracking.into();
         model.deleted = Set(true);
@@ -281,7 +285,7 @@ impl TrackingRepository for TrackingRepositoryImpl {
     }
 
     async fn find_filtered(&self, expr: &FilterExpr) -> Result<Vec<tracking::Model>, AppError> {
-        use sea_orm::{QueryOrder, JoinType, QuerySelect};
+        use sea_orm::{JoinType, QueryOrder, QuerySelect};
 
         let db = self.db.as_ref().expect("DB not initialized");
         let resolved = crate::filter::tree_ops::resolve_tree_operators(expr, db).await?;
@@ -305,7 +309,8 @@ impl TrackingRepository for TrackingRepositoryImpl {
     async fn undelete(&self, id: Uuid) -> Result<(), AppError> {
         let db = self.db.as_ref().expect("DB not initialized");
         let tracking = tracking::Entity::find_by_id(id)
-            .one(db).await?
+            .one(db)
+            .await?
             .ok_or(AppError::TrackingNotFound(id))?;
         let mut model: tracking::ActiveModel = tracking.into();
         model.deleted = Set(false);
@@ -313,7 +318,10 @@ impl TrackingRepository for TrackingRepositoryImpl {
         Ok(())
     }
 
-    async fn find_by_predecessor(&self, predecessor_id: Uuid) -> Result<Vec<tracking::Model>, AppError> {
+    async fn find_by_predecessor(
+        &self,
+        predecessor_id: Uuid,
+    ) -> Result<Vec<tracking::Model>, AppError> {
         let db = self.db.as_ref().expect("DB not initialized");
         Ok(tracking::Entity::find()
             .filter(tracking::Column::PredecessorId.eq(predecessor_id))
@@ -345,22 +353,32 @@ struct TrackingWithTaskRegistry;
 
 impl TrackingWithTaskRegistry {
     const TRACKING_COLS: &'static [&'static str] = &[
-        "id", "task_id", "predecessor_id", "started_at", "ended_at",
-        "deleted", "created_at",
+        "id",
+        "task_id",
+        "predecessor_id",
+        "started_at",
+        "ended_at",
+        "deleted",
+        "created_at",
     ];
     const TASK_COLS: &'static [&'static str] = &[
-        "id", "description", "status", "deleted", "deleted_at",
-        "priority", "parent_id", "created_at", "updated_at", "last_tracked_at", "path",
+        "id",
+        "description",
+        "status",
+        "deleted",
+        "deleted_at",
+        "priority",
+        "parent_id",
+        "created_at",
+        "updated_at",
+        "last_tracked_at",
+        "path",
     ];
 }
 
 impl ColumnRegistry for TrackingWithTaskRegistry {
-    fn resolve(
-        &self,
-        table: Option<&str>,
-        column: &str,
-    ) -> Option<sea_orm::sea_query::ColumnRef> {
-        use sea_orm::sea_query::{Alias, ColumnRef, ColumnName, TableName, IntoIden};
+    fn resolve(&self, table: Option<&str>, column: &str) -> Option<sea_orm::sea_query::ColumnRef> {
+        use sea_orm::sea_query::{Alias, ColumnName, ColumnRef, IntoIden, TableName};
 
         let qualified = |tbl: &str, col: &str| -> ColumnRef {
             ColumnRef::Column(ColumnName(

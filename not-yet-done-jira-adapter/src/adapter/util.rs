@@ -28,16 +28,13 @@ pub(super) fn format_file_size(bytes: u64) -> String {
 }
 
 /// Truncate a body string to `max_len` chars, replacing newlines with spaces.
+/// Used for the one-line comment previews in the comments list.
 pub(super) fn truncate_body(body: &str, max_len: usize) -> String {
     let flat: String = body
         .chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
         .collect();
-    if flat.len() <= max_len {
-        flat
-    } else {
-        format!("{}…", &flat[..max_len])
-    }
+    not_yet_done_content::text::truncate_with_ellipsis(&flat, max_len, "…")
 }
 
 /// Ensure a string ends with exactly one `\n`. `diffy::merge` is line-aware
@@ -76,8 +73,10 @@ pub(super) fn normalize_blank_lines(text: &str) -> String {
 /// `edit_with_comments` per-comment header for readability.
 pub(super) fn short_ts(ts: &str) -> String {
     let max = "2025-06-01T10:00".len();
-    if ts.len() >= max {
-        let head = &ts[..max];
+    // `get` rather than `&ts[..max]`: the field is a timestamp by contract, but
+    // a byte slice would panic outright on anything else that carries a
+    // multi-byte character across the cut.
+    if let Some(head) = ts.get(..max) {
         // Cheap sanity check: positions 4, 7, 10, 13 should be `-`/`-`/`T`/`:`.
         let bytes = head.as_bytes();
         if bytes.len() == max
@@ -109,9 +108,25 @@ mod tests {
         assert!(result.ends_with('…'));
     }
 
+    /// Regression: the comments list previews every comment at 80 chars. When
+    /// byte 80 fell inside a multi-byte character, the byte slice panicked and
+    /// took the whole tokio worker down — opening the comments of a ticket
+    /// written in a language with umlauts was enough to crash the TUI.
+    #[test]
+    fn truncate_body_cuts_on_a_char_boundary_not_a_byte() {
+        let body = format!("{}ä past the boundary", "a".repeat(79));
+        let preview = truncate_body(&body, 80);
+        assert_eq!(preview.chars().count(), 81, "80 chars plus the ellipsis");
+        assert!(preview.ends_with('…'));
+        assert!(preview.starts_with(&"a".repeat(79)));
+    }
+
     #[test]
     fn truncate_body_newlines() {
-        assert_eq!(truncate_body("line1\nline2\nline3", 80), "line1 line2 line3");
+        assert_eq!(
+            truncate_body("line1\nline2\nline3", 80),
+            "line1 line2 line3"
+        );
     }
 
     #[test]

@@ -50,7 +50,9 @@ fn start_tracking_for_nonexistent_task_fails() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Error:"))
-        .stderr(predicate::str::contains("Task not found").or(predicate::str::contains("not found")));
+        .stderr(
+            predicate::str::contains("Task not found").or(predicate::str::contains("not found")),
+        );
 }
 
 // ── track start <invalid uuid> ───────────────────────────────────────────────

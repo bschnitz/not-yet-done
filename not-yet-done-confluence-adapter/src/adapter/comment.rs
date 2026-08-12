@@ -55,15 +55,11 @@ pub(super) fn comment_node_type() -> NodeType {
 /// hints are stable without instantiating a comment node first.
 pub(super) fn comment_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("edit", "edit", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('e'),
+        NodeAction::new("edit", "edit", InputSpec::Editor),
         // Capital `D` matches CF-11's destructive convention — lowercase
         // `d` stays reserved for non-destructive operations (e.g. the
         // attachment download key).
-        NodeAction::new("delete", "delete", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('D'),
+        NodeAction::new("delete", "delete", InputSpec::None),
     ]
 }
 
@@ -85,11 +81,7 @@ pub(super) struct ConfluenceCommentNode {
 }
 
 impl ConfluenceCommentNode {
-    pub(super) fn new(
-        client: Arc<ConfluenceClient>,
-        comment: CommentMeta,
-        page_id: &str,
-    ) -> Self {
+    pub(super) fn new(client: Arc<ConfluenceClient>, comment: CommentMeta, page_id: &str) -> Self {
         let composite_id = format!("{}/comment/{}", page_id, comment.id);
         let cached_metadata = Metadata {
             fields: vec![
@@ -162,6 +154,7 @@ impl ConfluenceCommentNode {
             template,
             version: detail.version_number.to_string(),
             suffix: ".html".into(),
+            file_path: None,
         })
     }
 
@@ -189,12 +182,7 @@ impl ConfluenceCommentNode {
         let detail = self.detail().await?;
         match self
             .client
-            .update_comment(
-                &self.comment.id,
-                version_num + 1,
-                &detail.title,
-                user,
-            )
+            .update_comment(&self.comment.id, version_num + 1, &detail.title, user)
             .await
         {
             Ok(new_version) => Ok(ActionOutcome::Done {
@@ -262,27 +250,8 @@ impl Node for ConfluenceCommentNode {
     fn metadata(&self) -> &Metadata {
         &self.cached_metadata
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        comment_actions()
-    }
-
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        Vec::new()
-    }
-
-    async fn list(&self, _params: ListParams) -> Result<ListResult> {
-        Ok(ListResult {
-            items: vec![],
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -302,26 +271,23 @@ impl Node for ConfluenceCommentNode {
     /// confirm-popup pipeline (CF-11). Every other action either has its
     /// own pipeline (editor for `edit`) or no shortcut wired to it, so
     /// they fall through to [`ActionDispatch::Noop`].
-    async fn invoke_action(
-        &self,
-        name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
             "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             _ => Ok(ActionDispatch::Noop),
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("edit", ActionInput::Edited { text, original, version }) => {
-                self.execute_edit(&text, &original, &version).await
-            }
+            (
+                "edit",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => self.execute_edit(&text, &original, &version).await,
             ("delete", ActionInput::None) => self.execute_delete().await,
             (id, _) => Err(ContentError::NotSupported(format!(
                 "ConfluenceCommentNode action `{id}` not supported"
@@ -396,10 +362,12 @@ mod tests {
         assert_eq!(meta.fields[3].value, "12345");
     }
 
-    #[test]
-    fn comment_has_no_children() {
+    #[tokio::test]
+    async fn comment_has_no_children() {
+        use not_yet_done_content::children;
+        let adapter = super::super::test_adapter().await;
         let node = ConfluenceCommentNode::new(synthetic_client(), sample_comment(), "12345");
-        assert!(node.children_types().is_empty());
+        assert!(children::child_types(&adapter, &node).is_empty());
     }
 
     #[test]
@@ -407,10 +375,8 @@ mod tests {
         let actions = comment_actions();
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].id, "edit");
-        assert_eq!(actions[0].default_key, Some('e'));
         assert!(matches!(actions[0].input, InputSpec::Editor));
         assert_eq!(actions[1].id, "delete");
-        assert_eq!(actions[1].default_key, Some('D'));
         assert!(matches!(actions[1].input, InputSpec::None));
     }
 

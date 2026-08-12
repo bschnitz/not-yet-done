@@ -98,20 +98,31 @@ impl TaskService for TaskServiceImpl {
             None
         };
 
-        let task = self.task_repository.insert(description, parent_uuid, status, priority).await?;
+        let task = self
+            .task_repository
+            .insert(description, parent_uuid, status, priority)
+            .await?;
 
         if let Some(proj_ref) = project {
             let project = self.resolve_project(&proj_ref).await?;
-            self.task_repository.assign_project(task.id, project.id).await?;
+            self.task_repository
+                .assign_project(task.id, project.id)
+                .await?;
         }
 
         if let Some(tag_ref) = tag {
             let resolved = self.resolve_tag(task.id, &tag_ref).await?;
             match resolved {
-                crate::repository::ResolvedTag::Global(t) =>
-                    self.task_repository.assign_global_tag(task.id, t.id).await?,
-                crate::repository::ResolvedTag::Project(t) =>
-                    self.task_repository.assign_project_tag(task.id, t.id).await?,
+                crate::repository::ResolvedTag::Global(t) => {
+                    self.task_repository
+                        .assign_global_tag(task.id, t.id)
+                        .await?
+                }
+                crate::repository::ResolvedTag::Project(t) => {
+                    self.task_repository
+                        .assign_project_tag(task.id, t.id)
+                        .await?
+                }
             }
         }
 
@@ -138,7 +149,9 @@ impl TaskService for TaskServiceImpl {
         } else {
             None
         };
-        self.task_repository.find_all_including_deleted(project_id).await
+        self.task_repository
+            .find_all_including_deleted(project_id)
+            .await
     }
 
     /// Return all tasks matching the given filter expression.
@@ -155,7 +168,9 @@ impl TaskService for TaskServiceImpl {
         expr: &FilterExpr,
         options: &crate::filter::query_filter::QueryOptions,
     ) -> Result<Vec<task::Model>, AppError> {
-        self.task_repository.find_filtered_with_options(expr, options).await
+        self.task_repository
+            .find_filtered_with_options(expr, options)
+            .await
     }
 
     async fn get_subtree(
@@ -163,7 +178,9 @@ impl TaskService for TaskServiceImpl {
         root_id: Uuid,
         last_tracked_since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<task::Model>, AppError> {
-        self.task_repository.find_subtree(root_id, last_tracked_since).await
+        self.task_repository
+            .find_subtree(root_id, last_tracked_since)
+            .await
     }
 
     async fn delete_task(&self, id: Uuid) -> Result<(), AppError> {
@@ -200,26 +217,32 @@ impl TaskService for TaskServiceImpl {
 
         if let Some(proj_ref) = remove_project {
             let project = self.resolve_project(&proj_ref).await?;
-            self.task_repository.unassign_project(id, project.id).await?;
+            self.task_repository
+                .unassign_project(id, project.id)
+                .await?;
         }
 
         if let Some(tag_ref) = add_tag {
             let resolved = self.resolve_tag(id, &tag_ref).await?;
             match resolved {
-                crate::repository::ResolvedTag::Global(t) =>
-                    self.task_repository.assign_global_tag(id, t.id).await?,
-                crate::repository::ResolvedTag::Project(t) =>
-                    self.task_repository.assign_project_tag(id, t.id).await?,
+                crate::repository::ResolvedTag::Global(t) => {
+                    self.task_repository.assign_global_tag(id, t.id).await?
+                }
+                crate::repository::ResolvedTag::Project(t) => {
+                    self.task_repository.assign_project_tag(id, t.id).await?
+                }
             }
         }
 
         if let Some(tag_ref) = remove_tag {
             let resolved = self.resolve_tag(id, &tag_ref).await?;
             match resolved {
-                crate::repository::ResolvedTag::Global(t) =>
-                    self.task_repository.unassign_global_tag(id, t.id).await?,
-                crate::repository::ResolvedTag::Project(t) =>
-                    self.task_repository.unassign_project_tag(id, t.id).await?,
+                crate::repository::ResolvedTag::Global(t) => {
+                    self.task_repository.unassign_global_tag(id, t.id).await?
+                }
+                crate::repository::ResolvedTag::Project(t) => {
+                    self.task_repository.unassign_project_tag(id, t.id).await?
+                }
             }
         }
 
@@ -235,13 +258,16 @@ impl TaskService for TaskServiceImpl {
         parent_id: Option<Option<Uuid>>,
         deleted: Option<bool>,
     ) -> Result<task::Model, AppError> {
-        self.task_repository.update_task(id, description, status, priority, parent_id, deleted).await
+        self.task_repository
+            .update_task(id, description, status, priority, parent_id, deleted)
+            .await
     }
 
     async fn load_tags_for_tasks(
         &self,
         task_ids: &[Uuid],
-    ) -> Result<std::collections::HashMap<Uuid, Vec<crate::repository::ResolvedTag>>, AppError> {
+    ) -> Result<std::collections::HashMap<Uuid, Vec<crate::repository::ResolvedTag>>, AppError>
+    {
         self.task_repository.find_tags_by_task_ids(task_ids).await
     }
 }
@@ -293,8 +319,12 @@ impl TaskServiceImpl {
         }
 
         // Name resolution: check project tags of the task first
-        let project_ids = self.task_repository.find_project_ids_for_task(task_id).await?;
-        let project_matches = self.tag_repository
+        let project_ids = self
+            .task_repository
+            .find_project_ids_for_task(task_id)
+            .await?;
+        let project_matches = self
+            .tag_repository
             .find_project_tags_by_name(tag_ref, &project_ids)
             .await?;
 

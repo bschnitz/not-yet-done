@@ -31,8 +31,7 @@ use crate::client::{KimaiActivity, KimaiProject, KimaiTimesheet};
 
 pub(super) const EDITABLE_MARKER: &str = "---";
 pub(super) const BODY_MARKER: &str = "===";
-pub(super) const CACHE_MARKER: &str =
-    "#### CACHE / available entries (do not edit) ####";
+pub(super) const CACHE_MARKER: &str = "#### CACHE / available entries (do not edit) ####";
 
 const ERROR_BANNER_START: &str = "# ─── ERRORS ───";
 const ERROR_BANNER_END: &str = "# ──────────────";
@@ -259,8 +258,7 @@ fn entry_combos(
     let raw: Vec<(String, String, String, String, u64, u64)> = pairs
         .into_iter()
         .map(|(pid, aid)| {
-            let (token, display, project, activity) =
-                combo_parts(pid, aid, projects, activities);
+            let (token, display, project, activity) = combo_parts(pid, aid, projects, activities);
             (token, display, project, activity, pid, aid)
         })
         .collect();
@@ -334,8 +332,12 @@ fn resolve_entry(
     let value = value.trim();
     if let Some((p, a)) = value.split_once('_')
         && let (Some(pid), Some(aid)) = (
-            p.trim().strip_prefix('#').and_then(|v| v.parse::<u64>().ok()),
-            a.trim().strip_prefix('#').and_then(|v| v.parse::<u64>().ok()),
+            p.trim()
+                .strip_prefix('#')
+                .and_then(|v| v.parse::<u64>().ok()),
+            a.trim()
+                .strip_prefix('#')
+                .and_then(|v| v.parse::<u64>().ok()),
         )
     {
         return Ok((pid, aid));
@@ -549,7 +551,12 @@ pub(super) fn build_edit_plan(
     }
 
     let entry = parsed.editable.get("entry").and_then(|v| {
-        match resolve_entry(v, projects, activities, Some((current.project, current.activity))) {
+        match resolve_entry(
+            v,
+            projects,
+            activities,
+            Some((current.project, current.activity)),
+        ) {
             Ok(pair) => Some(pair),
             Err(e) => {
                 errors.push(e);
@@ -557,12 +564,14 @@ pub(super) fn build_edit_plan(
             }
         }
     });
-    let begin = parsed.editable.get("begin").and_then(|v| {
-        parse_begin(v).map_err(|e| errors.push(e)).ok()
-    });
-    let duration = parsed.editable.get("duration").and_then(|v| {
-        parse_duration(v).map_err(|e| errors.push(e)).ok()
-    });
+    let begin = parsed
+        .editable
+        .get("begin")
+        .and_then(|v| parse_begin(v).map_err(|e| errors.push(e)).ok());
+    let duration = parsed
+        .editable
+        .get("duration")
+        .and_then(|v| parse_duration(v).map_err(|e| errors.push(e)).ok());
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -585,8 +594,8 @@ pub(super) fn build_edit_plan(
         }
     }
 
-    let begin_changed = begin
-        .is_some_and(|b| b.format("%Y-%m-%dT%H:%M:%S").to_string() != current_begin);
+    let begin_changed =
+        begin.is_some_and(|b| b.format("%Y-%m-%dT%H:%M:%S").to_string() != current_begin);
     let duration_changed = !running && duration.is_some_and(|d| d != current_duration);
     if begin_changed || duration_changed {
         // Kimai derives duration from the begin/end pair, so both a begin
@@ -886,7 +895,10 @@ mod tests {
     #[test]
     fn slugify_produces_single_tokens() {
         assert_eq!(slugify("Website Relaunch"), "website-relaunch");
-        assert_eq!(slugify("  Multiple   spaces / slashes  "), "multiple-spaces-slashes");
+        assert_eq!(
+            slugify("  Multiple   spaces / slashes  "),
+            "multiple-spaces-slashes"
+        );
         assert_eq!(slugify("Bug-Fixing (urgent!)"), "bug-fixing-urgent");
         assert_eq!(slugify("!!!"), "");
     }
@@ -909,14 +921,24 @@ mod tests {
     fn resolve_entry_accepts_token_and_escape() {
         let (projects, activities) = lookups();
         assert_eq!(
-            resolve_entry("acme-corp_website-relaunch_development", &projects, &activities, None)
-                .unwrap(),
+            resolve_entry(
+                "acme-corp_website-relaunch_development",
+                &projects,
+                &activities,
+                None
+            )
+            .unwrap(),
             (7, 3)
         );
         // Case-insensitive on the token.
         assert_eq!(
-            resolve_entry("ACME-CORP_WEBSITE-RELAUNCH_MEETING", &projects, &activities, None)
-                .unwrap(),
+            resolve_entry(
+                "ACME-CORP_WEBSITE-RELAUNCH_MEETING",
+                &projects,
+                &activities,
+                None
+            )
+            .unwrap(),
             (7, 4)
         );
         // Bare token for the customer-less project.
@@ -1059,7 +1081,10 @@ mod tests {
         let edited = template.replace("duration: 0:00:00", "duration: 3:00:00");
         let parsed = parse_edit(&edited).unwrap();
         let plan = build_edit_plan(&parsed, &ts, &projects, &activities).unwrap();
-        assert!(plan.is_none(), "duration edits on a running entry are ignored");
+        assert!(
+            plan.is_none(),
+            "duration edits on a running entry are ignored"
+        );
     }
 
     #[test]
@@ -1071,8 +1096,7 @@ mod tests {
             ..sample_timesheet()
         };
         let template = render_edit_template(&ts, &projects, &activities);
-        let edited =
-            template.replace("begin: 2030-01-15T09:00:00", "begin: 2030-01-15T08:30:00");
+        let edited = template.replace("begin: 2030-01-15T09:00:00", "begin: 2030-01-15T08:30:00");
         let parsed = parse_edit(&edited).unwrap();
         let plan = build_edit_plan(&parsed, &ts, &projects, &activities)
             .unwrap()
@@ -1141,14 +1165,16 @@ mod tests {
     #[test]
     fn build_create_body_collects_field_errors() {
         let (projects, activities) = lookups();
-        let errors = build_create_body(
-            "nope", "not-a-date", "0", "x", &projects, &activities,
-        )
-        .unwrap_err();
+        let errors =
+            build_create_body("nope", "not-a-date", "0", "x", &projects, &activities).unwrap_err();
         // Unknown entry, unparseable begin, and non-positive duration all reported.
         assert!(errors.iter().any(|e| e.contains("unknown entry `nope`")));
         assert!(errors.iter().any(|e| e.contains("invalid begin")));
-        assert!(errors.iter().any(|e| e.contains("duration must be positive")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("duration must be positive"))
+        );
     }
 
     #[test]

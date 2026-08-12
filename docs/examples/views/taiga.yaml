@@ -11,7 +11,8 @@
 #              userstories). Required.
 #   sort:      optional default sort, list of {column, direction}.
 #              Runtime sort from the UI overrides this.
-#              Columns: ref, type, status, assignee, subject, modified, project.
+#              Columns: ref, type, status, assignee, creator, subject,
+#              modified, project.
 #   page:      optional `{ size: N }` — default page size for this view.
 #              The TUI may request a different offset/limit at runtime.
 #
@@ -54,6 +55,10 @@ views:
         queries:
           - { type: [task, issue, epic], assigned_to: $me }
           - { type: userstory, assigned_to: $me, is_archived: false }
+          # User stories support multiple assignees (`assigned_users`); the
+          # server-side `assigned_to` filter only matches the primary one, so a
+          # second block catches stories where you're a secondary assignee.
+          - { type: userstory, assigned_users: $me, is_archived: false }
         sort:
           - { column: type, direction: asc }
           - { column: modified, direction: desc }
@@ -84,6 +89,10 @@ views:
         sizing: max
       - key: assignee
         label: Assignee
+        sizing: max
+      # Who filed the item (Taiga's `owner`). Read-only, like `assignee`.
+      - key: creator
+        label: Creator
         sizing: max
       - key: subject
         label: Subject
@@ -125,12 +134,19 @@ views:
         text_search:
           prompt: "Taiga-Suche"
           # YAML query template. <input> is replaced by the (escaped)
-          # search term. The `ref:` block fires only when the input is
-          # numeric — otherwise the adapter drops it.
+          # search term.
+          #
+          # `q` is Taiga's own full-text filter and already covers the ref,
+          # so "112" and "#112" both find item #112 — no extra `ref:` block
+          # needed. Do not add one: Taiga's list endpoints ignore `ref` as a
+          # filter and answer with the *complete* unfiltered list, which
+          # would bury the actual hits.
+          #
+          # List every type that should be searchable — a type missing here
+          # is simply never found.
           query_template:
             queries:
-              - { type: [task, issue, epic], q: "<input>" }
-              - { type: [task, issue, epic], ref: <input_if_numeric> }
+              - { type: [task, issue, epic, userstory], q: "<input>" }
       - name: edit + comments
         key: e
         type: edit
@@ -205,6 +221,13 @@ views:
             key: e
             type: edit
             id: edit_full
+        # `delete` must be a `shortcuts:` binding (not an `actions:` entry): a
+        # row-level `type: custom` action dispatches straight to `execute` and
+        # cannot ask for confirmation, whereas a shortcut routes through
+        # `invoke_action`, which returns `DeleteSelf` so the TUI shows a
+        # `(y/n)` prompt before the irreversible REST delete.
+        shortcuts:
+          d: delete
 
       - name: Attachments
         key: a

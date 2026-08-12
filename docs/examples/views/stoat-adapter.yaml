@@ -16,15 +16,19 @@ auth:
   # `POST /api/auth/session/login`, which returns a session token sent as
   # the `X-Session-Token` header on every request (and to the gateway).
   #
-  # NOTE on field names: the unified `password-login` mechanism fixes the
-  # binding field names to `username` + `password`. Stoat has no separate
-  # username login, so the `username` field carries your **email address**.
-  # Only the session token is ever persisted — never the password
-  # (session_cache defaults to `until-rejected`: kept until the server
-  # returns 401/403, then a fresh login is triggered).
+  # NOTE on field names: Stoat's `password-login` mechanism declares the
+  # fields `username` + `password`. Stoat has no separate username login,
+  # so `username` carries your **email address** — which is why the login
+  # prompt labels it "E-mail address". Only the session token is ever
+  # persisted — never the password (session_cache defaults to
+  # `until-rejected`: kept until the server returns 401/403, then a fresh
+  # login is triggered).
+  #
+  # `nyd config auth stoat` prints the mechanism, its fields and every
+  # provider; `nyd config build stoat` asks and writes the block.
   mechanism: password-login
   bindings:
-    - field: username # ← put your LOGIN EMAIL here (mechanism-fixed name)
+    - field: username # ← put your LOGIN EMAIL here (mechanism-declared name)
       provider:
         type: prompt
         # Optionally pre-fill the email so only the password is asked for:

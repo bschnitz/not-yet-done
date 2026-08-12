@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  Fixture: an account picker whose tile click handler attaches only AFTER a
+  short delay, simulating the client-side hydration race on the live AAD page.
+  A click before the handler is live does nothing; a click once it is attached
+  removes #tilesHolder (the flow advances). Verifies that clickUntilGone retries
+  past the dead early click instead of giving up. Invented data.
+-->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Pick an account</title></head>
+  <body>
+    <div id="tilesHolder" role="list">
+      <div role="button" data-test-id="user@example.com">user@example.com</div>
+      <div id="otherTile" role="button">Use another account</div>
+    </div>
+    <script>
+      // Hydrate late: no working handler for the first 250 ms.
+      setTimeout(function () {
+        document
+          .querySelector('[data-test-id="user@example.com"]')
+          .addEventListener("click", function () {
+            document.getElementById("tilesHolder").remove();
+          });
+      }, 250);
+    </script>
+  </body>
+</html>

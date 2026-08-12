@@ -13,6 +13,9 @@
 #
 # The credentials are static, so there is no login flow and no persisted
 # session — the adapter resolves the providers once per process.
+#
+# `nyd config auth kimai` prints both mechanisms with their fields and
+# every provider; `nyd config build kimai` asks and writes the block.
 
 url: https://kimai.example.com
 
@@ -33,6 +36,14 @@ auth:
       provider:
         type: command
         script: pass show services/kimai/api-password
+
+# Kimai 2.14+ with a personal API token — one field, no username:
+#
+# auth:
+#   mechanism: bearer-token
+#   bindings:
+#     - field: token
+#       provider: { type: keyring, service: kimai, account: alice }
 
 # How many days back the timesheet listing reaches (the API is filtered to
 # `begin >= now - lookback_days`). Optional; defaults to 92 (~3 months).

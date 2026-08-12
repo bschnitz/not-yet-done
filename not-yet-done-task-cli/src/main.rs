@@ -18,7 +18,10 @@ where
     F: FnOnce(Arc<TaskDomainModule>) -> Fut,
     Fut: Future<Output = T>,
 {
-    let module = MODULE.get().expect("TaskDomainModule nicht initialisiert").clone();
+    let module = MODULE
+        .get()
+        .expect("TaskDomainModule nicht initialisiert")
+        .clone();
     tokio::runtime::Runtime::new()
         .expect("tokio Runtime konnte nicht erstellt werden")
         .block_on(f(module))
@@ -91,8 +94,11 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    MODULE.set(module).unwrap_or_else(|_| panic!("MODULE bereits gesetzt"));
-    DSN.set(dsn).unwrap_or_else(|_| panic!("DSN bereits gesetzt"));
+    MODULE
+        .set(module)
+        .unwrap_or_else(|_| panic!("MODULE bereits gesetzt"));
+    DSN.set(dsn)
+        .unwrap_or_else(|_| panic!("DSN bereits gesetzt"));
 
     std::process::ExitCode::from(cli::exec_cli().unwrap_or(0))
 }

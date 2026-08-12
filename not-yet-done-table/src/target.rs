@@ -46,7 +46,8 @@ impl CharBuf {
 
     /// Get the full buffer content with trailing spaces trimmed per line.
     pub fn to_string_trimmed(&self) -> String {
-        self.buf.iter()
+        self.buf
+            .iter()
             .map(|row| row.iter().collect::<String>().trim_end().to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -54,8 +55,12 @@ impl CharBuf {
 }
 
 impl RenderTarget for CharBuf {
-    fn width(&self) -> usize { self.width }
-    fn height(&self) -> usize { self.height }
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
     fn put_char(&mut self, x: usize, y: usize, ch: char) {
         if x < self.width && y < self.height {
             self.buf[y][x] = ch;
@@ -66,7 +71,9 @@ impl RenderTarget for CharBuf {
 impl std::fmt::Display for CharBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, row) in self.buf.iter().enumerate() {
-            if i > 0 { writeln!(f)?; }
+            if i > 0 {
+                writeln!(f)?;
+            }
             let s: String = row.iter().collect();
             write!(f, "{}", s)?;
         }
@@ -93,7 +100,9 @@ pub fn render_to_target<Id>(
     }
 
     for row in &table.rows {
-        if y >= target.height() { break; }
+        if y >= target.height() {
+            break;
+        }
         write_row(target, y, &row.cells, separator);
         y += 1;
     }

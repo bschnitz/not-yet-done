@@ -261,8 +261,12 @@ impl MultiChoice {
     }
 
     fn move_order_up(&mut self) {
-        if !self.ordering { return; }
-        if self.cursor == 0 { return; }
+        if !self.ordering {
+            return;
+        }
+        if self.cursor == 0 {
+            return;
+        }
         // Swap in the order vec.
         let a = self.filtered_indices[self.cursor];
         let b = self.filtered_indices[self.cursor - 1];
@@ -277,9 +281,13 @@ impl MultiChoice {
     }
 
     fn move_order_down(&mut self) {
-        if !self.ordering { return; }
+        if !self.ordering {
+            return;
+        }
         let max = self.filtered_indices.len().saturating_sub(1);
-        if self.cursor >= max { return; }
+        if self.cursor >= max {
+            return;
+        }
         // Swap in the order vec.
         let a = self.filtered_indices[self.cursor];
         let b = self.filtered_indices[self.cursor + 1];
@@ -329,7 +337,9 @@ impl MultiChoice {
             self.filtered_indices = self.order.clone();
         } else {
             let q = self.filter_query.to_lowercase();
-            self.filtered_indices = self.order.iter()
+            self.filtered_indices = self
+                .order
+                .iter()
                 .copied()
                 .filter(|&i| self.choices[i].to_lowercase().contains(&q))
                 .collect();
@@ -345,9 +355,9 @@ impl MultiChoice {
         } else {
             self.cursor = 0;
         }
-        self.scroll_offset = self.scroll_offset.min(
-            self.filtered_indices.len().saturating_sub(1),
-        );
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.filtered_indices.len().saturating_sub(1));
     }
 
     fn filter_push_char(&mut self, c: char) {
@@ -376,16 +386,24 @@ impl MultiChoice {
     }
 
     fn filter_cursor_left(&mut self) {
-        if self.filter_cursor == 0 { return; }
+        if self.filter_cursor == 0 {
+            return;
+        }
         let mut pos = self.filter_cursor - 1;
-        while !self.filter_query.is_char_boundary(pos) { pos -= 1; }
+        while !self.filter_query.is_char_boundary(pos) {
+            pos -= 1;
+        }
         self.filter_cursor = pos;
     }
 
     fn filter_cursor_right(&mut self) {
-        if self.filter_cursor >= self.filter_query.len() { return; }
+        if self.filter_cursor >= self.filter_query.len() {
+            return;
+        }
         let mut pos = self.filter_cursor + 1;
-        while pos <= self.filter_query.len() && !self.filter_query.is_char_boundary(pos) { pos += 1; }
+        while pos <= self.filter_query.len() && !self.filter_query.is_char_boundary(pos) {
+            pos += 1;
+        }
         self.filter_cursor = pos;
     }
 
@@ -401,7 +419,11 @@ impl MultiChoice {
 
 impl Component for MultiChoice {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        let style = if self.focused { &self.active_style } else { &self.inactive_style };
+        let style = if self.focused {
+            &self.active_style
+        } else {
+            &self.inactive_style
+        };
         let data = MultiChoiceViewData {
             title: &self.title,
             choices: &self.choices,
@@ -595,7 +617,11 @@ impl AppComponent<MultiChoiceEvent, NoUserEvent> for MultiChoice {
                 } => Cmd::Type(c),
                 _ => return None,
             }
-        } else if let KeyEvent { code: Key::Char(c), modifiers: KeyModifiers::NONE } = key_ev {
+        } else if let KeyEvent {
+            code: Key::Char(c),
+            modifiers: KeyModifiers::NONE,
+        } = key_ev
+        {
             // Check shortcuts.
             if let Some(idx) = self.shortcut_index(c) {
                 let real_idx = idx;
@@ -625,14 +651,20 @@ impl AppComponent<MultiChoiceEvent, NoUserEvent> for MultiChoice {
             CmdResult::Changed(State::Vec(values)) => {
                 let indices: Vec<usize> = values
                     .into_iter()
-                    .filter_map(|v| if let StateValue::Usize(i) = v { Some(i) } else { None })
+                    .filter_map(|v| {
+                        if let StateValue::Usize(i) = v {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 // Distinguish order change from selection change by checking
                 // if it came from an order command.
-                if self.ordering && (
-                    self.keymap.order_up.matches(&key_ev) ||
-                    self.keymap.order_down.matches(&key_ev)
-                ) {
+                if self.ordering
+                    && (self.keymap.order_up.matches(&key_ev)
+                        || self.keymap.order_down.matches(&key_ev))
+                {
                     Some(MultiChoiceEvent::OrderChanged(indices))
                 } else {
                     Some(MultiChoiceEvent::SelectionChanged(indices))
@@ -693,8 +725,7 @@ mod tests {
 
     #[test]
     fn ordering_disabled_noop() {
-        let mut mc = MultiChoice::default()
-            .with_choices(vec!["A", "B", "C"]);
+        let mut mc = MultiChoice::default().with_choices(vec!["A", "B", "C"]);
         mc.open = true;
         mc.cursor = 1;
         mc.move_order_up();

@@ -27,9 +27,8 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use not_yet_done_ratatui::{
-    Keys, MultiChoice, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType,
-    SelectList, SelectListKeymap, SelectListStyle, SelectListStyleType,
-    SelectionMarker, SelectionMode,
+    Keys, MultiChoice, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType, SelectList,
+    SelectListKeymap, SelectListStyle, SelectListStyleType, SelectionMarker, SelectionMode,
 };
 use tuirealm::{
     command::Cmd,
@@ -39,11 +38,11 @@ use tuirealm::{
 };
 
 use ratatui::{
+    DefaultTerminal,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
-    DefaultTerminal,
 };
 
 // ── Colours ───────────────────────────────────────────────────────────────────
@@ -71,24 +70,57 @@ const CURSOR_BG_MC: Color = Color::Rgb(35, 40, 60);
 fn sl_inactive_style() -> SelectListStyle {
     SelectListStyle::default()
         .set_style(SelectListStyleType::Item, Style::default().fg(TEXT_MUTED))
-        .set_style(SelectListStyleType::ItemSelected, Style::default().fg(SELECTED_MUTED))
-        .set_style(SelectListStyleType::ItemCursor, Style::default().fg(TEXT_MUTED))
-        .set_style(SelectListStyleType::ItemCursorSelected, Style::default().fg(SELECTED_MUTED))
+        .set_style(
+            SelectListStyleType::ItemSelected,
+            Style::default().fg(SELECTED_MUTED),
+        )
+        .set_style(
+            SelectListStyleType::ItemCursor,
+            Style::default().fg(TEXT_MUTED),
+        )
+        .set_style(
+            SelectListStyleType::ItemCursorSelected,
+            Style::default().fg(SELECTED_MUTED),
+        )
         .set_style(SelectListStyleType::GroupHeader, Style::default().fg(DIM))
-        .set_style(SelectListStyleType::FilterInput, Style::default().fg(TEXT_MUTED))
-        .set_style(SelectListStyleType::FilterCursor, Style::default().fg(TEXT_MUTED))
+        .set_style(
+            SelectListStyleType::FilterInput,
+            Style::default().fg(TEXT_MUTED),
+        )
+        .set_style(
+            SelectListStyleType::FilterCursor,
+            Style::default().fg(TEXT_MUTED),
+        )
         .set_style(SelectListStyleType::Footer, Style::default().fg(DIM))
 }
 
 fn sl_active_style() -> SelectListStyle {
     SelectListStyle::default()
         .set_style(SelectListStyleType::Item, Style::default().fg(TEXT))
-        .set_style(SelectListStyleType::ItemSelected, Style::default().fg(SELECTED_FG))
-        .set_style(SelectListStyleType::ItemCursor, Style::default().fg(TEXT).bg(CURSOR_BG))
-        .set_style(SelectListStyleType::ItemCursorSelected, Style::default().fg(SELECTED_FG).bg(CURSOR_BG))
-        .set_style(SelectListStyleType::GroupHeader, Style::default().fg(GROUP_FG).add_modifier(Modifier::BOLD))
-        .set_style(SelectListStyleType::FilterInput, Style::default().fg(FILTER_FG))
-        .set_style(SelectListStyleType::FilterCursor, Style::default().fg(TEXT).bg(FILTER_CURSOR_BG))
+        .set_style(
+            SelectListStyleType::ItemSelected,
+            Style::default().fg(SELECTED_FG),
+        )
+        .set_style(
+            SelectListStyleType::ItemCursor,
+            Style::default().fg(TEXT).bg(CURSOR_BG),
+        )
+        .set_style(
+            SelectListStyleType::ItemCursorSelected,
+            Style::default().fg(SELECTED_FG).bg(CURSOR_BG),
+        )
+        .set_style(
+            SelectListStyleType::GroupHeader,
+            Style::default().fg(GROUP_FG).add_modifier(Modifier::BOLD),
+        )
+        .set_style(
+            SelectListStyleType::FilterInput,
+            Style::default().fg(FILTER_FG),
+        )
+        .set_style(
+            SelectListStyleType::FilterCursor,
+            Style::default().fg(TEXT).bg(FILTER_CURSOR_BG),
+        )
         .set_style(SelectListStyleType::Footer, Style::default().fg(FOOTER_FG))
 }
 
@@ -98,23 +130,59 @@ fn mc_inactive_style() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(ACCENT)
         .set_style(MultiChoiceStyleType::Title, Style::default().fg(ACCENT))
-        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(TEXT_MUTED))
-        .set_style(MultiChoiceStyleType::Selected, Style::default().fg(SELECTED_MUTED))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(SELECTED_MUTED))
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(TEXT_MUTED),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(SELECTED_MUTED),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(SELECTED_MUTED),
+        )
 }
 
 fn mc_active_style() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(GREEN)
-        .set_style(MultiChoiceStyleType::Title, Style::default().fg(GREEN).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(TEXT).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Active, Style::default().fg(SELECTED_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Selected, Style::default().fg(TEXT).bg(SELECTED_BG))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(SELECTED_FG).bg(SELECTED_BG))
-        .set_style(MultiChoiceStyleType::LastLine, Style::default().bg(PANEL_BG))
-        .set_style(MultiChoiceStyleType::FilterInput, Style::default().fg(FILTER_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::FilterCursor, Style::default().fg(TEXT).bg(FILTER_CURSOR_BG))
-        .set_style(MultiChoiceStyleType::Footer, Style::default().fg(FOOTER_FG).bg(INPUT_BG))
+        .set_style(
+            MultiChoiceStyleType::Title,
+            Style::default().fg(GREEN).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(TEXT).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Active,
+            Style::default().fg(SELECTED_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(TEXT).bg(SELECTED_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(SELECTED_FG).bg(SELECTED_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::LastLine,
+            Style::default().bg(PANEL_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::FilterInput,
+            Style::default().fg(FILTER_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::FilterCursor,
+            Style::default().fg(TEXT).bg(FILTER_CURSOR_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Footer,
+            Style::default().fg(FOOTER_FG).bg(INPUT_BG),
+        )
 }
 
 // ── Keymaps ──────────────────────────────────────────────────────────────────
@@ -141,7 +209,16 @@ fn mc_keymap() -> MultiChoiceKeymap {
 
 fn make_languages() -> SelectList {
     SelectList::default()
-        .with_items(vec!["Rust", "Go", "TypeScript", "Python", "Zig", "C++", "Haskell", "Elixir"])
+        .with_items(vec![
+            "Rust",
+            "Go",
+            "TypeScript",
+            "Python",
+            "Zig",
+            "C++",
+            "Haskell",
+            "Elixir",
+        ])
         .with_keymap(sl_keymap())
         .with_inactive_style(sl_inactive_style())
         .with_active_style(sl_active_style())
@@ -149,7 +226,15 @@ fn make_languages() -> SelectList {
 
 fn make_toppings() -> SelectList {
     SelectList::default()
-        .with_items(vec!["Mozzarella", "Pepperoni", "Mushrooms", "Olives", "Basil", "Onions", "Peppers"])
+        .with_items(vec![
+            "Mozzarella",
+            "Pepperoni",
+            "Mushrooms",
+            "Olives",
+            "Basil",
+            "Onions",
+            "Peppers",
+        ])
         .with_marker(SelectionMarker::Checkbox)
         .with_keymap(sl_keymap())
         .with_inactive_style(sl_inactive_style())
@@ -169,7 +254,10 @@ fn make_difficulty() -> SelectList {
 fn make_status() -> SelectList {
     SelectList::default()
         .with_items(vec!["Active", "Paused", "Archived", "Draft", "Review"])
-        .with_marker(SelectionMarker::Custom { selected: "● ", unselected: "○ " })
+        .with_marker(SelectionMarker::Custom {
+            selected: "● ",
+            unselected: "○ ",
+        })
         .with_keymap(sl_keymap())
         .with_inactive_style(sl_inactive_style())
         .with_active_style(sl_active_style())
@@ -178,10 +266,23 @@ fn make_status() -> SelectList {
 fn make_countries() -> SelectList {
     SelectList::default()
         .with_items(vec![
-            "Germany", "France", "Italy", "Spain", "Portugal",
-            "Netherlands", "Belgium", "Austria", "Switzerland",
-            "Sweden", "Norway", "Denmark", "Finland", "Poland",
-            "Czech Republic", "Ireland", "Greece",
+            "Germany",
+            "France",
+            "Italy",
+            "Spain",
+            "Portugal",
+            "Netherlands",
+            "Belgium",
+            "Austria",
+            "Switzerland",
+            "Sweden",
+            "Norway",
+            "Denmark",
+            "Finland",
+            "Poland",
+            "Czech Republic",
+            "Ireland",
+            "Greece",
         ])
         .with_marker(SelectionMarker::Checkbox)
         .with_show_filter(true)
@@ -194,33 +295,80 @@ fn make_countries() -> SelectList {
 fn mc_dot_active_style() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(GREEN)
-        .set_style(MultiChoiceStyleType::Title, Style::default().fg(GREEN).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(TEXT_MUTED).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Active, Style::default().fg(TEXT).bg(CURSOR_BG_MC))
-        .set_style(MultiChoiceStyleType::Selected, Style::default().fg(SELECTED_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(SELECTED_FG).bg(CURSOR_BG_MC))
-        .set_style(MultiChoiceStyleType::LastLine, Style::default().bg(PANEL_BG))
-        .set_style(MultiChoiceStyleType::FilterInput, Style::default().fg(FILTER_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::FilterCursor, Style::default().fg(TEXT).bg(FILTER_CURSOR_BG))
-        .set_style(MultiChoiceStyleType::Footer, Style::default().fg(FOOTER_FG).bg(INPUT_BG))
+        .set_style(
+            MultiChoiceStyleType::Title,
+            Style::default().fg(GREEN).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(TEXT_MUTED).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Active,
+            Style::default().fg(TEXT).bg(CURSOR_BG_MC),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(SELECTED_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(SELECTED_FG).bg(CURSOR_BG_MC),
+        )
+        .set_style(
+            MultiChoiceStyleType::LastLine,
+            Style::default().bg(PANEL_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::FilterInput,
+            Style::default().fg(FILTER_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::FilterCursor,
+            Style::default().fg(TEXT).bg(FILTER_CURSOR_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Footer,
+            Style::default().fg(FOOTER_FG).bg(INPUT_BG),
+        )
 }
 
 fn mc_dot_inactive_style() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(ACCENT)
         .set_style(MultiChoiceStyleType::Title, Style::default().fg(ACCENT))
-        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(TEXT_MUTED))
-        .set_style(MultiChoiceStyleType::Selected, Style::default().fg(SELECTED_MUTED))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(SELECTED_MUTED))
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(TEXT_MUTED),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(SELECTED_MUTED),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(SELECTED_MUTED),
+        )
 }
 
 fn make_genres_dropdown() -> MultiChoice {
     MultiChoice::default()
         .with_title("Genres (dropdown)")
         .with_choices(vec![
-            "Rock", "Jazz", "Electronic", "Hip-Hop", "Classical",
-            "Metal", "Folk", "R&B", "Reggae", "Blues",
-            "Country", "Punk", "Soul", "Ambient",
+            "Rock",
+            "Jazz",
+            "Electronic",
+            "Hip-Hop",
+            "Classical",
+            "Metal",
+            "Folk",
+            "R&B",
+            "Reggae",
+            "Blues",
+            "Country",
+            "Punk",
+            "Soul",
+            "Ambient",
         ])
         .with_placeholder("Select genres…")
         .with_marker(SelectionMarker::Checkbox)
@@ -236,11 +384,20 @@ fn make_moods_dropdown() -> MultiChoice {
     MultiChoice::default()
         .with_title("Moods (●/○ style)")
         .with_choices(vec![
-            "Energetic", "Relaxing", "Melancholic", "Upbeat",
-            "Chill", "Dark", "Euphoric", "Nostalgic",
+            "Energetic",
+            "Relaxing",
+            "Melancholic",
+            "Upbeat",
+            "Chill",
+            "Dark",
+            "Euphoric",
+            "Nostalgic",
         ])
         .with_placeholder("Select moods…")
-        .with_marker(SelectionMarker::Custom { selected: "● ", unselected: "○ " })
+        .with_marker(SelectionMarker::Custom {
+            selected: "● ",
+            unselected: "○ ",
+        })
         .with_show_filter(true)
         .with_show_footer(true)
         .with_max_height(8)
@@ -312,7 +469,11 @@ impl App {
     }
 
     fn focus_prev(&mut self) {
-        self.set_focus(if self.active == 0 { TOTAL_FIELDS - 1 } else { self.active - 1 });
+        self.set_focus(if self.active == 0 {
+            TOTAL_FIELDS - 1
+        } else {
+            self.active - 1
+        });
     }
 }
 
@@ -389,9 +550,9 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),      // SelectList grid
-            Constraint::Length(1),    // spacer
-            Constraint::Length(12),   // MultiChoice dropdown area
+            Constraint::Min(8),     // SelectList grid
+            Constraint::Length(1),  // spacer
+            Constraint::Length(12), // MultiChoice dropdown area
         ])
         .split(content_area);
 
@@ -403,7 +564,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
 
     let top_cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(33), Constraint::Percentage(34), Constraint::Percentage(33)])
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
         .split(sl_rows[0]);
 
     let bottom_cols = Layout::default()
@@ -411,7 +576,13 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(sl_rows[1]);
 
-    let list_areas = [top_cols[0], top_cols[1], top_cols[2], bottom_cols[0], bottom_cols[1]];
+    let list_areas = [
+        top_cols[0],
+        top_cols[1],
+        top_cols[2],
+        bottom_cols[0],
+        bottom_cols[1],
+    ];
 
     for (i, &col_area) in list_areas.iter().enumerate() {
         let padded = Rect {
@@ -419,7 +590,10 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             width: col_area.width.saturating_sub(2),
             ..col_area
         };
-        let title_area = Rect { height: 1, ..padded };
+        let title_area = Rect {
+            height: 1,
+            ..padded
+        };
         let is_active = i == app.active;
         let title_fg = if is_active { GREEN } else { TEXT_MUTED };
         let indicator = if is_active { "▸ " } else { "  " };
@@ -461,17 +635,35 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     let help_y = panel.y + panel.height.saturating_sub(2);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" C-l", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " C-l",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" next  ", Style::default().fg(DIM)),
-            Span::styled("C-h", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "C-h",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" prev  ", Style::default().fg(DIM)),
-            Span::styled("↑↓/C-j/k", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "↑↓/C-j/k",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" nav  ", Style::default().fg(DIM)),
-            Span::styled("Spc", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Spc",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" toggle  ", Style::default().fg(DIM)),
-            Span::styled("Enter", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" open/close  ", Style::default().fg(DIM)),
-            Span::styled("Esc", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" quit", Style::default().fg(DIM)),
         ])),
         Rect::new(panel.x + 2, help_y, panel.width.saturating_sub(4), 1),

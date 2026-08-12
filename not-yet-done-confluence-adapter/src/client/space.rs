@@ -80,8 +80,7 @@ where
         #[serde(default)]
         id: String,
     }
-    let hp: Homepage =
-        serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+    let hp: Homepage = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
     Ok(hp.id)
 }
 
@@ -167,7 +166,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url_for_log, e))?;
-        let resp = http_log::check_status("GET", &url_for_log, resp).await?;
+        let resp = self.check_status("GET", &url_for_log, resp).await?;
         let body = resp
             .text()
             .await
@@ -197,7 +196,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()
             .await
@@ -263,7 +262,10 @@ mod tests {
         let env: SpaceEnvelope = serde_json::from_str(body).expect("parses");
         assert_eq!(env.results.len(), 1);
         assert_eq!(env.results[0].webui, "", "missing webui defaults to empty");
-        assert_eq!(env.results[0].space_type, "", "missing type defaults to empty");
+        assert_eq!(
+            env.results[0].space_type, "",
+            "missing type defaults to empty"
+        );
         assert_eq!(
             env.results[0].homepage_id, "",
             "missing homepage defaults to empty"

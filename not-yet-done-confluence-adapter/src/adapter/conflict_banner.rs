@@ -42,9 +42,8 @@ mod tests {
 
     #[test]
     fn strip_handles_full_banner_block() {
-        let with_banner = format!(
-            "{CONFLICT_BANNER_START}\n    some text\n{CONFLICT_BANNER_END}\n<p>body</p>"
-        );
+        let with_banner =
+            format!("{CONFLICT_BANNER_START}\n    some text\n{CONFLICT_BANNER_END}\n<p>body</p>");
         assert_eq!(strip_banner(&with_banner), "<p>body</p>");
     }
 

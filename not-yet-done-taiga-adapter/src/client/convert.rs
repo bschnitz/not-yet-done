@@ -57,7 +57,9 @@ pub async fn fetch_id_name_map(
     };
     http_log::log_request("GET", &url);
     let resp = match client
-        .send_retrying("GET", &url, || client.http.get(&url).headers(headers.clone()))
+        .send_retrying("GET", &url, || {
+            client.http.get(&url).headers(headers.clone())
+        })
         .await
     {
         Ok(r) => r,
@@ -96,7 +98,9 @@ pub async fn fetch_raw_detail(
     let headers = client.auth_headers()?;
     http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || client.http.get(&url).headers(headers.clone()))
+        .send_retrying("GET", &url, || {
+            client.http.get(&url).headers(headers.clone())
+        })
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     resp.json()

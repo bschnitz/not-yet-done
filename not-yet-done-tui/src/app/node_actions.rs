@@ -69,26 +69,17 @@ pub struct ResolvedShortcut<'a> {
     pub target: ShortcutTarget,
 }
 
-/// Parse a Postgres-adapter DB-script node id of the shape
-/// `<database>/db_scripts/<script>` into `(database, script)`. Returns
-/// `None` for any other shape so the dispatcher can fall through.
+/// Build the `NodeRef`-style scope string under which a node's script
+/// shortcuts are stored in `query_shortcut.scope` (SQ-8): the app-wide
+/// `<adapter_type>/<instance>` prefix joined with the adapter's own node
+/// id, which the host passes through opaquely.
 ///
-/// Kept separate so CP-9's `DeleteSelf` arm has a single place to keep
-/// the adapter-id format coupling, and so future migrations can switch
-/// to a typed channel without touching the dispatcher.
-/// Build the `NodeRef`-style scope string for a Postgres table-level
-/// shortcut. Mirrors the path the adapter's internal node ids would
-/// produce when joined with the app-wide `<adapter>/<instance>` prefix:
-/// `postgres/<instance>/<db>/schemas/<schema>/tables/<table>`. This is
-/// the form stored in `query_shortcut.scope` for table-scoped Postgres
-/// script bindings (SQ-8).
-pub(crate) fn postgres_table_scope(
-    instance_id: &str,
-    database: &str,
-    schema: &str,
-    table: &str,
-) -> String {
-    format!("postgres/{instance_id}/{database}/schemas/{schema}/tables/{table}")
+/// For a Postgres table that expands to
+/// `postgres/<instance>/<db>/schemas/<schema>/tables/<table>` — the exact
+/// string the previous table-only helper produced, so bindings already in
+/// the database keep resolving.
+pub(crate) fn node_script_scope(adapter_type: &str, instance_id: &str, node_id: &str) -> String {
+    format!("{adapter_type}/{instance_id}/{node_id}")
 }
 
 /// Parse a Postgres DB-script / DB-script-dir node id of the form
@@ -121,46 +112,24 @@ pub(crate) fn db_script_rel_path_str(segments: &[String]) -> String {
     segments.join("/")
 }
 
-/// DSF-4: Split a `CreateChild` hint body of the form `<db>[:<parent_rel>]`
-/// into `(db, parent_rel)`. The hint comes from the adapter's
-/// `invoke_action`; the dir/script discriminator is the hint's
-/// *prefix* (already stripped by the caller). Empty `parent_rel`
-/// means root.
-fn split_create_hint(rest: &str) -> (&str, &str) {
-    match rest.split_once(':') {
-        Some((db, parent_rel)) => (db, parent_rel),
-        None => (rest, ""),
-    }
-}
-
 /// DSF-4: TUI-owned action names → ViewRequest. These actions
-/// (`rename`, `mark-move`, `paste-move`) are exposed by the Postgres
-/// adapter purely so the shortcut/hint chain works; the adapter
-/// returns `Noop` for them and the App does the actual work. Returns
-/// `Some(req)` only for db_script* nodes — other adapters with the
-/// same action name (e.g. a future Jira rename) are left alone.
+/// (`mark-move`, `paste-move`) are exposed by the Postgres adapter purely
+/// so the shortcut/hint chain works; the adapter returns `Noop` for them
+/// and the App does the actual work. Returns `Some(req)` only for
+/// db_script* nodes — other adapters with the same action name (e.g. a
+/// future Jira mark-move) are left alone.
+///
+/// `rename` is *not* here anymore: it's an `InputSpec::Form` action that
+/// the adapter executes directly, so the generic form-popup path drives
+/// it (Phase 4.3) — it never reaches `invoke_action` / this dispatcher.
 fn tui_owned_db_script_action(
     action_name: &str,
-    view_index: usize,
-    pane_id: PaneId,
+    _view_index: usize,
+    _pane_id: PaneId,
     node_id: &str,
 ) -> Option<ViewRequest> {
-    let (database, segments) = parse_db_script_node_id(node_id)?;
-    let rel_path = db_script_rel_path_str(&segments);
+    let (_database, _segments) = parse_db_script_node_id(node_id)?;
     match action_name {
-        "rename" => {
-            // Dir-vs-script disambiguation can't be done from the id
-            // alone (filesystem probe lives in the adapter). The App
-            // resolves it before opening the prompt; default to
-            // `is_dir: false` here and let the App re-probe.
-            Some(ViewRequest::OpenDbScriptRenamePrompt {
-                view_index,
-                pane_id,
-                database,
-                rel_path,
-                is_dir: false,
-            })
-        }
         "mark-move" => Some(ViewRequest::MarkDbScriptForMove {
             node_id: node_id.to_string(),
         }),
@@ -378,87 +347,28 @@ pub fn dispatch_to_view_request(
                 sql,
             })
         }
-        // CP-9 / DSF-4: `add` on the DB Scripts group or a Dir emits
-        // `CreateChild { hint: "db_script:<db>[:<parent_rel>]" }`
-        // (script) or `db_script_dir:<db>[:<parent_rel>]` (dir). The
-        // `:<parent_rel>` suffix encodes the dir under which the new
-        // entry lives (empty for root). Other hints fall through to a
-        // Notify.
-        ActionDispatch::CreateChild { hint } => {
-            if let Some(rest) = hint.strip_prefix("db_script_dir:") {
-                let (db, parent_rel) = split_create_hint(rest);
-                if db.is_empty() {
-                    Some(ViewRequest::Notify(format!(
-                        "node-action '{action_name}' → CreateChild hint '{hint}' missing database"
-                    )))
-                } else {
-                    Some(ViewRequest::OpenDbScriptDirNewPrompt {
-                        view_index,
-                        pane_id,
-                        database: db.to_string(),
-                        parent_rel: parent_rel.to_string(),
-                    })
-                }
-            } else if let Some(rest) = hint.strip_prefix("db_script:") {
-                let (db, parent_rel) = split_create_hint(rest);
-                if db.is_empty() {
-                    Some(ViewRequest::Notify(format!(
-                        "node-action '{action_name}' → CreateChild hint '{hint}' missing database"
-                    )))
-                } else {
-                    Some(ViewRequest::OpenDbScriptNewPrompt {
-                        view_index,
-                        pane_id,
-                        database: db.to_string(),
-                        parent_rel: parent_rel.to_string(),
-                    })
-                }
-            } else {
-                Some(ViewRequest::Notify(format!(
-                    "node-action '{action_name}' → CreateChild hint '{hint}' not handled"
-                )))
-            }
-        }
-        // CP-9 / DSF-4: `delete` (script) or `delete-dir` (dir) on a
-        // DB-script node. The Postgres adapter returns DeleteSelf for
-        // both; we branch on `action_name` to pick the right confirm
-        // flow. The script-confirm now carries the full rel-path so
-        // nested scripts under directories work uniformly.
-        //
-        // CF-11: any other node-id shape falls through to the generic
+        // Every `DeleteSelf` — including Postgres db_scripts and
+        // db_script_dirs (Phase 4) — flows through the generic
         // `ConfirmDeleteContentNode` path, which after confirm calls
-        // `Node::execute("delete", ActionInput::None)` on the adapter —
-        // no adapter-specific App handler is needed. Confluence pages
-        // use this; future Jira/Taiga deletes can opt in by returning
+        // `Node::execute(<action_name>, ActionInput::None)` on the adapter.
+        // The Postgres nodes now implement that `execute` themselves
+        // (`delete` / `delete-dir` via the ScriptStore), so no
+        // adapter-specific App handler is needed. Confluence pages use the
+        // same path; future Jira/Taiga deletes opt in by returning
         // `DeleteSelf` from `invoke_action` without TUI changes.
-        ActionDispatch::DeleteSelf { confirm } => match parse_db_script_node_id(&node_id) {
-            Some((database, segments)) => {
-                let rel_path = db_script_rel_path_str(&segments);
-                if action_name == "delete-dir" {
-                    Some(ViewRequest::ConfirmDeleteAdapterDbScriptDir {
-                        view_index,
-                        pane_id,
-                        database,
-                        rel_path,
-                    })
-                } else {
-                    Some(ViewRequest::ConfirmDeleteAdapterDbScript {
-                        view_index,
-                        pane_id,
-                        database,
-                        script: rel_path,
-                    })
-                }
-            }
-            None => Some(ViewRequest::ConfirmDeleteContentNode {
-                view_index,
-                pane_id,
-                node_id,
-                action_name,
-                confirm,
-            }),
-        },
-        ActionDispatch::Reload => Some(ViewRequest::SpawnContentLoad {
+        ActionDispatch::DeleteSelf { confirm } => Some(ViewRequest::ConfirmDeleteContentNode {
+            view_index,
+            pane_id,
+            node_id,
+            action_name,
+            confirm,
+        }),
+        // The action ran on a row of the level the pane currently shows, so
+        // that level is what gets refetched. A plain `SpawnContentLoad` would
+        // re-list the *root* into the pane — inside a drill (a chat's message
+        // list, say) that replaces the rows with the root view's nodes and
+        // leaves the cursor on whatever the row index then points at.
+        ActionDispatch::Reload => Some(ViewRequest::ReloadContentCurrentLevel {
             view_index,
             pane_id,
         }),
@@ -495,6 +405,7 @@ mod tests {
             sc.insert(*k, ShortcutDef::Action((*name).to_string()));
         }
         ViewDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: "v".into(),
@@ -511,11 +422,14 @@ mod tests {
             action_chains: ActionChains::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: None,
             retries: 0,
             script_template: None,
+            script_source: None,
             shortcuts: sc,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             tree_connector_style: None,
@@ -525,6 +439,7 @@ mod tests {
             tree_markers: None,
             expand_depth: None,
             group_headers: None,
+            event_actions: Vec::new(),
         }
     }
 
@@ -534,6 +449,7 @@ mod tests {
             sc.insert(*k, ShortcutDef::Action((*name).to_string()));
         }
         ChildDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: node_type.into(),
@@ -548,15 +464,18 @@ mod tests {
             action_chains: ActionChains::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: None,
             shortcuts: sc,
             enter_action: None,
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             mark_read_on_reach_end: None,
+            cursor_on_open: None,
         }
     }
 
@@ -704,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_reload_yields_spawn_content_load() {
+    fn dispatch_reload_yields_current_level_reload() {
         let req = dispatch_to_view_request(
             ActionDispatch::Reload,
             7,
@@ -713,15 +632,17 @@ mod tests {
             "reload".into(),
             false,
         );
+        // Not `SpawnContentLoad`: that re-lists the root, which inside a drill
+        // would push the root view's nodes into the drilled pane.
         match req {
-            Some(ViewRequest::SpawnContentLoad {
+            Some(ViewRequest::ReloadContentCurrentLevel {
                 view_index,
                 pane_id,
             }) => {
                 assert_eq!(view_index, 7);
                 assert_eq!(pane_id, 3);
             }
-            other => panic!("expected SpawnContentLoad, got {other:?}"),
+            other => panic!("expected ReloadContentCurrentLevel, got {other:?}"),
         }
     }
 
@@ -884,113 +805,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_create_child_db_script_yields_prompt() {
-        // CP-9: `add` on the group node — dispatcher decodes the
-        // `db_script:<db>` hint and routes to the cmdline prompt.
-        let req = dispatch_to_view_request(
-            ActionDispatch::CreateChild {
-                hint: "db_script:live".into(),
-            },
-            5,
-            9,
-            "live/db_scripts".into(),
-            "add".into(),
-            false,
-        );
-        match req {
-            Some(ViewRequest::OpenDbScriptNewPrompt {
-                view_index,
-                pane_id,
-                database,
-                parent_rel,
-            }) => {
-                assert_eq!(view_index, 5);
-                assert_eq!(pane_id, 9);
-                assert_eq!(database, "live");
-                assert_eq!(parent_rel, "");
-            }
-            other => panic!("expected OpenDbScriptNewPrompt, got {other:?}"),
-        }
-    }
-
-    /// DSF-4: `add-script` from a dir node passes the parent rel-path
-    /// via the hint suffix — verifying the split/parse round-trip.
-    #[test]
-    fn dispatch_create_child_db_script_with_parent_rel_threads_through() {
-        let req = dispatch_to_view_request(
-            ActionDispatch::CreateChild {
-                hint: "db_script:live:maint/vacuum".into(),
-            },
-            1,
-            2,
-            "live/db_scripts/maint/vacuum".into(),
-            "add-script".into(),
-            false,
-        );
-        match req {
-            Some(ViewRequest::OpenDbScriptNewPrompt {
-                database,
-                parent_rel,
-                ..
-            }) => {
-                assert_eq!(database, "live");
-                assert_eq!(parent_rel, "maint/vacuum");
-            }
-            other => panic!("expected OpenDbScriptNewPrompt, got {other:?}"),
-        }
-    }
-
-    /// DSF-4: `add-dir` hint routes to the dir-new prompt.
-    #[test]
-    fn dispatch_create_child_db_script_dir_yields_dir_prompt() {
-        let req = dispatch_to_view_request(
-            ActionDispatch::CreateChild {
-                hint: "db_script_dir:live:maint".into(),
-            },
-            1,
-            2,
-            "live/db_scripts/maint".into(),
-            "add-dir".into(),
-            false,
-        );
-        match req {
-            Some(ViewRequest::OpenDbScriptDirNewPrompt {
-                database,
-                parent_rel,
-                ..
-            }) => {
-                assert_eq!(database, "live");
-                assert_eq!(parent_rel, "maint");
-            }
-            other => panic!("expected OpenDbScriptDirNewPrompt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn dispatch_create_child_unknown_hint_yields_notify() {
-        let req = dispatch_to_view_request(
-            ActionDispatch::CreateChild {
-                hint: "table:rows".into(),
-            },
-            0,
-            1,
-            "n".into(),
-            "add".into(),
-            false,
-        );
-        match req {
-            Some(ViewRequest::Notify(msg)) => {
-                assert!(msg.contains("table:rows"), "got: {msg}");
-            }
-            other => panic!("expected Notify, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn dispatch_delete_self_db_script_yields_confirm() {
-        // CP-9: `delete` on a db_script node — dispatcher decodes
-        // (database, script) from the node-id shape and routes to the
-        // confirm-then-unlink flow.
+    fn dispatch_delete_self_db_script_yields_generic_confirm() {
+        // Phase 4: `delete` on a db_script node now flows through the
+        // generic confirm path — after confirm the App calls
+        // `Node::execute("delete", None)`, which the Postgres node
+        // implements via the ScriptStore. No db_script-specific ViewRequest.
         let req = dispatch_to_view_request(
             ActionDispatch::DeleteSelf { confirm: None },
             4,
@@ -1000,25 +819,26 @@ mod tests {
             false,
         );
         match req {
-            Some(ViewRequest::ConfirmDeleteAdapterDbScript {
+            Some(ViewRequest::ConfirmDeleteContentNode {
                 view_index,
                 pane_id,
-                database,
-                script,
+                node_id,
+                action_name,
+                ..
             }) => {
                 assert_eq!(view_index, 4);
                 assert_eq!(pane_id, 8);
-                assert_eq!(database, "live");
-                assert_eq!(script, "report");
+                assert_eq!(node_id, "live/db_scripts/report");
+                assert_eq!(action_name, "delete");
             }
-            other => panic!("expected ConfirmDeleteAdapterDbScript, got {other:?}"),
+            other => panic!("expected ConfirmDeleteContentNode, got {other:?}"),
         }
     }
 
-    /// DSF-4: nested script under directories — rel-path is preserved
-    /// in `script` so the App's unlink can find the right file.
+    /// Phase 4: nested script under directories — the full node-id is
+    /// carried verbatim so the adapter's `execute` resolves the right file.
     #[test]
-    fn dispatch_delete_self_db_script_preserves_nested_rel_path() {
+    fn dispatch_delete_self_db_script_preserves_nested_node_id() {
         let req = dispatch_to_view_request(
             ActionDispatch::DeleteSelf { confirm: None },
             0,
@@ -1028,16 +848,17 @@ mod tests {
             false,
         );
         match req {
-            Some(ViewRequest::ConfirmDeleteAdapterDbScript { script, .. }) => {
-                assert_eq!(script, "maint/vacuum/full");
+            Some(ViewRequest::ConfirmDeleteContentNode { node_id, .. }) => {
+                assert_eq!(node_id, "live/db_scripts/maint/vacuum/full");
             }
-            other => panic!("expected ConfirmDeleteAdapterDbScript, got {other:?}"),
+            other => panic!("expected ConfirmDeleteContentNode, got {other:?}"),
         }
     }
 
-    /// DSF-4: `delete-dir` action-name routes to the dir-confirm flow.
+    /// Phase 4: `delete-dir` action-name is forwarded verbatim to the
+    /// generic confirm path (the adapter's `execute` matches on it).
     #[test]
-    fn dispatch_delete_self_db_script_dir_yields_dir_confirm() {
+    fn dispatch_delete_self_db_script_dir_yields_generic_confirm() {
         let req = dispatch_to_view_request(
             ActionDispatch::DeleteSelf { confirm: None },
             0,
@@ -1047,13 +868,15 @@ mod tests {
             false,
         );
         match req {
-            Some(ViewRequest::ConfirmDeleteAdapterDbScriptDir {
-                database, rel_path, ..
+            Some(ViewRequest::ConfirmDeleteContentNode {
+                node_id,
+                action_name,
+                ..
             }) => {
-                assert_eq!(database, "live");
-                assert_eq!(rel_path, "maint/vacuum");
+                assert_eq!(node_id, "live/db_scripts/maint/vacuum");
+                assert_eq!(action_name, "delete-dir");
             }
-            other => panic!("expected ConfirmDeleteAdapterDbScriptDir, got {other:?}"),
+            other => panic!("expected ConfirmDeleteContentNode, got {other:?}"),
         }
     }
 
@@ -1097,11 +920,12 @@ mod tests {
         }
     }
 
-    /// DSF-4: `rename` intercept — adapter `Noop` plus the
-    /// `rename` action name yield an `OpenDbScriptRenamePrompt` with
-    /// the rel-path reassembled.
+    /// Phase 4.3: `rename` is no longer a TUI-owned intercept. It's an
+    /// `InputSpec::Form` action executed by the adapter, so it never reaches
+    /// `invoke_action` / this dispatcher — a stray `Noop` on a `rename`
+    /// action name must fall through to `None` (no bespoke prompt).
     #[test]
-    fn dispatch_rename_intercepts_for_db_script_nodes() {
+    fn dispatch_rename_is_not_intercepted_anymore() {
         let req = dispatch_to_view_request(
             ActionDispatch::Noop,
             7,
@@ -1110,23 +934,7 @@ mod tests {
             "rename".into(),
             false,
         );
-        match req {
-            Some(ViewRequest::OpenDbScriptRenamePrompt {
-                view_index,
-                pane_id,
-                database,
-                rel_path,
-                is_dir,
-            }) => {
-                assert_eq!(view_index, 7);
-                assert_eq!(pane_id, 3);
-                assert_eq!(database, "live");
-                assert_eq!(rel_path, "maint/vacuum");
-                // is_dir default: App re-probes the filesystem.
-                assert!(!is_dir);
-            }
-            other => panic!("expected OpenDbScriptRenamePrompt, got {other:?}"),
-        }
+        assert!(req.is_none(), "got: {req:?}");
     }
 
     /// DSF-4: TUI-owned action interception is scoped to db_script*

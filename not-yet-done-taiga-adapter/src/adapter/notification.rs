@@ -12,8 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentError, InputSpec, Metadata, MetadataField, Node,
-    NodeAction, NodeSummary, NodeType, Result, SortDirection, SortKey, SortKind, SortableColumn,
+    ActionInput, ActionOutcome, ColumnSchema, ContentError, InputSpec, Metadata, MetadataField,
+    Node, NodeAction, NodeSummary, NodeType, Result, SortDirection, SortKey,
 };
 
 use super::types::notification_type;
@@ -58,16 +58,6 @@ impl Node for TaigaNotificationNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        // Static per type so the TUI's per-node_type hint cache can
-        // serve the whole pane after one fetch. `mark_as_read` is
-        // idempotent server-side, so showing it on already-read rows
-        // is harmless — and the read-state column already tells the
-        // user which is which.
-        notification_actions()
-    }
-
     async fn execute(&mut self, action_id: &str, _input: ActionInput) -> Result<ActionOutcome> {
         match action_id {
             "mark_as_read" => {
@@ -76,7 +66,10 @@ impl Node for TaigaNotificationNode {
                     .map_err(|e| ContentError::Other(e.into()))?;
                 self.read = true;
                 Ok(ActionOutcome::Done {
-                    message: Some(format!("Notification #{} marked as read", self.notification_id)),
+                    message: Some(format!(
+                        "Notification #{} marked as read",
+                        self.notification_id
+                    )),
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -91,7 +84,11 @@ pub(super) fn parse_notification_id(s: &str) -> Option<u64> {
 }
 
 pub(super) fn notification_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("mark_as_read", "Mark as read", InputSpec::None)]
+    vec![NodeAction::new(
+        "mark_as_read",
+        "Mark as read",
+        InputSpec::None,
+    )]
 }
 
 pub(super) fn notification_to_summary(n: &TaigaNotification) -> NodeSummary {
@@ -104,33 +101,32 @@ pub(super) fn notification_to_summary(n: &TaigaNotification) -> NodeSummary {
     }
 }
 
-pub(super) fn sortable_columns() -> Vec<SortableColumn> {
-    [
-        ("created", "Created"),
-        ("event", "Event"),
-        ("project", "Project"),
-        ("actor", "Actor"),
-        ("read", "Read"),
-        ("subject", "Subject"),
+/// The notification list's sortable columns. Every one is carried in the
+/// rows built by `build_metadata`; the ordering itself runs through the
+/// module's own [`apply_sort`], which compares the typed notification rather
+/// than the rendered cell.
+pub(super) fn columns() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema::new("created", "Created").typed("datetime"),
+        ColumnSchema::new("event", "Event"),
+        ColumnSchema::new("project", "Project"),
+        ColumnSchema::new("actor", "Actor"),
+        ColumnSchema::new("read", "Read"),
+        ColumnSchema::new("subject", "Subject"),
     ]
-    .iter()
-    .map(|(k, l)| SortableColumn {
-        key: (*k).into(),
-        label: (*l).into(),
-        // Taiga sorts server-side; the kind is unused here.
-        kind: SortKind::Text,
-    })
-    .collect()
 }
 
-pub(super) fn apply_sort(
-    items: &mut [TaigaNotification],
-    sort: &[SortKey],
-) -> Vec<SortKey> {
+pub(super) fn apply_sort(items: &mut [TaigaNotification], sort: &[SortKey]) -> Vec<SortKey> {
     let effective: Vec<SortKey> = if sort.is_empty() {
         vec![
-            SortKey { column: "read".into(), direction: SortDirection::Asc },
-            SortKey { column: "created".into(), direction: SortDirection::Desc },
+            SortKey {
+                column: "read".into(),
+                direction: SortDirection::Asc,
+            },
+            SortKey {
+                column: "created".into(),
+                direction: SortDirection::Desc,
+            },
         ]
     } else {
         sort.to_vec()
@@ -177,7 +173,11 @@ fn build_metadata(n: &TaigaNotification) -> Metadata {
         .item_type
         .map(|it| format!("{}:{}", it.as_str(), n.obj.id))
         .unwrap_or_default();
-    let read_label = if n.read_at.is_some() { "read" } else { "unread" };
+    let read_label = if n.read_at.is_some() {
+        "read"
+    } else {
+        "unread"
+    };
     Metadata {
         fields: vec![
             simple("event", &n.event.label(), "Event"),
@@ -212,7 +212,11 @@ mod tests {
             id,
             event: NotificationEvent::from_code(event),
             created: created.into(),
-            read_at: if read { Some("2026-01-02T00:00:00+0000".into()) } else { None },
+            read_at: if read {
+                Some("2026-01-02T00:00:00+0000".into())
+            } else {
+                None
+            },
             obj: NotificationTarget {
                 id: 100 + id,
                 reference: id,
@@ -232,8 +236,12 @@ mod tests {
         let n = synthetic(7, "2026-01-01T00:00:00+0000", false, 5);
         let s = notification_to_summary(&n);
         assert_eq!(s.id, "notification:7");
-        let target_id = s.metadata.fields.iter()
-            .find(|f| f.key == "target_id").unwrap();
+        let target_id = s
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "target_id")
+            .unwrap();
         assert_eq!(target_id.value, "userstory:107");
     }
 
@@ -244,8 +252,13 @@ mod tests {
         let su = notification_to_summary(&unread);
         let sr = notification_to_summary(&read);
         let read_of = |s: &NodeSummary| {
-            s.metadata.fields.iter().find(|f| f.key == "read")
-                .unwrap().value.clone()
+            s.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == "read")
+                .unwrap()
+                .value
+                .clone()
         };
         assert_eq!(read_of(&su), "unread");
         assert_eq!(read_of(&sr), "read");
@@ -257,10 +270,10 @@ mod tests {
         // assertions pin the two-key ordering: unread block sorts before read
         // block, and within each block newer items come first.
         let mut items = vec![
-            synthetic(1, "2026-02-01T00:00:00+0000", true, 1),   // read, middle date
-            synthetic(2, "2026-01-01T00:00:00+0000", false, 1),  // unread, oldest
-            synthetic(3, "2026-03-01T00:00:00+0000", true, 1),   // read, newest
-            synthetic(4, "2026-02-15T00:00:00+0000", false, 1),  // unread, newer
+            synthetic(1, "2026-02-01T00:00:00+0000", true, 1), // read, middle date
+            synthetic(2, "2026-01-01T00:00:00+0000", false, 1), // unread, oldest
+            synthetic(3, "2026-03-01T00:00:00+0000", true, 1), // read, newest
+            synthetic(4, "2026-02-15T00:00:00+0000", false, 1), // unread, newer
         ];
         let applied = apply_sort(&mut items, &[]);
         // Unread first, newest unread before older unread.

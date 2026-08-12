@@ -1,0 +1,21 @@
+<!doctype html>
+<!--
+  Fixture: the "pick an account" tile list, shown when the profile has one or
+  more remembered accounts (MSAL uses prompt=select_account, so this is the
+  DEFAULT once any account is remembered). Each account tile carries its UPN as
+  its data-test-id — the stable, locale-independent match key. Invented data.
+-->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Pick an account</title></head>
+  <body>
+    <h1>Pick an account</h1>
+    <div id="tilesHolder" role="list">
+      <div role="button" data-test-id="user@example.com">user@example.com</div>
+      <div role="button" data-test-id="user@example.com-menu-dots"></div>
+      <div role="button" data-test-id="other.person@example.com">
+        other.person@example.com
+      </div>
+      <div id="otherTile" role="button">Use another account</div>
+    </div>
+  </body>
+</html>

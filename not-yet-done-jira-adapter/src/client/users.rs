@@ -18,36 +18,56 @@ pub struct JiraUser {
 }
 
 impl JiraClient {
+    /// Query the label-suggest endpoint for a single query string. Returns the
+    /// raw label strings Jira offers (max ~20 per query, matched case-
+    /// insensitively as a substring). A non-success status yields an empty
+    /// list rather than an error, so callers can treat "no match" and "server
+    /// said no" alike. Used by [`all_labels`] (fanned out across prefixes) and
+    /// for on-demand canonical-label lookup when resolving an edited
+    /// `labels:` line.
+    pub async fn suggest_labels(&self, query: &str) -> Result<Vec<String>, String> {
+        #[derive(Deserialize)]
+        struct Suggestion {
+            label: String,
+        }
+        #[derive(Deserialize)]
+        struct SuggestResponse {
+            suggestions: Vec<Suggestion>,
+        }
+
+        let url = format!("{}/rest/api/1.0/labels/suggest", self.base_url);
+        http_log::log_request("GET", &format!("{url}?query={query}"));
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("query", query)])
+            .send()
+            .await
+            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        http_log::log_response("GET", &url, resp.status().as_u16());
+        if !resp.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Ok(serde_json::from_str::<SuggestResponse>(&body)
+            .map(|d| d.suggestions.into_iter().map(|s| s.label).collect())
+            .unwrap_or_default())
+    }
+
     /// Fetch all labels (global). Fans out across alphanumeric prefixes
     /// since the suggest endpoint returns max 20 per query.
     pub async fn all_labels(&self) -> Result<Vec<String>, String> {
-        #[derive(Deserialize)]
-        struct Suggestion { label: String }
-        #[derive(Deserialize)]
-        struct SuggestResponse { suggestions: Vec<Suggestion> }
-
         let mut all = std::collections::BTreeSet::new();
 
-        let prefixes: Vec<String> = ('A'..='Z')
+        let prefixes = ('A'..='Z')
             .chain('0'..='9')
             .map(|c| c.to_string())
             .chain(std::iter::once("_".to_string()))
-            .chain(std::iter::once(String::new()))
-            .collect();
+            .chain(std::iter::once(String::new()));
 
-        for prefix in &prefixes {
-            let url = format!("{}/rest/api/1.0/labels/suggest?query={prefix}", self.base_url);
-            http_log::log_request("GET", &url);
-            let resp = self.http.get(&url).send().await
-                .map_err(|e| http_log::network_error("GET", &url, e))?;
-            http_log::log_response("GET", &url, resp.status().as_u16());
-            if resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                if let Ok(data) = serde_json::from_str::<SuggestResponse>(&body) {
-                    for s in data.suggestions {
-                        all.insert(s.label);
-                    }
-                }
+        for prefix in prefixes {
+            for label in self.suggest_labels(&prefix).await? {
+                all.insert(label);
             }
         }
 
@@ -67,14 +87,13 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
             .await
             .map_err(|e| format!("Failed to read response: {e}"))?;
 
-        serde_json::from_str(&body_text)
-            .map_err(|e| format!("Failed to parse user: {e}"))
+        serde_json::from_str(&body_text).map_err(|e| format!("Failed to parse user: {e}"))
     }
 
     /// Fetch all users globally. Paginates until no more results.
@@ -90,13 +109,17 @@ impl JiraClient {
             );
 
             http_log::log_request("GET", &url);
-            let resp = self.http.get(&url).send().await
+            let resp = self
+                .http
+                .get(&url)
+                .send()
+                .await
                 .map_err(|e| http_log::network_error("GET", &url, e))?;
-            let resp = http_log::check_status("GET", &url, resp).await?;
+            let resp = self.check_status("GET", &url, resp).await?;
             let body = resp.text().await.unwrap_or_default();
 
-            let page: Vec<JiraUser> = serde_json::from_str(&body)
-                .map_err(|e| format!("Failed to parse users: {e}"))?;
+            let page: Vec<JiraUser> =
+                serde_json::from_str(&body).map_err(|e| format!("Failed to parse users: {e}"))?;
 
             let count = page.len();
             all.extend(page);

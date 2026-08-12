@@ -46,8 +46,8 @@ not-yet-done-tui
 ### Tabs and Views
 
 Every tab is an adapter-backed _content tab_, configured under
-`~/.config/not_yet_done/views/*.yaml` and shown according to the active
-[tab constellation](#tab-constellations). Task and time tracking are no
+`~/.config/not_yet_done/views/*.yaml` and shown according to the
+[tab order](#tab-order). Task and time tracking are no
 exception — they are adapter-backed views like everything else.
 
 **Tasks** — manage your task tree. Task management lives in the
@@ -105,79 +105,41 @@ for a fully-commented reference.
 
 Trackings can be grouped by day, week, month, or year (`G` to cycle). Active tracking durations update live with adaptive intervals.
 
-### Tab constellations
+### Tab order
 
-The set of top-level tabs and their switch keys is driven by named
-_constellations_ in `tui.yaml`. A constellation is an ordered list of
-tab names; the active one decides **which tabs are shown, in what order,
-and which digit key selects each**:
+The set of top-level tabs and their digit keys is driven by a single
+ordered list in `tui.yaml`. `tabs.order` is a list of tab names that
+decides **which tabs are shown, in what order, and which digit key
+selects each**:
 
 ```yaml
 tabs:
-  active: default
-  sets:
-    # Shorthand — a bare list of tab names (no icon, no popup shortcut):
-    default:
-      - Tasks
-      - Trackings
-      - Jira
-      - Taiga
-      - Analytics DB
-      - Confluence
-      - Stoat
-    # Full form — adds an `icon` and a human-friendly `label` (both shown
-    # in the switch popup) and a single-key `shortcut` (pressed in the
-    # popup to switch here):
-    my-corp:
-      icon: ""
-      label: My Corp
-      shortcut: m
-      tabs:
-        - Tasks
-        - Trackings
-        - Stoat
+  order:
+    - Tasks
+    - Trackings
+    - Jira
+    - Taiga
+    - Confluence
+    - Stoat
 ```
 
-A constellation may be written either as a bare list of tab names
-(shorthand) or as a mapping with `tabs:` plus optional `icon:`, `label:`
-and `shortcut:`. Both forms can be mixed freely under `sets:`. The popup
-shows `icon label` (the `label` falls back to the set's key when
-omitted), so a slug-style key like `work` can present as `Work`.
-
 Tabs are referenced by display name — each view's `tab.name` (e.g. the
-adapter-backed `Tasks` and `Trackings`). The list order
-assigns the **autonumber**
-keys — `1`..`9`, then `0` for a tenth tab; an eleventh and beyond get no
-digit and are reachable only via `Tab` / `Shift+Tab`. While a
-constellation is active the visible tabs own every digit key, so the
-legacy fixed `tab_jira: '3'` etc. bindings no longer apply.
+adapter-backed `Tasks` and `Trackings`). The list order assigns the
+**autonumber** keys — `1`..`9`, then `0` for a tenth tab; an eleventh and
+beyond get no digit and are reachable only via `Tab` / `Shift+Tab`.
 
-Only the tabs named in the active constellation are shown; a configured
-view whose `tab.name` is absent from the list is hidden (without being
-unloaded). Tabs not referenced anywhere stay hidden until you add them.
+Only the tabs named in `order` are shown; a configured view whose
+`tab.name` is absent from the list is hidden (without being unloaded).
+Tabs not referenced anywhere stay hidden until you add them.
 
-**Why this exists:** the previous model wired tab keys to fixed actions
-(`1`..`6`, positionally bound to Jira/Taiga/Postgres/Confluence), so a
-fifth adapter tab (e.g. Stoat) got no key at all. Constellations make the
-tab set and its numbering data-driven and let you keep several curated
-layouts side by side (a lean `default` vs. a wider `my-corp`).
+If `tabs.order` is empty or absent, every configured tab is shown in its
+natural slot order, autonumbered the same way — so existing setups keep
+working unchanged. **Two tabs sharing a display name is a hard error**
+(the name could no longer identify a tab) — the TUI shows a startup
+modal and falls back to showing every tab.
 
-If no `tabs:` section is present the feature stays dormant: every
-configured tab is shown in its `order:` with the legacy fixed keys, so
-existing setups keep working unchanged. **Two tabs sharing a display
-name is a hard error** (the name could no longer identify a tab) — the
-TUI shows a startup modal and falls back to the legacy layout.
-
-**Switching at runtime — the tab-set popup.** Press `Ctrl+X` (the
-`tab_set_popup` global binding) to open a popup listing every
-constellation with its icon. Press a set's `shortcut` key to switch to
-it immediately, or use the arrow keys and `Enter` to pick one without a
-shortcut; `Esc` cancels. Switching updates the active constellation and
-rebuilds the tab layout on the spot.
-
-> The switch is **session-only** — it is not written back to `tui.yaml`,
-> so a restart returns to the configured `active` set. (`active` is also
-> re-read on config reload via `:config` or editing `tui.yaml`.)
+The order is re-read on config reload via `:config` or by editing
+`tui.yaml`.
 
 ### Navigation
 
@@ -533,10 +495,15 @@ Stoat — without the CLI hard-coding anything about them:
 nyd tasks ls                       # list children of the root
 nyd tasks ls <id> --tree --depth 2 # a subtree, 2 levels deep
 nyd tasks ls --query 'status=open' # filtered (adapter's query language)
+nyd tasks queries                  # the stored queries of this instance (name + kind)
+nyd tasks ls --query-name mine     # …run one by name; may be an extended document
+nyd jira ls --query-name mine --var who=me   # bind its variables (repeatable)
 nyd tasks show <id>                # one node's fields
 nyd jira cat <id>                  # a node's raw text body to stdout (content nodes)
 nyd tasks actions <id>             # actions available on a node
 nyd tasks actions --type task:item # …or on a node type
+nyd tasks do help                  # document the current level (root: also capabilities)
+nyd jira  do help PROJ-123         # …of any node — descend and re-run for its children
 nyd tasks values tags              # enumerate a value source
 nyd tasks ls -o json               # any read verb takes -o table|json
 
@@ -553,10 +520,17 @@ nyd trackings ls --type tracking:tree-group --group-by started_at:day:desc --tre
 
 # Mutating verb: `do <action> [id]` runs a node action. The action's input
 # shape (seen in `actions`) decides how input is sourced:
-nyd tasks do add -m "$(cat task.md)"      # editor action, body inline (else $EDITOR)
+nyd tasks do add -m "new body"            # editor action, body inline (else $EDITOR)
+nyd tasks do add --file task.md           # editor action, body from a file
+nyd tasks do add -m -                     # editor action, body from stdin
 nyd tasks do toggle-tracking <id>         # no-input action
 nyd tasks do delete <id> --yes            # confirm-gated action needs --yes
 nyd pg do run --field name=report --field db=live   # form action
+
+# Jira tickets round-trip through Markdown from the CLI, sharing the exact
+# buffer and write-back pipeline of the TUI `edit (markdown)` action:
+nyd jira do to_markdown PROJ-123 > ticket.md      # dump ticket + comments as Markdown
+nyd jira do from_markdown PROJ-123 --file ticket.md   # write the edited Markdown back
 
 # Trackings carry split/move as form actions (the generic replacement for the
 # legacy `track split`/`track move`): pass the form fields with --field.
@@ -581,6 +555,20 @@ label — the CLI analogue of drilling in by name in the TUI. It uses only the
 protocol's per-level listing, so it works for any adapter; each segment must
 resolve to exactly one child (ambiguous or unmatched segments error and list
 the candidates).
+
+A **stored query** is named rather than typed: `queries` lists what an instance
+has saved (the same entries the TUI's query menu shows), and
+`ls --query-name NAME` runs one. Which of the two stores holds the name decides
+what happens — an adapter-native body goes to the adapter as one query, an
+_extended document_ (a Markdown file combining several native queries with
+`and`/`or`/`without`) is executed by the framework, which runs its branches,
+merges them and applies the document's own `order_by`. Names are unique across both stores, so `--query-name`
+never needs to say which kind it means. `--query` (a body typed on the command
+line) and `--query-name` are mutually exclusive; `--var name=value` binds a
+query variable (repeatable) — since a CLI cannot prompt, a variable with
+neither a binding nor a default is an error rather than a guess. `--tree` runs
+one query per subtree and therefore cannot run an extended document; list its
+levels one at a time.
 
 `--group-by` rides along in the list request; only adapters that advertise
 adapter-side grouping act on it (others ignore it with a warning). Grouping is
@@ -1118,16 +1106,12 @@ the derived 10s cap would abort a healthy-but-slow connect. See
 
 ## Manual Connect
 
-By default an adapter-backed tab spawns its initial `list()` call as
-soon as the TUI starts (and again on first activation of a still-
-unloaded subtab). For adapters with expensive or unreliable
-connections — Postgres-over-SSH-tunnel via Bastion, slow VPN-gated
-APIs — this is a problem: the connection attempt blocks for the full
-timeout × retry budget when the prerequisite (VPN, tunnel) isn't up,
-and the user just sees `Fetch failed: timed out` after a long wait.
-
-Set `manual_connect: true` on the adapter section to suppress all
-auto-loads for that tab:
+`adapter.manual_connect` decides whether an adapter-backed tab spawns
+its initial `list()` call by itself. **It defaults to `true`**: an
+adapter that says nothing waits for an explicit `reload` action.
+Connecting is the side-effecting choice — it can open an SSH tunnel,
+spend a VPN round-trip, or put a login dialog in front of you before
+you have asked for anything — so it is the one you opt into.
 
 ```yaml
 tab:
@@ -1137,7 +1121,7 @@ tab:
 adapter:
   type: postgres
   config: postgres-adapter.yaml
-  manual_connect: true # don't load until I press the reload key
+  # manual_connect: true is the default — nothing to write here
 
 views:
   - name: databases
@@ -1152,10 +1136,32 @@ While unloaded the view's banner reads
 `Auto-connect disabled — press \`r\` to connect`(it names the first`type: reload`action of the active subtab). After the user presses`r` the adapter connects and behaves normally; switching back to an
 already-loaded subtab shows the cached data without re-fetching.
 
-If you set `manual_connect: true` but the active view has no
-`type: reload` action configured, the banner degrades to
+If the active view has no `type: reload` action configured, the banner
+degrades to
 `Auto-connect disabled — no \`reload\` action configured for this view`
 so the misconfiguration is visible at a glance.
+
+### Connecting on startup
+
+Tabs whose connection is cheap and local — the task and tracking DB, a
+SQLite file, the projects list — are better off loading right away.
+They opt back in explicitly:
+
+```yaml
+adapter:
+  type: tasks
+  manual_connect: false # cheap and local: connect on startup
+```
+
+One consequence is worth knowing before you set it on a tab that logs
+in: an eager tab starts connecting the moment the TUI comes up, without
+you ever visiting it. If its login needs an answer — a password store to
+unlock, an MFA code — the credential dialog therefore opens **at
+startup, over whatever tab is in front**, rather than waiting until you
+switch to the tab it belongs to. Its title leads with the tab name so
+it is clear who is asking. Only one such dialog is shown at a time;
+if a second adapter asks meanwhile, its form is kept and shown when you
+open its tab.
 
 ## Confluence Adapter
 
@@ -1175,7 +1181,10 @@ Two YAML files in `~/.config/not_yet_done/views/`:
 Auth uses the same Crowd-SSO cookie pattern as the Jira adapter: a
 user-supplied script writes
 `JSESSIONID=...; crowd.token_key=...; atlassian.xsrf.token=...` to
-stdout. The path lives in `auth.bindings[].provider.script`.
+stdout. The path lives in `auth.bindings[].provider.script`. If that
+login needs to ask something first, put the script on `auth.script` and
+bind the field with `provider: { type: script-result }` — see
+[Authentication](#authentication).
 
 ### Sub-tabs
 
@@ -1332,6 +1341,30 @@ view sort state are persisted).
 > without a reload — only joining or leaving a whole server still needs a
 > reconnect.
 
+### Attachments
+
+Three separate things, because "a file in a chat" is three different questions:
+
+- **Posting** — `attach` on a channel opens the file picker (multi-select) and
+  uploads the selection. Revolt caps a message at 5 files, so a larger pick is
+  split across several messages rather than rejected; a single failed upload
+  does not abort the batch. There is deliberately no caption: the API cannot
+  add a file to an existing message, so a caption would be a second send —
+  `e` on the posted message adds the text in place instead.
+- **Browsing** — every file also exists as a `stoat:attachment` node below its
+  message (`filename`, `size`, `content_type`, `is_image`, `url`). `open`
+  downloads it into a per-message temp directory and hands the path to the OS
+  viewer; `download_all` saves every file of the message into a directory you
+  name. Node ids are composite (`<channel>/msg/<message>/file/<file>`) because
+  Revolt has no per-attachment endpoint — files only ever ship embedded in
+  their message, so the id has to carry enough to re-read the parent.
+- **Seeing** — the message body renders image attachments as markdown images
+  and everything else as a link, so a graphics-capable terminal draws
+  screenshots **inline between the messages**. See
+  [Inline images](#inline-images) for the switch and the cap; `i` on a message
+  still opens its images in the OS viewer, which is what you want for anything
+  you need at full size.
+
 ### Setup
 
 Two YAML files in `~/.config/not_yet_done/views/`:
@@ -1343,12 +1376,12 @@ Two YAML files in `~/.config/not_yet_done/views/`:
 
 You configure only the **base domain** (`url:`); the API path (`/api`)
 and the WebSocket URL are self-discovered via `GET /api/`. Auth uses the
-`password-login` mechanism. Because that mechanism fixes the binding
-field names to `username` + `password`, and Stoat logs in by email, the
-**`username` field carries your login email address**. Only the returned
-session token is persisted — never the password. Multi-factor auth is
-not supported yet (a login that returns an MFA ticket fails with a clear
-message).
+`password-login` mechanism, which declares the fields `username` +
+`password` (see [Authentication](#authentication)). Stoat logs in by
+email, so the **`username` field carries your login email address** —
+which is what the prompt labels it. Only the returned session token is
+persisted — never the password. Multi-factor auth is not supported yet
+(a login that returns an MFA ticket fails with a clear message).
 
 ## Waybar Integration
 
@@ -1420,6 +1453,244 @@ All TUI configuration lives in `~/.config/not_yet_done/tui.yaml`.
 task database path (otherwise each adapter uses the `database:` DSN from its
 view file, defaulting to `tasks.db`).
 
+### Authentication
+
+Every adapter that talks to a remote system authenticates through the same
+`auth:` block in its adapter YAML (`views/<name>-adapter.yaml`). The block
+answers two separate questions:
+
+- **`mechanism`** — _what the adapter speaks_ against the API. Each adapter
+  publishes its own set together with the input fields it needs; there is no
+  global list. Ask the adapter:
+
+  ```sh
+  nyd config auth jira      # mechanisms, their fields, and the providers
+  nyd config build jira     # the wizard that asks and writes the block
+  ```
+
+- **`provider`** (one per field) — _where the value comes from_. Independent of
+  the mechanism, so a username may come from the config while the token comes
+  from `pass`.
+
+```yaml
+auth:
+  mechanism: user-api-token # one of the ids `nyd config auth kimai` lists
+  bindings:
+    - field: username # a field name that mechanism declares
+      provider: { type: literal, value: alice }
+    - field: token
+      provider: { type: command, script: pass show services/kimai/api-password }
+  # Optional; controls the session the adapter derives from those credentials.
+  session_cache: { kind: until-rejected }
+```
+
+A mechanism the adapter does not implement, a missing field, or a binding for a
+field the mechanism never declared is rejected **when the config is read** —
+with the ids that adapter does support — instead of failing at the first login.
+
+#### Credential providers
+
+| `type:`         | Value comes from                                           | Keys                                         |
+| --------------- | ---------------------------------------------------------- | -------------------------------------------- |
+| `literal`       | the YAML itself                                            | `value`                                      |
+| `prompt`        | the user, on first use                                     | `prefill` (optional)                         |
+| `env`           | an environment variable (empty counts as missing)          | `var`                                        |
+| `file`          | a file's contents                                          | `path`, `trim` (default `true`)              |
+| `command`       | a shell command's stdout                                   | `script`, `timeout_secs` (30), `retries` (3) |
+| `script-result` | the auth block's `script` (see below)                      | — (the field name is the key)                |
+| `keyring`       | the OS keyring (secret-service / Keychain / Cred. Manager) | `service`, `account`                         |
+
+`prompt` and `script-result` need a frontend: the TUI shows the credential
+popup, the CLI asks on the terminal, and a command with no terminal (a pipe, a
+cron job) fails with "no terminal to ask on" rather than hanging. Everything
+else resolves headlessly.
+
+#### Script-driven credentials (`script` + `script-result`)
+
+`command` is a black box: the runtime runs it and takes its stdout, so it
+yields **one** value per invocation and has no way to ask the user anything. A
+credential store that may or may not be unlocked needs both — several values at
+once, and a passphrase question only when the store is actually locked.
+
+That is what `auth.script` is for. It is named **once per auth block**, and
+every field whose provider is `script-result` takes its value out of what that
+one script returns:
+
+```yaml
+auth:
+  mechanism: user-api-token
+  script: ~/.config/not_yet_done/scripts/pass_credentials.py
+  script_timeout_secs: 120 # optional; per round, not per login
+  bindings:
+    - field: username
+      provider: { type: script-result }
+    - field: token
+      provider: { type: script-result }
+```
+
+A `script` nobody binds to, and a `script-result` binding with no `script`, are
+both rejected when the config is read.
+
+##### The round protocol
+
+The script is run once per **round**, as a fresh process that remembers
+nothing. Each round gets one JSON object on stdin and answers with one JSON
+object on stdout:
+
+| Direction | Shape                                                             |
+| --------- | ----------------------------------------------------------------- |
+| stdin     | `{"request": ["username", "token"], "input": {…answers so far…}}` |
+| stdout    | exactly one of `result`, `form`, `error`                          |
+
+- `{"result": {"username": "…", "token": "…"}}` — done. It must cover every
+  name in `request`; a missing one fails the login instead of silently
+  producing an empty credential.
+- `{"form": {"header": "…", "fields": […]}}` — ask the user this, then run me
+  again. The answers arrive in `input`, which **accumulates** across rounds, so
+  a later round still sees what an earlier one collected.
+- `{"error": "the store rejected that passphrase"}` — give up with this
+  message.
+
+A form's `header` titles the dialog and its optional `error` says why it is
+being shown again; each of its `fields` takes `name` (required), `label`,
+`masked`, `optional` and `prefill`:
+
+```json
+{
+  "form": {
+    "header": "Password store locked",
+    "error": "that passphrase did not open the store",
+    "fields": [{ "name": "passphrase", "label": "Passphrase", "masked": true }]
+  }
+}
+```
+
+Enter submits, Escape cancels the login.
+
+```mermaid
+flowchart LR
+    R[run script] -->|result| D[login proceeds]
+    R -->|error| F[login fails with the message]
+    R -->|form| A[ask the user]
+    A -->|answers merged into input| R
+    A -->|Escape| C[login cancelled]
+```
+
+A login runs at most **5 rounds**; a script that keeps asking hits that cap and
+fails rather than looping at the user forever. Each round is bounded by
+`script_timeout_secs` (default 120 — generous, because a round may be waiting
+on a hardware token). A non-zero exit or unparsable output fails the login with
+the script's stderr as the message.
+
+This is why the passphrase question only appears when it is needed: the script
+tries the unlocked path first and returns `result` outright, and only the
+locked case ever reaches a `form`.
+
+```python
+#!/usr/bin/env python3
+"""Read a token out of the password store, asking for its passphrase only
+when the gpg agent turns out to be locked."""
+import json, os, subprocess, sys
+
+FILE = os.path.expanduser("~/.password-store/example/api.gpg")
+
+passphrase = json.load(sys.stdin).get("input", {}).get("passphrase")
+
+if passphrase is None:
+    # Unlocked agent? `error` forbids gpg to pop up a pinentry of its own —
+    # a locked store fails here instead of asking behind the TUI's back.
+    mode, feed = ["--pinentry-mode", "error"], None
+else:
+    mode, feed = ["--pinentry-mode", "loopback", "--passphrase-fd", "0"], passphrase
+
+r = subprocess.run(["gpg", "--quiet", "--batch", "--decrypt", *mode, FILE],
+                   input=feed, capture_output=True, text=True)
+
+if r.returncode != 0:
+    print(json.dumps({"form": {
+        "header": "Password store",
+        "error": r.stderr.strip() if passphrase is not None else None,
+        "fields": [{"name": "passphrase", "label": "Passphrase", "masked": True}],
+    }}))
+else:
+    print(json.dumps({"result": {"username": "alice", "token": r.stdout.strip()}}))
+```
+
+Plain `prompt` bindings are asked **before** the script runs, in one dialog:
+they are known from the config, while a script's form is only known once it has
+run.
+
+#### Secrets that are not part of a login (Postgres)
+
+Not every secret an adapter needs travels through a login. A Postgres
+connection has a database password, and if it tunnels, the hop wants a password
+or a key passphrase as well — each in its own provider slot, far away from
+`auth:`. Left to themselves, those slots resolve independently: every `command`
+provider is its own shell command, and a locked password store answers each of
+them with a pinentry window of its own, drawn by gpg **behind** the TUI rather
+than by the app.
+
+A slot can therefore hand itself to the auth block instead, by naming a
+provider that has no value of its own:
+
+```yaml
+transport:
+  mode: ssh_tunnel
+  ssh:
+    - host: bastion.example.invalid
+      user: alice
+      auth: { kind: password, password: { type: script-result } }
+  target: { host: db.internal.invalid, port: 5432 }
+
+auth:
+  mechanism: password
+  script: ~/.config/not_yet_done/scripts/pass_credentials.py
+  bindings:
+    - field: password
+      provider: { type: script-result }
+    - field: ssh_password
+      provider: { type: script-result }
+
+postgres:
+  user: warehouse_ro
+  password: { type: script-result }
+```
+
+One script now unlocks the store once and returns both secrets, and if it needs
+a passphrase it asks through the app's own credential popup.
+
+Which slot takes which field is **positional**, not spelled out: the database
+password takes `password`, an SSH hop's password takes `ssh_password`, a key's
+passphrase takes `ssh_key_passphrase`. The price of leaving it implicit is that
+only one slot may claim each field — a second delegating hop is rejected when
+the config is read, rather than quietly fed the first hop's secret. Rejected
+just as early: a delegating slot with no `auth:` block to serve it, a binding no
+slot ever reads, and an `auth:` block nothing consumes.
+
+Nothing forces the whole connection into the block. A hop with an unencrypted
+key stays `{ kind: public_key }` with no passphrase, and a database password
+that lives in the OS keyring stays `{ type: keyring }` — only the slots that
+would otherwise ask the user need to delegate.
+
+#### Session cache
+
+Mechanisms that derive a session token from the credentials (Taiga's JWT,
+Stoat's session token) cache it under `session_cache`; the primary credentials
+stay wherever their provider keeps them. Mechanisms that send the credential
+itself on every request (`bearer-token`, `cookie`, `basic-auth`) ignore this.
+
+| `kind:`          | Lifetime of the derived session                          |
+| ---------------- | -------------------------------------------------------- |
+| `none`           | in memory only, rebuilt on every start                   |
+| `ttl`            | persisted, expires after `ttl_secs` of wall-clock age    |
+| `ttl-or-close`   | `ttl_secs` or app close, whichever comes first           |
+| `until-rejected` | persisted until the server answers 401/403 (**default**) |
+| `explicit`       | persisted until an `invalidate_session` action is run    |
+
+Only the derived token is ever persisted — never a password. A view can bind
+the `invalidate_session` action (drop the token, keep the credentials) or
+`invalidate_credentials` (drop both, so prompts are asked again) to a key.
+
 ### Lifecycle hooks
 
 A **hook** binds an adapter action to a point in the adapter's lifetime,
@@ -1467,14 +1738,33 @@ editors:
     command: "kitty @ launch --location=hsplit --bias 20 sh -c '{env}nvim {file}; mv {file} {file}.done'"
     inline: false
     pause_tui: true
+  compose-builtin: # the in-process editor instead of an external one
+    builtin: true
+    height: "30%" # share of the terminal, or a bare row count
+    line_numbers: false
 ```
 
 Why named profiles: different actions want different editor geometries — a
 short chat compose fits a slim split below the terminal, a long ticket edit a
-full vsplit. The editor is always a separate process (your `$EDITOR`, e.g. via
-Kitty); a TUI pane cannot host it (no PTY embedding), so the split is realised
-by the terminal through the profile's `command`. An action references a profile
-with its `editor:` field; an unknown name is a hard config-load error.
+full vsplit. An external editor is always a separate process (your `$EDITOR`,
+e.g. via Kitty); a TUI pane cannot host a foreign process (no PTY embedding),
+so that split is realised by the terminal through the profile's `command`. An
+action references a profile with its `editor:` field; an unknown name is a hard
+config-load error.
+
+#### The built-in editor
+
+`builtin: true` edits in-process instead of spawning anything: the TUI hosts
+[`vimrealm`](vimrealm/README.md), a modal vim-like editor, as a pane at the
+bottom of the screen. Same profile mechanism, so a single view action can be
+switched between the two by name and nothing else — `editor: compose-builtin`
+for the pane, `editor: compose-below` for real nvim in a terminal split.
+
+While the pane is open it owns the keyboard, including the global quit binding
+(otherwise a `q` typed into the message would close the app). Leaving is vim's
+own `:q!`; `:w` runs the action's live-apply, `:wq` saves and closes. The keys
+it understands are documented [in the crate](vimrealm/README.md#keys); its
+colours come from [`theme.vim`](#theme-colors).
 
 ### Tracking
 
@@ -1493,6 +1783,33 @@ All colors are configurable as hex values under `theme:`. See the [full color re
 navigation:
   jump_chars: "abcdefghijklmnopqrstuvwxyz" # characters for jump labels
 ```
+
+### Inline images
+
+```yaml
+images:
+  enabled: true # query the terminal for graphics support at startup
+  max_height: 20 # tallest a single picture may get, in terminal rows
+```
+
+A markdown column (`markdown: true`) draws `![alt](url)` **as a picture** in
+the row itself, where the terminal can do it — Kitty, iTerm2 and Sixel
+terminals are detected automatically at startup. Nothing else changes: the
+image sits between the text lines of the same table, scrolls with them and is
+clipped at the pane edges. Anywhere else — a terminal without graphics,
+`enabled: false`, a download that fails, an undecodable file — the line stays
+the plain `[image: alt]` text it always was, so no view depends on the feature.
+
+The bytes come from the adapter that owns the row (its `download_asset`), not
+from a separate HTTP client, so pictures behind a login work with the session
+the adapter already holds. They are fetched **once per URL** in the background
+and the row redraws when they arrive; a failed URL is not retried.
+
+**Why `max_height`:** a phone screenshot is easily taller than the terminal.
+Without a cap one picture would push the whole conversation off the screen, so
+anything larger is scaled down (aspect preserved) to this many rows. Raise it
+if you read chats in a tall window; `enabled: false` turns the whole thing off,
+including the startup capability query.
 
 ### Theme Colors
 
@@ -1527,6 +1844,36 @@ navigation:
 | `toolbar_bg`         | Action/status bar background     |
 | `focused_bg`         | Focused element background       |
 | `form_bg`            | Form panel background            |
+
+Two optional sub-blocks refine individual surfaces. Every field in them is
+optional: what stays unset falls back to a colour from the table above, so an
+absent block changes nothing.
+
+`theme.form:` — the spec-driven form popup: `accent`, `label_idle`, `text`,
+`text_idle`, `placeholder`, `selected`, `hint`, `error`, `field_bg`,
+`field_bg_idle`, `panel_bg`.
+
+`theme.vim:` — the built-in editor pane (`builtin: true` profiles):
+
+| Field          | Description                      | Falls back to |
+| -------------- | -------------------------------- | ------------- |
+| `bg`           | Pane background                  | `surface`     |
+| `text`         | Buffer text                      | `text_high`   |
+| `cursor`       | Character under the block cursor | reverse video |
+| `cursor_bg`    | The block cursor                 | reverse video |
+| `gutter`       | Line-number gutter               | `text_dim`    |
+| `mode`         | Mode indicator (`-- INSERT --`)  | `accent`      |
+| `status`       | Status line                      | `text_med`    |
+| `command_line` | `:` line and its messages        | `primary`     |
+| `selection`    | Text inside a visual selection   | `text_high`   |
+| `selection_bg` | Fill behind a visual selection   | `focused_bg`  |
+
+Both cursor fields style the **block** cursor of normal and visual mode only.
+Insert and command mode use the terminal's own cursor, which keeps its
+configured shape and blink and is not a colour the app can set. And the block is
+the one role that is not a plain colour by default: it reverses whatever it sits
+on, which keeps it legible on the pane background and inside a selection alike.
+Setting `cursor` or `cursor_bg` opts out of that and paints the pair as given.
 
 </details>
 
@@ -1622,7 +1969,10 @@ For the full picture — crate dependency graph, the `ContentAdapter`
 abstraction, the dirty-gated render loop, the message/request enums, auth
 orchestration and the views layer — see
 [`docs/architecture.md`](docs/architecture.md). Architecture decision
-records live under [`docs/decisions/`](docs/decisions/).
+records live under [`docs/decisions/`](docs/decisions/). The contract an
+adapter has to fulfil — traits, capabilities, status reporting and the
+auth-mechanism table it publishes — is written up in
+[`docs/content-adapter-spec.md`](docs/content-adapter-spec.md).
 
 The original design analysis on whether the (now-removed) native Tasks
 and Trackings tabs could move onto the `ContentAdapter` abstraction —

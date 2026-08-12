@@ -1,0 +1,11 @@
+# Revisions this repository would rather `git blame` looked through.
+#
+# Only mechanical, behaviour-preserving rewrites belong here — a
+# reformat, a mass rename. Never a commit that changed what the code
+# does, however boring the diff looked.
+#
+# Make git honour this file (once per clone):
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: format the whole workspace with cargo fmt
+9a0018ac471f0956296176f583cc4048dccda05b

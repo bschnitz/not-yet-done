@@ -199,8 +199,14 @@ fn parse_flags(text: &str, line_num: usize) -> Result<(Vec<char>, &str), ParseEr
         if !KNOWN_FLAGS.contains(&ch) {
             return Err(ParseError {
                 line: line_num,
-                message: format!("Unknown flag '-{ch}'. Known flags: {}",
-                    KNOWN_FLAGS.iter().map(|f| format!("-{f}")).collect::<Vec<_>>().join(", ")),
+                message: format!(
+                    "Unknown flag '-{ch}'. Known flags: {}",
+                    KNOWN_FLAGS
+                        .iter()
+                        .map(|f| format!("-{f}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             });
         }
 

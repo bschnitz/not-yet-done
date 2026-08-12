@@ -4,18 +4,20 @@
 //! Apply (Enter), Edit (ctrl+e), Delete (ctrl+d), EditShortcut (ctrl+s), Close.
 //! When the user types a name with no match and presses Enter, a
 //! `CreateNew` message is emitted so the embedder can open the editor for a
-//! brand-new entry.
+//! brand-new entry. Prefixing the typed name with `+` forces that even when
+//! something is fuzzy-selected, and `++` asks for an extended document
+//! instead of an adapter-native query body.
 
 use std::sync::Arc;
 
-use ratatui::layout::Rect;
+use not_yet_done_content::QueryKind;
+
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use tuirealm::component::Component;
 
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
-use crate::config::keybindings::{
-    KeyBindingSection, KeyIconMap, PopupAction, QueryMenuAction,
-};
+use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction, QueryMenuAction};
 use crate::ui::theme::Theme;
 
 /// One entry in the menu. The embedder is responsible for any merging
@@ -47,11 +49,15 @@ pub enum QueryMenuMessage {
     Delete { name: String },
     /// Prompt for a new shortcut for the selected entry.
     EditShortcut { name: String, query: String },
+    /// Remove the shortcut bound to the selected entry (query kept).
+    ClearShortcut { name: String },
     /// Toggle the selected entry as the default query (embedder decides
     /// set-vs-clear and persists it).
     SetDefault { name: String },
-    /// User typed a name, no match — create a brand-new entry under that name.
-    CreateNew { name: String },
+    /// User typed a name (optionally `+name` / `++name`) — create a
+    /// brand-new entry under that name. `kind` says which store the body
+    /// belongs in; embedders that repurpose this menu for files ignore it.
+    CreateNew { name: String, kind: QueryKind },
 }
 
 pub struct QueryMenuComponent {
@@ -84,27 +90,23 @@ impl QueryMenuComponent {
     /// Attach the shared popup keybindings + icon map. Without this, the
     /// embedded [`SearchablePopup`] keeps its legacy behaviour (no
     /// intrinsic Next/Prev hints, embedder must dispatch every key).
-    pub fn with_popup_kb(
-        mut self,
-        kb: KeyBindingSection<PopupAction>,
-        icons: KeyIconMap,
-    ) -> Self {
+    pub fn with_popup_kb(mut self, kb: KeyBindingSection<PopupAction>, icons: KeyIconMap) -> Self {
         self.popup_kb = Some(kb);
         self.key_icons = Some(icons);
         self
     }
 
-    pub fn is_open(&self) -> bool { self.popup.is_some() }
+    pub fn is_open(&self) -> bool {
+        self.popup.is_some()
+    }
 
-    pub fn close(&mut self) { self.popup = None; }
+    pub fn close(&mut self) {
+        self.popup = None;
+    }
 
     /// Open the menu for saved queries — supports marking a default
     /// query (★) via [`QueryMenuAction::SetDefault`].
-    pub fn open(
-        &mut self,
-        entries: &[QueryMenuEntry],
-        kb: &KeyBindingSection<QueryMenuAction>,
-    ) {
+    pub fn open(&mut self, entries: &[QueryMenuEntry], kb: &KeyBindingSection<QueryMenuAction>) {
         self.open_inner(entries, kb, true);
     }
 
@@ -125,26 +127,29 @@ impl QueryMenuComponent {
         set_default_enabled: bool,
     ) {
         self.set_default_enabled = set_default_enabled;
-        let items: Vec<PopupItem> = entries.iter().map(|e| PopupItem {
-            label: e.name.clone(),
-            value: e.query.clone(),
-            marked: set_default_enabled && e.is_default,
-            suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
-        }).collect();
-        let mut popup = SearchablePopup::new(
-            Arc::clone(&self.theme),
-            self.title.clone(),
-            items,
-        );
+        let items: Vec<PopupItem> = entries
+            .iter()
+            .map(|e| PopupItem {
+                label: e.name.clone(),
+                value: e.query.clone(),
+                marked: set_default_enabled && e.is_default,
+                suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
+            })
+            .collect();
+        let mut popup = SearchablePopup::new(Arc::clone(&self.theme), self.title.clone(), items);
         if let (Some(pkb), Some(icons)) = (self.popup_kb.clone(), self.key_icons.clone()) {
             popup = popup.with_popup_kb(pkb, icons);
         }
         // Embedder-specific hints; Next/Prev are rendered automatically
         // by the popup when popup_kb is attached.
         let mut hints = vec![
-            (kb.label(&QueryMenuAction::Select), "apply".into()),
+            (kb.label(&QueryMenuAction::Select), "apply / +new".into()),
             (kb.label(&QueryMenuAction::Edit), "edit".into()),
             (kb.label(&QueryMenuAction::EditShortcut), "shortcut".into()),
+            (
+                kb.label(&QueryMenuAction::ClearShortcut),
+                "clear key".into(),
+            ),
             (kb.label(&QueryMenuAction::Delete), "delete".into()),
         ];
         if set_default_enabled {
@@ -160,14 +165,42 @@ impl QueryMenuComponent {
         key: &str,
         kb: &KeyBindingSection<QueryMenuAction>,
     ) -> QueryMenuMessage {
-        if self.popup.is_none() { return QueryMenuMessage::Unhandled; }
+        if self.popup.is_none() {
+            return QueryMenuMessage::Unhandled;
+        }
 
-        if kb.get(&QueryMenuAction::Close).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::Close)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup = None;
             return QueryMenuMessage::Closed;
         }
-        if kb.get(&QueryMenuAction::Select).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::Select)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
+            let typed = popup.query_text().trim().to_string();
+
+            // A `+` prefix forces creation even when the typed text
+            // fuzzy-matches an entry — without it, a name that is a
+            // substring of an existing one could never be created. A
+            // second `+` asks for an extended document; the two live in
+            // separate stores but share one namespace, so the prefix is
+            // the only place the user gets to say which one they mean.
+            if let Some(rest) = typed.strip_prefix('+') {
+                let (kind, name) = match rest.strip_prefix('+') {
+                    Some(rest) => (QueryKind::Extended, rest.trim().to_string()),
+                    None => (QueryKind::Saved, rest.trim().to_string()),
+                };
+                self.popup = None;
+                if name.is_empty() {
+                    return QueryMenuMessage::Closed;
+                }
+                return QueryMenuMessage::CreateNew { name, kind };
+            }
+
             if let Some(item) = popup.selected_item() {
                 let msg = QueryMenuMessage::Apply {
                     name: item.label.clone(),
@@ -176,20 +209,33 @@ impl QueryMenuComponent {
                 self.popup = None;
                 return msg;
             }
-            let typed = popup.query_text().trim().to_string();
             self.popup = None;
-            if typed.is_empty() { return QueryMenuMessage::Closed; }
-            return QueryMenuMessage::CreateNew { name: typed };
+            if typed.is_empty() {
+                return QueryMenuMessage::Closed;
+            }
+            return QueryMenuMessage::CreateNew {
+                name: typed,
+                kind: QueryKind::Saved,
+            };
         }
-        if kb.get(&QueryMenuAction::Next).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::Next)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup.as_mut().unwrap().select_next();
             return QueryMenuMessage::Handled;
         }
-        if kb.get(&QueryMenuAction::Prev).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::Prev)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup.as_mut().unwrap().select_prev();
             return QueryMenuMessage::Handled;
         }
-        if kb.get(&QueryMenuAction::Edit).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::Edit)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
                 let msg = QueryMenuMessage::EditExisting {
@@ -201,16 +247,24 @@ impl QueryMenuComponent {
             }
             return QueryMenuMessage::Handled;
         }
-        if kb.get(&QueryMenuAction::Delete).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::Delete)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
-                let msg = QueryMenuMessage::Delete { name: item.label.clone() };
+                let msg = QueryMenuMessage::Delete {
+                    name: item.label.clone(),
+                };
                 self.popup = None;
                 return msg;
             }
             return QueryMenuMessage::Handled;
         }
-        if kb.get(&QueryMenuAction::EditShortcut).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&QueryMenuAction::EditShortcut)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
                 let msg = QueryMenuMessage::EditShortcut {
@@ -222,12 +276,30 @@ impl QueryMenuComponent {
             }
             return QueryMenuMessage::Handled;
         }
-        if self.set_default_enabled
-            && kb.get(&QueryMenuAction::SetDefault).is_some_and(|b| b.matches(key))
+        if kb
+            .get(&QueryMenuAction::ClearShortcut)
+            .is_some_and(|b| b.matches(key))
         {
             let popup = self.popup.as_ref().unwrap();
             if let Some(item) = popup.selected_item() {
-                let msg = QueryMenuMessage::SetDefault { name: item.label.clone() };
+                let msg = QueryMenuMessage::ClearShortcut {
+                    name: item.label.clone(),
+                };
+                self.popup = None;
+                return msg;
+            }
+            return QueryMenuMessage::Handled;
+        }
+        if self.set_default_enabled
+            && kb
+                .get(&QueryMenuAction::SetDefault)
+                .is_some_and(|b| b.matches(key))
+        {
+            let popup = self.popup.as_ref().unwrap();
+            if let Some(item) = popup.selected_item() {
+                let msg = QueryMenuMessage::SetDefault {
+                    name: item.label.clone(),
+                };
                 self.popup = None;
                 return msg;
             }
@@ -268,8 +340,18 @@ mod tests {
 
     fn entries() -> Vec<QueryMenuEntry> {
         vec![
-            QueryMenuEntry { name: "alpha".into(), query: "Q1".into(), shortcut: None, is_default: false },
-            QueryMenuEntry { name: "beta".into(),  query: "Q2".into(), shortcut: Some("1".into()), is_default: true },
+            QueryMenuEntry {
+                name: "alpha".into(),
+                query: "Q1".into(),
+                shortcut: None,
+                is_default: false,
+            },
+            QueryMenuEntry {
+                name: "beta".into(),
+                query: "Q2".into(),
+                shortcut: Some("1".into()),
+                is_default: true,
+            },
         ]
     }
 
@@ -304,8 +386,60 @@ mod tests {
             menu.handle_key(&c.to_string(), &kb);
         }
         let msg = menu.handle_key("enter", &kb);
-        assert_eq!(msg, QueryMenuMessage::CreateNew { name: "xyz".into() });
+        assert_eq!(
+            msg,
+            QueryMenuMessage::CreateNew {
+                name: "xyz".into(),
+                kind: QueryKind::Saved,
+            }
+        );
         assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn plus_prefix_creates_even_when_an_entry_is_selected() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        // "alph" fuzzy-matches "alpha"; the prefix says "new one anyway".
+        for c in "+alph".chars() {
+            menu.handle_key(&c.to_string(), &kb);
+        }
+        let msg = menu.handle_key("enter", &kb);
+        assert_eq!(
+            msg,
+            QueryMenuMessage::CreateNew {
+                name: "alph".into(),
+                kind: QueryKind::Saved,
+            }
+        );
+    }
+
+    #[test]
+    fn double_plus_prefix_creates_an_extended_query() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        for c in "++combo".chars() {
+            menu.handle_key(&c.to_string(), &kb);
+        }
+        let msg = menu.handle_key("enter", &kb);
+        assert_eq!(
+            msg,
+            QueryMenuMessage::CreateNew {
+                name: "combo".into(),
+                kind: QueryKind::Extended,
+            }
+        );
+    }
+
+    #[test]
+    fn a_bare_plus_closes_instead_of_creating_a_nameless_entry() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        menu.handle_key("+", &kb);
+        assert_eq!(menu.handle_key("enter", &kb), QueryMenuMessage::Closed);
     }
 
     #[test]
@@ -314,7 +448,9 @@ mod tests {
         let kb = make_kb();
         menu.open(&entries(), &kb);
         let msg = menu.handle_key("ctrl+e", &kb);
-        assert!(matches!(msg, QueryMenuMessage::EditExisting { ref name, ref query, .. } if name == "alpha" && query == "Q1"));
+        assert!(
+            matches!(msg, QueryMenuMessage::EditExisting { ref name, ref query, .. } if name == "alpha" && query == "Q1")
+        );
         assert!(!menu.is_open());
     }
 
@@ -324,7 +460,12 @@ mod tests {
         let kb = make_kb();
         menu.open(&entries(), &kb);
         let msg = menu.handle_key("ctrl+d", &kb);
-        assert_eq!(msg, QueryMenuMessage::Delete { name: "alpha".into() });
+        assert_eq!(
+            msg,
+            QueryMenuMessage::Delete {
+                name: "alpha".into()
+            }
+        );
     }
 
     #[test]
@@ -342,7 +483,12 @@ mod tests {
         let kb = make_kb();
         menu.open(&entries(), &kb);
         let msg = menu.handle_key("ctrl+t", &kb);
-        assert_eq!(msg, QueryMenuMessage::SetDefault { name: "alpha".into() });
+        assert_eq!(
+            msg,
+            QueryMenuMessage::SetDefault {
+                name: "alpha".into()
+            }
+        );
         assert!(!menu.is_open());
     }
 

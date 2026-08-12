@@ -147,6 +147,33 @@ impl StoatState {
         }
     }
 
+    /// Reconcile a channel's `last_message_id` against what a **newest-page**
+    /// message fetch actually returned (`None` = the channel is empty).
+    ///
+    /// Why this is needed: Stoat never clears `last_message_id` when the last
+    /// message is deleted — the field keeps pointing at a message that 404s.
+    /// The stale pointer makes the tree offer an expand arrow for a channel
+    /// that lists nothing, and flags it unread forever (the read marker can
+    /// never reach a message that no longer exists). Opening the channel is
+    /// exactly the moment we learn the truth, so we heal the snapshot there.
+    ///
+    /// Emits [`Invalidation::All`] on an actual change so the tree drops the
+    /// arrow and the unread marker without a manual reload. A `MessageCreate`
+    /// racing the fetch can be undone here for one repaint — the event's own
+    /// refresh refetches and puts it back.
+    pub fn reconcile_last_message(&mut self, channel_id: &str, newest: Option<&str>) {
+        let Some(channel) = self.channels.get_mut(channel_id) else {
+            return;
+        };
+        if channel.last_message_id.as_deref() == newest {
+            return;
+        }
+        channel.last_message_id = newest.map(str::to_string);
+        if let Some(tx) = &self.inv_tx {
+            let _ = tx.send(Invalidation::All);
+        }
+    }
+
     /// Whether `channel_id` has unread messages: its `last_message_id` is
     /// strictly newer than the last-read marker (ULID lexicographic), or it
     /// has messages but no read marker at all. Channels without messages
@@ -187,7 +214,10 @@ impl StoatState {
     /// Channels that are direct messages or group DMs (no `server`).
     pub fn dm_channels(&self) -> impl Iterator<Item = &Channel> {
         self.channels.values().filter(|c| {
-            matches!(c.channel_type.as_str(), "DirectMessage" | "Group" | "SavedMessages")
+            matches!(
+                c.channel_type.as_str(),
+                "DirectMessage" | "Group" | "SavedMessages"
+            )
         })
     }
 }
@@ -265,7 +295,11 @@ mod tests {
     #[test]
     fn insert_channel_adds_to_map_and_server_list() {
         let mut st = StoatState::default();
-        st.apply_ready(vec![], vec![server("S1", &["C1"])], vec![text_channel("C1", "S1")]);
+        st.apply_ready(
+            vec![],
+            vec![server("S1", &["C1"])],
+            vec![text_channel("C1", "S1")],
+        );
         st.insert_channel(text_channel("C2", "S1"));
         assert!(st.channels.contains_key("C2"));
         assert_eq!(st.servers["S1"].channels, vec!["C1", "C2"]);
@@ -277,7 +311,11 @@ mod tests {
     #[test]
     fn patch_channel_renames_known_channel_only() {
         let mut st = StoatState::default();
-        st.apply_ready(vec![], vec![server("S1", &["C1"])], vec![text_channel("C1", "S1")]);
+        st.apply_ready(
+            vec![],
+            vec![server("S1", &["C1"])],
+            vec![text_channel("C1", "S1")],
+        );
         st.patch_channel(
             "C1",
             ChannelPatch {
@@ -314,7 +352,11 @@ mod tests {
     #[test]
     fn patch_server_replaces_categories_and_channels() {
         let mut st = StoatState::default();
-        st.apply_ready(vec![], vec![server("S1", &["C1"])], vec![text_channel("C1", "S1")]);
+        st.apply_ready(
+            vec![],
+            vec![server("S1", &["C1"])],
+            vec![text_channel("C1", "S1")],
+        );
         st.patch_server(
             "S1",
             ServerPatch {
@@ -342,11 +384,15 @@ mod tests {
     #[test]
     fn channel_unread_compares_last_message_against_read_marker() {
         let mut st = StoatState::default();
-        st.apply_ready(vec![], vec![server("S1", &["C1"])], vec![{
-            let mut c = text_channel("C1", "S1");
-            c.last_message_id = Some(NEWER_MSG.into());
-            c
-        }]);
+        st.apply_ready(
+            vec![],
+            vec![server("S1", &["C1"])],
+            vec![{
+                let mut c = text_channel("C1", "S1");
+                c.last_message_id = Some(NEWER_MSG.into());
+                c
+            }],
+        );
 
         // No read marker yet → a channel with messages is unread.
         assert!(st.is_channel_unread("C1"));
@@ -366,8 +412,45 @@ mod tests {
         assert!(st.is_channel_unread("C1"));
 
         // An idle channel (no messages) is never unread.
-        st.apply_ready(vec![], vec![server("S2", &["C2"])], vec![text_channel("C2", "S2")]);
+        st.apply_ready(
+            vec![],
+            vec![server("S2", &["C2"])],
+            vec![text_channel("C2", "S2")],
+        );
         assert!(!st.is_channel_unread("C2"));
+    }
+
+    #[test]
+    fn reconcile_clears_last_message_of_an_empty_channel() {
+        // The stale-pointer case: Stoat keeps `last_message_id` after the
+        // last message was deleted, so the channel claims messages (unread
+        // marker + expand arrow) while its newest page comes back empty.
+        let mut st = StoatState::default();
+        st.apply_ready(
+            vec![],
+            vec![server("S1", &["C1"])],
+            vec![{
+                let mut c = text_channel("C1", "S1");
+                c.last_message_id = Some(NEWER_MSG.into());
+                c
+            }],
+        );
+        assert!(st.is_channel_unread("C1"));
+
+        st.reconcile_last_message("C1", None);
+        assert_eq!(st.channels["C1"].last_message_id, None);
+        assert!(!st.is_channel_unread("C1"));
+
+        // A fetch that DOES return messages adopts its newest entry — the
+        // same heal for "only the latest message was deleted".
+        st.reconcile_last_message("C1", Some(OLDER_MSG));
+        assert_eq!(
+            st.channels["C1"].last_message_id.as_deref(),
+            Some(OLDER_MSG)
+        );
+
+        // Unknown channel (reconnect race) is a no-op, not a panic.
+        st.reconcile_last_message("nope", None);
     }
 
     #[test]

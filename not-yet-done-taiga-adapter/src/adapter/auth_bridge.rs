@@ -17,10 +17,27 @@ use sea_orm::DatabaseConnection;
 use tokio::sync::{Notify, RwLock, watch};
 use uuid::Uuid;
 
-use not_yet_done_content::{AdapterStatus, AuthOrchestrator, AuthSpec};
+use not_yet_done_content::{
+    AdapterStatus, AuthFieldSpec, AuthOrchestrator, AuthSpec, MechanismSpec,
+};
 
 use crate::auth_session_store::SqlAuthSessionStore;
 use crate::client::{TaigaClient, TaigaSession, perform_login};
+
+/// What this adapter can speak against a Taiga instance. The factory
+/// publishes this table and validates the config against it;
+/// [`AuthBridge::run_login`] below implements it. The two belong
+/// together — a new mechanism is an entry here plus a branch there.
+pub(crate) const MECHANISMS: &[MechanismSpec] = &[MechanismSpec {
+    id: "password-login",
+    label: "Username and password",
+    doc: "Log in with the Taiga account's username and password; the server hands back a JWT \
+          pair the adapter caches and refreshes.",
+    fields: &[
+        AuthFieldSpec::required("username", "Username", false),
+        AuthFieldSpec::required("password", "Password", true),
+    ],
+}];
 
 pub(super) struct AuthBridge {
     base_url: String,
@@ -66,6 +83,13 @@ impl AuthBridge {
     ) -> Result<(), String> {
         self.orchestrator
             .submit_credentials(fields)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub(super) async fn cancel_credentials(&self) -> Result<(), String> {
+        self.orchestrator
+            .cancel_prompt()
             .await
             .map_err(|e| e.to_string())
     }
@@ -118,6 +142,8 @@ impl AuthBridge {
     }
 
     async fn run_login(&self, creds: HashMap<String, String>) -> Result<String, String> {
+        // No match on the mechanism: `password-login` is the only entry
+        // in MECHANISMS, and the factory validated the config against it.
         let username = creds
             .get("username")
             .map(String::as_str)
@@ -132,8 +158,8 @@ impl AuthBridge {
     }
 
     async fn build_and_validate(&self, blob: &str) -> Result<Arc<TaigaClient>, String> {
-        let session: TaigaSession = serde_json::from_str(blob)
-            .map_err(|e| format!("parse session blob: {e}"))?;
+        let session: TaigaSession =
+            serde_json::from_str(blob).map_err(|e| format!("parse session blob: {e}"))?;
         let client = TaigaClient::from_session(
             &self.base_url,
             session,

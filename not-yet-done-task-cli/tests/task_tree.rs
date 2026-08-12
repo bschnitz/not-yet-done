@@ -60,14 +60,18 @@ fn tree_returns_nested_json() {
     let children = root_node["children"].as_array().unwrap();
     assert_eq!(children.len(), 2, "Root should have 2 children");
 
-    let descs: Vec<&str> = children.iter()
+    let descs: Vec<&str> = children
+        .iter()
         .map(|c| c["description"].as_str().unwrap())
         .collect();
     assert!(descs.contains(&"ChildA"));
     assert!(descs.contains(&"ChildB"));
 
     // Check nesting: ChildA should have LeafA1.
-    let child_a_node = children.iter().find(|c| c["description"] == "ChildA").unwrap();
+    let child_a_node = children
+        .iter()
+        .find(|c| c["description"] == "ChildA")
+        .unwrap();
     let a_children = child_a_node["children"].as_array().unwrap();
     assert_eq!(a_children.len(), 1);
     assert_eq!(a_children[0]["description"], "LeafA1");
@@ -138,7 +142,10 @@ fn tree_last_tracked_since_prunes_untracked_leaves() {
 
     // Track leaf_a1 (this sets last_tracked_at), but not leaf_b1.
     common::start_tracking(&db_url, &leaf_a1);
-    common::nyd(&db_url).args(["track", "stop"]).assert().success();
+    common::nyd(&db_url)
+        .args(["track", "stop"])
+        .assert()
+        .success();
 
     // Use a date in the past so the tracking qualifies.
     let output = common::nyd(&db_url)
@@ -159,10 +166,16 @@ fn tree_last_tracked_since_prunes_untracked_leaves() {
     assert!(!stdout.contains("LeafB1"), "LeafB1 should be pruned");
 
     // ChildB should also be pruned (no tracked descendants).
-    assert!(!stdout.contains("ChildB"), "ChildB should be pruned (no tracked leaves)");
+    assert!(
+        !stdout.contains("ChildB"),
+        "ChildB should be pruned (no tracked leaves)"
+    );
 
     // ChildA should still be there (ancestor of tracked LeafA1).
-    assert!(stdout.contains("ChildA"), "ChildA should be present as ancestor");
+    assert!(
+        stdout.contains("ChildA"),
+        "ChildA should be present as ancestor"
+    );
 }
 
 #[test]
@@ -172,7 +185,10 @@ fn tree_last_tracked_since_future_date_returns_empty_tree() {
 
     // Track a leaf.
     common::start_tracking(&db_url, &leaf_a1);
-    common::nyd(&db_url).args(["track", "stop"]).assert().success();
+    common::nyd(&db_url)
+        .args(["track", "stop"])
+        .assert()
+        .success();
 
     // Use a future date so nothing qualifies.
     let output = common::nyd(&db_url)
@@ -185,5 +201,8 @@ fn tree_last_tracked_since_future_date_returns_empty_tree() {
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let arr = json.as_array().unwrap();
-    assert!(arr.is_empty(), "Expected empty array for future date filter");
+    assert!(
+        arr.is_empty(),
+        "Expected empty array for future date filter"
+    );
 }

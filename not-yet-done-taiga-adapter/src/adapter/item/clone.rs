@@ -13,12 +13,12 @@ use not_yet_done_content::*;
 use crate::client::{CreateFields, CreatedItem, ItemType, TaigaClient, create_item};
 
 use super::TaigaItemNode;
-use super::node_type_for;
 use super::edit_full::build_tables;
+use super::node_type_for;
 use super::slugs::TaigaSlugTables;
 use super::template::{
-    self, BODY_MARKER, CACHE_MARKER, EDITABLE_MARKER, FieldError, Parsed3b,
-    render_with_errors, resolve_slugs_inplace, validate_3b,
+    self, BODY_MARKER, CACHE_MARKER, EDITABLE_MARKER, FieldError, Parsed3b, render_with_errors,
+    resolve_slugs_inplace, validate_3b,
 };
 
 fn clone_fields() -> Vec<String> {
@@ -28,8 +28,7 @@ fn clone_fields() -> Vec<String> {
 impl TaigaItemNode {
     pub(super) async fn prepare_clone(&self) -> Result<EditorPrep> {
         let (statuses, members, tags) =
-            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type)
-                .await?;
+            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type).await?;
         let tables = build_tables(&statuses, &members, &tags);
         let template = render_clone_template(&self.detail, &tables);
         Ok(EditorPrep {
@@ -37,14 +36,14 @@ impl TaigaItemNode {
             // No version semantics — create has no optimistic-lock token.
             version: String::new(),
             suffix: ".md".into(),
+            file_path: None,
         })
     }
 
     pub(super) async fn execute_clone(&mut self, text: &str) -> Result<ActionOutcome> {
         let editable_fields = clone_fields();
         let (statuses, members, tags) =
-            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type)
-                .await?;
+            fetch_project_meta(&self.client, self.detail.project_id, self.detail.item_type).await?;
         let tables = build_tables(&statuses, &members, &tags);
 
         let mut parsed = match template::parse_3b(text) {
@@ -91,17 +90,21 @@ impl TaigaItemNode {
             assigned_users,
         };
 
-        let CreatedItem { id: new_id, r#ref: new_ref } =
-            match create_item(&self.client, self.detail.item_type, fields).await {
-                Ok(created) => created,
-                Err(e) => {
-                    let banner = FieldError { message: format!("create failed: {e}") };
-                    return Ok(ActionOutcome::Reopen {
-                        content: render_with_errors(text, &[banner]),
-                        new_version: None,
-                    });
-                }
-            };
+        let CreatedItem {
+            id: new_id,
+            r#ref: new_ref,
+        } = match create_item(&self.client, self.detail.item_type, fields).await {
+            Ok(created) => created,
+            Err(e) => {
+                let banner = FieldError {
+                    message: format!("create failed: {e}"),
+                };
+                return Ok(ActionOutcome::Reopen {
+                    content: render_with_errors(text, &[banner]),
+                    new_version: None,
+                });
+            }
+        };
 
         let display_ref = match &self.detail.project_slug {
             Some(slug) if !slug.is_empty() => format!("{slug}#{new_ref}"),
@@ -125,11 +128,7 @@ impl TaigaItemNode {
 /// Pull just the inputs the clone POST cares about out of a parsed buffer.
 /// `validate_3b` has already guaranteed `subject` is present + non-empty.
 fn extract_clone_inputs(parsed: &Parsed3b) -> (String, Vec<String>, Vec<String>) {
-    let subject = parsed
-        .editable
-        .get("subject")
-        .cloned()
-        .unwrap_or_default();
+    let subject = parsed.editable.get("subject").cloned().unwrap_or_default();
     let assignees: Vec<String> = parsed
         .editable
         .get("assignee")
@@ -160,10 +159,7 @@ fn extract_clone_inputs(parsed: &Parsed3b) -> (String, Vec<String>, Vec<String>)
 /// read-only section advertises `type` (and `user_story` for tasks).
 /// The completions block lists users + tags (no statuses — clone
 /// always uses the project's default status).
-fn render_clone_template(
-    detail: &super::ItemDetail,
-    tables: &TaigaSlugTables,
-) -> String {
+fn render_clone_template(detail: &super::ItemDetail, tables: &TaigaSlugTables) -> String {
     let mut out = String::new();
     let display_ref = match &detail.project_slug {
         Some(slug) if !slug.is_empty() => format!("{slug}#{}", detail.r#ref),

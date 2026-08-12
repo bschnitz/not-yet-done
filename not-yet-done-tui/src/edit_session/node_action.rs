@@ -7,9 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentAdapter, ContentError, InputSpec,
-};
+use not_yet_done_content::{ActionInput, ActionOutcome, ContentAdapter, ContentError, InputSpec};
 
 use crate::views::content_view::PaneId;
 
@@ -38,6 +36,9 @@ pub struct NodeActionEditSession {
     template: String,
     version: String,
     suffix: String,
+    /// Persistent editor file requested by the adapter's `prepare`
+    /// ([`EditorPrep::file_path`]). `None` → classic temp-file editing.
+    file_path: Option<std::path::PathBuf>,
     label: String,
     nav: Option<NavContext>,
     reload: Option<ReloadTarget>,
@@ -73,7 +74,11 @@ impl NodeActionEditSession {
         commit_on_save: bool,
     ) -> Result<Self, ContentError> {
         let node = adapter.get_by_id(&node_id).await?;
-        if !node.actions().iter().any(|a| a.id == action_id) {
+        if !adapter
+            .actions_for_type(node.node_type())
+            .iter()
+            .any(|a| a.id == action_id)
+        {
             return Err(ContentError::NotSupported(format!(
                 "action `{action_id}` not available on this node"
             )));
@@ -87,6 +92,7 @@ impl NodeActionEditSession {
             template: prep.template,
             version: prep.version,
             suffix: prep.suffix,
+            file_path: prep.file_path,
             label,
             nav,
             reload,
@@ -104,6 +110,13 @@ impl EditSession for NodeActionEditSession {
 
     fn suffix(&self) -> &str {
         &self.suffix
+    }
+
+    fn spawn_context(&self) -> super::EditorSpawnContext {
+        super::EditorSpawnContext {
+            persistent_file: self.file_path.clone(),
+            ..Default::default()
+        }
     }
 
     fn editor_profile(&self) -> Option<&str> {
@@ -151,10 +164,19 @@ impl EditSession for NodeActionEditSession {
                 let msg = message.unwrap_or_else(|| format!("{} updated", self.node_id));
                 self.done_with_row_patch(msg)
             }
-            Ok(ActionOutcome::Reopen { content, new_version }) => {
+            Ok(ActionOutcome::Reopen {
+                content,
+                new_version,
+            }) => {
                 if let Some(v) = new_version {
                     self.version = v;
                 }
+                // The editor reopens showing `content` (the merged / conflict-
+                // bannered buffer). That reopened buffer is what the user now
+                // edits from, so it becomes the baseline for the next save:
+                // without this, a second save after a reopen diffs against the
+                // stale original template and misclassifies unchanged text.
+                self.template = content.clone();
                 CommitOutcome::Reopen { content }
             }
             Ok(ActionOutcome::NoChanges) => {
@@ -165,7 +187,11 @@ impl EditSession for NodeActionEditSession {
                     message: Some("No changes".into()),
                 }
             }
-            Ok(ActionOutcome::Navigate { node_id: new_id, node_type, message }) => {
+            Ok(ActionOutcome::Navigate {
+                node_id: new_id,
+                node_type,
+                message,
+            }) => {
                 self.mark_applied(text);
                 // commit_on_save: the action just created a node; retarget so
                 // later saves edit it in place instead of creating again.
@@ -195,15 +221,12 @@ impl EditSession for NodeActionEditSession {
                     // (e.g. Taiga `clone`): there's no parent-list context to
                     // insert into, so reload the originating pane's current
                     // level — the new sibling then shows up, same as `r`.
-                    (None, Some(target)) => {
-                        CommitOutcome::FollowUp(FollowUp::ReloadContentPane {
-                            view_index: target.view_index,
-                            pane_id: target.pane_id,
-                            message: message.unwrap_or_else(|| {
-                                format!("Created {}", node_type.display_name)
-                            }),
-                        })
-                    }
+                    (None, Some(target)) => CommitOutcome::FollowUp(FollowUp::ReloadContentPane {
+                        view_index: target.view_index,
+                        pane_id: target.pane_id,
+                        message: message
+                            .unwrap_or_else(|| format!("Created {}", node_type.display_name)),
+                    }),
                     _ => self.done_with_row_patch(format!("Created {new_id}")),
                 }
             }
@@ -260,8 +283,9 @@ impl NodeActionEditSession {
         let Ok(node) = self.adapter.get_by_id(&new_id).await else {
             return;
         };
-        let Some(edit_id) = node
-            .actions()
+        let Some(edit_id) = self
+            .adapter
+            .actions_for_type(node.node_type())
             .iter()
             .find(|a| matches!(a.input, InputSpec::Editor))
             .map(|a| a.id.clone())
@@ -289,7 +313,9 @@ impl NodeActionEditSession {
                 node_id: self.node_id.clone(),
                 message,
             }),
-            None => CommitOutcome::Done { message: Some(message) },
+            None => CommitOutcome::Done {
+                message: Some(message),
+            },
         }
     }
 }
@@ -331,7 +357,6 @@ mod tests {
 
     struct MockNode {
         id: String,
-        is_channel: bool,
         node_type: NodeType,
         meta: Metadata,
         backend: Arc<Mutex<Backend>>,
@@ -348,17 +373,35 @@ mod tests {
         fn capabilities(&self) -> AdapterCapabilities {
             AdapterCapabilities::default()
         }
+        fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+            match node_type.type_id.as_str() {
+                "mock:channel" => {
+                    vec![NodeAction::new("send_message", "send", InputSpec::Editor)]
+                }
+                _ => vec![
+                    NodeAction::new("edit_message", "edit", InputSpec::Editor),
+                    NodeAction::new("delete_message", "delete", InputSpec::None),
+                ],
+            }
+        }
         async fn root(&self) -> ContentResult<Box<dyn Node>> {
             self.get_by_id("channel").await
         }
         async fn get_by_id(&self, id: &str) -> ContentResult<Box<dyn Node>> {
             Ok(Box::new(MockNode {
                 id: id.to_string(),
-                is_channel: id == "channel",
-                node_type: ntype(if id == "channel" { "mock:channel" } else { "mock:message" }),
+                node_type: ntype(if id == "channel" {
+                    "mock:channel"
+                } else {
+                    "mock:message"
+                }),
                 meta: self.meta.clone(),
                 backend: Arc::clone(&self.backend),
             }))
+        }
+        fn childs<'a>(&'a self, _node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+            // The edit-session tests act on nodes directly; no child listing.
+            Vec::new()
         }
     }
 
@@ -376,21 +419,12 @@ mod tests {
         fn metadata(&self) -> &Metadata {
             &self.meta
         }
-        fn actions(&self) -> Vec<NodeAction> {
-            if self.is_channel {
-                vec![NodeAction::new("send_message", "send", InputSpec::Editor)]
-            } else {
-                vec![
-                    NodeAction::new("edit_message", "edit", InputSpec::Editor),
-                    NodeAction::new("delete_message", "delete", InputSpec::None),
-                ]
-            }
-        }
         async fn prepare(&self, _action_id: &str) -> ContentResult<EditorPrep> {
             Ok(EditorPrep {
                 template: String::new(),
                 version: "v1".into(),
                 suffix: ".md".into(),
+                file_path: None,
             })
         }
         async fn execute(
@@ -463,7 +497,10 @@ mod tests {
 
         // Changed save → one edit.
         s.live_apply("hello world").await;
-        assert_eq!(backend.lock().unwrap().edits, vec!["hello world".to_string()]);
+        assert_eq!(
+            backend.lock().unwrap().edits,
+            vec!["hello world".to_string()]
+        );
 
         // Close with no change since the last apply → still one send, one edit.
         s.commit("hello world").await;
@@ -493,7 +530,10 @@ mod tests {
                 parent_node_id: "channel".into(),
                 child_node_type: "mock:message".into(),
             }),
-            Some(ReloadTarget { view_index: 2, pane_id: 7 }),
+            Some(ReloadTarget {
+                view_index: 2,
+                pane_id: 7,
+            }),
             None,
             false,
         )
@@ -535,7 +575,10 @@ mod tests {
             "send_message".into(),
             "clone".into(),
             None,
-            Some(ReloadTarget { view_index: 3, pane_id: 9 }),
+            Some(ReloadTarget {
+                view_index: 3,
+                pane_id: 9,
+            }),
             None,
             false,
         )
@@ -555,6 +598,109 @@ mod tests {
             _ => panic!("expected ReloadContentPane follow-up"),
         }
         assert_eq!(backend.lock().unwrap().sends, vec!["hello".to_string()]);
+    }
+
+    /// A node whose editor action always answers `Reopen` with a fixed
+    /// merged buffer — models a validation/conflict banner (e.g. Jira's
+    /// foreign-comment reopen).
+    struct ReopenAdapter {
+        meta: Metadata,
+    }
+    struct ReopenNode {
+        node_type: NodeType,
+        meta: Metadata,
+    }
+
+    #[async_trait]
+    impl ContentAdapter for ReopenAdapter {
+        fn adapter_type(&self) -> &str {
+            "reopen"
+        }
+        fn instance_id(&self) -> &str {
+            "reopen"
+        }
+        fn capabilities(&self) -> AdapterCapabilities {
+            AdapterCapabilities::default()
+        }
+        fn actions_for_type(&self, _node_type: &NodeType) -> Vec<NodeAction> {
+            vec![NodeAction::new("edit", "edit", InputSpec::Editor)]
+        }
+        async fn root(&self) -> ContentResult<Box<dyn Node>> {
+            self.get_by_id("n").await
+        }
+        async fn get_by_id(&self, _id: &str) -> ContentResult<Box<dyn Node>> {
+            Ok(Box::new(ReopenNode {
+                node_type: ntype("reopen:node"),
+                meta: self.meta.clone(),
+            }))
+        }
+        fn childs<'a>(&'a self, _node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+            Vec::new()
+        }
+    }
+
+    #[async_trait]
+    impl Node for ReopenNode {
+        fn id(&self) -> &str {
+            "n"
+        }
+        fn label(&self) -> &str {
+            "n"
+        }
+        fn node_type(&self) -> &NodeType {
+            &self.node_type
+        }
+        fn metadata(&self) -> &Metadata {
+            &self.meta
+        }
+        async fn prepare(&self, _action_id: &str) -> ContentResult<EditorPrep> {
+            Ok(EditorPrep {
+                template: "orig".into(),
+                version: "v1".into(),
+                suffix: ".md".into(),
+                file_path: None,
+            })
+        }
+        async fn execute(
+            &mut self,
+            _action_id: &str,
+            _input: ActionInput,
+        ) -> ContentResult<ActionOutcome> {
+            Ok(ActionOutcome::Reopen {
+                content: "merged".into(),
+                new_version: Some("v2".into()),
+            })
+        }
+    }
+
+    /// After a `Reopen`, the reopened buffer becomes the baseline: the next
+    /// commit must send it as `original`, not the stale opening template.
+    #[tokio::test]
+    async fn reopen_rebaselines_template_for_next_commit() {
+        let adapter = Arc::new(ReopenAdapter {
+            meta: Metadata::default(),
+        });
+        let mut s = NodeActionEditSession::new(
+            adapter,
+            "n".into(),
+            "edit".into(),
+            "edit".into(),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("session builds");
+
+        assert_eq!(s.template(), "orig");
+        match s.commit("user edit").await {
+            CommitOutcome::Reopen { content } => assert_eq!(content, "merged"),
+            _ => panic!("expected Reopen"),
+        }
+        // The reopened content is now the baseline, and the new version stuck.
+        assert_eq!(s.template(), "merged");
+        assert_eq!(s.version, "v2");
     }
 
     /// Without `commit_on_save`, intermediate saves stay no-ops (the legacy

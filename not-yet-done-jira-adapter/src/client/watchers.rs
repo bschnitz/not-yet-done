@@ -22,7 +22,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
             .await
@@ -47,7 +47,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        http_log::check_status("POST", &url, resp).await?;
+        self.check_status("POST", &url, resp).await?;
         Ok(())
     }
 
@@ -63,7 +63,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("DELETE", &url, e))?;
-        http_log::check_status("DELETE", &url, resp).await?;
+        self.check_status("DELETE", &url, resp).await?;
         Ok(())
     }
 

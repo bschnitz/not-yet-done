@@ -69,7 +69,10 @@ fn active_text_style() -> TextInputStyle {
         .prefix_color(ACTIVE_ACCENT)
         .set_style(
             TextInputStyleType::Title,
-            Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACTIVE_ACCENT)
+                .bg(INPUT_BG)
+                .add_modifier(Modifier::BOLD),
         )
         .set_style(
             TextInputStyleType::Input,
@@ -89,7 +92,10 @@ fn inactive_select_list_style() -> SelectListStyle {
             SelectListStyleType::ItemSelected,
             Style::default().fg(INPUT_FG).bg(SELECTED_BG),
         )
-        .set_style(SelectListStyleType::ItemCursor, Style::default().fg(INPUT_FG))
+        .set_style(
+            SelectListStyleType::ItemCursor,
+            Style::default().fg(INPUT_FG),
+        )
         .set_style(
             SelectListStyleType::ItemCursorSelected,
             Style::default().fg(INPUT_FG).bg(SELECTED_BG),
@@ -223,11 +229,19 @@ fn render_chrome(frame: &mut ratatui::Frame, panel: Rect, help_lines: &[Line<'st
 fn help_lines(keymap: &FilePickerKeymap, max_width: u16) -> Vec<Line<'static>> {
     let entries: Vec<(String, &'static str)> = vec![
         (
-            format!("{}/{}", keymap.focus_next.display(), keymap.focus_prev.display()),
+            format!(
+                "{}/{}",
+                keymap.focus_next.display(),
+                keymap.focus_prev.display()
+            ),
             "focus",
         ),
         (
-            format!("{}/{}", keymap.browse_down.display(), keymap.browse_up.display()),
+            format!(
+                "{}/{}",
+                keymap.browse_down.display(),
+                keymap.browse_up.display()
+            ),
             "nav",
         ),
         (keymap.toggle.display(), "toggle"),
@@ -276,10 +290,7 @@ fn help_lines(keymap: &FilePickerKeymap, max_width: u16) -> Vec<Line<'static>> {
                     keys,
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(
-                    format!(" {label}"),
-                    Style::default().fg(DIM),
-                ));
+                spans.push(Span::styled(format!(" {label}"), Style::default().fg(DIM)));
             }
             Line::from(spans)
         })

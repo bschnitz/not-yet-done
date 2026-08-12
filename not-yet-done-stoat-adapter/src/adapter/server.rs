@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, FormFieldSpec,
-    InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
-    NodeType, Result,
+    InputSpec, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
+    Result,
 };
 
 use super::category::{categories_with_new, category_composite_id, move_marked_channel};
@@ -160,15 +160,6 @@ impl Node for StoatServerNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![category_type().clone(), channel_type().clone()]
-    }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        server_actions()
-    }
-
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         let name = form_field(&input, "name")?;
         match action_id {
@@ -226,69 +217,75 @@ impl Node for StoatServerNode {
             _ => ActionDispatch::Noop,
         })
     }
+}
 
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        let state = self.state.read().await;
-        let Some(server) = state.servers.get(&self.server_id) else {
-            return Ok(empty_result());
-        };
-
-        let items: Vec<NodeSummary> = match params.node_type.type_id.as_str() {
-            // Categories, in server order. An empty category still shows
-            // (faithful to server state) but is marked childless.
-            "stoat:category" => server
-                .categories
-                .iter()
-                .map(|cat| NodeSummary {
-                    id: category_composite_id(&self.server_id, &cat.id),
-                    label: cat.title.clone(),
-                    node_type: category_type().clone(),
-                    metadata: Metadata {
-                        fields: vec![
-                            MetadataField {
-                                key: "name".into(),
-                                value: cat.title.clone(),
-                                display_label: "Name".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            // A category is unread when any of its channels is.
-                            super::unread_field(state.is_category_unread(&self.server_id, &cat.id)),
-                        ],
+/// List a server's categories (in server order) from a state snapshot.
+/// Shared by the server node's legacy `list` and the adapter's `childs`
+/// fetcher. A vanished server (reconnect race) lists empty.
+pub(super) fn list_server_categories(state: &StoatState, server_id: &str) -> ListResult {
+    let Some(server) = state.servers.get(server_id) else {
+        return empty_result();
+    };
+    // Categories, in server order. An empty category still shows
+    // (faithful to server state) but is marked childless.
+    let items: Vec<NodeSummary> = server
+        .categories
+        .iter()
+        .map(|cat| NodeSummary {
+            id: category_composite_id(server_id, &cat.id),
+            label: cat.title.clone(),
+            node_type: category_type().clone(),
+            metadata: Metadata {
+                fields: vec![
+                    MetadataField {
+                        key: "name".into(),
+                        value: cat.title.clone(),
+                        display_label: "Name".into(),
+                        editable: false,
+                        allowed_values: None,
                     },
-                    has_children: Some(!cat.channels.is_empty()),
-                })
-                .collect(),
-            // Uncategorized channels only — anything a category claims is
-            // listed one level down by the category node instead.
-            "stoat:channel" => {
-                let categorized: HashSet<&str> = server
-                    .categories
-                    .iter()
-                    .flat_map(|cat| cat.channels.iter().map(String::as_str))
-                    .collect();
-                server
-                    .channels
-                    .iter()
-                    .filter(|cid| !categorized.contains(cid.as_str()))
-                    .filter_map(|cid| state.channels.get(cid))
-                    .map(|c| channel_summary(c, state.is_channel_unread(&c.id)))
-                    .collect()
-            }
-            other => {
-                return Err(ContentError::NotSupported(format!(
-                    "StoatServerNode lists stoat:category or stoat:channel, got {other}"
-                )));
-            }
-        };
-
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: Vec::new(),
+                    // A category is unread when any of its channels is.
+                    super::unread_field(state.is_category_unread(server_id, &cat.id)),
+                ],
+            },
+            has_children: Some(!cat.channels.is_empty()),
         })
+        .collect();
+    ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    }
+}
+
+/// List a server's uncategorized channels from a state snapshot — anything
+/// a category claims is listed one level down by the category node instead.
+/// Shared by the server node's legacy `list` and the adapter's `childs`
+/// fetcher.
+pub(super) fn list_uncategorized_channels(state: &StoatState, server_id: &str) -> ListResult {
+    let Some(server) = state.servers.get(server_id) else {
+        return empty_result();
+    };
+    let categorized: HashSet<&str> = server
+        .categories
+        .iter()
+        .flat_map(|cat| cat.channels.iter().map(String::as_str))
+        .collect();
+    let items: Vec<NodeSummary> = server
+        .channels
+        .iter()
+        .filter(|cid| !categorized.contains(cid.as_str()))
+        .filter_map(|cid| state.channels.get(cid))
+        .map(|c| channel_summary(c, state.is_channel_unread(&c.id)))
+        .collect();
+    ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: Vec::new(),
     }
 }
 
@@ -306,6 +303,7 @@ fn empty_result() -> ListResult {
 mod tests {
     use super::*;
     use crate::gateway::protocol::{Category, Channel, Server};
+    use not_yet_done_content::{ListParams, Node, children};
 
     fn channel(id: &str, kind: &str, last: Option<&str>) -> Channel {
         Channel {
@@ -332,13 +330,16 @@ mod tests {
         .expect("client")
     }
 
-    fn server_node(st: StoatState) -> StoatServerNode {
-        StoatServerNode::new(
+    fn server_node(st: StoatState) -> (StoatServerNode, crate::adapter::StoatAdapter) {
+        let state = Arc::new(RwLock::new(st));
+        let node = StoatServerNode::new(
             test_client(),
-            Arc::new(RwLock::new(st)),
+            Arc::clone(&state),
             "S1".into(),
             "Guild".into(),
-        )
+        );
+        let adapter = crate::adapter::StoatAdapter::for_test(state, test_client());
+        (node, adapter)
     }
 
     fn list_params(ty: &NodeType) -> ListParams {
@@ -371,8 +372,11 @@ mod tests {
                 channel("V1", "VoiceChannel", None),
             ],
         );
-        let node = server_node(st);
-        let res = node.list(list_params(channel_type())).await.unwrap();
+        let (node, adapter) = server_node(st);
+        let node: &dyn Node = &node;
+        let res = children::list(&adapter, node, list_params(channel_type()))
+            .await
+            .unwrap();
         let ids: Vec<&str> = res.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["C1", "C2", "V1"]);
         // Text channel with activity is expandable, idle one is not …
@@ -406,17 +410,22 @@ mod tests {
                 channel("C2", "TextChannel", None),
             ],
         );
-        let node = server_node(st);
+        let (node, adapter) = server_node(st);
+        let node: &dyn Node = &node;
 
         // Category branch: one category, expandable, composite id.
-        let cats = node.list(list_params(category_type())).await.unwrap();
+        let cats = children::list(&adapter, node, list_params(category_type()))
+            .await
+            .unwrap();
         assert_eq!(cats.items.len(), 1);
         assert_eq!(cats.items[0].label, "General");
         assert_eq!(cats.items[0].id, "S1/cat/cat1");
         assert_eq!(cats.items[0].has_children, Some(true));
 
         // Channel branch: only the uncategorized C2 surfaces here.
-        let chans = node.list(list_params(channel_type())).await.unwrap();
+        let chans = children::list(&adapter, node, list_params(channel_type()))
+            .await
+            .unwrap();
         let ids: Vec<&str> = chans.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["C2"]);
     }

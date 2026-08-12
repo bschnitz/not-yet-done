@@ -23,7 +23,9 @@ pub enum AppError {
     #[error("Tag name '{name}' already exists in this project: [project-tag:{id}]")]
     DuplicateProjectTag { name: String, id: Uuid },
 
-    #[error("Tag name '{0}' is ambiguous: it exists in multiple projects. Please use the full ID: project-tag:<id> or global-tag:<id>")]
+    #[error(
+        "Tag name '{0}' is ambiguous: it exists in multiple projects. Please use the full ID: project-tag:<id> or global-tag:<id>"
+    )]
     AmbiguousTag(String),
 
     #[error("Tracking not found: {0}")]

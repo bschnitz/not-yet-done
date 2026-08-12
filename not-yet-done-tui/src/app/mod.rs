@@ -3,25 +3,28 @@ use std::time::Instant;
 
 use std::collections::HashSet;
 
-use not_yet_done_core::repository::{
-    LinkRepository, QueryShortcutRepository, SettingsRepository,
-};
+use not_yet_done_content::{DefaultQuery, QueryKind};
+use not_yet_done_core::repository::{LinkRepository, QueryShortcutRepository, SettingsRepository};
 use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
 
 use uuid::Uuid;
 
 use crate::action::{self, Action};
+use crate::components::adapter_prompt_popup::{AdapterPromptPopup, PromptKeyOutcome};
 use crate::components::content_form_popup::{ContentFormEvent, ContentFormPopup};
 use crate::components::data_table::DataTable;
 use crate::components::notification_bar::NotificationBarComponent;
 use crate::components::query_error_bar::QueryErrorBarComponent;
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
+use crate::components::sort_menu::SortMenuOutcome;
 use crate::components::status_bar::StatusBarComponent;
 use crate::components::tab_bar::TabBarComponent;
+use crate::config::keybindings::binding_steps;
+use crate::config::tui_config::LoadBannerRoute;
 use crate::config::{CommonAction, GlobalAction, KeyBindingConfig, TuiConfig};
 use crate::tabs::{Tab, TabLayout};
 use crate::ui::theme::Theme;
-use crate::views::content_view::ContentView;
+use crate::views::content_view::{ContentView, LoadBanner, collapsed_load_banner};
 use crate::views::{SubViewMessage, ViewRequest};
 
 // ---------------------------------------------------------------------------
@@ -45,8 +48,18 @@ pub enum LoadMsg {
         items: Vec<not_yet_done_content::NodeSummary>,
         applied_sort: Vec<not_yet_done_content::SortKey>,
         page: Option<not_yet_done_content::PageInfo>,
-        sortable_columns: Vec<not_yet_done_content::SortableColumn>,
+        columns: Vec<not_yet_done_content::ColumnSchema>,
         error: Option<String>,
+    },
+    /// The columns the adapter *describes* for a node type
+    /// ([`ContentAdapter::describe_columns`]), fetched off-thread after a load
+    /// so the backend-authoritative column types can be merged into rendering
+    /// without blocking the render thread. Additive: a view with no described
+    /// columns simply never receives one.
+    ContentColumnSchema {
+        view_index: usize,
+        node_type: String,
+        schema: Vec<not_yet_done_content::ColumnSchema>,
     },
     /// Async-loaded preview for a content view node. `cache_key` is the
     /// pane's `preview_key` (the selected row's own id) — must match
@@ -79,6 +92,16 @@ pub enum LoadMsg {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         result: Result<String, String>,
+    },
+    /// An inline picture referenced by a `markdown: true` body finished
+    /// downloading and decoding. `image` is `None` when either step failed —
+    /// the pane retires the URL so a broken attachment costs one request, not
+    /// one per rebuild. See [`crate::views::images`].
+    ImageDecoded {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        url: String,
+        image: Option<crate::views::images::DecodedImage>,
     },
     /// A menu-step action returned [`ActionOutcome::OpenEditor`]: the user
     /// picked a target from a `Picker` (e.g. Taiga's convert target menu) and
@@ -154,6 +177,18 @@ pub enum LoadMsg {
         node_label: Option<String>,
         node_type: Option<not_yet_done_content::NodeType>,
     },
+    /// Open the generic action popup for an action that collects input via a
+    /// form. Emitted by [`App::spawn_invoke_container_action`] (root-scoped)
+    /// and [`App::spawn_invoke_node_action`] (per-row) once the resolved
+    /// node's action `InputSpec` is seen to be a form: `invoke_action` has no
+    /// form dispatch, so the popup / `execute` path drives it instead,
+    /// targeted at the resolved node id.
+    OpenContentActionPopup {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+    },
     /// Live connection-status update from a content adapter (e.g.
     /// `Connecting`, `Ready`, `Failed`). Pushed by a background task
     /// that watches the adapter's status channel.
@@ -168,6 +203,24 @@ pub enum LoadMsg {
     AdapterInvalidation {
         view_index: usize,
         inv: not_yet_done_content::Invalidation,
+    },
+    /// A reminder fired by an adapter's reminder stream. Pushed by
+    /// `spawn_content_reminder_watcher` only for tabs whose `reminder:`
+    /// block is present and `enabled`; `poll_load` runs that tab's
+    /// configured `command`. See [`not_yet_done_content::Reminder`].
+    AdapterReminder {
+        view_index: usize,
+        reminder: not_yet_done_content::Reminder,
+    },
+    /// A backend-initiated request for user input, raised mid-operation (e.g.
+    /// an MFA challenge during an interactive browser sign-in). Pushed by
+    /// `spawn_content_prompt_watcher` for tabs whose adapter exposes a prompt
+    /// stream; `poll_load` opens the global [`AdapterPromptPopup`] overlay (or
+    /// queues it behind one already shown). The overlay is tab-agnostic — the
+    /// request's `source` label carries the context — so no view index is
+    /// threaded through. See [`not_yet_done_content::PromptRequest`].
+    AdapterPrompt {
+        request: not_yet_done_content::PromptRequest,
     },
     /// Result of an interactive credential submission. `Ok` keeps the
     /// popup in submitting state until the status flips to `Ready` (the
@@ -228,9 +281,7 @@ pub enum LoadMsg {
     /// must not touch the visible tab: the handler only evaluates it when its
     /// view is active, otherwise it marks the view due in
     /// `pending_live_refresh` for a single coalesced refresh on switch-back.
-    LiveTick {
-        view_index: usize,
-    },
+    LiveTick { view_index: usize },
     /// In-flight retry progress for a failed content/drill/tree load on
     /// `view_index` / `pane_id`. Updates the pane's `retry_state` so
     /// the auth-status banner reads `"Retrying (n/total): {err}"`
@@ -257,6 +308,106 @@ pub enum LoadMsg {
         query: String,
         result: Result<Option<not_yet_done_content::TreeSearchResults>, String>,
     },
+    /// A [`BusEvent`](not_yet_done_content::BusEvent) received on the
+    /// well-known [`EVENT_CHANNEL`](not_yet_done_content::EVENT_CHANNEL),
+    /// forwarded by [`App::spawn_event_rule_watcher`]. The rule engine
+    /// ([`App::handle_bus_event`]) matches its `topic` against every content
+    /// view's `event_actions` bindings and runs the bound action; an unmatched
+    /// *request* (one carrying a `correlation_id`) is NACKed so the emitter
+    /// unblocks. Events the host itself emits (`source == "host"`) are dropped
+    /// in the watcher to avoid a self-trigger loop.
+    BusEvent {
+        event: not_yet_done_content::BusEvent,
+    },
+    /// A plain note from an off-thread load, surfaced through
+    /// [`App::notify`]. Loads that *succeed with a caveat* have no other way
+    /// back: their result rides in `ContentItems`, whose `error` field would
+    /// paint the load as failed. Extended queries produce exactly that —
+    /// "truncated at the limit", "the document's own order replaced the
+    /// adapter's" — and the rows are still worth showing.
+    Notify { text: String },
+}
+
+/// Distinct `node_type.type_id`s present in a batch of rows, in first-seen
+/// order. Used to fetch the backend-described column schema (3b) once per node
+/// type after a load.
+fn distinct_node_types(items: &[not_yet_done_content::NodeSummary]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter_map(|i| {
+            let t = &i.node_type.type_id;
+            seen.insert(t.clone()).then(|| t.clone())
+        })
+        .collect()
+}
+
+/// Execute an extended query document for one level of a content view.
+///
+/// Nothing about such a document can be handed to `children::list`: it
+/// combines several adapter-native queries, and only the executor knows how to
+/// render, fetch and merge them — via an [`AdapterBackend`] that lists this
+/// very `parent`/`node_type` once per branch. The merged set is therefore
+/// always complete, which is why the result carries no [`PageInfo`]: there is
+/// no server-side page to continue from.
+///
+/// `sort` is the pane's own sort (the `s` action). It wins over the document's
+/// `order_by` when set, so sorting keeps working in an extended view; with no
+/// pane sort the document's order — or, absent an `order_by`, the merge order
+/// — survives untouched.
+///
+/// Warnings are notes on a *successful* load ("truncated at the limit", "no
+/// backend order survived"), so they travel as [`LoadMsg::Notify`] rather than
+/// through the `error` field, which would paint the load as failed.
+#[allow(clippy::too_many_arguments)]
+async fn run_extended_query(
+    adapter: &dyn not_yet_done_content::ContentAdapter,
+    parent: &dyn not_yet_done_content::Node,
+    node_type: not_yet_done_content::NodeType,
+    document: &str,
+    vars: &std::collections::HashMap<String, String>,
+    sort: &[not_yet_done_content::SortKey],
+    columns: &[not_yet_done_content::ColumnSchema],
+    group_by: Option<not_yet_done_content::GroupSpec>,
+    tx: &tokio::sync::mpsc::UnboundedSender<LoadMsg>,
+) -> Result<not_yet_done_content::ListResult, String> {
+    let backend = not_yet_done_extended_query::AdapterBackend::new(adapter, parent, node_type)
+        .with_group_by(group_by);
+    let types = backend.column_types().await;
+    let execution = not_yet_done_extended_query::run(document, &backend, &types, vars, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    for warning in &execution.warnings {
+        let _ = tx.send(LoadMsg::Notify {
+            text: warning.to_string(),
+        });
+    }
+    let mut items = execution.items;
+    let applied_sort = if sort.is_empty() {
+        execution.applied_sort
+    } else {
+        not_yet_done_content::apply_sort(&mut items, sort, columns)
+    };
+    Ok(not_yet_done_content::ListResult {
+        items,
+        applied_sort,
+        page: None,
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
+}
+
+/// The pane's active query as a child level should run it.
+///
+/// A saved query arrives rendered — there is one body, so its variables are
+/// substituted once. An extended document arrives verbatim with its bindings
+/// instead, because each of its branches renders separately at execution time.
+#[derive(Clone, Debug)]
+struct SubtreeQuery {
+    text: String,
+    kind: QueryKind,
+    /// Bindings for the branches; empty for an already-rendered saved query.
+    vars: std::collections::HashMap<String, String>,
 }
 
 /// Run an async fallible operation up to `1 + retries` times, emitting
@@ -342,6 +493,26 @@ pub use editor::EditorRequest;
 /// Generate one label per sortable column. Single letters first, then
 /// two-letter combos. Capacity 26 + 26·26 = 702 — far more than any
 /// realistic column count.
+/// Opt-in reminder-pipeline tracing (`NYD_DEBUG_REMINDER=1`), the TUI half of
+/// the calendar-adapter's `rem_trace`. Appends to the same
+/// `$TMPDIR/nyd-reminder-debug.log` so a single run shows the whole chain:
+/// adapter fires → TUI receives → command runs. No-op unless the env var is set.
+fn reminder_trace(args: std::fmt::Arguments<'_>) {
+    if std::env::var_os("NYD_DEBUG_REMINDER").is_none() {
+        return;
+    }
+    let path = std::env::temp_dir().join("nyd-reminder-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let ts = chrono::Local::now().to_rfc3339();
+        let _ = writeln!(f, "[reminder {ts}] {args}");
+    }
+}
+
 fn generate_sort_labels(count: usize) -> Vec<String> {
     let alphabet: Vec<char> = ('a'..='z').collect();
     let n = alphabet.len();
@@ -460,24 +631,6 @@ pub enum PendingConfirmation {
     /// resolves. Triggered by `:linkprune` after the user accepts the
     /// preview count. The Vec holds the link table IDs to remove.
     BulkDeleteStaleLinks(Vec<Uuid>),
-    /// CP-9: delete a Postgres DB-level script after the user confirms.
-    /// On accept, the App calls `delete_db_script` (idempotent unlink)
-    /// and reloads the source pane so the row disappears.
-    DeleteAdapterDbScript {
-        view_index: usize,
-        pane_id: crate::views::content_view::PaneId,
-        database: String,
-        script: String,
-    },
-    /// DSF-4: delete an empty Postgres DB-script directory. The
-    /// storage layer rejects non-empty dirs; we surface that error
-    /// via Notify after the spawn fails.
-    DeleteAdapterDbScriptDir {
-        view_index: usize,
-        pane_id: crate::views::content_view::PaneId,
-        database: String,
-        rel_path: String,
-    },
     /// CF-11: generic content-node delete. On accept the App spawns
     /// `Node::execute("delete", ActionInput::None)` via the adapter
     /// and reloads the pane on `ActionOutcome::Done`. No per-adapter
@@ -503,27 +656,6 @@ pub enum PendingConfirmation {
         node_id: String,
         action_name: String,
     },
-}
-
-/// A saved query/filter with an optional keyboard shortcut.
-/// Persisted in the `saved_query` DB table.
-#[derive(Debug, Clone)]
-pub struct SavedQuery {
-    pub id: Option<Uuid>,
-    pub name: String,
-    pub query: String,
-    pub shortcut: Option<String>,
-}
-
-impl SavedQuery {
-    pub fn from_db(m: not_yet_done_core::entity::saved_query::Model) -> Self {
-        Self {
-            id: Some(m.id),
-            name: m.name,
-            query: m.query,
-            shortcut: m.shortcut,
-        }
-    }
 }
 
 /// Handle to a script running in an external terminal.
@@ -557,6 +689,55 @@ impl DetachedScript {
 // Content action popup state
 // ---------------------------------------------------------------------------
 
+/// Notification-bar slot holding the "opening editor" line while a session is
+/// prepared off-thread. One slot, because only one such load runs at a time
+/// ([`App::editor_busy`] rejects a second).
+const EDITOR_LOADING_SLOT: &str = "editor:loading";
+
+/// The one slot every globally routed load banner shares
+/// ([`App::sync_load_banners`]) — one tab names itself in it, several collapse
+/// into a single counter, so loads never cost the bar more than one line.
+const LOAD_BANNER_SLOT: &str = "load";
+
+/// A live notification-bar message opened by a `type: notify` event action,
+/// retained so an `on_event: { <topic>: close }` binding can retract exactly
+/// this message when the topic fires for the same `source`. See
+/// [`App::event_notices`].
+struct EventNotice {
+    /// The event `source` the notice was opened for (e.g. the calendar
+    /// connection id). A close event must match it, so one connection's
+    /// `resolved` doesn't dismiss another's notice.
+    source: String,
+    /// Bus topics that retract this notice (the `on_event: close` keys).
+    close_topics: Vec<String>,
+    /// The bar slot this notice owns. Unique per notice, so retracting one
+    /// cannot hit another whose text happens to be identical — two
+    /// connections of the same adapter word their prompts the same way.
+    key: String,
+    /// Which bar the message landed on, so the retract targets the same one:
+    /// `true` = the prominent top alert bar, `false` = the bottom bar.
+    prominent: bool,
+}
+
+/// Substitute `{field}` placeholders in `template` with the matching top-level
+/// keys of a bus event's JSON `payload`. A string value is inserted verbatim;
+/// any other JSON value uses its compact `to_string()` form (so `{n}` against
+/// `{"n": 42}` yields `42`, not `"42"`). Unknown placeholders are left as-is.
+/// Used by `type: notify` event actions (e.g. `"tap number {number}"`).
+fn render_payload_template(template: &str, payload: &serde_json::Value) -> String {
+    let mut out = template.to_string();
+    if let Some(obj) = payload.as_object() {
+        for (key, value) in obj {
+            let replacement = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out = out.replace(&format!("{{{key}}}"), &replacement);
+        }
+    }
+    out
+}
+
 /// State for the content action selection popup (e.g. Jira transitions).
 pub struct ContentActionPopupState {
     pub popup: SearchablePopup,
@@ -583,6 +764,14 @@ pub struct ContentFormPopupState {
     pub pane_id: crate::views::content_view::PaneId,
     pub node_id: String,
     pub action_id: String,
+    /// Set for an `InputSpec::ColumnForm` (custom columns): maps each field key
+    /// to the `value_type` the front-end knows from its own column config
+    /// (YAML `kind:`). On submit the values are delivered as a typed
+    /// [`ActionInput::ColumnForm`](not_yet_done_content::ActionInput::ColumnForm)
+    /// so the store can bootstrap a column on first write. `None` for a plain
+    /// [`InputSpec::Form`], which submits the untyped
+    /// [`ActionInput::Form`](not_yet_done_content::ActionInput::Form).
+    pub column_types: Option<std::collections::HashMap<String, String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +793,7 @@ pub enum SortHintPhase {
     WaitingForColumn {
         target: SortTarget,
         labels: Vec<(usize, String)>,
-        columns: Vec<not_yet_done_content::SortableColumn>,
+        columns: Vec<not_yet_done_content::ColumnSchema>,
         input: String,
     },
     /// Phase 2: a column is picked, awaiting direction key.
@@ -639,16 +828,27 @@ enum SortAction {
 /// `Broken` when the YAML failed to parse or `validate()` reported one
 /// or more errors. Broken slots still claim a tab so the user sees the
 /// error in-app rather than the process exiting at startup.
-/// Addressing tuple for a single Postgres per-table script. Carried in
-/// the shortcut-capture state so the captured key chord can be written
-/// to the right `<table_dir>/.shortcuts.yaml`.
+/// Address of a single per-node script. Carried in the shortcut-capture
+/// state so the captured key chord is persisted under the right node
+/// scope. `node_id` is the adapter's own id, passed through opaquely.
 #[derive(Debug, Clone)]
-pub struct PostgresScriptCoords {
+pub struct NodeScriptCoords {
     pub view_index: usize,
-    pub database: String,
-    pub schema: String,
-    pub table: String,
+    pub node_id: String,
     pub script: String,
+}
+
+/// A query waiting for the keypress that becomes its shortcut. Carries
+/// the body and its [`QueryKind`] because binding a shortcut also (re-)saves
+/// the body, and the two stores share one namespace — writing an extended
+/// document to the saved-query store would leave a second entry under the
+/// same name, in the wrong language.
+#[derive(Debug, Clone)]
+pub struct PendingFavorite {
+    pub scope: String,
+    pub name: String,
+    pub query: String,
+    pub kind: QueryKind,
 }
 
 /// Addressing for a `:script`-menu shortcut binding. Carried in the
@@ -669,6 +869,33 @@ pub enum ContentSlot {
         path: std::path::PathBuf,
         errors: Vec<String>,
     },
+}
+
+/// A DB-stored shortcut resolved back to the `query_shortcut` row it edits.
+/// Saved-query / `:script`-menu / Postgres-table script shortcuts keep their
+/// chord in the adapter database (`query_shortcut` table), not in any YAML
+/// file — so the shortcut editor edits them through the repository, and the
+/// owning content view's chord cache is dropped so the next keypress refetches
+/// and the new claim goes live.
+struct DbShortcutTarget {
+    /// `query_shortcut.scope` for the row.
+    scope: String,
+    /// `query_shortcut.name` for the row (the query/script name).
+    name: String,
+    /// Content view that owns the chord cache to invalidate.
+    view_index: usize,
+    invalidate: DbShortcutInvalidate,
+}
+
+/// How to drop the cached chord-claim for a [`DbShortcutTarget`] after its DB
+/// row changes, so the rebuilt keymap reflects the new state immediately.
+enum DbShortcutInvalidate {
+    /// Reload the view's saved queries (`reload_content_saved_queries`).
+    SavedQuery,
+    /// Drop `ContentView::script_shortcuts[scope]`.
+    ScriptScope(String),
+    /// Drop `ContentView::node_script_shortcuts[node_id]`.
+    NodeScript(String),
 }
 
 impl ContentSlot {
@@ -704,16 +931,23 @@ impl ContentSlot {
 
 pub struct App {
     pub active_tab: Tab,
-    /// Visible, ordered tabs + autonumber state (from the active
-    /// `tabs:` constellation, or the legacy all-tabs order). Drives tab
-    /// switching, `Tab`/`Shift+Tab` cycling, the digit keys and which
-    /// tabs the bar renders. Rebuilt on config reload.
+    /// Visible, ordered tabs (from `tabs.order`, or all tabs in slot
+    /// order when none is configured). Drives tab switching,
+    /// `Tab`/`Shift+Tab` cycling, the digit keys and which tabs the bar
+    /// renders. Rebuilt on config reload.
     pub tab_layout: TabLayout,
     pub keybindings: KeyBindingConfig,
     pub theme: Theme,
     pub shared_theme: Arc<Theme>,
     pub config: TuiConfig,
     pub should_quit: bool,
+
+    /// Fullscreen mode: when set, the chrome bars (tab bar, the active
+    /// view's action/shortcut bar and the bottom status bar) are hidden so
+    /// the content view fills the terminal. Message bars (alerts,
+    /// notifications, inline query errors) remain visible. Toggled by
+    /// [`GlobalAction::ToggleFullscreen`].
+    pub fullscreen: bool,
 
     pub query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
     settings_repo: Arc<dyn SettingsRepository>,
@@ -757,13 +991,20 @@ pub struct App {
     /// Active edit session — drives all `$EDITOR` round-trips.
     pub pending_session: Option<Box<dyn crate::edit_session::EditSession>>,
 
-    /// Exact notification-bar text shown while a `NodeActionEditSession`
-    /// is being prepared off-thread (the network-heavy fetch behind
-    /// `OpenContentEditor`). `Some` ⇒ a load is in flight: it counts
-    /// toward [`Self::editor_busy`] so a second open is rejected, and the
-    /// stored string lets the completion handler remove *exactly* this
-    /// notification without clearing unrelated ones.
-    editor_loading_msg: Option<String>,
+    /// Mounted builtin-editor pane (an editor profile with `builtin: true`).
+    /// Mutually exclusive with [`Self::detached_editor`]: both are gated by
+    /// [`Self::editor_busy`], so only one editor is ever live. While it is
+    /// `Some` the pane owns the keyboard and is laid out above the message
+    /// bars.
+    pub builtin_editor: Option<crate::components::builtin_editor::BuiltinEditorPane>,
+
+    /// Whether a `NodeActionEditSession` is being prepared off-thread (the
+    /// network-heavy fetch behind `OpenContentEditor`). `true` ⇒ a load is in
+    /// flight, which counts toward [`Self::editor_busy`] so a second open is
+    /// rejected. Its notification-bar line lives in the keyed slot
+    /// [`EDITOR_LOADING_SLOT`], which the completion handler clears without
+    /// having to remember the exact text it showed.
+    editor_loading: bool,
     /// Generation stamp bumped on every editor-open spawn (and on cancel).
     /// The off-thread result carries the stamp it was spawned with; a
     /// mismatch on arrival means a newer open superseded it, so the stale
@@ -804,6 +1045,10 @@ pub struct App {
     /// Column configuration popup.
     pub column_config_popup: Option<crate::components::column_config_popup::ColumnConfigPopup>,
 
+    /// Sort menu popup — the whole sort spec at once (`c s`). The second UI
+    /// path onto the state the `S` sort-hint mode edits column-by-column.
+    pub sort_menu_popup: Option<crate::components::sort_menu::SortMenu>,
+
     /// Generic, adapter-driven option menu (a `type: option_menu` action).
     /// Stays alive across opens; the inner popup toggles per session. Unlike
     /// the tag menu it knows nothing about tags — it lists whatever values the
@@ -827,9 +1072,10 @@ pub struct App {
     /// whenever the menu is closed.
     pub script_menu_ctx: Option<crate::app::script::ScriptContext>,
 
-    /// Tab-set switch popup (`ctrl+x`). Lists the configured
-    /// constellations; switching rebuilds [`Self::tab_layout`].
-    pub tab_set_popup: crate::components::tab_set_popup::TabSetPopup,
+    /// Shortcut/action menu (`global.shortcut_menu`, default `ctrl+y`).
+    /// Lists every configurable keyboard shortcut as name → keys, toggling
+    /// between the current context and every tab.
+    pub shortcut_menu: crate::components::shortcut_menu::ShortcutMenu,
 
     /// Adapter credentials popup (login form for adapters that surface
     /// `AdapterStatus::NeedsCreds`).
@@ -852,8 +1098,19 @@ pub struct App {
     /// Pending key for chord sequences (e.g. "g" waiting for "g" to form "gg").
     pub pending_key: Option<String>,
 
-    /// When true, the next keypress is captured as a shortcut for a new favorite.
-    pub awaiting_favorite_shortcut: Option<(String, String, String)>, // (scope, name, query)
+    /// Which-key chord-completion preview popup (see
+    /// [`crate::components::which_key::WhichKeyMenu`]). Purely informational;
+    /// mirrors [`Self::pending_key`] via [`Self::reconcile_which_key`].
+    pub which_key: crate::components::which_key::WhichKeyMenu,
+
+    /// When the which-key popup should reveal itself: set to
+    /// `now + which_key.delay_ms` when a chord prefix is first stashed, taken
+    /// by the main loop's timer branch. `None` while nothing is pending or
+    /// the popup is already shown.
+    which_key_deadline: Option<std::time::Instant>,
+
+    /// When set, the next keypress is captured as a shortcut for a new favorite.
+    pub awaiting_favorite_shortcut: Option<PendingFavorite>,
     /// Saved-query shortcut conflicts already surfaced as notifications
     /// this session. Saved queries reload on every tab switch and
     /// q-menu mutation, so without this an unresolved conflict would
@@ -862,7 +1119,7 @@ pub struct App {
     /// Pending shortcut capture for a Postgres per-table script. Carries
     /// the addressing tuple so the captured key chord lands in the right
     /// `<table_dir>/.shortcuts.yaml`. Reset on capture or Esc.
-    pub awaiting_postgres_script_shortcut: Option<PostgresScriptCoords>,
+    pub awaiting_node_script_shortcut: Option<NodeScriptCoords>,
     /// Pending shortcut capture for a `:script`-menu script. Carries the
     /// script scope + filename so the captured key chord is persisted via
     /// the `query_shortcut` table. Reset on capture or Esc.
@@ -877,6 +1134,12 @@ pub struct App {
     pub tab_bar: TabBarComponent,
     pub status_bar: StatusBarComponent,
     pub notification_bar: NotificationBarComponent,
+    /// Prominent notification strip just beneath the top chrome (tab bar +
+    /// action bar) for important messages (e.g. an MFA number to tap).
+    /// Fed only by `type: notify` actions flagged `prominent: true`, and only
+    /// while `notifications.alert_enabled` is set. Same component as
+    /// [`Self::notification_bar`], switched into its alert presentation.
+    pub alert_bar: NotificationBarComponent,
     pub query_error_bar: QueryErrorBarComponent,
     pub content_views: Vec<ContentSlot>,
 
@@ -884,6 +1147,23 @@ pub struct App {
     pub content_action_popup: Option<ContentActionPopupState>,
     pub content_file_picker_popup: Option<ContentFilePickerPopupState>,
     pub content_form_popup: Option<ContentFormPopupState>,
+
+    /// Global overlay for an adapter-initiated mid-operation prompt (e.g. an
+    /// MFA challenge). At most one is shown at a time; concurrent requests wait
+    /// in `adapter_prompt_queue` and are promoted when the current one closes.
+    pub adapter_prompt_popup: Option<AdapterPromptPopup>,
+    /// Prompts that arrived while another was already on screen (e.g. two
+    /// calendars needing MFA at startup). FIFO; drained by `poll_load`.
+    pub adapter_prompt_queue: std::collections::VecDeque<not_yet_done_content::PromptRequest>,
+
+    /// Live notification-bar messages opened by a `type: notify` event action
+    /// that declared `on_event: { <topic>: close }`. Each remembers the exact
+    /// message pushed, the topics that retract it, and the event `source` it
+    /// was opened for — so a later event (e.g. `…:mfa:resolved`) closes only
+    /// the notice raised for that same connection, not another's.
+    event_notices: Vec<EventNotice>,
+    /// Counter behind [`EventNotice::key`] — one slot per opened notice.
+    event_notice_seq: u64,
 
     /// App-wide link-mark slot. Set by `GlobalAction::LinkMark`, cleared
     /// by Esc (via [`dispatch_escape`]) or overwritten by another mark.
@@ -943,6 +1223,13 @@ pub struct App {
 
     /// Active sort-hint mode (column-pick → direction-pick). `Off` when idle.
     pub sort_hint_phase: SortHintPhase,
+
+    /// Guard for [`Self::spawn_event_rule_watcher`]. The rule watcher
+    /// subscribes to the host event bus, which outlives every config
+    /// reload — unlike the per-adapter watchers it would *not* die when
+    /// the views are rebuilt, so a second subscription would deliver each
+    /// bus event twice. Set on the first spawn, never cleared.
+    event_rule_watcher_started: bool,
 }
 
 impl App {
@@ -992,6 +1279,9 @@ impl App {
     ) -> Self {
         let keybindings = config.keybindings.clone();
         let shared_theme = Arc::new(Theme::new(config.theme.clone()));
+        // Pulled out before `config` is moved into the struct literal below.
+        let shortcut_menu_execute = config.shortcut_menu.execute_on_enter;
+        let shortcut_menu_toggle = config.shortcut_menu.toggle_key.clone();
         // Load content views from YAML config files (must happen before tab_bar).
         let content_views = load_content_views(
             &shared_theme,
@@ -1011,13 +1301,25 @@ impl App {
         let initial_tab = tab_layout.first();
         let tab_bar = TabBarComponent::new(
             Arc::clone(&shared_theme),
-            &config.keybindings,
             &content_tab_infos,
+            config.tabs.subtabs_own_line,
         );
         let status_bar = StatusBarComponent::new(Arc::clone(&shared_theme), &config.keybindings);
 
+        let bar_hint = notification_bar_hint(&config.keybindings.global);
         let mut notification_bar = NotificationBarComponent::new(Arc::clone(&shared_theme));
         notification_bar.set_max_lines(config.notifications.max_lines);
+        notification_bar.set_max_messages(config.notifications.max_messages);
+        notification_bar.set_history_limit(config.notifications.history_limit);
+        notification_bar.set_hint(bar_hint.clone());
+        let mut alert_bar = NotificationBarComponent::new(Arc::clone(&shared_theme));
+        alert_bar.set_prominent(true);
+        alert_bar.set_max_lines(config.notifications.alert_max_lines);
+        alert_bar.set_hint(bar_hint);
+        // The top bar carries the messages the user must not miss — it keeps
+        // every one of them on screen, so `max_messages` deliberately does not
+        // apply here. Only the log limit is shared.
+        alert_bar.set_history_limit(config.notifications.history_limit);
         let query_error_bar = QueryErrorBarComponent::new(Arc::clone(&shared_theme));
         let (load_tx, load_rx) = tokio::sync::mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1036,6 +1338,7 @@ impl App {
             shared_theme: Arc::clone(&shared_theme),
             config,
             should_quit: false,
+            fullscreen: false,
             query_shortcut_repo,
             settings_repo,
             link_repo,
@@ -1049,7 +1352,8 @@ impl App {
             detached_editor: None,
             detached_script: None,
             pending_session: None,
-            editor_loading_msg: None,
+            builtin_editor: None,
+            editor_loading: false,
             editor_load_token: 0,
             pending_editor_request: None,
             last_editor_buffer: None,
@@ -1058,6 +1362,7 @@ impl App {
             last_error: None,
             last_anim_tick: Instant::now(),
             column_config_popup: None,
+            sort_menu_popup: None,
             option_menu: crate::components::option_menu::OptionMenuComponent::new(Arc::clone(
                 &shared_theme,
             ))
@@ -1069,17 +1374,25 @@ impl App {
             )
             .with_popup_kb(popup_kb, popup_icons),
             script_menu_ctx: None,
-            tab_set_popup: crate::components::tab_set_popup::TabSetPopup::new(Arc::clone(
-                &shared_theme,
-            )),
+            shortcut_menu: crate::components::shortcut_menu::ShortcutMenu::new(
+                Arc::clone(&shared_theme),
+                shortcut_menu_execute,
+                shortcut_menu_toggle,
+            ),
             adapter_creds_popup: None,
+            adapter_prompt_popup: None,
+            adapter_prompt_queue: std::collections::VecDeque::new(),
+            event_notices: Vec::new(),
+            event_notice_seq: 0,
             query_var_popup: None,
             config_picker_popup: None,
             link_refs: HashSet::new(),
             pending_key: None,
+            which_key: crate::components::which_key::WhichKeyMenu::new(Arc::clone(&shared_theme)),
+            which_key_deadline: None,
             awaiting_favorite_shortcut: None,
             warned_saved_query_conflicts: std::collections::HashSet::new(),
-            awaiting_postgres_script_shortcut: None,
+            awaiting_node_script_shortcut: None,
             awaiting_script_shortcut: None,
             modal_message: None,
             pending_confirmation: None,
@@ -1090,6 +1403,7 @@ impl App {
             tab_bar,
             status_bar,
             notification_bar,
+            alert_bar,
             query_error_bar,
             sort_hint_phase: SortHintPhase::Off,
             marked_link: None,
@@ -1100,6 +1414,7 @@ impl App {
             jump_history: crate::app::link::JumpHistory::new(),
             adapter_factory_builder,
             host_ctx,
+            event_rule_watcher_started: false,
         };
         // A duplicate tab name is a hard config error — show it up front
         // (the layout already fell back to legacy so the app still runs).
@@ -1108,64 +1423,114 @@ impl App {
         }
 
         // Configure nav chars on all tables.
-        let nav_chars: Vec<char> = app.config.navigation.jump_chars.chars().collect();
-        for cv in app.content_views_iter_mut() {
-            cv.set_nav_chars(&nav_chars);
-        }
+        app.apply_nav_chars();
 
         app.reload_link_refs();
 
         app
     }
 
-    /// Auto-load content views that already have an adapter from YAML config.
-    /// The watcher is always spawned (it only subscribes to a watch
-    /// channel, no I/O); the load itself is skipped for tabs flagged
-    /// `adapter.manual_connect: true` so they wait for an explicit
-    /// user-triggered `reload` action.
-    ///
-    /// Lives outside [`App::new`] so main can apply DB-persisted state
-    /// (default saved queries) before the first fetch — otherwise every
-    /// tab with a default query would load twice on startup.
-    pub fn start_content_loads(&mut self) {
-        let to_watch: Vec<(usize, crate::views::content_view::PaneId, bool)> = self
-            .content_views_indexed()
-            .filter(|(_, cv)| cv.adapter.is_some())
-            .map(|(i, cv)| (i, cv.active_pane_id(), cv.manual_connect))
-            .collect();
-        for (i, pane_id, manual) in to_watch {
-            self.spawn_content_status_watcher(i);
-            self.spawn_content_invalidation_watcher(i);
-            if !manual {
-                self.spawn_content_load(i, pane_id);
-            }
+    /// Apply the jump-mode label alphabet (`navigation.jump_chars`) to
+    /// every content view. A view without it opens jump mode with no
+    /// labels, so this has to run for freshly built views — at startup
+    /// and again after every config reload that replaces them.
+    pub fn apply_nav_chars(&mut self) {
+        let nav_chars: Vec<char> = self.config.navigation.jump_chars.chars().collect();
+        for cv in self.content_views_iter_mut() {
+            cv.set_nav_chars(&nav_chars);
         }
     }
 
-    /// Stamp each content view's default saved query (if any) onto its
-    /// active pane — plus every subtab pane opting in via
-    /// `query.inherit_default` — so the initial loads already use it.
-    /// Runs once at startup after [`Self::load_content_saved_queries`];
-    /// a default whose name no longer exists in the store is skipped
-    /// silently (the view falls back to its YAML `query.default`).
-    pub fn apply_default_content_queries(&mut self) {
-        for idx in 0..self.content_views.len() {
-            let Some(cv) = self.content_view_mut(idx) else {
-                continue;
-            };
-            let Some(name) = cv.default_saved_query.clone() else {
-                continue;
-            };
-            let Some(body) = cv
-                .db_saved_queries
-                .iter()
-                .find(|q| q.name == name)
-                .map(|q| q.query.clone())
-            else {
-                continue;
-            };
-            cv.apply_default_query(body, Some(name));
+    /// [`Self::apply_nav_chars`] for a single slot.
+    pub fn apply_nav_chars_to(&mut self, view_index: usize) {
+        let nav_chars: Vec<char> = self.config.navigation.jump_chars.chars().collect();
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.set_nav_chars(&nav_chars);
         }
+    }
+
+    /// Everything a freshly constructed [`ContentView`] needs before it can
+    /// render and fetch: the jump alphabet, its DB-persisted state (column
+    /// overrides, saved queries, default query, sort spec) and the async
+    /// watchers plus the initial load.
+    ///
+    /// The single source for "what startup does to a view after building
+    /// it" — every in-process config reload that rebuilds a slot must run
+    /// this for it, or the replacement view stays empty and unwired (no
+    /// data, no jump labels, no adapter watchers) until the next restart.
+    pub fn wire_content_view(&mut self, view_index: usize) {
+        self.apply_load_banner_route(view_index);
+        self.apply_nav_chars_to(view_index);
+        self.load_column_config_for(view_index);
+        self.load_card_mode_for(view_index);
+        self.reload_content_saved_queries(view_index);
+        self.apply_default_content_query(view_index);
+        self.load_content_sort_state(view_index);
+        self.start_content_load(view_index);
+    }
+
+    /// [`Self::wire_content_view`] for every slot, plus the one global
+    /// subscription that is not per-view. Used by startup and by the
+    /// reload paths that rebuild the whole view set.
+    pub fn wire_content_views(&mut self) {
+        for idx in 0..self.content_views.len() {
+            self.wire_content_view(idx);
+        }
+        // Rule engine: one global subscription to the host event bus, routed
+        // by topic to whichever view declares a matching `event_actions`
+        // binding. Independent of the per-view watchers above.
+        self.spawn_event_rule_watcher();
+    }
+
+    /// Auto-load the content view in `view_index` if it has an adapter from
+    /// YAML config. The watchers are always spawned (they only subscribe to
+    /// a channel, no I/O); the load itself is skipped for tabs flagged
+    /// `adapter.manual_connect: true` so they wait for an explicit
+    /// user-triggered `reload` action.
+    ///
+    /// Called from [`Self::wire_content_view`] *after* the DB-persisted
+    /// default query has been stamped onto the pane, so the first fetch
+    /// already uses it — that ordering is why the wiring lives outside
+    /// [`App::new`], which has no repositories to read yet.
+    pub fn start_content_load(&mut self, view_index: usize) {
+        let Some((pane_id, manual)) = self
+            .content_view(view_index)
+            .filter(|cv| cv.adapter.is_some())
+            .map(|cv| (cv.active_pane_id(), cv.manual_connect))
+        else {
+            return;
+        };
+        self.spawn_content_status_watcher(view_index);
+        self.spawn_content_invalidation_watcher(view_index);
+        self.spawn_content_reminder_watcher(view_index);
+        self.spawn_content_prompt_watcher(view_index);
+        if !manual {
+            self.spawn_content_load(view_index, pane_id);
+        }
+    }
+
+    /// Stamp a content view's default saved query (if any) onto its active
+    /// pane — plus every subtab pane opting in via `query.inherit_default`
+    /// — so the initial load already uses it. Runs from
+    /// [`Self::wire_content_view`] after the saved queries were read from
+    /// the DB; a default whose name no longer exists in the store is
+    /// skipped silently (the view falls back to its YAML `query.default`).
+    pub fn apply_default_content_query(&mut self, view_index: usize) {
+        let Some(cv) = self.content_view_mut(view_index) else {
+            return;
+        };
+        let Some(name) = cv.default_saved_query.clone() else {
+            return;
+        };
+        let Some((body, kind)) = cv
+            .db_saved_queries
+            .iter()
+            .find(|q| q.name == name)
+            .map(|q| (q.query.clone(), q.kind))
+        else {
+            return;
+        };
+        cv.apply_default_query(body, Some(name), kind);
     }
 
     // -----------------------------------------------------------------------
@@ -1196,6 +1561,25 @@ impl App {
             let result = adapter.submit_credentials(values).await;
             let error = result.err().map(|e| e.to_string());
             let _ = tx.send(LoadMsg::CredentialSubmitResult { view_index, error });
+        });
+    }
+
+    /// Tell the adapter behind `view_index` that the user dismissed the
+    /// credential form, so the login it is waiting on gives up.
+    ///
+    /// Deliberately fire-and-forget: the popup is already gone, and an
+    /// adapter that does not support interactive auth cannot have been
+    /// waiting on one.
+    pub fn spawn_cancel_credentials(&self, view_index: usize) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
+        let adapter = Arc::clone(adapter);
+        tokio::spawn(async move {
+            let _ = adapter.cancel_credentials().await;
         });
     }
 
@@ -1251,6 +1635,307 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Forward an adapter's [`Reminder`] stream into `poll_load` as
+    /// [`LoadMsg::AdapterReminder`], but *only* for tabs that opted in with a
+    /// present-and-`enabled` `reminder:` block — a tab without one never
+    /// subscribes, so it ignores reminders entirely (the adapter still owns
+    /// *when* they fire; this owns *whether* and *what runs*). On `Lagged` we
+    /// simply skip the dropped reminders: firing a stale command late is worse
+    /// than missing one, and the next reminder arrives on schedule.
+    ///
+    /// [`Reminder`]: not_yet_done_content::Reminder
+    pub fn spawn_content_reminder_watcher(&self, view_index: usize) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        // Opt-in gate: no `reminder:` block, or `enabled: false` → no watcher.
+        match cv.reminder.as_ref() {
+            Some(r) if r.enabled => {}
+            _ => return,
+        }
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
+        let mut rx = adapter.subscribe_reminders();
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match rx.recv().await {
+                    Ok(reminder) => {
+                        if tx
+                            .send(LoadMsg::AdapterReminder {
+                                view_index,
+                                reminder,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// Forward an adapter's mid-operation [`PromptRequest`] stream into
+    /// `poll_load` as [`LoadMsg::AdapterPrompt`]. Take-once (`mpsc`, not
+    /// broadcast): each request carries a non-cloneable one-shot responder, so
+    /// exactly one frontend services it. Harmless for adapters that never
+    /// prompt — [`ContentAdapter::take_prompt_requests`] defaults to `None`, so
+    /// the watcher simply doesn't spawn.
+    ///
+    /// [`PromptRequest`]: not_yet_done_content::PromptRequest
+    /// [`ContentAdapter::take_prompt_requests`]: not_yet_done_content::ContentAdapter::take_prompt_requests
+    pub fn spawn_content_prompt_watcher(&self, view_index: usize) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let Some(adapter) = cv.adapter.as_ref() else {
+            return;
+        };
+        let Some(mut rx) = adapter.take_prompt_requests() else {
+            return;
+        };
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            while let Some(request) = rx.recv().await {
+                if tx.send(LoadMsg::AdapterPrompt { request }).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Subscribe to the host [`EVENT_CHANNEL`] and forward each
+    /// [`BusEvent`] into `poll_load` as [`LoadMsg::BusEvent`]. Spawned **once**
+    /// at startup (not per-view): topic-routing to the owning view happens in
+    /// [`Self::handle_bus_event`], and events such as an MFA challenge arrive
+    /// independent of which tab is active. Host-sourced events
+    /// (`source == "host"`) are dropped here so an action's own `emit` — or a
+    /// NACK the engine itself publishes — never re-enters the engine. On
+    /// `Lagged` we skip the dropped events: a missed prompt is re-raised by the
+    /// backend's own retry, while replaying a stale one is worse.
+    ///
+    /// [`EVENT_CHANNEL`]: not_yet_done_content::EVENT_CHANNEL
+    /// [`BusEvent`]: not_yet_done_content::BusEvent
+    pub fn spawn_event_rule_watcher(&mut self) {
+        // Once only: the host event bus outlives every config reload, so a
+        // second subscription would deliver each event twice.
+        if self.event_rule_watcher_started {
+            return;
+        }
+        self.event_rule_watcher_started = true;
+        let mut rx = not_yet_done_content::subscribe_events(&*self.host_ctx.event_bus);
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match rx.recv().await {
+                    Ok(raw) => {
+                        let Some(event) = not_yet_done_content::BusEvent::from_host_event(&raw)
+                        else {
+                            continue;
+                        };
+                        if event.source == "host" {
+                            continue;
+                        }
+                        if tx.send(LoadMsg::BusEvent { event }).is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// Open the global adapter-prompt overlay for `request`, or queue it behind
+    /// one already on screen. An input shape the overlay can't render inline is
+    /// cancelled cleanly (the raising op unwinds) with a user-facing note,
+    /// rather than left hanging.
+    fn open_adapter_prompt(&mut self, request: not_yet_done_content::PromptRequest) {
+        if self.adapter_prompt_popup.is_some() {
+            self.adapter_prompt_queue.push_back(request);
+            return;
+        }
+        let mut popup = AdapterPromptPopup::new(request, &self.theme);
+        if let Some(what) = popup.take_unsupported() {
+            self.notify_error(format!("Adapter prompt input '{what}' is not supported"));
+            return;
+        }
+        self.adapter_prompt_popup = Some(popup);
+        self.sync_components();
+    }
+
+    /// Promote the next queued adapter prompt, if any, once the current overlay
+    /// has closed. Called from the key interceptor after a prompt resolves.
+    fn advance_adapter_prompt_queue(&mut self) {
+        if self.adapter_prompt_popup.is_some() {
+            return;
+        }
+        if let Some(next) = self.adapter_prompt_queue.pop_front() {
+            self.open_adapter_prompt(next);
+        }
+    }
+
+    /// Rule engine: react to one [`BusEvent`](not_yet_done_content::BusEvent)
+    /// received on the host [`EVENT_CHANNEL`](not_yet_done_content::EVENT_CHANNEL).
+    ///
+    /// Scans **every** content view (not just the active tab — an MFA challenge
+    /// arrives whichever tab is focused) for an `event_actions` binding whose
+    /// `on:` topic equals the event's, and runs each bound action on its owning
+    /// view. When no binding matches and the event is a *request* (carries a
+    /// `correlation_id`), it is NACKed: a reply with the same id but no payload
+    /// goes back on the bus so the waiting emitter (e.g. an OTC prompt) unblocks
+    /// and cancels rather than hanging forever.
+    fn handle_bus_event(&mut self, event: not_yet_done_content::BusEvent) {
+        // A close/resolve event retracts any live notice it targets first —
+        // independent of whether it also triggers an action (a `resolved`
+        // event typically has no `event_actions` binding, only closes).
+        self.sweep_event_notices(&event);
+
+        // Collect (view_index, action_name) up front so the mutable dispatch
+        // below doesn't overlap the immutable view scan.
+        let targets: Vec<(usize, String)> = self
+            .content_views_indexed()
+            .flat_map(|(i, cv)| {
+                cv.event_action_targets(&event.topic)
+                    .into_iter()
+                    .map(move |name| (i, name))
+            })
+            .collect();
+
+        if targets.is_empty() {
+            if let Some(correlation_id) = event.correlation_id.clone() {
+                // Unhandled request → NACK so the emitter stops waiting. Same
+                // correlation id, empty payload, `source == "host"` (the
+                // watcher drops it, so this never re-enters the engine).
+                not_yet_done_content::publish_event(
+                    &*self.host_ctx.event_bus,
+                    not_yet_done_content::BusEvent::new(
+                        "host:nack",
+                        "host",
+                        serde_json::Value::Null,
+                    )
+                    .with_correlation(correlation_id),
+                );
+            }
+            return;
+        }
+
+        for (view_index, name) in targets {
+            self.dispatch_event_action(view_index, &name, &event);
+        }
+    }
+
+    /// Run the action named `name` on content view `view_index` in response to
+    /// bus `event`. A `type: notify` action is handled here — its message is
+    /// templated from the event payload and pushed to the notification bar
+    /// (retained for `on_event: close` when declared). Every other action type
+    /// runs through the view's normal execute path and its resulting
+    /// [`SubViewMessage`] is routed exactly like the key path.
+    fn dispatch_event_action(
+        &mut self,
+        view_index: usize,
+        name: &str,
+        event: &not_yet_done_content::BusEvent,
+    ) {
+        let Some(action) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.find_action_by_name(name))
+        else {
+            return;
+        };
+        if action.action_type == "notify" {
+            self.open_event_notice(&action, event);
+            return;
+        }
+        let msg = {
+            let Some(cv) = self.content_view_mut(view_index) else {
+                return;
+            };
+            cv.dispatch_event_action(name)
+        };
+        let _ = self.process_sub_view_message(msg);
+    }
+
+    /// Push a `type: notify` action's message onto the notification bar,
+    /// substituting `{field}` placeholders from the triggering event's JSON
+    /// payload. When the action declares `on_event: { <topic>: close }`, the
+    /// pushed message is remembered as an [`EventNotice`] so a later event on
+    /// one of those topics (for the same `source`) retracts it.
+    fn open_event_notice(
+        &mut self,
+        action: &crate::config::view_config::ActionDef,
+        event: &not_yet_done_content::BusEvent,
+    ) {
+        let template = action.message.as_deref().unwrap_or_default();
+        let message = render_payload_template(template, &event.payload);
+        if message.is_empty() {
+            return;
+        }
+        // Prominent messages go to the loud top bar — but only when it is
+        // enabled; otherwise they fall back to the ordinary bottom bar, so the
+        // message is never silently dropped.
+        let prominent = action.prominent && self.config.notifications.alert_enabled;
+        // Every notice owns a slot of its own, numbered rather than named
+        // after its text: two connections of one adapter phrase their prompts
+        // identically, and a retract must not be able to pick the wrong one.
+        self.event_notice_seq = self.event_notice_seq.wrapping_add(1);
+        let key = format!("event:{}", self.event_notice_seq);
+        let class = crate::components::notification_bar::NoticeClass::Message;
+        if prominent {
+            self.alert_bar.set_keyed(&key, class, message.clone());
+        } else {
+            self.notification_bar
+                .set_keyed(&key, class, message.clone());
+        }
+        let close_topics: Vec<String> = action
+            .on_event
+            .as_ref()
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, r)| {
+                        matches!(r, crate::config::view_config::OnEventReaction::Close)
+                    })
+                    .map(|(t, _)| t.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !close_topics.is_empty() {
+            self.event_notices.push(EventNotice {
+                source: event.source.clone(),
+                close_topics,
+                key,
+                prominent,
+            });
+        }
+    }
+
+    /// Retract every live [`EventNotice`] whose `close_topics` include this
+    /// event's topic and whose `source` matches — scoped so one connection's
+    /// resolve doesn't dismiss another's notice.
+    fn sweep_event_notices(&mut self, event: &not_yet_done_content::BusEvent) {
+        let mut i = 0;
+        while i < self.event_notices.len() {
+            let n = &self.event_notices[i];
+            if n.source == event.source && n.close_topics.iter().any(|t| t == &event.topic) {
+                let removed = self.event_notices.remove(i);
+                if removed.prominent {
+                    self.alert_bar.clear_keyed(&removed.key);
+                } else {
+                    self.notification_bar.clear_keyed(&removed.key);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Start, re-pace, or stop the live-refresh timer for `view_index`
@@ -1321,7 +2006,15 @@ impl App {
                 let spec = pane.adapter_group_spec(&cv.view_defs)?;
                 pane.eager_subtree_depth(&cv.view_defs)?;
                 let query = Self::subtree_query_for_pane(cv, pane, &adapter);
-                Some((spec, query))
+                // `live_group_rows` is the adapter recomputing its own bucket
+                // under one native query; an extended document has no such
+                // form. Such a pane sits out the live tick rather than being
+                // refreshed against a query it isn't showing — its rows still
+                // update on the next reload.
+                match query {
+                    Some(q) if q.kind == QueryKind::Extended => None,
+                    other => Some((spec, other.map(|q| q.text))),
+                }
             })
             .collect();
         let tx = self.load_tx.clone();
@@ -1487,10 +2180,32 @@ impl App {
         }
     }
 
+    /// Soft (re)load: list from the adapter, serving any warm cache. This is
+    /// the default used by the ~16 ordinary load call sites.
     pub fn spawn_content_load(
         &self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
+    ) {
+        self.spawn_content_load_inner(view_index, pane_id, false);
+    }
+
+    /// Hard reload (the `r` action): ask the adapter to `refresh()` — abort
+    /// every in-flight load and drop caches — *before* re-listing, so the load
+    /// always fetches fresh instead of re-serving a warm cache.
+    pub fn spawn_content_reload(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
+        self.spawn_content_load_inner(view_index, pane_id, true);
+    }
+
+    fn spawn_content_load_inner(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        force: bool,
     ) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
@@ -1513,8 +2228,15 @@ impl App {
             sort,
             page,
             vars,
+            kind,
         } = req;
-        let query = query.map(|raw| adapter.render_query(&raw, &vars));
+        // A saved query is one adapter-native body, so its variables are
+        // rendered once here. An extended document is rendered per branch
+        // inside the executor and must reach it verbatim.
+        let query = match kind {
+            QueryKind::Saved => query.map(|raw| adapter.render_query(&raw, &vars)),
+            QueryKind::Extended => query,
+        };
         // Adapter-grouped tree (capability `group_by_via_adapter`): the
         // pane's effective grouping rides along so the adapter buckets the
         // root level itself. `None` everywhere else.
@@ -1526,42 +2248,75 @@ impl App {
             .unwrap_or(0);
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
+            // Hard reload: let the adapter tear down in-flight work and caches
+            // first, so the list below runs against a clean slate. No-op for
+            // adapters that don't override `refresh()`.
+            if force {
+                let _ = adapter.refresh().await;
+            }
             let result = run_with_retries(retries, &tx, view_index, pane_id, || {
                 let adapter = Arc::clone(&adapter);
                 let node_type_id = node_type_id.clone();
                 let query = query.clone();
                 let sort = sort.clone();
+                let vars = vars.clone();
                 let group_by = group_by.clone();
+                let tx = tx.clone();
                 async move {
                     let root = adapter.root().await.map_err(|e| e.to_string())?;
-                    let node_type = root
-                        .children_types()
-                        .into_iter()
-                        .find(|t| t.type_id == node_type_id)
-                        .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
-                    let sortable_columns = root.sortable_columns(&node_type);
-                    let params = not_yet_done_content::ListParams {
-                        node_type,
-                        query,
-                        sort,
-                        page,
-                        download: false,
-                        group_by,
+                    let node_type =
+                        not_yet_done_content::children::child_types(&*adapter, root.as_ref())
+                            .into_iter()
+                            .find(|t| t.type_id == node_type_id)
+                            .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
+                    let columns = not_yet_done_content::children::columns_for(
+                        &*adapter,
+                        root.as_ref(),
+                        &node_type,
+                    )
+                    .await;
+                    let list = match (kind, query) {
+                        (QueryKind::Extended, Some(document)) => {
+                            run_extended_query(
+                                &*adapter,
+                                root.as_ref(),
+                                node_type,
+                                &document,
+                                &vars,
+                                &sort,
+                                &columns,
+                                group_by,
+                                &tx,
+                            )
+                            .await?
+                        }
+                        (_, query) => {
+                            let params = not_yet_done_content::ListParams {
+                                node_type,
+                                query,
+                                sort,
+                                page,
+                                download: false,
+                                group_by,
+                            };
+                            not_yet_done_content::children::list(&*adapter, root.as_ref(), params)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        }
                     };
-                    let list = root.list(params).await.map_err(|e| e.to_string())?;
-                    Ok((list, sortable_columns))
+                    Ok((list, columns))
                 }
             })
             .await;
             match result {
-                Ok((list, sortable_columns)) => {
+                Ok((list, columns)) => {
                     let _ = tx.send(LoadMsg::ContentItems {
                         view_index,
                         pane_id,
                         items: list.items,
                         applied_sort: list.applied_sort,
                         page: list.page,
-                        sortable_columns,
+                        columns,
                         error: None,
                     });
                 }
@@ -1572,7 +2327,7 @@ impl App {
                         items: vec![],
                         applied_sort: Vec::new(),
                         page: None,
-                        sortable_columns: Vec::new(),
+                        columns: Vec::new(),
                         error: Some(e),
                     });
                 }
@@ -1615,7 +2370,18 @@ impl App {
             sort,
             page,
             vars,
+            kind,
         } = req;
+        // Eager pre-expansion asks the adapter for the *whole* tree in one
+        // `list_subtree` call, which an extended document cannot be split
+        // across: it is executed per level, against one parent at a time.
+        // Skipping the pre-expansion costs only the eagerness — the tree still
+        // opens level by level, and every level runs the document — whereas
+        // passing the document down would have the adapter reject it, or worse,
+        // load the subtree unfiltered.
+        if kind == QueryKind::Extended && query.is_some() {
+            return;
+        }
         let query = query.map(|raw| adapter.render_query(&raw, &vars));
         let group_by = pane.adapter_group_spec(&cv.view_defs);
         let retries = cv
@@ -1633,11 +2399,11 @@ impl App {
                 let group_by = group_by.clone();
                 async move {
                     let root = adapter.root().await.map_err(|e| e.to_string())?;
-                    let node_type = root
-                        .children_types()
-                        .into_iter()
-                        .find(|t| t.type_id == node_type_id)
-                        .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
+                    let node_type =
+                        not_yet_done_content::children::child_types(&*adapter, root.as_ref())
+                            .into_iter()
+                            .find(|t| t.type_id == node_type_id)
+                            .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
                     let params = not_yet_done_content::ListParams {
                         node_type,
                         query,
@@ -1646,9 +2412,14 @@ impl App {
                         download: false,
                         group_by,
                     };
-                    root.list_subtree(params, depth)
-                        .await
-                        .map_err(|e| e.to_string())
+                    not_yet_done_content::children::list_subtree(
+                        &*adapter,
+                        root.as_ref(),
+                        params,
+                        depth,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
                 }
             })
             .await;
@@ -1716,6 +2487,17 @@ impl App {
         };
         let adapter = Arc::clone(adapter);
         let subtree_query = Self::subtree_query_for_pane(cv, pane, &adapter);
+        // The refresh re-reads the bucket's whole subtree in one
+        // `list_subtree`, which an extended document cannot be split across —
+        // the same reason the eager pre-expansion skips it. The bucket keeps
+        // the rows it has until the user reloads.
+        if subtree_query
+            .as_ref()
+            .is_some_and(|q| q.kind == QueryKind::Extended)
+        {
+            return;
+        }
+        let subtree_query = subtree_query.map(|q| q.text);
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             let payload = async {
@@ -1731,7 +2513,10 @@ impl App {
                     metadata: node.metadata().clone(),
                     has_children: Some(true),
                 };
-                let node_type = node.children_types().into_iter().next()?;
+                let node_type =
+                    not_yet_done_content::children::child_types(&*adapter, node.as_ref())
+                        .into_iter()
+                        .next()?;
                 let params = not_yet_done_content::ListParams {
                     node_type,
                     query: subtree_query,
@@ -1740,7 +2525,14 @@ impl App {
                     download: false,
                     group_by: None,
                 };
-                let subtree = node.list_subtree(params, depth).await.ok()?;
+                let subtree = not_yet_done_content::children::list_subtree(
+                    &*adapter,
+                    node.as_ref(),
+                    params,
+                    depth,
+                )
+                .await
+                .ok()?;
                 Some(NowBucketPayload { header, subtree })
             }
             .await;
@@ -1763,11 +2555,11 @@ impl App {
     /// returned [`CustomQueryItemsPayload`] carries the adapter's
     /// opaque `cursor_id` so the pane can chain a `Continue` on the
     /// next `>` press. `None` keeps the legacy LIMIT/OFFSET path.
-    pub fn spawn_postgres_query(
+    pub fn spawn_adapter_query(
         &self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
-        database: String,
+        node_id: String,
         query: String,
         page: Option<not_yet_done_content::PageRequest>,
         cursor: Option<not_yet_done_content::CursorIntent>,
@@ -1782,8 +2574,10 @@ impl App {
         };
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
-            let mut ctx =
-                not_yet_done_content::CustomQueryContext::new().with("database", database.clone());
+            // The adapter derives its own routing keys from the node id
+            // (for Postgres: the target database), so the host stays out
+            // of the id's shape.
+            let mut ctx = adapter.custom_query_context(&node_id);
             if let Some(p) = page {
                 ctx = ctx.with_page(p);
             }
@@ -1809,7 +2603,7 @@ impl App {
                     page: res.page,
                     custom_query: crate::views::content_view::CustomQueryRunState {
                         query: query.clone(),
-                        database: database.clone(),
+                        node_id: node_id.clone(),
                         // Placeholder — the pane overrides this with its
                         // own view-config-derived mode in
                         // `apply_custom_query_result`.
@@ -1864,12 +2658,13 @@ impl App {
         });
     }
 
-    /// CP-8 entry point: a `postgres:db_script` row's `x` shortcut
+    /// CP-8 entry point: a `<adapter>:db_script` row's `x` shortcut
     /// dispatched `ActionDispatch::ExecuteQuery { paged: true }`. Allocates
     /// (or reuses) the result pane child via the active level's first
-    /// `ChildDef` (typically `postgres:db_script_result` with
-    /// `split: right` + `pagination: { mode: cursor }`), then spawns a
-    /// cursor-paginated custom query against it.
+    /// `ChildDef` (typically a synthetic `<adapter>:db_script_result` with
+    /// `split: right` + a `pagination:` block), then spawns a paginated
+    /// custom query against it — cursor-based or LIMIT/OFFSET, whichever
+    /// that pane's `pagination: mode:` asks for.
     ///
     /// `sql` is the script body already stripped of scratch/marker by the
     /// adapter side — see `DbScriptNode::invoke_action("execute")`.
@@ -1887,22 +2682,35 @@ impl App {
             return;
         };
         let target_pane_id = cv.open_db_script_result_pane(&source_node_id, &source_label);
-        self.spawn_postgres_query(
+        // Open a cursor only where the result pane asks for one. The
+        // next/prev-page keys already derive this from the pane's
+        // `pagination:` block; deciding it here the same way keeps the first
+        // page consistent with the following ones — and keeps the host from
+        // assuming every SQL backend has server-side cursors (SQLite has
+        // none and rejects the intent outright).
+        let cursor = match cv.pane_pagination_mode(target_pane_id) {
+            crate::config::view_config::PaginationMode::Cursor => {
+                Some(not_yet_done_content::CursorIntent::Open)
+            }
+            crate::config::view_config::PaginationMode::Server
+            | crate::config::view_config::PaginationMode::All => None,
+        };
+        self.spawn_adapter_query(
             view_index,
             target_pane_id,
             database,
             sql,
             Some(not_yet_done_content::PageRequest {
                 offset: 0,
-                limit: crate::edit_session::POSTGRES_QUERY_DEFAULT_PAGE_SIZE,
+                limit: crate::edit_session::ADAPTER_QUERY_DEFAULT_PAGE_SIZE,
             }),
-            Some(not_yet_done_content::CursorIntent::Open),
+            cursor,
         );
     }
 
     /// CP-8 entry point: a `postgres:db_script` row's `e` shortcut
     /// dispatched `ActionDispatch::OpenEditor { session_kind: "script_editor" }`.
-    /// Opens [`PostgresDbScriptSession`] which writes the buffer back to
+    /// Opens [`AdapterDbScriptSession`] which writes the buffer back to
     /// `<instance_data_dir>/db_scripts/<database>/<script>.sql` on `:w`
     /// and does NOT re-execute — the user re-runs explicitly with `x`.
     fn open_adapter_db_script_editor(
@@ -1923,76 +2731,13 @@ impl App {
         };
         let session = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                crate::edit_session::PostgresDbScriptSession::open(
+                crate::edit_session::AdapterDbScriptSession::open(
                     adapter, database, script, in_place,
                 )
                 .await
             })
         });
         self.open_session(Box::new(session))
-    }
-
-    /// CP-9 / DSF-4 / DSF-5: open the active content tab's cmdline
-    /// pre-typed so the user only enters the new script name. Uses
-    /// the DSF-5 namespace `:db-script new <name>` — the selected row
-    /// already pins the current dir, so we don't need to thread
-    /// `parent_rel` through the cmdline.
-    fn open_db_script_new_prompt(
-        &mut self,
-        view_index: usize,
-        _pane_id: crate::views::content_view::PaneId,
-        _database: String,
-        _parent_rel: String,
-    ) {
-        use crate::views::HasCmdline;
-        if !matches!(self.active_tab, Tab::Content(idx) if idx == view_index) {
-            self.notify("Switch back to the Postgres tab to add a script".to_string());
-            return;
-        }
-        let Some(cv) = self.content_view_mut(view_index) else {
-            return;
-        };
-        cv.cmdline_open_with("db-script new ");
-    }
-
-    /// DSF-4 / DSF-5: pre-fill `:db-script new-dir <name>`.
-    fn open_db_script_dir_new_prompt(
-        &mut self,
-        view_index: usize,
-        _pane_id: crate::views::content_view::PaneId,
-        _database: String,
-        _parent_rel: String,
-    ) {
-        use crate::views::HasCmdline;
-        if !matches!(self.active_tab, Tab::Content(idx) if idx == view_index) {
-            self.notify("Switch back to the Postgres tab to add a folder".to_string());
-            return;
-        }
-        let Some(cv) = self.content_view_mut(view_index) else {
-            return;
-        };
-        cv.cmdline_open_with("db-script new-dir ");
-    }
-
-    /// DSF-4 / DSF-5: pre-fill `:db-script rename <name>` (the user
-    /// just types the new name and presses Enter).
-    fn open_db_script_rename_prompt(
-        &mut self,
-        view_index: usize,
-        _pane_id: crate::views::content_view::PaneId,
-        _database: String,
-        _rel_path: String,
-        _is_dir: bool,
-    ) {
-        use crate::views::HasCmdline;
-        if !matches!(self.active_tab, Tab::Content(idx) if idx == view_index) {
-            self.notify("Switch back to the Postgres tab to rename".to_string());
-            return;
-        }
-        let Some(cv) = self.content_view_mut(view_index) else {
-            return;
-        };
-        cv.cmdline_open_with("db-script rename ");
     }
 
     /// DSF-4: stash the marked source for a subsequent move. Mirrors
@@ -2082,67 +2827,6 @@ impl App {
                 self.refresh_db_scripts_tree_children(view_index, pane_id, &src_db);
             }
             Err(e) => self.notify_error(format!("Move failed: {e}")),
-        }
-    }
-
-    /// DSF-4: confirm + delete an empty DB-script directory. The
-    /// storage layer rejects non-empty dirs ("not empty (N entries)");
-    /// we surface that via Notify after the spawn so the user sees the
-    /// actual count.
-    fn confirm_delete_adapter_db_script_dir(
-        &mut self,
-        view_index: usize,
-        pane_id: crate::views::content_view::PaneId,
-        database: String,
-        rel_path: String,
-    ) {
-        let msg = format!("Delete empty DB-script folder '{rel_path}' in '{database}'? (y/n)");
-        self.modal_message = Some(msg.clone());
-        self.pending_confirmation = Some((
-            msg,
-            PendingConfirmation::DeleteAdapterDbScriptDir {
-                view_index,
-                pane_id,
-                database,
-                rel_path,
-            },
-        ));
-    }
-
-    /// DSF-4: do-the-actual-delete handler invoked from the confirm
-    /// accept path. Mirrors [`Self::delete_adapter_db_script_now`].
-    fn delete_adapter_db_script_dir_now(
-        &mut self,
-        view_index: usize,
-        pane_id: crate::views::content_view::PaneId,
-        database: String,
-        rel_path: String,
-    ) {
-        let Some(adapter) = self
-            .content_view(view_index)
-            .and_then(|cv| cv.adapter.as_ref())
-            .map(Arc::clone)
-        else {
-            self.notify("No adapter for this view".to_string());
-            return;
-        };
-        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match adapter.script_store() {
-                    Some(store) => store.delete_db_dir(&database, &rel_path).await,
-                    None => Err(not_yet_done_content::ContentError::NotSupported(
-                        "adapter has no script store".into(),
-                    )),
-                }
-            })
-        });
-        match result {
-            Ok(()) => {
-                self.notify(format!("Deleted DB-script folder '{rel_path}'"));
-                self.spawn_content_load(view_index, pane_id);
-                self.refresh_db_scripts_tree_children(view_index, pane_id, &database);
-            }
-            Err(e) => self.notify_error(format!("Delete folder failed: {e}")),
         }
     }
 
@@ -2291,106 +2975,50 @@ impl App {
         ))
     }
 
-    /// Reject names that contain path separators or start with `.` —
-    /// the underlying filesystem layer applies the same validation in
-    /// `rename_db_script_entry`, but we surface early so the user
-    /// gets a clean error instead of a generic io::Error.
-    fn validate_db_script_name(&mut self, sub: &str, name: &str) -> bool {
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
-            self.modal_message = Some(format!(
-                ":db-script {sub} — invalid name '{name}' (no slashes or leading dot)"
-            ));
-            return false;
-        }
-        true
+    /// Resolve the container node the cmdline create should act on: the
+    /// db_scripts group node (`<db>/db_scripts`) when the cursor sits at the
+    /// root, else the current directory node (`<db>/db_scripts/<rel>`). The
+    /// `.sql` default, rel_path composition and name validation all live in
+    /// the adapter's `execute`, so both the keyboard form and the cmdline
+    /// share one write path (Phase 4.2).
+    fn db_script_create_via_execute(&mut self, sub: &str, action_id: &str, name: &str) {
+        let Some((view_index, pane_id, _adapter, database, current_dir_rel, _selected)) =
+            self.resolve_db_script_context(sub)
+        else {
+            return;
+        };
+        let node_id = if current_dir_rel.is_empty() {
+            format!("{database}/db_scripts")
+        } else {
+            format!("{database}/db_scripts/{current_dir_rel}")
+        };
+        let values = std::collections::HashMap::from([("name".to_string(), name.to_string())]);
+        self.execute_content_action_form(
+            view_index,
+            pane_id,
+            node_id,
+            action_id.to_string(),
+            values,
+            None,
+        );
     }
 
     fn db_script_new_in_current_dir(&mut self, name: &str) {
-        if !self.validate_db_script_name("new", name) {
-            return;
-        }
-        let Some((view_index, pane_id, adapter, database, current_dir_rel, _selected)) =
-            self.resolve_db_script_context("new")
-        else {
-            return;
-        };
-        // Default extension: if the user did not include a dot in the
-        // filename, append `.sql`. Anything containing a `.` is taken
-        // as-is so `migrate.py`, `notes.md`, `helper.psql` etc. all work.
-        // The check is on the final segment only — a path like
-        // `util/audit` (no dot anywhere) still becomes `util/audit.sql`.
-        let file_name = if name.contains('.') {
-            name.to_string()
-        } else {
-            format!("{name}.sql")
-        };
-        let rel_path = if current_dir_rel.is_empty() {
-            file_name.clone()
-        } else {
-            format!("{current_dir_rel}/{file_name}")
-        };
-        let result: not_yet_done_content::Result<bool> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match adapter.script_store() {
-                    Some(store) => store.create_db_script(&database, &rel_path).await,
-                    None => Err(not_yet_done_content::ContentError::NotSupported(
-                        "adapter has no script store".into(),
-                    )),
-                }
-            })
-        });
-        match result {
-            Ok(true) => {
-                self.notify(format!("Created DB script '{rel_path}'"));
-                self.spawn_content_load(view_index, pane_id);
-                self.refresh_db_scripts_tree_children(view_index, pane_id, &database);
-            }
-            Ok(false) => {
-                self.notify_error(format!("DB script '{rel_path}' already exists"));
-            }
-            Err(e) => self.notify_error(format!("Create script failed: {e}")),
-        }
+        self.db_script_create_via_execute("new", "add-script", name);
     }
 
     fn db_script_new_dir_in_current_dir(&mut self, name: &str) {
-        if !self.validate_db_script_name("new-dir", name) {
-            return;
-        }
-        let Some((view_index, pane_id, adapter, database, current_dir_rel, _selected)) =
-            self.resolve_db_script_context("new-dir")
-        else {
-            return;
-        };
-        let rel_path = if current_dir_rel.is_empty() {
-            name.to_string()
-        } else {
-            format!("{current_dir_rel}/{name}")
-        };
-        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match adapter.script_store() {
-                    Some(store) => store.create_db_dir(&database, &rel_path).await,
-                    None => Err(not_yet_done_content::ContentError::NotSupported(
-                        "adapter has no script store".into(),
-                    )),
-                }
-            })
-        });
-        match result {
-            Ok(()) => {
-                self.notify(format!("Created DB-script folder '{rel_path}'"));
-                self.spawn_content_load(view_index, pane_id);
-                self.refresh_db_scripts_tree_children(view_index, pane_id, &database);
-            }
-            Err(e) => self.notify_error(format!("Create folder failed: {e}")),
-        }
+        self.db_script_create_via_execute("new-dir", "add-dir", name);
     }
 
+    /// Rename the selected script/dir through the adapter's `rename` form
+    /// action — the same `execute` write path the keyboard `r` and the CLI
+    /// `--field name=…` drive (Phase 4.3). Name validation, extension
+    /// preservation and the folder-vs-file distinction all live in the
+    /// adapter, so the cmdline just resolves the selected node id and hands
+    /// over the new name.
     fn db_script_rename_selected(&mut self, new_name: &str) {
-        if !self.validate_db_script_name("rename", new_name) {
-            return;
-        }
-        let Some((view_index, pane_id, adapter, database, _current_dir, selected)) =
+        let Some((view_index, pane_id, _adapter, database, _current_dir, selected)) =
             self.resolve_db_script_context("rename")
         else {
             return;
@@ -2401,24 +3029,16 @@ impl App {
             );
             return;
         };
-        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match adapter.script_store() {
-                    Some(store) => store.rename_db_entry(&database, &rel_path, new_name).await,
-                    None => Err(not_yet_done_content::ContentError::NotSupported(
-                        "adapter has no script store".into(),
-                    )),
-                }
-            })
-        });
-        match result {
-            Ok(()) => {
-                self.notify(format!("Renamed '{rel_path}' → '{new_name}'"));
-                self.spawn_content_load(view_index, pane_id);
-                self.refresh_db_scripts_tree_children(view_index, pane_id, &database);
-            }
-            Err(e) => self.notify_error(format!("Rename failed: {e}")),
-        }
+        let node_id = format!("{database}/db_scripts/{rel_path}");
+        let values = std::collections::HashMap::from([("name".to_string(), new_name.to_string())]);
+        self.execute_content_action_form(
+            view_index,
+            pane_id,
+            node_id,
+            "rename".to_string(),
+            values,
+            None,
+        );
     }
 
     fn db_script_move_selected_or_marked(&mut self, dest: &str) {
@@ -2503,45 +3123,35 @@ impl App {
     }
 
     fn db_script_delete_selected(&mut self) {
-        let Some((view_index, pane_id, _adapter, database, _current_dir, selected)) =
+        let Some((view_index, pane_id, _adapter, _database, _current_dir, selected)) =
             self.resolve_db_script_context("delete")
         else {
             return;
         };
-        let Some((rel_path, is_dir)) = selected else {
+        let Some((_rel_path, is_dir)) = selected else {
             self.modal_message = Some(
                 ":db-script delete — selected row is the group node, not an entry".to_string(),
             );
             return;
         };
-        if is_dir {
-            self.confirm_delete_adapter_db_script_dir(view_index, pane_id, database, rel_path);
-        } else {
-            self.confirm_delete_adapter_db_script(view_index, pane_id, database, rel_path);
-        }
-    }
-
-    /// CP-9: stage the confirm popup for unlinking a DB-level script.
-    /// On accept the App calls `delete_adapter_db_script_now`, which
-    /// removes the file (idempotent) and reloads the source pane.
-    fn confirm_delete_adapter_db_script(
-        &mut self,
-        view_index: usize,
-        pane_id: crate::views::content_view::PaneId,
-        database: String,
-        script: String,
-    ) {
-        let msg = format!("Delete DB script '{script}' in database '{database}'? (y/n)");
-        self.modal_message = Some(msg.clone());
-        self.pending_confirmation = Some((
-            msg,
-            PendingConfirmation::DeleteAdapterDbScript {
-                view_index,
-                pane_id,
-                database,
-                script,
-            },
-        ));
+        // The db_script(/_dir) nodes carry their own delete logic
+        // (`Node::execute("delete" | "delete-dir")`), so route through the
+        // generic adapter-executed path — identical to the keyboard `d`
+        // action. No TUI-owned filesystem reach-in remains.
+        let Some(node_id) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.selected_item_id().map(str::to_string))
+        else {
+            return;
+        };
+        let action_name = if is_dir { "delete-dir" } else { "delete" };
+        self.confirm_delete_content_node(
+            view_index,
+            pane_id,
+            node_id,
+            action_name.to_string(),
+            None,
+        );
     }
 
     /// CF-11: stage the confirm popup for a generic content-node delete.
@@ -2653,64 +3263,35 @@ impl App {
         });
     }
 
-    /// CP-9: unlink the script file and reload the source pane so the
-    /// row disappears. `delete_db_script` is idempotent (NotFound is
-    /// treated as success), so re-runs are safe.
-    fn delete_adapter_db_script_now(
-        &mut self,
-        view_index: usize,
-        pane_id: crate::views::content_view::PaneId,
-        database: String,
-        script: String,
-    ) {
-        let Some(adapter) = self
-            .content_view(view_index)
-            .and_then(|cv| cv.adapter.as_ref())
-            .map(Arc::clone)
-        else {
-            self.notify("No adapter for this view".to_string());
-            return;
-        };
-        let result: not_yet_done_content::Result<()> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match adapter.script_store() {
-                    Some(store) => store.delete_db_script(&database, &script).await,
-                    None => Err(not_yet_done_content::ContentError::NotSupported(
-                        "adapter has no script store".into(),
-                    )),
-                }
-            })
-        });
-        match result {
-            Ok(()) => {
-                self.notify(format!("Deleted DB script '{script}'"));
-                // Same dual-refresh pattern as `db_script_new_command`:
-                // root reload for drill-down panes, tree-expand re-fire
-                // for tree-mode panes with the DB-Scripts row expanded.
-                self.spawn_content_load(view_index, pane_id);
-                self.refresh_db_scripts_tree_children(view_index, pane_id, &database);
-            }
-            Err(e) => self.notify_error(format!("Delete failed: {e}")),
-        }
-    }
-
     /// Re-issue a tree-expand for every cached subtree whose immediate
     /// parent is either the `<database>/db_scripts` group node OR any
-    /// `postgres:db_script_dir` under it. Used by the create/delete/
+    /// script-directory node under it. Used by the create/delete/
     /// rename/move paths so a tree-mode pane that currently shows the
     /// scripts/folders under an expanded DB-Scripts row picks up the
     /// new on-disk state without a full reload.
     ///
-    /// Multi-tree-continuation (MT-1, DSF-3): both `postgres:db_script_dir`
-    /// AND `postgres:db_script` are fanned out per parent so newly
+    /// Multi-tree-continuation (MT-1, DSF-3): both the `db_script_dir`
+    /// AND the `db_script` level are fanned out per parent so newly
     /// created folders show up alongside scripts — refreshing only the
     /// script bucket would leave new folders invisible until restart.
+    ///
+    /// The two node types are derived from the adapter's own
+    /// `adapter_type()`: the `:db_script` / `:db_script_dir` suffixes are
+    /// the shared contract of the script-store shape, so every adapter
+    /// offering one gets this refresh without being named here.
     fn refresh_db_scripts_tree_children(
         &mut self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         database: &str,
     ) {
+        let Some(adapter_type) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(|a| a.adapter_type().to_string())
+        else {
+            return;
+        };
         let group_id = format!("{database}/db_scripts");
         let sub_prefix = format!("{group_id}/");
         let paths: Vec<(Vec<String>, String)> = {
@@ -2737,8 +3318,8 @@ impl App {
                 .collect()
         };
         let types: Vec<String> = vec![
-            "postgres:db_script_dir".to_string(),
-            "postgres:db_script".to_string(),
+            format!("{adapter_type}:db_script_dir"),
+            format!("{adapter_type}:db_script"),
         ];
         for (path, parent_node_id) in paths {
             if let Some(cv) = self.content_view_mut(view_index) {
@@ -2759,111 +3340,6 @@ impl App {
         }
     }
 
-    /// CP-9: `:db-script-new <database> <name>` — create an empty
-    /// script file (default template) and open the editor on it. The
-    /// caller passes everything after the command verb, so we parse
-    /// the two whitespace-separated tokens here.
-    fn db_script_new_command(&mut self, rest: &str) {
-        let mut tokens = rest.split_whitespace();
-        let database = match tokens.next() {
-            Some(s) => s.to_string(),
-            None => {
-                self.modal_message = Some(":db-script-new expects <database> <script>".to_string());
-                return;
-            }
-        };
-        let script = match tokens.next() {
-            Some(s) => s.to_string(),
-            None => {
-                self.modal_message =
-                    Some(":db-script-new expects a script name after the database".to_string());
-                return;
-            }
-        };
-        if tokens.next().is_some() {
-            self.modal_message = Some(
-                ":db-script-new — extra arguments after <script> (use names without spaces)"
-                    .to_string(),
-            );
-            return;
-        }
-        if script.contains('/')
-            || script.contains('\\')
-            || script.starts_with('.')
-            || script.is_empty()
-        {
-            self.modal_message = Some(format!(
-                ":db-script-new — invalid script name '{script}' (no slashes or leading dot)"
-            ));
-            return;
-        }
-        // Same default-extension policy as the in-tree create flow: a
-        // bare name gets `.sql`; anything containing a dot is taken
-        // as-is (so the user can opt into `migrate.py`, `notes.md` …).
-        let script = if script.contains('.') {
-            script
-        } else {
-            format!("{script}.sql")
-        };
-        let view_index = match self.current_content_view_index_or_modal("db-script-new") {
-            Some(idx) => idx,
-            None => return,
-        };
-        let Some(adapter) = self
-            .content_view(view_index)
-            .and_then(|cv| cv.adapter.as_ref())
-            .map(Arc::clone)
-        else {
-            self.modal_message = Some(":db-script-new — active tab has no adapter".to_string());
-            return;
-        };
-        let result: not_yet_done_content::Result<bool> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match adapter.script_store() {
-                    Some(store) => store.create_db_script(&database, &script).await,
-                    None => Err(not_yet_done_content::ContentError::NotSupported(
-                        "adapter has no script store".into(),
-                    )),
-                }
-            })
-        });
-        match result {
-            Ok(true) => {
-                self.notify(format!("Created DB script '{script}'"));
-                // Use the active pane as the editor's source — we don't
-                // have the dispatch pane_id here (cmdline route), and
-                // `_pane_id` is unused by the editor session.
-                let pane_id = self
-                    .content_view(view_index)
-                    .map(|cv| cv.active_pane_id())
-                    .unwrap_or(0);
-                // Refresh listings so the new script appears immediately:
-                // root reload covers drilled-into-DB-Scripts panes; the
-                // tree-expand re-fire covers tree-mode panes whose
-                // DB-Scripts row is expanded (root reload alone doesn't
-                // touch the cached children of expanded subtrees).
-                self.spawn_content_load(view_index, pane_id);
-                self.refresh_db_scripts_tree_children(view_index, pane_id, &database);
-                // Cmdline create-flow: use the view-config flag for the
-                // db_script ChildDef in case the user opts into in-place
-                // editing globally for this view.
-                let in_place = self
-                    .content_view(view_index)
-                    .and_then(|cv| cv.active_view_def())
-                    .map(|v| crate::app::node_actions::editor_in_place_for_node_id(v, ""))
-                    .unwrap_or(false);
-                let _ = self
-                    .open_adapter_db_script_editor(view_index, pane_id, database, script, in_place);
-            }
-            Ok(false) => {
-                self.modal_message = Some(format!(
-                    ":db-script-new — script '{script}' already exists (use :w to edit)"
-                ));
-            }
-            Err(e) => self.notify_error(format!("Create failed: {e}")),
-        }
-    }
-
     /// Spawn async drill-down load for a content view child level.
     /// Resolve the active (rendered) query a child/subtree `list()` should
     /// carry. Returns `None` unless the adapter opts into
@@ -2876,12 +3352,24 @@ impl App {
         cv: &crate::views::content_view::ContentView,
         pane: &crate::views::content_view::ContentPane,
         adapter: &Arc<dyn not_yet_done_content::ContentAdapter>,
-    ) -> Option<String> {
+    ) -> Option<SubtreeQuery> {
         if !adapter.capabilities().propagates_query_to_subtree {
             return None;
         }
-        pane.root_load_request(&cv.view_defs)
-            .and_then(|req| req.query.map(|raw| adapter.render_query(&raw, &req.vars)))
+        let req = pane.root_load_request(&cv.view_defs)?;
+        let text = req.query?;
+        Some(match req.kind {
+            QueryKind::Saved => SubtreeQuery {
+                text: adapter.render_query(&text, &req.vars),
+                kind: QueryKind::Saved,
+                vars: std::collections::HashMap::new(),
+            },
+            QueryKind::Extended => SubtreeQuery {
+                text,
+                kind: QueryKind::Extended,
+                vars: req.vars,
+            },
+        })
     }
 
     pub fn spawn_content_drill_down(
@@ -2929,41 +3417,73 @@ impl App {
                 let node_id = node_id.clone();
                 let child_node_type = child_node_type.clone();
                 let subtree_query = subtree_query.clone();
+                let tx = tx.clone();
                 async move {
                     let parent = adapter
                         .get_by_id(&node_id)
                         .await
                         .map_err(|e| e.to_string())?;
-                    let node_type = parent
-                        .children_types()
-                        .into_iter()
-                        .find(|t| t.type_id == child_node_type)
-                        .ok_or_else(|| {
-                            format!("Node type '{child_node_type}' not available on '{node_id}'")
-                        })?;
-                    let sortable_columns = parent.sortable_columns(&node_type);
-                    let params = not_yet_done_content::ListParams {
-                        node_type,
-                        query: subtree_query,
-                        sort: Vec::new(),
-                        page: Some(page),
-                        download: false,
-                        group_by: None,
+                    let node_type =
+                        not_yet_done_content::children::child_types(&*adapter, parent.as_ref())
+                            .into_iter()
+                            .find(|t| t.type_id == child_node_type)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Node type '{child_node_type}' not available on '{node_id}'"
+                                )
+                            })?;
+                    let columns = not_yet_done_content::children::columns_for(
+                        &*adapter,
+                        parent.as_ref(),
+                        &node_type,
+                    )
+                    .await;
+                    // An extended document re-runs whole, one level down: its
+                    // branches list this parent instead of the root, which is
+                    // what makes a drilled level filter by the same document
+                    // as the level above it.
+                    let list = match subtree_query {
+                        Some(sq) if sq.kind == QueryKind::Extended => {
+                            run_extended_query(
+                                &*adapter,
+                                parent.as_ref(),
+                                node_type,
+                                &sq.text,
+                                &sq.vars,
+                                &[],
+                                &columns,
+                                None,
+                                &tx,
+                            )
+                            .await?
+                        }
+                        subtree_query => {
+                            let params = not_yet_done_content::ListParams {
+                                node_type,
+                                query: subtree_query.map(|sq| sq.text),
+                                sort: Vec::new(),
+                                page: Some(page),
+                                download: false,
+                                group_by: None,
+                            };
+                            not_yet_done_content::children::list(&*adapter, parent.as_ref(), params)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        }
                     };
-                    let list = parent.list(params).await.map_err(|e| e.to_string())?;
-                    Ok((list, sortable_columns))
+                    Ok((list, columns))
                 }
             })
             .await;
             match result {
-                Ok((list, sortable_columns)) => {
+                Ok((list, columns)) => {
                     let _ = tx.send(LoadMsg::ContentItems {
                         view_index,
                         pane_id,
                         items: list.items,
                         applied_sort: list.applied_sort,
                         page: list.page,
-                        sortable_columns,
+                        columns,
                         error: None,
                     });
                 }
@@ -2974,7 +3494,7 @@ impl App {
                         items: vec![],
                         applied_sort: Vec::new(),
                         page: None,
-                        sortable_columns: Vec::new(),
+                        columns: Vec::new(),
                         error: Some(e),
                     });
                 }
@@ -3026,45 +3546,76 @@ impl App {
             .unwrap_or_default();
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
-            let payload =
-                run_with_retries(retries, &tx, view_index, pane_id, || {
-                    let adapter = Arc::clone(&adapter);
-                    let parent_node_id = parent_node_id.clone();
-                    let child_node_type = child_node_type.clone();
-                    let subtree_query = subtree_query.clone();
-                    let sort = sort.clone();
-                    async move {
-                        let parent = adapter
-                            .get_by_id(&parent_node_id)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let node_type = parent.children_types()
-                        .into_iter()
-                        .find(|t| t.type_id == child_node_type)
-                        .ok_or_else(|| format!(
-                            "Node type '{child_node_type}' not available on '{parent_node_id}'"
-                        ))?;
-                        let page_request = page.unwrap_or(not_yet_done_content::PageRequest {
-                            offset: 0,
-                            limit: page_size,
-                        });
-                        let params = not_yet_done_content::ListParams {
-                            node_type,
-                            query: subtree_query,
-                            sort,
-                            page: Some(page_request),
-                            download: false,
-                            group_by: None,
-                        };
-                        let list = parent.list(params).await.map_err(|e| e.to_string())?;
-                        Ok(TreeChildrenPayload {
-                            items: list.items,
-                            page_info: list.page,
-                            child_node_type: child_node_type.clone(),
-                        })
-                    }
-                })
-                .await;
+            let payload = run_with_retries(retries, &tx, view_index, pane_id, || {
+                let adapter = Arc::clone(&adapter);
+                let parent_node_id = parent_node_id.clone();
+                let child_node_type = child_node_type.clone();
+                let subtree_query = subtree_query.clone();
+                let sort = sort.clone();
+                let tx = tx.clone();
+                async move {
+                    let parent = adapter
+                        .get_by_id(&parent_node_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let node_type = not_yet_done_content::children::child_types(
+                        &*adapter,
+                        parent.as_ref(),
+                    )
+                    .into_iter()
+                    .find(|t| t.type_id == child_node_type)
+                    .ok_or_else(|| {
+                        format!("Node type '{child_node_type}' not available on '{parent_node_id}'")
+                    })?;
+                    let page_request = page.unwrap_or(not_yet_done_content::PageRequest {
+                        offset: 0,
+                        limit: page_size,
+                    });
+                    // See `spawn_content_drill_down`: an extended document
+                    // runs again for this level, against this parent.
+                    let list = match subtree_query {
+                        Some(sq) if sq.kind == QueryKind::Extended => {
+                            let columns = not_yet_done_content::children::columns_for(
+                                &*adapter,
+                                parent.as_ref(),
+                                &node_type,
+                            )
+                            .await;
+                            run_extended_query(
+                                &*adapter,
+                                parent.as_ref(),
+                                node_type,
+                                &sq.text,
+                                &sq.vars,
+                                &sort,
+                                &columns,
+                                None,
+                                &tx,
+                            )
+                            .await?
+                        }
+                        subtree_query => {
+                            let params = not_yet_done_content::ListParams {
+                                node_type,
+                                query: subtree_query.map(|sq| sq.text),
+                                sort,
+                                page: Some(page_request),
+                                download: false,
+                                group_by: None,
+                            };
+                            not_yet_done_content::children::list(&*adapter, parent.as_ref(), params)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        }
+                    };
+                    Ok(TreeChildrenPayload {
+                        items: list.items,
+                        page_info: list.page,
+                        child_node_type: child_node_type.clone(),
+                    })
+                }
+            })
+            .await;
             let _ = tx.send(LoadMsg::TreeChildren {
                 view_index,
                 pane_id,
@@ -3224,6 +3775,69 @@ impl App {
     /// call site so future per-view tuning (e.g. a `tree_find.limit`
     /// YAML knob) lands here without touching the trait. The default
     /// caller in CT-7 uses [`TREE_FIND_DEFAULT_LIMIT`].
+    /// Consume a pane's queued `:tree-find` query (if any) and start it:
+    /// stamp the loading state synchronously, then spawn the adapter
+    /// search. No-op when nothing is queued.
+    ///
+    /// Fired from the `LoadMsg::ContentItems` handler for ordinary tree
+    /// panes, but deferred to the `LoadMsg::Subtree` handler for
+    /// eager-subtree panes so the expand-to-hit walk runs against the
+    /// fully-ingested tree rather than racing the parallel subtree load
+    /// (see the call sites for the full rationale).
+    /// Opt-in tree-find pipeline tracing. Enable with `NYD_DEBUG_TREEFIND=1`;
+    /// each stage appends one line to `$TMPDIR/nyd-treefind-debug.log`. Zero
+    /// cost when the env var is unset.
+    ///
+    /// Added to diagnose the intermittent "a task created by an external
+    /// process (`nyd-t task add` from a Jira script) isn't visible in the
+    /// Tasks tree until the app restarts" report. The DB and reload paths are
+    /// provably fresh (a cross-process visibility test confirms a long-lived
+    /// connection sees the external insert), so the drop must be downstream —
+    /// this trace pins *which* stage loses the node in a live occurrence:
+    /// the fresh root reload (item count), the eager subtree ingest, or the
+    /// expand-to-hit walk (`hit count == 0` ⇒ search/data; `> 0` but invisible
+    /// ⇒ render/navigation).
+    fn treefind_trace(stage: &str, detail: impl std::fmt::Display) {
+        if std::env::var_os("NYD_DEBUG_TREEFIND").is_none() {
+            return;
+        }
+        let path = std::env::temp_dir().join("nyd-treefind-debug.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[treefind] {stage}: {detail}");
+        }
+    }
+
+    fn fire_pending_tree_find(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
+        let pending = self
+            .content_view_mut(view_index)
+            .and_then(|cv| cv.find_pane_mut(pane_id))
+            .and_then(|pane| pane.take_pending_tree_find());
+        let Some(query) = pending else {
+            Self::treefind_trace(
+                "fire_pending",
+                format!("view={view_index} — nothing queued (no-op)"),
+            );
+            return;
+        };
+        Self::treefind_trace("fire_pending", format!("view={view_index} query={query:?}"));
+        if let Some(pane) = self
+            .content_view_mut(view_index)
+            .and_then(|cv| cv.find_pane_mut(pane_id))
+        {
+            pane.tree_find_begin(query.clone());
+        }
+        self.spawn_tree_find(view_index, pane_id, query, Self::TREE_FIND_DEFAULT_LIMIT);
+    }
+
     pub fn spawn_tree_find(
         &self,
         view_index: usize,
@@ -3326,6 +3940,85 @@ impl App {
         changed
     }
 
+    /// Fetch the inline pictures the last markdown render asked for.
+    ///
+    /// Every pane collects the image URLs it couldn't resolve from its cache
+    /// (see [`crate::views::images::ImageStore`]); this drains those lists and
+    /// starts one task per URL. The download goes through the *view's*
+    /// adapter — an attachment usually sits behind the same authentication as
+    /// the messages — and the decode+downscale runs on the blocking pool
+    /// because it is pure CPU. The result comes back as
+    /// [`LoadMsg::ImageDecoded`].
+    ///
+    /// Cheap to call every loop iteration: with nothing queued it is a walk
+    /// over the panes draining empty vectors.
+    pub fn pump_image_downloads(&mut self) {
+        struct Job {
+            view_index: usize,
+            pane_id: crate::views::content_view::PaneId,
+            adapter: std::sync::Arc<dyn not_yet_done_content::ContentAdapter>,
+            url: String,
+            max_height: u16,
+            font: (u16, u16),
+        }
+
+        let mut jobs: Vec<Job> = Vec::new();
+        let view_indices: Vec<usize> = self.content_views_indexed().map(|(i, _)| i).collect();
+        for view_index in view_indices {
+            let Some(cv) = self.content_view(view_index) else {
+                continue;
+            };
+            let Some(adapter) = cv.adapter.clone() else {
+                continue;
+            };
+            for pane_id in cv.all_pane_ids() {
+                let Some(pane) = self
+                    .content_view_mut(view_index)
+                    .and_then(|cv| cv.find_pane_mut(pane_id))
+                else {
+                    continue;
+                };
+                let (max_height, font) = pane.image_decode_params();
+                for url in pane.take_wanted_images() {
+                    jobs.push(Job {
+                        view_index,
+                        pane_id,
+                        adapter: adapter.clone(),
+                        url,
+                        max_height,
+                        font,
+                    });
+                }
+            }
+        }
+
+        for job in jobs {
+            let tx = self.load_tx.clone();
+            tokio::spawn(async move {
+                let bytes = job.adapter.download_asset(&job.url).await.ok();
+                let image = match bytes {
+                    Some(bytes) => tokio::task::spawn_blocking(move || {
+                        crate::views::images::ImageStore::decode_bytes(
+                            &bytes,
+                            job.max_height,
+                            job.font,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten(),
+                    None => None,
+                };
+                let _ = tx.send(LoadMsg::ImageDecoded {
+                    view_index: job.view_index,
+                    pane_id: job.pane_id,
+                    url: job.url,
+                    image,
+                });
+            });
+        }
+    }
+
     /// Apply a single [`LoadMsg`] to App state, returning `true` when
     /// visible state may have changed. Split out from [`Self::poll_load`]
     /// so the event-driven (1b) `select!` loop can handle the one message
@@ -3334,29 +4027,61 @@ impl App {
     pub fn handle_load_msg(&mut self, msg: LoadMsg) -> bool {
         {
             match msg {
+                LoadMsg::ContentColumnSchema {
+                    view_index,
+                    node_type,
+                    schema,
+                } => {
+                    if let Some(cv) = self.content_view_mut(view_index) {
+                        cv.record_column_schema(node_type, schema);
+                        return true;
+                    }
+                    return false;
+                }
+                LoadMsg::ImageDecoded {
+                    view_index,
+                    pane_id,
+                    url,
+                    image,
+                } => {
+                    let Some(cv) = self.content_view_mut(view_index) else {
+                        return false;
+                    };
+                    let Some(pane) = cv.find_pane_mut(pane_id) else {
+                        return false;
+                    };
+                    if !pane.insert_decoded_image(&url, image) {
+                        // Failed download: nothing new to show, and the URL
+                        // is retired — no repaint needed.
+                        return false;
+                    }
+                    // The picture now needs its reserved lines, which only a
+                    // rebuild can produce.
+                    cv.rebuild_pane_table(pane_id);
+                    return true;
+                }
                 LoadMsg::ContentItems {
                     view_index,
                     pane_id,
                     items,
                     applied_sort,
                     page,
-                    sortable_columns,
+                    columns,
                     error,
                 } => {
                     if let Some(err) = error.as_ref() {
                         not_yet_done_content::http_log::log_error("content_load", err);
                         self.last_error = Some(err.clone());
                     }
+                    let item_count = items.len();
+                    // Distinct node types present, captured before `items` is
+                    // moved — used to fetch the backend-described column schema
+                    // (3b) off-thread so its types can be merged into rendering.
+                    let node_types = distinct_node_types(&items);
                     if let Some(cv) = self.content_view_mut(view_index) {
-                        cv.set_items_for_pane(
-                            pane_id,
-                            items,
-                            applied_sort,
-                            page,
-                            sortable_columns,
-                            error,
-                        );
+                        cv.set_items_for_pane(pane_id, items, applied_sort, page, columns, error);
                     }
+                    self.refresh_column_schema(view_index, node_types);
                     // Eager tree (capability `supports_eager_subtree`): the
                     // root rows are in; pull the WHOLE expanded subtree in one
                     // `list_subtree` call instead of running the per-node
@@ -3366,6 +4091,12 @@ impl App {
                         cv.find_pane(pane_id)
                             .and_then(|p| p.eager_subtree_depth(&cv.view_defs))
                     });
+                    Self::treefind_trace(
+                        "content_items",
+                        format!(
+                            "view={view_index} root_rows={item_count} eager_depth={eager_depth:?}"
+                        ),
+                    );
                     if let Some(depth) = eager_depth {
                         self.spawn_subtree_load(view_index, pane_id, depth);
                     } else {
@@ -3383,23 +4114,22 @@ impl App {
                     // root rows are in. The lazy expand-to-hit walk then
                     // proceeds via the normal `TreeFindResult` /
                     // `TreeChildren` drivers.
-                    let pending = self
-                        .content_view_mut(view_index)
-                        .and_then(|cv| cv.find_pane_mut(pane_id))
-                        .and_then(|pane| pane.take_pending_tree_find());
-                    if let Some(query) = pending {
-                        if let Some(pane) = self
-                            .content_view_mut(view_index)
-                            .and_then(|cv| cv.find_pane_mut(pane_id))
-                        {
-                            pane.tree_find_begin(query.clone());
-                        }
-                        self.spawn_tree_find(
-                            view_index,
-                            pane_id,
-                            query,
-                            Self::TREE_FIND_DEFAULT_LIMIT,
-                        );
+                    //
+                    // EXCEPTION — eager-subtree panes: the whole tree is
+                    // still being ingested by the parallel `spawn_subtree_load`
+                    // above. Firing the find here races that load: if the
+                    // find's cursor-park (`advance_tree_find` →
+                    // `set_selected`) lands *before* the subtree's
+                    // `apply_subtree` → `rebuild_table`, that rebuild only
+                    // re-clamps an out-of-bounds selection — it never
+                    // re-anchors to the hit's node id — so the parked cursor
+                    // ends up on a shifted row and the jump is silently lost.
+                    // Intermittent because it hinges on which async load lands
+                    // first. Defer the find to the `LoadMsg::Subtree` handler
+                    // (after `apply_subtree`), so the walk always runs last
+                    // against the fully-populated tree.
+                    if eager_depth.is_none() {
+                        self.fire_pending_tree_find(view_index, pane_id);
                     }
                     // Reload may have shifted the row under the cursor onto a
                     // different item (e.g. mark_as_read sorts the read entry
@@ -3467,9 +4197,29 @@ impl App {
                     }
                     match result {
                         Ok(subtree) => {
+                            fn count_subtree(st: &not_yet_done_content::Subtree) -> usize {
+                                st.items.len()
+                                    + st.items
+                                        .iter()
+                                        .map(|n| count_subtree(&n.children))
+                                        .sum::<usize>()
+                            }
+                            Self::treefind_trace(
+                                "subtree",
+                                format!(
+                                    "view={view_index} top_level={} total_nodes={}",
+                                    subtree.items.len(),
+                                    count_subtree(&subtree)
+                                ),
+                            );
                             if let Some(cv) = self.content_view_mut(view_index) {
                                 cv.apply_subtree(pane_id, parent_path, subtree);
                             }
+                            // A `:tree-find` queued on this eager pane was held
+                            // back in the `ContentItems` handler so it wouldn't
+                            // race this subtree load — now that the whole tree
+                            // is ingested, fire it against the settled cache.
+                            self.fire_pending_tree_find(view_index, pane_id);
                             // The eager load already laid down the whole
                             // expanded shape; nothing to cascade. A pending
                             // tree-find walk may still want to advance.
@@ -3481,7 +4231,10 @@ impl App {
                             self.notify_error(format!("Tree load error: {e}"));
                             // Fall back to the per-node cascade so the tree
                             // still expands progressively despite the eager
-                            // load failing.
+                            // load failing. The deferred tree-find still needs
+                            // to fire — the walk drives the lazy expansion
+                            // itself from here.
+                            self.fire_pending_tree_find(view_index, pane_id);
                             self.drive_tree_auto_expand(view_index, pane_id);
                         }
                     }
@@ -3571,8 +4324,8 @@ impl App {
                     if token != self.editor_load_token {
                         return true;
                     }
-                    if let Some(msg) = self.editor_loading_msg.take() {
-                        self.notification_bar.remove(&msg);
+                    if std::mem::take(&mut self.editor_loading) {
+                        self.notification_bar.clear_keyed(EDITOR_LOADING_SLOT);
                     }
                     match result {
                         Ok(session) => match self.open_session(session) {
@@ -3693,6 +4446,14 @@ impl App {
                         node_type,
                     );
                 }
+                LoadMsg::OpenContentActionPopup {
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_id,
+                } => {
+                    self.open_content_action_popup(view_index, pane_id, node_id, action_id);
+                }
                 LoadMsg::ContentAdapterStatus { view_index, status } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         cv.set_auth_status(status.clone());
@@ -3701,6 +4462,21 @@ impl App {
                 }
                 LoadMsg::AdapterInvalidation { view_index, inv } => {
                     self.handle_adapter_invalidation(view_index, inv);
+                }
+                LoadMsg::AdapterReminder {
+                    view_index,
+                    reminder,
+                } => {
+                    self.handle_adapter_reminder(view_index, reminder);
+                }
+                LoadMsg::AdapterPrompt { request } => {
+                    self.open_adapter_prompt(request);
+                }
+                LoadMsg::BusEvent { event } => {
+                    self.handle_bus_event(event);
+                }
+                LoadMsg::Notify { text } => {
+                    self.notify(text);
                 }
                 LoadMsg::ContentLoadProgress {
                     view_index,
@@ -3775,6 +4551,20 @@ impl App {
                             }
                         }
                     };
+                    Self::treefind_trace(
+                        "find_result",
+                        format!(
+                            "query={query:?} {outcome_summary}",
+                            outcome_summary = match &outcome {
+                                Outcome::Stale => "stale (query changed, dropped)".to_string(),
+                                Outcome::Landed { count, truncated } =>
+                                    format!("landed hits={count} truncated={truncated}"),
+                                Outcome::Unsupported =>
+                                    "unsupported (adapter has no tree search)".to_string(),
+                                Outcome::Failed(e) => format!("failed: {e}"),
+                            }
+                        ),
+                    );
                     match outcome {
                         Outcome::Stale => {}
                         Outcome::Landed { count, truncated } => {
@@ -3830,6 +4620,18 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: &str) -> EditorRequest {
+        // The builtin editor pane owns the keyboard while it is open —
+        // ahead of even the global quit binding, which would otherwise end
+        // the app on a plain `q` typed into the buffer. Leaving is `:q!`,
+        // and then quit works again. A modal message is the one exception:
+        // it is drawn on top of the pane, so its dismissing keypress is an
+        // answer to the modal rather than input for the buffer.
+        if self.builtin_editor.is_some() && self.modal_message.is_none() {
+            let req = self.handle_builtin_editor_key(key);
+            self.sync_components();
+            return req;
+        }
+
         // Quit always works, regardless of mode/popups.
         if self
             .keybindings
@@ -3845,7 +4647,7 @@ impl App {
         // Modal message: dismiss on any key (but not when awaiting shortcut/confirm).
         if self.modal_message.is_some()
             && self.awaiting_favorite_shortcut.is_none()
-            && self.awaiting_postgres_script_shortcut.is_none()
+            && self.awaiting_node_script_shortcut.is_none()
             && self.awaiting_script_shortcut.is_none()
             && self.pending_confirmation.is_none()
         {
@@ -3866,8 +4668,23 @@ impl App {
             return EditorRequest::None;
         }
 
+        // Adapter prompt overlay (e.g. MFA during an interactive sign-in) —
+        // global and tab-agnostic: while shown it intercepts every key. The
+        // popup owns its own input collection (acknowledge / embedded form) and
+        // sends the answer back to the raising operation on close; we then
+        // promote any queued prompt.
+        if self.adapter_prompt_popup.is_some() {
+            let popup = self.adapter_prompt_popup.as_mut().unwrap();
+            if let PromptKeyOutcome::Closed = popup.handle_key(key) {
+                self.adapter_prompt_popup = None;
+                self.advance_adapter_prompt_queue();
+            }
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
         // Postgres script shortcut capture mode.
-        if let Some(coords) = self.awaiting_postgres_script_shortcut.take() {
+        if let Some(coords) = self.awaiting_node_script_shortcut.take() {
             self.modal_message = None;
             if key == "esc" {
                 // Cancelled.
@@ -3876,11 +4693,11 @@ impl App {
                     "Shortcut '{}' is already taken!\n\nPress another key for '{}'\nEsc to cancel",
                     key, coords.script
                 ));
-                self.awaiting_postgres_script_shortcut = Some(coords);
+                self.awaiting_node_script_shortcut = Some(coords);
             } else {
                 let chord = key.to_string();
                 let script_label = coords.script.clone();
-                self.bind_postgres_script_shortcut(coords, &chord);
+                self.bind_node_script_shortcut(coords, &chord);
                 self.modal_message =
                     Some(format!("Script '{}' bound to [{}]", script_label, chord));
             }
@@ -3914,21 +4731,31 @@ impl App {
         }
 
         // Favorite shortcut capture mode.
-        if let Some((scope, name, query)) = self.awaiting_favorite_shortcut.take() {
+        if let Some(pending) = self.awaiting_favorite_shortcut.take() {
             self.modal_message = None;
             if key == "esc" {
                 // Cancelled — no modal needed.
-            } else if let Some(conflict) = self.favorite_shortcut_conflict(&scope, &name, key) {
+            } else if let Some(conflict) =
+                self.favorite_shortcut_conflict(&pending.scope, &pending.name, key)
+            {
                 // Show error and re-prompt.
                 self.modal_message = Some(format!(
                     "Shortcut '{}' is already taken by {}!\n\nPress another key for '{}'\nEsc to cancel",
-                    key, conflict, name
+                    key, conflict, pending.name
                 ));
-                self.awaiting_favorite_shortcut = Some((scope, name, query));
+                self.awaiting_favorite_shortcut = Some(pending);
             } else {
-                self.add_favorite(&scope, name.clone(), key.to_string(), query);
-                self.modal_message =
-                    Some(format!("Favorite '{}' added with shortcut [{}]", name, key));
+                let name = pending.name.clone();
+                match self.add_favorite(pending, key.to_string()) {
+                    Ok(()) => {
+                        self.modal_message =
+                            Some(format!("Favorite '{}' added with shortcut [{}]", name, key));
+                    }
+                    Err(e) => {
+                        self.modal_message =
+                            Some(format!("Could not add favorite '{}': {}", name, e));
+                    }
+                }
             }
             self.sync_components();
             return EditorRequest::None;
@@ -4049,7 +4876,12 @@ impl App {
 
         // Chord handling: if a pending key exists, try to complete the chord.
         if let Some(pending) = self.pending_key.take() {
-            let chord = format!("{pending}{key}");
+            // Steps are joined with a space, not concatenated: this is the
+            // canonical multi-step surface form, so a modifier-bearing step
+            // (`ctrl+k l`) reassembles correctly. Legacy single-char chords
+            // are unaffected — `binding_steps` normalises `"z r"` and `"zr"`
+            // to the same `[z, r]`.
+            let chord = format!("{pending} {key}");
             // Check if the chord matches any binding.
             // Global comes first so chords like `gl` land here regardless
             // of the active tab.
@@ -4125,8 +4957,16 @@ impl App {
             // Chord matches a user-defined cmdline shortcut?
             // (`cmdline_shortcuts:` in tui.yaml; the default ships
             // `mc`/`mp` for cut/paste-node.)
-            if let Some(cmd) = self.config.cmdline_shortcuts.get(&chord).cloned() {
+            if let Some(cmd) = self.cmdline_shortcut_for_chord(&chord) {
                 self.execute_cmdline(&cmd);
+                self.sync_components();
+                return EditorRequest::None;
+            }
+            // Chord completes a (rebound) tab-switch key, e.g. `tab.key:
+            // "ctrl+k t"`. Plain digit tab keys are single-step and never
+            // reach here.
+            if let Some(tab) = self.tab_for_pressed(&chord) {
+                self.set_active_tab(tab);
                 self.sync_components();
                 return EditorRequest::None;
             }
@@ -4153,6 +4993,7 @@ impl App {
                     .values()
                     .any(|b| b.is_prefix(&chord))
                 || self.cmdline_shortcut_chord_prefix(&chord)
+                || self.tab_switch_is_prefix(&chord)
                 || matches!(self.active_tab, Tab::Content(idx)
                     if self.content_view(idx).is_some_and(|cv| cv.yaml_action_chord_prefix(&chord)))
             {
@@ -4177,9 +5018,9 @@ impl App {
             return EditorRequest::None;
         }
 
-        // Tab-set switch popup intercepts all keys while open.
-        if self.tab_set_popup.is_open() {
-            self.handle_tab_set_popup_key(key);
+        // Shortcut menu intercepts all keys while open.
+        if self.shortcut_menu.is_open() {
+            self.handle_shortcut_menu_key(key);
             self.sync_components();
             return EditorRequest::None;
         }
@@ -4207,13 +5048,18 @@ impl App {
             let outcome = popup.handle_key(key);
             match outcome {
                 CredsKeyOutcome::Cancel => {
+                    // Closing the popup is not enough: the adapter's
+                    // login waits for an answer, holding the auth lock,
+                    // so it has to be told the form is gone.
+                    let view_index = popup.view_index();
                     self.adapter_creds_popup = None;
+                    self.spawn_cancel_credentials(view_index);
                 }
                 CredsKeyOutcome::Submit { values } => {
                     let view_index = popup.view_index();
                     self.spawn_submit_credentials(view_index, values);
                 }
-                CredsKeyOutcome::Consumed | CredsKeyOutcome::Pass => {}
+                CredsKeyOutcome::Consumed => {}
             }
             self.sync_components();
             return EditorRequest::None;
@@ -4234,7 +5080,7 @@ impl App {
                         self.apply_query_with_vars(target, values);
                     }
                 }
-                QueryVarKeyOutcome::Consumed | QueryVarKeyOutcome::Pass => {}
+                QueryVarKeyOutcome::Consumed => {}
             }
             self.sync_components();
             return EditorRequest::None;
@@ -4247,6 +5093,22 @@ impl App {
                 let result = popup.result();
                 self.column_config_popup = None;
                 self.apply_column_config(result);
+            }
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
+        // Sort menu intercepts all keys. Nothing is applied until Enter —
+        // an adapter-side sort would otherwise reload per keystroke.
+        if let Some(popup) = &mut self.sort_menu_popup {
+            let outcome = popup.handle_key(key, &self.keybindings);
+            match outcome {
+                SortMenuOutcome::Consumed => {}
+                SortMenuOutcome::Cancelled => self.sort_menu_popup = None,
+                SortMenuOutcome::Applied(sort) => {
+                    self.sort_menu_popup = None;
+                    self.apply_sort_spec(sort);
+                }
             }
             self.sync_components();
             return EditorRequest::None;
@@ -4301,6 +5163,7 @@ impl App {
                         popup.node_id,
                         popup.action_id,
                         values,
+                        popup.column_types,
                     );
                 }
                 ContentFormEvent::Cancelled => {
@@ -4374,7 +5237,7 @@ impl App {
             // global apply-on-chord handlers for them. No-op when the
             // focus isn't on a Postgres table or the cache is already
             // populated for that table.
-            self.ensure_postgres_table_shortcuts_loaded(idx);
+            self.ensure_node_script_shortcuts_loaded(idx);
             // Same idea for `:script`-menu shortcuts: pre-fill the cache for
             // the focused level so `build_view_claims` registers run-on-chord
             // handlers. No-op off a script-capable level / when cached.
@@ -4454,28 +5317,33 @@ impl App {
                 }
             };
             let prefix_cmdline = self.cmdline_shortcut_chord_prefix(key);
-            if prefix_global || prefix_common || prefix_tab || prefix_cmdline {
+            let prefix_tab_switch = self.tab_switch_is_prefix(key);
+            if prefix_global || prefix_common || prefix_tab || prefix_cmdline || prefix_tab_switch {
                 self.pending_key = Some(key.to_string());
                 return EditorRequest::None;
             }
         }
 
-        // Autonumber tab switch: in constellation mode the visible tabs
-        // own *every* digit key (`1`..`9`, then `0`). Resolved here at
-        // global priority — after view delegation, so a view that binds a
-        // digit on its own tab still wins. A mapped digit switches tabs; an
-        // unmapped digit (more digits than visible tabs) is swallowed so
-        // the legacy fixed `GlobalAction` keys can't switch to a hidden
-        // tab. In legacy mode (no constellation) this block is inert and
-        // the fixed keys below take over.
-        let is_plain_digit =
-            key.len() == 1 && key.chars().next().is_some_and(|c| c.is_ascii_digit());
-        if mode == action::InputMode::Normal && self.tab_layout.autonumber() && is_plain_digit {
-            if let Some(tab) = self.tab_layout.tab_for_key(key) {
+        // Tab switch: resolve the pressed key against each visible tab's
+        // effective switch binding (its `tab.key` override, else the
+        // autonumber digit). Resolved here at global priority — after view
+        // delegation, so a view that binds the same key on its own tab (or
+        // an open form consuming the input) still wins. Additionally, the
+        // visible tabs own *every* plain digit (`1`..`9`, then `0`): an
+        // unmapped digit is swallowed so it can't fall through to another
+        // single-key action, keeping the digit namespace reserved.
+        if mode == action::InputMode::Normal {
+            if let Some(tab) = self.tab_for_pressed(key) {
                 self.set_active_tab(tab);
+                self.sync_components();
+                return EditorRequest::None;
             }
-            self.sync_components();
-            return EditorRequest::None;
+            let is_plain_digit =
+                key.len() == 1 && key.chars().next().is_some_and(|c| c.is_ascii_digit());
+            if is_plain_digit {
+                self.sync_components();
+                return EditorRequest::None;
+            }
         }
 
         let action = action::resolve_key(key, mode, &self.keybindings, false);
@@ -4566,6 +5434,7 @@ impl App {
     fn has_input_popup(&self) -> bool {
         self.script_menu.is_open()
             || self.column_config_popup.is_some()
+            || self.sort_menu_popup.is_some()
             || self.adapter_creds_popup.is_some()
             || self.query_var_popup.is_some()
             || self.content_action_popup.is_some()
@@ -4573,7 +5442,7 @@ impl App {
             || self.content_form_popup.is_some()
             || self.link_popup.is_some()
             || self.config_picker_popup.is_some()
-            || self.tab_set_popup.is_open()
+            || self.shortcut_menu.is_open()
     }
 
     /// Execute a single chainable action through the Phase-2 dispatch
@@ -4653,33 +5522,19 @@ impl App {
     fn handle_global_action(&mut self, action: GlobalAction) -> EditorRequest {
         match action {
             GlobalAction::Quit => self.should_quit = true,
-            GlobalAction::TabJira => {
-                self.set_active_tab(Tab::Content(0));
-            }
-            GlobalAction::TabTaiga => {
-                if self.content_views.len() > 1 {
-                    self.set_active_tab(Tab::Content(1));
-                }
-            }
-            GlobalAction::TabPostgres => {
-                if self.content_views.len() > 2 {
-                    self.set_active_tab(Tab::Content(2));
-                }
-            }
-            GlobalAction::TabConfluence => {
-                if self.content_views.len() > 3 {
-                    self.set_active_tab(Tab::Content(3));
-                }
-            }
             GlobalAction::TabNext => {
                 self.set_active_tab(self.tab_layout.next(self.active_tab));
             }
             GlobalAction::TabPrev => {
                 self.set_active_tab(self.tab_layout.prev(self.active_tab));
             }
+            GlobalAction::SubtabNext => return self.cycle_active_subtab(true),
+            GlobalAction::SubtabPrev => return self.cycle_active_subtab(false),
             GlobalAction::DismissNotifications => self.dismiss_notifications(),
+            GlobalAction::ShowNotifications => return self.open_notifications_editor(),
             GlobalAction::ShowLastError => return self.open_last_error_editor(),
-            GlobalAction::TabSetPopup => self.open_tab_set_popup(),
+            GlobalAction::ShortcutMenu => self.open_shortcut_menu(),
+            GlobalAction::ToggleFullscreen => self.fullscreen = !self.fullscreen,
             GlobalAction::LinkMark => self.link_mark_current(),
             GlobalAction::LinkPaste => self.link_paste_current(),
             GlobalAction::LinkOpenPopup => self.link_open_popup(),
@@ -4689,59 +5544,1565 @@ impl App {
         EditorRequest::None
     }
 
-    /// Open the tab-set switch popup, populated from `tabs.sets` in their
-    /// deterministic display order. A no-op (with a notification) when no
-    /// constellation is configured — there is nothing to switch between.
-    fn open_tab_set_popup(&mut self) {
-        use crate::components::tab_set_popup::TabSetEntry;
-        let active = self.config.tabs.active.clone();
-        let entries: Vec<TabSetEntry> = self
-            .config
-            .tabs
-            .sets_sorted()
-            .into_iter()
-            .map(|(name, set)| TabSetEntry {
-                name: name.clone(),
-                label: set.label.clone().unwrap_or_else(|| name.clone()),
-                icon: set.icon.clone(),
-                shortcut: set.shortcut.clone(),
-                active: *name == active,
-            })
-            .collect();
-        if entries.is_empty() {
-            self.notify("No tab sets configured (tabs.sets in tui.yaml)".to_string());
-            return;
+    /// Cycle the active content tab's subtab forward/backward, routing the
+    /// resulting [`SubViewMessage`] through the same handler as the per-view
+    /// YAML switch keys (so a fresh subtab auto-loads). A no-op when the tab
+    /// has a single view.
+    fn cycle_active_subtab(&mut self, forward: bool) -> EditorRequest {
+        let Tab::Content(idx) = self.active_tab;
+        let msg = self
+            .content_view_mut(idx)
+            .and_then(|cv| cv.cycle_subtab(forward));
+        match msg {
+            Some(m) => self.process_sub_view_message(m),
+            None => EditorRequest::None,
         }
-        self.tab_set_popup.open(entries);
     }
 
-    /// Dispatch a key while the tab-set popup is open. Switching mutates
-    /// the in-memory active constellation and rebuilds the tab layout;
-    /// the change is session-only (not written back to `tui.yaml`).
-    fn handle_tab_set_popup_key(&mut self, key: &str) {
-        use crate::components::tab_set_popup::TabSetPopupMessage;
-        match self.tab_set_popup.handle_key(key) {
-            TabSetPopupMessage::Switch(name) => {
-                if self.config.tabs.active != name {
-                    self.config.tabs.active = name.clone();
-                    self.rebuild_tab_layout();
-                    self.notify(format!("Tab set: {name}"));
+    /// Open the shortcut menu (default `ctrl+y`).
+    ///
+    /// Collects two row sets: the *context* rows from the focused pane's
+    /// live keymap (exactly what would fire right now), and the *all* rows
+    /// projected from every content tab's leaf maps. The menu opens in the
+    /// configured [`crate::config::ShortcutScope`].
+    fn open_shortcut_menu(&mut self) {
+        use crate::keymap::{
+            KeyScope, ShortcutRow, build_leaf_maps_for, leaf_scope_label, shortcut_rows_with,
+        };
+
+        // Generic per-tab switch rows built from the active layout, so
+        // every configured tab is listed by its real name.
+        let switch_rows = self.tab_switch_rows();
+
+        // Context: the live keymap of the currently focused content view,
+        // plus its keyless actions, prefixed with the generic tab switches.
+        let Tab::Content(idx) = self.active_tab;
+        let mut context: Vec<ShortcutRow> = switch_rows.clone();
+        context.extend(
+            self.content_view(idx)
+                .map(|cv| cv.context_shortcut_rows())
+                .unwrap_or_default(),
+        );
+
+        // All: every configured shortcut across all content tabs and levels.
+        let kb = &self.config.keybindings;
+        let mut all: Vec<ShortcutRow> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for row in switch_rows {
+            if seen.insert((row.scope.clone(), row.name.clone(), row.keys.clone())) {
+                all.push(row);
+            }
+        }
+        for cv in self.content_views_iter() {
+            // When a tab has several subtabs (views), fold the subtab name into
+            // the scope path so pane-scoped shortcuts that flatten to the same
+            // `Pane(tab, profile)` scope — e.g. Jira's `tickets` vs `bookmarks`
+            // both offering `fuzzy filter` — become distinct, individually
+            // labelled rows (`Jira › tickets › fuzzy filter`) instead of two
+            // indistinguishable `Jira › fuzzy filter` entries. Mirrors the same
+            // folding in `all_node_shortcut_rows`.
+            let multi_subtab = cv.view_defs.len() > 1;
+            for leaf in build_leaf_maps_for(&cv.tab_name, &cv.view_defs, kb) {
+                // Tag each row with the scope the shortcut is actually active
+                // in — not the leaf it was enumerated in. Global and tab-wide
+                // claims live in every leaf, so labelling by leaf made them
+                // survive dedup once per drilldown level. Labelling by their
+                // real scope collapses them to a single row.
+                let rows = shortcut_rows_with(&leaf.keymap, |claim| match &claim.scope {
+                    KeyScope::Global => "Global".to_string(),
+                    KeyScope::Tab(_) => cv.tab_name.clone(),
+                    KeyScope::Pane(_, _) => match claim.source.subtab_view() {
+                        Some(view) if multi_subtab => {
+                            let mut parts = Vec::with_capacity(leaf.child_path.len() + 1);
+                            parts.push(view.to_string());
+                            parts.extend(leaf.child_path.iter().cloned());
+                            leaf_scope_label(&cv.tab_name, &parts)
+                        }
+                        _ => leaf_scope_label(&cv.tab_name, &leaf.child_path),
+                    },
+                });
+                for row in rows {
+                    if seen.insert((row.scope.clone(), row.name.clone(), row.keys.clone())) {
+                        all.push(row);
+                    }
                 }
             }
-            TabSetPopupMessage::Unhandled
-            | TabSetPopupMessage::Handled
-            | TabSetPopupMessage::Closed => {}
+            // Node `shortcuts:` and unbound adapter actions dispatch through
+            // the node-action path, not the pane keymap, so the leaf maps
+            // above miss them entirely. Add them across every declared level
+            // so the "All tabs" / "Unbound" scopes list bindable adapter
+            // actions (e.g. `toggle-tracking`) from every tab.
+            for row in cv.all_node_shortcut_rows() {
+                if seen.insert((row.scope.clone(), row.name.clone(), row.keys.clone())) {
+                    all.push(row);
+                }
+            }
+        }
+
+        // Refreshing an open menu (e.g. right after adding, deleting or
+        // restoring a binding) keeps the current scope and carries the live
+        // fuzzy filter across the rebuild; a fresh open uses the configured
+        // scope and an empty query.
+        if self.shortcut_menu.is_open() {
+            self.shortcut_menu.refresh(context, all);
+        } else {
+            self.shortcut_menu
+                .open(context, all, self.config.shortcut_menu.default_scope);
         }
     }
 
-    /// True iff some `cmdline_shortcuts:` key is strictly longer than
-    /// `key` and starts with it — i.e. `key` is a chord-prefix that
-    /// should be stashed and waited on (e.g. `m` for `mc`/`mp`).
+    /// Dispatch a key while the shortcut menu is open. In execute mode +
+    /// context scope, [`ShortcutMenuMessage::Execute`] replays the selected
+    /// row's key through the normal top-level [`Self::handle_key`] pipeline,
+    /// so the action runs exactly as if the user had pressed it.
+    fn handle_shortcut_menu_key(&mut self, key: &str) {
+        use crate::components::shortcut_menu::ShortcutMenuMessage;
+        match self.shortcut_menu.handle_key(key) {
+            ShortcutMenuMessage::Execute(k) => {
+                self.handle_key(&k);
+            }
+            ShortcutMenuMessage::AddBinding {
+                row,
+                binding,
+                overwrite,
+            } => {
+                self.add_binding_from_menu(row, binding, overwrite);
+            }
+            ShortcutMenuMessage::SetBindings { row, values } => {
+                self.set_bindings_from_menu(row, values);
+            }
+            ShortcutMenuMessage::RestoreDefault { row } => {
+                self.restore_binding_from_menu(row);
+            }
+            ShortcutMenuMessage::DeleteTagged { rows } => {
+                self.delete_tagged_from_menu(rows);
+            }
+            ShortcutMenuMessage::RestoreTagged { rows } => {
+                self.restore_tagged_from_menu(rows);
+            }
+            ShortcutMenuMessage::ResolveConflictApply {
+                row,
+                binding,
+                items,
+                overwrite,
+            } => {
+                self.resolve_conflict_apply(row, binding, items, overwrite);
+            }
+            ShortcutMenuMessage::ResolveRestoreBatchApply { rows, items } => {
+                self.apply_restore_batch(rows, items);
+            }
+            ShortcutMenuMessage::BindTagged {
+                rows,
+                binding,
+                overwrite,
+            } => {
+                self.bind_tagged_from_menu(rows, binding, overwrite);
+            }
+            ShortcutMenuMessage::ResolveBindBatchApply {
+                rows,
+                binding,
+                items,
+                overwrite,
+            } => {
+                self.apply_bind_batch(rows, binding, items, overwrite);
+            }
+            ShortcutMenuMessage::Unhandled
+            | ShortcutMenuMessage::Handled
+            | ShortcutMenuMessage::Closed => {}
+        }
+    }
+
+    /// Deadline at which the which-key popup should reveal itself, if armed.
+    /// Read by the main loop so it can `sleep_until` it.
+    pub fn which_key_deadline(&self) -> Option<std::time::Instant> {
+        self.which_key_deadline
+    }
+
+    /// Keep the which-key popup in sync with [`Self::pending_key`]. Called
+    /// after every keypress: no pending chord closes it; a fresh prefix arms
+    /// the reveal timer (once the delay elapses the main loop reveals it via
+    /// [`Self::reveal_which_key`]); a chord that steps deeper while the popup
+    /// is already open refilters it live.
+    pub fn reconcile_which_key(&mut self) {
+        let Some(prefix) = self.pending_key.clone() else {
+            self.which_key.close();
+            self.which_key_deadline = None;
+            return;
+        };
+        if !self.config.which_key.enabled || !self.which_key_prefix_allowed(&prefix) {
+            self.which_key.close();
+            self.which_key_deadline = None;
+            return;
+        }
+        if self.which_key.is_open() {
+            // Already shown — narrow the list to the deeper prefix. An empty
+            // result means the pending chord is a lone unshared prefix; keep
+            // the (now empty) popup closed rather than show a blank panel.
+            let rows = self.which_key_candidates(&prefix);
+            if rows.is_empty() {
+                self.which_key.close();
+            } else {
+                self.which_key.open(prefix, rows);
+            }
+        } else if self.which_key_deadline.is_none() {
+            self.which_key_deadline = Some(
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(self.config.which_key.delay_ms),
+            );
+        }
+    }
+
+    /// The reveal timer fired: open the popup for the current pending prefix.
+    /// Returns whether anything changed (drives a repaint). A vanished or
+    /// candidate-less prefix is a no-op.
+    pub fn reveal_which_key(&mut self) -> bool {
+        self.which_key_deadline = None;
+        let Some(prefix) = self.pending_key.clone() else {
+            return false;
+        };
+        if !self.config.which_key.enabled || !self.which_key_prefix_allowed(&prefix) {
+            return false;
+        }
+        let rows = self.which_key_candidates(&prefix);
+        if rows.is_empty() {
+            return false;
+        }
+        self.which_key.open(prefix, rows);
+        true
+    }
+
+    /// Is a pending chord `prefix` eligible for the popup? True when the
+    /// allowlist is empty (all prefixes), else when `prefix` starts with one
+    /// of the configured prefix sequences (matched step-wise).
+    fn which_key_prefix_allowed(&self, prefix: &str) -> bool {
+        which_key_prefix_allowed(&self.config.which_key.prefixes, prefix)
+    }
+
+    /// Every binding active in the focused pane whose sequence strictly
+    /// continues `prefix`, as `(action name, full combo)` pairs. Drawn from
+    /// the same sources the chord dispatcher resolves against: the global
+    /// keybindings, the focused content view's live keymap + keyless actions
+    /// (which folds in the common section), the generic tab-switch keys, and
+    /// user `cmdline_shortcuts`. Sorted by combo for stable order.
+    fn which_key_candidates(&self, prefix: &str) -> Vec<(String, String)> {
+        // (name, keys-field). The keys field is the shortcut-row surface form
+        // where alternatives are joined by " / "; split back out in the filter.
+        let mut sources: Vec<(String, String)> = Vec::new();
+        // Global section: dispatched at App level (e.g. a rebound `gl`), so it
+        // never reaches the content view's keymap. Name via the action's slug.
+        for (action, binding) in &self.keybindings.global.bindings {
+            sources.push((action.to_string(), binding.0.join(" / ")));
+        }
+        for r in self.tab_switch_rows() {
+            sources.push((r.name, r.keys));
+        }
+        let Tab::Content(idx) = self.active_tab;
+        if let Some(cv) = self.content_view(idx) {
+            for r in cv.context_shortcut_rows() {
+                sources.push((r.name, r.keys));
+            }
+        }
+        for (key, cmd) in &self.config.cmdline_shortcuts {
+            sources.push((cmd.clone(), key.clone()));
+        }
+
+        which_key_filter(sources, prefix)
+    }
+
+    /// Resolve the binding conflicts the user confirmed (y): drop every
+    /// colliding alternative listed in `items` from its owning shortcut, then
+    /// bind `binding` on `row`. Items are grouped by source so a shortcut with
+    /// two colliding alternatives loses both in a single write. All writes are
+    /// comment-preserving; each file is re-read fresh before its edit so
+    /// same-file edits compose, and every touched file is reloaded in-process.
+    fn resolve_conflict_apply(
+        &mut self,
+        row: crate::keymap::ShortcutRow,
+        binding: String,
+        items: Vec<crate::components::shortcut_menu::ConflictItem>,
+        overwrite: bool,
+    ) {
+        let Some(source) = row.source.clone() else {
+            self.notify_error("This shortcut is read-only".to_string());
+            return;
+        };
+        // A read-only conflict can't be freed — refuse rather than leave a
+        // shadowed binding behind. (The prompt already declines to confirm in
+        // this case; this guards the app path too.)
+        if let Some(ro) = items.iter().find(|i| !i.removable) {
+            self.notify_error(format!(
+                "'{binding}' conflicts with read-only '{}' — not applied",
+                ro.name
+            ));
+            return;
+        }
+
+        // 1. Drop the colliding alternatives, grouped by conflicting source so
+        //    each file is edited once even if it owns several collisions.
+        let mut touched: Vec<std::path::PathBuf> = Vec::new();
+        let mut by_source: Vec<(crate::keymap::KeySource, Vec<String>, Vec<String>)> = Vec::new();
+        for item in &items {
+            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
+                entry.2.push(item.drop.clone());
+            } else {
+                by_source.push((
+                    item.source.clone(),
+                    item.current.clone(),
+                    vec![item.drop.clone()],
+                ));
+            }
+        }
+        for (other_source, current, drops) in &by_source {
+            // DB-stored shortcuts (saved query / `:script` menu / Postgres
+            // table script) keep their chord in the `query_shortcut` table,
+            // not YAML — free them via the repository, then skip the file path.
+            match self.free_db_shortcut(other_source) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            }
+            let (loc, path) = match self.resolve_binding_target(other_source) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            };
+            // Single-slot bindings (a per-node `shortcuts:` map key, a subtab
+            // `key`, the query `menu_key`, a `preview.keybinding`, or a child
+            // keybinding override) carry no alternatives list to trim — freeing
+            // the key means deleting the whole entry line, not rewriting a
+            // `key:` value.
+            let is_slot = matches!(
+                other_source,
+                crate::keymap::KeySource::NodeShortcut { .. }
+                    | crate::keymap::KeySource::YamlSubtab { .. }
+                    | crate::keymap::KeySource::YamlMenuKey { .. }
+                    | crate::keymap::KeySource::YamlPreviewKey { .. }
+                    | crate::keymap::KeySource::YamlChildKeybinding { .. }
+                    | crate::keymap::KeySource::AppActionChain { .. }
+                    | crate::keymap::KeySource::PaneSearchJump { .. }
+            );
+            let res = if is_slot {
+                self.remove_binding_file(&path, &loc)
+            } else {
+                let new: Vec<String> = current
+                    .iter()
+                    .filter(|b| !drops.contains(b))
+                    .cloned()
+                    .collect();
+                self.edit_binding_file(&path, &loc, &new)
+            };
+            if let Err(e) = res {
+                self.notify_error(e);
+                return;
+            }
+            if !touched.contains(&path) {
+                touched.push(path);
+            }
+        }
+
+        // 2. Bind the new key on the target action. A DB-stored target writes
+        //    the chord to the `query_shortcut` table (single chord, replaces);
+        //    a YAML target edits its file (read fresh: it may be one just
+        //    edited above).
+        match self.set_db_shortcut(&source, &binding) {
+            Ok(true) => {}
+            Ok(false) if matches!(source, crate::keymap::KeySource::NodeShortcut { .. }) => {
+                // Per-node `shortcuts:` target: add `<binding>: <action>`,
+                // reading fresh so it composes with any key freed above.
+                let crate::keymap::KeySource::NodeShortcut { action, .. } = &source else {
+                    unreachable!()
+                };
+                let action = action.clone();
+                let current = Self::row_bindings(&row);
+                let target = if overwrite {
+                    vec![binding.clone()]
+                } else {
+                    let mut t = current.clone();
+                    if !t.contains(&binding) {
+                        t.push(binding.clone());
+                    }
+                    t
+                };
+                match self.rewrite_node_shortcut(&source, &action, &current, &target) {
+                    Ok(path) => {
+                        if !touched.contains(&path) {
+                            touched.push(path);
+                        }
+                    }
+                    Err(e) => {
+                        self.notify_error(e);
+                        return;
+                    }
+                }
+            }
+            Ok(false) => {
+                let (loc, path) = match self.resolve_binding_target(&source) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.notify_error(e);
+                        return;
+                    }
+                };
+                let values = if overwrite {
+                    vec![binding.clone()]
+                } else {
+                    let mut v = Self::row_bindings(&row);
+                    if !v.iter().any(|b| b == &binding) {
+                        v.push(binding.clone());
+                    }
+                    v
+                };
+                if let Err(e) = self.edit_binding_file(&path, &loc, &values) {
+                    self.notify_error(e);
+                    return;
+                }
+                if !touched.contains(&path) {
+                    touched.push(path);
+                }
+            }
+            Err(e) => {
+                self.notify_error(e);
+                return;
+            }
+        }
+
+        // 3. Reload every touched file, then refresh the menu.
+        for p in &touched {
+            let _ = self.reload_config(p);
+        }
+        self.notify(format!("Rebound '{binding}' to {}", row.name));
+        self.open_shortcut_menu();
+    }
+
+    /// Read `path`, apply `set_binding` at `location` with `values`, and write
+    /// it back. Returns a user-facing error string on any failure. Does not
+    /// reload — callers batch reloads when several files change.
+    fn edit_binding_file(
+        &self,
+        path: &std::path::Path,
+        location: &crate::config::keybinding_edit::BindingLocation,
+        values: &[String],
+    ) -> Result<(), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        let edited = crate::config::keybinding_edit::set_binding(location, &text, values)
+            .map_err(|e| format!("Edit failed: {e}"))?;
+        self.validate_config_text(path, &edited)
+            .map_err(|e| format!("Change rejected — would break {}: {e}", path.display()))?;
+        std::fs::write(path, &edited).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+    }
+
+    /// Read `path`, remove the located entry line entirely (comment-preserving)
+    /// and write it back. Used for per-node `shortcuts:` collisions, whose map
+    /// key *is* the binding — dropping it means deleting the whole line, not
+    /// rewriting a `key:` value. Returns a user-facing error string on failure.
+    fn remove_binding_file(
+        &self,
+        path: &std::path::Path,
+        location: &crate::config::keybinding_edit::BindingLocation,
+    ) -> Result<(), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        let edited = crate::config::keybinding_edit::remove_binding(location, &text)
+            .map_err(|e| format!("Edit failed: {e}"))?;
+        self.validate_config_text(path, &edited)
+            .map_err(|e| format!("Change rejected — would break {}: {e}", path.display()))?;
+        std::fs::write(path, &edited).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+    }
+
+    /// Rewrite a per-node `shortcuts:` block so the keys mapping to `action`
+    /// become exactly `target` (each entry is `key: action`). Keys in
+    /// `current` but not `target` are removed; keys in `target` but not
+    /// `current` are inserted with the action verb as their value, creating
+    /// the `shortcuts:` map/block if it is absent or empty.
+    ///
+    /// This is the write path for adapter-declared actions surfaced by the
+    /// menu without a YAML binding: their map key *is* the chord and the value
+    /// is the action verb — the reverse of every `key:`-valued binding, so the
+    /// generic [`Self::edit_binding_file`] cannot express it. Reads the file
+    /// fresh (so it composes with prior same-file edits) and returns the
+    /// touched path; the caller reloads.
+    fn rewrite_node_shortcut(
+        &self,
+        source: &crate::keymap::KeySource,
+        action: &str,
+        current: &[String],
+        target: &[String],
+    ) -> Result<std::path::PathBuf, String> {
+        use crate::config::keybinding_edit::{remove_binding, set_binding_in_optional_map};
+
+        let (base, path) = self.resolve_binding_target(source)?;
+        let mut text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        // Drop keys that should no longer map to this action.
+        for k in current.iter().filter(|k| !target.contains(k)) {
+            let mut loc = base.clone();
+            loc.entry = k.clone();
+            match remove_binding(&loc, &text) {
+                Ok(t) => text = t,
+                // An already-absent key (e.g. never persisted) is not an error.
+                Err(e) if e.contains("not found") => {}
+                Err(e) => return Err(format!("Edit failed: {e}")),
+            }
+        }
+        // Insert the newly-wanted keys, each pointing at the action verb.
+        for k in target.iter().filter(|k| !current.contains(k)) {
+            let mut loc = base.clone();
+            loc.entry = k.clone();
+            text = set_binding_in_optional_map(&loc, &text, &[action.to_string()])
+                .map_err(|e| format!("Edit failed: {e}"))?;
+        }
+        self.validate_config_text(&path, &text)
+            .map_err(|e| format!("Change rejected — would break {}: {e}", path.display()))?;
+        std::fs::write(&path, &text)
+            .map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
+        Ok(path)
+    }
+
+    /// Reload an already-written config `path` in-process, surface `ok_msg` and
+    /// refresh the open menu. The twin of [`Self::write_reload_and_refresh`]
+    /// for callers that have written the file themselves (e.g.
+    /// [`Self::rewrite_node_shortcut`]).
+    fn reload_note_refresh(&mut self, path: &std::path::Path, ok_msg: String) {
+        match self.reload_config(path) {
+            Ok(_) => {
+                self.notify(ok_msg);
+                self.open_shortcut_menu();
+            }
+            Err(e) => self.notify_error(format!("Saved, but reload failed: {e}")),
+        }
+    }
+
+    /// Resolve the editable [`BindingLocation`] and owning file path behind a
+    /// shortcut-menu row, or an error string to surface if the row is
+    /// read-only / not locatable / its file cannot be found.
+    fn resolve_binding_target(
+        &self,
+        source: &crate::keymap::KeySource,
+    ) -> Result<
+        (
+            crate::config::keybinding_edit::BindingLocation,
+            std::path::PathBuf,
+        ),
+        String,
+    > {
+        use crate::config::keybinding_edit::{EditTarget, locate_binding};
+
+        let location = locate_binding(source).ok_or("This shortcut is not editable here")?;
+        let path = match &location.target {
+            EditTarget::TuiYaml => crate::app::config_edit::config_root()
+                .ok_or("Cannot locate config dir")?
+                .join("tui.yaml"),
+            EditTarget::ViewFile { view } => self
+                .content_views_iter()
+                .find_map(|cv| {
+                    cv.view_defs
+                        .iter()
+                        .any(|vd| &vd.name == view)
+                        .then(|| cv.source_path.clone())
+                        .flatten()
+                })
+                .ok_or_else(|| format!("No config file found for view '{view}'"))?,
+            EditTarget::TabFile { tab } => self
+                .content_views_iter()
+                .find_map(|cv| {
+                    (cv.tab_name == *tab)
+                        .then(|| cv.source_path.clone())
+                        .flatten()
+                })
+                .ok_or_else(|| format!("No config file found for tab '{tab}'"))?,
+        };
+        Ok((location, path))
+    }
+
+    /// Write `edited` YAML to `path`, reload it in-process and refresh the
+    /// open shortcut menu, surfacing `ok_msg` on success. Every failure mode
+    /// notifies the user.
+    fn write_reload_and_refresh(&mut self, path: &std::path::Path, edited: &str, ok_msg: String) {
+        if let Err(e) = self.validate_config_text(path, edited) {
+            self.notify_error(format!(
+                "Change rejected — would break {}: {e}",
+                path.display()
+            ));
+            return;
+        }
+        if let Err(e) = std::fs::write(path, edited) {
+            self.notify_error(format!("Cannot write {}: {e}", path.display()));
+            return;
+        }
+        match self.reload_config(path) {
+            Ok(_) => {
+                self.notify(ok_msg);
+                // Refresh so the change shows in the menu immediately.
+                self.open_shortcut_menu();
+            }
+            Err(e) => self.notify_error(format!("Saved, but reload failed: {e}")),
+        }
+    }
+
+    /// The current bindings of a menu row (`"a / ctrl+k l"` → `["a", "ctrl+k l"]`).
+    fn row_bindings(row: &crate::keymap::ShortcutRow) -> Vec<String> {
+        row.keys
+            .split(" / ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Add a newly-recorded `binding` (surface form, steps space-joined) as an
+    /// alternative to the shortcut behind `row`, writing it to the owning
+    /// config file comment-preservingly and reloading in-process.
+    ///
+    /// Conflicts (scope-overlapping claims, including built-in globals and
+    /// prefix collisions) abort the write and are surfaced instead — the
+    /// interactive resolve-the-conflict prompt lands in a later phase. Success
+    /// and every failure mode notify the user; the menu stays open.
+    fn add_binding_from_menu(
+        &mut self,
+        row: crate::keymap::ShortcutRow,
+        binding: String,
+        overwrite: bool,
+    ) {
+        use crate::config::keybinding_edit::set_binding;
+        use crate::config::keybindings::KeyBinding;
+
+        let Some(source) = row.source.clone() else {
+            self.notify_error("This shortcut is read-only".to_string());
+            return;
+        };
+        let Some(scope) = row.key_scope.clone() else {
+            self.notify_error("This shortcut has no editable scope".to_string());
+            return;
+        };
+        let scope = self.repair_pane_scope(&source, scope);
+
+        // Ctrl-U (overwrite) replaces the row's bindings with exactly the new
+        // one; Ctrl-N (add) appends it as an alternative. Overwrite is how a
+        // terminal key (`f`) is promoted to a chord (`f f`) without leaving the
+        // shadowing single key behind, so it deliberately drops the old value.
+        let values = if overwrite {
+            vec![binding.clone()]
+        } else {
+            let mut v = Self::row_bindings(&row);
+            if v.iter().any(|b| b == &binding) {
+                self.notify(format!("'{binding}' is already bound here"));
+                return;
+            }
+            v.push(binding.clone());
+            v
+        };
+
+        // Conflict check against every live claim across all content tabs. A
+        // collision raises the resolve-the-conflict prompt instead of writing.
+        let claims = self.all_live_claims();
+        let proposed = KeyBinding(vec![binding.clone()]);
+        let conflicts = crate::keymap::binding_conflicts(&proposed, &scope, &claims, Some(&source));
+        if !conflicts.is_empty() {
+            let items = self.build_conflict_items(&conflicts, &claims);
+            self.shortcut_menu
+                .show_conflicts(row.clone(), binding.clone(), items, overwrite);
+            return;
+        }
+
+        // Per-node `shortcuts:` binding: the map key is the chord and its
+        // value is the action verb, so we can't append a chord to a `key:`
+        // list — we add a `<binding>: <action>` entry (keeping any existing
+        // keys; several keys may map to the same action).
+        if let crate::keymap::KeySource::NodeShortcut { action, .. } = &source {
+            let action = action.clone();
+            let current = Self::row_bindings(&row);
+            // Overwrite replaces the key(s) mapping to this action with just the
+            // new chord; add keeps the existing keys and appends.
+            let target = if overwrite {
+                vec![binding.clone()]
+            } else {
+                let mut t = current.clone();
+                t.push(binding.clone());
+                t
+            };
+            match self.rewrite_node_shortcut(&source, &action, &current, &target) {
+                Ok(path) => {
+                    self.reload_note_refresh(&path, format!("Bound '{binding}' to {}", row.name))
+                }
+                Err(e) => self.notify_error(e),
+            }
+            return;
+        }
+
+        // DB-stored shortcut: chord lives in the `query_shortcut` table (single
+        // chord — Ctrl+N replaces, there is no alternatives list to append to).
+        match self.set_db_shortcut(&source, &binding) {
+            Ok(true) => {
+                self.notify(format!("Bound '{binding}' to {}", row.name));
+                self.open_shortcut_menu();
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                self.notify_error(e);
+                return;
+            }
+        }
+
+        let (location, path) = match self.resolve_binding_target(&source) {
+            Ok(v) => v,
+            Err(e) => {
+                self.notify_error(e);
+                return;
+            }
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notify_error(format!("Cannot read {}: {e}", path.display()));
+                return;
+            }
+        };
+        match set_binding(&location, &text, &values) {
+            Ok(edited) => self.write_reload_and_refresh(
+                &path,
+                &edited,
+                format!("Bound '{binding}' to {}", row.name),
+            ),
+            Err(e) => self.notify_error(format!("Edit failed: {e}")),
+        }
+    }
+
+    /// Overwrite the shortcut behind `row` with exactly `values` — the delete
+    /// path (Ctrl+D). An empty `values` writes the disable form `[]`, so the
+    /// action's last/only binding is removed ("gone", built-ins included);
+    /// otherwise the remaining alternatives are written. Deleting can never
+    /// introduce a conflict, so no conflict check runs.
+    fn set_bindings_from_menu(&mut self, row: crate::keymap::ShortcutRow, values: Vec<String>) {
+        use crate::config::keybinding_edit::set_binding;
+
+        let Some(source) = row.source.clone() else {
+            self.notify_error("This shortcut is read-only".to_string());
+            return;
+        };
+        let ok_msg = if values.is_empty() {
+            format!("Disabled '{}'", row.name)
+        } else {
+            format!("Updated bindings for '{}'", row.name)
+        };
+
+        // Per-node `shortcuts:` binding: the remaining keys must map to the
+        // action verb, so rewrite the block to exactly `values` (empty =>
+        // every key line removed) rather than writing a bogus `key: []`.
+        if let crate::keymap::KeySource::NodeShortcut { action, .. } = &source {
+            let action = action.clone();
+            let current = Self::row_bindings(&row);
+            match self.rewrite_node_shortcut(&source, &action, &current, &values) {
+                Ok(path) => self.reload_note_refresh(&path, ok_msg),
+                Err(e) => self.notify_error(e),
+            }
+            return;
+        }
+
+        // DB-stored shortcut: a single chord in `query_shortcut`. Empty values
+        // (`[]`) means disable → unset the row; otherwise replace with the one
+        // remaining chord. No YAML file is touched.
+        if self.resolve_db_shortcut(&source).is_some() {
+            let res = match values.last() {
+                Some(chord) => self.set_db_shortcut(&source, chord),
+                None => self.free_db_shortcut(&source),
+            };
+            match res {
+                Ok(_) => {
+                    self.notify(ok_msg);
+                    self.open_shortcut_menu();
+                }
+                Err(e) => self.notify_error(e),
+            }
+            return;
+        }
+
+        let (location, path) = match self.resolve_binding_target(&source) {
+            Ok(v) => v,
+            Err(e) => {
+                self.notify_error(e);
+                return;
+            }
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notify_error(format!("Cannot read {}: {e}", path.display()));
+                return;
+            }
+        };
+        match set_binding(&location, &text, &values) {
+            Ok(edited) => self.write_reload_and_refresh(&path, &edited, ok_msg),
+            Err(e) => self.notify_error(format!("Edit failed: {e}")),
+        }
+    }
+
+    /// Restore a built-in shortcut to its compiled-in default (Ctrl+R) by
+    /// removing its `tui.yaml` override entry. Only meaningful for built-ins;
+    /// the menu suppresses Ctrl+R for view actions (which have no default).
+    fn restore_binding_from_menu(&mut self, row: crate::keymap::ShortcutRow) {
+        use crate::config::keybinding_edit::remove_binding;
+
+        let Some(source) = row.source.clone() else {
+            self.notify_error("This shortcut is read-only".to_string());
+            return;
+        };
+        if !source.has_compiled_default() {
+            self.notify_error(
+                "Only built-in and tab-switch shortcuts have a default to restore".to_string(),
+            );
+            return;
+        }
+        let (location, path) = match self.resolve_binding_target(&source) {
+            Ok(v) => v,
+            Err(e) => {
+                self.notify_error(e);
+                return;
+            }
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notify_error(format!("Cannot read {}: {e}", path.display()));
+                return;
+            }
+        };
+        match remove_binding(&location, &text) {
+            Ok(edited) => self.write_reload_and_refresh(
+                &path,
+                &edited,
+                format!("Restored default for '{}'", row.name),
+            ),
+            // No override entry to drop — a tab-switch key already on its
+            // autonumber digit, or a built-in already at its compiled default.
+            Err(e) if e.contains("not found") => {
+                self.notify(format!("'{}' is already at its default", row.name))
+            }
+            Err(e) => self.notify_error(format!("Edit failed: {e}")),
+        }
+    }
+
+    /// Repair a context row's [`KeyScope::Pane`] whose tab name is the empty
+    /// placeholder the runtime keymap files context-scope claims under (the
+    /// real tab was never plumbed through `Pane::build_claims`). Recovers the
+    /// tab from the content view that owns this binding's subtab view, so the
+    /// conflict check overlaps correctly against tab-wide built-ins. Non-Pane
+    /// scopes and already-named Panes pass through unchanged.
+    fn repair_pane_scope(
+        &self,
+        source: &crate::keymap::KeySource,
+        scope: crate::keymap::KeyScope,
+    ) -> crate::keymap::KeyScope {
+        use crate::keymap::{KeyScope, TabRef};
+        let KeyScope::Pane(tab, profile) = scope else {
+            return scope;
+        };
+        if !tab.0.is_empty() {
+            return KeyScope::Pane(tab, profile);
+        }
+        let real = source
+            .subtab_view()
+            .and_then(|view| {
+                self.content_views_iter()
+                    .find(|cv| cv.view_defs.iter().any(|vd| vd.name == view))
+            })
+            .map(|cv| cv.tab_name.clone());
+        KeyScope::Pane(real.map(TabRef::new).unwrap_or(tab), profile)
+    }
+
+    /// Every live [`KeyClaim`] across all content tabs — the full set the
+    /// shortcut-menu conflict check runs against. Folds together each view's
+    /// leaf keymaps, the generic tab-switch keys (kept out of leaf maps), and
+    /// the per-node `shortcuts:` entries (which override built-ins in leaves,
+    /// so they must be added explicitly or a real binding would be invisible).
+    fn all_live_claims(&self) -> Vec<crate::keymap::KeyClaim> {
+        use crate::keymap::{KeyClaim, build_leaf_maps_for};
+        let kb = &self.config.keybindings;
+        let mut claims: Vec<KeyClaim> = Vec::new();
+        for cv in self.content_views_iter() {
+            for leaf in build_leaf_maps_for(&cv.tab_name, &cv.view_defs, kb) {
+                claims.extend(leaf.keymap.claims);
+            }
+        }
+        claims.extend(self.tab_switch_claims());
+        for cv in self.content_views_iter() {
+            claims.extend(crate::keymap::node_shortcut_claims(
+                &cv.tab_name,
+                &cv.view_defs,
+            ));
+        }
+        claims
+    }
+
+    /// Build one prompt [`ConflictItem`] per distinct `(source, colliding
+    /// binding)`. A built-in claim is folded into every leaf, so the same
+    /// collision arrives many times — this dedups it. `claims` is used to
+    /// recover each conflicting shortcut's full current bindings (for the
+    /// drop-then-rewrite) and its surface form.
+    fn build_conflict_items(
+        &self,
+        conflicts: &[crate::keymap::BindingConflict],
+        claims: &[crate::keymap::KeyClaim],
+    ) -> Vec<crate::components::shortcut_menu::ConflictItem> {
+        use crate::components::shortcut_menu::ConflictItem;
+        let mut items: Vec<ConflictItem> = Vec::new();
+        for c in conflicts {
+            let current: Vec<String> = claims
+                .iter()
+                .find(|cl| cl.source == c.source)
+                .map(|cl| cl.key.0.clone())
+                .unwrap_or_default();
+            let drop = current
+                .iter()
+                .find(|b| crate::config::keybindings::binding_steps(b) == c.existing_seq)
+                .cloned()
+                .unwrap_or_else(|| c.existing_seq.join(" "));
+            if items
+                .iter()
+                .any(|it| it.source == c.source && it.drop == drop)
+            {
+                continue;
+            }
+            items.push(ConflictItem {
+                source: c.source.clone(),
+                current,
+                drop,
+                name: c.source.action_name(),
+                removable: crate::config::keybinding_edit::locate_binding(&c.source).is_some()
+                    || self.resolve_db_shortcut(&c.source).is_some(),
+            });
+        }
+        items
+    }
+
+    /// The compiled-in default binding for a source that has one (the four
+    /// built-in sections, plus tab-switch keys whose default is the positional
+    /// autonumber digit). Returns `None` for sources with no default — the
+    /// same set [`KeySource::has_compiled_default`] rejects.
+    fn compiled_default_binding(
+        &self,
+        source: &crate::keymap::KeySource,
+    ) -> Option<crate::config::keybindings::KeyBinding> {
+        use crate::config::keybindings::{
+            CommonAction, ContentAction, GlobalAction, KeyBinding, KeyBindingSection, WindowAction,
+        };
+        use crate::keymap::KeySource;
+        match source {
+            KeySource::Global(a) => KeyBindingSection::<GlobalAction>::default()
+                .bindings
+                .get(a)
+                .cloned(),
+            KeySource::Common(a) => KeyBindingSection::<CommonAction>::default()
+                .bindings
+                .get(a)
+                .cloned(),
+            KeySource::Content(a) => KeyBindingSection::<ContentAction>::default()
+                .bindings
+                .get(a)
+                .cloned(),
+            KeySource::Window(a) => KeyBindingSection::<WindowAction>::default()
+                .bindings
+                .get(a)
+                .cloned(),
+            KeySource::TabSwitch { tab } => {
+                let t = self.tab_layout.tabs().iter().copied().find(|&t| {
+                    let Tab::Content(idx) = t;
+                    self.content_view(idx)
+                        .map(|cv| cv.tab_name == *tab)
+                        .unwrap_or(false)
+                })?;
+                self.tab_layout
+                    .digit_for(t)
+                    .map(|d| KeyBinding(vec![d.to_string()]))
+            }
+            _ => None,
+        }
+    }
+
+    /// Clear a row's binding(s) (`[]`) without reloading — the shared write
+    /// half of both single-row delete and batch delete. Returns the config
+    /// file(s) touched so the caller can batch a single reload. DB-stored
+    /// shortcuts are freed via the repository and touch no file.
+    fn disable_binding(
+        &mut self,
+        row: &crate::keymap::ShortcutRow,
+    ) -> Result<Vec<std::path::PathBuf>, String> {
+        let source = row
+            .source
+            .clone()
+            .ok_or_else(|| "This shortcut is read-only".to_string())?;
+
+        // Per-node `shortcuts:` binding: remove every key line mapping to the
+        // action (the map key is the chord — there's no `key: []` to write).
+        if let crate::keymap::KeySource::NodeShortcut { action, .. } = &source {
+            let action = action.clone();
+            let current = Self::row_bindings(row);
+            let path = self.rewrite_node_shortcut(&source, &action, &current, &[])?;
+            return Ok(vec![path]);
+        }
+        // DB-stored shortcut: unset the `query_shortcut` row; no YAML file.
+        if self.resolve_db_shortcut(&source).is_some() {
+            self.free_db_shortcut(&source)?;
+            return Ok(Vec::new());
+        }
+        let (location, path) = self.resolve_binding_target(&source)?;
+        self.edit_binding_file(&path, &location, &[])?;
+        Ok(vec![path])
+    }
+
+    /// Batch Ctrl+D: disable every tagged row. Deleting can never introduce a
+    /// conflict, so each row is cleared straight away; touched files reload
+    /// once at the end and the menu refreshes.
+    fn delete_tagged_from_menu(&mut self, rows: Vec<crate::keymap::ShortcutRow>) {
+        let mut touched: Vec<std::path::PathBuf> = Vec::new();
+        let mut done = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for row in &rows {
+            match self.disable_binding(row) {
+                Ok(paths) => {
+                    done += 1;
+                    for p in paths {
+                        if !touched.contains(&p) {
+                            touched.push(p);
+                        }
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {e}", row.name)),
+            }
+        }
+        for p in &touched {
+            let _ = self.reload_config(p);
+        }
+        if errors.is_empty() {
+            self.notify(format!("Disabled {done} shortcut(s)"));
+        } else {
+            self.notify_error(format!(
+                "Disabled {done}, {} failed: {}",
+                errors.len(),
+                errors.join("; ")
+            ));
+        }
+        self.open_shortcut_menu();
+    }
+
+    /// Aggregated conflict items for restoring every row in `rows` to its
+    /// compiled default. Each restored default is checked against the claims
+    /// of shortcuts *not* being restored (the restored ones are being cleared,
+    /// so they can't collide). Deduplicated across rows by `(source, drop)`.
+    /// Empty means the whole batch applies without a prompt.
+    fn restore_batch_conflicts(
+        &self,
+        rows: &[crate::keymap::ShortcutRow],
+    ) -> Vec<crate::components::shortcut_menu::ConflictItem> {
+        use crate::keymap::{KeyClaim, KeySource};
+        let claims = self.all_live_claims();
+        // The sources being restored are having their current bindings dropped,
+        // so they are not collision targets for one another.
+        let restoring: Vec<KeySource> = rows.iter().filter_map(|r| r.source.clone()).collect();
+        let others: Vec<KeyClaim> = claims
+            .iter()
+            .filter(|cl| !restoring.contains(&cl.source))
+            .cloned()
+            .collect();
+        let mut items: Vec<crate::components::shortcut_menu::ConflictItem> = Vec::new();
+        for row in rows {
+            let Some(source) = row.source.clone() else {
+                continue;
+            };
+            let Some(default) = self.compiled_default_binding(&source) else {
+                continue;
+            };
+            let Some(scope) = row.key_scope.clone() else {
+                continue;
+            };
+            let scope = self.repair_pane_scope(&source, scope);
+            let conflicts =
+                crate::keymap::binding_conflicts(&default, &scope, &others, Some(&source));
+            for it in self.build_conflict_items(&conflicts, &claims) {
+                if items
+                    .iter()
+                    .any(|x| x.source == it.source && x.drop == it.drop)
+                {
+                    continue;
+                }
+                items.push(it);
+            }
+        }
+        items
+    }
+
+    /// Batch Ctrl+E: restore every tagged row to its compiled default. Rows
+    /// with no default are skipped. A clean batch applies immediately;
+    /// otherwise an aggregated y/n conflict prompt is raised (resolved by
+    /// [`Self::apply_restore_batch`]).
+    fn restore_tagged_from_menu(&mut self, rows: Vec<crate::keymap::ShortcutRow>) {
+        let restorable: Vec<crate::keymap::ShortcutRow> = rows
+            .into_iter()
+            .filter(|r| {
+                r.source
+                    .as_ref()
+                    .map(|s| s.has_compiled_default())
+                    .unwrap_or(false)
+            })
+            .collect();
+        if restorable.is_empty() {
+            self.notify("None of the tagged shortcuts have a default to restore".to_string());
+            return;
+        }
+        let items = self.restore_batch_conflicts(&restorable);
+        if items.is_empty() {
+            self.apply_restore_batch(restorable, Vec::new());
+        } else {
+            self.shortcut_menu.show_restore_conflicts(restorable, items);
+        }
+    }
+
+    /// Apply a (possibly conflict-resolved) batch restore: drop every colliding
+    /// binding in `items` (grouped by source, comment-preservingly), then
+    /// restore each row in `rows` to its default by removing its override
+    /// entry. Refuses if any collision is with a read-only binding. Every
+    /// touched file reloads once at the end and the menu refreshes.
+    fn apply_restore_batch(
+        &mut self,
+        rows: Vec<crate::keymap::ShortcutRow>,
+        items: Vec<crate::components::shortcut_menu::ConflictItem>,
+    ) {
+        use crate::keymap::KeySource;
+        if let Some(ro) = items.iter().find(|i| !i.removable) {
+            self.notify_error(format!(
+                "Restore collides with read-only '{}' — not applied",
+                ro.name
+            ));
+            return;
+        }
+        let mut touched: Vec<std::path::PathBuf> = Vec::new();
+
+        // 1. Drop colliding bindings, grouped by source so each file is edited
+        //    once even if it owns several collisions.
+        let mut by_source: Vec<(KeySource, Vec<String>, Vec<String>)> = Vec::new();
+        for item in &items {
+            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
+                entry.2.push(item.drop.clone());
+            } else {
+                by_source.push((
+                    item.source.clone(),
+                    item.current.clone(),
+                    vec![item.drop.clone()],
+                ));
+            }
+        }
+        for (other_source, current, drops) in &by_source {
+            match self.free_db_shortcut(other_source) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            }
+            let (loc, path) = match self.resolve_binding_target(other_source) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            };
+            let is_slot = matches!(
+                other_source,
+                KeySource::NodeShortcut { .. }
+                    | KeySource::YamlSubtab { .. }
+                    | KeySource::YamlMenuKey { .. }
+                    | KeySource::YamlPreviewKey { .. }
+                    | KeySource::YamlChildKeybinding { .. }
+                    | KeySource::AppActionChain { .. }
+                    | KeySource::PaneSearchJump { .. }
+            );
+            let res = if is_slot {
+                self.remove_binding_file(&path, &loc)
+            } else {
+                let new: Vec<String> = current
+                    .iter()
+                    .filter(|b| !drops.contains(b))
+                    .cloned()
+                    .collect();
+                self.edit_binding_file(&path, &loc, &new)
+            };
+            if let Err(e) = res {
+                self.notify_error(e);
+                return;
+            }
+            if !touched.contains(&path) {
+                touched.push(path);
+            }
+        }
+
+        // 2. Restore each row: drop its override entry (read fresh so it
+        //    composes with any drop above in the same file).
+        let mut done = 0usize;
+        for row in &rows {
+            let Some(source) = row.source.clone() else {
+                continue;
+            };
+            let (location, path) = match self.resolve_binding_target(&source) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.notify_error(format!("Cannot read {}: {e}", path.display()));
+                    return;
+                }
+            };
+            match crate::config::keybinding_edit::remove_binding(&location, &text) {
+                Ok(edited) => {
+                    if let Err(e) = self.validate_config_text(&path, &edited) {
+                        self.notify_error(format!(
+                            "Change rejected — would break {}: {e}",
+                            path.display()
+                        ));
+                        return;
+                    }
+                    if let Err(e) = std::fs::write(&path, &edited) {
+                        self.notify_error(format!("Cannot write {}: {e}", path.display()));
+                        return;
+                    }
+                    if !touched.contains(&path) {
+                        touched.push(path);
+                    }
+                    done += 1;
+                }
+                // Already at its default — nothing to drop.
+                Err(e) if e.contains("not found") => done += 1,
+                Err(e) => {
+                    self.notify_error(format!("Edit failed: {e}"));
+                    return;
+                }
+            }
+        }
+
+        for p in &touched {
+            let _ = self.reload_config(p);
+        }
+        self.notify(format!("Restored {done} default(s)"));
+        self.open_shortcut_menu();
+    }
+
+    /// Write `binding` onto a single row without a conflict check or reload —
+    /// the shared write half of both the batch bind and its conflict-resolved
+    /// apply. `overwrite` replaces the row's bindings with exactly `binding`;
+    /// otherwise it is appended as an alternative (a no-op if already present).
+    /// Returns the file(s) touched so the caller can batch one reload; DB
+    /// shortcuts apply through the repository and touch no file.
+    fn write_binding_for_row(
+        &mut self,
+        row: &crate::keymap::ShortcutRow,
+        binding: &str,
+        overwrite: bool,
+    ) -> Result<Vec<std::path::PathBuf>, String> {
+        use crate::keymap::KeySource;
+        let source = row
+            .source
+            .clone()
+            .ok_or_else(|| "This shortcut is read-only".to_string())?;
+
+        // Per-node `shortcuts:` binding: the map key is the chord, its value the
+        // action verb, so we rewrite the block rather than a `key:` list.
+        if let KeySource::NodeShortcut { action, .. } = &source {
+            let action = action.clone();
+            let current = Self::row_bindings(row);
+            let target = if overwrite {
+                vec![binding.to_string()]
+            } else {
+                let mut t = current.clone();
+                if !t.iter().any(|b| b == binding) {
+                    t.push(binding.to_string());
+                }
+                t
+            };
+            let path = self.rewrite_node_shortcut(&source, &action, &current, &target)?;
+            return Ok(vec![path]);
+        }
+        // DB-stored shortcut: a single chord in `query_shortcut` (no list to
+        // append to — the chord is replaced regardless of `overwrite`).
+        if self.resolve_db_shortcut(&source).is_some() {
+            self.set_db_shortcut(&source, binding)?;
+            return Ok(Vec::new());
+        }
+        let values = if overwrite {
+            vec![binding.to_string()]
+        } else {
+            let mut v = Self::row_bindings(row);
+            if !v.iter().any(|b| b == binding) {
+                v.push(binding.to_string());
+            }
+            v
+        };
+        let (location, path) = self.resolve_binding_target(&source)?;
+        self.edit_binding_file(&path, &location, &values)?;
+        Ok(vec![path])
+    }
+
+    /// Aggregated conflicts for binding `binding` on every row in `rows`.
+    /// `Err` means the batch is impossible up front: two tagged rows share a
+    /// scope, so the same key would shadow between them (unresolvable). `Ok`
+    /// carries the collisions with shortcuts *not* in the batch, deduplicated
+    /// by `(source, drop)`; empty means the batch applies without a prompt.
+    fn bind_batch_conflicts(
+        &self,
+        rows: &[crate::keymap::ShortcutRow],
+        binding: &str,
+    ) -> Result<Vec<crate::components::shortcut_menu::ConflictItem>, String> {
+        use crate::config::keybindings::KeyBinding;
+        use crate::keymap::{KeyClaim, KeySource};
+        let claims = self.all_live_claims();
+        // The rows being (re)bound are not collision targets for one another
+        // via their *old* bindings; their intra-batch overlap is handled below.
+        let rebinding: Vec<KeySource> = rows.iter().filter_map(|r| r.source.clone()).collect();
+        let others: Vec<KeyClaim> = claims
+            .iter()
+            .filter(|cl| !rebinding.contains(&cl.source))
+            .cloned()
+            .collect();
+        let proposed = KeyBinding(vec![binding.to_string()]);
+
+        // Intra-batch guard: every tagged row gets the *same* key, so any two
+        // whose scopes overlap would collide with each other — which dropping a
+        // third binding can't fix. Refuse with a clear message. (The intended
+        // use is one action across different tabs, whose scopes never overlap.)
+        let describe = |row: &crate::keymap::ShortcutRow| -> String {
+            let path = if row.scope.is_empty() {
+                row.name.clone()
+            } else {
+                format!("{} › {}", row.scope, row.name)
+            };
+            if row.keys.is_empty() {
+                format!("{path} (unbound)")
+            } else {
+                format!("{path} [{}]", row.keys)
+            }
+        };
+        let mut scoped: Vec<(String, crate::keymap::KeyScope, KeySource)> = Vec::new();
+        for row in rows {
+            let (Some(source), Some(scope)) = (row.source.clone(), row.key_scope.clone()) else {
+                continue;
+            };
+            let scope = self.repair_pane_scope(&source, scope);
+            // Two rows only truly collide when their scopes overlap *and* they
+            // don't each belong to a different subtab of the same tab. The
+            // `Pane` scope only tracks the tab, so sibling subtabs (e.g. Jira's
+            // `tickets` vs `bookmarks` view) flatten to the same scope yet are
+            // never active simultaneously — the same guard `binding_conflicts`
+            // applies at dispatch time.
+            let clash = scoped.iter().find(|(_, s, src)| {
+                if !s.overlaps_with(&scope) {
+                    return false;
+                }
+                match (src.subtab_view(), source.subtab_view()) {
+                    (Some(a), Some(b)) if a != b => false,
+                    _ => true,
+                }
+            });
+            if let Some((other_desc, _, _)) = clash {
+                return Err(format!(
+                    "These two tagged shortcuts share a scope, so they can't both use '{binding}':\n  • {}\n  • {}",
+                    other_desc,
+                    describe(row)
+                ));
+            }
+            scoped.push((describe(row), scope, source));
+        }
+
+        let mut items: Vec<crate::components::shortcut_menu::ConflictItem> = Vec::new();
+        for row in rows {
+            let (Some(source), Some(scope)) = (row.source.clone(), row.key_scope.clone()) else {
+                continue;
+            };
+            let scope = self.repair_pane_scope(&source, scope);
+            let conflicts =
+                crate::keymap::binding_conflicts(&proposed, &scope, &others, Some(&source));
+            for it in self.build_conflict_items(&conflicts, &claims) {
+                if items
+                    .iter()
+                    .any(|x| x.source == it.source && x.drop == it.drop)
+                {
+                    continue;
+                }
+                items.push(it);
+            }
+        }
+        Ok(items)
+    }
+
+    /// Batch Ctrl+N/Ctrl+U: bind the recorded `binding` on every tagged row.
+    /// Refuses if two tagged rows share a scope; a clean batch applies
+    /// immediately, otherwise an aggregated y/n conflict prompt is raised
+    /// (resolved by [`Self::apply_bind_batch`]).
+    fn bind_tagged_from_menu(
+        &mut self,
+        rows: Vec<crate::keymap::ShortcutRow>,
+        binding: String,
+        overwrite: bool,
+    ) {
+        let bindable: Vec<crate::keymap::ShortcutRow> =
+            rows.into_iter().filter(|r| r.source.is_some()).collect();
+        if bindable.is_empty() {
+            self.notify("None of the tagged shortcuts are editable".to_string());
+            return;
+        }
+        match self.bind_batch_conflicts(&bindable, &binding) {
+            Err(e) => self.notify_error(e),
+            Ok(items) if items.is_empty() => {
+                self.apply_bind_batch(bindable, binding, Vec::new(), overwrite)
+            }
+            Ok(items) => self
+                .shortcut_menu
+                .show_bind_conflicts(bindable, binding, overwrite, items),
+        }
+    }
+
+    /// Apply a (possibly conflict-resolved) batch bind: drop every colliding
+    /// binding in `items` (grouped by source, comment-preservingly), then bind
+    /// `binding` on every row in `rows`. Refuses if any collision is read-only.
+    /// Every touched file reloads once at the end and the menu refreshes.
+    fn apply_bind_batch(
+        &mut self,
+        rows: Vec<crate::keymap::ShortcutRow>,
+        binding: String,
+        items: Vec<crate::components::shortcut_menu::ConflictItem>,
+        overwrite: bool,
+    ) {
+        use crate::keymap::KeySource;
+        if let Some(ro) = items.iter().find(|i| !i.removable) {
+            self.notify_error(format!(
+                "Bind collides with read-only '{}' — not applied",
+                ro.name
+            ));
+            return;
+        }
+        let mut touched: Vec<std::path::PathBuf> = Vec::new();
+
+        // 1. Drop colliding bindings, grouped by source (each file edited once).
+        let mut by_source: Vec<(KeySource, Vec<String>, Vec<String>)> = Vec::new();
+        for item in &items {
+            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
+                entry.2.push(item.drop.clone());
+            } else {
+                by_source.push((
+                    item.source.clone(),
+                    item.current.clone(),
+                    vec![item.drop.clone()],
+                ));
+            }
+        }
+        for (other_source, current, drops) in &by_source {
+            match self.free_db_shortcut(other_source) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            }
+            let (loc, path) = match self.resolve_binding_target(other_source) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.notify_error(e);
+                    return;
+                }
+            };
+            let is_slot = matches!(
+                other_source,
+                KeySource::NodeShortcut { .. }
+                    | KeySource::YamlSubtab { .. }
+                    | KeySource::YamlMenuKey { .. }
+                    | KeySource::YamlPreviewKey { .. }
+                    | KeySource::YamlChildKeybinding { .. }
+                    | KeySource::AppActionChain { .. }
+                    | KeySource::PaneSearchJump { .. }
+            );
+            let res = if is_slot {
+                self.remove_binding_file(&path, &loc)
+            } else {
+                let new: Vec<String> = current
+                    .iter()
+                    .filter(|b| !drops.contains(b))
+                    .cloned()
+                    .collect();
+                self.edit_binding_file(&path, &loc, &new)
+            };
+            if let Err(e) = res {
+                self.notify_error(e);
+                return;
+            }
+            if !touched.contains(&path) {
+                touched.push(path);
+            }
+        }
+
+        // 2. Bind each row (read fresh so it composes with any drop above).
+        let mut done = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for row in &rows {
+            match self.write_binding_for_row(row, &binding, overwrite) {
+                Ok(paths) => {
+                    done += 1;
+                    for p in paths {
+                        if !touched.contains(&p) {
+                            touched.push(p);
+                        }
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {e}", row.name)),
+            }
+        }
+
+        for p in &touched {
+            let _ = self.reload_config(p);
+        }
+        if errors.is_empty() {
+            self.notify(format!("Bound '{binding}' on {done} shortcut(s)"));
+        } else {
+            self.notify_error(format!(
+                "Bound {done}, {} failed: {}",
+                errors.len(),
+                errors.join("; ")
+            ));
+        }
+        self.open_shortcut_menu();
+    }
+
+    /// True iff some `cmdline_shortcuts:` key is a strict step-prefix of the
+    /// accumulated `key` sequence — i.e. `key` should be stashed and waited
+    /// on (e.g. `m` for `mc`/`mp`). Compared per-step so the space-form and
+    /// legacy concatenation both resolve.
     fn cmdline_shortcut_chord_prefix(&self, key: &str) -> bool {
+        let pressed = binding_steps(key);
+        self.config.cmdline_shortcuts.keys().any(|k| {
+            let ks = binding_steps(k);
+            ks.len() > pressed.len() && ks[..pressed.len()] == pressed[..]
+        })
+    }
+
+    /// The command bound to a fully-pressed cmdline-shortcut sequence, if
+    /// any. Matched per-step (via [`binding_steps`]) so the accumulated
+    /// space-joined chord matches a config key written either way.
+    fn cmdline_shortcut_for_chord(&self, chord: &str) -> Option<String> {
+        let pressed = binding_steps(chord);
         self.config
             .cmdline_shortcuts
-            .keys()
-            .any(|k| k.len() > key.len() && k.starts_with(key))
+            .iter()
+            .find(|(k, _)| binding_steps(k) == pressed)
+            .map(|(_, v)| v.clone())
     }
 
     /// Clear notification bar, sticky notification, and the most recent
@@ -4749,6 +7110,8 @@ impl App {
     /// and the `:dismiss-notifications` cmdline command.
     fn dismiss_notifications(&mut self) {
         self.notification_bar.clear();
+        self.alert_bar.clear();
+        self.event_notices.clear();
         self.notification = None;
         self.set_query_error(None);
     }
@@ -4951,7 +7314,12 @@ impl App {
             return;
         };
 
+        Self::treefind_trace(
+            "command",
+            format!("tab={tab_name:?} view={view_name:?} query={query:?}"),
+        );
         if let Err(e) = self.tree_find_in_tab(tab_idx, view_name, query) {
+            Self::treefind_trace("command", format!("tree_find_in_tab error: {e}"));
             self.modal_message = Some(format!(":tree-find — {e}"));
         }
     }
@@ -5077,7 +7445,7 @@ impl App {
         self.reload_content_saved_queries(tab_idx);
 
         // ── 4. Look up saved query + pane, hand off to dispatcher ───────
-        let (raw_query, saved_name, pane_id) = {
+        let (raw_query, saved_name, kind, pane_id) = {
             let cv = match &mut self.content_views[tab_idx] {
                 ContentSlot::Working(cv) => cv,
                 ContentSlot::Broken { name, errors, .. } => {
@@ -5106,7 +7474,7 @@ impl App {
                 ));
                 return;
             };
-            (sq.query, sq.name, cv.active_pane_id())
+            (sq.query, sq.name, sq.kind, cv.active_pane_id())
         };
 
         let target = crate::components::query_var_popup::QueryVarPopupTarget {
@@ -5114,23 +7482,26 @@ impl App {
             pane_id,
             raw_query,
             saved_name: Some(saved_name),
+            kind,
         };
         // CLI path: only popup when required vars are missing. Scripts
         // that pre-fill all `--var` flags get a popup-free apply.
         self.start_query_apply(target, vars_prefilled, false);
     }
 
-    /// `:query edit <name>` — open the body file for `<name>` in the
-    /// adapter's saved-query store in the external editor. Operates
-    /// on the currently active content tab. Modal-errors when the
-    /// active tab isn't a content tab, the adapter doesn't expose a
-    /// filesystem-backed store, or the query doesn't exist.
+    /// `:query edit <name>` — open the body file for `<name>` in the store
+    /// that holds it in the external editor. Operates on the currently
+    /// active content tab. Modal-errors when the active tab isn't a content
+    /// tab, the adapter doesn't expose a filesystem-backed store, or the
+    /// query doesn't exist.
     fn query_edit_command(&mut self, name: &str) {
         let view_index = match self.current_content_view_index_or_modal("edit") {
             Some(idx) => idx,
             None => return,
         };
-        let Some(path) = self.saved_query_path_or_modal("edit", view_index, name) else {
+        let kind = self.content_query_kind(view_index, name);
+        let Some((path, suffix)) = self.query_body_path_or_modal("edit", view_index, name, kind)
+        else {
             return;
         };
         if !path.exists() {
@@ -5143,6 +7514,7 @@ impl App {
             path.clone(),
             view_index,
             name.to_string(),
+            suffix,
         ) {
             Ok(session) => {
                 let _ = self.open_session(Box::new(session));
@@ -5156,22 +7528,40 @@ impl App {
     /// `:query new <name>` — open the external editor on an empty
     /// buffer; first commit creates the body file in the adapter's
     /// saved-query store. Operates on the active content tab.
+    ///
+    /// Always an adapter-native body: an extended document is created from
+    /// the query menu (`++Name`), which can hand the editor a working
+    /// template. The name still has to be free in *both* stores, since they
+    /// share one namespace.
     fn query_new_command(&mut self, name: &str) {
         let view_index = match self.current_content_view_index_or_modal("new") {
             Some(idx) => idx,
             None => return,
         };
-        let Some(path) = self.saved_query_path_or_modal("new", view_index, name) else {
+        match self.existing_query_kind(view_index, name) {
+            Ok(Some(kind)) => {
+                self.modal_message = Some(format!(
+                    ":query new — '{name}' already exists ({kind}, use :query edit to modify)"
+                ));
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.modal_message = Some(format!(":query new — could not check names: {e}"));
+                return;
+            }
+        }
+        let Some((path, suffix)) =
+            self.query_body_path_or_modal("new", view_index, name, QueryKind::Saved)
+        else {
             return;
         };
-        if path.exists() {
-            self.modal_message = Some(format!(
-                ":query new — '{name}' already exists (use :query edit to modify)"
-            ));
-            return;
-        }
-        let session =
-            crate::edit_session::SavedQueryEditSession::new(path, view_index, name.to_string());
+        let session = crate::edit_session::SavedQueryEditSession::new(
+            path,
+            view_index,
+            name.to_string(),
+            suffix,
+        );
         let _ = self.open_session(Box::new(session));
     }
 
@@ -5194,7 +7584,8 @@ impl App {
                 return;
             }
         };
-        self.delete_content_query(view_index, &scope, name);
+        let kind = self.content_query_kind(view_index, name);
+        self.delete_content_query(view_index, &scope, name, kind);
         self.reload_content_saved_queries(view_index);
         self.notify(format!("Deleted saved query '{name}'"));
     }
@@ -5216,36 +7607,48 @@ impl App {
         }
     }
 
-    /// Look up the on-disk path for saved-query `<name>` in the active
-    /// content view's adapter store. Returns `None` (and sets
-    /// `modal_message`) when the adapter exposes no store, or its store
-    /// returns `None` from `path()` (opaque storage).
-    fn saved_query_path_or_modal(
+    /// Look up the on-disk path and editor suffix for query `<name>` of
+    /// `kind` in the active content view's adapter store. Returns `None`
+    /// (and sets `modal_message`) when the adapter exposes no such store, or
+    /// its store returns `None` from `path()` (opaque storage).
+    fn query_body_path_or_modal(
         &mut self,
         sub: &str,
         view_index: usize,
         name: &str,
-    ) -> Option<std::path::PathBuf> {
+        kind: QueryKind,
+    ) -> Option<(std::path::PathBuf, String)> {
         let cv = self.content_view(view_index)?;
         let Some(adapter) = cv.adapter.as_ref() else {
             self.modal_message = Some(format!(":query {sub} — this tab has no adapter"));
             return None;
         };
-        let Some(store) = adapter.saved_query_store() else {
+        let found = match kind {
+            QueryKind::Saved => adapter
+                .saved_query_store()
+                .map(|s| (s.path(name), adapter.query_body_suffix().to_string())),
+            QueryKind::Extended => adapter.extended_query_store().map(|s| {
+                (
+                    s.path(name),
+                    not_yet_done_content::EXTENDED_QUERY_SUFFIX.to_string(),
+                )
+            }),
+        };
+        let Some((path, suffix)) = found else {
             self.modal_message = Some(format!(
-                ":query {sub} — adapter '{}' has no saved-query store",
+                ":query {sub} — adapter '{}' has no {kind}-query store",
                 adapter.adapter_type()
             ));
             return None;
         };
-        let Some(path) = store.path(name) else {
+        let Some(path) = path else {
             self.modal_message = Some(format!(
                 ":query {sub} — adapter '{}' stores queries opaquely (no file path)",
                 adapter.adapter_type()
             ));
             return None;
         };
-        Some(path)
+        Some((path, suffix))
     }
 
     /// Decide whether a saved-query apply needs the variable input
@@ -5272,7 +7675,30 @@ impl App {
                 return;
             }
         };
-        let vars = adapter.query_variables(&target.raw_query);
+        // An extended document declares its variables across several branch
+        // queries, each in the adapter's own language — only the executor can
+        // collect them, and a document that doesn't even parse must say so
+        // here rather than fail silently on the load that follows.
+        let vars = match target.kind {
+            QueryKind::Saved => adapter.query_variables(&target.raw_query),
+            QueryKind::Extended => {
+                match not_yet_done_extended_query::document_variables(
+                    &target.raw_query,
+                    adapter.as_ref(),
+                ) {
+                    Ok((vars, warnings)) => {
+                        for w in warnings {
+                            self.notify(w.to_string());
+                        }
+                        vars
+                    }
+                    Err(e) => {
+                        self.modal_message = Some(format!(":query apply — {e}"));
+                        return;
+                    }
+                }
+            }
+        };
         let any_required_missing = vars
             .iter()
             .any(|v| v.default.is_none() && !prefilled.contains_key(&v.name));
@@ -5294,9 +7720,19 @@ impl App {
         ));
     }
 
-    /// Apply a saved query with the given variable bindings: set the
-    /// pane's query+vars, then synchronously run the load and update
-    /// the pane (same body as the legacy `:query apply` path).
+    /// Apply a saved query with the given variable bindings: stamp the
+    /// pane's query+vars, then hand the load off to the ordinary async
+    /// path (`spawn_content_load`).
+    ///
+    /// This MUST NOT block the main task. Applying a saved query can
+    /// trigger an interactive login (e.g. the calendar's headless-browser
+    /// 2FA) that takes seconds to minutes; the previous implementation
+    /// `block_on`-ned the whole fetch on the main task and froze all input
+    /// and rendering until it finished (or the browser was closed).
+    /// `spawn_content_load` runs the fetch off-task and delivers the
+    /// result via `LoadMsg::ContentItems` — which also drives the
+    /// `expand_depth` auto-expand cascade — so the UI stays live and a
+    /// later query change can supersede this one.
     pub fn apply_query_with_vars(
         &mut self,
         target: crate::components::query_var_popup::QueryVarPopupTarget,
@@ -5305,7 +7741,7 @@ impl App {
         let tab_idx = target.tab_idx;
         let pane_id = target.pane_id;
 
-        let (adapter, load_req, group_by) = {
+        {
             let cv = match &mut self.content_views[tab_idx] {
                 ContentSlot::Working(cv) => cv,
                 ContentSlot::Broken { name, errors, .. } => {
@@ -5316,100 +7752,70 @@ impl App {
                     return;
                 }
             };
+            if cv.adapter.is_none() {
+                self.modal_message = Some(":query apply — this tab has no adapter".to_string());
+                return;
+            }
+            // Stamp the query+vars onto the target pane; `root_load_request`
+            // (read by `spawn_content_load`) returns them via `active_query`
+            // / `active_query_vars`.
             cv.set_query_for_pane_with_vars(
                 pane_id,
                 target.raw_query.clone(),
                 target.saved_name.clone(),
-                vars.clone(),
+                vars,
+                target.kind,
             );
-            let adapter = match cv.adapter.as_ref() {
-                Some(a) => Arc::clone(a),
-                None => {
-                    self.modal_message = Some(":query apply — this tab has no adapter".to_string());
-                    return;
-                }
-            };
-            let Some(pane) = cv.find_pane(pane_id) else {
-                self.modal_message =
-                    Some(":query apply — could not build a load request".to_string());
-                return;
-            };
-            let Some(req) = pane.root_load_request(&cv.view_defs) else {
-                self.modal_message =
-                    Some(":query apply — could not build a load request".to_string());
-                return;
-            };
-            // Adapter-grouped tree: keep the pane's grouping across a
-            // query apply, same as `spawn_content_load`.
-            (adapter, req, pane.adapter_group_spec(&cv.view_defs))
-        };
+        }
 
-        let crate::views::content_view::LoadRequest {
-            node_type_id,
-            query,
-            sort,
-            page,
-            vars: req_vars,
-        } = load_req;
-        let query = query.map(|raw| adapter.render_query(&raw, &req_vars));
-        let result: Result<_, String> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let root = adapter.root().await.map_err(|e| e.to_string())?;
-                let node_type = root
-                    .children_types()
-                    .into_iter()
-                    .find(|t| t.type_id == node_type_id)
-                    .ok_or_else(|| format!("Node type '{node_type_id}' not found"))?;
-                let sortable_columns = root.sortable_columns(&node_type);
-                let params = not_yet_done_content::ListParams {
-                    node_type,
-                    query,
-                    sort,
-                    page,
-                    download: false,
-                    group_by,
-                };
-                let list = root.list(params).await.map_err(|e| e.to_string())?;
-                Ok((list, sortable_columns))
-            })
-        });
+        self.spawn_content_load(tab_idx, pane_id);
+    }
+}
 
-        match result {
-            Ok((list, sortable_columns)) => {
-                if let Some(cv) = self.content_view_mut(tab_idx) {
-                    cv.set_items_for_pane(
-                        pane_id,
-                        list.items,
-                        list.applied_sort,
-                        list.page,
-                        sortable_columns,
-                        None,
-                    );
-                }
-                // `set_query_*` re-armed the pane's `expand_depth`
-                // cascade; the async load path pumps it from
-                // `LoadMsg::ContentItems`, but this synchronous apply
-                // bypasses that — drive it here so the filtered tree
-                // unfolds just like a fresh load.
-                self.drive_tree_auto_expand(tab_idx, pane_id);
+/// Which-key allowlist test: is a pending chord `prefix` eligible for the
+/// popup given the configured `prefixes`? Empty list → every prefix passes.
+/// Otherwise the pending chord must *start with* one of the configured
+/// prefix sequences (compared step-wise, so `g l` matches the entry `g`).
+fn which_key_prefix_allowed(prefixes: &[String], prefix: &str) -> bool {
+    if prefixes.is_empty() {
+        return true;
+    }
+    let steps = binding_steps(prefix);
+    prefixes.iter().any(|p| {
+        let ps = binding_steps(p);
+        !ps.is_empty() && steps.len() >= ps.len() && steps[..ps.len()] == ps[..]
+    })
+}
+
+/// Filter `(name, keys-field)` candidate rows down to the bindings that
+/// strictly continue `prefix`. `keys-field` is the shortcut-row surface
+/// form (alternatives joined by `" / "`); each alternative is checked
+/// independently and the *matching* combos are returned as `(name, combo)`,
+/// de-duplicated and sorted by combo for stable display.
+fn which_key_filter(sources: Vec<(String, String)>, prefix: &str) -> Vec<(String, String)> {
+    let pre = binding_steps(prefix);
+    if pre.is_empty() {
+        return Vec::new();
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (name, keys) in sources {
+        for alt in keys.split(" / ") {
+            let alt = alt.trim();
+            if alt.is_empty() {
+                continue;
             }
-            Err(e) => {
-                not_yet_done_content::http_log::log_error("query_apply", &e);
-                self.last_error = Some(e.clone());
-                if let Some(cv) = self.content_view_mut(tab_idx) {
-                    cv.set_items_for_pane(
-                        pane_id,
-                        vec![],
-                        Vec::new(),
-                        None,
-                        Vec::new(),
-                        Some(e.clone()),
-                    );
-                }
-                self.modal_message = Some(format!(":query apply — {e}"));
+            let steps = binding_steps(alt);
+            if steps.len() > pre.len()
+                && steps[..pre.len()] == pre[..]
+                && seen.insert((name.clone(), alt.to_string()))
+            {
+                rows.push((name.clone(), alt.to_string()));
             }
         }
     }
+    rows.sort_by(|a, b| a.1.cmp(&b.1));
+    rows
 }
 
 /// Parse the arguments to `:query apply`. Returns the prefilled vars
@@ -5451,9 +7857,11 @@ fn parse_query_apply_args(
         }
         if let Some(after) = rest.strip_prefix("-t") {
             let after = after.trim_start();
-            let mut parts = after.splitn(2, char::is_whitespace);
-            let tgt = parts.next().unwrap_or("").trim();
-            let tail = parts.next().unwrap_or("").trim_start();
+            // Quote-aware, like `:tree-find` — a tab whose display name has
+            // spaces is addressed as `-t "My Tab"`, and the quotes must be
+            // stripped so the name matches `tab_name()` (which has none).
+            let (tgt, tail) = split_leading_token(after);
+            let tgt = tgt.trim();
             if tgt.is_empty() {
                 return Err("-t expects <Tab>[:<view>]".into());
             }
@@ -5490,6 +7898,43 @@ fn split_leading_token(s: &str) -> (String, &str) {
     }
 }
 
+/// May the view at `view_index` put a credential form in front of the user?
+///
+/// The active tab always may — the user is looking at it. Beyond that, a tab
+/// that loads eagerly (`adapter.manual_connect: false`) may too: it starts
+/// connecting the moment the app comes up, without the user ever visiting it,
+/// so deferring its login to the first tab switch would park it on an answer
+/// nobody can see. A `manual_connect` tab has no such problem — its load only
+/// ever starts from a `reload` the user pressed on that very tab.
+///
+/// `popup_owner` is the view a form is already open for, if any. It is never
+/// taken away: that login waits for its answer, and dropping its form is the
+/// one thing that would leave it hanging forever. The loser keeps its
+/// `NeedsCreds` on the view and is replayed when its tab is opened.
+fn credential_form_allowed(
+    active_view: usize,
+    view_index: usize,
+    manual_connect: bool,
+    popup_owner: Option<usize>,
+) -> bool {
+    if popup_owner.is_some_and(|owner| owner != view_index) {
+        return false;
+    }
+    active_view == view_index || !manual_connect
+}
+
+/// Title for the credential form. A credential script names what it is asking
+/// for ("Unlock the password store") but not for which tab — and the form can
+/// belong to a tab the user is not looking at — so the tab name leads.
+fn credential_form_title(header: Option<&str>, tab_name: Option<&str>) -> String {
+    match (header, tab_name) {
+        (Some(h), Some(tab)) => format!("{tab}: {h}"),
+        (Some(h), None) => h.to_string(),
+        (None, Some(tab)) => format!("Login: {tab}"),
+        (None, None) => "Login".into(),
+    }
+}
+
 fn format_focus_error(e: &crate::views::focus_node::FocusError) -> String {
     use crate::views::focus_node::FocusError::*;
     match e {
@@ -5517,6 +7962,62 @@ fn format_focus_error(e: &crate::views::focus_node::FocusError) -> String {
     }
 }
 
+/// Render notification-log records as one `[timestamp] message` block, oldest
+/// first regardless of which bar they came from. Entries flagged `true` came
+/// from the loud top alert bar and carry a `!` marker so they stay
+/// distinguishable. Continuation lines of a multi-line message are indented so
+/// entry boundaries stay readable. Empty input yields an empty string.
+fn format_notification_log<'a>(
+    records: impl Iterator<
+        Item = (
+            &'a crate::components::notification_bar::NotificationRecord,
+            bool,
+        ),
+    >,
+) -> String {
+    let mut entries: Vec<_> = records.collect();
+    entries.sort_by_key(|(r, _)| r.at);
+
+    let mut out = String::new();
+    for (record, alert) in entries {
+        let stamp = record.at.format("%Y-%m-%d %H:%M:%S");
+        let marker = if alert { "! " } else { "" };
+        if record.message.is_empty() {
+            out.push_str(&format!("[{stamp}] {marker}\n"));
+            continue;
+        }
+        for (i, line) in record.message.lines().enumerate() {
+            if i == 0 {
+                out.push_str(&format!("[{stamp}] {marker}{line}\n"));
+            } else {
+                out.push_str(&format!("    {line}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// The right-aligned hint both notification bars render, built from the live
+/// bindings of the two actions that act on them: dismiss, and open the log in
+/// the editor. Rebinding either key therefore updates the hint, and an unbound
+/// action simply drops out of it.
+fn notification_bar_hint(
+    gkb: &crate::config::keybindings::KeyBindingSection<GlobalAction>,
+) -> String {
+    [
+        (GlobalAction::DismissNotifications, "dismiss"),
+        (GlobalAction::ShowNotifications, "open"),
+    ]
+    .iter()
+    .filter_map(|(action, label)| {
+        // `display_label` already brackets the key(s), e.g. `[Z]`.
+        let binding = gkb.get(action)?;
+        Some(format!("{} {label}", binding.display_label()))
+    })
+    .collect::<Vec<_>>()
+    .join("  ")
+}
+
 impl App {
     /// Open the most recently captured error in `$EDITOR` (read-only).
     /// Falls back to a notification when no error has been recorded yet.
@@ -5530,6 +8031,35 @@ impl App {
         };
         let session = crate::edit_session::ErrorViewSession::new(text, scope);
         self.open_session(Box::new(session))
+    }
+
+    /// Open the notification log in `$EDITOR` (read-only) — both bars' messages
+    /// merged chronologically, so nothing the short bottom bar pushed out (or a
+    /// `Z` dismissed) is lost. Falls back to a notification when nothing has
+    /// been shown yet.
+    fn open_notifications_editor(&mut self) -> EditorRequest {
+        let text = self.notification_log_text();
+        if text.is_empty() {
+            self.notify("No notifications yet".to_string());
+            return EditorRequest::None;
+        }
+        let scope = match self.active_tab {
+            Tab::Content(_) => crate::edit_session::SessionScope::Content,
+        };
+        let session = crate::edit_session::NotificationViewSession::new(text, scope);
+        self.open_session(Box::new(session))
+    }
+
+    /// Both bars' notification logs merged into one text block — see
+    /// [`format_notification_log`].
+    fn notification_log_text(&self) -> String {
+        format_notification_log(
+            self.notification_bar
+                .history()
+                .iter()
+                .map(|r| (r, false))
+                .chain(self.alert_bar.history().iter().map(|r| (r, true))),
+        )
     }
 
     fn set_active_tab(&mut self, tab: Tab) {
@@ -5589,32 +8119,20 @@ impl App {
     }
 
     /// Build the main-tab label list from the active [`TabLayout`]:
-    /// visible tabs in order, each as `icon name key`. The key hint is
-    /// the autonumber digit in constellation mode, or the legacy fixed
-    /// `GlobalAction` key otherwise (so pre-constellation labels render
-    /// byte-for-byte as before).
-    fn build_main_tab_labels(&self) -> Vec<(Tab, String)> {
-        let gkb = &self.keybindings.global;
-        let autonumber = self.tab_layout.autonumber();
+    /// visible tabs in order, each as `icon key name`, keyed by the tab's
+    /// autonumber digit (`1`..`9`, then `0`).
+    ///
+    /// A view whose adapter reports unread rows ([`ContentView::has_unread`])
+    /// additionally gets its unread marker in front of the icon and carries
+    /// its emphasis patch along, so a background chat tab announces new
+    /// messages in the bar itself.
+    fn build_main_tab_labels(&self) -> Vec<crate::tabs::MainTab> {
         self.tab_layout
             .tabs()
             .iter()
             .map(|&tab| {
-                let key = if autonumber {
-                    self.tab_layout
-                        .digit_for(tab)
-                        .map(|c| c.to_string())
-                        .unwrap_or_default()
-                } else {
-                    match tab {
-                        Tab::Content(0) => gkb.label(&GlobalAction::TabJira),
-                        Tab::Content(1) => gkb.label(&GlobalAction::TabTaiga),
-                        Tab::Content(2) => gkb.label(&GlobalAction::TabPostgres),
-                        Tab::Content(3) => gkb.label(&GlobalAction::TabConfluence),
-                        Tab::Content(_) => String::new(),
-                    }
-                };
-                let label = match tab {
+                let key = self.tab_switch_key(tab);
+                let (label, unread) = match tab {
                     Tab::Content(idx) => {
                         let (name, icon) = self
                             .content_views
@@ -5626,44 +8144,172 @@ impl App {
                                 )
                             })
                             .unwrap_or_default();
-                        crate::tabs::tab_label(&icon, &key, &name)
+                        let view = self
+                            .content_views
+                            .get(idx)
+                            .and_then(|s| s.as_view())
+                            .filter(|cv| cv.has_unread());
+                        let marker = view.map(|cv| cv.unread_tab_marker()).unwrap_or_default();
+                        (
+                            crate::tabs::tab_label_with_marker(marker, &icon, &key, &name),
+                            view.map(|cv| cv.unread_tab_style()),
+                        )
                     }
                 };
-                (tab, label)
+                crate::tabs::MainTab { tab, label, unread }
+            })
+            .collect()
+    }
+
+    /// The key hint that selects `tab` for the tab bar: the first entry of
+    /// its effective switch binding — the `tab.key` override when set,
+    /// otherwise the autonumber digit (`1`..`9`, then `0`). Empty when the
+    /// tab has no switch key (disabled, or an 11th+ tab with no digit).
+    fn tab_switch_key(&self, tab: Tab) -> String {
+        self.tab_switch_entries(tab)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// The surface-form binding entries that switch to `tab`: the view
+    /// file's `tab.key` override when present (possibly `[]` → disabled),
+    /// otherwise the single positional autonumber digit. Empty when the tab
+    /// has no switch key (disabled, or an 11th+ tab with no digit).
+    fn tab_switch_entries(&self, tab: Tab) -> Vec<String> {
+        let Tab::Content(idx) = tab;
+        match self.content_view(idx).and_then(|cv| cv.tab_key_override()) {
+            Some(kb) => kb.0.clone(),
+            None => self
+                .tab_layout
+                .digit_for(tab)
+                .map(|d| vec![d.to_string()])
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The effective tab-switch [`KeyBinding`] for `tab` (override or
+    /// autonumber digit), for matching pressed keys against.
+    fn tab_switch_binding(&self, tab: Tab) -> crate::config::keybindings::KeyBinding {
+        crate::config::keybindings::KeyBinding(self.tab_switch_entries(tab))
+    }
+
+    /// Resolve a fully-pressed key / chord (surface form) to the tab it
+    /// switches to, honouring per-tab `tab.key` overrides and falling back
+    /// to autonumber digits.
+    fn tab_for_pressed(&self, key: &str) -> Option<Tab> {
+        self.tab_layout
+            .tabs()
+            .iter()
+            .copied()
+            .find(|&tab| self.tab_switch_binding(tab).matches(key))
+    }
+
+    /// Whether `key` is a strict prefix of some tab's effective switch
+    /// binding — a chorded tab key still waiting to be completed.
+    fn tab_switch_is_prefix(&self, key: &str) -> bool {
+        self.tab_layout
+            .tabs()
+            .iter()
+            .copied()
+            .any(|tab| self.tab_switch_binding(tab).is_prefix(key))
+    }
+
+    /// Global-scope [`KeyClaim`]s for the visible tabs' effective switch
+    /// bindings, so the shortcut-menu conflict check catches a rebind that
+    /// collides with another tab's key (or with a global). Tabs with no
+    /// switch key (disabled / no digit) contribute nothing.
+    fn tab_switch_claims(&self) -> Vec<crate::keymap::KeyClaim> {
+        use crate::keymap::{KeyClaim, KeyScope, KeySource};
+        self.tab_layout
+            .tabs()
+            .iter()
+            .filter_map(|&tab| {
+                let Tab::Content(idx) = tab;
+                let name = self.content_views.get(idx)?.tab_name().to_string();
+                let binding = self.tab_switch_binding(tab);
+                if binding.0.is_empty() {
+                    return None;
+                }
+                Some(KeyClaim::handler(
+                    binding,
+                    KeyScope::Global,
+                    KeySource::TabSwitch { tab: name },
+                ))
+            })
+            .collect()
+    }
+
+    /// Generic tab-switch shortcut rows — one per visible tab, from the
+    /// active [`TabLayout`], keyed by its effective switch binding (the
+    /// `tab.key` override or the autonumber digit) and labelled with the
+    /// tab's real name. Editable from the shortcut menu (Ctrl+N / Ctrl+D /
+    /// Ctrl+R) via the [`KeySource::TabSwitch`] source.
+    ///
+    /// [`KeySource::TabSwitch`]: crate::keymap::KeySource::TabSwitch
+    fn tab_switch_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
+        use crate::keymap::{KeyScope, KeySource};
+        self.tab_layout
+            .tabs()
+            .iter()
+            .filter_map(|&tab| {
+                let Tab::Content(idx) = tab;
+                let name = self.content_views.get(idx)?.tab_name().to_string();
+                let entries = self.tab_switch_entries(tab);
+                Some(crate::keymap::ShortcutRow {
+                    name: format!("Switch to {name}"),
+                    keys: entries.join(" / "),
+                    scope: "Global".to_string(),
+                    source: Some(KeySource::TabSwitch { tab: name }),
+                    key_scope: Some(KeyScope::Global),
+                })
             })
             .collect()
     }
 
     /// Open / close the adapter credentials popup based on a fresh status.
-    /// Only acts when the status is for the currently active content tab.
+    ///
+    /// Acts for the active tab and for eager background tabs (see
+    /// [`credential_form_allowed`]). There is one popup slot, so whoever asks
+    /// first keeps it — a second adapter asking meanwhile is not dropped, its
+    /// `NeedsCreds` stays on the view and is replayed when its tab is opened.
     fn react_to_adapter_status(
         &mut self,
         view_index: usize,
         status: &not_yet_done_content::AdapterStatus,
     ) {
-        let Tab::Content(active) = self.active_tab;
-        if active != view_index {
-            return;
-        }
         match status {
-            not_yet_done_content::AdapterStatus::NeedsCreds { fields } => {
-                let already_open = self
-                    .adapter_creds_popup
-                    .as_ref()
-                    .is_some_and(|p| p.view_index() == view_index && p.is_open());
+            not_yet_done_content::AdapterStatus::NeedsCreds {
+                fields,
+                header,
+                error,
+            } => {
+                let Tab::Content(active) = self.active_tab;
+                let manual = self
+                    .content_view(view_index)
+                    .is_none_or(|cv| cv.manual_connect);
+                let owner = self.adapter_creds_popup.as_ref().map(|p| p.view_index());
+                if !credential_form_allowed(active, view_index, manual, owner) {
+                    return;
+                }
+                let tab_name = self.content_view(view_index).map(|cv| cv.tab_name.clone());
+                let title = credential_form_title(header.as_deref(), tab_name.as_deref());
+                let already_open = self.adapter_creds_popup.as_ref().is_some_and(|p| {
+                    p.view_index() == view_index
+                        && p.is_open()
+                        && p.shows(&title, fields, error.as_deref())
+                });
                 if !already_open {
-                    let title = self
-                        .content_view(view_index)
-                        .map(|cv| format!("Login: {}", cv.tab_name))
-                        .unwrap_or_else(|| "Login".into());
-                    self.adapter_creds_popup = Some(
-                        crate::components::adapter_creds_popup::AdapterCredsPopup::new(
-                            Arc::clone(&self.shared_theme),
-                            title,
-                            view_index,
-                            fields.clone(),
-                        ),
+                    let mut popup = crate::components::adapter_creds_popup::AdapterCredsPopup::new(
+                        Arc::clone(&self.shared_theme),
+                        title,
+                        view_index,
+                        fields.clone(),
                     );
+                    if let Some(e) = error {
+                        popup.set_error(e.clone());
+                    }
+                    self.adapter_creds_popup = Some(popup);
                 }
             }
             not_yet_done_content::AdapterStatus::Ready => {
@@ -5769,6 +8415,23 @@ impl App {
         );
         let column_config_active = self.column_config_popup.is_some();
         let script_active = self.detached_script.is_some();
+        // App-global activatable shortcuts (the shortcut menu today) surface in
+        // the content action bar alongside the view's own activatable hints —
+        // their key binding and active surface are App-owned, so we resolve
+        // `active` here and hand finished hints to the view. Derived from the
+        // exhaustive `GlobalAction::placement()` (BarPlacement::Active), so a
+        // newly Active-placed global appears automatically once bound.
+        let global_action_hints: Vec<crate::components::action_bar::ActionHint> =
+            crate::config::keybindings::global_active_hints(&self.keybindings.global)
+                .into_iter()
+                .map(|(action, key, desc)| {
+                    let active = match action {
+                        GlobalAction::ShortcutMenu => self.shortcut_menu.is_open(),
+                        _ => false,
+                    };
+                    crate::components::action_bar::ActionHint { key, desc, active }
+                })
+                .collect();
         {
             let Tab::Content(idx) = self.active_tab;
             if let Some(cv) = self.content_view_mut(idx) {
@@ -5781,16 +8444,19 @@ impl App {
                     confirm_active,
                     column_config_active,
                     script_active,
+                    global_action_hints,
                 );
             }
         }
 
         {
             let Tab::Content(idx) = self.active_tab;
-            // Content tabs use dynamic hints from ContentView.
-            let gkb = &self.keybindings.global;
+            // Leading app-global hints (quit, cycle tabs) are derived from the
+            // exhaustive `GlobalAction::placement()` — see
+            // `keybindings::global_status_hints`. Content-specific hints and
+            // the sort mode follow, so the fixed global frame stays first.
             let mut hints: Vec<(String, String)> =
-                vec![(gkb.label(&GlobalAction::Quit), "quit".to_string())];
+                crate::config::keybindings::global_status_hints(&self.keybindings.global);
             if let Some(cv) = self.content_view(idx) {
                 for (k, v) in cv.status_bar_hints() {
                     hints.push((k, v));
@@ -5799,14 +8465,6 @@ impl App {
             hints.push((
                 self.keybindings.common.label(&CommonAction::SortMode),
                 "sort".to_string(),
-            ));
-            hints.push((
-                format!(
-                    "{}/{}",
-                    gkb.label(&GlobalAction::TabNext),
-                    gkb.label(&GlobalAction::TabPrev)
-                ),
-                "cycle tabs".to_string(),
             ));
             self.status_bar.set_custom_hints(hints);
         }
@@ -5860,6 +8518,10 @@ impl App {
         match req {
             ViewRequest::OpenColumnConfig => {
                 self.open_column_config_popup();
+                EditorRequest::None
+            }
+            ViewRequest::PersistCardMode { view_index } => {
+                self.persist_card_mode(view_index);
                 EditorRequest::None
             }
             ViewRequest::Notify(msg) => {
@@ -5938,6 +8600,20 @@ impl App {
                 self.spawn_content_load(view_index, pane_id);
                 EditorRequest::None
             }
+            ViewRequest::ReloadContentCurrentLevel {
+                view_index,
+                pane_id,
+            } => {
+                self.reload_content_pane_current_level(view_index, pane_id);
+                EditorRequest::None
+            }
+            ViewRequest::ForceReloadContent {
+                view_index,
+                pane_id,
+            } => {
+                self.spawn_content_reload(view_index, pane_id);
+                EditorRequest::None
+            }
             ViewRequest::TreeFindStart {
                 view_index,
                 pane_id,
@@ -5959,12 +8635,14 @@ impl App {
                 pane_id,
                 query,
                 name,
+                kind,
             } => {
                 let target = crate::components::query_var_popup::QueryVarPopupTarget {
                     tab_idx: view_index,
                     pane_id,
                     raw_query: query,
                     saved_name: Some(name),
+                    kind,
                 };
                 self.start_query_apply(target, std::collections::HashMap::new(), true);
                 EditorRequest::None
@@ -6053,49 +8731,33 @@ impl App {
                 pane_id: _,
                 save_name,
                 is_new,
-            } => {
-                let query_text = self
-                    .content_view(view_index)
-                    .map(|cv| {
-                        if is_new {
-                            cv.default_query_text()
-                        } else {
-                            cv.current_query_text()
-                        }
-                    })
-                    .unwrap_or_default();
-                let session = crate::edit_session::ContentQueryFilterSession::new(
-                    view_index, save_name, is_new, query_text,
-                );
-                self.open_session(Box::new(session))
-            }
+                kind,
+            } => self.open_content_query_editor(view_index, save_name, is_new, kind),
             ViewRequest::OpenAdapterQueryEditor {
                 view_index,
                 pane_id,
                 parent_node_id,
             } => self.open_adapter_query_editor(view_index, pane_id, parent_node_id),
-            ViewRequest::OpenPostgresScriptsMenu {
+            ViewRequest::OpenNodeScriptsMenu {
                 view_index,
                 pane_id,
-                table_node_id,
-            } => self.open_postgres_scripts_menu(view_index, pane_id, table_node_id),
-            ViewRequest::RunPostgresScript {
+                node_id,
+            } => self.open_node_scripts_menu(view_index, pane_id, node_id),
+            ViewRequest::RunNodeScript {
                 view_index,
                 pane_id,
-                database,
-                schema,
-                table,
+                node_id,
                 script,
-            } => self.run_postgres_script(view_index, pane_id, database, schema, table, script),
-            ViewRequest::RunPostgresQuery {
+            } => self.run_node_script(view_index, pane_id, node_id, script),
+            ViewRequest::RunAdapterQuery {
                 view_index,
                 pane_id,
-                database,
+                node_id,
                 query,
                 page,
                 cursor,
             } => {
-                self.spawn_postgres_query(view_index, pane_id, database, query, Some(page), cursor);
+                self.spawn_adapter_query(view_index, pane_id, node_id, query, Some(page), cursor);
                 EditorRequest::None
             }
             ViewRequest::CloseAdapterCursor {
@@ -6132,42 +8794,6 @@ impl App {
             } => {
                 self.open_adapter_db_script_editor(view_index, pane_id, database, script, in_place)
             }
-            ViewRequest::OpenDbScriptNewPrompt {
-                view_index,
-                pane_id,
-                database,
-                parent_rel,
-            } => {
-                self.open_db_script_new_prompt(view_index, pane_id, database, parent_rel);
-                EditorRequest::None
-            }
-            ViewRequest::OpenDbScriptDirNewPrompt {
-                view_index,
-                pane_id,
-                database,
-                parent_rel,
-            } => {
-                self.open_db_script_dir_new_prompt(view_index, pane_id, database, parent_rel);
-                EditorRequest::None
-            }
-            ViewRequest::ConfirmDeleteAdapterDbScript {
-                view_index,
-                pane_id,
-                database,
-                script,
-            } => {
-                self.confirm_delete_adapter_db_script(view_index, pane_id, database, script);
-                EditorRequest::None
-            }
-            ViewRequest::ConfirmDeleteAdapterDbScriptDir {
-                view_index,
-                pane_id,
-                database,
-                rel_path,
-            } => {
-                self.confirm_delete_adapter_db_script_dir(view_index, pane_id, database, rel_path);
-                EditorRequest::None
-            }
             ViewRequest::ConfirmDeleteContentNode {
                 view_index,
                 pane_id,
@@ -6202,16 +8828,6 @@ impl App {
                 self.spawn_invoke_container_action(view_index, pane_id, action_name);
                 EditorRequest::None
             }
-            ViewRequest::OpenDbScriptRenamePrompt {
-                view_index,
-                pane_id,
-                database,
-                rel_path,
-                is_dir,
-            } => {
-                self.open_db_script_rename_prompt(view_index, pane_id, database, rel_path, is_dir);
-                EditorRequest::None
-            }
             ViewRequest::MarkDbScriptForMove { node_id } => {
                 self.mark_db_script_for_move(node_id);
                 EditorRequest::None
@@ -6220,36 +8836,38 @@ impl App {
                 self.paste_db_script_move(target_node_id);
                 EditorRequest::None
             }
-            ViewRequest::EditPostgresScript {
+            ViewRequest::EditNodeScript {
                 view_index,
                 pane_id,
-                database,
-                schema,
-                table,
+                node_id,
                 script,
                 is_new,
-            } => self
-                .edit_postgres_script(view_index, pane_id, database, schema, table, script, is_new),
-            ViewRequest::DeletePostgresScript {
+            } => self.edit_node_script(view_index, pane_id, node_id, script, is_new),
+            ViewRequest::DeleteNodeScript {
                 view_index,
                 pane_id,
-                database,
-                schema,
-                table,
+                node_id,
                 script,
             } => {
-                self.delete_postgres_script(view_index, pane_id, database, schema, table, script);
+                self.delete_node_script(view_index, pane_id, node_id, script);
                 EditorRequest::None
             }
-            ViewRequest::PromptPostgresScriptShortcut {
+            ViewRequest::PromptNodeScriptShortcut {
                 view_index,
                 pane_id: _,
-                database,
-                schema,
-                table,
+                node_id,
                 script,
             } => {
-                self.prompt_postgres_script_shortcut(view_index, database, schema, table, script);
+                self.prompt_node_script_shortcut(view_index, node_id, script);
+                EditorRequest::None
+            }
+            ViewRequest::ClearNodeScriptShortcut {
+                view_index,
+                pane_id: _,
+                node_id,
+                script,
+            } => {
+                self.clear_node_script_shortcut(view_index, node_id, script);
                 EditorRequest::None
             }
             ViewRequest::ExecuteContentAction {
@@ -6267,7 +8885,14 @@ impl App {
                 node_id,
                 action_name,
             } => {
-                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, false, None);
+                self.spawn_invoke_node_action(
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_name,
+                    false,
+                    None,
+                );
                 EditorRequest::None
             }
             ViewRequest::InvalidateContentSession { view_index } => {
@@ -6347,7 +8972,8 @@ impl App {
                 name,
                 query,
             } => {
-                self.save_content_query_body(view_index, &name, &query);
+                let kind = self.content_query_kind(view_index, &name);
+                self.save_content_query_body(view_index, &name, &query, kind);
                 self.reload_content_saved_queries(view_index);
                 EditorRequest::None
             }
@@ -6356,7 +8982,10 @@ impl App {
                 scope,
                 name,
             } => {
-                self.delete_content_query(view_index, &scope, &name);
+                // The merged menu list is the authority on a name's kind:
+                // it is what the user just picked the entry from.
+                let kind = self.content_query_kind(view_index, &name);
+                self.delete_content_query(view_index, &scope, &name, kind);
                 self.reload_content_saved_queries(view_index);
                 self.notify(format!("Deleted query '{name}'"));
                 EditorRequest::None
@@ -6371,13 +9000,29 @@ impl App {
                 name,
                 query,
             } => {
-                self.save_content_query_body(view_index, &name, &query);
+                let kind = self.content_query_kind(view_index, &name);
+                self.save_content_query_body(view_index, &name, &query, kind);
                 self.reload_content_saved_queries(view_index);
                 self.modal_message = Some(format!(
                     "Press a shortcut key for '{}'\n\nEsc to cancel",
                     name
                 ));
-                self.awaiting_favorite_shortcut = Some((scope, name, query));
+                self.awaiting_favorite_shortcut = Some(PendingFavorite {
+                    scope,
+                    name,
+                    query,
+                    kind,
+                });
+                EditorRequest::None
+            }
+            ViewRequest::ClearContentQueryShortcut {
+                view_index,
+                scope,
+                name,
+            } => {
+                self.clear_content_query_shortcut(view_index, &scope, &name);
+                self.reload_content_saved_queries(view_index);
+                self.notify(format!("Cleared shortcut for '{name}'"));
                 EditorRequest::None
             }
             ViewRequest::RenameContentQuery {
@@ -6402,11 +9047,9 @@ impl App {
                     ScriptScope::FilteredSet => {
                         self.open_script_menu_for_content_batch(view_index, pane_id)
                     }
-                    ScriptScope::Table => self.open_script_menu_for_content_table(
-                        view_index,
-                        pane_id,
-                        default_field,
-                    ),
+                    ScriptScope::Table => {
+                        self.open_script_menu_for_content_table(view_index, pane_id, default_field)
+                    }
                 }
                 EditorRequest::None
             }
@@ -6489,6 +9132,10 @@ impl App {
         // universe. Resolved here (needs `&self`) before the spawn.
         let query = self.pane_active_query(view_index, pane_id);
         tokio::spawn(async move {
+            // Captured before `value` moves into the context below — used to
+            // gate the form-popup reroute (a value-carrying invocation is an
+            // option-menu/confirm path, never a form).
+            let has_value = value.is_some();
             let ctx = not_yet_done_content::ActionContext {
                 marked,
                 confirmed,
@@ -6503,20 +9150,54 @@ impl App {
             };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.
-            let outcome: not_yet_done_content::Result<(
-                not_yet_done_content::ActionDispatch,
-                String,
-                not_yet_done_content::NodeType,
-            )> = async {
+            let outcome: not_yet_done_content::Result<
+                Option<(
+                    not_yet_done_content::ActionDispatch,
+                    String,
+                    not_yet_done_content::NodeType,
+                )>,
+            > = async {
                 let node = adapter.get_by_id(&node_id_for_task).await?;
+                // Form-collecting row actions can't go through `invoke_action`
+                // (there is no form dispatch): route them to the popup /
+                // `execute` path against this row's node id, mirroring the
+                // container path. `confirmed` re-invokes and value/option-menu
+                // dispatches never carry a form spec, so guard on the plain
+                // first invocation only.
+                if !confirmed && !has_value {
+                    let wants_form = adapter
+                        .actions_for_type(node.node_type())
+                        .into_iter()
+                        .find(|a| a.id == action_name_for_task)
+                        .is_some_and(|a| {
+                            matches!(
+                                a.input,
+                                not_yet_done_content::InputSpec::Form { .. }
+                                    | not_yet_done_content::InputSpec::ColumnForm
+                            )
+                        });
+                    if wants_form {
+                        let _ = tx.send(LoadMsg::OpenContentActionPopup {
+                            view_index,
+                            pane_id,
+                            node_id: node_id_for_task.clone(),
+                            action_id: action_name_for_task.clone(),
+                        });
+                        return Ok(None);
+                    }
+                }
                 let label = node.label().to_string();
                 let node_type = node.node_type().clone();
                 let dispatch = node.invoke_action(&action_name_for_task, &ctx).await?;
-                Ok((dispatch, label, node_type))
+                Ok(Some((dispatch, label, node_type)))
             }
             .await;
             let (result, node_label, node_type) = match outcome {
-                Ok((dispatch, label, node_type)) => (Ok(dispatch), Some(label), Some(node_type)),
+                // Rerouted to the form popup — nothing to dispatch here.
+                Ok(None) => return,
+                Ok(Some((dispatch, label, node_type))) => {
+                    (Ok(dispatch), Some(label), Some(node_type))
+                }
                 Err(e) => (
                     Err(format!("Action '{action_name_for_task}': {e}")),
                     None,
@@ -6567,35 +9248,65 @@ impl App {
         // `spawn_invoke_node_action`): resolve it before the spawn.
         let query = self.pane_active_query(view_index, pane_id);
         tokio::spawn(async move {
-            let outcome: not_yet_done_content::Result<(
-                String,
-                not_yet_done_content::ActionDispatch,
-                String,
-                not_yet_done_content::NodeType,
-            )> = async {
-                let node = adapter.root().await?;
-                let node_id = node.id().to_string();
-                let label = node.label().to_string();
-                let node_type = node.node_type().clone();
-                let ctx = not_yet_done_content::ActionContext {
-                    query,
-                    ..Default::default()
-                };
-                let dispatch = node.invoke_action(&action_name_for_task, &ctx).await?;
-                Ok((node_id, dispatch, label, node_type))
-            }
-            .await;
-            let (node_id, result, node_label, node_type) = match outcome {
-                Ok((node_id, dispatch, label, node_type)) => {
-                    (node_id, Ok(dispatch), Some(label), Some(node_type))
+            // Resolve the container (root) node first, then decide the path.
+            let root = match adapter.root().await {
+                Ok(node) => node,
+                Err(e) => {
+                    let _ = tx.send(LoadMsg::NodeActionDispatched {
+                        view_index,
+                        pane_id,
+                        node_id: String::new(),
+                        action_name: action_name_for_task.clone(),
+                        result: Err(format!("Action '{action_name_for_task}': {e}")),
+                        node_label: None,
+                        node_type: None,
+                    });
+                    return;
                 }
-                Err(e) => (
-                    String::new(),
-                    Err(format!("Action '{action_name_for_task}': {e}")),
-                    None,
-                    None,
-                ),
             };
+            let node_id = root.id().to_string();
+            // Form-collecting container actions can't go through
+            // `invoke_action` (there is no form dispatch): route them to the
+            // popup / `execute` path against the root node id instead, exactly
+            // like a per-row form action. Every other container action keeps
+            // the `invoke_action` → `ActionDispatch` dispatch (Confirm, mark /
+            // paste-move, Reload, …).
+            let wants_form = adapter
+                .actions_for_type(root.node_type())
+                .into_iter()
+                .find(|a| a.id == action_name_for_task)
+                .is_some_and(|a| {
+                    matches!(
+                        a.input,
+                        not_yet_done_content::InputSpec::Form { .. }
+                            | not_yet_done_content::InputSpec::ColumnForm
+                    )
+                });
+            if wants_form {
+                let _ = tx.send(LoadMsg::OpenContentActionPopup {
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_id: action_name_for_task,
+                });
+                return;
+            }
+
+            let label = root.label().to_string();
+            let node_type = root.node_type().clone();
+            let ctx = not_yet_done_content::ActionContext {
+                query,
+                ..Default::default()
+            };
+            let (result, node_label, node_type) =
+                match root.invoke_action(&action_name_for_task, &ctx).await {
+                    Ok(dispatch) => (Ok(dispatch), Some(label), Some(node_type)),
+                    Err(e) => (
+                        Err(format!("Action '{action_name_for_task}': {e}")),
+                        None,
+                        None,
+                    ),
+                };
             let _ = tx.send(LoadMsg::NodeActionDispatched {
                 view_index,
                 pane_id,
@@ -6769,7 +9480,8 @@ impl App {
             tokio::runtime::Handle::current().block_on(async {
                 let node = adapter.get_by_id(&node_id).await?;
                 Ok::<_, not_yet_done_content::ContentError>(
-                    node.actions()
+                    adapter
+                        .actions_for_type(node.node_type())
                         .into_iter()
                         .find(|a| a.id == action_id)
                         .map(|a| a.input),
@@ -6802,8 +9514,10 @@ impl App {
                     .await;
                     // `OpenExternal` takes its own message so the app can hand
                     // the file to the OS viewer instead of reloading the pane.
-                    if let Ok(not_yet_done_content::ActionOutcome::OpenExternal { target, message }) =
-                        &outcome
+                    if let Ok(not_yet_done_content::ActionOutcome::OpenExternal {
+                        target,
+                        message,
+                    }) = &outcome
                     {
                         let _ = tx.send(LoadMsg::ContentOpenExternal {
                             target: target.clone(),
@@ -7033,30 +9747,184 @@ impl App {
                 });
             }
             not_yet_done_content::InputSpec::Form { fields } => {
-                // Prefill values from the node (edit flow); falls back to
-                // each field's static `default` inside the popup.
-                let prefill = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let node = adapter.get_by_id(&node_id).await?;
-                        node.form_prep(&action_id).await
+                self.open_content_form_popup(
+                    adapter, view_index, pane_id, node_id, action_id, fields, None,
+                );
+            }
+            not_yet_done_content::InputSpec::ColumnForm => {
+                // The fields come from *this view's* `source: custom` columns —
+                // the front-end's own typed config — not from the backend
+                // schema. So a column that has never been written still gets an
+                // input, and its YAML `kind:` supplies the `value_type` the TUI
+                // sends on submit, letting the store bootstrap the column on
+                // first write (type-on-first-write). No `describe_columns`
+                // round-trip, no separate "define a column" step.
+                let custom = self
+                    .content_view(view_index)
+                    .and_then(|cv| {
+                        cv.find_pane(pane_id)
+                            .map(|p| p.custom_column_fields(&cv.view_defs))
                     })
-                });
-                let prefill = match prefill {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.notify_error(format!("Failed to prepare form: {e}"));
-                        return;
-                    }
-                };
-                let popup = ContentFormPopup::new(action_id.clone(), fields, &prefill);
-                self.content_form_popup = Some(ContentFormPopupState {
-                    popup,
+                    .unwrap_or_default();
+                if custom.is_empty() {
+                    self.notify("No custom columns configured in this view".to_string());
+                    return;
+                }
+                let column_types = custom
+                    .iter()
+                    .map(|c| (c.key.clone(), c.value_type.clone()))
+                    .collect();
+                let fields = custom
+                    .into_iter()
+                    .map(|c| not_yet_done_content::FormFieldSpec::text(c.key, c.label).optional())
+                    .collect();
+                self.open_content_form_popup(
+                    adapter,
                     view_index,
                     pane_id,
                     node_id,
                     action_id,
-                });
+                    fields,
+                    Some(column_types),
+                );
             }
+        }
+    }
+
+    /// Shared tail for the two form-shaped input specs
+    /// ([`InputSpec::Form`](not_yet_done_content::InputSpec::Form) and
+    /// [`InputSpec::ColumnForm`](not_yet_done_content::InputSpec::ColumnForm)):
+    /// prefill from the node (edit flow, static `default` fallback inside the
+    /// popup) and open the generic form popup.
+    fn open_content_form_popup(
+        &mut self,
+        adapter: Arc<dyn not_yet_done_content::ContentAdapter>,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        action_id: String,
+        fields: Vec<not_yet_done_content::FormFieldSpec>,
+        column_types: Option<std::collections::HashMap<String, String>>,
+    ) {
+        let prefill = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let node = adapter.get_by_id(&node_id).await?;
+                node.form_prep(&action_id).await
+            })
+        });
+        let prefill = match prefill {
+            Ok(p) => p,
+            Err(e) => {
+                self.notify_error(format!("Failed to prepare form: {e}"));
+                return;
+            }
+        };
+        // Resolve the per-action layout/style (columns, field bar, inline vs
+        // dropdown selects) from the pane's `ActionDef.form` block — matched by
+        // the adapter-side action `id`, the same identifier the popup carries.
+        // Absent (or no matching action) → the driver's classic single-column,
+        // no-bar, dropdown defaults, so existing forms are unchanged.
+        let form_cfg = self.content_view(view_index).and_then(|cv| {
+            let pane = cv.find_pane(pane_id)?;
+            let vd = cv.view_defs.get(pane.view_def_index())?;
+            vd.actions
+                .iter()
+                .find(|a| a.id.as_deref() == Some(action_id.as_str()))
+                .and_then(|a| a.form.clone())
+        });
+        let form_options = Self::build_form_options(form_cfg.as_ref(), &fields);
+        let popup = ContentFormPopup::new(
+            action_id.clone(),
+            fields,
+            &prefill,
+            &self.theme,
+            &form_options,
+        );
+        self.content_form_popup = Some(ContentFormPopupState {
+            popup,
+            view_index,
+            pane_id,
+            node_id,
+            action_id,
+            column_types,
+        });
+    }
+
+    /// Translate a per-action [`ActionFormConfig`] (view YAML) into the
+    /// driver-level [`FormOptions`]. Absent config → today's defaults
+    /// (1 column, no bar, dropdown selects). `column_assignment` lists field
+    /// **keys** per column; they're resolved to per-field column indices
+    /// (`column_of`) against the actual `fields`, with unlisted fields left in
+    /// column 0.
+    fn build_form_options(
+        cfg: Option<&crate::config::view_config::ActionFormConfig>,
+        fields: &[not_yet_done_content::FormFieldSpec],
+    ) -> not_yet_done_ratatui::FormOptions {
+        use crate::config::view_config::SelectStyleConfig;
+        use not_yet_done_ratatui::{FormOptions, SelectStyle};
+
+        let mut opts = FormOptions::default();
+        let Some(cfg) = cfg else {
+            return opts;
+        };
+        if let Some(c) = cfg.columns {
+            opts.columns = c;
+        }
+        if let Some(b) = cfg.field_bar {
+            opts.field_bar = b;
+        }
+        if let Some(s) = cfg.select_style {
+            opts.select_style = match s {
+                SelectStyleConfig::Inline => SelectStyle::Inline,
+                SelectStyleConfig::Dropdown => SelectStyle::Dropdown,
+            };
+        }
+        if let Some(assign) = &cfg.column_assignment {
+            let mut column_of = vec![0usize; fields.len()];
+            for (col_idx, keys) in assign.iter().enumerate() {
+                for key in keys {
+                    if let Some(fi) = fields.iter().position(|f| &f.key == key) {
+                        column_of[fi] = col_idx;
+                    }
+                }
+            }
+            opts.column_of = column_of;
+        }
+        opts
+    }
+
+    /// Fetch the columns the adapter *describes* for each given node type
+    /// off-thread (3b) and route them back via [`LoadMsg::ContentColumnSchema`]
+    /// so their backend-authoritative types merge into column rendering. Fired
+    /// after a content load. An empty schema (the common case — no custom
+    /// columns) is dropped rather than sent, so a view without described
+    /// columns triggers no extra rebuilds.
+    fn refresh_column_schema(&self, view_index: usize, node_types: Vec<String>) {
+        if node_types.is_empty() {
+            return;
+        }
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            return;
+        };
+        let tx = self.load_tx.clone();
+        for node_type in node_types {
+            let adapter = Arc::clone(&adapter);
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let schema = adapter.describe_columns(&node_type).await;
+                if schema.is_empty() {
+                    return;
+                }
+                let _ = tx.send(LoadMsg::ContentColumnSchema {
+                    view_index,
+                    node_type,
+                    schema,
+                });
+            });
         }
     }
 
@@ -7109,6 +9977,7 @@ impl App {
         node_id: String,
         action_id: String,
         values: std::collections::HashMap<String, String>,
+        column_types: Option<std::collections::HashMap<String, String>>,
     ) {
         let adapter = self
             .content_view(view_index)
@@ -7118,6 +9987,28 @@ impl App {
             self.notify("No adapter available".to_string());
             return;
         };
+        // A `ColumnForm` carries per-field types (from the view YAML `kind:`),
+        // so it submits typed cells the backend can bootstrap on first write;
+        // a plain `Form` submits the untyped value map.
+        let input = match column_types {
+            Some(types) => not_yet_done_content::ActionInput::ColumnForm(
+                values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let value_type = types
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_else(|| "text".to_string());
+                        not_yet_done_content::ColumnCellInput {
+                            key,
+                            value,
+                            value_type,
+                        }
+                    })
+                    .collect(),
+            ),
+            None => not_yet_done_content::ActionInput::Form(values),
+        };
         let tx = self.load_tx.clone();
         let vi = view_index;
         let pid = pane_id;
@@ -7125,8 +10016,7 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(&action_id, not_yet_done_content::ActionInput::Form(values))
-                    .await
+                node.execute(&action_id, input).await
             }
             .await;
             let result = match outcome {
@@ -7189,9 +10079,12 @@ impl App {
         });
         self.editor_load_token = self.editor_load_token.wrapping_add(1);
         let token = self.editor_load_token;
-        let msg = format!("⏳ Opening editor: {label}…");
-        self.notify(msg.clone());
-        self.editor_loading_msg = Some(msg);
+        self.notification_bar.set_keyed(
+            EDITOR_LOADING_SLOT,
+            crate::components::notification_bar::NoticeClass::Message,
+            format!("⏳ Opening editor: {label}…"),
+        );
+        self.editor_loading = true;
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             let result = crate::edit_session::NodeActionEditSession::new(
@@ -7251,14 +10144,12 @@ impl App {
                         Ok(not_yet_done_content::ActionOutcome::Done { message }) => {
                             Ok(message.unwrap_or_else(|| format!("{action_id} executed")))
                         }
-                        Ok(not_yet_done_content::ActionOutcome::OpenEditor {
-                            action_id: next,
-                        }) => {
-                            // Resolve the editor label from the node's own
-                            // action list (the picked value is a real action
-                            // id present in `actions()`); fall back to the id.
-                            let label = node
-                                .actions()
+                        Ok(not_yet_done_content::ActionOutcome::OpenEditor { action_id: next }) => {
+                            // Resolve the editor label from the type-level
+                            // action set (the picked value is a real action id
+                            // present in `actions_for_type`); fall back to the id.
+                            let label = adapter
+                                .actions_for_type(node.node_type())
                                 .into_iter()
                                 .find(|a| a.id == next)
                                 .map(|a| a.label)
@@ -7358,7 +10249,6 @@ impl App {
             CommonAction::ColumnConfig => {
                 self.open_column_config_popup();
             }
-            CommonAction::TrackingToggle => {}
             CommonAction::FormClose => {}
             CommonAction::FavoriteToggle => {
                 // Handled before action resolution when popup is open.
@@ -7377,6 +10267,9 @@ impl App {
             }
             CommonAction::SortMode => {
                 self.enter_sort_hint_mode();
+            }
+            CommonAction::SortMenu => {
+                self.open_sort_menu();
             }
             CommonAction::ColumnLeft => {
                 if let Some(table) = self.active_table_mut() {
@@ -7435,6 +10328,29 @@ impl App {
         let key = format!("content_columns:{}", cv.tab_name);
         let value = serde_json::to_string(cv.column_overrides()).unwrap_or_default();
         let empty = cv.column_overrides().is_empty();
+        let _ = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if empty {
+                    settings.delete(&key).await
+                } else {
+                    settings.set(&key, &value).await
+                }
+            })
+        });
+    }
+
+    /// Write a content tab's per-level card-mode map to the settings store.
+    /// Mirrors [`Self::apply_column_config`]: one JSON row per tab (level key
+    /// → on/off), deleted once the map is empty so a full reset back to the
+    /// configured defaults leaves no residue.
+    fn persist_card_mode(&mut self, view_index: usize) {
+        let settings = Arc::clone(&self.settings_repo);
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let key = format!("card_mode:{}", cv.tab_name);
+        let value = serde_json::to_string(cv.card_mode_overrides()).unwrap_or_default();
+        let empty = cv.card_mode_overrides().is_empty();
         let _ = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 if empty {
@@ -7530,6 +10446,87 @@ impl App {
         });
     }
 
+    /// Act on a [`Reminder`] fired for `view_index`: look up that tab's
+    /// `reminder:` block (the watcher only subscribes for enabled tabs, but
+    /// re-check so a mid-session config reload can't fire a stale command) and
+    /// run its `command`. The reminder's fields are handed to the command as
+    /// environment, never spliced into the string — see [`run_reminder_command`].
+    ///
+    /// [`Reminder`]: not_yet_done_content::Reminder
+    /// [`run_reminder_command`]: Self::run_reminder_command
+    fn handle_adapter_reminder(
+        &mut self,
+        view_index: usize,
+        reminder: not_yet_done_content::Reminder,
+    ) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let command = match cv.reminder.as_ref() {
+            Some(r) if r.enabled => r.command.clone(),
+            _ => {
+                reminder_trace(format_args!(
+                    "TUI received reminder {:?} but reminder disabled/absent → no command",
+                    reminder.title
+                ));
+                return;
+            }
+        };
+        reminder_trace(format_args!(
+            "TUI received reminder {:?} (lead={}min) → running command",
+            reminder.title, reminder.lead_minutes
+        ));
+        if let Err(e) = self.run_reminder_command(&command, &reminder) {
+            reminder_trace(format_args!("run_reminder_command FAILED: {e}"));
+            self.notify_error(format!("Reminder command failed: {e}"));
+        }
+    }
+
+    /// Run a tab's reminder `command` via `sh -c`, detached, exporting the
+    /// reminder's fields as `NYD_REMINDER_*` environment variables. Passing
+    /// them as env (not string interpolation) means an event title can never
+    /// be interpreted as shell — the command sees plain data. `NYD_REMINDER_UNTIL`
+    /// carries the item's end instant (empty when it has none), so a command can
+    /// keep a notification up until the moment is over. Stdio is nulled
+    /// and the child joins a fresh process group so it outlives this session
+    /// cleanly, exactly like [`spawn_link_opener`](Self::spawn_link_opener).
+    fn run_reminder_command(
+        &self,
+        command: &str,
+        reminder: &not_yet_done_content::Reminder,
+    ) -> Result<(), String> {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        if command.trim().is_empty() {
+            return Err("empty command".to_string());
+        }
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(command)
+            .env("NYD_REMINDER_ID", &reminder.id)
+            .env("NYD_REMINDER_TITLE", &reminder.title)
+            .env(
+                "NYD_REMINDER_DETAIL",
+                reminder.detail.as_deref().unwrap_or(""),
+            )
+            .env("NYD_REMINDER_WHEN", &reminder.when)
+            .env(
+                "NYD_REMINDER_UNTIL",
+                reminder.until.as_deref().unwrap_or(""),
+            )
+            .env(
+                "NYD_REMINDER_LEAD_MINUTES",
+                reminder.lead_minutes.to_string(),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.process_group(0);
+
+        cmd.spawn().map(|_child| ()).map_err(|e| e.to_string())
+    }
+
     /// Spawn the configured link opener (default `xdg-open`) on `target`,
     /// detached. The opener string is split on whitespace so leading flags
     /// work; `target` is the final argument. Stdio is nulled and the child is
@@ -7562,62 +10559,77 @@ impl App {
             .map_err(|e| format!("Failed to open: {e}"))
     }
 
-    /// Load column configuration from DB.
-    pub fn load_column_config(&mut self) {
-        // Load per-content-tab column overrides (one JSON row per tab,
-        // mapping level key → visible column keys in order). An unparsable
-        // row is ignored — the views then just show their YAML defaults.
-        let targets: Vec<(usize, String)> = self
-            .content_views_indexed()
-            .map(|(i, cv)| (i, cv.tab_name.clone()))
-            .collect();
-        for (idx, tab_name) in targets {
-            let settings = Arc::clone(&self.settings_repo);
-            let key = format!("content_columns:{tab_name}");
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async { settings.get(&key).await })
-            });
-            if let Ok(Some(value)) = result {
-                if let Ok(map) =
-                    serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(&value)
-                {
-                    if !map.is_empty() {
-                        if let Some(cv) = self.content_view_mut(idx) {
-                            cv.set_column_overrides(map);
-                        }
+    /// Load the per-content-tab card-mode map (one JSON row per tab, mapping
+    /// level key → on/off) so a mode the user toggled is restored before the
+    /// tab's first render. An unparsable row is ignored — the levels then
+    /// follow their `card.default`.
+    pub fn load_card_mode_for(&mut self, view_index: usize) {
+        let Some(tab_name) = self.content_view(view_index).map(|cv| cv.tab_name.clone()) else {
+            return;
+        };
+        let settings = Arc::clone(&self.settings_repo);
+        let key = format!("card_mode:{tab_name}");
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { settings.get(&key).await })
+        });
+        if let Ok(Some(value)) = result {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, bool>>(&value)
+            {
+                if !map.is_empty() {
+                    if let Some(cv) = self.content_view_mut(view_index) {
+                        cv.set_card_mode_overrides(map);
                     }
                 }
             }
         }
     }
 
-    /// Pre-fill the saved sort spec for every configured content view
-    /// from its adapter's persistence layer. Called once at startup,
-    /// before the first content load fires.
-    pub fn load_content_sort_states(&mut self) {
-        use crate::views::SortableView;
-        let entries: Vec<(
-            usize,
-            std::sync::Arc<dyn not_yet_done_content::ContentAdapter>,
-            String,
-        )> = self
-            .content_views_indexed()
-            .filter_map(|(i, cv)| {
-                cv.adapter
-                    .as_ref()
-                    .map(|a| (i, Arc::clone(a), cv.query_scope.clone()))
-            })
-            .collect();
-        for (idx, adapter, scope) in entries {
-            let res = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { adapter.load_view_sort(&scope).await })
-            });
-            if let Ok(sort) = res {
-                if !sort.is_empty() {
-                    if let Some(cv) = self.content_view_mut(idx) {
-                        SortableView::set_current_sort(cv, sort);
+    /// Load column configuration from DB for a single slot: the
+    /// per-content-tab column overrides (one JSON row per tab, mapping level
+    /// key → visible column keys in order). An unparsable row is ignored —
+    /// the view then just shows its YAML defaults.
+    pub fn load_column_config_for(&mut self, view_index: usize) {
+        let Some(tab_name) = self.content_view(view_index).map(|cv| cv.tab_name.clone()) else {
+            return;
+        };
+        let settings = Arc::clone(&self.settings_repo);
+        let key = format!("content_columns:{tab_name}");
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { settings.get(&key).await })
+        });
+        if let Ok(Some(value)) = result {
+            if let Ok(map) =
+                serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(&value)
+            {
+                if !map.is_empty() {
+                    if let Some(cv) = self.content_view_mut(view_index) {
+                        cv.set_column_overrides(map);
                     }
+                }
+            }
+        }
+    }
+
+    /// Pre-fill a content view's saved sort spec from its adapter's
+    /// persistence layer. Runs from [`Self::wire_content_view`], before
+    /// the view's first content load fires.
+    pub fn load_content_sort_state(&mut self, view_index: usize) {
+        use crate::views::SortableView;
+        let Some((adapter, scope)) = self.content_view(view_index).and_then(|cv| {
+            cv.adapter
+                .as_ref()
+                .map(|a| (Arc::clone(a), cv.query_scope.clone()))
+        }) else {
+            return;
+        };
+        let res = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { adapter.load_view_sort(&scope).await })
+        });
+        if let Ok(sort) = res {
+            if !sort.is_empty() {
+                if let Some(cv) = self.content_view_mut(view_index) {
+                    SortableView::set_current_sort(cv, sort);
                 }
             }
         }
@@ -7705,13 +10717,13 @@ impl App {
     // ── Sort-hint mode ─────────────────────────────────────────────
 
     /// Enter sort-hint mode for the active tab. Builds the column → label
-    /// map from the active view's [`SortableView::sortable_columns`].
+    /// map from the active view's [`SortableView::columns`].
     /// No-op for views that expose no sortable columns.
     pub fn enter_sort_hint_mode(&mut self) {
         use crate::views::SortableView;
         let Tab::Content(idx) = self.active_tab;
         let (target, columns) = match self.content_view(idx) {
-            Some(cv) => (SortTarget::Content(idx), SortableView::sortable_columns(cv)),
+            Some(cv) => (SortTarget::Content(idx), SortableView::columns(cv)),
             None => return,
         };
         if columns.is_empty() {
@@ -7770,7 +10782,7 @@ impl App {
                     self.sort_hint_phase = SortHintPhase::WaitingForDirection {
                         target,
                         column_id: col.key.clone(),
-                        column_name: col.label.clone(),
+                        column_name: col.display_label().to_string(),
                     };
                     return;
                 }
@@ -7848,6 +10860,21 @@ impl App {
             SortAction::Clear => format!("Sort cleared on {}", column_name),
         };
 
+        self.commit_sort(target, new_sort);
+        self.notify(descr);
+    }
+
+    /// Store a sort spec on the target view, persist it, and reload when it
+    /// actually changed. The single write path: the `S` hint mode and the
+    /// sort menu (`c s`) are two UI paths onto this one function.
+    /// Returns whether the view's sort changed.
+    fn commit_sort(
+        &mut self,
+        target: SortTarget,
+        new_sort: Vec<not_yet_done_content::SortKey>,
+    ) -> bool {
+        use crate::views::SortableView;
+
         match target {
             SortTarget::Content(idx) => {
                 let changed = self
@@ -7862,22 +10889,104 @@ impl App {
                         .unwrap_or_default();
                     self.spawn_content_load(idx, pane_id);
                 }
+                changed
             }
         }
-        self.notify(descr);
+    }
+
+    /// Open the sort menu for the active tab — the whole sort spec as one
+    /// editable list. Same source of columns as [`Self::enter_sort_hint_mode`],
+    /// so a view without sortable columns says so instead of showing an
+    /// empty popup.
+    fn open_sort_menu(&mut self) {
+        use crate::components::sort_menu::SortMenu;
+        use crate::views::SortableView;
+
+        let Tab::Content(idx) = self.active_tab;
+        let Some((columns, current)) = self.content_view(idx).map(|cv| {
+            (
+                SortableView::columns(cv),
+                SortableView::current_sort(cv).to_vec(),
+            )
+        }) else {
+            return;
+        };
+        if columns.is_empty() {
+            self.notify("No sortable columns".to_string());
+            return;
+        }
+        self.sort_menu_popup = Some(SortMenu::new(
+            Arc::clone(&self.shared_theme),
+            &columns,
+            &current,
+            &self.keybindings,
+        ));
+    }
+
+    /// Apply a full sort spec produced by the sort menu. Unlike
+    /// [`Self::apply_sort`] this replaces the spec wholesale — the menu
+    /// already shows every column, so what it hands over *is* the sort.
+    fn apply_sort_spec(&mut self, sort: Vec<not_yet_done_content::SortKey>) {
+        use crate::views::SortableView;
+        use not_yet_done_content::SortDirection;
+
+        let Tab::Content(idx) = self.active_tab;
+        let labels: Vec<(String, String)> = self
+            .content_view(idx)
+            .map(|cv| {
+                SortableView::columns(cv)
+                    .into_iter()
+                    .map(|c| {
+                        let label = c.display_label().to_string();
+                        (c.key, label)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let descr = if sort.is_empty() {
+            "Sort cleared".to_string()
+        } else {
+            let parts: Vec<String> = sort
+                .iter()
+                .map(|k| {
+                    let label = labels
+                        .iter()
+                        .find(|(key, _)| *key == k.column)
+                        .map(|(_, l)| l.as_str())
+                        .unwrap_or(k.column.as_str());
+                    let dir = match k.direction {
+                        SortDirection::Asc => "asc",
+                        SortDirection::Desc => "desc",
+                    };
+                    format!("{} ({})", label, dir)
+                })
+                .collect();
+            format!("Sort by {}", parts.join(", "))
+        };
+        // Silent when Enter changed nothing — closing the menu unchanged is
+        // not an event worth a notification.
+        if self.commit_sort(SortTarget::Content(idx), sort) {
+            self.notify(descr);
+        }
     }
 
     // ── Saved queries / favorites ──────────────────────────────────
 
     /// Write or delete the `default_query:{scope}` settings row. `None`
     /// clears the default.
-    fn persist_default_query(&self, scope: &str, name: Option<&str>) {
+    ///
+    /// The value carries the owning store's kind (`saved:Name`), so that
+    /// applying the default on start goes to one store instead of probing
+    /// both; [`DefaultQuery::from_setting`] still reads the bare names
+    /// written before kinds existed.
+    fn persist_default_query(&self, scope: &str, default: Option<&DefaultQuery>) {
         let repo = Arc::clone(&self.settings_repo);
         let key = format!("default_query:{scope}");
+        let value = default.map(|d| d.to_setting());
         let _ = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                match name {
-                    Some(n) => repo.set(&key, n).await,
+                match value {
+                    Some(v) => repo.set(&key, &v).await,
                     None => repo.delete(&key).await,
                 }
             })
@@ -7899,7 +11008,15 @@ impl App {
         } else {
             Some(name.to_string())
         };
-        self.persist_default_query(&scope, new.as_deref());
+        // The kind is recorded so a startup resolution can go straight to
+        // the owning store; the merged menu list stays the authority when
+        // both are listed anyway.
+        let kind = cv.query_kind_of(name);
+        let encoded = new.as_deref().map(|n| DefaultQuery {
+            kind,
+            name: n.to_string(),
+        });
+        self.persist_default_query(&scope, encoded.as_ref());
         if let Some(cv) = self.content_view_mut(view_index) {
             cv.default_saved_query = new.clone();
         }
@@ -7909,20 +11026,17 @@ impl App {
         }
     }
 
-    /// Load DB saved queries for all content views and merge with YAML defaults.
-    pub fn load_content_saved_queries(&mut self) {
-        for i in 0..self.content_views.len() {
-            self.reload_content_saved_queries(i);
-        }
-    }
-
-    /// Reload saved queries for a single content view.
+    /// Reload saved queries for a single content view and merge with the
+    /// YAML defaults.
     ///
-    /// Bodies come from the adapter's `SavedQueryStore` (filesystem),
-    /// shortcuts from the `query_shortcut` table scoped to this view.
-    /// An adapter without a store (Postgres, plus any adapter that
-    /// opts out) yields an empty list — view-YAML `default:` is the
-    /// only fallback then.
+    /// Bodies come from *both* adapter-managed stores — adapter-native
+    /// saved queries and extended query documents — merged into one list,
+    /// because names are unique across the two and the user is not meant to
+    /// tell them apart; each entry remembers its `kind` so the loader knows
+    /// which way to execute it. Shortcuts come from the `query_shortcut`
+    /// table scoped to this view. An adapter without a store (Postgres, plus
+    /// any adapter that opts out) yields an empty list — view-YAML `default:`
+    /// is the only fallback then.
     fn reload_content_saved_queries(&mut self, view_index: usize) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
@@ -7933,31 +11047,56 @@ impl App {
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let settings_repo = Arc::clone(&self.settings_repo);
 
-        let (entries, default_query): (Vec<(String, String, Option<String>)>, Option<String>) =
+        type ReloadResult = (
+            Vec<crate::views::content_view::MergedSavedQuery>,
+            Option<String>,
+            Option<String>,
+        );
+        let (entries, default_query, load_error): ReloadResult =
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
+                    // Only the name is kept: the setting's `kind` is a hint
+                    // written at save time, while the merged list below is the
+                    // authority on which store a name actually lives in today
+                    // (see `ContentView::query_kind_of`).
                     let default_query = settings_repo
                         .get(&format!("default_query:{scope}"))
                         .await
                         .ok()
-                        .flatten();
+                        .flatten()
+                        .map(|v| DefaultQuery::from_setting(&v).name);
                     let Some(adapter) = adapter.as_ref() else {
-                        return (Vec::new(), default_query);
+                        return (Vec::new(), default_query, None);
                     };
                     let Some(store) = adapter.saved_query_store() else {
-                        return (Vec::new(), default_query);
+                        return (Vec::new(), default_query, None);
                     };
                     let names = match store.list().await {
                         Ok(n) => n,
-                        Err(_) => return (Vec::new(), default_query),
+                        Err(e) => {
+                            return (
+                                Vec::new(),
+                                default_query,
+                                Some(format!("could not list saved queries: {e}")),
+                            );
+                        }
                     };
-                    let shortcut_map: std::collections::HashMap<String, String> = shortcut_repo
-                        .list_by_scope(&scope)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|m| (m.name, m.shortcut))
-                        .collect();
+                    // A single malformed row (e.g. a text-encoded `id`)
+                    // fails the whole scope's decode; surface it instead of
+                    // silently dropping every shortcut in this scope.
+                    let (shortcut_map, mut load_error): (
+                        std::collections::HashMap<String, String>,
+                        Option<String>,
+                    ) = match shortcut_repo.list_by_scope(&scope).await {
+                        Ok(rows) => (
+                            rows.into_iter().map(|m| (m.name, m.shortcut)).collect(),
+                            None,
+                        ),
+                        Err(e) => (
+                            std::collections::HashMap::new(),
+                            Some(format!("could not load query shortcuts: {e}")),
+                        ),
+                    };
                     let mut out = Vec::with_capacity(names.len());
                     for name in names {
                         let body = match store.load(&name).await {
@@ -7965,9 +11104,40 @@ impl App {
                             Err(_) => continue,
                         };
                         let shortcut = shortcut_map.get(&name).cloned();
-                        out.push((name, body, shortcut));
+                        out.push(crate::views::content_view::MergedSavedQuery {
+                            name,
+                            query: body,
+                            shortcut,
+                            kind: QueryKind::Saved,
+                        });
                     }
-                    (out, default_query)
+                    // The extended store rides alongside, not instead: an
+                    // adapter has one only if it has a saved-query store, and
+                    // a listing failure there must not lose the saved queries
+                    // already collected.
+                    if let Some(extended) = adapter.extended_query_store() {
+                        match extended.list().await {
+                            Ok(names) => {
+                                for name in names {
+                                    let Ok(body) = extended.load(&name).await else {
+                                        continue;
+                                    };
+                                    let shortcut = shortcut_map.get(&name).cloned();
+                                    out.push(crate::views::content_view::MergedSavedQuery {
+                                        name,
+                                        query: body,
+                                        shortcut,
+                                        kind: QueryKind::Extended,
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                load_error
+                                    .get_or_insert(format!("could not list extended queries: {e}"));
+                            }
+                        }
+                    }
+                    (out, default_query, load_error)
                 })
             });
 
@@ -7982,8 +11152,10 @@ impl App {
             Some(cv) => {
                 let mut bound: Vec<(String, String)> = Vec::new();
                 let mut warnings = Vec::new();
-                for (name, _, shortcut) in &entries {
-                    let Some(sc) = shortcut else { continue };
+                for entry in &entries {
+                    let (name, Some(sc)) = (&entry.name, &entry.shortcut) else {
+                        continue;
+                    };
                     if let Some(conflict) = crate::keymap::saved_query_shortcut_conflict(
                         &cv.tab_name,
                         &cv.view_defs,
@@ -8013,39 +11185,44 @@ impl App {
                 self.notify(w);
             }
         }
+        // A DB/store load error would otherwise vanish (empty list ==
+        // "no shortcuts"), which is exactly what hid the text-uuid bug.
+        // Surface it once per distinct message.
+        if let Some(err) = load_error {
+            let msg = format!("{}: {}", scope, err);
+            if self.warned_saved_query_conflicts.insert(msg.clone()) {
+                self.notify(msg);
+            }
+        }
     }
 
-    /// Populate `ContentView::postgres_table_shortcuts` for the
+    /// Populate `ContentView::node_script_shortcuts` for the
     /// currently-focused Postgres table (SQ-8d). Cache miss → one
     /// indexed `query_shortcut` lookup keyed on the table's NodeRef
     /// scope. Cache hits short-circuit. Called once per content-tab
     /// keypress; insulated from non-Postgres adapters by the cheap
-    /// `adapter_type()`/`target_postgres_table_node_id()` checks.
-    pub fn ensure_postgres_table_shortcuts_loaded(&mut self, view_index: usize) {
+    /// `adapter_type()`/`target_node_script_node_id()` checks.
+    pub fn ensure_node_script_shortcuts_loaded(&mut self, view_index: usize) {
         let Some(cv) = self.content_view(view_index) else {
             return;
         };
         let Some(adapter) = cv.adapter.as_ref() else {
             return;
         };
-        if adapter.adapter_type() != "postgres" {
+        if !adapter.capabilities().supports_node_query_editor {
             return;
         }
-        let Some(table_node_id) = cv.target_postgres_table_node_id() else {
+        let Some(node_id) = cv.target_node_script_node_id() else {
             return;
         };
-        if cv.postgres_table_shortcuts.contains_key(&table_node_id) {
+        if cv.node_script_shortcuts.contains_key(&node_id) {
             return;
         }
-        let instance_id = adapter.instance_id().to_string();
-        let Some((db, schema, table)) =
-            crate::views::content_view::parse_postgres_table_node_id(&table_node_id)
-        else {
-            // Adapter id form changed — leave the cache empty so the
-            // claim path quietly stays disabled until the parsers catch up.
-            return;
-        };
-        let scope = format!("postgres/{instance_id}/{db}/schemas/{schema}/tables/{table}",);
+        let scope = crate::app::node_actions::node_script_scope(
+            adapter.adapter_type(),
+            adapter.instance_id(),
+            &node_id,
+        );
         let repo = Arc::clone(&self.query_shortcut_repo);
         let entries: Vec<(String, String)> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -8058,7 +11235,7 @@ impl App {
             })
         });
         if let Some(cv) = self.content_view_mut(view_index) {
-            cv.postgres_table_shortcuts.insert(table_node_id, entries);
+            cv.node_script_shortcuts.insert(node_id, entries);
         }
     }
 
@@ -8067,7 +11244,7 @@ impl App {
     /// `query_shortcut` lookup. No-op when the level offers no `type:
     /// script` action (so no scope) or the cache is already populated.
     /// Called once per content-tab keypress, symmetric with
-    /// [`Self::ensure_postgres_table_shortcuts_loaded`].
+    /// [`Self::ensure_node_script_shortcuts_loaded`].
     pub fn ensure_script_shortcuts_loaded(&mut self, view_index: usize) {
         let Some(cv) = self.content_view(view_index) else {
             return;
@@ -8105,7 +11282,13 @@ impl App {
         let chord_owned = chord.to_string();
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
-                .block_on(async { shortcut_repo.set(&scope, &name, &chord_owned).await })
+                // Script rows share the query_shortcut table but are resolved
+                // through their scope, so the kind column stays at its default.
+                .block_on(async {
+                    shortcut_repo
+                        .set(&scope, &name, QueryKind::Saved.as_str(), &chord_owned)
+                        .await
+                })
         });
         if let Err(e) = result {
             self.notify_error(format!("Failed to persist shortcut: {e}"));
@@ -8139,33 +11322,61 @@ impl App {
             .any(|b| b.matches(shortcut))
     }
 
-    fn add_favorite(&mut self, scope: &str, name: String, shortcut: String, query: String) {
+    /// Bind `shortcut` to the saved query `name` in `scope`: write the
+    /// body to the adapter store and the key chord to the DB, then reload.
+    /// Returns `Err` with a user-facing message when the scope matches no
+    /// content view or the DB write fails — the caller must not report
+    /// success blindly (a swallowed `set` error here is exactly what made
+    /// a failed bind look like it worked).
+    fn add_favorite(&mut self, favorite: PendingFavorite, shortcut: String) -> Result<(), String> {
+        let PendingFavorite {
+            scope,
+            name,
+            query,
+            kind,
+        } = favorite;
         // Content view scope — body in adapter store, shortcut in DB.
         let target_idx = self
             .content_views_indexed()
             .find(|(_, cv)| cv.query_scope == scope)
             .map(|(idx, _)| idx);
-        if let Some(idx) = target_idx {
-            self.save_content_query_body(idx, &name, &query);
-            let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-            let scope_owned = scope.to_string();
-            let name_owned = name.clone();
-            let shortcut_owned = shortcut.clone();
-            let _ = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    shortcut_repo
-                        .set(&scope_owned, &name_owned, &shortcut_owned)
-                        .await
-                })
-            });
-            self.reload_content_saved_queries(idx);
+        let Some(idx) = target_idx else {
+            return Err(format!("no content view matches scope '{scope}'"));
+        };
+        self.save_content_query_body(idx, &name, &query, kind);
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let scope_owned = scope.to_string();
+        let name_owned = name.clone();
+        let shortcut_owned = shortcut.clone();
+        let set_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                // The row records the kind so a shortcut press can go
+                // straight to the owning store.
+                shortcut_repo
+                    .set(&scope_owned, &name_owned, kind.as_str(), &shortcut_owned)
+                    .await
+            })
+        });
+        if let Err(e) = set_result {
+            return Err(format!("could not save shortcut: {e}"));
         }
+        self.reload_content_saved_queries(idx);
+        Ok(())
     }
 
-    /// Write `body` to the active adapter's `SavedQueryStore` for the
-    /// view at `view_index`. No-op if the adapter doesn't expose a
-    /// store (e.g. Postgres).
-    fn save_content_query_body(&self, view_index: usize, name: &str, body: &str) {
+    /// Which store owns the query named `name` in this view, according to
+    /// the merged menu list. Unknown names read as `Saved` — that is a body
+    /// typed into the editor, which is always adapter-native.
+    fn content_query_kind(&self, view_index: usize, name: &str) -> QueryKind {
+        self.content_view(view_index)
+            .map(|cv| cv.query_kind_of(name))
+            .unwrap_or_default()
+    }
+
+    /// Write `body` to the store `kind` names on the active adapter of the
+    /// view at `view_index`. No-op if the adapter doesn't expose that store
+    /// (e.g. Postgres, which has neither).
+    fn save_content_query_body(&self, view_index: usize, name: &str, body: &str, kind: QueryKind) {
         let Some(cv) = self.content_view(view_index) else {
             return;
         };
@@ -8177,15 +11388,24 @@ impl App {
                 let Some(adapter) = adapter.as_ref() else {
                     return;
                 };
-                let Some(store) = adapter.saved_query_store() else {
-                    return;
+                let _ = match kind {
+                    QueryKind::Saved => match adapter.saved_query_store() {
+                        Some(store) => store.save(&name_owned, &body_owned).await,
+                        None => return,
+                    },
+                    QueryKind::Extended => match adapter.extended_query_store() {
+                        Some(store) => store.save(&name_owned, &body_owned).await,
+                        None => return,
+                    },
                 };
-                let _ = store.save(&name_owned, &body_owned).await;
             })
         });
     }
 
-    fn delete_content_query(&self, view_index: usize, scope: &str, name: &str) {
+    /// Delete a query body plus its shortcut row. `kind` picks the store:
+    /// deleting from the wrong one would leave the entry in the menu while
+    /// reporting success.
+    fn delete_content_query(&self, view_index: usize, scope: &str, name: &str, kind: QueryKind) {
         let Some(cv) = self.content_view(view_index) else {
             return;
         };
@@ -8196,10 +11416,32 @@ impl App {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 if let Some(adapter) = adapter.as_ref() {
-                    if let Some(store) = adapter.saved_query_store() {
-                        let _ = store.delete(&name_owned).await;
+                    match kind {
+                        QueryKind::Saved => {
+                            if let Some(store) = adapter.saved_query_store() {
+                                let _ = store.delete(&name_owned).await;
+                            }
+                        }
+                        QueryKind::Extended => {
+                            if let Some(store) = adapter.extended_query_store() {
+                                let _ = store.delete(&name_owned).await;
+                            }
+                        }
                     }
                 }
+                let _ = shortcut_repo.unset(&scope_owned, &name_owned).await;
+            })
+        });
+    }
+
+    /// Remove the keyboard shortcut bound to a saved content query,
+    /// leaving the query body itself in place.
+    fn clear_content_query_shortcut(&self, _view_index: usize, scope: &str, name: &str) {
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let scope_owned = scope.to_string();
+        let name_owned = name.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
                 let _ = shortcut_repo.unset(&scope_owned, &name_owned).await;
             })
         });
@@ -8230,6 +11472,128 @@ impl App {
                     .await;
             })
         });
+    }
+
+    // ── DB-stored shortcut editing (query_shortcut table) ─────────────
+
+    /// Resolve a DB-backed shortcut source (saved query / `:script`-menu /
+    /// Postgres-table script) to the `query_shortcut` row it edits and the
+    /// content view whose chord cache must be invalidated, or `None` for any
+    /// other (YAML-backed or built-in) source. Clones everything so no borrow
+    /// on `self` leaks out — the caller then mutates through the repository.
+    fn resolve_db_shortcut(&self, source: &crate::keymap::KeySource) -> Option<DbShortcutTarget> {
+        use crate::keymap::KeySource;
+        match source {
+            KeySource::SavedQueryShortcut { view, name } => {
+                let (idx, cv) = self
+                    .content_views_indexed()
+                    .find(|(_, cv)| cv.active_view_name() == *view)?;
+                Some(DbShortcutTarget {
+                    scope: cv.query_scope.clone(),
+                    name: name.clone(),
+                    view_index: idx,
+                    invalidate: DbShortcutInvalidate::SavedQuery,
+                })
+            }
+            KeySource::ScriptShortcut { scope, name } => {
+                let (idx, _) = self
+                    .content_views_indexed()
+                    .find(|(_, cv)| cv.focused_script_scope().as_deref() == Some(scope.as_str()))?;
+                Some(DbShortcutTarget {
+                    scope: scope.clone(),
+                    name: name.clone(),
+                    view_index: idx,
+                    invalidate: DbShortcutInvalidate::ScriptScope(scope.clone()),
+                })
+            }
+            KeySource::NodeScriptShortcut { node_id, script } => {
+                let (idx, cv) = self
+                    .content_views_indexed()
+                    .find(|(_, cv)| cv.node_script_shortcuts.contains_key(node_id))?;
+                let adapter = cv.adapter.as_ref()?;
+                // Same string `node_actions::node_script_scope` builds, so
+                // the row this resolves to is the one the bind path wrote.
+                let scope = crate::app::node_actions::node_script_scope(
+                    adapter.adapter_type(),
+                    adapter.instance_id(),
+                    node_id,
+                );
+                Some(DbShortcutTarget {
+                    scope,
+                    name: script.clone(),
+                    view_index: idx,
+                    invalidate: DbShortcutInvalidate::NodeScript(node_id.clone()),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Drop the cached chord-claim behind a DB shortcut so the next keypress
+    /// rebuilds the keymap from the changed `query_shortcut` state.
+    fn invalidate_db_shortcut(&mut self, target: &DbShortcutTarget) {
+        match &target.invalidate {
+            DbShortcutInvalidate::SavedQuery => {
+                self.reload_content_saved_queries(target.view_index)
+            }
+            DbShortcutInvalidate::ScriptScope(scope) => {
+                if let Some(cv) = self.content_view_mut(target.view_index) {
+                    cv.script_shortcuts.remove(scope);
+                }
+            }
+            DbShortcutInvalidate::NodeScript(node) => {
+                if let Some(cv) = self.content_view_mut(target.view_index) {
+                    cv.node_script_shortcuts.remove(node);
+                }
+            }
+        }
+    }
+
+    /// Clear the chord of a DB-stored shortcut (unset its `query_shortcut`
+    /// row), leaving the query/script body in place. Returns `Ok(true)` when
+    /// `source` was DB-backed and the row was unset, `Ok(false)` when it is a
+    /// YAML/built-in source the caller must handle itself, or `Err` on DB
+    /// failure. Mirrors `clear_content_query_shortcut` / `clear_postgres_…`.
+    fn free_db_shortcut(&mut self, source: &crate::keymap::KeySource) -> Result<bool, String> {
+        let Some(target) = self.resolve_db_shortcut(source) else {
+            return Ok(false);
+        };
+        let repo = Arc::clone(&self.query_shortcut_repo);
+        let (scope, name) = (target.scope.clone(), target.name.clone());
+        let res = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { repo.unset(&scope, &name).await })
+        });
+        res.map_err(|e| format!("could not clear shortcut: {e}"))?;
+        self.invalidate_db_shortcut(&target);
+        Ok(true)
+    }
+
+    /// Bind (or replace — a DB shortcut has a single chord, no alternatives
+    /// list) the chord of a DB-stored shortcut. Returns `Ok(true)` when
+    /// `source` was DB-backed and the row was set, `Ok(false)` when the caller
+    /// must edit YAML instead, or `Err` on DB failure.
+    fn set_db_shortcut(
+        &mut self,
+        source: &crate::keymap::KeySource,
+        chord: &str,
+    ) -> Result<bool, String> {
+        let Some(target) = self.resolve_db_shortcut(source) else {
+            return Ok(false);
+        };
+        let repo = Arc::clone(&self.query_shortcut_repo);
+        let (scope, name, chord_owned) =
+            (target.scope.clone(), target.name.clone(), chord.to_string());
+        let res = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                // Script row — see `bind_script_shortcut` on the kind.
+                .block_on(async {
+                    repo.set(&scope, &name, QueryKind::Saved.as_str(), &chord_owned)
+                        .await
+                })
+        });
+        res.map_err(|e| format!("could not save shortcut: {e}"))?;
+        self.invalidate_db_shortcut(&target);
+        Ok(true)
     }
 
     // ── Command line (:) ──────────────────────────────────────────────
@@ -8335,16 +11699,6 @@ impl App {
                 return;
             }
             self.tree_find_command(rest.trim());
-            return;
-        }
-
-        if args[0] == "db-script-new" {
-            let rest = cmd
-                .trim()
-                .splitn(2, char::is_whitespace)
-                .nth(1)
-                .unwrap_or("");
-            self.db_script_new_command(rest.trim());
             return;
         }
 
@@ -8476,22 +11830,6 @@ impl App {
                     Err(e) => self.notify_error(format!("Delete error: {e}")),
                 }
             }
-            PendingConfirmation::DeleteAdapterDbScript {
-                view_index,
-                pane_id,
-                database,
-                script,
-            } => {
-                self.delete_adapter_db_script_now(view_index, pane_id, database, script);
-            }
-            PendingConfirmation::DeleteAdapterDbScriptDir {
-                view_index,
-                pane_id,
-                database,
-                rel_path,
-            } => {
-                self.delete_adapter_db_script_dir_now(view_index, pane_id, database, rel_path);
-            }
             PendingConfirmation::DeleteContentNode {
                 view_index,
                 pane_id,
@@ -8509,7 +11847,14 @@ impl App {
                 // Re-invoke the same action on the same node, now with
                 // `confirmed: true`, so the adapter does the work instead of
                 // returning another `Confirm`.
-                self.spawn_invoke_node_action(view_index, pane_id, node_id, action_name, true, None);
+                self.spawn_invoke_node_action(
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_name,
+                    true,
+                    None,
+                );
             }
             PendingConfirmation::BulkDeleteStaleLinks(link_ids) => {
                 let repo = Arc::clone(&self.link_repo);
@@ -8568,11 +11913,14 @@ impl App {
         }
     }
 
-    /// Returns `true` if an external editor is currently running OR if a
-    /// previous commit is still being processed in the background. Both
-    /// states should reject a new editor open.
+    /// Returns `true` if an editor is currently live — an external process,
+    /// the builtin pane — or if a previous commit is still being processed
+    /// in the background. All three states reject a new editor open.
     pub fn editor_busy(&self) -> bool {
-        self.detached_editor.is_some() || self.commit_in_flight || self.editor_loading_msg.is_some()
+        self.detached_editor.is_some()
+            || self.builtin_editor.is_some()
+            || self.commit_in_flight
+            || self.editor_loading
     }
 
     /// Returns `true` if a session is awaiting a buffer from the editor
@@ -8605,10 +11953,70 @@ impl App {
         true
     }
 
-    /// True while any content adapter is in a `Busy` state — the only
-    /// banner whose text advances purely with wall-clock time.
+    /// True while any content adapter is in a `Busy` state whose banner is
+    /// actually shown — the only banner whose text advances purely with
+    /// wall-clock time. A tab with `load_banner: off` has nothing to repaint,
+    /// so it must not keep the loop awake for a second counter nobody sees.
     fn has_live_banner(&self) -> bool {
-        self.content_views_indexed().any(|(_, cv)| cv.is_busy())
+        self.content_views_indexed()
+            .any(|(_, cv)| cv.is_busy() && cv.load_banner_route() != LoadBannerRoute::Off)
+    }
+
+    /// Resolve where this view's load banner goes: its own `tab.load_banner`
+    /// if the view file set one, else the global `notifications.load_banner`.
+    /// Re-run on every wiring, so an edited config takes effect on reload.
+    fn apply_load_banner_route(&mut self, view_index: usize) {
+        let global = self.config.notifications.load_banner;
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.set_load_banner_default(global);
+        }
+    }
+
+    /// Keep the global load slot in step with the tabs that route their load
+    /// banner there (`load_banner: global`). Called once per frame: the slot
+    /// is derived state, and re-deriving it beats subscribing to every status
+    /// transition that could invalidate it — a missed transition would leave
+    /// a counter ticking forever on a tab that finished long ago.
+    ///
+    /// All globally routed tabs share **one** slot: a single tab names itself
+    /// (`"Jira — Loading… 40 % (3s)"`, since the global bar cannot say which
+    /// tab is meant), several collapse into one counter. The bar therefore
+    /// never spends more than one line on loads, whatever is going on.
+    pub fn sync_load_banners(&mut self) {
+        let live: Vec<(String, LoadBanner)> = self
+            .content_views_indexed()
+            .filter_map(|(_, cv)| cv.global_load_banner().map(|b| (cv.tab_name.clone(), b)))
+            .collect();
+        let text = match live.len() {
+            0 => None,
+            1 => Some(format!("{} — {}", live[0].0, live[0].1.text)),
+            n => {
+                let oldest = live
+                    .iter()
+                    .map(|(_, b)| b.started_at_unix_ms)
+                    .min()
+                    .unwrap_or_default();
+                Some(collapsed_load_banner(n, oldest))
+            }
+        };
+        // Same fallback as a prominent `notify` action: a user who switched the
+        // loud top strip off gets the counter in the bottom bar instead of
+        // losing it. Clearing the other bar covers a config reload that flips
+        // `alert_enabled` while a load is in flight.
+        let (target, other) = if self.config.notifications.alert_enabled {
+            (&mut self.alert_bar, &mut self.notification_bar)
+        } else {
+            (&mut self.notification_bar, &mut self.alert_bar)
+        };
+        other.clear_keyed(LOAD_BANNER_SLOT);
+        match text {
+            Some(t) => target.set_keyed(
+                LOAD_BANNER_SLOT,
+                crate::components::notification_bar::NoticeClass::Load,
+                t,
+            ),
+            None => target.clear_keyed(LOAD_BANNER_SLOT),
+        }
     }
 
     /// Whether the event-driven (1b) loop must arm its periodic ticker.
@@ -8718,8 +12126,8 @@ fn has_clipboard() -> bool {
 /// Build the [`TabLayout`] for the current config + loaded content
 /// views. Returns the layout plus an optional hard-error message (a
 /// duplicate tab name) for the caller to surface as a startup modal; on
-/// that error the layout falls back to legacy so the app still runs.
-/// Soft issues (unknown / missing constellation) are logged, not
+/// that error the layout falls back to all tabs so the app still runs.
+/// Soft issues (unknown tab names in `tabs.order`) are logged, not
 /// returned.
 fn build_tab_layout(
     tabs_cfg: &crate::config::TabsConfig,
@@ -8737,7 +12145,7 @@ fn build_tab_layout(
         Ok(layout) => (layout, None),
         Err(hard) => {
             not_yet_done_content::http_log::log_error("tab_layout", &hard);
-            (TabLayout::legacy(content_views.len()), Some(hard))
+            (TabLayout::all_tabs(content_views.len()), Some(hard))
         }
     }
 }
@@ -8900,7 +12308,11 @@ fn load_content_views(
                                 None
                             }
                             Some(cfg) => {
-                                match factory.create(config.adapter.effective_instance_id(), &cfg, host_ctx) {
+                                match factory.create(
+                                    config.adapter.effective_instance_id(),
+                                    &cfg,
+                                    host_ctx,
+                                ) {
                                     Ok(a) => Some(Arc::from(a)),
                                     Err(e) => {
                                         init_error = Some(e.to_string());
@@ -8956,7 +12368,164 @@ fn load_content_views(
 
 #[cfg(test)]
 mod tests {
-    use super::{image_temp_filename, split_leading_token};
+    use super::{
+        App, credential_form_allowed, credential_form_title, format_notification_log,
+        image_temp_filename, notification_bar_hint, parse_query_apply_args,
+        render_payload_template, split_leading_token, which_key_filter, which_key_prefix_allowed,
+    };
+
+    #[test]
+    fn the_active_tab_may_always_ask_for_credentials() {
+        assert!(credential_form_allowed(2, 2, true, None));
+        assert!(credential_form_allowed(2, 2, false, None));
+    }
+
+    #[test]
+    fn an_eager_background_tab_may_ask_at_startup() {
+        // manual_connect: false — it connects without the user visiting it,
+        // so its form has to be visible from wherever the user is.
+        assert!(credential_form_allowed(0, 3, false, None));
+    }
+
+    #[test]
+    fn a_manual_connect_background_tab_stays_quiet() {
+        // Its load only starts from a `reload` pressed on that tab, so the
+        // form waits until the tab is opened.
+        assert!(!credential_form_allowed(0, 3, true, None));
+    }
+
+    #[test]
+    fn an_open_form_is_never_taken_from_another_view() {
+        assert!(!credential_form_allowed(1, 1, false, Some(4)));
+        assert!(!credential_form_allowed(0, 3, false, Some(4)));
+        // …but the owner may keep refreshing its own form (new error, new
+        // round of a multi-step script).
+        assert!(credential_form_allowed(0, 4, false, Some(4)));
+    }
+
+    #[test]
+    fn credential_form_title_leads_with_the_tab() {
+        assert_eq!(
+            credential_form_title(Some("Password store locked"), Some("Kimai")),
+            "Kimai: Password store locked"
+        );
+        assert_eq!(credential_form_title(None, Some("Kimai")), "Login: Kimai");
+        assert_eq!(
+            credential_form_title(Some("Password store locked"), None),
+            "Password store locked"
+        );
+        assert_eq!(credential_form_title(None, None), "Login");
+    }
+
+    /// Build a log record at a fixed local time so the rendered stamp is
+    /// deterministic.
+    fn record(
+        hour: u32,
+        minute: u32,
+        message: &str,
+    ) -> crate::components::notification_bar::NotificationRecord {
+        use chrono::TimeZone;
+        crate::components::notification_bar::NotificationRecord {
+            at: chrono::Local
+                .with_ymd_and_hms(2026, 8, 3, hour, minute, 0)
+                .unwrap(),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn notification_log_merges_both_bars_chronologically() {
+        let bottom = [record(9, 5, "second"), record(9, 20, "fourth")];
+        let top = [record(9, 0, "first"), record(9, 10, "third")];
+        let text = format_notification_log(
+            bottom
+                .iter()
+                .map(|r| (r, false))
+                .chain(top.iter().map(|r| (r, true))),
+        );
+        assert_eq!(
+            text,
+            "[2026-08-03 09:00:00] ! first\n\
+             [2026-08-03 09:05:00] second\n\
+             [2026-08-03 09:10:00] ! third\n\
+             [2026-08-03 09:20:00] fourth\n"
+        );
+    }
+
+    #[test]
+    fn notification_log_indents_continuation_lines() {
+        let rec = [record(9, 0, "headline\ndetail")];
+        let text = format_notification_log(rec.iter().map(|r| (r, false)));
+        assert_eq!(text, "[2026-08-03 09:00:00] headline\n    detail\n");
+    }
+
+    #[test]
+    fn notification_log_is_empty_without_records() {
+        assert!(format_notification_log(std::iter::empty()).is_empty());
+    }
+
+    #[test]
+    fn bar_hint_names_the_bound_keys() {
+        let gkb = crate::config::keybindings::KeyBindingSection::<
+            crate::config::keybindings::GlobalAction,
+        >::default();
+        assert_eq!(notification_bar_hint(&gkb), "[Z] dismiss  [f10] open");
+    }
+
+    #[test]
+    fn form_options_default_when_no_config() {
+        let fields = vec![not_yet_done_content::FormFieldSpec::text("a", "A")];
+        let opts = App::build_form_options(None, &fields);
+        assert_eq!(opts, not_yet_done_ratatui::FormOptions::default());
+    }
+
+    #[test]
+    fn form_options_resolve_column_assignment_to_indices() {
+        use crate::config::view_config::{ActionFormConfig, SelectStyleConfig};
+        let fields = vec![
+            not_yet_done_content::FormFieldSpec::text("name", "Name"),
+            not_yet_done_content::FormFieldSpec::text("description", "Desc"),
+            not_yet_done_content::FormFieldSpec::text("extra", "Extra"),
+        ];
+        let cfg = ActionFormConfig {
+            columns: Some(2),
+            // `extra` is deliberately unlisted → stays in column 0.
+            column_assignment: Some(vec![vec!["name".into()], vec!["description".into()]]),
+            field_bar: Some(true),
+            select_style: Some(SelectStyleConfig::Inline),
+        };
+        let opts = App::build_form_options(Some(&cfg), &fields);
+        assert_eq!(opts.columns, 2);
+        assert!(opts.field_bar);
+        assert_eq!(opts.select_style, not_yet_done_ratatui::SelectStyle::Inline);
+        assert_eq!(opts.column_of, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn render_payload_template_substitutes_string_and_number_fields() {
+        let payload = serde_json::json!({ "number": "42", "who": "alice" });
+        assert_eq!(
+            render_payload_template("Authenticator: tap {number} ({who})", &payload),
+            "Authenticator: tap 42 (alice)"
+        );
+        // A JSON number renders without quotes.
+        let numeric = serde_json::json!({ "n": 7 });
+        assert_eq!(render_payload_template("code {n}", &numeric), "code 7");
+    }
+
+    #[test]
+    fn render_payload_template_leaves_unknown_placeholders_and_handles_empty() {
+        let payload = serde_json::json!({ "a": "x" });
+        assert_eq!(
+            render_payload_template("{a} then {missing}", &payload),
+            "x then {missing}"
+        );
+        // Non-object payloads (null, array) simply yield the template verbatim.
+        assert_eq!(
+            render_payload_template("no fields", &serde_json::Value::Null),
+            "no fields"
+        );
+    }
 
     #[test]
     fn image_temp_filename_prefixes_index_and_keeps_basename() {
@@ -8976,7 +12545,10 @@ mod tests {
 
     #[test]
     fn image_temp_filename_appends_extension_when_missing() {
-        assert_eq!(image_temp_filename(1, "https://cdn.test/blob"), "01_blob.img");
+        assert_eq!(
+            image_temp_filename(1, "https://cdn.test/blob"),
+            "01_blob.img"
+        );
     }
 
     #[test]
@@ -9007,5 +12579,86 @@ mod tests {
         let (tok, rest) = split_leading_token(r#""Tasks (A"#);
         assert_eq!(tok, "Tasks (A");
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn query_apply_strips_quotes_from_target_tab() {
+        // Regression: `query apply -t "Tasks" All` must resolve the tab as
+        // `Tasks`, not `"Tasks"` — the quotes are shell-style grouping and
+        // must be stripped so it matches `tab_name()`. (goto_task.py emits
+        // the quoted form because a tab name can contain spaces.)
+        let (_vars, target, name) = parse_query_apply_args(r#"-t "Tasks" All"#).expect("parses");
+        assert_eq!(target, Some(("Tasks".to_string(), None)));
+        assert_eq!(name, "All");
+    }
+
+    #[test]
+    fn query_apply_unquoted_target_with_view() {
+        // Unquoted `tab:view` still splits into tab + view. (A quoted tab
+        // name and a `:view` can't be combined — the closing quote ends the
+        // token before the colon; same limitation as `:tree-find`.)
+        let (_vars, target, name) =
+            parse_query_apply_args("-t Postgres:items My Query").expect("parses");
+        assert_eq!(
+            target,
+            Some(("Postgres".to_string(), Some("items".to_string())))
+        );
+        assert_eq!(name, "My Query");
+    }
+
+    #[test]
+    fn which_key_empty_allowlist_permits_every_prefix() {
+        assert!(which_key_prefix_allowed(&[], "g"));
+        assert!(which_key_prefix_allowed(&[], "ctrl+k"));
+    }
+
+    #[test]
+    fn which_key_allowlist_matches_step_wise() {
+        let list = vec!["g".to_string(), "z".to_string()];
+        // First step in the allowlist — a deeper pending chord still matches.
+        assert!(which_key_prefix_allowed(&list, "g"));
+        assert!(which_key_prefix_allowed(&list, "g l"));
+        assert!(which_key_prefix_allowed(&list, "z"));
+        // Not listed → rejected.
+        assert!(!which_key_prefix_allowed(&list, "f"));
+    }
+
+    #[test]
+    fn which_key_allowlist_supports_multi_step_entries() {
+        let list = vec!["g l".to_string()];
+        assert!(which_key_prefix_allowed(&list, "g l"));
+        // `g` alone is a prefix of the entry, not a continuation of it.
+        assert!(!which_key_prefix_allowed(&list, "g"));
+        assert!(!which_key_prefix_allowed(&list, "g m"));
+    }
+
+    #[test]
+    fn which_key_filter_keeps_only_strict_continuations() {
+        let sources = vec![
+            ("New channel".to_string(), "a l".to_string()),
+            ("Archive".to_string(), "a a".to_string()),
+            // Exact match, not a continuation → dropped (nothing left to type).
+            ("Fuzzy".to_string(), "a".to_string()),
+            // Different prefix → dropped.
+            ("Delete".to_string(), "d".to_string()),
+        ];
+        let rows = which_key_filter(sources, "a");
+        // Sorted by combo: "a a" before "a l".
+        assert_eq!(
+            rows,
+            vec![
+                ("Archive".to_string(), "a a".to_string()),
+                ("New channel".to_string(), "a l".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn which_key_filter_splits_binding_alternatives() {
+        // One shortcut with two alternatives; only the one continuing the
+        // prefix survives.
+        let sources = vec![("Jump".to_string(), "g g / ctrl+home".to_string())];
+        let rows = which_key_filter(sources, "g");
+        assert_eq!(rows, vec![("Jump".to_string(), "g g".to_string())]);
     }
 }

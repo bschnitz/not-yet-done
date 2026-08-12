@@ -126,7 +126,9 @@ fn parse_throttle(spec: &str) -> Result<Duration, String> {
         "m" => Ok(Duration::minutes(n)),
         "h" => Ok(Duration::hours(n)),
         "d" => Ok(Duration::days(n)),
-        other => Err(format!("throttle '{spec}': unknown unit '{other}' (expected s/m/h/d)")),
+        other => Err(format!(
+            "throttle '{spec}': unknown unit '{other}' (expected s/m/h/d)"
+        )),
     }
 }
 
@@ -161,7 +163,8 @@ fn load_state() -> HashMap<String, DateTime<Utc>> {
 fn save_state(state: &HashMap<String, DateTime<Utc>>) -> Result<(), String> {
     let path = state_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| format!("writing {}: {e}", path.display()))
@@ -342,7 +345,12 @@ pub async fn fire_hook_with(
         );
         return bindings
             .iter()
-            .map(|b| report(&b.run, HookOutcome::Skipped("hook not declared by adapter".into())))
+            .map(|b| {
+                report(
+                    &b.run,
+                    HookOutcome::Skipped("hook not declared by adapter".into()),
+                )
+            })
             .collect();
     }
 
@@ -351,7 +359,10 @@ pub async fn fire_hook_with(
     for binding in bindings {
         let outcome = process_binding(adapter, instance, hook, binding, now).await;
         if let HookOutcome::Failed(e) = &outcome {
-            eprintln!("nyd-hooks: {instance}:{hook}: '{}' failed: {e}", binding.run);
+            eprintln!(
+                "nyd-hooks: {instance}:{hook}: '{}' failed: {e}",
+                binding.run
+            );
         }
         reports.push(report(&binding.run, outcome));
     }
@@ -378,7 +389,10 @@ pub async fn fire_connected_hooks() -> Vec<HookReport> {
         };
         // Pre-gate: skip the (potentially expensive) adapter build entirely if
         // every binding is still throttled.
-        if bindings.iter().all(|b| is_throttled(&instance, "connected", b, now)) {
+        if bindings
+            .iter()
+            .all(|b| is_throttled(&instance, "connected", b, now))
+        {
             continue;
         }
         let adapter = match crate::resolve_adapter(&instance, &ctx) {
@@ -447,7 +461,9 @@ connected:
     #[test]
     fn outcome_mapping() {
         assert_eq!(
-            outcome_for(ActionDispatch::Notify { message: "ok".into() }),
+            outcome_for(ActionDispatch::Notify {
+                message: "ok".into()
+            }),
             HookOutcome::Fired(Some("ok".into()))
         );
         assert_eq!(outcome_for(ActionDispatch::Noop), HookOutcome::Fired(None));
@@ -456,7 +472,11 @@ connected:
             HookOutcome::Failed("boom".into())
         );
         assert!(matches!(
-            outcome_for(ActionDispatch::CreateChild { hint: "x".into() }),
+            outcome_for(ActionDispatch::ExecuteQuery {
+                database: "db".into(),
+                sql: "select 1".into(),
+                paged: false,
+            }),
             HookOutcome::Failed(_)
         ));
     }

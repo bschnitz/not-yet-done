@@ -29,16 +29,34 @@ tuirealm             = { version = "4.1", features = ["crossterm"] }
 # so headings/tables came out unstyled. Instead we use our own fork bumped to
 # ratatui 0.30 — it keeps the full renderer (tables, lists, code, soft-wrap)
 # and pulls every color from our Theme via the RichTextTheme bridge
-# (no-hardcoded-colors rule). default-features = false → only the `markdown`
-# feature (no tree-sitter/image/mermaid). Pinned to a rev for reproducibility.
+# (no-hardcoded-colors rule). default-features = false → only `markdown` plus
+# `image` (no tree-sitter/mermaid). Pinned to a rev for reproducibility.
 # RECHECK on the next ratatui bump: if upstream ratatui-markdown has released a
 # 0.30+ version by then, drop this fork and go back to the crates.io crate.
-ratatui-markdown     = { git = "https://github.com/bschnitz/ratatui-markdown-fork", rev = "1667ea6", default-features = false, features = ["markdown"] }
+#
+# `image` adds the parse/render pair that keeps images in the text flow:
+# `parse_with_images` hands every `![alt](url)` block to a resolver, and
+# `render_full` reserves as many blank lines as the picture is tall and reports
+# where it landed. Drawing those pixels is ours (see `views::images`).
+ratatui-markdown     = { git = "https://github.com/bschnitz/ratatui-markdown-fork", rev = "1667ea6", default-features = false, features = ["markdown", "image"] }
+# Terminal graphics for those placements: kitty / sixel / iTerm2 with a
+# unicode-halfblock fallback, probed at startup. `SlicedImage` is the reason
+# this crate and not another — it draws an image at a *signed* offset and
+# clips it to the pane, which is exactly what a picture scrolling out of a
+# message list needs. default-features = false drops `chafa-dyn` (a C library
+# we don't want to link) and keeps crossterm + all `image` decoders.
+ratatui-image        = { version = "11.0", default-features = false, features = ["crossterm", "image-defaults"] }
+# Decoding the downloaded bytes. Same 0.25 line the two crates above pin, so
+# `DynamicImage` is one type across the whole pipeline.
+image                = { version = "0.25", default-features = false }
 async-trait          = { workspace = true }
 arboard              = { workspace = true, optional = true }
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-core    = { path = "../not-yet-done-core" }
+not-yet-done-macros  = { workspace = true }
 not-yet-done-filter  = { path = "../not-yet-done-filter" }
+not-yet-done-extended-query = { path = "../not-yet-done-extended-query" }
+not-yet-done-scripts = { path = "../not-yet-done-scripts" }
 not-yet-done-host    = { path = "../not-yet-done-host" }
 # The adapter factories are built centrally by `not-yet-done-host::factories()`,
 # so the TUI no longer depends on most adapter crates directly. It keeps only
@@ -49,10 +67,12 @@ not-yet-done-local-adapter = { path = "../not-yet-done-local-adapter" }
 not-yet-done-forest  = { path = "../not-yet-done-forest" }
 not-yet-done-table   = { path = "../not-yet-done-table" }
 not-yet-done-ratatui = { path = "../not-yet-done-ratatui" }
-ratatui-form-widgets = { path = "../ratatui_form_widgets" }
+# In-process modal editor for `builtin: true` editor profiles.
+vimrealm             = { path = "../vimrealm" }
 serde_json.workspace = true
 slug = "0.1.6"
 regex                = { workspace = true }
+marked-yaml = "0.8.0"
 
 [features]
 default = ["clipboard"]

@@ -1,0 +1,35 @@
+# Example SQLite adapter config, referenced by sqlite.yaml.
+#
+# A SQLite database is a file, so there is no host, no port and no
+# credentials here. What replaces them is `sources:` — a list of glob
+# patterns. Every file a pattern matches becomes one root child in the
+# tree, so this is also how you browse a whole directory of databases at
+# once. Patterns are re-matched on every reload (`r`), so a file created
+# after the tab was opened shows up without restarting the TUI.
+
+name: example-sqlite
+
+sources:
+  # A plain path is a glob that matches itself.
+  - ~/databases/metrics.db
+  # Every database directly in a directory. `*` does not cross `/`.
+  - ~/databases/*.sqlite
+  # `**` descends — bounded to 16 levels so a wide pattern can't turn
+  # into a full home-directory crawl. Symlinked directories are not
+  # followed (that keeps the walk free of cycles).
+  - /srv/exports/**/*.db
+
+# Open every file read-only. This is the default, and worth keeping
+# unless you actually intend to write: it makes a stray UPDATE in a
+# scratch script an error instead of damage.
+read_only: true
+
+# SQLite locks at file level, so a writer elsewhere (another process,
+# another tab) makes reads fail immediately with SQLITE_BUSY unless we
+# agree to wait this long for the lock. Default 5000.
+busy_timeout_ms: 5000
+
+# Hard deadline per catalogue read / row fetch. Omit for "wait forever".
+# A local file rarely stalls, but one on a network mount can — and
+# busy_timeout_ms only covers lock contention, not a hung filesystem.
+query_timeout_secs: 10

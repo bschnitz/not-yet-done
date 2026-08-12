@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection,
-    EntityTrait, QueryFilter, Set,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
 };
 use shaku::Component;
 use uuid::Uuid;
@@ -59,7 +59,10 @@ pub trait TagRepository: shaku::Interface {
     ) -> Result<project_tag::Model, AppError>;
 
     async fn find_all_global(&self) -> Result<Vec<global_tag::Model>, AppError>;
-    async fn find_all_by_project(&self, project_id: Uuid) -> Result<Vec<project_tag::Model>, AppError>;
+    async fn find_all_by_project(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<project_tag::Model>, AppError>;
     async fn find_all_project_tags(&self) -> Result<Vec<project_tag::Model>, AppError>;
 
     async fn find_global_by_id(&self, id: Uuid) -> Result<global_tag::Model, AppError>;
@@ -136,7 +139,7 @@ impl TagRepository for TagRepositoryImpl {
             .filter(project_tag::Column::Name.eq(&name))
             .filter(project_tag::Column::ProjectId.eq(project_id))
             .one(db)
-        .await?;
+            .await?;
 
         if let Some(existing) = existing {
             return Err(AppError::DuplicateProjectTag {
@@ -193,10 +196,7 @@ impl TagRepository for TagRepositoryImpl {
             .ok_or_else(|| AppError::TagNotFound(id.to_string()))
     }
 
-    async fn find_global_by_name(
-        &self,
-        name: &str,
-    ) -> Result<Option<global_tag::Model>, AppError> {
+    async fn find_global_by_name(&self, name: &str) -> Result<Option<global_tag::Model>, AppError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         Ok(global_tag::Entity::find()
             .filter(global_tag::Column::Name.eq(name))
@@ -226,10 +226,18 @@ impl TagRepository for TagRepositoryImpl {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let tag = self.find_global_by_id(id).await?;
         let mut model: global_tag::ActiveModel = tag.into();
-        if let Some(n) = name { model.name = Set(n); }
-        if let Some(c) = style.fg_color { model.fg_color = Set(c); }
-        if let Some(c) = style.bg_color { model.bg_color = Set(c); }
-        if let Some(s) = style.symbol   { model.symbol   = Set(s); }
+        if let Some(n) = name {
+            model.name = Set(n);
+        }
+        if let Some(c) = style.fg_color {
+            model.fg_color = Set(c);
+        }
+        if let Some(c) = style.bg_color {
+            model.bg_color = Set(c);
+        }
+        if let Some(s) = style.symbol {
+            model.symbol = Set(s);
+        }
         Ok(model.update(db).await?)
     }
 
@@ -242,10 +250,18 @@ impl TagRepository for TagRepositoryImpl {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let tag = self.find_project_tag_by_id(id).await?;
         let mut model: project_tag::ActiveModel = tag.into();
-        if let Some(n) = name { model.name = Set(n); }
-        if let Some(c) = style.fg_color { model.fg_color = Set(c); }
-        if let Some(c) = style.bg_color { model.bg_color = Set(c); }
-        if let Some(s) = style.symbol   { model.symbol   = Set(s); }
+        if let Some(n) = name {
+            model.name = Set(n);
+        }
+        if let Some(c) = style.fg_color {
+            model.fg_color = Set(c);
+        }
+        if let Some(c) = style.bg_color {
+            model.bg_color = Set(c);
+        }
+        if let Some(s) = style.symbol {
+            model.symbol = Set(s);
+        }
         Ok(model.update(db).await?)
     }
 

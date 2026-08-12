@@ -1,0 +1,18 @@
+[package]
+name = "vimrealm"
+description = "A modal, vim-like multi-line text editor widget for ratatui, ready to mount as a tuirealm component."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bschnitz/not-yet-done"
+readme = "README.md"
+keywords = ["ratatui", "tuirealm", "editor", "vim", "tui"]
+categories = ["command-line-interface", "text-editors"]
+
+[dependencies]
+ratatui = "0.30"
+tuirealm = { version = "4.1", features = ["crossterm"] }
+unicode-width = "0.2.0"
+
+[dev-dependencies]
+crossterm = "0.29.0"

@@ -28,17 +28,25 @@ pub const ATTR_ERROR: &str = "error";
 
 const CMD_DELETE_FWD: &str = "delete_fwd";
 const CMD_CLEAR: &str = "clear";
+/// Jump the cursor to the start / end of the value (`Home` / `End`).
+pub const CMD_HOME: &str = "home";
+pub const CMD_END: &str = "end";
 
 impl Component for TextInput {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        let style = if self.focused { &self.active_style } else { &self.inactive_style };
+        let style = if self.focused {
+            &self.active_style
+        } else {
+            &self.inactive_style
+        };
         let data = TextInputViewData {
-            title:              &self.title,
-            value:              &self.value,
-            placeholder:        &self.placeholder,
-            error:              self.error.as_deref(),
+            title: &self.title,
+            value: &self.value,
+            placeholder: &self.placeholder,
+            error: self.error.as_deref(),
             cursor_byte_offset: self.cursor,
-            focused:            self.focused,
+            focused: self.focused,
+            masked: self.masked,
             style,
         };
         render(frame, area, &data);
@@ -48,10 +56,12 @@ impl Component for TextInput {
         match attr {
             Attribute::Focus => Some(QueryResult::Owned(AttrValue::Flag(self.focused))),
             Attribute::Value => Some(QueryResult::Owned(AttrValue::String(self.value.clone()))),
-            Attribute::Custom(key) if key == ATTR_ERROR => Some(QueryResult::Owned(match &self.error {
-                Some(e) => AttrValue::String(e.clone()),
-                None    => AttrValue::Flag(false),
-            })),
+            Attribute::Custom(key) if key == ATTR_ERROR => {
+                Some(QueryResult::Owned(match &self.error {
+                    Some(e) => AttrValue::String(e.clone()),
+                    None => AttrValue::Flag(false),
+                }))
+            }
             _ => None,
         }
     }
@@ -66,13 +76,13 @@ impl Component for TextInput {
             Attribute::Value => {
                 if let AttrValue::String(s) = value {
                     self.cursor = s.len();
-                    self.value  = s;
+                    self.value = s;
                 }
             }
             Attribute::Custom(key) if key == ATTR_ERROR => match value {
-                AttrValue::String(msg)    => self.error = Some(msg),
-                AttrValue::Flag(false)    => self.error = None,
-                _                         => {}
+                AttrValue::String(msg) => self.error = Some(msg),
+                AttrValue::Flag(false) => self.error = None,
+                _ => {}
             },
             _ => {}
         }
@@ -99,6 +109,14 @@ impl Component for TextInput {
             Cmd::Custom(CMD_DELETE_FWD) => {
                 self.delete_forward();
                 CmdResult::Changed(State::Single(StateValue::String(self.value.clone())))
+            }
+            Cmd::Custom(CMD_HOME) => {
+                self.move_cursor_home();
+                CmdResult::Changed(State::Single(StateValue::Usize(self.cursor)))
+            }
+            Cmd::Custom(CMD_END) => {
+                self.move_cursor_end();
+                CmdResult::Changed(State::Single(StateValue::Usize(self.cursor)))
             }
             Cmd::Custom(CMD_CLEAR) => {
                 self.clear_value();
@@ -135,10 +153,14 @@ impl AppComponent<TextInputEvent, NoUserEvent> for TextInput {
             Cmd::Submit
         } else {
             match key_ev {
-                KeyEvent { code: Key::Char(c), modifiers: KeyModifiers::NONE }
-                | KeyEvent { code: Key::Char(c), modifiers: KeyModifiers::SHIFT } => {
-                    Cmd::Type(c)
+                KeyEvent {
+                    code: Key::Char(c),
+                    modifiers: KeyModifiers::NONE,
                 }
+                | KeyEvent {
+                    code: Key::Char(c),
+                    modifiers: KeyModifiers::SHIFT,
+                } => Cmd::Type(c),
                 _ => return None,
             }
         };

@@ -1,5 +1,5 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use crate::types::{CellGroup, GridConfig};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 // ── GridLayout ────────────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ pub struct GridLayout {
     pub content_y: u16,
 
     /// Total width of the area passed to [`compute_layout`].
-    pub total_width:  u16,
+    pub total_width: u16,
     /// Total height of the area passed to [`compute_layout`].
     pub total_height: u16,
 }
@@ -41,7 +41,12 @@ pub struct GridLayout {
 impl GridLayout {
     /// Absolute `Rect` of cell `(row, col)` — does not account for groups.
     pub fn cell_rect(&self, row: usize, col: usize) -> Rect {
-        Rect::new(self.col_x[col], self.row_y[row], self.col_w[col], self.row_h[row])
+        Rect::new(
+            self.col_x[col],
+            self.row_y[row],
+            self.col_w[col],
+            self.row_h[row],
+        )
     }
 
     /// Absolute `Rect` of the bounding box `(fr, fc) .. (lr, lc)`, spanning
@@ -80,7 +85,8 @@ pub fn compute_layout(cfg: &GridConfig, area: Rect) -> GridLayout {
     // Inner area: shrink by 1 on each side when an outer border is present.
     let inner = if has_outer {
         Rect::new(
-            area.x + 1, area.y + 1,
+            area.x + 1,
+            area.y + 1,
             area.width.saturating_sub(2),
             area.height.saturating_sub(2),
         )
@@ -103,17 +109,19 @@ pub fn compute_layout(cfg: &GridConfig, area: Rect) -> GridLayout {
         .constraints(v_constraints)
         .split(inner);
 
-    let (col_x, col_w, v_gap_x) =
-        extract_cells_and_gaps(&h_rects, cfg.cols, &cfg.v_gaps, true);
-    let (row_y, row_h, h_gap_y) =
-        extract_cells_and_gaps(&v_rects, cfg.rows, &cfg.h_gaps, false);
+    let (col_x, col_w, v_gap_x) = extract_cells_and_gaps(&h_rects, cfg.cols, &cfg.v_gaps, true);
+    let (row_y, row_h, h_gap_y) = extract_cells_and_gaps(&v_rects, cfg.rows, &cfg.h_gaps, false);
 
     GridLayout {
-        col_x, col_w, row_y, row_h,
-        v_gap_x, h_gap_y,
+        col_x,
+        col_w,
+        row_y,
+        row_h,
+        v_gap_x,
+        h_gap_y,
         content_x: inner.x,
         content_y: inner.y,
-        total_width:  area.width,
+        total_width: area.width,
         total_height: area.height,
     }
 }
@@ -147,15 +155,20 @@ fn extract_cells_and_gaps<T>(
     gaps: &[Option<T>],
     use_x: bool,
 ) -> (Vec<u16>, Vec<u16>, Vec<Option<u16>>) {
-    let mut positions  = Vec::with_capacity(cell_count);
-    let mut sizes      = Vec::with_capacity(cell_count);
+    let mut positions = Vec::with_capacity(cell_count);
+    let mut sizes = Vec::with_capacity(cell_count);
     let mut gap_pos: Vec<Option<u16>> = vec![None; gaps.len()];
 
     let mut rect_idx = 0usize;
     for cell_idx in 0..cell_count {
         let r = rects[rect_idx];
-        if use_x { positions.push(r.x); sizes.push(r.width); }
-        else      { positions.push(r.y); sizes.push(r.height); }
+        if use_x {
+            positions.push(r.x);
+            sizes.push(r.width);
+        } else {
+            positions.push(r.y);
+            sizes.push(r.height);
+        }
         rect_idx += 1;
 
         if cell_idx < gaps.len() && gaps[cell_idx].is_some() {

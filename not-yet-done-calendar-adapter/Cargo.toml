@@ -1,0 +1,42 @@
+[package]
+name = "not-yet-done-calendar-adapter"
+version = "0.1.0"
+edition = "2024"
+
+# The `calendar` content adapter. Aggregates events from any number of
+# configured connections (each a `CalendarBackend` — see calendar-core) into
+# one flat, time-sorted, groupable event list. Owns connection config parsing,
+# id namespacing across connections, and a background poll task that pushes a
+# change signal over the content layer's invalidation channel (decoupled: the
+# frontend never learns this is a calendar).
+#
+# Backends are pulled in as optional, feature-gated dependencies so each
+# calendar protocol is an independent unit; the backend registry only offers
+# the ones compiled in.
+
+[features]
+default = ["microsoft", "office365-web", "caldav"]
+microsoft = ["dep:not-yet-done-calendar-msgraph"]
+office365-web = ["dep:not-yet-done-calendar-office365-web"]
+caldav = ["dep:not-yet-done-calendar-caldav"]
+
+[dependencies]
+async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
+futures     = { workspace = true }
+chrono      = { workspace = true }
+dirs        = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
+tokio       = { workspace = true }
+
+not-yet-done-content       = { path = "../not-yet-done-content" }
+not-yet-done-filter        = { path = "../not-yet-done-filter" }
+not-yet-done-calendar-core = { path = "../not-yet-done-calendar-core" }
+# Shared natural-language date/time resolver — the `New event` form's start/end
+# fields are free-text phrases ("tomorrow 14:00", "next monday"); the adapter
+# resolves them on submit via `resolve_datetime`.
+natural-date               = { path = "../natural-date" }
+not-yet-done-calendar-msgraph = { path = "../not-yet-done-calendar-msgraph", optional = true }
+not-yet-done-calendar-office365-web = { path = "../not-yet-done-calendar-office365-web", optional = true }
+not-yet-done-calendar-caldav = { path = "../not-yet-done-calendar-caldav", optional = true }

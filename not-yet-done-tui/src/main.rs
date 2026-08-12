@@ -1,4 +1,5 @@
 mod action;
+mod active_surface;
 mod app;
 mod components;
 mod config;
@@ -17,25 +18,36 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use shaku::HasComponent;
 use std::io;
 
 use app::{App, EditorRequest};
 use config::TuiConfigService;
-use tabs::Tab;
 use not_yet_done_core::{
-    config::{Config, ConfigServiceImpl, ConfigErrorKind},
+    config::{Config, ConfigErrorKind, ConfigServiceImpl},
     db,
     module::CoreModule,
 };
+use tabs::Tab;
 use ui::theme::Theme;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = load_or_create_config().await?;
+
+    // Install diagnostic logging before anything can log. Errors (including
+    // everything surfaced via `notify_error`) go to a rotating daily file;
+    // env vars (NYD_DEBUG, NYD_LOG_DIR, …) still override the config.
+    not_yet_done_content::http_log::configure(not_yet_done_content::http_log::LogSettings {
+        enabled: config.logging.enabled,
+        directory: config.logging.directory.clone(),
+        retention_days: config.logging.retention_days as i64,
+        verbose: config.logging.verbose,
+    });
+
     let db_url = config.database.url;
 
     let db_conn = db::connect(&db_url, true).await?;
@@ -48,24 +60,33 @@ async fn main() -> Result<()> {
     // only the app shell's settings / saved queries / query shortcuts / links.
     let core_module = CoreModule::builder()
         .with_component_parameters::<not_yet_done_core::repository::SettingsRepositoryImpl>(
-            not_yet_done_core::repository::SettingsRepositoryImplParameters { db: Some(db_conn.clone()) },
-        )
-        .with_component_parameters::<not_yet_done_core::repository::SavedQueryRepositoryImpl>(
-            not_yet_done_core::repository::SavedQueryRepositoryImplParameters { db: Some(db_conn.clone()) },
+            not_yet_done_core::repository::SettingsRepositoryImplParameters {
+                db: Some(db_conn.clone()),
+            },
         )
         .with_component_parameters::<not_yet_done_core::repository::QueryShortcutRepositoryImpl>(
-            not_yet_done_core::repository::QueryShortcutRepositoryImplParameters { db: Some(db_conn.clone()) },
+            not_yet_done_core::repository::QueryShortcutRepositoryImplParameters {
+                db: Some(db_conn.clone()),
+            },
         )
         .with_component_parameters::<not_yet_done_core::repository::LinkRepositoryImpl>(
-            not_yet_done_core::repository::LinkRepositoryImplParameters { db: Some(db_conn.clone()) },
+            not_yet_done_core::repository::LinkRepositoryImplParameters {
+                db: Some(db_conn.clone()),
+            },
         )
         .build();
 
-    let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> = core_module.resolve();
-    let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> = core_module.resolve();
+    let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> =
+        core_module.resolve();
+    let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> =
+        core_module.resolve();
     let link_repo: Arc<dyn not_yet_done_core::repository::LinkRepository> = core_module.resolve();
     let tui_config = TuiConfigService::load()?;
-    let theme      = Theme::new(tui_config.theme.clone());
+    let theme = Theme::new(tui_config.theme.clone());
+    // Kept out of the move into `App::new`: the terminal can only be asked
+    // about its graphics support once the alternate screen is up, which is
+    // well after the config is read.
+    let images_cfg = tui_config.images.clone();
 
     // Host-owned cross-adapter event bus (Phase C4): the App owns it and
     // hands every adapter a `HostContext` at construction. The self-contained
@@ -86,24 +107,32 @@ async fn main() -> Result<()> {
             + Sync,
     > = Box::new(not_yet_done_host::factories);
 
-    let mut app    = App::new(tui_config, theme, query_shortcut_repo, settings_repo, link_repo, factory_builder, host_ctx);
+    let mut app = App::new(
+        tui_config,
+        theme,
+        query_shortcut_repo,
+        settings_repo,
+        link_repo,
+        factory_builder,
+        host_ctx,
+    );
 
-    // Load column config from DB. (Tracking state is no longer cached at
-    // App level — the action-bar highlight reads it live from each adapter.)
-    app.load_column_config();
-    app.load_content_saved_queries();
-    app.apply_default_content_queries();
-    app.load_content_sort_states();
-
-    // Initial content loads start only now — after the default saved
-    // queries have been stamped onto the panes, so the first fetch
-    // already uses them.
-    app.start_content_loads();
+    // Wire every content view: DB-persisted state (column config, saved
+    // queries, default query, sort spec), the jump alphabet, the adapter
+    // watchers and the initial fetch — in that order per view, so the first
+    // fetch already uses the stamped default query. The config reloads run
+    // the same routine on the views they rebuild. (Tracking state is no
+    // longer cached at App level — the action-bar highlight reads it live
+    // from each adapter.)
+    app.wire_content_views();
 
     // Daily backup of the legacy core DB (`nyd.db`: saved queries, settings,
     // links), owned by core. Best-effort — a backup failure must never block
     // startup.
-    if let Err(e) = not_yet_done_core::service::BackupServiceImpl.ensure_daily_backup().await {
+    if let Err(e) = not_yet_done_core::service::BackupServiceImpl
+        .ensure_daily_backup()
+        .await
+    {
         eprintln!("Backup warning (nyd.db): {e}");
     }
     // Fire the `connected` lifecycle hook for every configured instance that
@@ -116,7 +145,13 @@ async fn main() -> Result<()> {
     not_yet_done_host::fire_connected_hooks().await;
 
     let mut terminal = setup_terminal()?;
-    let result       = run_loop(&mut terminal, &mut app).await;
+    // Ask the terminal which graphics protocol it speaks. Must sit between
+    // entering the alternate screen and starting the event reader: the query
+    // writes an escape sequence and reads the reply straight off stdin, and a
+    // running reader would swallow it. Panes bind to the answer lazily, on
+    // their first markdown render, so the ones built above still see it.
+    views::images::init_terminal_graphics(images_cfg.enabled, images_cfg.max_height);
+    let result = run_loop(&mut terminal, &mut app).await;
     restore_terminal(&mut terminal)?;
 
     result
@@ -163,8 +198,8 @@ async fn run_loop(
     // touched visible state (`dirty`). Rationale and the prior 1a
     // (200 ms dirty-gated poll) loop are in
     // docs/decisions/0001-render-loop-dirty-gating.md.
-    use tokio_stream::StreamExt;
     use crossterm::event::{Event, EventStream};
+    use tokio_stream::StreamExt;
 
     // crossterm's `EventStream` runs a background thread that blocks on
     // stdin. It must be torn down before any child process (editor,
@@ -177,6 +212,11 @@ async fn run_loop(
 
     let mut dirty = true; // always paint the first frame
     loop {
+        // Inline pictures a markdown body asked for during the last build.
+        // A no-op walk when nothing is queued; each hit spawns a download
+        // that reports back through `load_rx`.
+        app.pump_image_downloads();
+
         if dirty {
             app.sync_components();
             terminal.draw(|frame| render::render(frame, app))?;
@@ -201,17 +241,27 @@ async fn run_loop(
         // `handle_load_msg` can't bubble one out. Suspends the terminal,
         // so tear the reader down for the duration.
         if let Some(req) = app.pending_editor_request.take() {
-            drop(reader);
-            dispatch_editor_request(terminal, app, req).await?;
-            reader = EventStream::new();
+            if req.suspends_terminal() {
+                drop(reader);
+                dispatch_editor_request(terminal, app, req).await?;
+                reader = EventStream::new();
+            } else {
+                dispatch_editor_request(terminal, app, req).await?;
+            }
             dirty = true;
             continue;
         }
 
-        if app.should_quit { break; }
+        if app.should_quit {
+            break;
+        }
 
         // Arm the periodic ticker only while a poll-backed source is live.
         let periodic = app.needs_periodic_tick();
+
+        // Deadline at which a half-typed chord's which-key preview pops up.
+        // `None` disarms the branch (parks on a never-resolving future).
+        let which_key_deadline = app.which_key_deadline();
 
         tokio::select! {
             // Background-loaded results (tasks, content items, adapter
@@ -234,6 +284,18 @@ async fn run_loop(
                 dirty = true;
             }
 
+            // Which-key preview reveal: fires once the pending chord has
+            // sat for `which_key.delay_ms`. Disarmed by parking on a
+            // never-resolving future when no deadline is set.
+            _ = async {
+                match which_key_deadline {
+                    Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                dirty |= app.reveal_which_key();
+            }
+
             // Poll-backed change sources, serviced only while one is
             // pending. Each self-gates on its own interval/condition, so
             // running them all every tick is cheap.
@@ -252,10 +314,16 @@ async fn run_loop(
                     Some(Ok(event)) => {
                         if let Some(key_str) = events::event_to_key_string(&event) {
                             let req = app.handle_key(&key_str);
-                            if !matches!(req, EditorRequest::None) {
+                            // Sync the which-key preview to the (possibly
+                            // changed) pending chord: close, arm the reveal
+                            // timer, or narrow it live.
+                            app.reconcile_which_key();
+                            if req.suspends_terminal() {
                                 drop(reader);
                                 dispatch_editor_request(terminal, app, req).await?;
                                 reader = EventStream::new();
+                            } else if !matches!(req, EditorRequest::None) {
+                                dispatch_editor_request(terminal, app, req).await?;
                             }
                             dirty = true;
                         } else if matches!(event, Event::Resize(_, _)) {
@@ -283,11 +351,20 @@ async fn dispatch_editor_request(
     req: EditorRequest,
 ) -> Result<()> {
     match req {
-        EditorRequest::Inline { command, content, suffix, spawn_context } => {
+        EditorRequest::Inline {
+            command,
+            content,
+            suffix,
+            spawn_context,
+        } => {
             let mut editor_content = content;
             loop {
                 let result = run_inline_editor_get_content(
-                    terminal, &command, &editor_content, suffix, &spawn_context,
+                    terminal,
+                    &command,
+                    &editor_content,
+                    suffix,
+                    &spawn_context,
                 )?;
                 let Some(result_content) = result else { break };
                 match app.process_editor_content(&result_content).await {
@@ -298,15 +375,35 @@ async fn dispatch_editor_request(
                 }
             }
         }
-        EditorRequest::Launch { command, content, suffix, spawn_context } => {
-            run_launch_editor(
-                terminal, app, &command, &content, suffix, &spawn_context,
+        EditorRequest::Launch {
+            command,
+            content,
+            suffix,
+            spawn_context,
+        } => {
+            run_launch_editor(terminal, app, &command, &content, suffix, &spawn_context)?;
+        }
+        EditorRequest::Script {
+            script_path,
+            stdin_json,
+            capture,
+            output_suffix,
+            child_env,
+        } => {
+            run_interactive_script(
+                terminal,
+                app,
+                &script_path,
+                &stdin_json,
+                capture,
+                &output_suffix,
+                &child_env,
             )?;
         }
-        EditorRequest::Script { script_path, stdin_json, capture, output_suffix, child_env } => {
-            run_interactive_script(
-                terminal, app, &script_path, &stdin_json, capture, &output_suffix, &child_env,
-            )?;
+        // A `:w` in the builtin editor pane: no child process, no terminal
+        // hand-over — just the session's async `live_apply`.
+        EditorRequest::BuiltinLiveApply { content } => {
+            app.apply_builtin_live_save(&content).await;
         }
         EditorRequest::None => {}
     }
@@ -328,9 +425,7 @@ async fn dispatch_editor_request(
 /// For a fullscreen viewport, `resize` to the current size has the same
 /// visible effect as the old `clear()` (issues `ESC[2J` and resets the back
 /// buffer so the next frame is a full repaint) but never touches the cursor.
-fn force_full_redraw(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> Result<()> {
+fn force_full_redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     let size = terminal.size()?;
     terminal.resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))?;
     Ok(())
@@ -345,7 +440,11 @@ fn run_inline_editor_get_content(
     suffix: &str,
     spawn_context: &crate::edit_session::EditorSpawnContext,
 ) -> Result<Option<String>> {
-    let cmd = if command.is_empty() { None } else { Some(command) };
+    let cmd = if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    };
     let _ = events::disable_kitty_protocol();
     let result = match not_yet_done_ratatui::open_editor_inline_in(
         cmd,
@@ -354,6 +453,7 @@ fn run_inline_editor_get_content(
         spawn_context.tempfile_dir.as_deref(),
         spawn_context.tempfile_prefix,
         &spawn_context.child_env,
+        spawn_context.persistent_file.as_deref(),
     ) {
         Ok(content) => Some(content),
         Err(e) => {
@@ -374,13 +474,18 @@ fn reopen_editor_with_errors(
 ) -> Result<()> {
     // Resolve the SAME editor profile the original open used, via the
     // still-pending session's `editor_profile()` (None → `default`).
-    let editor = app
-        .config
-        .editors
-        .resolve(app.pending_session.as_ref().and_then(|s| s.editor_profile()));
+    let editor = app.config.editors.resolve(
+        app.pending_session
+            .as_ref()
+            .and_then(|s| s.editor_profile()),
+    );
     let cmd = editor.command.clone();
     let pause_tui = editor.pause_tui;
-    let command = if cmd.is_empty() { None } else { Some(cmd.as_str()) };
+    let command = if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.as_str())
+    };
     // Pull suffix + spawn context from the still-pending session. The
     // session's `spawn_context()` is recomputed (not the original
     // snapshot from `open_session`) so a connection that came up since
@@ -399,6 +504,7 @@ fn reopen_editor_with_errors(
             spawn_context.tempfile_dir.as_deref(),
             spawn_context.tempfile_prefix,
             &spawn_context.child_env,
+            spawn_context.persistent_file.as_deref(),
         ) {
             app.detached_editor = Some(handle);
         }
@@ -418,7 +524,11 @@ fn run_launch_editor(
     suffix: &str,
     spawn_context: &crate::edit_session::EditorSpawnContext,
 ) -> Result<()> {
-    let cmd = if command.is_empty() { None } else { Some(command) };
+    let cmd = if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    };
     let _ = events::disable_kitty_protocol();
     match not_yet_done_ratatui::open_editor_launch_in(
         cmd,
@@ -427,6 +537,7 @@ fn run_launch_editor(
         spawn_context.tempfile_dir.as_deref(),
         spawn_context.tempfile_prefix,
         &spawn_context.child_env,
+        spawn_context.persistent_file.as_deref(),
     ) {
         Ok(handle) => {
             app.detached_editor = Some(handle);
@@ -451,20 +562,23 @@ fn run_interactive_script(
     output_suffix: &str,
     child_env: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
-    use std::process::{Command, Stdio};
     use crossterm::event::{self as ct_event, Event};
+    use std::process::{Command, Stdio};
 
     // Leave alternate screen so script gets the real terminal.
     let _ = events::disable_kitty_protocol();
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
 
     let path = std::path::Path::new(script_path);
     let cwd = path.parent().unwrap_or(std::path::Path::new("."));
 
     // Write JSON to temp file.
-    let json_path = std::env::temp_dir()
-        .join(format!("nyd-interactive-{}.json", std::process::id()));
+    let json_path =
+        std::env::temp_dir().join(format!("nyd-interactive-{}.json", std::process::id()));
     std::fs::write(&json_path, stdin_json)?;
 
     let result = if capture {
@@ -502,7 +616,10 @@ fn run_interactive_script(
     disable_raw_mode()?;
 
     // Restore TUI.
-    execute!(terminal.backend_mut(), crossterm::terminal::EnterAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::EnterAlternateScreen
+    )?;
     enable_raw_mode()?;
     let _ = events::enable_kitty_protocol();
     force_full_redraw(terminal)?;

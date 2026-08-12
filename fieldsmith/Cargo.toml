@@ -1,0 +1,31 @@
+[package]
+name = "fieldsmith"
+description = "Reflect, template, and interactively build config structs from a single derive."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bschnitz/not-yet-done"
+readme = "README.md"
+keywords = ["config", "derive", "reflection", "serde", "cli"]
+categories = ["config", "development-tools", "command-line-interface"]
+
+[features]
+# Interactive stdin builder (recursive prompts over the schema).
+stdin = ["dep:dialoguer", "dep:console", "dep:serde", "dep:serde_yaml"]
+
+[dependencies]
+fieldsmith-derive = { path = "../fieldsmith-derive", version = "0.1.0" }
+dialoguer = { version = "0.11", optional = true }
+# Terminal styling for the interactive driver (dimmed help, red retry hints).
+# dialoguer re-exports this crate; pin the same major to share one copy.
+console = { version = "0.15", optional = true }
+serde = { version = "1", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+[[example]]
+name = "interactive"
+required-features = ["stdin"]

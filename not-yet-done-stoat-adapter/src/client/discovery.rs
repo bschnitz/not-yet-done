@@ -42,10 +42,7 @@ pub struct AutumnFeature {
 }
 
 /// Fetch the instance config from `{base_url}/api/`.
-pub async fn fetch_root_info(
-    http: &reqwest::Client,
-    base_url: &str,
-) -> Result<RootInfo, String> {
+pub async fn fetch_root_info(http: &reqwest::Client, base_url: &str) -> Result<RootInfo, String> {
     let url = format!("{}/api/", base_url.trim_end_matches('/'));
     http_log::log_request("GET", &url);
     let resp = http

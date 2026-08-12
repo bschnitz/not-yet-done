@@ -103,7 +103,11 @@ impl TaigaClient {
         project_id: u64,
         item_type: ItemType,
     ) -> Result<Vec<TaigaStatus>, String> {
-        if let Some(s) = self.project_meta.statuses_snapshot(project_id, item_type).await {
+        if let Some(s) = self
+            .project_meta
+            .statuses_snapshot(project_id, item_type)
+            .await
+        {
             return Ok(s);
         }
         if let Ok(rows) =
@@ -123,10 +127,7 @@ impl TaigaClient {
             ItemType::Epic => "epic-statuses",
             ItemType::UserStory => "userstory-statuses",
         };
-        let url = format!(
-            "{}/api/v1/{segment}?project={project_id}",
-            self.base_url,
-        );
+        let url = format!("{}/api/v1/{segment}?project={project_id}", self.base_url,);
         let headers = self.auth_headers()?;
         http_log::log_request("GET", &url);
         let resp = self
@@ -183,10 +184,8 @@ impl TaigaClient {
             .send_retrying("GET", &url, || self.http.get(&url).headers(headers.clone()))
             .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
-        let raw: Vec<serde_json::Value> = resp
-            .json()
-            .await
-            .map_err(|e| format!("users parse: {e}"))?;
+        let raw: Vec<serde_json::Value> =
+            resp.json().await.map_err(|e| format!("users parse: {e}"))?;
         let mut members: Vec<TaigaMember> = raw
             .into_iter()
             .filter_map(|v| {
@@ -202,14 +201,17 @@ impl TaigaClient {
                     .or_else(|| v.get("full_name").and_then(|x| x.as_str()))
                     .unwrap_or("")
                     .to_string();
-                Some(TaigaMember { id, username, full_name })
+                Some(TaigaMember {
+                    id,
+                    username,
+                    full_name,
+                })
             })
             .collect();
         // De-dup by username (project members can appear multiple times via roles).
         members.sort_by(|a, b| a.username.cmp(&b.username));
         members.dedup_by(|a, b| a.username == b.username);
-        let _ =
-            cache_store::merge_members(&self.db, self.scope_id, project_id, &members).await;
+        let _ = cache_store::merge_members(&self.db, self.scope_id, project_id, &members).await;
         self.project_meta
             .store_members(project_id, members.clone())
             .await;
@@ -222,9 +224,7 @@ impl TaigaClient {
         }
         if let Ok(rows) = cache_store::load_tags(&self.db, self.scope_id, project_id).await {
             if !rows.is_empty() {
-                self.project_meta
-                    .store_tags(project_id, rows.clone())
-                    .await;
+                self.project_meta.store_tags(project_id, rows.clone()).await;
                 return Ok(rows);
             }
         }
@@ -243,11 +243,9 @@ impl TaigaClient {
         // keys are the tag names. (Older / array-of-pairs forms are kept
         // for compatibility.)
         let tags: Vec<String> = match raw.get("tags_colors") {
-            Some(serde_json::Value::Object(map)) => map
-                .keys()
-                .filter(|k| !k.is_empty())
-                .cloned()
-                .collect(),
+            Some(serde_json::Value::Object(map)) => {
+                map.keys().filter(|k| !k.is_empty()).cloned().collect()
+            }
             Some(serde_json::Value::Array(arr)) => arr
                 .iter()
                 .filter_map(|entry| match entry {
@@ -257,7 +255,11 @@ impl TaigaClient {
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string()),
                     serde_json::Value::String(s) => {
-                        if s.is_empty() { None } else { Some(s.clone()) }
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(s.clone())
+                        }
                     }
                     _ => None,
                 })

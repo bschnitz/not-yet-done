@@ -1,0 +1,15 @@
+[package]
+name = "not-yet-done-scripts"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dirs = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+fieldsmith = { path = "../fieldsmith" }
+not-yet-done-content = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content", features = ["mock"] }

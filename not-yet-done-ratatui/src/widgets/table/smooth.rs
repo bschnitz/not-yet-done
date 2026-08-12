@@ -15,21 +15,31 @@
 //! physical-line offset; the helpers here convert between that offset and the
 //! `(row, sub-line)` pair, and clamp it to the valid range.
 //!
-//! ## Selection (early hand-off in the scroll direction)
+//! ## Selection (the cursor rides the leading edge)
 //!
 //! The selection (the highlight, and the row that node-actions operate on) is
 //! attached to a *specific row*, not to a screen position. Scrolling only pans
-//! the viewport; the highlighted row stays put while it is **fully** visible.
-//! The single trigger for a hand-off is "the focused row is no longer fully
-//! visible": as soon as a pan clips even one of its physical lines at an edge,
-//! the focus moves to the **adjacent selectable row in the scroll direction** —
-//! the next row down when scrolling down, the previous row up when scrolling
-//! up. The new row need **not** itself be fully visible: if a tall neighbour
-//! still runs off the far edge, it is focused anyway (it becomes fully visible
-//! as you keep scrolling). What matters is only whether the *current* focus has
-//! started to leave the view, never whether the next one already fits. (When a
-//! single row is taller than the whole viewport so nothing begins/ends inside
-//! it, the focus stays put, so it is never lost.)
+//! the viewport, but every pan also hands the focus **one row onward in the
+//! direction of travel as soon as that row can be seen**: scrolling down moves
+//! it to the next selectable row the moment any highlightable line of that row
+//! enters the viewport, scrolling up to the previous one. Only when the
+//! neighbour is still off-screen (a row taller than what is left of the
+//! viewport) does the focus stay put and the pan is pure scrolling.
+//!
+//! The rule is deliberately about the **neighbour**, not about the current
+//! row: waiting for the focused row to leave the view is what made `j` feel
+//! dead in a chat, where a long message keeps the highlight for a dozen
+//! keypresses while the next message already sits fully on screen. One pan
+//! hands off at most one row, so `j`/`k` walk the messages one by one and the
+//! cursor ends up riding the edge the content scrolls toward.
+//!
+//! "Can be seen" means a line that actually *shows* the highlight: the trailing
+//! spacer line of a chat row opts out of it, so a row whose spacer alone peeks
+//! in is not focused yet — the highlight would be invisible.
+//!
+//! A pan large enough to leave the focus completely behind (the page keys)
+//! falls back to the direction-agnostic re-attach below, so the cursor never
+//! drops off-screen.
 //!
 //! Frame rebuilds and data/viewport changes use a gentler, direction-agnostic
 //! re-attach ([`reattach_selection_if_offscreen`](Table::reattach_selection_if_offscreen))
@@ -39,7 +49,10 @@
 //!
 //! `Home`/`End` are explicit jumps and place the selection on the first / last
 //! selectable row; programmatic selection ([`Table::set_selected`]) scrolls
-//! the target *minimally* into view rather than forcing it to the top.
+//! the target *minimally* into view rather than forcing it to the top. The one
+//! placement that does anchor the target at the top edge is
+//! [`Table::set_selected_at_top`] — used when what follows the target is the
+//! point of the jump (e.g. the first unread chat message).
 //!
 //! ## Cursor step when nothing can scroll
 //!
@@ -115,14 +128,20 @@ impl Table {
     }
 
     fn last_selectable(&self) -> Option<usize> {
-        (0..self.rows.len()).rev().find(|&i| self.rows[i].selectable)
+        (0..self.rows.len())
+            .rev()
+            .find(|&i| self.rows[i].selectable)
     }
 
     /// The topmost and bottommost *selectable* rows that are at least
     /// partially inside the viewport `[view_top, view_bottom)` (both in
     /// global physical-line coordinates). `None` if no selectable row is
     /// visible (e.g. a zero-height viewport).
-    fn visible_selectable_range(&self, view_top: usize, view_bottom: usize) -> Option<(usize, usize)> {
+    fn visible_selectable_range(
+        &self,
+        view_top: usize,
+        view_bottom: usize,
+    ) -> Option<(usize, usize)> {
         let mut acc = 0;
         let mut first = None;
         let mut last = None;
@@ -141,57 +160,52 @@ impl Table {
         first.zip(last)
     }
 
-    /// Early hand-off after a scroll, in the direction of travel: keep the
-    /// focus on its row only while that row is **fully** visible; the moment a
-    /// pan clips even one of its physical lines at an edge, hand the focus to
-    /// the **adjacent selectable row in the scroll direction** — the next row
-    /// that is no longer clipped at the *top* when scrolling down, the previous
-    /// row no longer clipped at the *bottom* when scrolling up.
+    /// Global physical-line span of the part of `row` that can actually *show*
+    /// the highlight, i.e. from its first to its last `highlight_on_select`
+    /// line. `None` for a row that has no such line at all (a pure spacer):
+    /// focusing it would leave no visible cursor.
+    fn row_highlight_span(&self, row: usize) -> Option<(usize, usize)> {
+        let lines = &self.rows.get(row)?.lines;
+        let first = lines.iter().position(|l| l.highlight_on_select)?;
+        let last = lines.iter().rposition(|l| l.highlight_on_select)?;
+        let base = self.row_line_start(row);
+        Some((base + first, base + last + 1))
+    }
+
+    /// Hand the focus one row onward after a scroll: the **adjacent selectable
+    /// row in the direction of travel** takes the focus as soon as any of its
+    /// highlightable lines is inside the viewport — the next row down when
+    /// scrolling down, the previous row up when scrolling up. The row being
+    /// left need not have moved out of view; what matters is that the user can
+    /// see the row the cursor moves onto (see the module docs for why).
     ///
-    /// The trigger is solely "the current selection is no longer fully
-    /// visible"; the target need **not** itself be fully visible (a tall
-    /// neighbour may still run off the far edge). This is what keeps `j`/`k`
-    /// moving even when neither the old nor the new row fits in full. If no
-    /// row begins/ends inside the viewport (a single row taller than the whole
-    /// viewport), the focus stays put so it is never lost. Never moves the
-    /// viewport.
+    /// At most one row per pan, so `j`/`k` step message by message instead of
+    /// jumping to the far edge of the viewport. When the neighbour is still
+    /// off-screen the focus stays put and the pan is pure scrolling. A pan big
+    /// enough to leave the focus entirely behind (the page keys) is caught by
+    /// [`reattach_selection_if_offscreen`](Self::reattach_selection_if_offscreen).
+    /// Never moves the viewport.
     fn handoff_after_scroll(&mut self, down: bool, line_budget: usize) {
         if self.rows.is_empty() {
             return;
         }
         let view_top = self.scroll_line_offset();
         let view_bottom = view_top + line_budget;
-        let sel_start = self.row_line_start(self.selected_row);
-        let sel_end = sel_start + self.rows[self.selected_row].height();
-        // Current focus still fully visible → nothing to hand off.
-        if sel_start >= view_top && sel_end <= view_bottom {
-            return;
-        }
-        let mut acc = 0;
-        let mut target = None;
-        for (i, row) in self.rows.iter().enumerate() {
-            let start = acc;
-            let end = acc + row.height();
-            acc = end;
-            if !row.selectable {
-                continue;
-            }
-            if down {
-                // First selectable row that begins inside the viewport (i.e.
-                // is not clipped at the top) — the next message to focus.
-                if start >= view_top && start < view_bottom {
-                    target = Some(i);
-                    break;
+        let neighbour = if down {
+            (self.selected_row + 1..self.rows.len()).find(|&i| self.rows[i].selectable)
+        } else {
+            (0..self.selected_row)
+                .rev()
+                .find(|&i| self.rows[i].selectable)
+        };
+        if let Some(i) = neighbour {
+            if let Some((start, end)) = self.row_highlight_span(i) {
+                if start < view_bottom && end > view_top {
+                    self.selected_row = i;
                 }
-            } else if end <= view_bottom && end > view_top {
-                // Bottommost selectable row that ends inside the viewport
-                // (not clipped at the bottom) — keep scanning for the last.
-                target = Some(i);
             }
         }
-        if let Some(i) = target {
-            self.selected_row = i;
-        }
+        self.reattach_selection_if_offscreen(line_budget);
     }
 
     /// Gentle re-attach for frame rebuilds and data/viewport changes: keep the
@@ -244,7 +258,11 @@ impl Table {
         if !self.rows[self.selected_row].selectable {
             let fwd = (self.selected_row..self.rows.len()).find(|&i| self.rows[i].selectable);
             self.selected_row = fwd
-                .or_else(|| (0..self.selected_row).rev().find(|&i| self.rows[i].selectable))
+                .or_else(|| {
+                    (0..self.selected_row)
+                        .rev()
+                        .find(|&i| self.rows[i].selectable)
+                })
                 .unwrap_or(self.selected_row);
         }
     }
@@ -295,7 +313,10 @@ impl Table {
     /// and scroll it minimally into view. The upward counterpart of
     /// [`step_selection_down`](Self::step_selection_down).
     pub(crate) fn step_selection_up(&mut self) -> bool {
-        if let Some(prev) = (0..self.selected_row).rev().find(|&i| self.rows[i].selectable) {
+        if let Some(prev) = (0..self.selected_row)
+            .rev()
+            .find(|&i| self.rows[i].selectable)
+        {
             self.selected_row = prev;
             self.scroll_selection_into_view();
             true
@@ -331,6 +352,37 @@ impl Table {
         self.set_scroll_line_offset(0, self.last_line_budget);
         if let Some(i) = self.first_selectable() {
             self.selected_row = i;
+        }
+    }
+
+    /// Select `row` and pull it to the **top** edge of the viewport.
+    ///
+    /// [`set_selected`](Table::set_selected) scrolls the *minimum* amount, so
+    /// a target below the fold ends up parked at the **bottom** edge with
+    /// everything that follows it off-screen. A "jump to the first unread
+    /// row" wants the opposite: the run of unread rows has to read downward
+    /// from the cursor, which means anchoring the target at the top.
+    ///
+    /// Lives here (rather than beside `set_selected`) because it needs the
+    /// module-private line arithmetic; the discrete branch uses
+    /// [`clamp_selection_smooth`](Self::clamp_selection_smooth) for the same
+    /// reason — it clamps identically and, unlike the discrete
+    /// `clamp_selection`, never touches the scroll position we just set.
+    pub fn set_selected_at_top(&mut self, row: usize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.selected_row = row;
+        self.clamp_selection_smooth();
+        if self.smooth_scroll {
+            let start = self.row_line_start(self.selected_row);
+            self.set_scroll_line_offset(start, self.last_line_budget);
+        } else {
+            // Discrete mode scrolls whole rows, so the selected row simply
+            // becomes the first visible one. Overshoot near the end (blank
+            // space below) is the same trade-off every other discrete jump
+            // makes — `view()` never pulls the offset back on its own.
+            self.scroll_offset = self.selected_row;
         }
     }
 
@@ -386,8 +438,7 @@ mod tests {
         // Content scrolled one physical line: top row clipped, sub-line 1.
         assert_eq!(t.scroll_offset, 0);
         assert_eq!(t.scroll_sub_line, 1);
-        // Early hand-off: row 0 is now clipped at the top, so the focus moves
-        // to the next fully-visible message (row 1) — it is never shown cut.
+        // Row 1 is on screen, so one pan hands the focus onward to it.
         assert_eq!(t.selected_row(), 1);
     }
 
@@ -400,26 +451,76 @@ mod tests {
         // Scrolled exactly one row's worth of lines.
         assert_eq!(t.scroll_offset, 1);
         assert_eq!(t.scroll_sub_line, 0);
-        // Focus handed off to row 1 on the first line (row 0 clipped) and
-        // stays there: row 1 spans [3,6) and is fully visible the whole way.
-        assert_eq!(t.selected_row(), 1);
+        // One hand-off per pan: rows 1, 2 and 3 are visible in turn, so three
+        // presses walk the focus three messages down.
+        assert_eq!(t.selected_row(), 3);
     }
 
     #[test]
-    fn selection_hands_off_as_soon_as_its_row_is_clipped() {
+    fn the_focus_moves_on_as_soon_as_the_next_row_is_visible() {
         let mut t = smooth_table(5, 9);
-        // Row 0 spans lines [0,3). A single line of scroll clips its top, so
-        // the focus hands off immediately to the topmost fully-visible row.
+        // Rows are 3 lines, the viewport 9 → rows 0,1,2 are on screen from the
+        // start. Row 0 is still fully visible after one line of scroll, but
+        // waiting for it to leave is exactly what made `j` feel dead in a chat:
+        // the focus goes to row 1 because row 1 can be *seen*.
         t.scroll_lines(1);
-        assert_eq!(t.selected_row(), 1, "row 0 clipped at top → next full row");
-        // Row 1 spans [3,6); it stays fully visible while view_top is 1..3,
-        // so the focus sticks to it across those pans.
+        assert_eq!(t.selected_row(), 1, "next row on screen → focus moves");
         t.scroll_lines(1);
-        assert_eq!(t.selected_row(), 1, "row 1 still fully visible");
+        assert_eq!(
+            t.selected_row(),
+            2,
+            "one row per pan, never a jump to the edge"
+        );
+        // View [3,12) now shows rows 1,2,3 — row 3 has come in at the bottom.
         t.scroll_lines(1);
-        assert_eq!(t.selected_row(), 1, "row 1 still fully visible at view_top 3");
-        // One more line clips row 1's top → hand off to row 2.
+        assert_eq!(t.selected_row(), 3);
+    }
+
+    #[test]
+    fn a_row_taller_than_the_rest_of_the_view_keeps_the_focus() {
+        // One 12-line row followed by normal ones, in a 9-line viewport: while
+        // the tall row is being scrolled through, its successor is nowhere on
+        // screen, so the pan stays pure scrolling and the focus does not move.
+        let mut t = Table::default().with_smooth_scroll(true).with_rows(vec![
+            TableWidgetRow::multiline(
+                (0..12)
+                    .map(|i| {
+                        TableWidgetLine::new(vec![TableWidgetCell::plain(format!("tall {i}"))])
+                    })
+                    .collect(),
+            ),
+            chat_row("after"),
+        ]);
+        t.set_focused(true);
+        t.last_line_budget = 9;
+
         t.scroll_lines(1);
+        assert_eq!(t.selected_row(), 0, "successor still off-screen");
+        t.scroll_lines(1);
+        assert_eq!(t.selected_row(), 0);
+        // View [3,12): the tall row ends at 12, so row 1 is still out of sight.
+        t.scroll_lines(1);
+        assert_eq!(t.selected_row(), 0);
+        // View [4,13) — the first line of row 1 appears at the bottom edge.
+        t.scroll_lines(1);
+        assert_eq!(t.selected_row(), 1, "focus follows once the next row shows");
+    }
+
+    #[test]
+    fn a_bare_spacer_line_does_not_attract_the_focus() {
+        // Scrolling up, the first line of the previous row to come back into
+        // view is its trailing spacer — which opts out of the highlight. Moving
+        // the focus there would leave no visible cursor, so the hand-off waits
+        // for a line that can show it.
+        let mut t = smooth_table(8, 9);
+        t.scroll_lines(9); // view [9,18) → rows 3,4,5 visible, focus re-attached
+        assert_eq!(t.selected_row(), 3);
+        // View [8,17): line 8 is row 2's spacer, the only part of row 2 in
+        // sight. Row 2's highlightable span is [6,8) — still above the edge.
+        t.scroll_lines(-1);
+        assert_eq!(t.selected_row(), 3, "only the invisible spacer is showing");
+        // View [7,16): row 2's body line is on screen now.
+        t.scroll_lines(-1);
         assert_eq!(t.selected_row(), 2);
     }
 
@@ -438,7 +539,11 @@ mod tests {
         t.scroll_lines(1);
         assert_eq!(t.scroll_offset, 0);
         assert_eq!(t.scroll_sub_line, 1);
-        assert_eq!(t.selected_row(), 1, "next row focused though it is clipped at the bottom");
+        assert_eq!(
+            t.selected_row(),
+            1,
+            "next row focused though it is clipped at the bottom"
+        );
 
         // Scrolling back up: row 1 now clips at the bottom of [0,4) → hand back
         // to the previous row (0), which also is not fully visible here.
@@ -450,11 +555,12 @@ mod tests {
     fn scrolling_back_up_hands_off_at_the_bottom() {
         let mut t = smooth_table(6, 9);
         // Deep enough that the selection has handed off a few times.
-        t.scroll_lines(9); // view_top = 9 → rows 3,4,5 fully visible; selection = 3
+        // A page-sized pan leaves the focus far behind (row 0 is off-screen and
+        // its neighbour too), so the re-attach places it on the first visible
+        // row rather than the single-row hand-off.
+        t.scroll_lines(9); // view_top = 9 → rows 3,4,5 fully visible
         assert_eq!(t.selected_row(), 3);
-        // Scroll back to the top: row 3 spans [9,12), now clipped at the
-        // bottom of the [0,9) viewport → hand off to the bottommost
-        // fully-visible row (2).
+        // Scrolling back up hands the focus to the previous row as usual.
         t.scroll_lines(-9);
         assert_eq!(t.scroll_offset, 0);
         assert_eq!(t.scroll_sub_line, 0);
@@ -537,13 +643,22 @@ mod tests {
     fn after_bottoming_out_j_steps_through_the_last_visible_messages() {
         // 5 rows × 3 = 15 lines, budget 9 → max scroll offset = 6 lines.
         let mut t = smooth_table(5, 9);
-        // Scroll all the way down; selection hands off to the topmost visible
-        // row (2), leaving rows 3 and 4 visible but not yet selected.
+        // Scroll all the way down; the focus rides along and ends on the last
+        // message, which is what the pans kept handing it to.
         for _ in 0..20 {
             t.scroll_lines(1);
         }
         assert_eq!(t.scroll_offset, 2);
-        assert_eq!(t.selected_row(), 2, "topmost visible after bottoming out");
+        assert_eq!(
+            t.selected_row(),
+            4,
+            "focus rode the scroll to the last message"
+        );
+
+        // Put the cursor back on an earlier — still visible — message, the way
+        // a jump or a search hit would. View is [6,15), so rows 2,3,4 show.
+        t.set_selected(2);
+        assert_eq!(t.scroll_offset, 2, "target already visible → no re-scroll");
 
         // Scroll is maxed, so j cannot pan further; the cursor must step onto
         // the still-visible rows so the very last message stays reachable.
@@ -570,6 +685,27 @@ mod tests {
         t.set_selected(4);
         assert_eq!(t.selected_row(), 4);
         assert_eq!((t.scroll_offset, t.scroll_sub_line), before);
+    }
+
+    #[test]
+    fn set_selected_at_top_anchors_the_target_at_the_top_edge() {
+        let mut t = smooth_table(8, 9);
+        // Row 5 spans [15,18). `set_selected` would park it at the bottom
+        // edge (view_top 9, see the test above); the top-anchored placement
+        // must instead start the viewport at the row itself, so rows 6 and 7
+        // — the rest of the unread run — are what fills the screen below it.
+        t.set_selected_at_top(5);
+        assert_eq!(t.selected_row(), 5);
+        assert_eq!(t.scroll_offset, 5);
+        assert_eq!(t.scroll_sub_line, 0);
+
+        // Near the end the position clamps: 8 rows × 3 = 24 lines, budget 9 →
+        // max scroll = 15 lines = row 5. Asking for the last row therefore
+        // leaves it on-screen instead of scrolling into empty space.
+        t.set_selected_at_top(7);
+        assert_eq!(t.selected_row(), 7);
+        assert_eq!(t.scroll_offset, 5);
+        assert_eq!(t.scroll_sub_line, 0);
     }
 
     #[test]

@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ratatui::{Frame, layout::Rect};
 use tuirealm::command::{Cmd, CmdResult, Direction, Position};
 use tuirealm::component::{AppComponent, Component};
@@ -6,7 +9,7 @@ use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
 use super::{
-    ColumnStyles, StyleMap, TableWidgetRow,
+    ColumnStyles, ImagePainter, StyleMap, TableWidgetRow,
     keymap::TableKeymap,
     render::{RenderData, render},
     state::TableEvent,
@@ -83,6 +86,15 @@ pub struct Table {
     pub(crate) style_map: StyleMap,
     pub(crate) style: TableStyle,
     pub(crate) keymap: TableKeymap,
+
+    // --- inline images ---
+    /// Draws the pictures whose lines the rows reserved space for. Shared
+    /// with the consumer (one store serves every table), hence the
+    /// `Rc<RefCell<…>>`: the painter needs `&mut` at paint time to cache
+    /// encoded protocols, but the table only borrows it for that instant.
+    /// `None` (the default) means no image support — reserved lines simply
+    /// stay blank.
+    pub(crate) image_painter: Option<Rc<RefCell<dyn ImagePainter>>>,
 
     // --- hop-style jump navigation ---
     /// Characters used to generate jump labels.
@@ -175,6 +187,7 @@ impl Default for Table {
             style_map: StyleMap::default(),
             style: TableStyle::default(),
             keymap: TableKeymap::default(),
+            image_painter: None,
             nav_chars: Vec::new(),
             jump_phase: JumpPhase::Off,
             link_phase: LinkPhase::Off,
@@ -191,6 +204,12 @@ impl Table {
     /// Whether jump mode is waiting for the initial search character.
     pub fn is_jump_waiting_for_char(&self) -> bool {
         matches!(self.jump_phase, JumpPhase::WaitingForChar)
+    }
+
+    /// Install the painter for inline images. Without one, lines that
+    /// reserved space for a picture render blank.
+    pub fn set_image_painter(&mut self, painter: Rc<RefCell<dyn ImagePainter>>) {
+        self.image_painter = Some(painter);
     }
 
     /// Configure the characters used for jump labels.
@@ -218,16 +237,22 @@ impl Table {
 
         // First pass: collect (row_idx, all_match_positions).
         let mut raw_matches: Vec<(usize, Vec<usize>)> = Vec::new();
-        for (vi, row) in self.rows.iter()
+        for (vi, row) in self
+            .rows
+            .iter()
             .skip(self.scroll_offset)
             .take(self.last_visible_data_rows)
             .enumerate()
         {
-            if !row.selectable { continue; }
+            if !row.selectable {
+                continue;
+            }
             let mut positions = Vec::new();
             let mut char_offset = 0usize;
             for (ci, cell) in row.primary_line().iter().enumerate() {
-                if ci > 0 { char_offset += sep_len; }
+                if ci > 0 {
+                    char_offset += sep_len;
+                }
                 for (i, c) in cell.text.chars().enumerate() {
                     if c.to_lowercase().next() == Some(search) {
                         positions.push(char_offset + i);
@@ -270,10 +295,18 @@ impl Table {
 
     /// Phase 2: user typed a label char. Returns `Some(row_index)` if resolved.
     pub fn jump_mode_label_input(&mut self, ch: char) -> Option<usize> {
-        let (search_char, matches, mut input) = match std::mem::replace(&mut self.jump_phase, JumpPhase::Off) {
-            JumpPhase::ShowingLabels { search_char, matches, input } => (search_char, matches, input),
-            other => { self.jump_phase = other; return None; }
-        };
+        let (search_char, matches, mut input) =
+            match std::mem::replace(&mut self.jump_phase, JumpPhase::Off) {
+                JumpPhase::ShowingLabels {
+                    search_char,
+                    matches,
+                    input,
+                } => (search_char, matches, input),
+                other => {
+                    self.jump_phase = other;
+                    return None;
+                }
+            };
 
         input.push(ch);
         let label_len = self.label_len_for_count(matches.len());
@@ -286,7 +319,8 @@ impl Table {
             }
             None
         } else {
-            let still_valid: Vec<_> = matches.iter()
+            let still_valid: Vec<_> = matches
+                .iter()
                 .filter(|(_, _, label)| label.starts_with(&input))
                 .collect();
             if still_valid.is_empty() {
@@ -296,7 +330,11 @@ impl Table {
                 self.set_selected(row_idx);
                 Some(row_idx)
             } else {
-                self.jump_phase = JumpPhase::ShowingLabels { search_char, matches, input };
+                self.jump_phase = JumpPhase::ShowingLabels {
+                    search_char,
+                    matches,
+                    input,
+                };
                 None
             }
         }
@@ -304,17 +342,25 @@ impl Table {
 
     fn label_len_for_count(&self, count: usize) -> usize {
         let base = self.nav_chars.len();
-        if base == 0 { return 0; }
+        if base == 0 {
+            return 0;
+        }
         if count <= base { 1 } else { 2 }
     }
 
     /// Generate the label for the nth match out of `total` matches.
     fn nth_label_of(&self, n: usize, total: usize) -> String {
         let base = self.nav_chars.len();
-        if base == 0 { return String::new(); }
+        if base == 0 {
+            return String::new();
+        }
         let len = self.label_len_for_count(total);
         if len == 1 {
-            if n < base { self.nav_chars[n].to_string() } else { String::new() }
+            if n < base {
+                self.nav_chars[n].to_string()
+            } else {
+                String::new()
+            }
         } else {
             let first = n / base;
             let second = n % base;
@@ -392,8 +438,7 @@ impl Table {
                     while start + needle_chars.len() <= chars.len() {
                         let hit = chars[start..start + needle_chars.len()] == needle_chars[..];
                         if hit {
-                            let free = (start..start + needle_chars.len())
-                                .all(|i| !claimed[i]);
+                            let free = (start..start + needle_chars.len()).all(|i| !claimed[i]);
                             if free {
                                 for i in start..start + needle_chars.len() {
                                     claimed[i] = true;
@@ -422,7 +467,13 @@ impl Table {
             if label.is_empty() {
                 continue;
             }
-            matches.push(LinkMatch { row, line, col, payload, label });
+            matches.push(LinkMatch {
+                row,
+                line,
+                col,
+                payload,
+                label,
+            });
         }
         if matches.is_empty() {
             return 0;
@@ -656,8 +707,12 @@ impl Table {
     /// last cell of the currently selected row. No-op when the cursor
     /// is disabled.
     pub fn move_column_right(&mut self) {
-        let Some(c) = self.selected_column else { return; };
-        let Some(max) = self.column_count().checked_sub(1) else { return; };
+        let Some(c) = self.selected_column else {
+            return;
+        };
+        let Some(max) = self.column_count().checked_sub(1) else {
+            return;
+        };
         if c < max {
             self.selected_column = Some(c + 1);
         }
@@ -676,7 +731,9 @@ impl Table {
     /// after `set_rows` / `set_data` so a shrinking column count never
     /// leaves the cursor pointing past the end.
     fn clamp_column(&mut self) {
-        let Some(c) = self.selected_column else { return; };
+        let Some(c) = self.selected_column else {
+            return;
+        };
         let count = self.column_count();
         if count == 0 {
             return;
@@ -735,7 +792,9 @@ impl Table {
     // --- internal ---
 
     fn move_up(&mut self) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         if self.smooth_scroll {
             // Scroll one physical line; if the viewport is already clamped
             // (everything fits, or at the top edge) the virtual cursor steps
@@ -747,7 +806,9 @@ impl Table {
         }
         let mut target = self.selected_row;
         loop {
-            if target == 0 { break; }
+            if target == 0 {
+                break;
+            }
             target -= 1;
             if self.rows[target].selectable {
                 self.selected_row = target;
@@ -760,7 +821,9 @@ impl Table {
     /// Move selection by `n` rows (positive = down, negative = up).
     /// Skips non-selectable rows.
     pub fn scroll_by(&mut self, n: isize) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         let max = self.rows.len() - 1;
         let target = if n >= 0 {
             (self.selected_row as isize + n).min(max as isize) as usize
@@ -810,7 +873,9 @@ impl Table {
     }
 
     fn move_last(&mut self) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         if self.smooth_scroll {
             self.scroll_to_end();
             return;
@@ -821,7 +886,9 @@ impl Table {
     }
 
     fn move_down(&mut self) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         if self.smooth_scroll {
             // Scroll one physical line; if the viewport is already clamped
             // (everything fits, or at the bottom edge) the virtual cursor
@@ -834,7 +901,9 @@ impl Table {
         let max = self.rows.len() - 1;
         let mut target = self.selected_row;
         loop {
-            if target >= max { break; }
+            if target >= max {
+                break;
+            }
             target += 1;
             if self.rows[target].selectable {
                 self.selected_row = target;
@@ -866,19 +935,29 @@ impl Table {
                 col += span;
             }
         };
-        for row in &self.fixed_header_rows { consider(row); }
-        for row in &self.rows { consider(row); }
-        for row in &self.fixed_footer_rows { consider(row); }
+        for row in &self.fixed_header_rows {
+            consider(row);
+        }
+        for row in &self.rows {
+            consider(row);
+        }
+        for row in &self.fixed_footer_rows {
+            consider(row);
+        }
         widths
     }
 
     /// Visible right-edge x-coordinate (relative to area.left()) of the
     /// `target` column, given a leading scroll of `s` columns.
     fn visible_right_of(s: usize, target: usize, widths: &[usize], sep: usize) -> usize {
-        if target < s { return 0; }
+        if target < s {
+            return 0;
+        }
         let mut total = 0usize;
         for i in s..=target {
-            if i > s { total += sep; }
+            if i > s {
+                total += sep;
+            }
             total += widths.get(i).copied().unwrap_or(0);
         }
         total
@@ -909,7 +988,9 @@ impl Table {
         let mut s = self.scroll_col_offset.min(target);
         while s < target {
             let r = Self::visible_right_of(s, target, &widths, sep);
-            if r <= area_w { break; }
+            if r <= area_w {
+                break;
+            }
             s += 1;
         }
         self.scroll_col_offset = s;
@@ -976,7 +1057,8 @@ impl Component for Table {
         // Budget is in terminal LINES; with variable row heights the number
         // of whole rows that fit depends on the scroll position, so it's
         // derived below rather than being a constant.
-        let line_budget = area.height
+        let line_budget = area
+            .height
             .saturating_sub(fixed_top)
             .saturating_sub(fixed_bottom) as usize;
         // Remember the line budget for event handlers (smooth scrolling
@@ -1026,10 +1108,15 @@ impl Component for Table {
         let (jump_matches, jump_showing_labels, jump_input) = match &self.jump_phase {
             JumpPhase::ShowingLabels { matches, input, .. } => {
                 // Convert data_row_index to visible_index for the renderer.
-                let visible: Vec<(usize, Vec<usize>, String)> = matches.iter()
+                let visible: Vec<(usize, Vec<usize>, String)> = matches
+                    .iter()
                     .filter_map(|(row_idx, positions, label)| {
                         let vi = row_idx.checked_sub(self.scroll_offset)?;
-                        if vi < visible_data { Some((vi, positions.clone(), label.clone())) } else { None }
+                        if vi < visible_data {
+                            Some((vi, positions.clone(), label.clone()))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 (visible, true, input.as_str())
@@ -1069,7 +1156,7 @@ impl Component for Table {
             0
         };
 
-        let data = RenderData {
+        let mut data = RenderData {
             fixed_header_rows: &self.fixed_header_rows,
             rows: &self.rows,
             fixed_footer_rows: &self.fixed_footer_rows,
@@ -1090,8 +1177,14 @@ impl Component for Table {
             jump_input,
             link_matches: &link_matches,
             link_showing,
+            image_painter: None,
         };
-        render(frame.buffer_mut(), area, &data);
+        // The painter is borrowed for the duration of the paint only, so a
+        // store shared by every table stays usable elsewhere between frames.
+        let painter = self.image_painter.clone();
+        let mut borrowed = painter.as_ref().map(|p| p.borrow_mut());
+        data.image_painter = borrowed.as_deref_mut().map(|p| p as &mut dyn ImagePainter);
+        render(frame.buffer_mut(), area, &mut data);
     }
 
     fn query(&self, attr: Attribute) -> Option<QueryResult<'_>> {
@@ -1131,12 +1224,8 @@ impl Component for Table {
                 self.move_last();
                 CmdResult::Changed(State::Single(StateValue::Usize(self.selected_row)))
             }
-            Cmd::Submit => {
-                CmdResult::Submit(State::Single(StateValue::Usize(self.selected_row)))
-            }
-            Cmd::Cancel => {
-                CmdResult::Batch(vec![])
-            }
+            Cmd::Submit => CmdResult::Submit(State::Single(StateValue::Usize(self.selected_row))),
+            Cmd::Cancel => CmdResult::Batch(vec![]),
             _ => CmdResult::NoChange,
         }
     }
@@ -1200,8 +1289,8 @@ impl AppComponent<TableEvent, NoUserEvent> for Table {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::TableWidgetCell;
+    use super::*;
 
     fn make_rows() -> Vec<TableWidgetRow> {
         vec![
@@ -1243,8 +1332,9 @@ mod tests {
     #[test]
     fn scroll_adjusts_on_move_down() {
         let mut table = Table::default().with_rows(
-            (0..20).map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
-                .collect()
+            (0..20)
+                .map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
+                .collect(),
         );
         table.last_visible_data_rows = 5;
         table.focused = true;
@@ -1259,11 +1349,15 @@ mod tests {
 
     fn make_wide_rows() -> Vec<TableWidgetRow> {
         // 5 columns, 10 chars each, separator "  " (2) → row width 58.
-        (0..3).map(|r| {
-            TableWidgetRow::new((0..5).map(|c| {
-                TableWidgetCell::plain(format!("r{r}c{c}aaaaaa"))
-            }).collect())
-        }).collect()
+        (0..3)
+            .map(|r| {
+                TableWidgetRow::new(
+                    (0..5)
+                        .map(|c| TableWidgetCell::plain(format!("r{r}c{c}aaaaaa")))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -1335,8 +1429,9 @@ mod tests {
     #[test]
     fn set_selected_adjusts_scroll() {
         let mut table = Table::default().with_rows(
-            (0..20).map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
-                .collect()
+            (0..20)
+                .map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
+                .collect(),
         );
         table.last_visible_data_rows = 5;
 
@@ -1350,7 +1445,9 @@ mod tests {
     fn chat_row(text: &str) -> TableWidgetRow {
         // 3 physical lines: meta, body, spacer (spacer not highlighted).
         TableWidgetRow::multiline(vec![
-            super::super::TableWidgetLine::new(vec![TableWidgetCell::plain(format!("meta {text}"))]),
+            super::super::TableWidgetLine::new(vec![TableWidgetCell::plain(format!(
+                "meta {text}"
+            ))]),
             super::super::TableWidgetLine::new(vec![TableWidgetCell::plain(text)]),
             super::super::TableWidgetLine::new(vec![]).with_highlight_on_select(false),
         ])
@@ -1377,9 +1474,8 @@ mod tests {
     #[test]
     fn visible_row_count_honours_height() {
         // Three 3-line rows, budget 7 lines → only 2 whole rows fit (6 lines).
-        let table = Table::default().with_rows(
-            (0..3).map(|i| chat_row(&format!("m{i}"))).collect(),
-        );
+        let table =
+            Table::default().with_rows((0..3).map(|i| chat_row(&format!("m{i}"))).collect());
         assert_eq!(table.visible_row_count_from(0, 7), 2);
         assert_eq!(table.visible_row_count_from(0, 9), 3);
         // A budget smaller than one row still shows that row (clipped).
@@ -1429,8 +1525,14 @@ mod tests {
     fn link_hop_first_label_maps_to_topmost_match() {
         let mut t = link_table(&["https://first.test", "https://second.test"]);
         let targets = vec![
-            ("https://first.test".to_string(), "https://first.test".to_string()),
-            ("https://second.test".to_string(), "https://second.test".to_string()),
+            (
+                "https://first.test".to_string(),
+                "https://first.test".to_string(),
+            ),
+            (
+                "https://second.test".to_string(),
+                "https://second.test".to_string(),
+            ),
         ];
         assert_eq!(t.link_hop_open(&targets), 2);
         // Labels read top-to-bottom: 'a' → first row's URL.
@@ -1450,7 +1552,10 @@ mod tests {
     #[test]
     fn link_hop_needle_absent_from_screen_is_not_labelled() {
         let mut t = link_table(&["nothing to see"]);
-        let targets = vec![("https://ghost.test".to_string(), "https://ghost.test".to_string())];
+        let targets = vec![(
+            "https://ghost.test".to_string(),
+            "https://ghost.test".to_string(),
+        )];
         assert_eq!(t.link_hop_open(&targets), 0);
         assert!(!t.is_link_hop_active());
     }

@@ -34,18 +34,21 @@ pub async fn apply_changes(
     }
 
     // Validate: if !allow_parallel, at most one item may have -t flag.
-    let tracked_items: Vec<&ParsedItem> = items.iter()
-        .filter(|i| i.has_flag('t'))
-        .collect();
+    let tracked_items: Vec<&ParsedItem> = items.iter().filter(|i| i.has_flag('t')).collect();
     if !allow_parallel && tracked_items.len() > 1 {
-        let names: Vec<&str> = tracked_items.iter().map(|i| i.description.as_str()).collect();
+        let names: Vec<&str> = tracked_items
+            .iter()
+            .map(|i| i.description.as_str())
+            .collect();
         return Err(format!(
             "Only one task can be tracked at a time (allow_parallel=false). Tracked: {}",
             names.join(", "),
         ));
     }
 
-    let root_task = original_tasks.iter().find(|t| t.id == root_id)
+    let root_task = original_tasks
+        .iter()
+        .find(|t| t.id == root_id)
         .ok_or("Root task not found in originals")?;
     let root_parent = root_task.parent_id;
 
@@ -59,13 +62,17 @@ pub async fn apply_changes(
 
     for item in &items {
         let depth = item.depth;
-        let parent_id = if depth == 0 { root_parent } else {
+        let parent_id = if depth == 0 {
+            root_parent
+        } else {
             id_at_depth.get(depth - 1).copied().flatten()
         };
 
         if let Some(ref sid) = item.short_id {
             let full_id = resolve_short_id(sid, original_tasks)?;
-            let original = original_tasks.iter().find(|t| t.id == full_id)
+            let original = original_tasks
+                .iter()
+                .find(|t| t.id == full_id)
                 .ok_or_else(|| format!("Task {sid} not found"))?;
 
             seen_ids.push(full_id);
@@ -76,21 +83,28 @@ pub async fn apply_changes(
             if parent_changed {
                 let mut updated_task = original.clone();
                 updated_task.parent_id = parent_id;
-                crate::notes::move_notes(&updated_task, original_tasks, &build_updated_tasks(original_tasks, full_id, parent_id));
+                crate::notes::move_notes(
+                    &updated_task,
+                    original_tasks,
+                    &build_updated_tasks(original_tasks, full_id, parent_id),
+                );
             }
 
             ensure_depth(&mut id_at_depth, depth);
             id_at_depth[depth] = Some(full_id);
         } else {
             // New item — create immediately so children can reference its UUID.
-            let new_task = task_service.add_task(
-                item.description.clone(),
-                None,
-                parent_id.map(|id| id.to_string()),
-                None,
-                Some(item.status.clone()),
-                Some(item.priority.unwrap_or(0)),
-            ).await.map_err(|e| format!("Failed to create '{}': {e}", item.description))?;
+            let new_task = task_service
+                .add_task(
+                    item.description.clone(),
+                    None,
+                    parent_id.map(|id| id.to_string()),
+                    None,
+                    Some(item.status.clone()),
+                    Some(item.priority.unwrap_or(0)),
+                )
+                .await
+                .map_err(|e| format!("Failed to create '{}': {e}", item.description))?;
 
             ensure_depth(&mut id_at_depth, depth);
             id_at_depth[depth] = Some(new_task.id);
@@ -101,7 +115,9 @@ pub async fn apply_changes(
     // Soft-delete items in the original that are missing from the editor.
     for task in original_tasks {
         if !task.deleted && !seen_ids.contains(&task.id) {
-            task_service.delete_task(task.id).await
+            task_service
+                .delete_task(task.id)
+                .await
                 .map_err(|e| format!("Failed to delete task: {e}"))?;
             deleted += 1;
         }
@@ -127,14 +143,20 @@ pub async fn apply_changes(
                             }
                         }
                     }
-                    tracking_repo.insert(full_id, chrono::Utc::now(), None).await
+                    tracking_repo
+                        .insert(full_id, chrono::Utc::now(), None)
+                        .await
                         .map_err(|e| format!("Failed to start tracking: {e}"))?;
                     tracking_started += 1;
                 } else if !wants_tracked && was_tracked {
-                    let active = tracking_repo.find_active_for_task(full_id).await
+                    let active = tracking_repo
+                        .find_active_for_task(full_id)
+                        .await
                         .map_err(|e| format!("Failed to find active tracking: {e}"))?;
                     if let Some(t) = active {
-                        tracking_repo.stop(t.id, chrono::Utc::now()).await
+                        tracking_repo
+                            .stop(t.id, chrono::Utc::now())
+                            .await
                             .map_err(|e| format!("Failed to stop tracking: {e}"))?;
                     }
                     tracking_stopped += 1;
@@ -143,18 +165,31 @@ pub async fn apply_changes(
         }
     }
 
-    if created == 0 && updated == 0 && deleted == 0
-        && tracking_started == 0 && tracking_stopped == 0
+    if created == 0
+        && updated == 0
+        && deleted == 0
+        && tracking_started == 0
+        && tracking_stopped == 0
     {
         return Ok("No changes".into());
     }
 
     let mut parts = Vec::new();
-    if created > 0 { parts.push(format!("{created} created")); }
-    if updated > 0 { parts.push(format!("{updated} updated")); }
-    if deleted > 0 { parts.push(format!("{deleted} deleted")); }
-    if tracking_started > 0 { parts.push(format!("{tracking_started} tracking started")); }
-    if tracking_stopped > 0 { parts.push(format!("{tracking_stopped} tracking stopped")); }
+    if created > 0 {
+        parts.push(format!("{created} created"));
+    }
+    if updated > 0 {
+        parts.push(format!("{updated} updated"));
+    }
+    if deleted > 0 {
+        parts.push(format!("{deleted} deleted"));
+    }
+    if tracking_started > 0 {
+        parts.push(format!("{tracking_started} tracking started"));
+    }
+    if tracking_stopped > 0 {
+        parts.push(format!("{tracking_stopped} tracking stopped"));
+    }
     Ok(parts.join(", "))
 }
 
@@ -177,45 +212,77 @@ async fn apply_updates(
     let parent_changed = parent_id != original.parent_id;
     let deleted_changed = item.deleted != original.deleted;
 
-    if !desc_changed && !status_changed && !priority_changed && !parent_changed && !deleted_changed {
+    if !desc_changed && !status_changed && !priority_changed && !parent_changed && !deleted_changed
+    {
         return Ok(0);
     }
 
-    service.update_task(
-        id,
-        if desc_changed { Some(item.description.clone()) } else { None },
-        if status_changed { Some(item.status.clone()) } else { None },
-        if priority_changed { item.priority } else { None },
-        if parent_changed { Some(parent_id) } else { None },
-        if deleted_changed { Some(item.deleted) } else { None },
-    ).await.map_err(|e| format!("Failed to update task: {e}"))?;
+    service
+        .update_task(
+            id,
+            if desc_changed {
+                Some(item.description.clone())
+            } else {
+                None
+            },
+            if status_changed {
+                Some(item.status.clone())
+            } else {
+                None
+            },
+            if priority_changed {
+                item.priority
+            } else {
+                None
+            },
+            if parent_changed {
+                Some(parent_id)
+            } else {
+                None
+            },
+            if deleted_changed {
+                Some(item.deleted)
+            } else {
+                None
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to update task: {e}"))?;
 
     Ok(1)
 }
 
 fn resolve_short_id(short: &str, tasks: &[Task]) -> Result<Uuid, String> {
-    let matches: Vec<&Task> = tasks.iter()
-        .filter(|t| short_id(t.id) == short)
-        .collect();
+    let matches: Vec<&Task> = tasks.iter().filter(|t| short_id(t.id) == short).collect();
     match matches.len() {
         0 => Err(format!("Unknown id={short}")),
         1 => Ok(matches[0].id),
-        _ => Err(format!("Ambiguous id={short} (matches {} tasks)", matches.len())),
+        _ => Err(format!(
+            "Ambiguous id={short} (matches {} tasks)",
+            matches.len()
+        )),
     }
 }
 
 /// Build a snapshot of tasks with one task's parent_id updated.
 /// Used to compute the new notes path after a reparent.
-fn build_updated_tasks(original_tasks: &[Task], task_id: Uuid, new_parent: Option<Uuid>) -> Vec<Task> {
-    original_tasks.iter().map(|t| {
-        if t.id == task_id {
-            let mut updated = t.clone();
-            updated.parent_id = new_parent;
-            updated
-        } else {
-            t.clone()
-        }
-    }).collect()
+fn build_updated_tasks(
+    original_tasks: &[Task],
+    task_id: Uuid,
+    new_parent: Option<Uuid>,
+) -> Vec<Task> {
+    original_tasks
+        .iter()
+        .map(|t| {
+            if t.id == task_id {
+                let mut updated = t.clone();
+                updated.parent_id = new_parent;
+                updated
+            } else {
+                t.clone()
+            }
+        })
+        .collect()
 }
 
 fn ensure_depth(id_at_depth: &mut Vec<Option<Uuid>>, depth: usize) {
@@ -234,7 +301,13 @@ mod tests {
     use chrono::Utc;
     use not_yet_done_task_core::entity::task::TaskStatus;
 
-    fn task(id_prefix: &str, desc: &str, parent_prefix: Option<&str>, status: TaskStatus, priority: i32) -> Task {
+    fn task(
+        id_prefix: &str,
+        desc: &str,
+        parent_prefix: Option<&str>,
+        status: TaskStatus,
+        priority: i32,
+    ) -> Task {
         Task {
             id: make_uuid(id_prefix),
             description: desc.to_string(),
@@ -274,9 +347,8 @@ mod tests {
     fn parse_detects_new_items() {
         let root = task("a1b2c3d4", "Root", None, TaskStatus::Todo, 0);
         let sid = short_id(root.id);
-        let content = format!(
-            "- [ ] Root  (p=0  id={sid})\n  - [ ] New child\n    - [x] New grandchild\n"
-        );
+        let content =
+            format!("- [ ] Root  (p=0  id={sid})\n  - [ ] New child\n    - [x] New grandchild\n");
         let items = parse::parse(&content).unwrap();
         assert_eq!(items.len(), 3);
         assert!(items[1].short_id.is_none()); // new

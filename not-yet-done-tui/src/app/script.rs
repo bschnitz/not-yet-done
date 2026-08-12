@@ -22,8 +22,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use not_yet_done_content::NodeRef;
+use not_yet_done_scripts::{ScriptRepo, ScriptScope, normalize_name};
 
-use crate::app::editor::{parse_script_mode, parse_script_output_suffix, ScriptMode};
+use crate::app::editor::{ScriptMode, parse_script_mode, parse_script_output_suffix};
 use crate::app::{App, ContentSlot, DetachedScript, EditorRequest};
 use crate::components::script_menu::{ScriptMenuEntry, ScriptMenuMessage};
 use crate::edit_session::{ScriptOutputSession, ScriptSession, SessionScope};
@@ -128,35 +129,47 @@ impl ScriptContext {
     /// the global fallback.
     pub fn new_script_template(&self) -> &str {
         match self {
-            ScriptContext::ContentNode { new_script_template, .. }
-            | ScriptContext::ContentBatch { new_script_template, .. }
-            | ScriptContext::ContentTable { new_script_template, .. } => new_script_template,
+            ScriptContext::ContentNode {
+                new_script_template,
+                ..
+            }
+            | ScriptContext::ContentBatch {
+                new_script_template,
+                ..
+            }
+            | ScriptContext::ContentTable {
+                new_script_template,
+                ..
+            } => new_script_template,
         }
     }
 }
 
 impl ScriptContext {
+    /// The adapter-agnostic [`ScriptScope`] for this context: the owning
+    /// adapter type (tab) plus the view-hierarchy node-type path. This is the
+    /// single handle both the on-disk directory and the shortcut scope are
+    /// derived from — the TUI and CLI share the derivation via
+    /// `not-yet-done-scripts`.
+    pub fn script_scope(&self) -> ScriptScope {
+        match self {
+            ScriptContext::ContentNode { tab, view_path, .. }
+            | ScriptContext::ContentBatch { tab, view_path, .. }
+            | ScriptContext::ContentTable { tab, view_path, .. } => {
+                ScriptScope::new(tab.clone(), view_path.clone())
+            }
+        }
+    }
+
     /// Where the menu reads / writes script files for this context.
     /// Both batch and content-node scripts use the **view path** (root
     /// ViewDef + drill-down ChildDefs, *not* the item-type) under
     /// `<data>/not_yet_done/scripts/<tab>/<view…>/`. `/` and `:` in
     /// node_types are replaced with `_` to keep path segments safe.
+    /// Delegates to [`ScriptScope::dir`] so the layout stays in one place.
     pub fn scripts_dir(&self) -> std::path::PathBuf {
-        match self {
-            ScriptContext::ContentNode { tab, view_path, .. }
-            | ScriptContext::ContentBatch { tab, view_path, .. }
-            | ScriptContext::ContentTable { tab, view_path, .. } => {
-                let mut p = dirs::data_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("not_yet_done")
-                    .join("scripts")
-                    .join(tab);
-                for seg in view_path {
-                    p = p.join(seg.replace(['/', ':'], "_"));
-                }
-                p
-            }
-        }
+        self.script_scope()
+            .dir(&not_yet_done_scripts::default_root())
     }
 
     /// Build the JSON string handed to the script (either via temp
@@ -165,7 +178,12 @@ impl ScriptContext {
     /// for backward compatibility with the user's existing scripts.
     pub fn build_json(&self) -> String {
         match self {
-            ScriptContext::ContentBatch { node_ids, min_date, max_date, .. } => {
+            ScriptContext::ContentBatch {
+                node_ids,
+                min_date,
+                max_date,
+                ..
+            } => {
                 // Legacy aggregate JSON shape (key stays `tracking_ids`) so the
                 // migrated aggregate scripts run unchanged.
                 let ids = node_ids
@@ -186,7 +204,11 @@ impl ScriptContext {
                 )
             }
             ScriptContext::ContentTable {
-                rows, query, selected_index, selected_field, ..
+                rows,
+                query,
+                selected_index,
+                selected_field,
+                ..
             } => {
                 let rows_inner = rows
                     .iter()
@@ -221,7 +243,14 @@ impl ScriptContext {
                 )
             }
             ScriptContext::ContentNode {
-                tab, instance, node_type, node_id, node_ref, label, fields, ..
+                tab,
+                instance,
+                node_type,
+                node_id,
+                node_ref,
+                label,
+                fields,
+                ..
             } => {
                 let fields_inner = fields
                     .iter()
@@ -247,13 +276,7 @@ impl ScriptContext {
     /// Mirrors [`crate::views::content_view::ContentView::focused_script_scope`]
     /// so a chord bound here is registered for the same focused level.
     pub fn shortcut_scope(&self) -> String {
-        match self {
-            ScriptContext::ContentNode { tab, view_path, .. }
-            | ScriptContext::ContentBatch { tab, view_path, .. }
-            | ScriptContext::ContentTable { tab, view_path, .. } => {
-                format!("script:{tab}/{}", view_path.join("/"))
-            }
-        }
+        self.script_scope().shortcut_scope()
     }
 
     /// `view_index` carried by this context — used to address the owning
@@ -362,13 +385,13 @@ impl App {
             .collect();
         let node_ref = format!("{kind}/{instance}/{node_id}");
         let view_def_idx = pane.view_def_index();
-        let view_path = pane.view_path_node_types(&cv.view_defs);
+        let view_path = pane.script_scope_path(&cv.view_defs);
         let per_view_template = cv
             .view_defs
             .get(view_def_idx)
             .and_then(|vd| vd.script_template.clone());
-        let new_script_template = per_view_template
-            .unwrap_or_else(|| self.config.script.template.clone());
+        let new_script_template =
+            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
 
         let ctx = ScriptContext::ContentNode {
             view_index,
@@ -423,7 +446,7 @@ impl App {
         };
         let node_ids = pane.filtered_item_ids();
         let view_def_idx = pane.view_def_index();
-        let view_path = pane.view_path_node_types(&cv.view_defs);
+        let view_path = pane.script_scope_path(&cv.view_defs);
         // Date bounds from the active query (relative dates already
         // resolved by `query_filter::parse`), mirroring the legacy
         // trackings filter's `extract_date_bounds`.
@@ -519,7 +542,7 @@ impl App {
             Some(query_text)
         };
         let view_def_idx = pane.view_def_index();
-        let view_path = pane.view_path_node_types(&cv.view_defs);
+        let view_path = pane.script_scope_path(&cv.view_defs);
         let per_view_template = cv
             .view_defs
             .get(view_def_idx)
@@ -550,6 +573,8 @@ impl App {
     /// the path — otherwise an empty popup is easy to mistake for "the
     /// menu didn't open at all".
     fn open_script_menu(&mut self, ctx: ScriptContext) {
+        let repo = ScriptRepo::default();
+        let script_scope = ctx.script_scope();
         let dir = ctx.scripts_dir();
         let _ = std::fs::create_dir_all(&dir);
         // Map each script's filename → its bound chord (if any) so the menu
@@ -569,22 +594,18 @@ impl App {
                         .collect()
                 })
             });
-        let mut entries: Vec<ScriptMenuEntry> = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-                .map(|e| {
-                    let label = e.file_name().to_string_lossy().to_string();
-                    ScriptMenuEntry {
-                        path: e.path().to_string_lossy().to_string(),
-                        shortcut: shortcuts.get(&label).cloned(),
-                        label,
-                    }
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        entries.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        // `ScriptRepo::list` already returns files only, sorted
+        // case-insensitively by name — the same order the menu wants.
+        let entries: Vec<ScriptMenuEntry> = repo
+            .list(&script_scope)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| ScriptMenuEntry {
+                path: e.path.to_string_lossy().to_string(),
+                shortcut: shortcuts.get(&e.name).cloned(),
+                label: e.name,
+            })
+            .collect();
 
         if entries.is_empty() {
             self.notify(format!(
@@ -610,7 +631,8 @@ impl App {
                 self.keybindings.popup.clone(),
                 self.keybindings.key_icons.clone(),
             );
-        self.script_menu.open(&entries, &self.keybindings.script_menu);
+        self.script_menu
+            .open(&entries, &self.keybindings.script_menu);
         self.script_menu_ctx = Some(ctx);
     }
 
@@ -618,7 +640,9 @@ impl App {
     /// [`EditorRequest`] when the chosen action opens an external editor
     /// (Edit / CreateNew); otherwise [`EditorRequest::None`].
     pub fn handle_script_menu_key(&mut self, key: &str) -> EditorRequest {
-        let msg = self.script_menu.handle_key(key, &self.keybindings.script_menu);
+        let msg = self
+            .script_menu
+            .handle_key(key, &self.keybindings.script_menu);
         match msg {
             ScriptMenuMessage::Unhandled | ScriptMenuMessage::Handled => EditorRequest::None,
             ScriptMenuMessage::Closed => {
@@ -637,7 +661,9 @@ impl App {
                 // capture branch in `App::handle_key`) is persisted as this
                 // script's chord under the level's script scope.
                 let ctx = self.script_menu_ctx.take();
-                let Some(ctx) = ctx else { return EditorRequest::None };
+                let Some(ctx) = ctx else {
+                    return EditorRequest::None;
+                };
                 self.modal_message = Some(format!(
                     "Press a shortcut key for script '{}'\n\nEsc to cancel",
                     label
@@ -651,8 +677,12 @@ impl App {
             }
             ScriptMenuMessage::Edit { path, label } => {
                 let ctx = self.script_menu_ctx.take();
-                let Some(ctx) = ctx else { return EditorRequest::None };
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                let Some(ctx) = ctx else {
+                    return EditorRequest::None;
+                };
+                let content = ScriptRepo::default()
+                    .read(&ctx.script_scope(), &label)
+                    .unwrap_or_default();
                 let filename = std::path::Path::new(&path)
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
@@ -666,9 +696,12 @@ impl App {
                 );
                 self.open_session(Box::new(session))
             }
-            ScriptMenuMessage::Delete { path, label } => {
-                self.script_menu_ctx = None;
-                match std::fs::remove_file(&path) {
+            ScriptMenuMessage::Delete { path: _, label } => {
+                let ctx = self.script_menu_ctx.take();
+                let Some(ctx) = ctx else {
+                    return EditorRequest::None;
+                };
+                match ScriptRepo::default().delete(&ctx.script_scope(), &label) {
                     Ok(_) => self.notify(format!("Deleted script {label}")),
                     Err(e) => self.notify_error(format!("Failed to delete {label}: {e}")),
                 }
@@ -676,14 +709,12 @@ impl App {
             }
             ScriptMenuMessage::CreateNew { name } => {
                 let ctx = self.script_menu_ctx.take();
-                let Some(ctx) = ctx else { return EditorRequest::None };
+                let Some(ctx) = ctx else {
+                    return EditorRequest::None;
+                };
                 let template = ctx.new_script_template().to_string();
                 // Default suffix `.py` when the user types a bare name.
-                let filename = if name.contains('.') {
-                    name.clone()
-                } else {
-                    format!("{name}.py")
-                };
+                let filename = normalize_name(&name);
                 let session = ScriptSession::new(
                     ctx.scripts_dir(),
                     filename,
@@ -719,9 +750,7 @@ impl App {
         let ctx = match scope {
             ScriptScope::Node => self.build_content_node_ctx(view_index, pane_id),
             ScriptScope::FilteredSet => self.build_content_batch_ctx(view_index, pane_id),
-            ScriptScope::Table => {
-                self.build_content_table_ctx(view_index, pane_id, default_field)
-            }
+            ScriptScope::Table => self.build_content_table_ctx(view_index, pane_id, default_field),
         };
         let Some(ctx) = ctx else {
             return EditorRequest::None;
@@ -747,7 +776,12 @@ impl App {
         &self,
         ctx: &ScriptContext,
     ) -> std::collections::HashMap<String, String> {
-        let ScriptContext::ContentNode { view_index, node_ref, .. } = ctx else {
+        let ScriptContext::ContentNode {
+            view_index,
+            node_ref,
+            ..
+        } = ctx
+        else {
             return std::collections::HashMap::new();
         };
         let Some(adapter) = self
@@ -804,13 +838,27 @@ impl App {
             };
         }
 
-        let result =
-            self.run_script_background(ctx, script_path, &stdin_json, mode, &output_suffix, &child_env);
+        let result = self.run_script_background(
+            ctx,
+            script_path,
+            &stdin_json,
+            mode,
+            &output_suffix,
+            &child_env,
+        );
         // Batch / table scripts may mutate the underlying data (e.g. a period
         // equalizer, a bulk edit); reload the pane so the change is visible.
         match ctx {
-            ScriptContext::ContentBatch { view_index, pane_id, .. }
-            | ScriptContext::ContentTable { view_index, pane_id, .. } => {
+            ScriptContext::ContentBatch {
+                view_index,
+                pane_id,
+                ..
+            }
+            | ScriptContext::ContentTable {
+                view_index,
+                pane_id,
+                ..
+            } => {
                 self.reload_content_pane_current_level(*view_index, *pane_id);
             }
             ScriptContext::ContentNode { .. } => {}
@@ -863,10 +911,8 @@ impl App {
         let pause_tui = self.config.script.pause_tui;
         if pause_tui {
             let _ = crate::events::disable_kitty_protocol();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::LeaveAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
         }
         // For shells that don't substitute the placeholder themselves
         // we also expose the output file as an env var — that's how
@@ -883,10 +929,8 @@ impl App {
             .env("NYD_OUTPUT_FILE", &output_path)
             .status();
         if pause_tui {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::EnterAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen);
             let _ = crate::events::enable_kitty_protocol();
         }
         match result {
@@ -994,10 +1038,7 @@ impl App {
                             self.notify(stderr.trim().to_string());
                         }
                         if !output.status.success() {
-                            self.notify_error(format!(
-                                "Script exited with {}",
-                                output.status
-                            ));
+                            self.notify_error(format!("Script exited with {}", output.status));
                         } else if let Some(ref op) = commands_output_path {
                             self.run_script_output_commands(op);
                         }
@@ -1036,9 +1077,7 @@ impl App {
         let raw = match std::fs::read_to_string(output_path) {
             Ok(s) => s,
             Err(e) => {
-                self.notify_error(format!(
-                    "Failed to read script output file: {e}"
-                ));
+                self.notify_error(format!("Failed to read script output file: {e}"));
                 return;
             }
         };
@@ -1053,16 +1092,12 @@ impl App {
             }
         };
         let Some(cmds) = parsed.get("commands").and_then(|v| v.as_array()) else {
-            self.notify_error(
-                "Script output JSON missing `commands` array".to_string(),
-            );
+            self.notify_error("Script output JSON missing `commands` array".to_string());
             return;
         };
         for entry in cmds {
             let Some(s) = entry.as_str() else {
-                self.notify_error(
-                    "Script command entry is not a string".to_string(),
-                );
+                self.notify_error("Script command entry is not a string".to_string());
                 continue;
             };
             let stripped = s.trim().strip_prefix(':').unwrap_or(s.trim());
@@ -1183,7 +1218,11 @@ mod tests {
             selected_field: None,
             new_script_template: String::new(),
         };
-        assert!(table.scripts_dir().ends_with("scripts/postgres/postgres_row"));
+        assert!(
+            table
+                .scripts_dir()
+                .ends_with("scripts/postgres/postgres_row")
+        );
     }
 
     #[test]

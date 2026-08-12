@@ -136,7 +136,13 @@ mod tests {
     #[test]
     fn bare_url_is_its_own_needle() {
         let links = extract_links("see https://example.com/page for details");
-        assert_eq!(links, vec![("https://example.com/page".to_string(), "https://example.com/page".to_string())]);
+        assert_eq!(
+            links,
+            vec![(
+                "https://example.com/page".to_string(),
+                "https://example.com/page".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -148,7 +154,13 @@ mod tests {
     #[test]
     fn markdown_link_uses_text_as_needle() {
         let links = extract_links("check [the docs](https://example.com/docs) now");
-        assert_eq!(links, vec![("the docs".to_string(), "https://example.com/docs".to_string())]);
+        assert_eq!(
+            links,
+            vec![(
+                "the docs".to_string(),
+                "https://example.com/docs".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -156,7 +168,10 @@ mod tests {
         // The URL inside the markdown link must not leak out as a second target.
         let links = extract_links("[site](https://example.com)");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0], ("site".to_string(), "https://example.com".to_string()));
+        assert_eq!(
+            links[0],
+            ("site".to_string(), "https://example.com".to_string())
+        );
     }
 
     #[test]
@@ -166,7 +181,10 @@ mod tests {
             links,
             vec![
                 ("a".to_string(), "https://a.test".to_string()),
-                ("https://b.test/2".to_string(), "https://b.test/2".to_string()),
+                (
+                    "https://b.test/2".to_string(),
+                    "https://b.test/2".to_string()
+                ),
             ]
         );
     }
@@ -203,6 +221,9 @@ mod tests {
     fn unicode_before_link_keeps_url_intact() {
         // A multi-byte prefix must not corrupt byte offsets used when masking.
         let links = extract_links("änderung [länk](https://ü.test/ä) ende");
-        assert_eq!(links, vec![("länk".to_string(), "https://ü.test/ä".to_string())]);
+        assert_eq!(
+            links,
+            vec![("länk".to_string(), "https://ü.test/ä".to_string())]
+        );
     }
 }

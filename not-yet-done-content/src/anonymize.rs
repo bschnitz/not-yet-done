@@ -127,11 +127,10 @@ impl StandardAnonymizer {
 /// Neutral, fully invented replacement tokens. No real customer/person/project
 /// terms — these ship in the repo, so they must stay invented.
 const WORD_POOL: &[&str] = &[
-    "Falcon", "Harbor", "Maple", "Quartz", "Cedar", "Lumen", "Vega", "Onyx",
-    "Pine", "Cobalt", "Sage", "Drift", "Ember", "Flint", "Grove", "Halcyon",
-    "Indigo", "Juniper", "Koan", "Larch", "Mesa", "Nimbus", "Orbit", "Pylon",
-    "Quill", "Rowan", "Slate", "Tundra", "Umber", "Verdant", "Willow", "Xenon",
-    "Yarrow", "Zephyr", "Anchor", "Beacon", "Cinder", "Delta", "Echo", "Fable",
+    "Falcon", "Harbor", "Maple", "Quartz", "Cedar", "Lumen", "Vega", "Onyx", "Pine", "Cobalt",
+    "Sage", "Drift", "Ember", "Flint", "Grove", "Halcyon", "Indigo", "Juniper", "Koan", "Larch",
+    "Mesa", "Nimbus", "Orbit", "Pylon", "Quill", "Rowan", "Slate", "Tundra", "Umber", "Verdant",
+    "Willow", "Xenon", "Yarrow", "Zephyr", "Anchor", "Beacon", "Cinder", "Delta", "Echo", "Fable",
 ];
 
 /// A value the [`StandardAnonymizer`] leaves untouched: empty, a number, a
@@ -158,8 +157,7 @@ fn is_structural(value: &str) -> bool {
     }
     // Duration / clock token: only digits and time punctuation, at least one digit.
     if v.chars().any(|c| c.is_ascii_digit())
-        && v
-            .chars()
+        && v.chars()
             .all(|c| c.is_ascii_digit() || matches!(c, ':' | '.' | ',' | ' ' | 'h' | 'm' | 's'))
     {
         return true;
@@ -214,12 +212,36 @@ impl Anonymizer for StandardAnonymizer {
 /// Invented person names. Repo-safe: no real person. English throughout — the
 /// pools ship in the repo and the whole mask reads in one language.
 const PERSON_POOL: &[&str] = &[
-    "Mara Fields", "Jonas Brennan", "Lena Crowe", "Tobias Reed", "Nina Walters",
-    "Felix Somers", "Clara Burke", "David Hooper", "Sophie Long", "Paul Adler",
-    "Hanna Vosse", "Erik Dale", "Mira Sharpe", "Lucas Freed", "Anya Poole",
-    "Timo Rennick", "Greta Sayle", "Niles Bowers", "Ida Markwell", "Ben Lawrence",
-    "Romy Farber", "Joel Wendell", "Selma Rothe", "Kai Manning", "Lea Birch",
-    "Aaron Stone", "Mia Holloway", "Finn Overton", "Tara Nolden", "Ollie Graves",
+    "Mara Fields",
+    "Jonas Brennan",
+    "Lena Crowe",
+    "Tobias Reed",
+    "Nina Walters",
+    "Felix Somers",
+    "Clara Burke",
+    "David Hooper",
+    "Sophie Long",
+    "Paul Adler",
+    "Hanna Vosse",
+    "Erik Dale",
+    "Mira Sharpe",
+    "Lucas Freed",
+    "Anya Poole",
+    "Timo Rennick",
+    "Greta Sayle",
+    "Niles Bowers",
+    "Ida Markwell",
+    "Ben Lawrence",
+    "Romy Farber",
+    "Joel Wendell",
+    "Selma Rothe",
+    "Kai Manning",
+    "Lea Birch",
+    "Aaron Stone",
+    "Mia Holloway",
+    "Finn Overton",
+    "Tara Nolden",
+    "Ollie Graves",
 ];
 
 /// Invented adjectives for the `<adjective>_<noun>` label scheme (Postgres
@@ -227,18 +249,43 @@ const PERSON_POOL: &[&str] = &[
 /// that `big_database`, `nifty_table`, `mellow_channel` read as obvious
 /// placeholders while still telling the viewer *what kind of thing* it is.
 const ADJ_POOL: &[&str] = &[
-    "big", "beautiful", "nifty", "swift", "mellow", "bright", "clever", "jolly",
-    "quiet", "brave", "calm", "eager", "fancy", "gentle", "happy", "keen",
-    "lively", "merry", "noble", "proud", "rapid", "shiny", "tidy", "witty",
-    "amber", "crisp", "dapper", "fleet", "humble", "plucky",
+    "big",
+    "beautiful",
+    "nifty",
+    "swift",
+    "mellow",
+    "bright",
+    "clever",
+    "jolly",
+    "quiet",
+    "brave",
+    "calm",
+    "eager",
+    "fancy",
+    "gentle",
+    "happy",
+    "keen",
+    "lively",
+    "merry",
+    "noble",
+    "proud",
+    "rapid",
+    "shiny",
+    "tidy",
+    "witty",
+    "amber",
+    "crisp",
+    "dapper",
+    "fleet",
+    "humble",
+    "plucky",
 ];
 
 /// Invented uppercase project codes — shaped like Jira keys / Confluence space
 /// keys / Taiga slugs. Repo-safe: no real project.
 const CODE_POOL: &[&str] = &[
-    "ACME", "NOVA", "ZEPH", "LUMO", "VEGA", "ONYX", "ATLS", "HLX", "ORB", "QZ",
-    "MAPL", "CEDR", "FLNT", "GRV", "NIMB", "PYLN", "RWN", "SLT", "TND", "UMBR",
-    "VRD", "WLW", "XEN", "YRW",
+    "ACME", "NOVA", "ZEPH", "LUMO", "VEGA", "ONYX", "ATLS", "HLX", "ORB", "QZ", "MAPL", "CEDR",
+    "FLNT", "GRV", "NIMB", "PYLN", "RWN", "SLT", "TND", "UMBR", "VRD", "WLW", "XEN", "YRW",
 ];
 
 /// Map a real person/display name to a stable invented one. Empty / letterless
@@ -358,13 +405,26 @@ impl AdapterFactory for AnonymizingFactory {
         self.inner.adapter_type()
     }
 
-    fn create(&self, instance_id: &str, config: &str, ctx: &HostContext) -> Result<Box<dyn ContentAdapter>> {
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        ctx: &HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
         let adapter = self.inner.create(instance_id, config, ctx)?;
         if ctx.anonymize {
             Ok(Box::new(AnonymizingAdapter::new(adapter)))
         } else {
             Ok(adapter)
         }
+    }
+
+    fn config_schema(&self) -> fieldsmith::TypeSchema {
+        self.inner.config_schema()
+    }
+
+    fn auth_mechanisms(&self) -> &'static [crate::MechanismSpec] {
+        self.inner.auth_mechanisms()
     }
 }
 
@@ -402,7 +462,53 @@ impl ContentAdapter for AnonymizingAdapter {
         Ok(wrap_node(self.inner.root().await?, self.anon.clone()))
     }
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
-        Ok(wrap_node(self.inner.get_by_id(id).await?, self.anon.clone()))
+        Ok(wrap_node(
+            self.inner.get_by_id(id).await?,
+            self.anon.clone(),
+        ))
+    }
+
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<crate::children::Child<'a>> {
+        // Delegate to the inner adapter — it only reads `node.id()`/
+        // `node.node_type()`, both of which the wrapping node forwards
+        // unchanged — then scrub each fetched row as the closure runs.
+        self.inner
+            .childs(node)
+            .into_iter()
+            .map(|c| {
+                let anon = self.anon.clone();
+                crate::children::Child {
+                    node_type: c.node_type,
+                    columns: c.columns,
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let mut result = (c.list)(params).await?;
+                            for summary in result.items.iter_mut() {
+                                anon.scrub_summary(summary);
+                            }
+                            Ok(result)
+                        })
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    async fn eager_subtree(
+        &self,
+        node: &dyn Node,
+        params: &ListParams,
+        depth: u32,
+    ) -> Option<Result<Subtree>> {
+        // Preserve the inner adapter's one-pass expansion (and its per-level
+        // sort), scrubbing the whole subtree afterwards.
+        match self.inner.eager_subtree(node, params, depth).await {
+            Some(Ok(mut subtree)) => {
+                scrub_subtree(&mut subtree, &*self.anon);
+                Some(Ok(subtree))
+            }
+            other => other,
+        }
     }
 
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
@@ -466,6 +572,10 @@ impl ContentAdapter for AnonymizingAdapter {
     async fn submit_credentials(&self, fields: HashMap<String, String>) -> Result<()> {
         self.inner.submit_credentials(fields).await
     }
+
+    async fn cancel_credentials(&self) -> Result<()> {
+        self.inner.cancel_credentials().await
+    }
     async fn try_refresh_session(&self) -> Result<()> {
         self.inner.try_refresh_session().await
     }
@@ -499,6 +609,13 @@ impl ContentAdapter for AnonymizingAdapter {
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         self.inner.saved_query_store()
     }
+    /// Forwarded, unlike most display-facing strings: it names the *language*
+    /// the wrapped adapter's queries are written in — which is also where
+    /// `query_language()` derives from, so leaving it at the default would
+    /// have an anonymised Jira view reject its own `jql` fences.
+    fn query_body_suffix(&self) -> &str {
+        self.inner.query_body_suffix()
+    }
     fn script_store(&self) -> Option<&dyn ScriptStore> {
         self.inner.script_store()
     }
@@ -513,11 +630,33 @@ impl ContentAdapter for AnonymizingAdapter {
         }
         Ok(results)
     }
+    /// Pure addressing (node ids) — nothing to scrub, just forward.
+    async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
+        self.inner.locate_node_path(node_id).await
+    }
     fn hooks(&self) -> Vec<&str> {
         self.inner.hooks()
     }
     fn anonymizer(&self) -> Arc<dyn Anonymizer> {
         self.anon.clone()
+    }
+    async fn describe_columns(&self, node_type: &str) -> Vec<ColumnSchema> {
+        // Delegate: this is the outer wrapper, so the default (empty) would
+        // shadow any columns the inner adapter (e.g. custom-columns) describes.
+        // The schema carries only structural metadata (key/type), not user
+        // values — those flow through the scrubbed metadata path — so it needs
+        // no anonymization of its own; labels are scrubbed defensively.
+        self.inner
+            .describe_columns(node_type)
+            .await
+            .into_iter()
+            .map(|mut c| {
+                if let Some(label) = c.label.take() {
+                    c.label = Some(self.anon.scrub_value("label", &label));
+                }
+                c
+            })
+            .collect()
     }
 }
 
@@ -562,7 +701,9 @@ impl AnonymizingNode {
     }
 
     fn refresh_cached(&mut self) {
-        self.label = self.anon.scrub_label(self.inner.node_type(), self.inner.label());
+        self.label = self
+            .anon
+            .scrub_label(self.inner.node_type(), self.inner.label());
         self.metadata = self.inner.metadata().clone();
         self.anon.scrub_metadata(&mut self.metadata);
     }
@@ -596,39 +737,16 @@ impl Node for AnonymizingNode {
         summary
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        self.inner.children_types()
-    }
-    fn sortable_columns(&self, node_type: &NodeType) -> Vec<SortableColumn> {
-        self.inner.sortable_columns(node_type)
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        let mut result = self.inner.list(params).await?;
-        for summary in result.items.iter_mut() {
-            self.anon.scrub_summary(summary);
-        }
-        // `downloaded` nodes feed the export/batch path, not display — left raw.
-        Ok(result)
-    }
-
-    async fn list_subtree(&self, params: ListParams, depth: u32) -> Result<Subtree> {
-        let mut subtree = self.inner.list_subtree(params, depth).await?;
-        scrub_subtree(&mut subtree, &*self.anon);
-        Ok(subtree)
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        Ok(wrap_node(self.inner.get_child(id).await?, self.anon.clone()))
+        Ok(wrap_node(
+            self.inner.get_child(id).await?,
+            self.anon.clone(),
+        ))
     }
 
     fn content(&self) -> Option<&dyn Content> {
         // Editable/exportable body — left raw to avoid overwrite-on-save.
         self.inner.content()
-    }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        self.inner.actions()
     }
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         self.inner.invoke_action(name, ctx).await
@@ -664,8 +782,21 @@ mod tests {
     #[test]
     fn standard_leaves_numbers_durations_dates_empty() {
         let a = StandardAnonymizer::new();
-        for v in ["", "   ", "42", "3.5", "2026-06-22T10:00:00Z", "2026-06-22", "1:30:00", "2h 15m"] {
-            assert_eq!(a.scrub_value("x", v), v, "structural value must survive: {v:?}");
+        for v in [
+            "",
+            "   ",
+            "42",
+            "3.5",
+            "2026-06-22T10:00:00Z",
+            "2026-06-22",
+            "1:30:00",
+            "2h 15m",
+        ] {
+            assert_eq!(
+                a.scrub_value("x", v),
+                v,
+                "structural value must survive: {v:?}"
+            );
         }
     }
 
@@ -703,7 +834,10 @@ mod tests {
                 display_name: "T".into(),
             },
             metadata: Metadata {
-                fields: vec![field("summary", "Confidential thing"), field("minutes", "90")],
+                fields: vec![
+                    field("summary", "Confidential thing"),
+                    field("minutes", "90"),
+                ],
             },
             has_children: None,
         };
@@ -722,7 +856,10 @@ mod tests {
         assert!(PERSON_POOL.contains(&p1.as_str()));
         assert!(!p1.contains("Roe"));
         // Username/email derive from the same name → consistent.
-        assert_eq!(pseudo_username("Jane Roe"), p1.to_lowercase().replace(' ', "."));
+        assert_eq!(
+            pseudo_username("Jane Roe"),
+            p1.to_lowercase().replace(' ', ".")
+        );
         assert!(pseudo_email("Jane Roe").ends_with("@example.invalid"));
 
         // Issue key: prefix mapped, numeric tail kept, still key-shaped.
@@ -752,7 +889,11 @@ mod tests {
         let a = pseudo_labeled("customer_prod", "database");
         assert!(a.ends_with("_database"), "noun (kind) preserved: {a}");
         assert!(!a.contains("customer"), "real name must not survive: {a}");
-        assert_eq!(a, pseudo_labeled("customer_prod", "database"), "deterministic");
+        assert_eq!(
+            a,
+            pseudo_labeled("customer_prod", "database"),
+            "deterministic"
+        );
         // Adjective is keyed by the value: same value, different noun → same adj.
         let adj_db = pseudo_labeled("billing", "database");
         let adj_schema = pseudo_labeled("billing", "schema");

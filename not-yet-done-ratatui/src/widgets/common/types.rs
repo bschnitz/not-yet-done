@@ -25,9 +25,30 @@ impl SelectionMarker {
     pub fn text(&self, selected: bool) -> &str {
         match self {
             Self::None => "",
-            Self::Checkbox => if selected { "[x] " } else { "[ ] " },
-            Self::Radio => if selected { "(●) " } else { "( ) " },
-            Self::Custom { selected: s, unselected: u } => if selected { s } else { u },
+            Self::Checkbox => {
+                if selected {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            }
+            Self::Radio => {
+                if selected {
+                    "(●) "
+                } else {
+                    "( ) "
+                }
+            }
+            Self::Custom {
+                selected: s,
+                unselected: u,
+            } => {
+                if selected {
+                    s
+                } else {
+                    u
+                }
+            }
         }
     }
 }

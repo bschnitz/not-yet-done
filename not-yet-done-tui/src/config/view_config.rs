@@ -21,6 +21,41 @@ pub struct ViewFileConfig {
     pub adapter: AdapterConfig,
     #[serde(default)]
     pub views: Vec<ViewDef>,
+    /// Optional per-tab reminder handling. When present and enabled, the
+    /// frontend subscribes to the adapter's reminder stream
+    /// ([`ContentAdapter::subscribe_reminders`]) and runs `command` for each
+    /// reminder that fires. Absent → the adapter may still emit reminders, but
+    /// nothing acts on them. The adapter owns *when* a reminder fires; this
+    /// block owns *whether* we care and *what* runs.
+    ///
+    /// [`ContentAdapter::subscribe_reminders`]: not_yet_done_content::ContentAdapter::subscribe_reminders
+    #[serde(default)]
+    pub reminder: Option<ReminderConfig>,
+}
+
+/// Frontend-side reminder handling for one tab (see [`ViewFileConfig::reminder`]).
+///
+/// ```yaml
+/// reminder:
+///   enabled: true
+///   command: notify-send "$NYD_REMINDER_TITLE" "in $NYD_REMINDER_LEAD_MINUTES min — $NYD_REMINDER_DETAIL"
+/// ```
+///
+/// `command` runs through `sh -c`, detached, with the reminder's fields
+/// exported as environment variables (`NYD_REMINDER_ID`, `_TITLE`, `_DETAIL`,
+/// `_WHEN`, `_UNTIL`, `_LEAD_MINUTES`) — passing them as env rather than
+/// string-splicing keeps event titles from ever being interpreted as shell.
+/// `_UNTIL` is the item's end instant (empty when it has none), so a command
+/// can keep a notification on screen until the moment has passed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReminderConfig {
+    /// Whether reminders are acted on. Defaults to `true` so that simply
+    /// declaring the block with a `command` is enough.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Shell command run for each reminder (via `sh -c`, detached).
+    pub command: String,
 }
 
 impl ViewFileConfig {
@@ -106,6 +141,17 @@ impl ViewFileConfig {
         editors: &super::editor::EditorsConfig,
     ) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
+        // A tab needs at least one view (subtab) — the runtime builds one
+        // pane tree per view and always addresses `views[active_subtab]`,
+        // so an empty list would panic on the first access. Reject it here
+        // as a broken slot with a clear message instead.
+        if self.views.is_empty() {
+            errors.push(format!(
+                "tab '{}': `views` is empty — define at least one view (subtab)",
+                self.tab.name
+            ));
+            return Err(errors);
+        }
         for view in &self.views {
             for action in &view.actions {
                 check_action(view.name.as_str(), None, action, editors, &mut errors);
@@ -137,6 +183,17 @@ impl ViewFileConfig {
                     ));
                 }
             }
+            // `script_source` must name a sibling view in this file; a
+            // typo would silently fall back to the view's own scope
+            // (defeating the shared-source intent), so flag it here.
+            if let Some(src) = &view.script_source {
+                if !self.views.iter().any(|v| &v.name == src) {
+                    errors.push(format!(
+                        "views.{}: script_source '{}' names no view in this file",
+                        view.name, src
+                    ));
+                }
+            }
             check_row_layout(
                 view.name.as_str(),
                 None,
@@ -144,6 +201,30 @@ impl ViewFileConfig {
                 &view.columns,
                 &mut errors,
             );
+            check_card(
+                view.name.as_str(),
+                None,
+                view.card.as_ref(),
+                &view.columns,
+                &mut errors,
+            );
+            // `event_actions:` rules must point at a real action in this
+            // view — a typo'd `run:` would silently never fire. Topics are
+            // free-form (the adapter contract), but must be non-empty.
+            for binding in &view.event_actions {
+                if binding.on.trim().is_empty() {
+                    errors.push(format!(
+                        "views.{}: event_actions entry has an empty `on:` topic",
+                        view.name
+                    ));
+                }
+                if !view.actions.iter().any(|a| a.name == binding.run) {
+                    errors.push(format!(
+                        "views.{}: event_actions `run: {}` names no action in this view",
+                        view.name, binding.run
+                    ));
+                }
+            }
             // `mode: server` without `page_size` is allowed — it tells the
             // adapter to omit the `?page_size=` query param and accept
             // whatever default the server applies (typical for DRF-based
@@ -180,6 +261,13 @@ fn check_child(
         view,
         Some(child.name.as_str()),
         child.row_layout.as_deref(),
+        &child.columns,
+        errors,
+    );
+    check_card(
+        view,
+        Some(child.name.as_str()),
+        child.card.as_ref(),
         &child.columns,
         errors,
     );
@@ -229,6 +317,68 @@ fn check_row_layout(
     }
 }
 
+/// Validate a `card:` block against the level's `columns`.
+///
+/// Card mode reads its values straight out of the level's cells, so every
+/// field must name a declared column. The rest catches config that would
+/// silently produce an unusable card: `columns: 0`, a `weights:` list that
+/// doesn't line up with the grid, or a `markdown:` column — that one expands
+/// into N soft-wrapped lines and cannot live in a fixed-height grid slot.
+///
+/// An omitted `fields:` means "every column of this level", so it is only an
+/// error when that leaves nothing to show.
+fn check_card(
+    view: &str,
+    child: Option<&str>,
+    card: Option<&CardConfig>,
+    columns: &[ColumnDef],
+    errors: &mut Vec<String>,
+) {
+    let Some(card) = card else { return };
+    let scope = match child {
+        Some(c) => format!("views.{view}.children.{c}.card"),
+        None => format!("views.{view}.card"),
+    };
+    if card.fields.is_empty() && !columns.iter().any(|c| !c.markdown) {
+        errors.push(format!(
+            "{scope}: `fields:` is omitted (= all columns) but this level has no \
+             column the card could show"
+        ));
+    }
+    if card.columns == 0 {
+        errors.push(format!(
+            "{scope}: `columns: 0` is not a grid — use 1 or more fields per line"
+        ));
+    }
+    if !card.weights.is_empty() && card.weights.len() != card.columns {
+        errors.push(format!(
+            "{scope}: `weights:` has {} entries but `columns:` is {} — give one \
+             weight per grid column or drop `weights:` for equal shares",
+            card.weights.len(),
+            card.columns
+        ));
+    }
+    if card.weights.iter().all(|w| *w == 0) && !card.weights.is_empty() {
+        errors.push(format!(
+            "{scope}: all `weights:` are 0 — at least one grid column needs a share"
+        ));
+    }
+    for field in &card.fields {
+        match columns.iter().find(|c| c.key == field.column) {
+            None => errors.push(format!(
+                "{scope}: field '{}' is not declared in this level's `columns:`",
+                field.column
+            )),
+            Some(col) if col.markdown => errors.push(format!(
+                "{scope}: field '{}' is a `markdown: true` column — markdown expands \
+                 into multiple lines and cannot sit in a card grid slot",
+                field.column
+            )),
+            Some(_) => {}
+        }
+    }
+}
+
 /// Validate a `shortcuts:` map against the surrounding `actions:` list.
 ///
 /// We can't check whether the action `id` exists on the adapter at
@@ -263,9 +413,14 @@ fn check_shortcuts(
             ));
         }
         for a in actions {
-            // ActionDef.key is a string (may include modifiers like "ctrl+n");
-            // a single-char shortcut conflicts only with single-char action keys.
-            if a.key.chars().count() == 1 && a.key.chars().next() == Some(*key) {
+            // ActionDef.key may hold several alternatives (each possibly
+            // modifier-prefixed like "ctrl+n"); a single-char shortcut
+            // conflicts only with an alternative that is exactly that char.
+            // Event-only actions (no key) never collide.
+            if a.key_strings()
+                .iter()
+                .any(|k| k.chars().count() == 1 && k.chars().next() == Some(*key))
+            {
                 errors.push(format!(
                     "{scope}['{key}']: key already bound to view-level action '{}' \
                      (type={}). Remove either the shortcut or the action's key.",
@@ -336,9 +491,19 @@ fn inherit_actions_into(
 ) {
     if child.tree_label.is_some() {
         // A child's own binding on the same key overrides the inherited one.
-        let local_keys: HashSet<String> = child.actions.iter().map(|a| a.key.clone()).collect();
+        // Event-only actions (no key) are not deduped by key — they inherit
+        // as-is (each carries its own event binding via the view).
+        let local_keys: HashSet<String> = child
+            .actions
+            .iter()
+            .flat_map(|a| a.key_strings().iter().cloned())
+            .collect();
         for action in parent_actions {
-            if !local_keys.contains(&action.key) {
+            // A parent action is shadowed only if *every* alternative it binds
+            // is already claimed locally; a keyless action always inherits.
+            let keys = action.key_strings();
+            let keep = keys.is_empty() || keys.iter().any(|k| !local_keys.contains(k));
+            if keep {
                 child.actions.push(action.clone());
             }
         }
@@ -599,6 +764,128 @@ pub struct TabConfig {
     pub order: i32,
     #[serde(default)]
     pub icon: Option<String>,
+    /// Optional override for this tab's switch shortcut. Absent → the
+    /// positional autonumber digit (`1`..`9`, then `0`); an empty list
+    /// (`key: []`) disables the switch key entirely; a scalar or list sets
+    /// explicit binding(s), including chords (`key: "ctrl+k t"`). Editable
+    /// from the shortcut menu (Ctrl+Y), which writes it back here.
+    #[serde(default)]
+    pub key: Option<KeyBinding>,
+    /// Leading glyph prefixed to this tab's bar label while the view holds
+    /// unread items — the tab-bar counterpart of [`ViewDef::unread_marker`],
+    /// rendered as `<marker> <icon> <key> <name>`. `None` falls back to the
+    /// view's own `unread_marker` (so tree and tab agree by default), then to
+    /// the built-in `🔔` — a bell rather than the rows' `💬`, because the tab
+    /// already carries an `icon:` a speech balloon would compete with. The
+    /// empty string suppresses the glyph and leaves only `unread_style` to
+    /// carry the signal.
+    ///
+    /// Why separate from the view-level marker at all: the tab label is the
+    /// only part of a **background** tab that stays on screen, so it may want
+    /// a louder or quieter cue than the rows inside — and the tab already
+    /// carries an `icon:`, which the marker must stay distinguishable from.
+    #[serde(default)]
+    pub unread_marker: Option<String>,
+    /// How the tab's own label is emphasised while the view holds unread
+    /// items. `None` renders the label **bold** — the conventional
+    /// "something new here" weight, and the one emphasis that survives on
+    /// both the active (already bold, already colored) and the inactive tab
+    /// without fighting the bar's own palette.
+    ///
+    /// Deliberately its own setting rather than reusing [`ViewDef::unread_style`]:
+    /// that one recolors *rows*, where color is free to vary; the tab bar
+    /// paints active/inactive tabs from the theme, so an unread tab usually
+    /// wants a font change, not a hue. See [`TabUnreadStyle`] for the forms.
+    #[serde(default)]
+    pub unread_style: Option<TabUnreadStyle>,
+    /// Where *this* tab's load banner goes, overriding the global
+    /// `notifications.load_banner`. `None` takes the global setting.
+    ///
+    /// Per-tab because the cost of a load is per-tab: a Postgres query over a
+    /// slow tunnel is worth watching from another tab (`global`), while a
+    /// local task list finishes before the banner is read (`off`), and the
+    /// global default cannot be right for both.
+    #[serde(default)]
+    pub load_banner: Option<crate::config::tui_config::LoadBannerRoute>,
+}
+
+/// Emphasis for an unread tab's bar label ([`TabConfig::unread_style`]).
+/// Three surface forms, all optional:
+///
+/// ```yaml
+/// unread_style: unread              # theme color name, no font change
+/// unread_style: [bold]              # font modifiers, no recolor
+/// unread_style: { fg: unread, modifiers: [bold] }
+/// ```
+///
+/// Whatever it resolves to is layered **on top of** the bar's normal
+/// active/inactive style, so an unset part keeps the theme's value.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum TabUnreadStyle {
+    /// A bare theme color name (`unread`, `accent`, …) — recolor only.
+    Color(String),
+    /// A bare modifier list (`[bold]`) — font change only.
+    Modifiers(Vec<TextModifier>),
+    /// Both, either part omittable.
+    Detailed {
+        #[serde(default)]
+        fg: Option<String>,
+        #[serde(default)]
+        modifiers: Vec<TextModifier>,
+    },
+}
+
+impl TabUnreadStyle {
+    /// The theme color name this style recolors to, if any.
+    pub fn fg(&self) -> Option<&str> {
+        match self {
+            Self::Color(name) => Some(name.as_str()),
+            Self::Modifiers(_) => None,
+            Self::Detailed { fg, .. } => fg.as_deref(),
+        }
+    }
+
+    /// The font modifiers this style adds, folded into one ratatui bitset.
+    pub fn modifiers(&self) -> ratatui::style::Modifier {
+        let list: &[TextModifier] = match self {
+            Self::Color(_) => &[],
+            Self::Modifiers(m) => m,
+            Self::Detailed { modifiers, .. } => modifiers,
+        };
+        list.iter()
+            .fold(ratatui::style::Modifier::empty(), |acc, m| {
+                acc | m.to_ratatui()
+            })
+    }
+}
+
+/// A font attribute a [`TabUnreadStyle`] can add. Named after the ratatui
+/// modifiers it maps onto; how much of it a terminal honours is up to the
+/// terminal (italic and crossed-out are the usual casualties).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextModifier {
+    Bold,
+    Dim,
+    Italic,
+    Underlined,
+    Reversed,
+    CrossedOut,
+}
+
+impl TextModifier {
+    pub fn to_ratatui(self) -> ratatui::style::Modifier {
+        use ratatui::style::Modifier;
+        match self {
+            Self::Bold => Modifier::BOLD,
+            Self::Dim => Modifier::DIM,
+            Self::Italic => Modifier::ITALIC,
+            Self::Underlined => Modifier::UNDERLINED,
+            Self::Reversed => Modifier::REVERSED,
+            Self::CrossedOut => Modifier::CROSSED_OUT,
+        }
+    }
 }
 
 /// The `adapter:` block of a view file. Defined once in `not-yet-done-host`
@@ -653,9 +940,13 @@ pub struct ViewDef {
     #[serde(default)]
     pub default: bool,
     /// Optional shortcut key that switches the parent content tab to this
-    /// view (subtab navigation). Only honored when at root level.
+    /// view (subtab navigation). Only honored when at root level. Absent → no
+    /// switch key; an empty list (`key: []`) disables it; a scalar or list sets
+    /// explicit binding(s), including chords and alternatives
+    /// (`key: [n, ctrl+n]`). Mirrors [`TabConfig::key`] so the shortcut menu
+    /// (Ctrl+Y) can write list/chord forms here without breaking the parse.
     #[serde(default)]
-    pub key: Option<String>,
+    pub key: Option<KeyBinding>,
     #[serde(default)]
     pub query: Option<QueryConfig>,
     #[serde(default)]
@@ -667,6 +958,13 @@ pub struct ViewDef {
     /// (meta line + message body + spacer). See [`LineLayout`].
     #[serde(default)]
     pub row_layout: Option<Vec<LineLayout>>,
+    /// Optional card mode for this level: one row rendered as a framed card
+    /// whose fields sit in a grid of `columns:` slots per line. Absent → the
+    /// level has no card mode. Present → the mode is *available* and is
+    /// entered via `card.key` (persisted per level) or `card.default`.
+    /// See [`CardConfig`].
+    #[serde(default)]
+    pub card: Option<CardConfig>,
     /// Smooth (line-wise) scrolling. When `true`, navigation moves the
     /// viewport one physical line at a time over the whole content instead
     /// of jumping entry-to-entry; the content glides continuously and the
@@ -704,6 +1002,24 @@ pub struct ViewDef {
     /// in the list. See docs/generic-view-spec.md `record_detail:`.
     #[serde(default)]
     pub record_detail: bool,
+    /// Opt-in for per-node scripts: the adapter-native query editor (`Q`)
+    /// and the per-node scripts menu (`q`) act on the rows of this level.
+    ///
+    /// This is what makes those two keys generic. The host used to ask
+    /// "is the adapter `postgres` and are these `postgres:table` rows?";
+    /// now the view declares which level owns scripts and the host only
+    /// checks that the adapter offers a
+    /// [`ScriptStore`](not_yet_done_content::ScriptStore) and advertises
+    /// `supports_node_query_editor`. Off by default, so no existing view
+    /// grows the keys by accident.
+    ///
+    /// The flag belongs on the level whose *items* own the scripts (e.g.
+    /// the tables level), not on the level that shows a script's result.
+    /// Drilling one step deeper keeps the keys live and addresses the
+    /// parent node — editing a table's query while looking at its rows is
+    /// the common case.
+    #[serde(default)]
+    pub node_scripts: bool,
     /// Opt-in for the window/split operations reachable via the `w`
     /// leader chord (split right/down, close pane, focus parent/child,
     /// pane-tag switch). Off by default so `w` stays a free, ordinary key
@@ -743,6 +1059,18 @@ pub struct ViewDef {
     /// that pre-references `fields.ref` and `fields.assignee`).
     #[serde(default)]
     pub script_template: Option<String>,
+    /// Name of a sibling view (same tab) whose script source this view
+    /// should share. When set, both the script *directory*
+    /// (`scripts/<tab>/<node_type…>/`) and the DB shortcut *scope*
+    /// (`script:<tab>/<node_type…>`) are derived from the referenced
+    /// view's root `node_type` instead of this view's own — so two views
+    /// (e.g. Jira `tickets` and `bookmarks`) present the same scripts and
+    /// script-shortcuts. Only the root segment is swapped; any drilled
+    /// child levels keep their own node_types. An unknown name is a
+    /// silent no-op (this view keeps its own scope). Generic across
+    /// adapters.
+    #[serde(default)]
+    pub script_source: Option<String>,
     /// Per-node-type shortcuts. Maps a key (single char) to an adapter-
     /// declared action `id` (returned from `Node::actions`). At runtime
     /// the TUI calls `Node::invoke_action(id)` and dispatches the
@@ -763,6 +1091,19 @@ pub struct ViewDef {
     /// sitting under the same `recursive: true` ChildDef.
     #[serde(default)]
     pub leaf_glyph: Option<String>,
+    /// Type glyph shown in the tree-mode label column immediately before
+    /// the label, for **every** row of this level — expandable or not.
+    /// `None` (default) renders no glyph.
+    ///
+    /// Why, next to `leaf_glyph`: that one encodes the *expand state*
+    /// (this row has nothing below it), this one encodes the row's
+    /// *kind*. They are independent questions, and a level whose rows are
+    /// expandable never gets a `leaf_glyph` at all. Needed wherever two
+    /// different node types share one tree depth and would otherwise be
+    /// indistinguishable — e.g. the Stoat server level, which lists
+    /// uncategorized channels and categories side by side.
+    #[serde(default)]
+    pub icon: Option<String>,
     /// Default grouping for this view (M3). Partitions the flat list into
     /// groups, each introduced by a header row. Runtime-switchable via
     /// view-state (this is only the startup default). `None` = ungrouped
@@ -869,6 +1210,14 @@ pub struct ViewDef {
     /// be expanded by cursor (headers are not selectable).
     #[serde(default)]
     pub group_headers: Option<GroupHeadersDef>,
+    /// Event → action rules for this view. Each binding runs a named action
+    /// (from this view's `actions:`) when a bus event on its `on:` topic
+    /// arrives, passing the event's payload/`correlation_id`/`source` to the
+    /// rule engine. This is how the app reacts to adapter-published events
+    /// (e.g. MFA number-match / OTC prompts) without the old callback
+    /// machinery. Empty (default) → the view ignores all bus events.
+    #[serde(default)]
+    pub event_actions: Vec<EventActionBinding>,
 }
 
 /// Value of [`ViewDef::group_headers`]. Presence alone enables the header
@@ -994,6 +1343,13 @@ pub enum PaginationMode {
 pub struct QueryConfig {
     #[serde(default, deserialize_with = "deserialize_optional_query_source")]
     pub default: Option<String>,
+    /// Scaffold shown in the editor when creating a *new* query, when there
+    /// is no active/`default` query to seed from. Unlike `default` this is
+    /// never applied as a live filter — it only pre-fills the editor buffer,
+    /// so it may be entirely commented-out examples. Falls back to `default`
+    /// when absent.
+    #[serde(default, deserialize_with = "deserialize_optional_query_source")]
+    pub template: Option<String>,
     #[serde(default)]
     pub editable: bool,
     /// Key to open the query menu popup (e.g. "q").
@@ -1327,6 +1683,165 @@ impl<'de> Deserialize<'de> for LineLayout {
 }
 
 // ---------------------------------------------------------------------------
+// Card mode
+// ---------------------------------------------------------------------------
+
+/// One field slot of a card layout (see [`CardConfig::fields`]).
+///
+/// Deserializes from either a bare column key (`author`) — the label then
+/// comes from that column's own `label:` — or a map with an explicit
+/// override (`{ column: author, label: "By" }`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardFieldDef {
+    /// Column `key` this slot reads. Must be declared in the level's
+    /// `columns:` (enforced by the validator).
+    pub column: String,
+    /// Label shown for the value. `None` → the column's `label:`, falling
+    /// back to its `key`.
+    pub label: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CardFieldDef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            // Shorthand: just the column key.
+            Short(String),
+            // Full form with an explicit label override.
+            Full {
+                column: String,
+                #[serde(default)]
+                label: Option<String>,
+            },
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Short(column) => CardFieldDef {
+                column,
+                label: None,
+            },
+            Raw::Full { column, label } => CardFieldDef { column, label },
+        })
+    }
+}
+
+/// Where a field's label is drawn relative to its value. Mirrors
+/// `not_yet_done_table::CardLabels` on the config side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardLabelMode {
+    /// Values only, no labels.
+    None,
+    /// `Label: value` on one line. The default.
+    #[default]
+    Inline,
+    /// Labels on their own line above the values — each grid row of the card
+    /// becomes two physical lines.
+    Above,
+}
+
+/// Card frame style. Mirrors `not_yet_done_table::CardBorder`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardBorderMode {
+    /// No frame; cards are separated by `gap:` alone.
+    None,
+    /// Square corners.
+    Plain,
+    /// Rounded corners. The default.
+    #[default]
+    Rounded,
+}
+
+/// Card mode for a level (see [`ViewDef::card`]).
+///
+/// Card mode is the table's alternative rendering: one row becomes one
+/// framed card whose fields are laid out in a grid of `columns:` slots per
+/// line. The number of card lines is **derived** — `fields ÷ columns`,
+/// rounded up — so listing six fields at `columns: 3` yields a two-line
+/// card. Trailing slots of the last line stay blank so every card keeps the
+/// same height.
+///
+/// Declaring `card:` does not switch the level over; it makes the mode
+/// *available*. `key:` toggles it at runtime (and the choice survives a
+/// restart), `default: true` opens the level in card mode.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardConfig {
+    /// Fields in reading order, filled row-major into the grid. Every entry
+    /// must name a column declared in this level's `columns:`.
+    ///
+    /// Omit the key to show **every** column of the level, in its configured
+    /// order — the card then tracks the table instead of having to repeat its
+    /// column list (and a column added later shows up on its own).
+    /// `markdown: true` columns are skipped, since those cannot sit in a
+    /// fixed-height grid slot.
+    #[serde(default)]
+    pub fields: Vec<CardFieldDef>,
+    /// Fields side by side on one card line. Default `1` (one field per
+    /// line); `3` with six fields gives a 2×3 card.
+    #[serde(default = "default_card_columns")]
+    pub columns: usize,
+    /// Per-grid-column width weights. Empty → equal shares; otherwise the
+    /// length must match `columns:`. `[1, 1, 2]` gives the third slot half
+    /// the card's inner width.
+    #[serde(default)]
+    pub weights: Vec<usize>,
+    #[serde(default)]
+    pub labels: CardLabelMode,
+    #[serde(default)]
+    pub border: CardBorderMode,
+    /// Theme color for the frame glyphs. `None` → the theme's `card_border`.
+    #[serde(default)]
+    pub border_style: Option<String>,
+    /// Theme color for field labels. `None` → the theme's `card_label`.
+    #[serde(default)]
+    pub label_style: Option<String>,
+    /// Blank columns between frame and content, left and right. Default `1`.
+    #[serde(default = "default_card_padding")]
+    pub padding: usize,
+    /// Blank lines after each card. They never take the selection highlight,
+    /// so cards read as separate blocks. Default `0`.
+    #[serde(default)]
+    pub gap: usize,
+    /// Filler between two grid slots. Default two spaces.
+    #[serde(default = "default_card_separator")]
+    pub separator: String,
+    /// Rule drawn *between* two cards, the glyph repeated across the card
+    /// width (`divider: "─"`). Empty (the default) → the cards are separated by
+    /// `gap:` alone. Takes the place of the last `gap:` line, so `gap: 1` plus
+    /// a divider is one ruled line rather than a blank one plus a rule; never
+    /// drawn after the last card. Not to be confused with `separator:`, which
+    /// fills the space between two slots *within* a card line.
+    #[serde(default)]
+    pub divider: String,
+    /// Key that toggles card mode on this level. Absent → the mode is only
+    /// reachable via `default: true` (no key is stolen). Accepts the same
+    /// forms as every other binding, including alternatives (`key: [C, ctrl+d]`).
+    #[serde(default)]
+    pub key: Option<KeyBinding>,
+    /// Open this level in card mode. A stored per-level choice (the toggle
+    /// key) wins over this default once the user has flipped the mode.
+    #[serde(default)]
+    pub default: bool,
+}
+
+fn default_card_columns() -> usize {
+    1
+}
+
+fn default_card_padding() -> usize {
+    1
+}
+
+fn default_card_separator() -> String {
+    "  ".to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Preview
 // ---------------------------------------------------------------------------
 
@@ -1411,7 +1926,17 @@ pub enum ScriptScope {
 #[serde(deny_unknown_fields)]
 pub struct ActionDef {
     pub name: String,
-    pub key: String,
+    /// Keyboard binding(s). `None` for an **event-only** action: one that is
+    /// never bound to a key and only runs when the rule engine matches a
+    /// bus event to it via the view's `event_actions:`. A keyed action may
+    /// additionally be event-triggered — the two triggers are independent.
+    ///
+    /// Accepts a scalar or a list in YAML (same convenience as the `tui.yaml`
+    /// [`KeyBinding`] sections): `key: e` or `key: [e, ctrl+k l]`. A list is
+    /// alternatives (any one triggers); a space inside a single string is a
+    /// step separator for a chord sequence.
+    #[serde(default)]
+    pub key: Option<KeyBinding>,
     #[serde(rename = "type")]
     pub action_type: String,
     /// Adapter-side action identifier (e.g. `"edit_full"`, `"transition"`,
@@ -1544,9 +2069,115 @@ pub struct ActionDef {
     /// `false`.
     #[serde(default)]
     pub force: bool,
+    /// Publish a bus event when this action completes. Built for the
+    /// request/response half of the MFA flow: an OTC-input action answers
+    /// the backend's `otc-required` request by emitting the typed code. The
+    /// emitted event's `correlation_id` is copied from the event that
+    /// triggered this action (when it ran in response to one), so a
+    /// request and its reply match up even with two connections in flight.
+    #[serde(default)]
+    pub emit: Option<EmitConfig>,
+    /// React to bus events while this action's UI (popup / input field) is
+    /// open. Maps a bus topic to a reaction; for now only `close` exists
+    /// (dismiss this action's popup when the topic fires, scoped to the
+    /// same `source`/`correlation_id` as the event that opened it). E.g. a
+    /// number-match notification closes itself when the backend publishes
+    /// `…:mfa:resolved`.
+    #[serde(default)]
+    pub on_event: Option<HashMap<String, OnEventReaction>>,
+    /// For `type: notify` actions: the message to show in the notification
+    /// bar. Placeholders `{field}` are replaced with the matching key from the
+    /// triggering bus event's JSON payload (e.g. `"Authenticator: tap number
+    /// {number}"`). A notify action is normally event-only (no `key`) and, if
+    /// it declares `on_event: { <topic>: close }`, its message is retracted
+    /// when that topic fires for the same `source`.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// For `type: notify` actions: render the message in the prominent top
+    /// alert bar (loud `alert_fg`/`alert_bg` colours) instead of the ordinary
+    /// bottom notification bar. Use for messages that must not be missed — e.g.
+    /// the Microsoft Authenticator number to tap during an interactive sign-in.
+    /// Honoured only while `notifications.alert_enabled` is set; otherwise the
+    /// message falls back to the bottom bar. Default `false`.
+    #[serde(default)]
+    pub prominent: bool,
+    /// For `edit`/`create`/`custom` actions that open an
+    /// [`InputSpec::Form`](not_yet_done_content::InputSpec) popup: per-action
+    /// overrides for the form's **layout and behaviour** (column count,
+    /// explicit column assignment, whether the focused field draws a filled
+    /// bar, inline-radio vs dropdown selects). Colours live in the theme's
+    /// `form:` block, not here. Absent → the global `form_defaults` (else the
+    /// classic single-column, no-bar, dropdown look). Ignored by actions that
+    /// don't open a form.
+    #[serde(default)]
+    pub form: Option<ActionFormConfig>,
+}
+
+/// Per-action layout/behaviour overrides for an [`InputSpec::Form`] popup.
+/// Every field is optional; an absent field falls back to the global
+/// `form_defaults` and finally to the driver's classic defaults (1 column,
+/// no field bar, dropdown selects). See [`ActionDef::form`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionFormConfig {
+    /// Number of columns to lay the fields out in (`1` or `2`; other values
+    /// are clamped by the driver). `None` → default.
+    #[serde(default)]
+    pub columns: Option<u8>,
+    /// Explicit per-column field assignment as lists of field **keys**
+    /// (matching [`FormFieldSpec::key`](not_yet_done_content::FormFieldSpec)).
+    /// The outer vec is the columns (left-to-right), each inner vec the keys
+    /// placed in that column, top-to-bottom. Keys not listed keep spec order
+    /// in the first column. `None` → the driver auto-balances by height.
+    #[serde(default)]
+    pub column_assignment: Option<Vec<Vec<String>>>,
+    /// Draw a filled bar behind the focused field (needs `form.field_bg` set
+    /// in the theme to be visible). `None` → default (off).
+    #[serde(default)]
+    pub field_bar: Option<bool>,
+    /// Render selects as an inline radio list (`inline`) or a collapsed
+    /// dropdown (`dropdown`). `None` → default (dropdown).
+    #[serde(default)]
+    pub select_style: Option<SelectStyleConfig>,
+}
+
+/// How a form's select fields are rendered. Mirrors
+/// [`not_yet_done_ratatui::SelectStyle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectStyleConfig {
+    /// Inline radio list, every option always visible.
+    Inline,
+    /// Collapsed dropdown showing only the current value.
+    Dropdown,
 }
 
 impl ActionDef {
+    /// Every key string bound to this action (empty for an event-only
+    /// action). Flattens the alternatives of the [`KeyBinding`] so callers
+    /// that reason per-key (conflict/inheritance dedup, forced-key stripping)
+    /// don't have to know the scalar-or-list shape.
+    pub fn key_strings(&self) -> &[String] {
+        match &self.key {
+            Some(b) => &b.0,
+            None => &[],
+        }
+    }
+
+    /// Whether this action is bound to at least one key.
+    pub fn has_key(&self) -> bool {
+        self.key.as_ref().is_some_and(|b| !b.0.is_empty())
+    }
+
+    /// The representative key for single-slot displays (action/status bar
+    /// hints show one key). First alternative, or `None` when unbound.
+    pub fn primary_key(&self) -> Option<&str> {
+        self.key
+            .as_ref()
+            .and_then(|b| b.0.first())
+            .map(|s| s.as_str())
+    }
+
     /// Whether this action should appear in the action bar by default.
     /// Actions with persistent/modal state belong in the action bar:
     /// - edit/create/query_edit: open an editor (shown as active while open)
@@ -1586,6 +2217,45 @@ impl ActionDef {
                 | "option_menu"
         )
     }
+}
+
+/// Value of [`ActionDef::emit`] — a bus event published when the action
+/// completes. The `correlation_id` is not configured here; the rule engine
+/// copies it from the triggering event so a reply matches its request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmitConfig {
+    /// Topic of the emitted event (e.g. `office365-web:mfa:otc-provided`).
+    pub topic: String,
+    /// Static payload for the event. Values may use `{…}` templates
+    /// resolved from the action's input at emit time (e.g. `{code}` /
+    /// `{form.code}`), mirroring the `text_search` `{q}` convention. An
+    /// empty payload (`{}`) is valid — a bare acknowledgement.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+/// Value of an [`ActionDef::on_event`] entry — what happens when the mapped
+/// bus topic fires while the action's UI is open. Deliberately a closed enum
+/// so unknown reactions are a config error; today only `close` is wired up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnEventReaction {
+    /// Dismiss this action's popup / input field.
+    Close,
+}
+
+/// One entry of a view's `event_actions:` list — a rule that runs an action
+/// in response to a bus event. See [`ViewDef::event_actions`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventActionBinding {
+    /// Bus topic to match (e.g. `office365-web:mfa:number-match`).
+    pub on: String,
+    /// Name of the action (in this view's `actions:`) to run when the topic
+    /// fires. The event's payload is exposed to the action as `{…}` template
+    /// values and its `correlation_id`/`source` are carried through.
+    pub run: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1701,6 +2371,9 @@ pub struct ChildDef {
     /// each message as a meta line + body line + spacer.
     #[serde(default)]
     pub row_layout: Option<Vec<LineLayout>>,
+    /// Card mode for this drill level. Same semantics as [`ViewDef::card`].
+    #[serde(default)]
+    pub card: Option<CardConfig>,
     /// Smooth (line-wise) scrolling for this drill level. Same semantics as
     /// [`ViewDef::smooth_scroll`]; default `false`. Set on the Stoat
     /// `messages` level so the chat history glides line-by-line.
@@ -1748,6 +2421,11 @@ pub struct ChildDef {
     /// `Rows` / `DB Script Result` levels, which are reached via drill).
     #[serde(default)]
     pub record_detail: bool,
+    /// Opt-in for per-node scripts on this child's items. Same semantics
+    /// as [`ViewDef::node_scripts`] — set it on the level whose rows own
+    /// the scripts (e.g. the Postgres `Tables` child under a schema).
+    #[serde(default)]
+    pub node_scripts: bool,
     /// Continue the parent's tree chain into this child level. When set
     /// AND the parent (ViewDef or another ChildDef) also has
     /// `tree_label`, drilling into a row of the parent expands its
@@ -1798,6 +2476,13 @@ pub struct ChildDef {
     /// applies when the entry's level is reached via this ChildDef.
     #[serde(default)]
     pub leaf_glyph: Option<String>,
+    /// Per-ChildDef type glyph, drawn before the label on every row of
+    /// this level. See [`ViewDef::icon`] for the semantics; this field
+    /// applies when the entry's level is reached via this ChildDef —
+    /// which is what makes two sibling branches at the same tree depth
+    /// (Stoat: channels vs. categories) tell themselves apart.
+    #[serde(default)]
+    pub icon: Option<String>,
     /// Default grouping for this drill level (M3). Same semantics as
     /// [`ViewDef::group_by`]; applies to the pane that displays this
     /// child's items. Runtime-switchable. Ignored in tree mode.
@@ -1825,6 +2510,36 @@ pub struct ChildDef {
     /// tree mode.
     #[serde(default)]
     pub mark_read_on_reach_end: Option<String>,
+    /// Where the cursor lands when this drill level is **opened** — a drill
+    /// into a row, or a coupled pane's hot-replace — as soon as its items
+    /// arrive. `None` keeps the historical behaviour (the first row).
+    ///
+    /// Only the *opening* applies it: a reload of an already-open level
+    /// (`r`, a live invalidation, a page change) leaves the cursor where the
+    /// user put it. Chat levels set `first_unread` so opening a channel lands
+    /// on the oldest message not yet seen. Like [`Self::mark_read_on_reach_end`]
+    /// this is a generic engine hook reading the same `unread` metadata
+    /// field, so any feed-style adapter opts in without frontend code.
+    /// Ignored in tree mode (an expansion is not a fresh list).
+    #[serde(default)]
+    pub cursor_on_open: Option<CursorOnOpen>,
+}
+
+/// Initial cursor placement for a freshly-opened drill level
+/// ([`ChildDef::cursor_on_open`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorOnOpen {
+    /// The first (top) row — the engine's default, spelled out.
+    First,
+    /// The last (bottom) row. On an oldest-first chat page that is the
+    /// newest message.
+    Last,
+    /// The first row whose `unread` metadata field is `"true"`, anchored at
+    /// the **top** edge so the whole unread run reads downward from the
+    /// cursor. Falls back to [`Last`](Self::Last) when nothing is unread —
+    /// with no news to catch up on, the newest row is what the user came for.
+    FirstUnread,
 }
 
 /// Split direction relative to the source pane: where the new pane lands.
@@ -1881,6 +2596,79 @@ impl Default for SplitDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse just a `tab:` block (the rest of the file is the smallest
+    /// thing that still deserializes).
+    fn parse_tab(tab_yaml: &str) -> TabConfig {
+        let yaml = format!("{tab_yaml}\nadapter:\n  type: mock\n");
+        serde_yaml::from_str::<ViewFileConfig>(&yaml)
+            .expect("view file parses")
+            .tab
+    }
+
+    #[test]
+    fn tab_unread_defaults_to_absent() {
+        let tab = parse_tab("tab:\n  name: Stoat\n");
+        assert!(tab.unread_marker.is_none());
+        assert!(tab.unread_style.is_none());
+    }
+
+    #[test]
+    fn tab_unread_style_accepts_color_modifiers_and_both() {
+        // A bare theme color name.
+        let tab = parse_tab("tab:\n  name: Stoat\n  unread_style: unread\n");
+        let style = tab.unread_style.unwrap();
+        assert_eq!(style.fg(), Some("unread"));
+        assert!(style.modifiers().is_empty());
+
+        // A bare modifier list — the "only the font changes" case.
+        let tab = parse_tab("tab:\n  name: Stoat\n  unread_style: [bold]\n");
+        let style = tab.unread_style.unwrap();
+        assert_eq!(style.fg(), None);
+        assert!(style.modifiers().contains(ratatui::style::Modifier::BOLD));
+
+        // Both, and more than one modifier folds into the bitset.
+        let tab = parse_tab(
+            "tab:\n  name: Stoat\n  unread_marker: \"🔔\"\n\
+             \x20 unread_style:\n    fg: accent\n    modifiers: [bold, underlined]\n",
+        );
+        assert_eq!(tab.unread_marker.as_deref(), Some("🔔"));
+        let style = tab.unread_style.unwrap();
+        assert_eq!(style.fg(), Some("accent"));
+        let m = style.modifiers();
+        assert!(m.contains(ratatui::style::Modifier::BOLD));
+        assert!(m.contains(ratatui::style::Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn child_cursor_on_open_parses_snake_case_and_defaults_to_none() {
+        let parse = |line: &str| -> Option<CursorOnOpen> {
+            let yaml = format!(
+                "tab:\n  name: T\nadapter:\n  type: mock\nviews:\n  - name: v\n    \
+                 node_type: \"mock:a\"\n    columns:\n      - {{ key: name }}\n    \
+                 children:\n      - name: messages\n        node_type: \"mock:msg\"\n        \
+                 columns:\n          - {{ key: name }}\n{line}"
+            );
+            serde_yaml::from_str::<ViewFileConfig>(&yaml)
+                .expect("view file parses")
+                .views[0]
+                .children[0]
+                .cursor_on_open
+        };
+        assert_eq!(parse(""), None, "unset → the engine's own default");
+        assert_eq!(
+            parse("        cursor_on_open: first_unread\n"),
+            Some(CursorOnOpen::FirstUnread)
+        );
+        assert_eq!(
+            parse("        cursor_on_open: last\n"),
+            Some(CursorOnOpen::Last)
+        );
+        assert_eq!(
+            parse("        cursor_on_open: first\n"),
+            Some(CursorOnOpen::First)
+        );
+    }
 
     #[test]
     fn parse_full_config() {
@@ -1972,6 +2760,7 @@ views:
         // Actions
         assert_eq!(view.actions.len(), 3);
         assert_eq!(view.actions[0].action_type, "edit");
+        assert_eq!(view.actions[0].primary_key(), Some("e")); // scalar key form
         assert_eq!(view.actions[0].id.as_deref(), Some("edit_full"));
         assert_eq!(view.actions[1].action_type, "reload");
         assert_eq!(view.actions[2].action_type, "navigate");
@@ -1983,6 +2772,156 @@ views:
         assert_eq!(view.children[0].node_type, "jira:comment");
         assert_eq!(view.children[0].columns.len(), 2);
         assert_eq!(view.children[0].columns[1].sizing, "flex(1)");
+    }
+
+    /// `ActionDef.key` accepts the same scalar-or-list convenience as the
+    /// `tui.yaml` keybinding sections: a bare scalar is one binding; a list
+    /// is a set of alternatives (any one triggers). A space inside a single
+    /// string stays a chord-step separator (Phase 1 dispatch), not a split
+    /// into alternatives.
+    #[test]
+    fn action_key_accepts_scalar_and_list() {
+        let yaml = r#"
+tab:
+  name: T
+adapter:
+  type: demo
+views:
+  - name: v
+    node_type: "demo:x"
+    columns:
+      - key: a
+    actions:
+      - name: scalar
+        key: e
+        type: reload
+      - name: alternatives
+        key: [a, "ctrl+k l"]
+        type: reload
+      - name: eventonly
+        type: reload
+"#;
+        let config: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let actions = &config.views[0].actions;
+
+        // Scalar → single binding.
+        assert_eq!(actions[0].key_strings(), &["e".to_string()]);
+        assert_eq!(actions[0].primary_key(), Some("e"));
+        assert!(actions[0].has_key());
+
+        // List → two alternatives, the chord string kept whole.
+        assert_eq!(
+            actions[1].key_strings(),
+            &["a".to_string(), "ctrl+k l".to_string()]
+        );
+        assert_eq!(actions[1].primary_key(), Some("a"));
+
+        // No key → event-only, empty inventory.
+        assert!(actions[2].key_strings().is_empty());
+        assert!(!actions[2].has_key());
+        assert_eq!(actions[2].primary_key(), None);
+    }
+
+    /// The committed calendar example ships a `create` action carrying the
+    /// new per-action `form:` block (2 columns, field bar, inline selects).
+    /// Parse the real file so a typo or schema drift is caught here rather
+    /// than only at runtime when the user copies it.
+    #[test]
+    fn committed_calendar_example_form_config_parses() {
+        let yaml = include_str!("../../../docs/examples/views/calendar.yaml");
+        let config: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("committed calendar.yaml must parse");
+        let create = config
+            .views
+            .iter()
+            .flat_map(|v| &v.actions)
+            .find(|a| a.id.as_deref() == Some("create"))
+            .expect("calendar create action present");
+        let form = create
+            .form
+            .as_ref()
+            .expect("create action carries form config");
+        assert_eq!(form.columns, Some(2));
+        assert_eq!(form.field_bar, Some(true));
+        assert_eq!(form.select_style, Some(SelectStyleConfig::Inline));
+        let cols = form.column_assignment.as_ref().expect("explicit columns");
+        assert_eq!(cols.len(), 2);
+    }
+
+    /// The shipped `stoat.yaml` is what a user copies, so a typo or schema
+    /// drift in it must fail here rather than in their terminal. Parse and
+    /// fully validate the real file, then pin the two levels that are easy
+    /// to get wrong: the channel's `attach` (a FilePicker action, hence
+    /// `custom`) and the `stoat:attachment` list below a message.
+    #[test]
+    fn committed_stoat_example_parses_and_validates() {
+        let yaml = include_str!("../../../docs/examples/views/stoat.yaml");
+        let cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("committed stoat.yaml must parse");
+        // The example binds the `compose-below` editor profile, which the
+        // validator only accepts when `tui.yaml` defines it.
+        let editors: crate::config::editor::EditorsConfig =
+            serde_yaml::from_str("default: {}\ncompose-below: {}").unwrap();
+        cfg.validate(&KeyBindingConfig::default(), &editors)
+            .expect("committed stoat.yaml must validate");
+
+        // Both channel branches (uncategorized and inside a category) offer
+        // the upload; a file picker routes through the custom pipeline.
+        let channels: Vec<&ChildDef> = collect_children(&cfg.views[0].children)
+            .into_iter()
+            .filter(|c| c.node_type == "stoat:channel")
+            .collect();
+        assert_eq!(channels.len(), 2, "uncategorized + categorized channels");
+        for channel in &channels {
+            let attach = channel
+                .actions
+                .iter()
+                .find(|a| a.id.as_deref() == Some("attach"))
+                .expect("channel offers attach");
+            assert_eq!(attach.action_type, "custom");
+            assert!(
+                attach
+                    .key
+                    .as_ref()
+                    .is_some_and(|k| k.matches_sequence(&["A".to_string()])),
+                "attach is bound to Shift+A"
+            );
+        }
+
+        // Every message level drills into its files.
+        let messages: Vec<&ChildDef> = collect_children(&cfg.views[0].children)
+            .into_iter()
+            .filter(|c| c.node_type == "stoat:message")
+            .collect();
+        assert_eq!(messages.len(), 2);
+        for message in &messages {
+            let files = message
+                .children
+                .iter()
+                .find(|c| c.node_type == "stoat:attachment")
+                .expect("message drills into its attachments");
+            // Files are leaves: no tree_label, so Enter drills instead of
+            // expanding, and the two actions the adapter exposes are bound.
+            assert!(files.tree_label.is_none());
+            for id in ["open", "download_all"] {
+                assert!(
+                    files.actions.iter().any(|a| a.id.as_deref() == Some(id)),
+                    "attachment level binds `{id}`"
+                );
+            }
+            assert!(files.columns.iter().any(|c| c.key == "filename"));
+        }
+    }
+
+    /// Flatten a child tree into one list (depth-first), so a test can look
+    /// for a node type without walking the nesting by hand.
+    fn collect_children(children: &[ChildDef]) -> Vec<&ChildDef> {
+        let mut out = Vec::new();
+        for child in children {
+            out.push(child);
+            out.extend(collect_children(&child.children));
+        }
+        out
     }
 
     #[test]
@@ -2118,10 +3057,46 @@ views:
     }
 
     #[test]
+    fn subtab_key_accepts_scalar_list_and_empty() {
+        // Regression: the shortcut menu writes the subtab switch key as a
+        // list of alternatives (`key: [n, ctrl+n]`) just like a tab key.
+        // `ViewDef.key` used to be scalar-only `Option<String>`, so a list
+        // made the whole view file unparseable and its tab vanished on the
+        // next startup. It is now `Option<KeyBinding>` — scalar, list and
+        // the empty-list "disabled" form must all deserialize.
+        let yaml = r#"
+tab:
+  name: T
+adapter:
+  type: x
+views:
+  - name: scalar
+    node_type: t
+    key: i
+  - name: alternatives
+    node_type: t
+    key: [n, ctrl+n]
+  - name: disabled
+    node_type: t
+    key: []
+  - name: absent
+    node_type: t
+"#;
+        let config: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.views[0].key, Some("i".into()));
+        assert_eq!(
+            config.views[1].key.as_ref().unwrap().0,
+            vec!["n".to_string(), "ctrl+n".to_string()]
+        );
+        assert!(config.views[2].key.as_ref().unwrap().0.is_empty());
+        assert_eq!(config.views[3].key, None);
+    }
+
+    #[test]
     fn shows_in_action_bar_defaults() {
         let make = |action_type: &str| ActionDef {
             name: "test".into(),
-            key: "x".into(),
+            key: Some("x".into()),
             action_type: action_type.into(),
             id: None,
             node_id_from: None,
@@ -2141,6 +3116,11 @@ views:
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         };
         // Modal/persistent state actions → action bar
         assert!(make("edit").shows_in_action_bar());
@@ -2163,7 +3143,7 @@ views:
     fn hide_from_bar_overrides_default() {
         let action = ActionDef {
             name: "edit".into(),
-            key: "e".into(),
+            key: Some("e".into()),
             action_type: "edit".into(),
             id: None,
             node_id_from: None,
@@ -2183,6 +3163,11 @@ views:
             on_container: false,
             option_menu: None,
             force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
         };
         assert!(!action.shows_in_action_bar());
     }
@@ -2256,6 +3241,24 @@ views:
             .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("create") && errs[0].contains("id"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_views() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views: []
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("views") && errs[0].contains("empty"));
     }
 
     #[test]
@@ -2402,24 +3405,36 @@ views:
             .iter()
             .find(|a| a.action_type == "script")
             .unwrap();
-        assert_eq!(root_script.key, "x");
+        assert_eq!(root_script.primary_key(), Some("x"));
         assert!(child.actions.iter().any(|a| a.action_type == "script"));
         // Task-1 semantics: `a` adds a child of the selected node in the
         // tree (`under_selection`, adapter id `add`); `A` adds a *sibling*
         // (adapter id `add-sibling`). `U` un-nests to the top level. All
         // three inherit down to the recursive branch.
-        let add = root.actions.iter().find(|a| a.key == "a").unwrap();
+        let add = root
+            .actions
+            .iter()
+            .find(|a| a.primary_key() == Some("a"))
+            .unwrap();
         assert_eq!(add.id.as_deref(), Some("add"));
         assert!(
             add.under_selection,
             "tree `a` re-targets onto the selection"
         );
-        let add_sibling = root.actions.iter().find(|a| a.key == "A").unwrap();
+        let add_sibling = root
+            .actions
+            .iter()
+            .find(|a| a.primary_key() == Some("A"))
+            .unwrap();
         assert_eq!(add_sibling.action_type, "create");
         assert_eq!(add_sibling.id.as_deref(), Some("add-sibling"));
         assert!(add_sibling.under_selection);
         assert_eq!(root.shortcuts.get(&'U').map(|s| s.action()), Some("unnest"));
-        let child_sibling = child.actions.iter().find(|a| a.key == "A").unwrap();
+        let child_sibling = child
+            .actions
+            .iter()
+            .find(|a| a.primary_key() == Some("A"))
+            .unwrap();
         assert_eq!(child_sibling.id.as_deref(), Some("add-sibling"));
         assert!(child_sibling.under_selection);
         assert_eq!(
@@ -2449,9 +3464,9 @@ views:
 
         // Three views: flat (key a), condensed (key v), tree (key t).
         let flat = cfg.views.iter().find(|v| v.name == "trackings").unwrap();
-        assert_eq!(flat.key.as_deref(), Some("a"));
+        assert_eq!(flat.key, Some("a".into()));
         let condensed = cfg.views.iter().find(|v| v.name == "condensed").unwrap();
-        assert_eq!(condensed.key.as_deref(), Some("v"));
+        assert_eq!(condensed.key, Some("v".into()));
         // Condensed + Tree are projections of the same trackings, so the
         // user-set default saved query follows across them.
         assert!(condensed.query.as_ref().unwrap().inherit_default);
@@ -2462,7 +3477,7 @@ views:
         // subtree-cumulated tracked time as two side-by-side columns
         // (native column parity).
         let tree = cfg.views.iter().find(|v| v.name == "tree").unwrap();
-        assert_eq!(tree.key.as_deref(), Some("t"));
+        assert_eq!(tree.key, Some("t".into()));
         assert_eq!(tree.node_type, "tracking:tree-group");
         assert_eq!(tree.tree_label.as_deref(), Some("task"));
         assert!(tree.query.as_ref().unwrap().inherit_default);
@@ -2506,6 +3521,187 @@ views:
             &crate::config::editor::EditorsConfig::default(),
         )
         .expect("trackings.yaml should pass the validator");
+    }
+
+    #[test]
+    fn example_calendar_yaml_parses_and_validates() {
+        // The shipped `docs/examples/views/calendar.yaml` documents the MFA
+        // number-match rule-engine wiring (event_actions + a keyless `notify`
+        // action with `on_event: close`). Keep it loadable and valid so the
+        // example never drifts from the schema.
+        let yaml = include_str!("../../../docs/examples/views/calendar.yaml");
+        let cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("calendar.yaml should deserialize");
+        assert_eq!(cfg.adapter.adapter_type, "calendar");
+
+        let events = cfg.views.iter().find(|v| v.name == "events").unwrap();
+        // The bus binding routes the number-match topic to the notify action.
+        let binding = events
+            .event_actions
+            .iter()
+            .find(|b| b.on == "office365-web:mfa:number-match")
+            .expect("calendar.yaml binds the number-match topic");
+        assert_eq!(binding.run, "show auth number");
+        // The bound action is event-only (no key), type notify, and closes on
+        // resolve.
+        let notify = events
+            .actions
+            .iter()
+            .find(|a| a.name == "show auth number")
+            .expect("calendar.yaml declares the show-auth-number action");
+        assert_eq!(notify.action_type, "notify");
+        assert!(notify.key.is_none());
+        assert!(notify.message.as_deref().unwrap().contains("{number}"));
+        assert_eq!(
+            notify
+                .on_event
+                .as_ref()
+                .unwrap()
+                .get("office365-web:mfa:resolved"),
+            Some(&OnEventReaction::Close)
+        );
+
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("calendar.yaml should pass the validator");
+    }
+
+    #[test]
+    fn example_postgres_yaml_parses_and_validates() {
+        // The shipped `docs/examples/views/postgres.yaml` documents the
+        // Postgres tree/flat views, the coupled record-detail split
+        // (`record_detail: true`) and — the point of the example — the
+        // `w` window-leader opt-in (`window_ops: true`) on every
+        // top-level view. Keep it loadable and valid so it never drifts.
+        let yaml = include_str!("../../../docs/examples/views/postgres.yaml");
+        let mut cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("postgres.yaml should deserialize");
+        // The recursive db-script branch ships neither columns nor
+        // actions of its own; mirror the loader's inherit passes.
+        cfg.inherit_tree_columns();
+        cfg.inherit_tree_actions();
+        assert_eq!(cfg.adapter.adapter_type, "postgres");
+
+        // Every top-level view opts into the window-leader chords — the
+        // regression this example guards against (window_ops defaults off).
+        for name in ["databases", "tables", "scripts"] {
+            let v = cfg
+                .views
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap_or_else(|| panic!("postgres.yaml should declare a `{name}` view"));
+            assert!(v.window_ops, "`{name}` view should set window_ops: true");
+        }
+
+        // The flat `tables` view offers the record-detail split on its Rows.
+        let tables = cfg.views.iter().find(|v| v.name == "tables").unwrap();
+        let rows = tables
+            .children
+            .iter()
+            .find(|c| c.name == "Rows")
+            .expect("tables view should have a Rows child");
+        assert!(rows.record_detail, "Rows should set record_detail: true");
+
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("postgres.yaml should pass the validator");
+    }
+
+    #[test]
+    fn example_sqlite_yaml_parses_and_validates() {
+        // The shipped `docs/examples/views/sqlite.yaml` documents the
+        // SQLite tree — one level flatter than Postgres, since SQLite has
+        // no schema namespace: database → Tables → table → rows. Keep it
+        // loadable and valid so it never drifts.
+        let yaml = include_str!("../../../docs/examples/views/sqlite.yaml");
+        let mut cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("sqlite.yaml should deserialize");
+        cfg.inherit_tree_columns();
+        cfg.inherit_tree_actions();
+        assert_eq!(cfg.adapter.adapter_type, "sqlite");
+
+        for name in ["databases", "tables"] {
+            let v = cfg
+                .views
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap_or_else(|| panic!("sqlite.yaml should declare a `{name}` view"));
+            assert!(v.window_ops, "`{name}` view should set window_ops: true");
+        }
+
+        // The drill has no schema level: Tables sits directly under a
+        // database. That's the structural difference the example exists
+        // to document.
+        let databases = cfg.views.iter().find(|v| v.name == "databases").unwrap();
+        let tables_group = databases
+            .children
+            .iter()
+            .find(|c| c.node_type == "sqlite:tables")
+            .expect("databases view should have a Tables group child");
+        let table = tables_group
+            .children
+            .iter()
+            .find(|c| c.node_type == "sqlite:table")
+            .expect("Tables group should list sqlite:table directly");
+
+        // Per-table SQL scripts are opt-in via `node_scripts:` — the host
+        // knows nothing about SQLite, so without the flag `q`/`Q` stay
+        // ordinary keys. It has to sit on the table level in both views.
+        assert!(table.node_scripts, "Table child should own node scripts");
+        let flat_tables = cfg.views.iter().find(|v| v.name == "tables").unwrap();
+        assert!(
+            flat_tables.node_scripts,
+            "flat tables view should own node scripts"
+        );
+
+        // The db-script branch hangs beside Tables, with the same recursive
+        // folder shape the Postgres example has.
+        let scripts = databases
+            .children
+            .iter()
+            .find(|c| c.node_type == "sqlite:db_scripts")
+            .expect("databases view should have a Scripts group child");
+        let dir = scripts
+            .children
+            .iter()
+            .find(|c| c.node_type == "sqlite:db_script_dir")
+            .expect("Scripts group should list folders");
+        assert!(dir.recursive, "folders have to nest arbitrarily deep");
+
+        // The one place this branch must NOT copy Postgres: SQLite has no
+        // server-side cursor, so every result pane pages via LIMIT/OFFSET.
+        // A `mode: cursor` here would make `x` fail at runtime.
+        for script in scripts
+            .children
+            .iter()
+            .chain(dir.children.iter())
+            .filter(|c| c.node_type == "sqlite:db_script")
+        {
+            let result = script
+                .children
+                .iter()
+                .find(|c| c.node_type == "sqlite:db_script_result")
+                .expect("a script should open a result pane");
+            let pagination = result
+                .pagination
+                .as_ref()
+                .expect("result pane should configure pagination");
+            assert_eq!(
+                pagination.mode,
+                PaginationMode::Server,
+                "sqlite result panes cannot use cursor pagination"
+            );
+        }
+
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("sqlite.yaml should pass the validator");
     }
 
     #[test]
@@ -2563,6 +3759,60 @@ views:
             errs.iter()
                 .any(|e| e.contains("group_headers") && e.contains("group_by")),
             "got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_script_source() {
+        // A `script_source` naming no sibling view is flagged (typo would
+        // otherwise silently fall back to the view's own script scope).
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+  - name: bookmarks
+    node_type: b
+    script_source: typo
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("script_source") && e.contains("typo")),
+            "got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_known_script_source() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+  - name: bookmarks
+    node_type: b
+    script_source: tickets
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .err()
+            .unwrap_or_default();
+        assert!(
+            !errs.iter().any(|e| e.contains("script_source")),
+            "unexpected script_source error: {errs:?}"
         );
     }
 
@@ -2826,6 +4076,80 @@ views:
     }
 
     #[test]
+    fn event_only_action_and_event_actions_parse_and_validate() {
+        // An event-only action has no `key`; it is reached solely via the
+        // view's `event_actions:` rule engine. `notify`, `emit`, and
+        // `on_event` are the new MFA-flow building blocks.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - name: show-auth-number
+        type: notify
+        on_event: { "office365-web:mfa:resolved": close }
+      - name: enter-otc
+        key: o
+        type: custom
+        id: noop
+        emit:
+          topic: office365-web:mfa:otc-provided
+          payload: { code: "{code}" }
+    event_actions:
+      - { on: "office365-web:mfa:number-match", run: show-auth-number }
+      - { on: "office365-web:mfa:otc-required", run: enter-otc }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
+        let view = &cfg.views[0];
+        // Event-only action: no key, no keymap presence.
+        assert!(view.actions[0].key.is_none());
+        assert_eq!(
+            view.actions[0].on_event.as_ref().unwrap()["office365-web:mfa:resolved"],
+            OnEventReaction::Close
+        );
+        // Emitting action carries the reply topic + templated payload.
+        assert_eq!(
+            view.actions[1].emit.as_ref().unwrap().topic,
+            "office365-web:mfa:otc-provided"
+        );
+        assert_eq!(view.event_actions.len(), 2);
+        assert_eq!(view.event_actions[0].run, "show-auth-number");
+    }
+
+    #[test]
+    fn event_action_run_must_name_an_existing_action() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - { name: edit, key: e, type: edit, id: edit_full }
+    event_actions:
+      - { on: "some:topic", run: nonexistent }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("names no action")),
+            "expected a run-target error, got {errs:?}"
+        );
+    }
+
+    #[test]
     fn tree_label_defaults_to_none() {
         let yaml = r#"
 tab: { name: T }
@@ -3009,6 +4333,327 @@ views:
         assert!(
             res.is_ok() || !res.unwrap_err().iter().any(|e| e.contains("row_layout")),
             "row_layout must validate clean",
+        );
+    }
+
+    /// The 2×3 shape from the spec: six fields at `columns: 3`. Also pins the
+    /// defaults and both field forms (bare key vs. explicit label).
+    #[test]
+    fn card_parses_a_two_by_three_grid_with_defaults() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns:
+      - { key: key }
+      - { key: summary }
+      - { key: status }
+      - { key: assignee }
+      - { key: updated }
+      - { key: creator }
+    card:
+      key: C
+      fields:
+        - key
+        - { column: summary, label: "Title" }
+        - status
+        - assignee
+        - updated
+        - creator
+      columns: 3
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
+        let card = cfg.views[0].card.as_ref().unwrap();
+        assert_eq!(card.columns, 3);
+        // Six fields over three grid columns → two card lines (derived).
+        assert_eq!(card.fields.len(), 6);
+        assert_eq!(card.fields[0].column, "key");
+        assert_eq!(
+            card.fields[0].label, None,
+            "bare key inherits the column label"
+        );
+        assert_eq!(card.fields[1].label.as_deref(), Some("Title"));
+        assert_eq!(card.labels, CardLabelMode::Inline);
+        assert_eq!(card.border, CardBorderMode::Rounded);
+        assert_eq!(card.padding, 1);
+        assert_eq!(card.gap, 0);
+        assert_eq!(card.separator, "  ");
+        assert!(
+            !card.default,
+            "declaring card: only makes the mode available"
+        );
+        assert!(card.key.is_some());
+        assert!(card.weights.is_empty(), "no weights → equal shares");
+    }
+
+    #[test]
+    fn example_cards_yaml_parses_and_validates() {
+        // The shipped `docs/examples/views/cards.yaml` documents the 2×3 card
+        // and must stay loadable: it parses into a ViewFileConfig, passes the
+        // semantic validator, and keeps the shape the doc claims.
+        let yaml = include_str!("../../../docs/examples/views/cards.yaml");
+        let cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("cards.yaml should deserialize");
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("cards.yaml should validate");
+        let card = cfg.views[0].card.as_ref().unwrap();
+        assert_eq!(card.columns, 3);
+        assert_eq!(
+            card.fields.len(),
+            6,
+            "six fields over three slots → two lines"
+        );
+        assert_eq!(card.weights, vec![1, 1, 2]);
+        assert!(card.key.is_some(), "the example ships a toggle key");
+        assert!(!card.default, "the example opens as a table");
+    }
+
+    #[test]
+    fn card_defaults_to_one_field_per_line_and_is_absent_by_default() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: name }]
+    children:
+      - name: c
+        node_type: t2
+        columns: [{ key: body }]
+        card:
+          fields: [body]
+          labels: none
+          border: plain
+          gap: 1
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
+        assert!(cfg.views[0].card.is_none(), "no card: → no card mode");
+        let card = cfg.views[0].children[0].card.as_ref().unwrap();
+        assert_eq!(card.columns, 1);
+        assert_eq!(card.labels, CardLabelMode::None);
+        assert_eq!(card.border, CardBorderMode::Plain);
+        assert_eq!(card.gap, 1);
+        assert!(card.key.is_none(), "no key → reachable via default: only");
+    }
+
+    /// `border: none` plus a `divider:` is the "no frame, ruled between cards"
+    /// look: both are plain config, no extra switch.
+    #[test]
+    fn card_parses_borderless_with_a_divider_rule() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: a }, { key: b }]
+    card:
+      fields: [a, b]
+      columns: 2
+      border: none
+      divider: "─"
+      gap: 1
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
+        let card = cfg.views[0].card.as_ref().unwrap();
+        assert_eq!(card.border, CardBorderMode::None);
+        assert_eq!(card.divider, "─");
+        assert_eq!(
+            card.separator, "  ",
+            "`separator:` (within a line) is untouched by `divider:`"
+        );
+    }
+
+    #[test]
+    fn card_divider_defaults_to_empty() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: a }]
+    card:
+      fields: [a]
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.views[0].card.as_ref().unwrap().divider.is_empty());
+    }
+
+    #[test]
+    fn validate_card_rejects_unknown_field() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: name }]
+    card:
+      fields: [name, nope]
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("card") && e.contains("'nope'")),
+            "got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_card_rejects_markdown_field() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns:
+      - { key: author }
+      - { key: body, markdown: true }
+    card:
+      fields: [author, body]
+      columns: 2
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("card") && e.contains("markdown")),
+            "got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_card_rejects_weights_not_matching_columns() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: a }, { key: b }, { key: c }]
+    card:
+      fields: [a, b, c]
+      columns: 3
+      weights: [1, 2]
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("weights")), "got: {errs:?}");
+    }
+
+    #[test]
+    fn validate_card_rejects_zero_columns() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: a }]
+    card:
+      fields: [a]
+      columns: 0
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("columns: 0")),
+            "got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn card_without_fields_is_valid_and_means_all_columns() {
+        // No `fields:` — the card shows the level's whole column list, so a
+        // column added later needs no second edit.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: a }, { key: b }, { key: c }]
+    card:
+      columns: 2
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("an omitted `fields:` is not an error");
+        assert!(cfg.views[0].card.as_ref().unwrap().fields.is_empty());
+    }
+
+    #[test]
+    fn validate_card_rejects_omitted_fields_with_nothing_to_show() {
+        // "All columns" minus the markdown ones leaves an empty card — that
+        // one is worth reporting instead of rendering blank frames.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns: [{ key: a, markdown: true }]
+    card:
+      columns: 1
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("`fields:` is omitted") && e.contains("no column")),
+            "got: {errs:?}"
         );
     }
 
@@ -3686,5 +5331,106 @@ views:
         cfg.inherit_tree_columns();
         let rows = &cfg.views[0].children[0];
         assert!(rows.columns.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Scaffold round-trip contract
+    //
+    // `content::scaffold::generate` hand-renders view-config YAML from the
+    // adapter protocol (it lives in the content crate and can't `Serialize`
+    // *these* structs, which are `Deserialize`-only and downstream of it).
+    // That means the field names it emits are an untyped contract with this
+    // schema. This test pins that contract: whatever the scaffolder emits must
+    // still deserialize into `ViewFileConfig` — if a field here is renamed or
+    // gains `deny_unknown_fields` coverage the scaffolder doesn't know about,
+    // this fails instead of silently shipping a config the TUI rejects.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn scaffold_output_deserializes_into_view_file_config() {
+        use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
+        use not_yet_done_content::{
+            AdapterCapabilities, InputSpec, NodeAction, ScaffoldFileMeta, ScaffoldSelection,
+            generate_scaffold,
+        };
+
+        let adapter = MockAdapterBuilder::new("mock")
+            .instance_id("mock-1")
+            .capabilities(AdapterCapabilities {
+                supports_create: true,
+                ..Default::default()
+            })
+            .actions_for(
+                "mock:root",
+                vec![NodeAction::new("add", "add", InputSpec::Editor)],
+            )
+            .actions_for(
+                "mock:issue",
+                vec![
+                    // Adapters no longer suggest keys, so the scaffolder emits
+                    // *every* action commented out with a `# TODO key`; neither
+                    // may break the round trip.
+                    NodeAction::new("edit", "edit", InputSpec::Editor),
+                    NodeAction::new("transition", "transition", InputSpec::Picker),
+                ],
+            )
+            .node(
+                MockNodeData::new("root", "Root")
+                    .child_type(issue_type())
+                    .child(MockNodeData::new("ISS-1", "First").node_type(issue_type())),
+            )
+            .build();
+
+        let meta = ScaffoldFileMeta {
+            tab_name: "Mock".to_string(),
+            order: 3,
+            adapter_type: "mock".to_string(),
+            adapter_id: Some("mock-1".to_string()),
+            config: None,
+            config_inline: Some("{}".to_string()),
+            manual_connect: false,
+        };
+
+        let yaml = generate_scaffold(&adapter, &meta, &ScaffoldSelection::all())
+            .await
+            .expect("scaffold generation failed");
+
+        // The contract: it deserializes into the real schema without loss.
+        let cfg: ViewFileConfig = serde_yaml::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("scaffold did not round-trip: {e}\n---\n{yaml}"));
+
+        // And the header + one view the protocol described survived intact,
+        // proving the field names (not just the syntax) line up.
+        assert_eq!(cfg.tab.name, "Mock");
+        assert_eq!(cfg.tab.order, 3);
+        assert_eq!(cfg.adapter.adapter_type, "mock");
+        assert_eq!(cfg.adapter.id.as_deref(), Some("mock-1"));
+        let view = cfg
+            .views
+            .iter()
+            .find(|v| v.node_type == "mock:issue")
+            .expect("issue view missing");
+        assert!(view.default, "first view should be the default");
+        assert!(view.key.is_some(), "top-level view should get a subtab key");
+        assert!(
+            view.columns.iter().any(|c| c.key == "label"),
+            "label column seed missing"
+        );
+        // Every action is emitted commented out (adapters no longer suggest
+        // keys), so none of them materialize in the parsed set…
+        assert!(
+            view.actions.is_empty(),
+            "actions should all be commented out, got {:?}",
+            view.actions
+        );
+        // …but they are present-but-commented in the raw text with a `# TODO
+        // key`, so nothing is silently dropped.
+        assert!(
+            yaml.contains("# TODO key") && yaml.contains("id: edit"),
+            "edit action should be present but commented out:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("id: transition"),
+            "transition action should be present but commented out:\n{yaml}"
+        );
     }
 }

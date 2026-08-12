@@ -7,11 +7,57 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub backup: BackupConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String,
+}
+
+/// Diagnostic logging into a rotating daily file. Errors (everything the user
+/// also sees as a notification, plus failed HTTP responses) are written
+/// whenever `enabled`; the full request/response mirror only when `verbose`.
+/// Consumed by `not_yet_done_content::http_log`; environment variables
+/// (`NYD_DEBUG`, `NYD_LOG_DIR`, …) still override these at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_logging_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_log_directory")]
+    pub directory: PathBuf,
+    #[serde(default = "default_log_retention_days")]
+    pub retention_days: u64,
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+fn default_logging_enabled() -> bool {
+    true
+}
+
+fn default_log_retention_days() -> u64 {
+    3
+}
+
+fn default_log_directory() -> PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .expect("Could not determine state/data directory")
+        .join("not_yet_done")
+        .join("logs")
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_logging_enabled(),
+            directory: default_log_directory(),
+            retention_days: default_log_retention_days(),
+            verbose: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +109,7 @@ impl Config {
         Self {
             database: DatabaseConfig { url: db_url },
             backup: BackupConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 
