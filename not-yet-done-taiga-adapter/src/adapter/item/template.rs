@@ -3,9 +3,9 @@
 //! Layout:
 //! ```text
 //! subject: …
-//! status: ss-…
-//! assignee: uu-… (or empty)
-//! tags: tt-foo, tt-bar
+//! status: ss_…
+//! assignee: uu_… (or empty)
+//! tags: tt_foo, tt_bar
 //! ---
 //! ref: 42
 //! type: task
@@ -15,17 +15,15 @@
 //! <description body>
 //!
 //! # === COMPLETIONS ===
-//! # statuses: ss-new, ss-in-progress, …
-//! # users: uu-alice, uu-bob, …
-//! # tags: tt-frontend, tt-bug, …
+//! # statuses: ss_new, ss_in_progress, …
+//! # users: uu_alice, uu_bob, …
+//! # tags: tt_frontend, tt_bug, …
 //! ```
 
 use std::collections::{HashMap, HashSet};
 
 use super::ItemDetail;
-use super::slugs::{
-    STATUS_PREFIX, TAG_PREFIX, TaigaSlugTables, USER_PREFIX,
-};
+use super::slugs::{STATUS_PREFIX, TAG_PREFIX, TaigaSlugTables, USER_PREFIX};
 
 pub(super) const EDITABLE_MARKER: &str = "---";
 pub(super) const BODY_MARKER: &str = "===";
@@ -63,11 +61,7 @@ pub(super) fn edit_full_fields() -> Vec<String> {
 }
 
 /// Render the editable value of one field (slug-aware).
-fn editable_value_with_slugs(
-    detail: &ItemDetail,
-    key: &str,
-    tables: &TaigaSlugTables,
-) -> String {
+fn editable_value_with_slugs(detail: &ItemDetail, key: &str, tables: &TaigaSlugTables) -> String {
     match key {
         "subject" => detail.subject.clone(),
         "status" => tables
@@ -104,6 +98,7 @@ fn readonly_value(detail: &ItemDetail, key: &str) -> String {
             _ => format!("#{}", detail.r#ref),
         },
         "type" => detail.item_type.as_str().to_string(),
+        "creator" => detail.creator.clone(),
         "modified" => detail.modified.clone().unwrap_or_default(),
         _ => String::new(),
     }
@@ -154,7 +149,7 @@ pub(super) fn render_3b(
     out.push_str(EDITABLE_MARKER);
     out.push('\n');
     let editable_set: HashSet<&str> = editable_fields.iter().map(String::as_str).collect();
-    for key in ["ref", "type", "modified"] {
+    for key in ["ref", "type", "creator", "modified"] {
         if editable_set.contains(key) {
             continue;
         }
@@ -261,7 +256,11 @@ pub(super) fn parse_3b(text: &str) -> std::result::Result<Parsed3b, Vec<FieldErr
     let text = strip_banner(text);
 
     #[derive(PartialEq)]
-    enum Section { Editable, Readonly, Body }
+    enum Section {
+        Editable,
+        Readonly,
+        Body,
+    }
     let mut section = Section::Editable;
     let mut editable: HashMap<String, String> = HashMap::new();
     let mut body_lines: Vec<&str> = Vec::new();
@@ -343,14 +342,14 @@ pub(super) fn parse_3b(text: &str) -> std::result::Result<Parsed3b, Vec<FieldErr
     while body_lines.last().is_some_and(|l| l.trim().is_empty()) {
         body_lines.pop();
     }
-    Ok(Parsed3b { editable, body: body_lines.join("\n") })
+    Ok(Parsed3b {
+        editable,
+        body: body_lines.join("\n"),
+    })
 }
 
 /// Field-level checks (run after `parse_3b`).
-pub(super) fn validate_3b(
-    parsed: &Parsed3b,
-    editable_fields: &[String],
-) -> Vec<FieldError> {
+pub(super) fn validate_3b(parsed: &Parsed3b, editable_fields: &[String]) -> Vec<FieldError> {
     let mut errors = Vec::new();
     let allowed: HashSet<&str> = editable_fields.iter().map(String::as_str).collect();
     for key in parsed.editable.keys() {
@@ -440,7 +439,9 @@ pub(super) fn resolve_slugs_inplace(
                 }),
             }
         }
-        parsed.editable.insert("assignee".into(), originals.join(","));
+        parsed
+            .editable
+            .insert("assignee".into(), originals.join(","));
     }
 
     if let Some(raw) = parsed.editable.get("tags").cloned() {
@@ -471,10 +472,10 @@ pub(super) fn resolve_slugs_inplace(
     }
 }
 
-/// Rewrite `@uu-slug` user mentions in free text (comment and description
+/// Rewrite `@uu_slug` user mentions in free text (comment and description
 /// bodies) to Taiga's wire `@username` form so the server resolves them into
 /// real mentions/notifications. Only matches at a word boundary, so
-/// `mail@uu-x.example` is left intact. Unknown `@uu-…` slugs are kept
+/// `mail@uu_x.example` is left intact. Unknown `@uu_…` slugs are kept
 /// verbatim — a body is free text, and a stray token must not block the save.
 ///
 /// The header fields (assignee/status/tags) resolve via
@@ -521,7 +522,7 @@ fn is_word_byte(b: u8) -> bool {
 }
 
 fn is_slug_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-'
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 pub(super) fn render_with_errors(original_text: &str, errors: &[FieldError]) -> String {
@@ -541,10 +542,7 @@ pub(super) fn render_with_errors(original_text: &str, errors: &[FieldError]) -> 
 /// Diff parsed editable against current detail. `assignee` is compared by
 /// canonical username; `tags` compares as sorted set; everything else by
 /// equality on the resolved value.
-pub(super) fn diff_against_current(
-    parsed: &Parsed3b,
-    detail: &ItemDetail,
-) -> ChangeSet {
+pub(super) fn diff_against_current(parsed: &Parsed3b, detail: &ItemDetail) -> ChangeSet {
     let mut metadata_changes = Vec::new();
     for (key, new_value) in &parsed.editable {
         let unchanged = match key.as_str() {
@@ -590,7 +588,10 @@ pub(super) fn diff_against_current(
     } else {
         None
     };
-    ChangeSet { metadata_changes, body: body_change }
+    ChangeSet {
+        metadata_changes,
+        body: body_change,
+    }
 }
 
 #[cfg(test)]
@@ -612,7 +613,7 @@ mod tests {
     #[test]
     fn resolves_known_mention_to_username() {
         assert_eq!(
-            resolve_user_mentions("cc @uu-ada-lovelace please", &users()),
+            resolve_user_mentions("cc @uu_ada_lovelace please", &users()),
             "cc @alovelace please"
         );
     }
@@ -620,7 +621,7 @@ mod tests {
     #[test]
     fn resolves_multiple_mentions() {
         assert_eq!(
-            resolve_user_mentions("@uu-ada-lovelace and @uu-grace-hopper", &users()),
+            resolve_user_mentions("@uu_ada_lovelace and @uu_grace_hopper", &users()),
             "@alovelace and @ghopper"
         );
     }
@@ -628,18 +629,18 @@ mod tests {
     #[test]
     fn keeps_unknown_mention_verbatim() {
         assert_eq!(
-            resolve_user_mentions("hi @uu-nobody there", &users()),
-            "hi @uu-nobody there"
+            resolve_user_mentions("hi @uu_nobody there", &users()),
+            "hi @uu_nobody there"
         );
     }
 
     #[test]
     fn ignores_at_not_on_word_boundary() {
-        // `@uu-` preceded by a word char (e.g. an email local part) is left
+        // `@uu_` preceded by a word char (e.g. an email local part) is left
         // alone.
         assert_eq!(
-            resolve_user_mentions("mail@uu-ada-lovelace.example", &users()),
-            "mail@uu-ada-lovelace.example"
+            resolve_user_mentions("mail@uu_ada_lovelace.example", &users()),
+            "mail@uu_ada_lovelace.example"
         );
     }
 }

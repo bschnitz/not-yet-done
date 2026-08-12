@@ -13,10 +13,10 @@ use not_yet_done_content::{ActionOutcome, Result};
 use crate::adapter::create_template::render_filled;
 use crate::client::UpdatePageError;
 
-use super::ConfluencePageNode;
-use super::format::format_xhtml;
 use super::super::conflict_banner::{CONFLICT_BANNER_END, CONFLICT_BANNER_START, strip_banner};
 use super::super::other_err;
+use super::ConfluencePageNode;
+use super::format::format_xhtml;
 
 /// Prepend the conflict banner to a body buffer that already contains
 /// diffy's `<<<<<<< ours` / `>>>>>>> theirs` markers, re-attaching the
@@ -63,7 +63,9 @@ impl ConfluencePageNode {
                 let mut content = String::new();
                 content.push_str(CONFLICT_BANNER_START);
                 content.push('\n');
-                content.push_str("    Page was modified upstream and the fresh state could not be re-fetched.\n");
+                content.push_str(
+                    "    Page was modified upstream and the fresh state could not be re-fetched.\n",
+                );
                 content.push_str(&format!("    Error: {e}\n"));
                 content.push_str("    Save again to overwrite, or Esc to cancel.\n");
                 content.push_str(CONFLICT_BANNER_END);
@@ -133,9 +135,8 @@ mod tests {
 
     #[test]
     fn strip_banner_removes_full_block() {
-        let with_banner = format!(
-            "{CONFLICT_BANNER_START}\n    a\n    b\n{CONFLICT_BANNER_END}\n<p>body</p>"
-        );
+        let with_banner =
+            format!("{CONFLICT_BANNER_START}\n    a\n    b\n{CONFLICT_BANNER_END}\n<p>body</p>");
         assert_eq!(strip_banner(&with_banner), "<p>body</p>");
     }
 

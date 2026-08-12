@@ -5,6 +5,20 @@ use serde::Deserialize;
 
 use super::{Assignee, JiraClient, NameField, normalize_eol};
 
+/// Join the names of a `fixVersions`-shaped array. Jira allows several
+/// versions per issue, so the display value is a comma-separated list;
+/// unnamed entries (an id-only reference) are dropped rather than rendered
+/// as a blank slot.
+fn version_names(versions: Option<Vec<NameField>>) -> String {
+    versions
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.name)
+        .filter(|n| !n.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A simplified Jira ticket for display.
 #[derive(Debug, Clone)]
 pub struct JiraTicket {
@@ -13,6 +27,14 @@ pub struct JiraTicket {
     pub status: String,
     pub priority: String,
     pub assignee: String,
+    /// Display name of the user who filed the issue (`creator`). Empty when
+    /// Jira reports no creator — deleted accounts, or a deployment that
+    /// strips the field.
+    pub creator: String,
+    /// Names of the issue's `fixVersions`, comma-separated. Empty when the
+    /// issue is unscheduled — which is the common case, so the column is
+    /// expected to be blank on many rows.
+    pub fix_versions: String,
     pub issue_type: String,
     pub updated: String,
     pub attachments_count: u64,
@@ -42,6 +64,9 @@ pub struct JiraIssueDetail {
     pub creator: String,
     pub creator_key: String,
     pub labels: Vec<String>,
+    /// Names of the issue's `fixVersions`, comma-separated (see
+    /// [`JiraTicket::fix_versions`]).
+    pub fix_versions: String,
     pub updated: String,
 }
 
@@ -77,7 +102,11 @@ struct IssueFields {
     status: Option<NameField>,
     priority: Option<NameField>,
     assignee: Option<Assignee>,
+    #[serde(default)]
+    creator: Option<Assignee>,
     issuetype: Option<NameField>,
+    #[serde(default, rename = "fixVersions")]
+    fix_versions: Option<Vec<NameField>>,
     #[serde(default)]
     updated: Option<String>,
     #[serde(default)]
@@ -103,6 +132,8 @@ struct IssueDetailFields {
     #[serde(default)]
     creator: Option<Assignee>,
     labels: Option<Vec<String>>,
+    #[serde(default, rename = "fixVersions")]
+    fix_versions: Option<Vec<NameField>>,
     updated: Option<String>,
 }
 
@@ -121,34 +152,59 @@ impl JiraClient {
             "jql": jql,
             "startAt": start_at,
             "maxResults": max_results,
-            "fields": ["summary", "status", "priority", "assignee", "issuetype", "updated", "attachment"]
+            "fields": ["summary", "status", "priority", "assignee", "creator", "issuetype", "fixVersions", "updated", "attachment"]
         });
 
         http_log::log_request("POST", &url);
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .json(&body)
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        let resp = http_log::check_status("POST", &url, resp).await?;
-        let body_text = resp.text().await
+        let resp = self.check_status("POST", &url, resp).await?;
+        let body_text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {e}"))?;
 
         let data: SearchResponse = serde_json::from_str(&body_text)
             .map_err(|e| format!("Failed to parse Jira response: {e}"))?;
 
-        let tickets = data.issues.unwrap_or_default().into_iter().map(|issue| {
-            JiraTicket {
+        let tickets = data
+            .issues
+            .unwrap_or_default()
+            .into_iter()
+            .map(|issue| JiraTicket {
                 key: issue.key,
                 summary: issue.fields.summary.unwrap_or_default(),
                 status: issue.fields.status.and_then(|s| s.name).unwrap_or_default(),
-                priority: issue.fields.priority.and_then(|p| p.name).unwrap_or_default(),
-                assignee: issue.fields.assignee.and_then(|a| a.display_name).unwrap_or_default(),
-                issue_type: issue.fields.issuetype.and_then(|t| t.name).unwrap_or_default(),
+                priority: issue
+                    .fields
+                    .priority
+                    .and_then(|p| p.name)
+                    .unwrap_or_default(),
+                assignee: issue
+                    .fields
+                    .assignee
+                    .and_then(|a| a.display_name)
+                    .unwrap_or_default(),
+                creator: issue
+                    .fields
+                    .creator
+                    .and_then(|a| a.display_name)
+                    .unwrap_or_default(),
+                issue_type: issue
+                    .fields
+                    .issuetype
+                    .and_then(|t| t.name)
+                    .unwrap_or_default(),
+                fix_versions: version_names(issue.fields.fix_versions),
                 updated: issue.fields.updated.unwrap_or_default(),
                 attachments_count: issue.fields.attachment.map(|v| v.len() as u64).unwrap_or(0),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(SearchPage {
             tickets,
@@ -160,31 +216,43 @@ impl JiraClient {
 
     /// Fetch the first page of tickets assigned to the current user.
     pub async fn my_tickets(&self, max_results: u32) -> Result<SearchPage, String> {
-        self.search("assignee = currentUser() ORDER BY updated DESC", 0, max_results).await
+        self.search(
+            "assignee = currentUser() ORDER BY updated DESC",
+            0,
+            max_results,
+        )
+        .await
     }
 
     /// Fetch full details of a single issue (for editing).
     pub async fn get_issue(&self, key: &str) -> Result<JiraIssueDetail, String> {
         let url = format!(
             "{}/rest/api/2/issue/{}?fields=summary,description,status,priority,\
-             issuetype,assignee,reporter,creator,labels,updated",
+             issuetype,assignee,reporter,creator,labels,fixVersions,updated",
             self.base_url, key
         );
 
         http_log::log_request("GET", &url);
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
-        let body_text = resp.text().await
+        let resp = self.check_status("GET", &url, resp).await?;
+        let body_text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {e}"))?;
 
-        let data: IssueDetail = serde_json::from_str(&body_text)
-            .map_err(|e| format!("Failed to parse issue: {e}"))?;
+        let data: IssueDetail =
+            serde_json::from_str(&body_text).map_err(|e| format!("Failed to parse issue: {e}"))?;
 
         let split = |a: Option<Assignee>| -> (String, String) {
-            let display = a.as_ref().and_then(|x| x.display_name.clone()).unwrap_or_default();
+            let display = a
+                .as_ref()
+                .and_then(|x| x.display_name.clone())
+                .unwrap_or_default();
             let key = a.and_then(|x| x.name).unwrap_or_default();
             (display, key)
         };
@@ -194,9 +262,15 @@ impl JiraClient {
 
         let status_field = data.fields.status;
         let issuetype_field = data.fields.issuetype;
-        let status_id = status_field.as_ref().and_then(|s| s.id.clone()).unwrap_or_default();
+        let status_id = status_field
+            .as_ref()
+            .and_then(|s| s.id.clone())
+            .unwrap_or_default();
         let status_name = status_field.and_then(|s| s.name).unwrap_or_default();
-        let issue_type_id = issuetype_field.as_ref().and_then(|t| t.id.clone()).unwrap_or_default();
+        let issue_type_id = issuetype_field
+            .as_ref()
+            .and_then(|t| t.id.clone())
+            .unwrap_or_default();
         let issue_type_name = issuetype_field.and_then(|t| t.name).unwrap_or_default();
         Ok(JiraIssueDetail {
             key: data.key,
@@ -204,7 +278,11 @@ impl JiraClient {
             description: normalize_eol(data.fields.description.unwrap_or_default()),
             status: status_name,
             status_id,
-            priority: data.fields.priority.and_then(|p| p.name).unwrap_or_default(),
+            priority: data
+                .fields
+                .priority
+                .and_then(|p| p.name)
+                .unwrap_or_default(),
             issue_type: issue_type_name,
             issue_type_id,
             assignee,
@@ -214,13 +292,20 @@ impl JiraClient {
             creator,
             creator_key,
             labels: data.fields.labels.unwrap_or_default(),
+            fix_versions: version_names(data.fields.fix_versions),
             updated: data.fields.updated.unwrap_or_default(),
         })
     }
 
     /// Update summary and description of an issue.
-    pub async fn update_issue(&self, key: &str, summary: &str, description: &str) -> Result<(), String> {
-        self.update_issue_full(key, Some(summary), Some(description), None, None).await
+    pub async fn update_issue(
+        &self,
+        key: &str,
+        summary: &str,
+        description: &str,
+    ) -> Result<(), String> {
+        self.update_issue_full(key, Some(summary), Some(description), None, None)
+            .await
     }
 
     /// Update arbitrary subset of issue fields. `labels = Some(_)` overwrites
@@ -239,10 +324,14 @@ impl JiraClient {
             fields.insert("summary".into(), serde_json::Value::String(s.to_string()));
         }
         if let Some(d) = description {
-            fields.insert("description".into(), serde_json::Value::String(d.to_string()));
+            fields.insert(
+                "description".into(),
+                serde_json::Value::String(d.to_string()),
+            );
         }
         if let Some(ls) = labels {
-            let arr: Vec<serde_json::Value> = ls.iter()
+            let arr: Vec<serde_json::Value> = ls
+                .iter()
                 .map(|l| serde_json::Value::String(l.clone()))
                 .collect();
             fields.insert("labels".into(), serde_json::Value::Array(arr));
@@ -260,18 +349,24 @@ impl JiraClient {
     }
 
     /// Update arbitrary fields on an issue via PUT.
-    pub async fn update_fields(&self, key: &str, fields: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    pub async fn update_fields(
+        &self,
+        key: &str,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
         let url = format!("{}/rest/api/2/issue/{}", self.base_url, key);
 
         let body = serde_json::json!({ "fields": fields });
 
         http_log::log_request("PUT", &url);
-        let resp = self.http.put(&url)
+        let resp = self
+            .http
+            .put(&url)
             .json(&body)
             .send()
             .await
             .map_err(|e| http_log::network_error("PUT", &url, e))?;
-        http_log::check_status("PUT", &url, resp).await?;
+        self.check_status("PUT", &url, resp).await?;
 
         Ok(())
     }

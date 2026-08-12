@@ -28,7 +28,9 @@ pub fn expand_tilde(input: &str) -> String {
 pub fn prepare_target_dir(input: &str) -> Result<std::path::PathBuf, ContentError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(ContentError::Other("target directory is required".to_string().into()));
+        return Err(ContentError::Other(
+            "target directory is required".to_string().into(),
+        ));
     }
     let dir = std::path::PathBuf::from(expand_tilde(trimmed));
     match std::fs::metadata(&dir) {
@@ -38,13 +40,15 @@ pub fn prepare_target_dir(input: &str) -> Result<std::path::PathBuf, ContentErro
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(&dir).map_err(|e| {
-                ContentError::Other(format!("cannot create directory {}: {e}", dir.display()).into())
+                ContentError::Other(
+                    format!("cannot create directory {}: {e}", dir.display()).into(),
+                )
             })?;
             Ok(dir)
         }
-        Err(e) => {
-            Err(ContentError::Other(format!("cannot access {}: {e}", dir.display()).into()))
-        }
+        Err(e) => Err(ContentError::Other(
+            format!("cannot access {}: {e}", dir.display()).into(),
+        )),
     }
 }
 

@@ -10,8 +10,8 @@ use not_yet_done_content::*;
 
 use super::types::{attachment_type, comment_type, node_type_for};
 use crate::client::{
-    ItemType, TaigaAttachment, TaigaClient, fetch_comments, list_attachments, toggle_watch,
-    upload_attachment,
+    ItemType, TaigaAttachment, TaigaClient, fetch_comments, list_attachments, member_display_name,
+    owner_display_name, toggle_watch, upload_attachment,
 };
 
 mod clone;
@@ -37,6 +37,9 @@ pub(super) struct ItemDetail {
     pub(super) assignees: Vec<String>,
     /// Canonical usernames parallel to `assignees`.
     pub(super) assignee_usernames: Vec<String>,
+    /// Display name of the user who created the item (Taiga's `owner`). Empty
+    /// when the payload carries neither the name nor a resolvable id.
+    pub(super) creator: String,
     pub(super) tags: Vec<String>,
     pub(super) modified: Option<String>,
     pub(super) version: u64,
@@ -91,7 +94,11 @@ impl TaigaItemNode {
     ) -> Result<Self> {
         let detail = fetch_detail(&client, item_type, id).await?;
         let composite_id = format!("{}:{}", item_type.as_str(), id);
-        Ok(Self { client, detail, composite_id })
+        Ok(Self {
+            client,
+            detail,
+            composite_id,
+        })
     }
 }
 
@@ -139,6 +146,30 @@ pub(super) async fn resolve_detail_assignees(
     let assignees: Vec<String> = named.iter().map(|(_, d, _)| d.clone()).collect();
     let usernames: Vec<String> = named.into_iter().map(|(_, _, u)| u).collect();
     (assignees, usernames)
+}
+
+/// Creator display name for a detail payload. Taiga embeds it in
+/// `owner_extra_info`; only when that block is missing do we pay for a member
+/// lookup on the bare `owner` id. Mirrors the list path so a row and its
+/// ticket buffer show the same name.
+async fn resolve_detail_creator(
+    client: &TaigaClient,
+    project_id: u64,
+    raw: &serde_json::Value,
+) -> String {
+    let embedded = owner_display_name(raw);
+    if !embedded.is_empty() {
+        return embedded;
+    }
+    let Some(owner_id) = raw
+        .get("owner")
+        .and_then(|x| x.as_u64())
+        .filter(|id| *id != 0)
+    else {
+        return String::new();
+    };
+    let members = client.ensure_members(project_id).await.unwrap_or_default();
+    member_display_name(members.iter().find(|m| m.id == owner_id), owner_id)
 }
 
 pub(super) async fn fetch_detail(
@@ -199,6 +230,7 @@ pub(super) async fn fetch_detail(
     }
     let (assignees, assignee_usernames) =
         resolve_detail_assignees(client, project_id, &assignee_ids).await;
+    let creator = resolve_detail_creator(client, project_id, &raw).await;
     let status = raw
         .get("status_extra_info")
         .and_then(|e| e.get("name"))
@@ -215,7 +247,11 @@ pub(super) async fn fetch_detail(
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string()),
                 serde_json::Value::String(s) => {
-                    if s.is_empty() { None } else { Some(s.clone()) }
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s.clone())
+                    }
                 }
                 _ => None,
             })
@@ -223,9 +259,7 @@ pub(super) async fn fetch_detail(
         _ => Vec::new(),
     };
 
-    let parent_user_story_id = raw
-        .get("user_story")
-        .and_then(|x| x.as_u64());
+    let parent_user_story_id = raw.get("user_story").and_then(|x| x.as_u64());
     let parent_user_story_subject = raw
         .get("user_story_extra_info")
         .and_then(|e| e.get("subject"))
@@ -244,6 +278,7 @@ pub(super) async fn fetch_detail(
         status,
         assignees,
         assignee_usernames,
+        creator,
         tags,
         modified: raw
             .get("modified_date")
@@ -257,9 +292,10 @@ pub(super) async fn fetch_detail(
 
 /// The **list-row** projection of an item detail — mirrors the field keys
 /// `item_summary_to_node_summary` emits (`ref, type, status, assignee,
-/// modified, subject`) so the post-edit row patch refreshes the same columns
-/// the list rendered. `attachments` is intentionally omitted: the detail fetch
-/// carries no attachment count, so the patch keeps the row's last-known value.
+/// creator, modified, subject`) so the post-edit row patch refreshes the same
+/// columns the list rendered. `attachments` is intentionally omitted: the
+/// detail fetch carries no attachment count, so the patch keeps the row's
+/// last-known value.
 fn item_detail_to_row_summary(d: &ItemDetail, composite_id: &str) -> NodeSummary {
     let display_ref = match &d.project_slug {
         Some(slug) if !slug.is_empty() => format!("{slug}#{}", d.r#ref),
@@ -282,7 +318,12 @@ fn item_detail_to_row_summary(d: &ItemDetail, composite_id: &str) -> NodeSummary
                 f("type", d.item_type.as_str().to_string(), "Type"),
                 f("status", d.status.clone(), "Status"),
                 f("assignee", d.assignees.join(", "), "Assignee"),
-                f("modified", d.modified.clone().unwrap_or_default(), "Modified"),
+                f("creator", d.creator.clone(), "Creator"),
+                f(
+                    "modified",
+                    d.modified.clone().unwrap_or_default(),
+                    "Modified",
+                ),
                 f("subject", d.subject.clone(), "Subject"),
             ],
         },
@@ -319,28 +360,9 @@ impl Node for TaigaItemNode {
         item_detail_to_row_summary(&self.detail, &self.composite_id)
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![comment_type().clone(), attachment_type().clone()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "taiga:comment" => self.list_comments().await,
-            "taiga:attachment" => self.list_attachments().await,
-            other => Err(ContentError::NotSupported(format!(
-                "unsupported child type: {other}"
-            ))),
-        }
-    }
-
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        item_actions(Some(self.detail.item_type))
-    }
-
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         match action_id {
             convert::CONVERT_ACTION_ID => {
@@ -367,24 +389,37 @@ impl Node for TaigaItemNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("edit_full", ActionInput::Edited { text, original, version }) => {
-                self.execute_edit_full(&text, &original, &version).await
-            }
-            ("edit_with_comments", ActionInput::Edited { text, original, version }) => {
-                self.execute_edit_with_comments(&text, &original, &version).await
+            (
+                "edit_full",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => self.execute_edit_full(&text, &original, &version).await,
+            (
+                "edit_with_comments",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => {
+                self.execute_edit_with_comments(&text, &original, &version)
+                    .await
             }
             ("toggle_watch", ActionInput::None) => {
                 let now_watching =
                     toggle_watch(&self.client, self.detail.item_type, self.detail.id)
                         .await
                         .map_err(|e| ContentError::Other(e.into()))?;
-                let label = if now_watching { "watching" } else { "no longer watching" };
+                let label = if now_watching {
+                    "watching"
+                } else {
+                    "no longer watching"
+                };
                 let display_ref = match &self.detail.project_slug {
                     Some(slug) if !slug.is_empty() => {
                         format!("{slug}#{}", self.detail.r#ref)
@@ -399,9 +434,7 @@ impl Node for TaigaItemNode {
             ("upload_attachment", ActionInput::Files(paths)) => {
                 self.execute_upload_attachment(paths).await
             }
-            ("clone", ActionInput::Edited { text, .. }) => {
-                self.execute_clone(&text).await
-            }
+            ("clone", ActionInput::Edited { text, .. }) => self.execute_clone(&text).await,
             (convert::CONVERT_ACTION_ID, ActionInput::Picked(value)) => {
                 // Menu step: the picked value is a `convert:<target>` editor
                 // action id. Hand it back so the frontend opens that editor on
@@ -439,9 +472,7 @@ impl TaigaItemNode {
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                ContentError::Other(
-                    "open_in_browser: project slug missing on item detail".into(),
-                )
+                ContentError::Other("open_in_browser: project slug missing on item detail".into())
             })?;
         let base = self.client.base_url.trim_end_matches('/');
         let url = format!(
@@ -458,7 +489,9 @@ impl TaigaItemNode {
             .spawn()
             .map_err(|e| ContentError::Other(format!("spawn xdg-open: {e}").into()))?;
 
-        Ok(ActionOutcome::Done { message: Some(format!("opened {url}")) })
+        Ok(ActionOutcome::Done {
+            message: Some(format!("opened {url}")),
+        })
     }
 
     async fn execute_upload_attachment(
@@ -495,87 +528,19 @@ impl TaigaItemNode {
                 .into(),
             ));
         }
-        let noun = if uploaded == 1 { "attachment" } else { "attachments" };
+        let noun = if uploaded == 1 {
+            "attachment"
+        } else {
+            "attachments"
+        };
         Ok(ActionOutcome::Done {
             message: Some(format!("uploaded {uploaded} {noun}")),
         })
     }
 
-    async fn list_comments(&self) -> Result<ListResult> {
-        let comments = fetch_comments(&self.client, self.detail.item_type, self.detail.id)
-            .await
-            .map_err(|e| ContentError::Other(e.into()))?;
-        let items = comments
-            .into_iter()
-            .map(|c| NodeSummary {
-                id: format!("{}/comment/{}", self.composite_id, c.id),
-                label: c.body.clone(),
-                node_type: comment_type().clone(),
-                metadata: Metadata {
-                    fields: vec![
-                        MetadataField {
-                            key: "author".into(),
-                            value: c.author,
-                            display_label: "Author".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "created".into(),
-                            value: c.created,
-                            display_label: "Created".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "body".into(),
-                            value: c.body,
-                            display_label: "Body".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                    ],
-                },
-                has_children: None,
-            })
-            .collect();
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
-    async fn list_attachments(&self) -> Result<ListResult> {
-        let attachments = list_attachments(
-            &self.client,
-            self.detail.item_type,
-            self.detail.id,
-            self.detail.project_id,
-        )
-        .await
-        .map_err(|e| ContentError::Other(e.into()))?;
-        let items = attachments
-            .into_iter()
-            .map(|a| attachment_summary(&self.composite_id, &a))
-            .collect();
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
     /// Re-fetch attachments and find the requested one by id. Used by
     /// `TaigaAdapter::get_by_id` for `task:1/attachment/42` paths.
-    pub(super) async fn find_attachment(
-        &self,
-        attachment_id: u64,
-    ) -> Result<TaigaAttachment> {
+    pub(super) async fn find_attachment(&self, attachment_id: u64) -> Result<TaigaAttachment> {
         let attachments = list_attachments(
             &self.client,
             self.detail.item_type,
@@ -589,6 +554,88 @@ impl TaigaItemNode {
             .find(|a| a.id == attachment_id)
             .ok_or_else(|| ContentError::NotFound(format!("attachment {attachment_id}")))
     }
+}
+
+/// Fetch an item's comments as list rows. Shared by [`TaigaItemNode::list`]
+/// (via the node method) and [`super::TaigaAdapter::childs`] (via a closure
+/// that reconstructs `item_type`/`id`/`composite_id` from `node.id()`).
+pub(super) async fn list_item_comments(
+    client: &TaigaClient,
+    item_type: ItemType,
+    id: u64,
+    composite_id: &str,
+) -> Result<ListResult> {
+    let comments = fetch_comments(client, item_type, id)
+        .await
+        .map_err(|e| ContentError::Other(e.into()))?;
+    let items = comments
+        .into_iter()
+        .map(|c| NodeSummary {
+            id: format!("{composite_id}/comment/{}", c.id),
+            label: c.body.clone(),
+            node_type: comment_type().clone(),
+            metadata: Metadata {
+                fields: vec![
+                    MetadataField {
+                        key: "author".into(),
+                        value: c.author,
+                        display_label: "Author".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "created".into(),
+                        value: c.created,
+                        display_label: "Created".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "body".into(),
+                        value: c.body,
+                        display_label: "Body".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                ],
+            },
+            has_children: None,
+        })
+        .collect();
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    })
+}
+
+/// Fetch an item's attachments as list rows. `project_id` is not encoded in
+/// `node.id()`, so [`super::TaigaAdapter::childs`] recovers it via
+/// [`fetch_detail`] before calling this — mirroring what `get_by_id` does
+/// when resolving a `.../attachment/{id}` path.
+pub(super) async fn list_item_attachments(
+    client: &TaigaClient,
+    item_type: ItemType,
+    id: u64,
+    project_id: u64,
+    composite_id: &str,
+) -> Result<ListResult> {
+    let attachments = list_attachments(client, item_type, id, project_id)
+        .await
+        .map_err(|e| ContentError::Other(e.into()))?;
+    let items = attachments
+        .into_iter()
+        .map(|a| attachment_summary(composite_id, &a))
+        .collect();
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    })
 }
 
 fn attachment_summary(parent_id: &str, a: &TaigaAttachment) -> NodeSummary {
@@ -710,6 +757,7 @@ mod row_summary_tests {
             status: "In progress".into(),
             assignees: vec!["Dana Lee".into(), "Sam Ray".into()],
             assignee_usernames: vec!["dana".into(), "sam".into()],
+            creator: "Kim Vale".into(),
             tags: vec![],
             modified: Some("2025-02-03T09:00:00+0000".into()),
             version: 4,
@@ -733,7 +781,12 @@ mod row_summary_tests {
         assert_eq!(row.label, "Add export button");
 
         let keys: Vec<&str> = row.metadata.fields.iter().map(|f| f.key.as_str()).collect();
-        assert_eq!(keys, ["ref", "type", "status", "assignee", "modified", "subject"]);
+        assert_eq!(
+            keys,
+            [
+                "ref", "type", "status", "assignee", "creator", "modified", "subject"
+            ]
+        );
         assert!(!keys.contains(&"attachments"));
 
         let value = |k: &str| {
@@ -747,6 +800,7 @@ mod row_summary_tests {
         assert_eq!(value("ref"), "demo-board#87");
         assert_eq!(value("status"), "In progress");
         assert_eq!(value("assignee"), "Dana Lee, Sam Ray");
+        assert_eq!(value("creator"), "Kim Vale");
         assert_eq!(value("modified"), "2025-02-03T09:00:00+0000");
     }
 

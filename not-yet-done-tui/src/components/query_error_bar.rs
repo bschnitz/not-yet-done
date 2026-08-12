@@ -3,18 +3,18 @@
 //! Unlike NotificationBar (auto-dismissing), this stays visible until the
 //! query error is resolved.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
-use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
-use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
-use std::sync::Arc;
 use crate::ui::theme::Theme;
+use std::sync::Arc;
 
 pub struct QueryErrorBarComponent {
     theme: Arc<Theme>,
@@ -39,7 +39,9 @@ impl QueryErrorBarComponent {
     pub fn required_height(&self, width: u16) -> u16 {
         let Some(err) = &self.error else { return 0 };
         let w = width.saturating_sub(4) as usize;
-        if w == 0 { return 1; }
+        if w == 0 {
+            return 1;
+        }
         err.lines()
             .map(|line| ((line.chars().count() / w.max(1)) + 1) as u16)
             .sum::<u16>()
@@ -59,7 +61,9 @@ impl Component for QueryErrorBarComponent {
             .render(area, frame.buffer_mut());
     }
 
-    fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> { None }
+    fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> {
+        None
+    }
     fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
     fn state(&self) -> State {
         match &self.error {
@@ -67,5 +71,7 @@ impl Component for QueryErrorBarComponent {
             None => State::None,
         }
     }
-    fn perform(&mut self, _cmd: Cmd) -> CmdResult { CmdResult::NoChange }
+    fn perform(&mut self, _cmd: Cmd) -> CmdResult {
+        CmdResult::NoChange
+    }
 }

@@ -15,15 +15,17 @@ use std::path::Path;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DatabaseConnection,
-    DbBackend, Schema,
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DatabaseConnection, DbBackend,
+    Schema,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use not_yet_done_task_core::entity::task::{self, ActiveModel, TaskStatus};
 use not_yet_done_task_core::filter::FilterExpr;
-use not_yet_done_task_core::repository::{TaskRepository, TaskRepositoryImpl, TaskRepositoryImplParameters};
+use not_yet_done_task_core::repository::{
+    TaskRepository, TaskRepositoryImpl, TaskRepositoryImplParameters,
+};
 
 // ---------------------------------------------------------------------------
 // Fixture types
@@ -44,7 +46,9 @@ struct TaskSeed {
     parent_description: Option<String>,
 }
 
-fn default_status() -> String { "todo".to_string() }
+fn default_status() -> String {
+    "todo".to_string()
+}
 
 /// One filter fixture file.
 #[derive(Debug, Deserialize)]
@@ -77,16 +81,16 @@ async fn setup_db() -> DatabaseConnection {
 /// Seed the database from `fixtures/tasks.yaml` and return a map of
 /// description → inserted Uuid (needed to resolve parent references).
 async fn seed_tasks(db: &DatabaseConnection) -> std::collections::HashMap<String, Uuid> {
-    let yaml = std::fs::read_to_string(fixture_path("tasks.yaml"))
-        .expect("tasks.yaml not found");
-    let seeds: Vec<TaskSeed> = serde_yaml::from_str(&yaml)
-        .expect("failed to parse tasks.yaml");
+    let yaml = std::fs::read_to_string(fixture_path("tasks.yaml")).expect("tasks.yaml not found");
+    let seeds: Vec<TaskSeed> = serde_yaml::from_str(&yaml).expect("failed to parse tasks.yaml");
 
     let mut desc_to_id: std::collections::HashMap<String, Uuid> = Default::default();
 
     // First pass: insert tasks without parent_id
     for seed in &seeds {
-        if seed.parent_description.is_some() { continue; }
+        if seed.parent_description.is_some() {
+            continue;
+        }
 
         let status = parse_status(&seed.status);
         let id = Uuid::new_v4();
@@ -111,9 +115,12 @@ async fn seed_tasks(db: &DatabaseConnection) -> std::collections::HashMap<String
 
     // Second pass: insert tasks that have a parent
     for seed in &seeds {
-        let Some(ref parent_desc) = seed.parent_description else { continue };
+        let Some(ref parent_desc) = seed.parent_description else {
+            continue;
+        };
 
-        let parent_id = *desc_to_id.get(parent_desc)
+        let parent_id = *desc_to_id
+            .get(parent_desc)
             .unwrap_or_else(|| panic!("parent '{}' not found in seed data", parent_desc));
 
         let status = parse_status(&seed.status);
@@ -142,11 +149,11 @@ async fn seed_tasks(db: &DatabaseConnection) -> std::collections::HashMap<String
 
 fn parse_status(s: &str) -> TaskStatus {
     match s {
-        "todo"        => TaskStatus::Todo,
+        "todo" => TaskStatus::Todo,
         "in_progress" => TaskStatus::InProgress,
-        "done"        => TaskStatus::Done,
-        "cancelled"   => TaskStatus::Cancelled,
-        other         => panic!("unknown status in fixture: '{other}'"),
+        "done" => TaskStatus::Done,
+        "cancelled" => TaskStatus::Cancelled,
+        other => panic!("unknown status in fixture: '{other}'"),
     }
 }
 
@@ -161,8 +168,7 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
 fn load_fixture(name: &str) -> FilterFixture {
     let yaml = std::fs::read_to_string(fixture_path(name))
         .unwrap_or_else(|_| panic!("fixture '{name}' not found"));
-    serde_yaml::from_str(&yaml)
-        .unwrap_or_else(|e| panic!("failed to parse fixture '{name}': {e}"))
+    serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse fixture '{name}': {e}"))
 }
 
 /// Run a single filter fixture against the database and assert the results.
@@ -174,15 +180,13 @@ async fn run_fixture(repo: &dyn TaskRepository, fixture_name: &str) {
         .await
         .unwrap_or_else(|e| panic!("[{}] find_filtered failed: {e}", fixture.description));
 
-    let actual: HashSet<String> = results
-        .into_iter()
-        .map(|t| t.description)
-        .collect();
+    let actual: HashSet<String> = results.into_iter().map(|t| t.description).collect();
 
     let expected: HashSet<String> = fixture.expected.into_iter().collect();
 
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "\n[{}]\n  missing:    {:?}\n  unexpected: {:?}",
         fixture.description,
         expected.difference(&actual).collect::<Vec<_>>(),
@@ -201,16 +205,16 @@ async fn run_fixture(repo: &dyn TaskRepository, fixture_name: &str) {
 /// `HasComponent::resolve`.
 macro_rules! fresh_repo {
     () => {{
-        use shaku::HasComponent;
         use not_yet_done_task_core::module::TaskDomainModule;
+        use shaku::HasComponent;
 
         let db = setup_db().await;
         seed_tasks(&db).await;
 
         let module = TaskDomainModule::builder()
-            .with_component_parameters::<TaskRepositoryImpl>(
-                TaskRepositoryImplParameters { db: Some(db) }
-            )
+            .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
+                db: Some(db),
+            })
             .build();
 
         let repo: std::sync::Arc<dyn TaskRepository> = module.resolve();

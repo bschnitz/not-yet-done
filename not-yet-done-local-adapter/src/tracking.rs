@@ -63,14 +63,17 @@
 //!   owner — the engine then only single-level-groups the rows into `── day ──`
 //!   headers, which lets the requested item sort (`S`) order the task rows
 //!   within each day. No adapter is forced to condense; one that can't simply
-//!   exposes no condensed view.
+//!   exposes no condensed view. A running tracking's condensed cell ticks live
+//!   like the flat list — [`TrackingSnapshot::live_condensed_rows`] re-sums the
+//!   running `(day, task)` cell(s) each tick and [`TrackingAdapter::live_rows`]
+//!   emits them alongside the entry rows, so the day + Σ totals re-fold too.
 //! - **Tree** — a second projection of the same loads: the **task forest**
 //!   (`tracking:tree-item`) where each node carries its own tracked seconds
 //!   plus the subtree-cumulated total ([`TreeProjection`], folded bottom-up).
 //!   The view declares a `tree_aggregate` column that toggles own↔cumulated
 //!   (M4); the adapter advertises [`AdapterCapabilities::supports_tree_aggregation`].
 //!   The tree is pruned to tasks with tracked time and bakes durations at
-//!   load (no live tick — like Condensed).
+//!   load; its live tick is [`TrackingSnapshot::live_group_rows`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -78,11 +81,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use not_yet_done_content::{
-    apply_sort, grouping, ActionContext, ActionDispatch, ActionInput, ActionOutcome,
-    AdapterCapabilities, AdapterFactory, ContentAdapter, ContentError, FormFieldSpec,
-    FsSavedQueryStore, GroupBucket, GroupSpec, HintPlacement, HostContext, HostEvent, InputSpec,
-    Invalidation, MarkedNode, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
-    Result, SavedQueryStore, SortDirection, SortKey, SortKind, SortableColumn, Subtree, SubtreeNode,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
+    ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket, GroupSpec, HostContext,
+    HostEvent, InputSpec, Invalidation, MarkedNode, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKey, Subtree, SubtreeNode,
+    TypedAdapterFactory, apply_sort, grouping,
 };
 use not_yet_done_task_core::entity::granularity::Granularity;
 use not_yet_done_task_core::entity::tracking;
@@ -93,10 +96,10 @@ use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
 
 use crate::datetime::{LocalDateTime, LocalOffset};
 use crate::form::{form_flag, form_opt, form_required, invalid_input};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
-use crate::{as_domain_event, publish_row_patches, CoreHandle};
+use crate::{CoreHandle, as_domain_event, publish_row_patches};
 
 /// Stable id of the synthetic list-root node.
 const ROOT_ID: &str = "tracking:root";
@@ -326,6 +329,9 @@ struct TreeProjection {
     by_id: HashMap<Uuid, TreeTaskRow>,
     /// parent id → ordered child ids (`None` key = forest roots).
     children: HashMap<Option<Uuid>, Vec<Uuid>>,
+    /// Active-tracking marker glyph carried through to `tree_metadata`, from
+    /// the adapter config (default `⏱`).
+    marker: Arc<str>,
 }
 
 impl TreeProjection {
@@ -340,7 +346,11 @@ impl TreeProjection {
     /// as the children map records them. Inside a group bucket the `scope`
     /// is embedded in every id (see [`BucketScope`]); `None` keeps the plain
     /// `tree:<uuid>` ids of the ungrouped tree.
-    fn child_summaries(&self, parent: Option<Uuid>, scope: Option<&BucketScope>) -> Vec<NodeSummary> {
+    fn child_summaries(
+        &self,
+        parent: Option<Uuid>,
+        scope: Option<&BucketScope>,
+    ) -> Vec<NodeSummary> {
         self.children
             .get(&parent)
             .map(|ids| {
@@ -393,7 +403,7 @@ impl TreeProjection {
             id: tree_item_id(scope, id),
             label: row.description.clone(),
             node_type: tracking_tree_item_type(),
-            metadata: tree_metadata(id, row),
+            metadata: tree_metadata(id, row, &self.marker),
             has_children: Some(has_children),
         }
     }
@@ -439,6 +449,10 @@ struct TrackingSnapshot {
     /// re-folded the whole task forest (O(tasks + trackings)), which made
     /// grouped trees visibly slow to expand.
     fold_cache: std::sync::RwLock<HashMap<(String, String), Arc<TreeProjection>>>,
+    /// Active-tracking marker glyph (default `⏱`) from the adapter config,
+    /// threaded to the flat/group/condensed metadata builders and to every
+    /// re-folded [`TreeProjection`].
+    marker: Arc<str>,
 }
 
 impl TrackingSnapshot {
@@ -507,7 +521,13 @@ impl TrackingSnapshot {
                 },
             );
         }
-        let tree = Arc::new(build_tree_projection(&task_map, &own_secs, &active_tasks));
+        let marker = handle.tracking_marker();
+        let tree = Arc::new(build_tree_projection(
+            &task_map,
+            &own_secs,
+            &active_tasks,
+            Arc::clone(&marker),
+        ));
         Ok(Arc::new(TrackingSnapshot {
             by_id,
             order,
@@ -516,6 +536,7 @@ impl TrackingSnapshot {
             built_at: now,
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker,
         }))
     }
 
@@ -533,7 +554,9 @@ impl TrackingSnapshot {
         let mut own_secs: HashMap<Uuid, i64> = HashMap::new();
         let mut active_tasks: HashSet<Uuid> = HashSet::new();
         for id in visible {
-            let Some(row) = self.by_id.get(id) else { continue };
+            let Some(row) = self.by_id.get(id) else {
+                continue;
+            };
             *own_secs.entry(row.tracking.task_id).or_default() += duration_seconds(row, now);
             if row.active {
                 active_tasks.insert(row.tracking.task_id);
@@ -543,6 +566,7 @@ impl TrackingSnapshot {
             &self.task_map,
             &own_secs,
             &active_tasks,
+            Arc::clone(&self.marker),
         ))
     }
 
@@ -560,7 +584,9 @@ impl TrackingSnapshot {
         if let Some(hit) = self.visible_cache.read().unwrap().get(&raw) {
             return Ok(Some(Arc::clone(hit)));
         }
-        let set = resolve_visible_set(handle, query).await?.unwrap_or_default();
+        let set = resolve_visible_set(handle, query)
+            .await?
+            .unwrap_or_default();
         let set = Arc::new(set);
         self.visible_cache
             .write()
@@ -650,14 +676,20 @@ impl TrackingSnapshot {
     /// `built_at`, like the tree fold) and a `⏱` marker when one of them is
     /// still running. Buckets are ordered by their ISO key (lexical =
     /// chronological) per `spec.order`.
-    fn group_summaries(&self, filter: Option<&HashSet<Uuid>>, spec: &GroupSpec) -> Vec<NodeSummary> {
+    fn group_summaries(
+        &self,
+        filter: Option<&HashSet<Uuid>>,
+        spec: &GroupSpec,
+    ) -> Vec<NodeSummary> {
         let now = self.built_at;
         let mut buckets: HashMap<String, (i64, bool)> = HashMap::new();
         for id in &self.order {
             if !filter.map_or(true, |f| f.contains(id)) {
                 continue;
             }
-            let Some(row) = self.by_id.get(id) else { continue };
+            let Some(row) = self.by_id.get(id) else {
+                continue;
+            };
             let key = grouping::group_key(&bucket_raw_value(row, &spec.column), spec.bucket);
             let entry = buckets.entry(key).or_insert((0, false));
             entry.0 += duration_seconds(row, now);
@@ -676,7 +708,7 @@ impl TrackingSnapshot {
                     bucket: spec.bucket,
                     key,
                 };
-                group_summary(&scope, total_secs, active)
+                group_summary(&scope, total_secs, active, &self.marker)
             })
             .collect()
     }
@@ -778,7 +810,9 @@ impl TrackingSnapshot {
         let mut active_tasks: HashSet<Uuid> = HashSet::new();
         let mut total_secs = 0i64;
         for id in &members {
-            let Some(row) = self.by_id.get(id) else { continue };
+            let Some(row) = self.by_id.get(id) else {
+                continue;
+            };
             let secs = duration_seconds(row, now);
             *own_secs.entry(row.tracking.task_id).or_default() += secs;
             total_secs += secs;
@@ -789,7 +823,12 @@ impl TrackingSnapshot {
         if active_tasks.is_empty() {
             return Vec::new(); // nothing running in this bucket → nothing ticks
         }
-        let projection = build_tree_projection(&self.task_map, &own_secs, &active_tasks);
+        let projection = build_tree_projection(
+            &self.task_map,
+            &own_secs,
+            &active_tasks,
+            Arc::clone(&self.marker),
+        );
         // The running chain: each active task plus its ancestors (their
         // cumulated grows). Cycle-guarded by the `insert` short-circuit.
         let mut chain: HashSet<Uuid> = HashSet::new();
@@ -802,7 +841,7 @@ impl TrackingSnapshot {
                 current = self.task_map.get(&id).and_then(|(_, parent)| *parent);
             }
         }
-        let mut rows = vec![group_summary(&scope, total_secs, true)];
+        let mut rows = vec![group_summary(&scope, total_secs, true, &self.marker)];
         for id in chain {
             if projection.is_visible(id) {
                 if let Some(row) = projection.by_id.get(&id) {
@@ -819,9 +858,7 @@ impl TrackingSnapshot {
     fn bucket_members(&self, filter: Option<&HashSet<Uuid>>, scope: &BucketScope) -> HashSet<Uuid> {
         self.by_id
             .iter()
-            .filter(|(id, row)| {
-                filter.map_or(true, |f| f.contains(id)) && scope_member(row, scope)
-            })
+            .filter(|(id, row)| filter.map_or(true, |f| f.contains(id)) && scope_member(row, scope))
             .map(|(id, _)| *id)
             .collect()
     }
@@ -837,7 +874,11 @@ impl TrackingSnapshot {
         self.order
             .iter()
             .filter(|id| filter.map_or(true, |f| f.contains(id)))
-            .filter_map(|id| self.by_id.get(id).map(|row| entry_summary(*id, row, now)))
+            .filter_map(|id| {
+                self.by_id
+                    .get(id)
+                    .map(|row| entry_summary(*id, row, now, &self.marker))
+            })
             .collect()
     }
 
@@ -863,6 +904,22 @@ impl TrackingSnapshot {
         now: chrono::DateTime<chrono::Utc>,
         sort: &[SortKey],
     ) -> (Vec<NodeSummary>, Vec<SortKey>) {
+        let mut items = self.condensed_cells(filter, now, false);
+        let applied = apply_sort(&mut items, sort, &tracking_columns());
+        (items, applied)
+    }
+
+    /// Build the `(day, task)` condensed cells for `filter`, each summed
+    /// against `now`. Shared by [`condensed_summaries`](Self::condensed_summaries)
+    /// (all cells, then sorted) and [`live_condensed_rows`](Self::live_condensed_rows)
+    /// (only the running cells, for the live tick). Unsorted — the cell order
+    /// follows `self.order` (newest first).
+    fn condensed_cells(
+        &self,
+        filter: Option<&HashSet<Uuid>>,
+        now: chrono::DateTime<chrono::Utc>,
+        active_only: bool,
+    ) -> Vec<NodeSummary> {
         // Visible rows in display order (newest first); each cell's
         // representative is therefore its newest interval.
         let ids: Vec<Uuid> = self
@@ -890,21 +947,44 @@ impl TrackingSnapshot {
                 .map(|(s, t)| (s.as_str(), t.as_str())),
             Some(GroupBucket::Day),
         );
-        let mut items: Vec<NodeSummary> = cells
+        cells
             .into_iter()
-            .map(|cell| {
+            .filter_map(|cell| {
+                let active = cell.members.iter().any(|&m| self.by_id[&ids[m]].active);
+                if active_only && !active {
+                    return None;
+                }
                 let rep = &self.by_id[&ids[cell.members[0]]];
                 let total_secs: i64 = cell
                     .members
                     .iter()
                     .map(|&m| duration_seconds(&self.by_id[&ids[m]], now))
                     .sum();
-                let active = cell.members.iter().any(|&m| self.by_id[&ids[m]].active);
-                condensed_summary(&cell.bucket_key, rep, total_secs, active)
+                Some(condensed_summary(
+                    &cell.bucket_key,
+                    rep,
+                    total_secs,
+                    active,
+                    &self.marker,
+                ))
             })
-            .collect();
-        let applied = apply_sort(&mut items, sort, &tracking_sortable_columns());
-        (items, applied)
+            .collect()
+    }
+
+    /// The condensed rows carrying a *running* tracking, re-summed against the
+    /// live `now` — the M9 live-tick counterpart of
+    /// [`condensed_summaries`](Self::condensed_summaries) (which bakes each
+    /// cell's duration at snapshot time). Returns one `cond:` row per
+    /// `(day, task)` cell that has a running tracking, keyed exactly as the
+    /// rendered condensed row so the frontend's `patch_row` swaps the ticking
+    /// duration in place and re-folds the `── day ──` / Σ totals. Empty when
+    /// nothing is running.
+    fn live_condensed_rows(
+        &self,
+        filter: Option<&HashSet<Uuid>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<NodeSummary> {
+        self.condensed_cells(filter, now, true)
     }
 }
 
@@ -1000,12 +1080,16 @@ fn scope_member(row: &TrackingRow, scope: &BucketScope) -> bool {
 /// human label (the tree view's `tree_label` column); both duration columns
 /// carry the bucket total so the `tree_aggregate` toggle (`zt`) never blanks
 /// the group row.
-fn group_metadata(label: &str, total_secs: i64, active: bool) -> Metadata {
+fn group_metadata(label: &str, total_secs: i64, active: bool, marker: &str) -> Metadata {
     Metadata {
         fields: vec![
             field(
                 "marker",
-                if active { "⏱".to_string() } else { String::new() },
+                if active {
+                    marker.to_string()
+                } else {
+                    String::new()
+                },
                 "Active",
             ),
             field("task", label.to_string(), "Task"),
@@ -1017,13 +1101,13 @@ fn group_metadata(label: &str, total_secs: i64, active: bool) -> Metadata {
 
 /// Build a group bucket's [`NodeSummary`]. Always expandable — a bucket
 /// exists only because at least one tracking fell into it.
-fn group_summary(scope: &BucketScope, total_secs: i64, active: bool) -> NodeSummary {
+fn group_summary(scope: &BucketScope, total_secs: i64, active: bool, marker: &str) -> NodeSummary {
     let label = grouping::bucket_display_label(&scope.key, scope.bucket);
     NodeSummary {
         id: format!("{GROUP_ID_PREFIX}{}", scope.encode()),
         label: label.clone(),
         node_type: tracking_tree_group_type(),
-        metadata: group_metadata(&label, total_secs, active),
+        metadata: group_metadata(&label, total_secs, active, marker),
         has_children: Some(true),
     }
 }
@@ -1037,6 +1121,7 @@ fn build_tree_projection(
     task_map: &HashMap<Uuid, (String, Option<Uuid>)>,
     own_secs: &HashMap<Uuid, i64>,
     active_tasks: &HashSet<Uuid>,
+    marker: Arc<str>,
 ) -> TreeProjection {
     let mut children: HashMap<Option<Uuid>, Vec<Uuid>> = HashMap::new();
     for (&id, (_, parent)) in task_map {
@@ -1069,7 +1154,11 @@ fn build_tree_projection(
             )
         })
         .collect();
-    TreeProjection { by_id, children }
+    TreeProjection {
+        by_id,
+        children,
+        marker,
+    }
 }
 
 /// Recursive subtree total: `own[id]` plus every child's cumulated total.
@@ -1104,12 +1193,16 @@ fn cumulated_for(
 /// `duration_cumulated` the subtree total — the `tree_aggregate` column in
 /// `views/trackings.yaml` reads `duration` by default and toggles
 /// (`zt`) to `duration_cumulated`. Both are canonical integer seconds.
-fn tree_metadata(id: Uuid, row: &TreeTaskRow) -> Metadata {
+fn tree_metadata(id: Uuid, row: &TreeTaskRow, marker: &str) -> Metadata {
     Metadata {
         fields: vec![
             field(
                 "marker",
-                if row.active { "⏱".to_string() } else { String::new() },
+                if row.active {
+                    marker.to_string()
+                } else {
+                    String::new()
+                },
                 "Active",
             ),
             field("task", row.description.clone(), "Task"),
@@ -1127,13 +1220,17 @@ fn tree_metadata(id: Uuid, row: &TreeTaskRow) -> Metadata {
 /// Build the column-backing metadata for a tracking. Values are the
 /// **canonical strings** the engine's typed columns parse: integer seconds
 /// for `duration`, RFC 3339 for `datetime`, `/`-segments for `path`.
-fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Metadata {
+fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>, marker: &str) -> Metadata {
     Metadata {
         fields: vec![
-            // Marker: a running-stopwatch glyph while the tracking is open.
+            // Marker: a running-tracking glyph while the tracking is open.
             field(
                 "marker",
-                if row.active { "⏱".to_string() } else { String::new() },
+                if row.active {
+                    marker.to_string()
+                } else {
+                    String::new()
+                },
                 "Active",
             ),
             field("taskpath", canonical_path(&row.task_path), "Task Path"),
@@ -1150,7 +1247,11 @@ fn entry_metadata(row: &TrackingRow, now: chrono::DateTime<chrono::Utc>) -> Meta
                     .unwrap_or_else(|| "running".to_string()),
                 "Ended",
             ),
-            field("duration", duration_seconds(row, now).to_string(), "Duration"),
+            field(
+                "duration",
+                duration_seconds(row, now).to_string(),
+                "Duration",
+            ),
             field("id", row.tracking.id.to_string(), "ID"),
             // Stable per-task key on the entry row. The Condensed view's
             // per-task condensing now happens adapter-side
@@ -1183,12 +1284,13 @@ fn entry_summary(
     id: Uuid,
     row: &TrackingRow,
     now: chrono::DateTime<chrono::Utc>,
+    marker: &str,
 ) -> NodeSummary {
     NodeSummary {
         id: id.to_string(),
         label: row.task_description.clone(),
         node_type: tracking_entry_type(),
-        metadata: entry_metadata(row, now),
+        metadata: entry_metadata(row, now, marker),
         has_children: Some(false),
     }
 }
@@ -1203,12 +1305,17 @@ fn condensed_metadata(
     rep: &TrackingRow,
     total_secs: i64,
     active: bool,
+    marker: &str,
 ) -> Metadata {
     Metadata {
         fields: vec![
             field(
                 "marker",
-                if active { "⏱".to_string() } else { String::new() },
+                if active {
+                    marker.to_string()
+                } else {
+                    String::new()
+                },
                 "Active",
             ),
             field("taskpath", canonical_path(&rep.task_path), "Task Path"),
@@ -1218,11 +1325,7 @@ fn condensed_metadata(
             field("started", rep.tracking.started_at.to_rfc3339(), "Started"),
             field("duration", total_secs.to_string(), "Duration"),
             field("task_id", rep.tracking.task_id.to_string(), "Task ID"),
-            field(
-                "id",
-                format!("{day_key}:{}", rep.tracking.task_id),
-                "ID",
-            ),
+            field("id", format!("{day_key}:{}", rep.tracking.task_id), "ID"),
         ],
     }
 }
@@ -1235,12 +1338,13 @@ fn condensed_summary(
     rep: &TrackingRow,
     total_secs: i64,
     active: bool,
+    marker: &str,
 ) -> NodeSummary {
     NodeSummary {
         id: format!("{CONDENSED_ID_PREFIX}{day_key}:{}", rep.tracking.task_id),
         label: rep.task_description.clone(),
         node_type: tracking_condensed_type(),
-        metadata: condensed_metadata(day_key, rep, total_secs, active),
+        metadata: condensed_metadata(day_key, rep, total_secs, active, marker),
         has_children: Some(false),
     }
 }
@@ -1250,21 +1354,17 @@ fn condensed_summary(
 /// order follows the requested sort) via the generic
 /// [`not_yet_done_content::apply_sort`]; each column declares the [`SortKind`]
 /// that helper needs to compare its cells correctly.
-fn tracking_sortable_columns() -> Vec<SortableColumn> {
+fn tracking_columns() -> Vec<ColumnSchema> {
     [
-        ("marker", "Active", SortKind::Text),
-        ("task", "Task", SortKind::Text),
-        ("taskpath", "Task path", SortKind::Text),
-        ("started", "Started", SortKind::DateTime),
-        ("ended", "Ended", SortKind::DateTime),
-        ("duration", "Duration", SortKind::Number),
+        ("marker", "Active", "text"),
+        ("task", "Task", "text"),
+        ("taskpath", "Task path", "text"),
+        ("started", "Started", "datetime"),
+        ("ended", "Ended", "datetime"),
+        ("duration", "Duration", "number"),
     ]
     .into_iter()
-    .map(|(key, label, kind)| SortableColumn {
-        key: key.to_string(),
-        label: label.to_string(),
-        kind,
-    })
+    .map(|(key, label, value_type)| ColumnSchema::new(key, label).typed(value_type))
     .collect()
 }
 
@@ -1311,27 +1411,21 @@ fn tracking_root_actions() -> Vec<NodeAction> {
 /// not adapter actions, so they are not listed here.
 fn tracking_entry_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("delete", "Delete", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('d'),
-        NodeAction::new("restore", "Restore", InputSpec::None).with_default_key('R'),
-        NodeAction::new("toggle-tracking", "track", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('s'),
-        NodeAction::new("split", "Split", split_input_spec()).with_default_key('i'),
-        NodeAction::new("move", "Move", move_input_spec()).with_default_key('m'),
+        NodeAction::new("delete", "Delete", InputSpec::None),
+        NodeAction::new("restore", "Restore", InputSpec::None),
+        NodeAction::new("toggle-tracking", "track", InputSpec::None),
+        NodeAction::new("split", "Split", split_input_spec()),
+        NodeAction::new("move", "Move", move_input_spec()),
         // Repack (mark/paste): `mark-move` records the row as the move source
         // via the frontend's generic move clipboard (returns `Noop`; the App
         // does the marking). `paste-move` slots the marked interval — keeping
         // its duration and its own task — into the target row's *day*, directly
         // after the target, cascading to the day's end and then before the
         // day's first interval when there is no room. See [`invoke_paste_move`].
-        // No `default_key` (it is dead — the YAML `shortcuts:` `m`/`p` are
-        // authoritative). `ActionBar` placement is what surfaces their hints.
-        NodeAction::new("mark-move", "Mark for move", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar),
-        NodeAction::new("paste-move", "Move here", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar),
+        // Keys live in the YAML `shortcuts:` (`m`/`p`); `ActionBar` placement is
+        // what surfaces their hints.
+        NodeAction::new("mark-move", "Mark for move", InputSpec::None),
+        NodeAction::new("paste-move", "Move here", InputSpec::None),
     ]
 }
 
@@ -1382,7 +1476,9 @@ async fn execute_split(
         .parse()
         .map_err(invalid_input)?;
     let second_task_id = match form_opt(values, "task") {
-        Some(s) => Some(Uuid::parse_str(&s).map_err(|_| invalid_input(format!("invalid task id '{s}'")))?),
+        Some(s) => {
+            Some(Uuid::parse_str(&s).map_err(|_| invalid_input(format!("invalid task id '{s}'")))?)
+        }
         None => None,
     };
     handle
@@ -1423,11 +1519,7 @@ async fn execute_move(
         .map(|_| Granularity::from_original(&start.original));
 
     let offset = match form_opt(values, "offset") {
-        Some(s) => Some(
-            s.parse::<LocalOffset>()
-                .map_err(invalid_input)?
-                .duration,
-        ),
+        Some(s) => Some(s.parse::<LocalOffset>().map_err(invalid_input)?.duration),
         None => None,
     };
 
@@ -1564,7 +1656,10 @@ async fn invoke_paste_move(
     ctx: &ActionContext,
 ) -> ActionDispatch {
     // The marked source comes from the frontend's generic move clipboard.
-    let Some(MarkedNode { node_id, node_type, .. }) = ctx.marked.as_ref() else {
+    let Some(MarkedNode {
+        node_id, node_type, ..
+    }) = ctx.marked.as_ref()
+    else {
         return ActionDispatch::Error("Nothing marked — press `m` on a tracking first".to_string());
     };
     if node_type.type_id != tracking_entry_type().type_id {
@@ -1574,7 +1669,9 @@ async fn invoke_paste_move(
         return ActionDispatch::Error("Invalid marked tracking".to_string());
     };
     if marked == target {
-        return ActionDispatch::Error("Marked tracking is the target — pick another row".to_string());
+        return ActionDispatch::Error(
+            "Marked tracking is the target — pick another row".to_string(),
+        );
     }
 
     let Some(m_row) = snapshot.by_id.get(&marked) else {
@@ -1592,14 +1689,8 @@ async fn invoke_paste_move(
     };
     let d = m_end - m_start;
     let tz = *chrono::Local::now().offset();
-    let (after, end, before) = paste_slots(
-        snapshot,
-        tz,
-        marked,
-        t_row.tracking.started_at,
-        t_end,
-        d,
-    );
+    let (after, end, before) =
+        paste_slots(snapshot, tz, marked, t_row.tracking.started_at, t_end, d);
 
     // Resolve which slot to move into, driven by the confirm stage.
     let (start, clear) = if !ctx.confirmed {
@@ -1607,10 +1698,15 @@ async fn invoke_paste_move(
         if after.fits {
             (Some(after.start), true)
         } else {
-            *flow.lock().unwrap() = Some(PasteFlow { marked, target, stage: PasteStage::AskedEnd });
+            *flow.lock().unwrap() = Some(PasteFlow {
+                marked,
+                target,
+                stage: PasteStage::AskedEnd,
+            });
             return ActionDispatch::Confirm {
-                prompt: "Not enough room after the selected tracking. Move to the end of the day? (y/n)"
-                    .to_string(),
+                prompt:
+                    "Not enough room after the selected tracking. Move to the end of the day? (y/n)"
+                        .to_string(),
             };
         }
     } else {
@@ -1622,8 +1718,11 @@ async fn invoke_paste_move(
         match stage {
             Some(PasteStage::AskedEnd) if end.fits => (Some(end.start), true),
             Some(PasteStage::AskedEnd) => {
-                *flow.lock().unwrap() =
-                    Some(PasteFlow { marked, target, stage: PasteStage::AskedBefore });
+                *flow.lock().unwrap() = Some(PasteFlow {
+                    marked,
+                    target,
+                    stage: PasteStage::AskedBefore,
+                });
                 return ActionDispatch::Confirm {
                     prompt: "No room at the end of the day either. Move before the day's first tracking? (y/n)"
                         .to_string(),
@@ -1641,8 +1740,11 @@ async fn invoke_paste_move(
                 if after.fits {
                     (Some(after.start), true)
                 } else {
-                    *flow.lock().unwrap() =
-                        Some(PasteFlow { marked, target, stage: PasteStage::AskedEnd });
+                    *flow.lock().unwrap() = Some(PasteFlow {
+                        marked,
+                        target,
+                        stage: PasteStage::AskedEnd,
+                    });
                     return ActionDispatch::Confirm {
                         prompt: "Not enough room after the selected tracking. Move to the end of the day? (y/n)"
                             .to_string(),
@@ -1686,11 +1788,7 @@ async fn invoke_paste_move(
 /// [`crate::task::apply_tracking`] policy as the other views. (Reload /
 /// fuzzy-filter are generic frontend actions in `views/trackings.yaml`.)
 fn tracking_tree_actions() -> Vec<NodeAction> {
-    vec![
-        NodeAction::new("toggle-tracking", "track", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('s'),
-    ]
+    vec![NodeAction::new("toggle-tracking", "track", InputSpec::None)]
 }
 
 /// Actions a condensed row (`tracking:condensed-row`) exposes. A cell
@@ -1700,11 +1798,7 @@ fn tracking_tree_actions() -> Vec<NodeAction> {
 /// other views. (Reload / fuzzy-filter are generic frontend actions in
 /// `views/trackings.yaml`.)
 fn tracking_condensed_actions() -> Vec<NodeAction> {
-    vec![
-        NodeAction::new("toggle-tracking", "track", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('s'),
-    ]
+    vec![NodeAction::new("toggle-tracking", "track", InputSpec::None)]
 }
 
 /// Announce a non-transition tracking change (delete/restore) so the bridge
@@ -1734,7 +1828,10 @@ async fn execute_delete(handle: &CoreHandle, tracking_id: Uuid) -> Result<Action
 /// Hard-delete every successor of `tracking_id` (the predecessor chain that a
 /// split/edit produced), so a restore doesn't resurrect a row alongside the
 /// successors that replaced it. BFS, deepest-first. Mirrors the native tab.
-async fn purge_successors(handle: &CoreHandle, tracking_id: Uuid) -> std::result::Result<(), AppError> {
+async fn purge_successors(
+    handle: &CoreHandle,
+    tracking_id: Uuid,
+) -> std::result::Result<(), AppError> {
     let mut queue = vec![tracking_id];
     let mut to_delete = Vec::new();
     while let Some(id) = queue.pop() {
@@ -1753,7 +1850,10 @@ async fn purge_successors(handle: &CoreHandle, tracking_id: Uuid) -> std::result
 /// produced) without deleting anything — used to tell the user, before they
 /// confirm, how many intervals a restore would irreversibly purge. Same BFS
 /// walk as [`purge_successors`].
-async fn count_successors(handle: &CoreHandle, tracking_id: Uuid) -> std::result::Result<u32, AppError> {
+async fn count_successors(
+    handle: &CoreHandle,
+    tracking_id: Uuid,
+) -> std::result::Result<u32, AppError> {
     let mut queue = vec![tracking_id];
     let mut count = 0u32;
     while let Some(id) = queue.pop() {
@@ -1799,7 +1899,10 @@ async fn invoke_restore(handle: &CoreHandle, tracking_id: Uuid, confirmed: bool)
         }
         if !confirmed {
             let purged = count_successors(handle, tracking_id).await?;
-            return Ok(Some(restore_confirm_prompt("Restore this tracking", purged)));
+            return Ok(Some(restore_confirm_prompt(
+                "Restore this tracking",
+                purged,
+            )));
         }
         purge_successors(handle, tracking_id).await?;
         handle.tracking_repo.undelete(tracking_id).await?;
@@ -1852,7 +1955,9 @@ async fn invoke_restore_all(
                 "Restore {n} deleted tracking{}",
                 if n == 1 { "" } else { "s" }
             );
-            return Ok(RestoreAll::Confirm(restore_confirm_prompt(&subject, purged)));
+            return Ok(RestoreAll::Confirm(restore_confirm_prompt(
+                &subject, purged,
+            )));
         }
         // Phase 2: do the work.
         for &id in &deleted_ids {
@@ -1912,6 +2017,99 @@ async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDis
 }
 
 // ---------------------------------------------------------------------------
+// Per-node list bodies (single source of truth)
+// ---------------------------------------------------------------------------
+//
+// Each node's `list` body extracted as a free fn so BOTH the legacy
+// `Node::list` AND the `ContentAdapter::childs` fetch closures run one
+// implementation. The root keeps its full `params.node_type`/`group_by`
+// dispatch in one place (`list_root`), so the four root child types it
+// advertises resolve exactly as before; group-bucket and tree-item child
+// levels get their own scope-parameterised fns.
+
+/// The root's whole list dispatch (flat / condensed / grouped tree / plain
+/// tree), keyed on `params.node_type` and `params.group_by` — the one
+/// implementation the legacy [`TrackingRootNode::list`] and every root
+/// [`ContentAdapter::childs`] fetch closure share. Behaviour is identical to
+/// the former inline body: which projection runs is chosen from `params`, not
+/// from any node-held view mode.
+async fn list_root(
+    snapshot: &TrackingSnapshot,
+    handle: &CoreHandle,
+    params: &not_yet_done_content::ListParams,
+) -> Result<not_yet_done_content::ListResult> {
+    if params.node_type.type_id == tracking_tree_group_type().type_id {
+        if let Some(spec) = &params.group_by {
+            let filter = snapshot.visible_set(handle, &params.query).await?;
+            return Ok(list_result(
+                snapshot.group_summaries(filter.as_deref(), spec),
+            ));
+        }
+        // Grouping cycled off at runtime: the same root request serves the
+        // plain task tree.
+        return Ok(list_result(
+            snapshot
+                .scoped_projection(handle, None, &params.query)
+                .await?
+                .child_summaries(None, None),
+        ));
+    }
+    if params.node_type.type_id == tracking_tree_item_type().type_id {
+        return Ok(list_result(
+            snapshot
+                .scoped_projection(handle, None, &params.query)
+                .await?
+                .child_summaries(None, None),
+        ));
+    }
+    let filter = snapshot.visible_set(handle, &params.query).await?;
+    let now = chrono::Utc::now();
+    if params.node_type.type_id == tracking_condensed_type().type_id {
+        let (items, applied) = snapshot.condensed_summaries(filter.as_deref(), now, &params.sort);
+        return Ok(list_result_with_sort(items, applied));
+    }
+    let mut items = snapshot.entries(filter.as_deref(), now);
+    let applied = apply_sort(&mut items, &params.sort, &tracking_columns());
+    Ok(list_result_with_sort(items, applied))
+}
+
+/// A group bucket's child level: the scoped task-tree roots of `scope`. Backs
+/// [`TrackingGroupNode::list`] and its `childs` fetch closure. `scope` is
+/// reconstructed from the group node's `treegrp:…` id.
+async fn list_group_children(
+    snapshot: &TrackingSnapshot,
+    handle: &CoreHandle,
+    scope: &BucketScope,
+    params: &not_yet_done_content::ListParams,
+) -> Result<not_yet_done_content::ListResult> {
+    Ok(list_result(
+        snapshot
+            .scoped_projection(handle, Some(scope), &params.query)
+            .await?
+            .child_summaries(None, Some(scope)),
+    ))
+}
+
+/// A tree-item's child level: the child tasks of `task_id` in the
+/// (optionally bucket-scoped) duration projection. Backs
+/// [`TrackingTreeNode::list`] and its `childs` fetch closure. Both `scope` and
+/// `task_id` are reconstructed from the tree node's `tree:…` id.
+async fn list_tree_children(
+    snapshot: &TrackingSnapshot,
+    handle: &CoreHandle,
+    scope: Option<&BucketScope>,
+    task_id: Uuid,
+    params: &not_yet_done_content::ListParams,
+) -> Result<not_yet_done_content::ListResult> {
+    Ok(list_result(
+        snapshot
+            .scoped_projection(handle, scope, &params.query)
+            .await?
+            .child_summaries(Some(task_id), scope),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
@@ -1940,121 +2138,6 @@ impl Node for TrackingRootNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    fn children_types(&self) -> Vec<NodeType> {
-        // The flat/condensed entry rows, the A2c duration-tree task nodes
-        // and the grouped tree's bucket nodes all hang off this one root;
-        // the loader picks the type matching the active view's `node_type`,
-        // and `list` dispatches on it.
-        vec![
-            tracking_entry_type(),
-            tracking_condensed_type(),
-            tracking_tree_item_type(),
-            tracking_tree_group_type(),
-        ]
-    }
-    fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
-        tracking_sortable_columns()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        tracking_root_actions()
-    }
-    async fn list(
-        &self,
-        params: not_yet_done_content::ListParams,
-    ) -> Result<not_yet_done_content::ListResult> {
-        // The Tree view asks for top-level task projections (grouped into
-        // bucket nodes while a `group_by` rides along — the generic
-        // `group_by_via_adapter` mechanism); every other view (flat list /
-        // condensed) asks for the flat tracking entries. All honor the
-        // pane's saved query — the tree re-folds its durations from the
-        // visible trackings only.
-        if params.node_type.type_id == tracking_tree_group_type().type_id {
-            if let Some(spec) = &params.group_by {
-                let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
-                return Ok(list_result(
-                    self.snapshot.group_summaries(filter.as_deref(), spec),
-                ));
-            }
-            // Grouping cycled off at runtime: the same root request serves
-            // the plain task tree — the frontend's type-based chain
-            // resolution matches the recursive tree-item level from depth 0.
-            return Ok(list_result(
-                self.snapshot
-                    .scoped_projection(&self.handle, None, &params.query)
-                    .await?
-                    .child_summaries(None, None),
-            ));
-        }
-        if params.node_type.type_id == tracking_tree_item_type().type_id {
-            return Ok(list_result(
-                self.snapshot
-                    .scoped_projection(&self.handle, None, &params.query)
-                    .await?
-                    .child_summaries(None, None),
-            ));
-        }
-        let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
-        let now = chrono::Utc::now();
-        // Condensed view: the adapter collapses the day's intervals of each
-        // task into one summed row and sorts those rows (`S`); the engine then
-        // single-level-groups them into day headers.
-        if params.node_type.type_id == tracking_condensed_type().type_id {
-            let (items, applied) =
-                self.snapshot
-                    .condensed_summaries(filter.as_deref(), now, &params.sort);
-            return Ok(list_result_with_sort(items, applied));
-        }
-        // Flat list: apply the requested item sort here (before any
-        // engine-side grouping, whose group bucketing is stable, so the
-        // within-group order follows this sort). `S` drives `params.sort`.
-        let mut items = self.snapshot.entries(filter.as_deref(), now);
-        let applied = apply_sort(&mut items, &params.sort, &tracking_sortable_columns());
-        Ok(list_result_with_sort(items, applied))
-    }
-    async fn list_subtree(
-        &self,
-        params: not_yet_done_content::ListParams,
-        depth: u32,
-    ) -> Result<Subtree> {
-        // Mirrors `list`'s view dispatch, but expands the whole tree in one
-        // pass (capability `supports_eager_subtree`).
-        if params.node_type.type_id == tracking_tree_group_type().type_id {
-            if let Some(spec) = &params.group_by {
-                let filter = self.snapshot.visible_set(&self.handle, &params.query).await?;
-                return self
-                    .snapshot
-                    .group_subtree(&self.handle, filter.as_deref(), spec, &params.query, depth)
-                    .await;
-            }
-            // Grouping cycled off: the plain task forest, same as `list`.
-            return Ok(self
-                .snapshot
-                .scoped_projection(&self.handle, None, &params.query)
-                .await?
-                .subtree(None, None, depth));
-        }
-        if params.node_type.type_id == tracking_tree_item_type().type_id {
-            return Ok(self
-                .snapshot
-                .scoped_projection(&self.handle, None, &params.query)
-                .await?
-                .subtree(None, None, depth));
-        }
-        // Flat / condensed entry views aren't trees: one level of leaves,
-        // exactly what `list` returns (depth is irrelevant for leaf rows).
-        let result = self.list(params).await?;
-        Ok(Subtree {
-            items: result
-                .items
-                .into_iter()
-                .map(|summary| SubtreeNode {
-                    summary,
-                    children: Subtree::default(),
-                })
-                .collect(),
-            page: result.page,
-        })
-    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         if id.starts_with(GROUP_ID_PREFIX) {
             return TrackingGroupNode::fetch(&self.snapshot, &self.handle, id);
@@ -2076,7 +2159,8 @@ impl Node for TrackingRootNode {
                 // them (the query is the sole filter; `deleted=false` is not
                 // baked in). With no query, the whole list is in scope, which
                 // is exactly what the pane shows.
-                let candidates: Vec<Uuid> = match resolve_visible_set(&self.handle, &ctx.query).await
+                let candidates: Vec<Uuid> = match resolve_visible_set(&self.handle, &ctx.query)
+                    .await
                 {
                     Ok(Some(set)) => set.into_iter().collect(),
                     Ok(None) => self.snapshot.order.clone(),
@@ -2152,7 +2236,7 @@ impl TrackingEntryNode {
             id_str: id.to_string(),
             label: row.task_description.clone(),
             node_type: tracking_entry_type(),
-            metadata: entry_metadata(row, now),
+            metadata: entry_metadata(row, now, &snapshot.marker),
             handle: handle.clone(),
             task_id: row.tracking.task_id,
             snapshot: snapshot.clone(),
@@ -2190,12 +2274,6 @@ impl Node for TrackingEntryNode {
     }
     fn metadata(&self) -> &Metadata {
         &self.metadata
-    }
-    fn children_types(&self) -> Vec<NodeType> {
-        Vec::new()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        tracking_entry_actions()
     }
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
@@ -2299,7 +2377,7 @@ impl TrackingCondensedNode {
             id_str: id.to_string(),
             label: rep.task_description.clone(),
             node_type: tracking_condensed_type(),
-            metadata: condensed_metadata(day_key, rep, total_secs, active),
+            metadata: condensed_metadata(day_key, rep, total_secs, active, &snapshot.marker),
             handle: handle.clone(),
             task_id,
         }))
@@ -2320,12 +2398,6 @@ impl Node for TrackingCondensedNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    fn children_types(&self) -> Vec<NodeType> {
-        Vec::new()
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        tracking_condensed_actions()
-    }
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
@@ -2342,7 +2414,6 @@ impl Node for TrackingCondensedNode {
 struct TrackingGroupNode {
     snapshot: Arc<TrackingSnapshot>,
     handle: CoreHandle,
-    scope: BucketScope,
     id_str: String,
     label: String,
     node_type: NodeType,
@@ -2373,10 +2444,9 @@ impl TrackingGroupNode {
         }
         let label = grouping::bucket_display_label(&scope.key, scope.bucket);
         Ok(Box::new(TrackingGroupNode {
+            metadata: group_metadata(&label, total_secs, active, &snapshot.marker),
             snapshot: snapshot.clone(),
             handle: handle.clone(),
-            metadata: group_metadata(&label, total_secs, active),
-            scope,
             id_str: id.to_string(),
             label,
             node_type: tracking_tree_group_type(),
@@ -2398,31 +2468,6 @@ impl Node for TrackingGroupNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![tracking_tree_item_type()]
-    }
-    async fn list(
-        &self,
-        params: not_yet_done_content::ListParams,
-    ) -> Result<not_yet_done_content::ListResult> {
-        Ok(list_result(
-            self.snapshot
-                .scoped_projection(&self.handle, Some(&self.scope), &params.query)
-                .await?
-                .child_summaries(None, Some(&self.scope)),
-        ))
-    }
-    async fn list_subtree(
-        &self,
-        params: not_yet_done_content::ListParams,
-        depth: u32,
-    ) -> Result<Subtree> {
-        Ok(self
-            .snapshot
-            .scoped_projection(&self.handle, Some(&self.scope), &params.query)
-            .await?
-            .subtree(None, Some(&self.scope), depth))
-    }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
     }
@@ -2439,8 +2484,6 @@ struct TrackingTreeNode {
     snapshot: Arc<TrackingSnapshot>,
     handle: CoreHandle,
     task_id: Uuid,
-    /// `Some` when this node lives under a group bucket.
-    scope: Option<BucketScope>,
     id_str: String,
     label: String,
     node_type: NodeType,
@@ -2469,8 +2512,7 @@ impl TrackingTreeNode {
             id_str: id.to_string(),
             label: row.description.clone(),
             node_type: tracking_tree_item_type(),
-            metadata: tree_metadata(task_id, row),
-            scope,
+            metadata: tree_metadata(task_id, row, &projection.marker),
         }))
     }
 }
@@ -2503,41 +2545,6 @@ impl Node for TrackingTreeNode {
     }
     fn metadata(&self) -> &Metadata {
         &self.metadata
-    }
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![tracking_tree_item_type()]
-    }
-    fn actions(&self) -> Vec<NodeAction> {
-        tracking_tree_actions()
-    }
-    async fn list(
-        &self,
-        params: not_yet_done_content::ListParams,
-    ) -> Result<not_yet_done_content::ListResult> {
-        // The engine propagates the pane's query into subtree loads
-        // (capability `propagates_query_to_subtree`), so an expanded
-        // branch shows the same filtered durations as the root level.
-        // Under a group bucket the query intersects the bucket's set.
-        Ok(list_result(
-            self.snapshot
-                .scoped_projection(&self.handle, self.scope.as_ref(), &params.query)
-                .await?
-                .child_summaries(Some(self.task_id), self.scope.as_ref()),
-        ))
-    }
-    async fn list_subtree(
-        &self,
-        params: not_yet_done_content::ListParams,
-        depth: u32,
-    ) -> Result<Subtree> {
-        // Same scope + query semantics as `list`, but walk the whole subtree
-        // in one in-memory pass instead of a single level (capability
-        // `supports_eager_subtree`).
-        Ok(self
-            .snapshot
-            .scoped_projection(&self.handle, self.scope.as_ref(), &params.query)
-            .await?
-            .subtree(Some(self.task_id), self.scope.as_ref(), depth))
     }
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
@@ -2660,7 +2667,12 @@ fn spawn_tracking_bridge(
                             if let Some(row) = snap.by_id.get(&tracking_id) {
                                 publish_row_patches(
                                     &inv_tx,
-                                    [entry_summary(tracking_id, row, chrono::Utc::now())],
+                                    [entry_summary(
+                                        tracking_id,
+                                        row,
+                                        chrono::Utc::now(),
+                                        &snap.marker,
+                                    )],
                                 );
                             }
                             // A grouped tree can't be expressed by a single
@@ -2710,18 +2722,20 @@ impl TrackingAdapterFactory {
     }
 }
 
-impl AdapterFactory for TrackingAdapterFactory {
+impl TypedAdapterFactory for TrackingAdapterFactory {
+    type Config = crate::LocalAdapterConfig;
+
     fn adapter_type(&self) -> &str {
         "trackings"
     }
 
-    fn create(
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: crate::LocalAdapterConfig,
         ctx: &HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let handle = crate::open_core_handle(config, ctx)?;
+        let handle = crate::open_core_handle(cfg, ctx)?;
         Ok(Box::new(TrackingAdapter::new(instance_id, handle)))
     }
 }
@@ -2737,7 +2751,7 @@ pub struct TrackingAdapter {
     /// Filesystem-backed saved queries (`<data>/not_yet_done/trackings/<id>/
     /// queries/*.yaml`). Bodies are `name`/`query`(`FilterExpr`)/`options`;
     /// applying one filters the list via [`resolve_visible_set`].
-    saved_queries: FsSavedQueryStore,
+    saved_queries: FsQueryStore,
     /// The cadence last announced via [`Invalidation::RefreshInterval`],
     /// in seconds (`0` = stopped). [`ContentAdapter::live_rows`] compares
     /// the adaptive target against this on every tick and re-paces the
@@ -2779,7 +2793,7 @@ impl TrackingAdapter {
             handle,
             inv_tx,
             snapshot,
-            saved_queries: FsSavedQueryStore::new(queries_root),
+            saved_queries: FsQueryStore::new(queries_root, ".yaml"),
             last_live_secs,
             paste_flow: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -2817,6 +2831,88 @@ impl TrackingAdapter {
     /// as the tracking ages and the bracket slows down.
     fn announce_interval(&self, snapshot: &TrackingSnapshot) {
         announce_live_interval(&self.inv_tx, &self.last_live_secs, snapshot);
+    }
+
+    /// Eager subtree for the forest root, ported from the former
+    /// `TrackingRootNode::list_subtree`. Mirrors `list_root`'s view dispatch
+    /// but expands the whole tree in one pass. See [`Self::eager_subtree`].
+    async fn root_subtree(
+        &self,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let snapshot = self.snapshot().await?;
+        // Grouped tree: one re-folded subtree per bucket while a `group_by`
+        // rides along; grouping cycled off falls back to the plain forest.
+        if params.node_type.type_id == tracking_tree_group_type().type_id {
+            if let Some(spec) = &params.group_by {
+                let filter = snapshot.visible_set(&self.handle, &params.query).await?;
+                return snapshot
+                    .group_subtree(&self.handle, filter.as_deref(), spec, &params.query, depth)
+                    .await;
+            }
+            return Ok(snapshot
+                .scoped_projection(&self.handle, None, &params.query)
+                .await?
+                .subtree(None, None, depth));
+        }
+        // Ungrouped duration tree.
+        if params.node_type.type_id == tracking_tree_item_type().type_id {
+            return Ok(snapshot
+                .scoped_projection(&self.handle, None, &params.query)
+                .await?
+                .subtree(None, None, depth));
+        }
+        // Flat / condensed entry views aren't trees: one level of leaves,
+        // exactly what `list_root` returns (depth is irrelevant for leaves).
+        let result = list_root(&snapshot, &self.handle, params).await?;
+        Ok(Subtree {
+            items: result
+                .items
+                .into_iter()
+                .map(|summary| SubtreeNode {
+                    summary,
+                    children: Subtree::default(),
+                })
+                .collect(),
+            page: result.page,
+        })
+    }
+
+    /// Eager subtree under a grouped-tree bucket, scope recovered from the
+    /// node's `treegrp:…` id (never a downcast). Ported from the former
+    /// `TrackingGroupNode::list_subtree`.
+    async fn group_bucket_subtree(
+        &self,
+        id: &str,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let scope = id
+            .strip_prefix(GROUP_ID_PREFIX)
+            .and_then(BucketScope::parse)
+            .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
+        let snapshot = self.snapshot().await?;
+        Ok(snapshot
+            .scoped_projection(&self.handle, Some(&scope), &params.query)
+            .await?
+            .subtree(None, Some(&scope), depth))
+    }
+
+    /// Eager subtree under a duration-tree task node, scope + uuid recovered
+    /// from the node's `tree:…` id. Ported from `TrackingTreeNode::list_subtree`.
+    async fn tree_item_subtree(
+        &self,
+        id: &str,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Result<Subtree> {
+        let (scope, task_id) = parse_tree_id(id)?;
+        let snapshot = self.snapshot().await?;
+        Ok(snapshot
+            .scoped_projection(&self.handle, scope.as_ref(), &params.query)
+            .await?
+            .subtree(Some(task_id), scope.as_ref(), depth))
     }
 }
 
@@ -2930,7 +3026,124 @@ impl ContentAdapter for TrackingAdapter {
         if id.starts_with(TREE_ID_PREFIX) {
             return TrackingTreeNode::fetch(&snapshot, &self.handle, id);
         }
+        // `cond:…` addresses a condensed-row node (A2c Condensed view). Without
+        // this branch a per-row action (e.g. `toggle-tracking` on `s`) resolves
+        // the row via `adapter.get_by_id` and falls through to the entry parser,
+        // which rejects the synthetic id — mirror `get_child`.
+        if id.starts_with(CONDENSED_ID_PREFIX) {
+            return TrackingCondensedNode::fetch(&snapshot, &self.handle, id);
+        }
         TrackingEntryNode::fetch(&snapshot, &self.handle, &self.paste_flow, id)
+    }
+
+    /// Single source of truth about a tracking node's children.
+    ///
+    /// The **view mode is NOT a node field** here: the root advertises all
+    /// four view types (`tracking:entry` flat, `tracking:condensed-row`,
+    /// `tracking:tree-item`, `tracking:tree-group`) unconditionally — exactly
+    /// as its legacy `children_types` did — and which projection actually runs
+    /// is chosen inside `list_root` from `params.node_type` / `params.group_by`
+    /// (the pane's active view), not from any state carried on the node. So
+    /// every root child's fetch closure runs the same `list_root`; the derived
+    /// `children::list` picks the matching `Child` by `params.node_type` before
+    /// calling it, so the redundant self-dispatch is harmless and behaviour is
+    /// identical.
+    ///
+    /// A **group bucket** (`tracking:tree-group`) has `tracking:tree-item`
+    /// children; its `BucketScope` is reconstructed from the node's
+    /// `treegrp:…` id (never a downcast). A **tree item**
+    /// (`tracking:tree-item`) likewise has `tracking:tree-item` children,
+    /// scope + task uuid recovered from its `tree:…` id via `parse_tree_id`.
+    /// Flat entries and condensed rows are leaves. No child scope needs data
+    /// beyond `node.id()` + a freshly-loaded snapshot, so the STOP condition is
+    /// not hit.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+        use not_yet_done_content::Child;
+        // Every root child type fetches through the same `list_root`; the
+        // derived `children::list` selects the right `Child` by node_type.
+        let root_child = |node_type: NodeType| Child {
+            node_type,
+            columns: tracking_columns(),
+            list: Box::new(move |params| {
+                Box::pin(async move {
+                    let snapshot = self.snapshot().await?;
+                    list_root(&snapshot, &self.handle, &params).await
+                })
+            }),
+        };
+        match node.node_type().type_id.as_str() {
+            "tracking:root" => vec![
+                root_child(tracking_entry_type()),
+                root_child(tracking_condensed_type()),
+                root_child(tracking_tree_item_type()),
+                root_child(tracking_tree_group_type()),
+            ],
+            "tracking:tree-group" => {
+                // Scope parsed from the group node's `treegrp:…` id.
+                let id = node.id().to_string();
+                vec![Child {
+                    node_type: tracking_tree_item_type(),
+                    columns: tracking_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let scope = id
+                                .strip_prefix(GROUP_ID_PREFIX)
+                                .and_then(BucketScope::parse)
+                                .ok_or_else(|| ContentError::NotFound(id.clone()))?;
+                            let snapshot = self.snapshot().await?;
+                            list_group_children(&snapshot, &self.handle, &scope, &params).await
+                        })
+                    }),
+                }]
+            }
+            "tracking:tree-item" => {
+                // Scope + task uuid parsed from the tree node's `tree:…` id.
+                let id = node.id().to_string();
+                vec![Child {
+                    node_type: tracking_tree_item_type(),
+                    columns: tracking_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let (scope, task_id) = parse_tree_id(&id)?;
+                            let snapshot = self.snapshot().await?;
+                            list_tree_children(
+                                &snapshot,
+                                &self.handle,
+                                scope.as_ref(),
+                                task_id,
+                                &params,
+                            )
+                            .await
+                        })
+                    }),
+                }]
+            }
+            // `tracking:entry` and `tracking:condensed-row` are leaves.
+            _ => Vec::new(),
+        }
+    }
+
+    /// Fast, per-level in-memory subtree for the container node kinds
+    /// (capability `supports_eager_subtree`): the root's tree/grouped views,
+    /// a grouped bucket, and a duration-tree task node each expand in one
+    /// projection walk that carries `params.sort`/scope down every level —
+    /// which the generic recursion in `children::list_subtree` cannot. Flat
+    /// entries and condensed rows are leaves, so they return `None` and fall
+    /// through to that generic path.
+    async fn eager_subtree(
+        &self,
+        node: &dyn Node,
+        params: &not_yet_done_content::ListParams,
+        depth: u32,
+    ) -> Option<Result<Subtree>> {
+        match node.node_type().type_id.as_str() {
+            "tracking:root" => Some(self.root_subtree(params, depth).await),
+            "tracking:tree-group" => {
+                Some(self.group_bucket_subtree(node.id(), params, depth).await)
+            }
+            "tracking:tree-item" => Some(self.tree_item_subtree(node.id(), params, depth).await),
+            _ => None,
+        }
     }
 
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
@@ -2959,14 +3172,26 @@ impl ContentAdapter for TrackingAdapter {
         {
             let _ = self.inv_tx.send(Invalidation::RefreshInterval(target));
         }
-        snapshot
+        // Flat-list entry rows for the running trackings…
+        let mut rows: Vec<NodeSummary> = snapshot
             .order
             .iter()
             .filter_map(|id| {
                 let row = snapshot.by_id.get(id)?;
-                row.active.then(|| entry_summary(*id, row, now))
+                row.active
+                    .then(|| entry_summary(*id, row, now, &snapshot.marker))
             })
-            .collect()
+            .collect();
+        // …plus the Condensed pane's `cond:` aggregate rows for the same
+        // running trackings, re-summed to `now`. A view can show both the flat
+        // and the condensed sub-tab over one adapter; each pane's `patch_row`
+        // keeps only the ids it renders (entry ids vs `cond:` ids), so emitting
+        // both here is harmless where a pane doesn't show them. Unfiltered like
+        // the entry rows above: a saved query includes/excludes a task's whole
+        // day-cell, never a partial interval, so the full sum still matches the
+        // filtered view (and a mismatch self-corrects on the next reload).
+        rows.extend(snapshot.live_condensed_rows(None, now));
+        rows
     }
 
     async fn bucket_for_now(&self, group_by: &GroupSpec) -> Option<String> {
@@ -2975,18 +3200,18 @@ impl ContentAdapter for TrackingAdapter {
         self.snapshot().await.ok()?.bucket_for_now(group_by)
     }
 
-    async fn live_group_rows(
-        &self,
-        group_by: &GroupSpec,
-        query: Option<&str>,
-    ) -> Vec<NodeSummary> {
+    async fn live_group_rows(&self, group_by: &GroupSpec, query: Option<&str>) -> Vec<NodeSummary> {
         let Ok(snapshot) = self.snapshot().await else {
             return Vec::new();
         };
         // Honour the pane's saved query so the ticked rows match the filtered
         // tree the user sees; `None`/empty → whole bucket.
         let query = query.map(str::to_string);
-        let filter = snapshot.visible_set(&self.handle, &query).await.ok().flatten();
+        let filter = snapshot
+            .visible_set(&self.handle, &query)
+            .await
+            .ok()
+            .flatten();
         snapshot.live_group_rows(group_by, filter.as_deref(), chrono::Utc::now())
     }
 
@@ -3033,7 +3258,12 @@ mod tests {
 
     /// A soft-deleted clone of [`tracking`] — its row stays in the snapshot
     /// universe but must never count as running (adapter contract).
-    fn deleted_tracking(id: Uuid, task_id: Uuid, started_min_ago: i64, ended: bool) -> tracking::Model {
+    fn deleted_tracking(
+        id: Uuid,
+        task_id: Uuid,
+        started_min_ago: i64,
+        ended: bool,
+    ) -> tracking::Model {
         tracking::Model {
             deleted: true,
             ..tracking(id, task_id, started_min_ago, ended)
@@ -3066,6 +3296,7 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         })
     }
 
@@ -3104,14 +3335,28 @@ mod tests {
         let b = Uuid::from_u128(12); // 12:00–13:00
         let marked = Uuid::from_u128(99); // lives elsewhere; not in the day
         let snap = snapshot_from(vec![
-            (a, row(fixed_tracking(a, at(9, 0), at(10, 0)), "a", vec!["a"])),
-            (t, row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"])),
-            (b, row(fixed_tracking(b, at(12, 0), at(13, 0)), "b", vec!["b"])),
+            (
+                a,
+                row(fixed_tracking(a, at(9, 0), at(10, 0)), "a", vec!["a"]),
+            ),
+            (
+                t,
+                row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"]),
+            ),
+            (
+                b,
+                row(fixed_tracking(b, at(12, 0), at(13, 0)), "b", vec!["b"]),
+            ),
         ]);
 
         // 1h fits directly after the target (11:00 → next interval at 12:00).
         let (after, _end, _before) = paste_slots(
-            &snap, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(1),
+            &snap,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::hours(1),
         );
         assert!(after.fits);
         assert_eq!(after.start, at(11, 0));
@@ -3119,7 +3364,12 @@ mod tests {
         // 1h30m does NOT fit after (only 1h gap) but fits at the day's end,
         // flush after the last interval (b ends 13:00).
         let (after, end, _before) = paste_slots(
-            &snap, tz, marked, at(10, 0), at(11, 0), chrono::Duration::minutes(90),
+            &snap,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::minutes(90),
         );
         assert!(!after.fits);
         assert!(end.fits);
@@ -3130,14 +3380,25 @@ mod tests {
         // the before-gap (00:00→10:00 = 10h) is large.
         let long = Uuid::from_u128(20);
         let packed = snapshot_from(vec![
-            (t, row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"])),
-            (long, row(fixed_tracking(long, at(11, 0), at(23, 30)), "l", vec!["l"])),
+            (
+                t,
+                row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"]),
+            ),
+            (
+                long,
+                row(fixed_tracking(long, at(11, 0), at(23, 30)), "l", vec!["l"]),
+            ),
         ]);
 
         // 5h fits neither after (0 gap) nor at the end (30m) but does before
         // the first interval — flush against it, so it starts `d` earlier.
         let (after, end, before) = paste_slots(
-            &packed, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(5),
+            &packed,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::hours(5),
         );
         assert!(!after.fits);
         assert!(!end.fits);
@@ -3147,7 +3408,12 @@ mod tests {
         // Bigger than any free gap anywhere (before-gap is the largest, 10h) →
         // all three report no room.
         let (after, end, before) = paste_slots(
-            &packed, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(11),
+            &packed,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::hours(11),
         );
         assert!(!after.fits && !end.fits && !before.fits);
     }
@@ -3168,15 +3434,26 @@ mod tests {
         let mut m_del = fixed_tracking(del, at(11, 30), at(12, 30));
         m_del.deleted = true;
         let snap = snapshot_from(vec![
-            (t, row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"])),
-            (marked, row(fixed_tracking(marked, at(11, 0), at(13, 0)), "m", vec!["m"])),
+            (
+                t,
+                row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"]),
+            ),
+            (
+                marked,
+                row(fixed_tracking(marked, at(11, 0), at(13, 0)), "m", vec!["m"]),
+            ),
             (del, row(m_del, "d", vec!["d"])),
         ]);
 
         // The marked interval's own slot (11:00–13:00) and the deleted one both
         // count as free, so a 2h paste fits directly after the target.
         let (after, _end, _before) = paste_slots(
-            &snap, tz, marked, at(10, 0), at(11, 0), chrono::Duration::hours(2),
+            &snap,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::hours(2),
         );
         assert!(after.fits);
         assert_eq!(after.start, at(11, 0));
@@ -3200,7 +3477,11 @@ mod tests {
         );
         let mut children = HashMap::new();
         children.insert(None, vec![task]);
-        let projection = TreeProjection { by_id, children };
+        let projection = TreeProjection {
+            by_id,
+            children,
+            marker: Arc::from("⏱"),
+        };
 
         let row = projection.by_id.get(&task).unwrap();
         let summary = projection.summary(task, row, None);
@@ -3268,6 +3549,7 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         };
 
         // No filter → the prebuilt projection is reused untouched.
@@ -3292,10 +3574,7 @@ mod tests {
     #[test]
     fn canonical_path_formats_leading_slash() {
         assert_eq!(canonical_path(&[]), "");
-        assert_eq!(
-            canonical_path(&["a".to_string(), "b".to_string()]),
-            "/a/b"
-        );
+        assert_eq!(canonical_path(&["a".to_string(), "b".to_string()]), "/a/b");
     }
 
     /// A completed tracking starting at local noon on `date` (timezone-stable
@@ -3326,10 +3605,38 @@ mod tests {
         let a = Uuid::from_u128(10);
         let b = Uuid::from_u128(20);
         let snapshot = snapshot_from(vec![
-            (Uuid::from_u128(1), row(model_on(Uuid::from_u128(1), a, (2026, 6, 9), 30), "A", vec![])),
-            (Uuid::from_u128(2), row(model_on(Uuid::from_u128(2), a, (2026, 6, 9), 30), "A", vec![])),
-            (Uuid::from_u128(3), row(model_on(Uuid::from_u128(3), b, (2026, 6, 9), 90), "B", vec![])),
-            (Uuid::from_u128(4), row(model_on(Uuid::from_u128(4), a, (2026, 6, 10), 10), "A", vec![])),
+            (
+                Uuid::from_u128(1),
+                row(
+                    model_on(Uuid::from_u128(1), a, (2026, 6, 9), 30),
+                    "A",
+                    vec![],
+                ),
+            ),
+            (
+                Uuid::from_u128(2),
+                row(
+                    model_on(Uuid::from_u128(2), a, (2026, 6, 9), 30),
+                    "A",
+                    vec![],
+                ),
+            ),
+            (
+                Uuid::from_u128(3),
+                row(
+                    model_on(Uuid::from_u128(3), b, (2026, 6, 9), 90),
+                    "B",
+                    vec![],
+                ),
+            ),
+            (
+                Uuid::from_u128(4),
+                row(
+                    model_on(Uuid::from_u128(4), a, (2026, 6, 10), 10),
+                    "A",
+                    vec![],
+                ),
+            ),
         ]);
         let now = chrono::Utc::now();
 
@@ -3369,8 +3676,22 @@ mod tests {
         let a = Uuid::from_u128(10);
         let b = Uuid::from_u128(20);
         let snapshot = snapshot_from(vec![
-            (Uuid::from_u128(1), row(model_on(Uuid::from_u128(1), a, (2026, 6, 9), 30), "A", vec![])),
-            (Uuid::from_u128(2), row(model_on(Uuid::from_u128(2), b, (2026, 6, 9), 90), "B", vec![])),
+            (
+                Uuid::from_u128(1),
+                row(
+                    model_on(Uuid::from_u128(1), a, (2026, 6, 9), 30),
+                    "A",
+                    vec![],
+                ),
+            ),
+            (
+                Uuid::from_u128(2),
+                row(
+                    model_on(Uuid::from_u128(2), b, (2026, 6, 9), 90),
+                    "B",
+                    vec![],
+                ),
+            ),
         ]);
         let now = chrono::Utc::now();
         let sort = sort_by("duration", SortDirection::Desc);
@@ -3412,14 +3733,22 @@ mod tests {
         let now = chrono::Utc::now();
         let m = tracking(Uuid::from_u128(7), Uuid::from_u128(9), 60, true);
         let r = row(m, "Write report", vec!["Work", "Q2"]);
-        let md = entry_metadata(&r, now);
-        let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        let md = entry_metadata(&r, now, "⏱");
+        let get = |k: &str| {
+            md.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("marker").as_deref(), Some("")); // completed → no glyph
         assert_eq!(get("taskpath").as_deref(), Some("/Work/Q2"));
         assert_eq!(get("task").as_deref(), Some("Write report"));
         assert_eq!(get("duration").as_deref(), Some("1800"));
         // Hidden per-task key for the Condensed view's inner grouping level.
-        assert_eq!(get("task_id").as_deref(), Some(Uuid::from_u128(9).to_string().as_str()));
+        assert_eq!(
+            get("task_id").as_deref(),
+            Some(Uuid::from_u128(9).to_string().as_str())
+        );
         let started = get("started").unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&started).is_ok());
         assert!(chrono::DateTime::parse_from_rfc3339(&get("ended").unwrap()).is_ok());
@@ -3430,18 +3759,28 @@ mod tests {
         let now = chrono::Utc::now();
         // A live row carries an empty `deleted` field; a soft-deleted row
         // carries "true" — the TUI dims rows whose `deleted` field is "true".
-        let live = row(tracking(Uuid::from_u128(1), Uuid::from_u128(9), 60, true), "Live", vec![]);
+        let live = row(
+            tracking(Uuid::from_u128(1), Uuid::from_u128(9), 60, true),
+            "Live",
+            vec![],
+        );
         let gone = row(
             deleted_tracking(Uuid::from_u128(2), Uuid::from_u128(9), 60, true),
             "Gone",
             vec![],
         );
         let get = |md: &Metadata, k: &str| {
-            md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone())
+            md.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
         };
-        assert_eq!(get(&entry_metadata(&live, now), "deleted").as_deref(), Some(""));
         assert_eq!(
-            get(&entry_metadata(&gone, now), "deleted").as_deref(),
+            get(&entry_metadata(&live, now, "⏱"), "deleted").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            get(&entry_metadata(&gone, now, "⏱"), "deleted").as_deref(),
             Some("true")
         );
     }
@@ -3451,8 +3790,13 @@ mod tests {
         let now = chrono::Utc::now();
         let m = tracking(Uuid::from_u128(7), Uuid::from_u128(9), 5, false);
         let r = row(m, "Task", vec![]);
-        let md = entry_metadata(&r, now);
-        let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        let md = entry_metadata(&r, now, "⏱");
+        let get = |k: &str| {
+            md.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("marker").as_deref(), Some("⏱"));
         // Literal "running" (native parity): the engine's datetime column
         // passes unparseable values through verbatim.
@@ -3483,8 +3827,14 @@ mod tests {
         let a = Uuid::from_u128(1);
         let b = Uuid::from_u128(2);
         let snap = snapshot_from(vec![
-            (a, row(tracking(a, Uuid::from_u128(9), 60, true), "A", vec![])),
-            (b, row(tracking(b, Uuid::from_u128(9), 30, true), "B", vec![])),
+            (
+                a,
+                row(tracking(a, Uuid::from_u128(9), 60, true), "A", vec![]),
+            ),
+            (
+                b,
+                row(tracking(b, Uuid::from_u128(9), 30, true), "B", vec![]),
+            ),
         ]);
         let visible: HashSet<Uuid> = [b].into_iter().collect();
         let now = chrono::Utc::now();
@@ -3499,16 +3849,22 @@ mod tests {
     fn flat_list_sort_uses_adapter_column_kinds() {
         // The flat `list()` path sorts entries via the generic
         // `apply_sort` helper using the kinds declared in
-        // `tracking_sortable_columns()`. This exercises that integration:
+        // `tracking_columns()`. This exercises that integration:
         // `started` must compare as a DateTime and `task` lexically.
         let a = Uuid::from_u128(1); // started 60 min ago, "Banana"
         let b = Uuid::from_u128(2); // started  5 min ago, "apple"
         let snap = snapshot_from(vec![
-            (a, row(tracking(a, Uuid::from_u128(9), 60, true), "Banana", vec![])),
-            (b, row(tracking(b, Uuid::from_u128(9), 5, true), "apple", vec![])),
+            (
+                a,
+                row(tracking(a, Uuid::from_u128(9), 60, true), "Banana", vec![]),
+            ),
+            (
+                b,
+                row(tracking(b, Uuid::from_u128(9), 5, true), "apple", vec![]),
+            ),
         ]);
         let now = chrono::Utc::now();
-        let cols = tracking_sortable_columns();
+        let cols = tracking_columns();
 
         // started ascending → oldest (a, 60 min ago) before youngest (b).
         let mut items = snap.entries(None, now);
@@ -3544,9 +3900,18 @@ mod tests {
         let b = Uuid::from_u128(2);
         let c = Uuid::from_u128(3);
         let snap = snapshot_from(vec![
-            (a, row(tracking(a, Uuid::from_u128(9), 60, false), "A", vec![])), // active, older
-            (b, row(tracking(b, Uuid::from_u128(9), 30, true), "B", vec![])),  // done
-            (c, row(tracking(c, Uuid::from_u128(9), 5, false), "C", vec![])),  // active, youngest
+            (
+                a,
+                row(tracking(a, Uuid::from_u128(9), 60, false), "A", vec![]),
+            ), // active, older
+            (
+                b,
+                row(tracking(b, Uuid::from_u128(9), 30, true), "B", vec![]),
+            ), // done
+            (
+                c,
+                row(tracking(c, Uuid::from_u128(9), 5, false), "C", vec![]),
+            ), // active, youngest
         ]);
         let now = chrono::Utc::now();
         // The youngest active tracking (5 min ago) sets the pace; the
@@ -3593,24 +3958,12 @@ mod tests {
         assert!(has(&a, "toggle-tracking"));
         assert!(has(&a, "split"));
         assert!(has(&a, "move"));
-        // Repack actions: `m` marks, `p` pastes (keys bound in YAML).
+        // Repack actions: `m` marks, `p` pastes (keys bound in YAML). Bar
+        // placement is derived TUI-side from InputSpec + id (mark-move lights
+        // up in the action bar, paste-move is a fire-and-forget status hint),
+        // so the adapter only has to expose the actions.
         assert!(has(&a, "mark-move"));
         assert!(has(&a, "paste-move"));
-        // `delete` and `toggle-tracking` show in the action bar; `restore`
-        // is a recovery shortcut only.
-        let key = |id: &str| a.iter().find(|x| x.id == id).and_then(|x| x.default_key);
-        assert_eq!(key("delete"), Some('d'));
-        assert_eq!(key("toggle-tracking"), Some('s'));
-        assert_eq!(key("restore"), Some('R'));
-        assert_eq!(key("split"), Some('i'));
-        assert_eq!(key("move"), Some('m'));
-        // The repack actions carry no dead `default_key` (YAML drives them)…
-        assert_eq!(key("mark-move"), None);
-        assert_eq!(key("paste-move"), None);
-        // …but sit in the action bar so their hints stay visible.
-        let placement = |id: &str| a.iter().find(|x| x.id == id).map(|x| x.placement);
-        assert_eq!(placement("mark-move"), Some(HintPlacement::ActionBar));
-        assert_eq!(placement("paste-move"), Some(HintPlacement::ActionBar));
     }
 
     #[test]
@@ -3643,7 +3996,10 @@ mod tests {
         assert!(mv.iter().find(|f| f.key == "start").unwrap().required);
         // The three guards are toggles (never required); gravity/offset optional.
         for k in ["gravity", "offset", "allow_overlap", "allow_future"] {
-            assert!(!mv.iter().find(|f| f.key == k).unwrap().required, "{k} optional");
+            assert!(
+                !mv.iter().find(|f| f.key == k).unwrap().required,
+                "{k} optional"
+            );
         }
     }
 
@@ -3703,7 +4059,10 @@ mod tests {
         let task = Uuid::from_u128(9);
         let snap = snapshot_from(vec![
             (live, row(tracking(live, task, 60, true), "live", vec![])),
-            (gone, row(deleted_tracking(gone, task, 30, true), "gone", vec![])),
+            (
+                gone,
+                row(deleted_tracking(gone, task, 30, true), "gone", vec![]),
+            ),
         ]);
         let now = chrono::Utc::now();
 
@@ -3737,7 +4096,10 @@ mod tests {
         // Both un-ended; the deleted one is also the youngest (started later).
         let snap = snapshot_from(vec![
             (live, row(tracking(live, task, 60, false), "live", vec![])),
-            (gone, row(deleted_tracking(gone, task, 10, false), "gone", vec![])),
+            (
+                gone,
+                row(deleted_tracking(gone, task, 10, false), "gone", vec![]),
+            ),
         ]);
 
         let active = snap.active_ids();
@@ -3783,7 +4145,7 @@ mod tests {
         let own: HashMap<Uuid, i64> = [(root, 10), (child, 20), (grandchild, 30)]
             .into_iter()
             .collect();
-        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+        let proj = build_tree_projection(&tm, &own, &HashSet::new(), Arc::from("⏱"));
 
         // Own values are preserved verbatim…
         assert_eq!(proj.by_id[&grandchild].own_secs, 30);
@@ -3807,7 +4169,7 @@ mod tests {
         // Only the tracked child has any time; its ancestor (root) inherits a
         // non-zero cumulated and stays, the empty top-level branch is pruned.
         let own: HashMap<Uuid, i64> = [(tracked_child, 42)].into_iter().collect();
-        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+        let proj = build_tree_projection(&tm, &own, &HashSet::new(), Arc::from("⏱"));
 
         let roots = proj.child_summaries(None, None);
         assert_eq!(roots.len(), 1, "the empty branch is pruned");
@@ -3838,7 +4200,7 @@ mod tests {
         // Only the deepest leaf + the sibling carry time; root/mid inherit a
         // non-zero cumulated and stay visible.
         let own: HashMap<Uuid, i64> = [(leaf, 30), (sibling, 10)].into_iter().collect();
-        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+        let proj = build_tree_projection(&tm, &own, &HashSet::new(), Arc::from("⏱"));
 
         // depth 0 ⇔ child_summaries: top level only, nothing expanded. Ids
         // carry the plain `tree:` prefix (no scope).
@@ -3855,13 +4217,21 @@ mod tests {
         assert_eq!(r1.children.items[0].summary.label, "Mid");
         assert!(r1.children.items[0].children.items.is_empty());
         // The sibling is a genuine leaf — never expanded.
-        let sib = d1.items.iter().find(|n| n.summary.label == "Sibling").unwrap();
+        let sib = d1
+            .items
+            .iter()
+            .find(|n| n.summary.label == "Sibling")
+            .unwrap();
         assert_eq!(sib.summary.has_children, Some(false));
         assert!(sib.children.items.is_empty());
 
         // depth all: the full chain Root → Mid → Leaf, stopping at the leaf.
         let dall = proj.subtree(None, None, u32::MAX);
-        let r = dall.items.iter().find(|n| n.summary.label == "Root").unwrap();
+        let r = dall
+            .items
+            .iter()
+            .find(|n| n.summary.label == "Root")
+            .unwrap();
         let m = &r.children.items[0];
         assert_eq!(m.summary.label, "Mid");
         assert_eq!(m.children.items.len(), 1);
@@ -3877,7 +4247,7 @@ mod tests {
         let missing = Uuid::from_u128(999);
         let tm = task_map(&[(orphan, "Orphan", Some(missing))]);
         let own: HashMap<Uuid, i64> = [(orphan, 5)].into_iter().collect();
-        let proj = build_tree_projection(&tm, &own, &HashSet::new());
+        let proj = build_tree_projection(&tm, &own, &HashSet::new(), Arc::from("⏱"));
         // The orphan (parent gone) re-roots to the forest top, so it shows
         // up as a top-level row rather than vanishing under the missing id.
         let roots = proj.child_summaries(None, None);
@@ -3895,8 +4265,13 @@ mod tests {
             cumulated_secs: 1800,
             active: true,
         };
-        let md = tree_metadata(id, &r);
-        let get = |k: &str| md.fields.iter().find(|f| f.key == k).map(|f| f.value.clone());
+        let md = tree_metadata(id, &r, "⏱");
+        let get = |k: &str| {
+            md.fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("task").as_deref(), Some("Write report"));
         assert_eq!(get("duration").as_deref(), Some("600"));
         assert_eq!(get("duration_cumulated").as_deref(), Some("1800"));
@@ -3929,7 +4304,10 @@ mod tests {
     fn bucket_scope_and_scoped_tree_id_round_trip() {
         let scope = day_scope("2026-06-09");
         assert_eq!(scope.encode(), "started:day:2026-06-09");
-        assert_eq!(BucketScope::parse("started:day:2026-06-09"), Some(scope.clone()));
+        assert_eq!(
+            BucketScope::parse("started:day:2026-06-09"),
+            Some(scope.clone())
+        );
         // Unknown granularity token → bad id.
         assert_eq!(BucketScope::parse("started:fortnight:x"), None);
 
@@ -3989,9 +4367,18 @@ mod tests {
         let t3 = Uuid::from_u128(3);
         let snap = snapshot_from(vec![
             // Two trackings on the 9th (one still running), one on the 8th.
-            (t1, row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![])),
-            (t2, row(tracking_on(t2, task, "2026-06-09", 0, false), "A", vec![])),
-            (t3, row(tracking_on(t3, task, "2026-06-08", 45, true), "B", vec![])),
+            (
+                t1,
+                row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![]),
+            ),
+            (
+                t2,
+                row(tracking_on(t2, task, "2026-06-09", 0, false), "A", vec![]),
+            ),
+            (
+                t3,
+                row(tracking_on(t3, task, "2026-06-08", 45, true), "B", vec![]),
+            ),
         ]);
         let spec = GroupSpec {
             column: "started".to_string(),
@@ -4011,22 +4398,35 @@ mod tests {
             grouping::bucket_display_label("2026-06-09", Some(GroupBucket::Day))
         );
         let get = |g: &NodeSummary, k: &str| {
-            g.metadata.fields.iter().find(|f| f.key == k).map(|f| f.value.clone())
+            g.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == k)
+                .map(|f| f.value.clone())
         };
         // The 9th: 30 min completed + the open tracking's seconds up to the
         // snapshot's `built_at`; marker set. Both duration columns carry the
         // total (so `zt` never blanks the row).
         let total: i64 = get(&groups[0], "duration").unwrap().parse().unwrap();
         assert!(total >= 30 * 60, "got {total}");
-        assert_eq!(get(&groups[0], "duration"), get(&groups[0], "duration_cumulated"));
+        assert_eq!(
+            get(&groups[0], "duration"),
+            get(&groups[0], "duration_cumulated")
+        );
         assert_eq!(get(&groups[0], "marker").as_deref(), Some("⏱"));
         // The 8th: 45 min, nothing running.
         assert_eq!(get(&groups[1], "duration").as_deref(), Some("2700"));
         assert_eq!(get(&groups[1], "marker").as_deref(), Some(""));
 
         // Asc flips the order.
-        let asc = GroupSpec { order: SortDirection::Asc, ..spec };
-        assert_eq!(snap.group_summaries(None, &asc)[0].id, "treegrp:started:day:2026-06-08");
+        let asc = GroupSpec {
+            order: SortDirection::Asc,
+            ..spec
+        };
+        assert_eq!(
+            snap.group_summaries(None, &asc)[0].id,
+            "treegrp:started:day:2026-06-08"
+        );
     }
 
     #[test]
@@ -4035,9 +4435,23 @@ mod tests {
         let older = Uuid::from_u128(1);
         let youngest = Uuid::from_u128(2);
         let snap = snapshot_from(vec![
-            (older, row(tracking_on(older, task, "2026-06-08", 45, false), "A", vec![])),
+            (
+                older,
+                row(
+                    tracking_on(older, task, "2026-06-08", 45, false),
+                    "A",
+                    vec![],
+                ),
+            ),
             // Latest `started_at` — the bucket a start/stop just shifted.
-            (youngest, row(tracking_on(youngest, task, "2026-06-09", 0, true), "A", vec![])),
+            (
+                youngest,
+                row(
+                    tracking_on(youngest, task, "2026-06-09", 0, true),
+                    "A",
+                    vec![],
+                ),
+            ),
         ]);
         let day = GroupSpec {
             column: "started".to_string(),
@@ -4052,7 +4466,10 @@ mod tests {
         );
         // Order doesn't affect resolution — it's the youngest item, not the
         // first bucket.
-        let asc = GroupSpec { order: SortDirection::Asc, ..day };
+        let asc = GroupSpec {
+            order: SortDirection::Asc,
+            ..day
+        };
         assert_eq!(
             snap.bucket_for_now(&asc).as_deref(),
             Some("treegrp:started:day:2026-06-09")
@@ -4064,8 +4481,22 @@ mod tests {
         let t_old = Uuid::from_u128(1);
         let t_new = Uuid::from_u128(2);
         let snap = snapshot_from(vec![
-            (t_old, row(tracking_on(t_old, Uuid::from_u128(8), "2026-06-08", 30, false), "Old task", vec![])),
-            (t_new, row(tracking_on(t_new, Uuid::from_u128(9), "2026-06-09", 0, true), "New task", vec![])),
+            (
+                t_old,
+                row(
+                    tracking_on(t_old, Uuid::from_u128(8), "2026-06-08", 30, false),
+                    "Old task",
+                    vec![],
+                ),
+            ),
+            (
+                t_new,
+                row(
+                    tracking_on(t_new, Uuid::from_u128(9), "2026-06-09", 0, true),
+                    "New task",
+                    vec![],
+                ),
+            ),
         ]);
         // Grouping verbatim by the task label (no date bucket): the now-bucket
         // is the youngest tracking's task, keyed verbatim.
@@ -4111,8 +4542,22 @@ mod tests {
         ]);
         let started = tracking_on(running, task_b, "2026-06-09", 0, false).started_at;
         let mut by_id = HashMap::new();
-        by_id.insert(running, row(tracking_on(running, task_b, "2026-06-09", 0, false), "B", vec!["A"]));
-        by_id.insert(idle, row(tracking_on(idle, other, "2026-06-09", 30, true), "Other", vec![]));
+        by_id.insert(
+            running,
+            row(
+                tracking_on(running, task_b, "2026-06-09", 0, false),
+                "B",
+                vec!["A"],
+            ),
+        );
+        by_id.insert(
+            idle,
+            row(
+                tracking_on(idle, other, "2026-06-09", 30, true),
+                "Other",
+                vec![],
+            ),
+        );
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![running, idle],
@@ -4121,6 +4566,7 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         };
         let spec = GroupSpec {
             column: "started".to_string(),
@@ -4143,7 +4589,10 @@ mod tests {
         assert!(ids1.contains(header.as_str()));
         assert!(ids1.contains(a_id.as_str()));
         assert!(ids1.contains(b_id.as_str()));
-        assert!(!ids1.contains(other_id.as_str()), "idle sibling isn't returned");
+        assert!(
+            !ids1.contains(other_id.as_str()),
+            "idle sibling isn't returned"
+        );
 
         let dur = |rows: &[NodeSummary], id: &str, key: &str| -> i64 {
             rows.iter()
@@ -4183,7 +4632,10 @@ mod tests {
         let t1 = Uuid::from_u128(1);
         let tm = task_map(&[(task, "A", None)]);
         let mut by_id = HashMap::new();
-        by_id.insert(t1, row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![]));
+        by_id.insert(
+            t1,
+            row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![]),
+        );
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![t1],
@@ -4192,13 +4644,107 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         };
         let spec = GroupSpec {
             column: "started".to_string(),
             bucket: Some(GroupBucket::Day),
             order: SortDirection::Desc,
         };
-        assert!(snapshot.live_group_rows(&spec, None, chrono::Utc::now()).is_empty());
+        assert!(
+            snapshot
+                .live_group_rows(&spec, None, chrono::Utc::now())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn live_condensed_rows_tick_running_cell_and_match_condensed_id() {
+        // One task with two same-day intervals: a completed 30 min plus a
+        // running one. The live fold returns exactly that `(day, task)` cell,
+        // keyed identically to the rendered condensed row, with the duration
+        // re-summed to the live `now` (completed 1800 s + the running elapsed).
+        let task = Uuid::from_u128(9);
+        let completed = Uuid::from_u128(1);
+        let running = Uuid::from_u128(2);
+        let started = tracking_on(running, task, "2026-06-09", 0, false).started_at;
+        let mut by_id = HashMap::new();
+        by_id.insert(
+            completed,
+            row(
+                tracking_on(completed, task, "2026-06-09", 30, true),
+                "A",
+                vec![],
+            ),
+        );
+        by_id.insert(
+            running,
+            row(
+                tracking_on(running, task, "2026-06-09", 0, false),
+                "A",
+                vec![],
+            ),
+        );
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![running, completed],
+            tree: Arc::new(TreeProjection::default()),
+            task_map: task_map(&[(task, "A", None)]),
+            built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
+        };
+
+        let cond_id = format!("{CONDENSED_ID_PREFIX}2026-06-09:{task}");
+        let dur = |rows: &[NodeSummary]| -> i64 {
+            rows.iter()
+                .find(|r| r.id == cond_id)
+                .and_then(|r| r.metadata.fields.iter().find(|f| f.key == "duration"))
+                .map(|f| f.value.parse().unwrap())
+                .unwrap()
+        };
+
+        let now1 = started + chrono::Duration::hours(1);
+        let rows1 = snapshot.live_condensed_rows(None, now1);
+        assert_eq!(rows1.len(), 1, "only the one running cell ticks");
+        // Its id matches what the rendered condensed list produces.
+        let (listed, _) = snapshot.condensed_summaries(None, now1, &[]);
+        assert!(listed.iter().any(|r| r.id == cond_id));
+        // completed 1800 s + one running hour = 5400 s.
+        assert_eq!(dur(&rows1), 1800 + 3600);
+
+        // An hour later the same cell has grown by exactly the running hour —
+        // proof the sum ran against the live `now`, not the frozen snapshot.
+        let rows2 = snapshot.live_condensed_rows(None, started + chrono::Duration::hours(2));
+        assert_eq!(dur(&rows2), 1800 + 7200);
+    }
+
+    #[test]
+    fn live_condensed_rows_empty_without_running_tracking() {
+        // Only completed trackings → nothing ticks → no live condensed rows.
+        let task = Uuid::from_u128(9);
+        let t1 = Uuid::from_u128(1);
+        let mut by_id = HashMap::new();
+        by_id.insert(
+            t1,
+            row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![]),
+        );
+        let snapshot = TrackingSnapshot {
+            by_id,
+            order: vec![t1],
+            tree: Arc::new(TreeProjection::default()),
+            task_map: task_map(&[(task, "A", None)]),
+            built_at: chrono::Utc::now(),
+            visible_cache: Default::default(),
+            fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
+        };
+        assert!(
+            snapshot
+                .live_condensed_rows(None, chrono::Utc::now())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4208,9 +4754,18 @@ mod tests {
         let t2 = Uuid::from_u128(2);
         let t3 = Uuid::from_u128(3);
         let snap = snapshot_from(vec![
-            (t1, row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![])),
-            (t2, row(tracking_on(t2, task, "2026-06-09", 15, true), "A", vec![])),
-            (t3, row(tracking_on(t3, task, "2026-06-08", 45, true), "B", vec![])),
+            (
+                t1,
+                row(tracking_on(t1, task, "2026-06-09", 30, true), "A", vec![]),
+            ),
+            (
+                t2,
+                row(tracking_on(t2, task, "2026-06-09", 15, true), "A", vec![]),
+            ),
+            (
+                t3,
+                row(tracking_on(t3, task, "2026-06-08", 45, true), "B", vec![]),
+            ),
         ]);
         let scope = day_scope("2026-06-09");
         // Scope alone: both trackings of the 9th.
@@ -4233,8 +4788,22 @@ mod tests {
         let t2 = Uuid::from_u128(2);
         let tm = task_map(&[(task_a, "A", None), (task_b, "B", Some(task_a))]);
         let mut by_id = HashMap::new();
-        by_id.insert(t1, row(tracking_on(t1, task_b, "2026-06-08", 30, true), "B", vec!["A"]));
-        by_id.insert(t2, row(tracking_on(t2, task_b, "2026-06-09", 45, true), "B", vec!["A"]));
+        by_id.insert(
+            t1,
+            row(
+                tracking_on(t1, task_b, "2026-06-08", 30, true),
+                "B",
+                vec!["A"],
+            ),
+        );
+        by_id.insert(
+            t2,
+            row(
+                tracking_on(t2, task_b, "2026-06-09", 45, true),
+                "B",
+                vec!["A"],
+            ),
+        );
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![t2, t1],
@@ -4243,6 +4812,7 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         };
 
         let scope = day_scope("2026-06-09");
@@ -4275,7 +4845,14 @@ mod tests {
             (task_c, "C", Some(task_b)),
         ]);
         let mut by_id = HashMap::new();
-        by_id.insert(t1, row(tracking_on(t1, task_c, "2026-06-09", 45, true), "C", vec!["A", "B"]));
+        by_id.insert(
+            t1,
+            row(
+                tracking_on(t1, task_c, "2026-06-09", 45, true),
+                "C",
+                vec!["A", "B"],
+            ),
+        );
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![t1],
@@ -4284,6 +4861,7 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         };
 
         let scope = day_scope("2026-06-09");
@@ -4312,7 +4890,10 @@ mod tests {
         let t1 = Uuid::from_u128(1);
         let tm = task_map(&[(task_a, "A", None)]);
         let mut by_id = HashMap::new();
-        by_id.insert(t1, row(tracking_on(t1, task_a, "2026-06-09", 30, true), "A", vec![]));
+        by_id.insert(
+            t1,
+            row(tracking_on(t1, task_a, "2026-06-09", 30, true), "A", vec![]),
+        );
         let snapshot = TrackingSnapshot {
             by_id,
             order: vec![t1],
@@ -4321,32 +4902,57 @@ mod tests {
             built_at: chrono::Utc::now(),
             visible_cache: Default::default(),
             fold_cache: Default::default(),
+            marker: Arc::from("⏱"),
         };
 
         // Scope-less = the eagerly built projection, no fold at all.
-        assert!(Arc::ptr_eq(&snapshot.unfiltered_projection(None), &snapshot.tree));
+        assert!(Arc::ptr_eq(
+            &snapshot.unfiltered_projection(None),
+            &snapshot.tree
+        ));
         // Scoped folds once; the second request is the same Arc (an
         // expand-all cascade lands here once per node — this is the fix
         // for the seconds-long grouped-tree build).
         let scope = day_scope("2026-06-09");
         let first = snapshot.unfiltered_projection(Some(&scope));
         assert_eq!(first.by_id[&task_a].own_secs, 30 * 60);
-        assert!(Arc::ptr_eq(&first, &snapshot.unfiltered_projection(Some(&scope))));
+        assert!(Arc::ptr_eq(
+            &first,
+            &snapshot.unfiltered_projection(Some(&scope))
+        ));
     }
 
     #[test]
     fn bucket_raw_value_matches_entry_metadata_columns() {
-        let m = tracking_on(Uuid::from_u128(1), Uuid::from_u128(9), "2026-06-09", 30, true);
+        let m = tracking_on(
+            Uuid::from_u128(1),
+            Uuid::from_u128(9),
+            "2026-06-09",
+            30,
+            true,
+        );
         let r = row(m, "Write report", vec!["Work"]);
         assert_eq!(bucket_raw_value(&r, "task"), "Write report");
         assert_eq!(bucket_raw_value(&r, "taskpath"), "/Work");
-        assert_eq!(bucket_raw_value(&r, "started"), r.tracking.started_at.to_rfc3339());
+        assert_eq!(
+            bucket_raw_value(&r, "started"),
+            r.tracking.started_at.to_rfc3339()
+        );
         // Unknown column falls back to `started`.
-        assert_eq!(bucket_raw_value(&r, "bogus"), bucket_raw_value(&r, "started"));
+        assert_eq!(
+            bucket_raw_value(&r, "bogus"),
+            bucket_raw_value(&r, "started")
+        );
         // An open tracking's `ended` is the literal "running" (groups
         // verbatim — same as the flat view's engine-side grouping).
         let open = row(
-            tracking_on(Uuid::from_u128(2), Uuid::from_u128(9), "2026-06-09", 0, false),
+            tracking_on(
+                Uuid::from_u128(2),
+                Uuid::from_u128(9),
+                "2026-06-09",
+                0,
+                false,
+            ),
             "X",
             vec![],
         );
@@ -4358,10 +4964,6 @@ mod tests {
         let a = tracking_tree_actions();
         assert!(has(&a, "toggle-tracking"));
         assert_eq!(a.len(), 1);
-        assert_eq!(
-            a.iter().find(|x| x.id == "toggle-tracking").and_then(|x| x.default_key),
-            Some('s')
-        );
     }
 }
 
@@ -4379,11 +4981,11 @@ mod restore_scope_tests {
     };
     use shaku::HasComponent;
 
+    use not_yet_done_content::InMemoryHostBus;
     use not_yet_done_task_core::entity::{
         task::{self, TaskStatus},
         tracking as tracking_entity,
     };
-    use not_yet_done_content::InMemoryHostBus;
     use not_yet_done_task_core::module::TaskDomainModule;
     use not_yet_done_task_core::repository::{
         ProjectRepositoryImpl, ProjectRepositoryImplParameters, TagRepositoryImpl,
@@ -4418,9 +5020,9 @@ mod restore_scope_tests {
             .with_component_parameters::<TagRepositoryImpl>(TagRepositoryImplParameters {
                 db: Some(db.clone()),
             })
-            .with_component_parameters::<TrackingRepositoryImpl>(
-                TrackingRepositoryImplParameters { db: Some(db.clone()) },
-            )
+            .with_component_parameters::<TrackingRepositoryImpl>(TrackingRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
             .build();
 
         let task_service: Arc<dyn TaskService> = module.resolve();
@@ -4535,7 +5137,9 @@ mod restore_scope_tests {
             .expect("insert live tracking");
         let gone = insert_deleted_tracking(&handle, task).await;
 
-        let snapshot = TrackingSnapshot::load(&handle).await.expect("load snapshot");
+        let snapshot = TrackingSnapshot::load(&handle)
+            .await
+            .expect("load snapshot");
         let ctx = ActionContext::default();
 
         // A live row routes into the generic delete-confirm flow.
@@ -4582,7 +5186,11 @@ mod restore_scope_tests {
             deleted: Set(false),
             created_at: Set(Utc::now()),
         };
-        model.insert(db).await.expect("insert completed tracking").id
+        model
+            .insert(db)
+            .await
+            .expect("insert completed tracking")
+            .id
     }
 
     #[tokio::test]
@@ -4669,5 +5277,45 @@ mod restore_scope_tests {
             .expect("invalid gravity");
         assert!(format!("{err}").contains("invalid gravity"));
         assert!(!is_deleted(&handle, original).await, "original untouched");
+    }
+
+    #[tokio::test]
+    async fn get_by_id_resolves_a_condensed_row_id() {
+        use chrono::TimeZone;
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Theta project").await;
+
+        // One completed interval at local noon → timezone-stable day bucket.
+        let start = chrono::Local
+            .with_ymd_and_hms(2026, 3, 22, 12, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let model = tracking_entity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            task_id: Set(task),
+            predecessor_id: Set(None),
+            started_at: Set(start),
+            ended_at: Set(Some(start + chrono::Duration::minutes(30))),
+            deleted: Set(false),
+            created_at: Set(Utc::now()),
+        };
+        model.insert(&db).await.expect("insert tracking");
+
+        // The synthetic id of that day's condensed row, built the same way the
+        // adapter builds it (`cond:<day-key>:<task-uuid>`).
+        let day_key = grouping::group_key(&start.to_rfc3339(), Some(GroupBucket::Day));
+        let cond_id = format!("{CONDENSED_ID_PREFIX}{day_key}:{task}");
+
+        // Regression: `get_by_id` lacked a `cond:` branch, so this id fell into
+        // the entry-uuid parser and returned NotFound — that is exactly why `s`
+        // (toggle-tracking) stopped working on a condensed row. It must now
+        // resolve to the condensed node (mirroring `get_child`).
+        let adapter = TrackingAdapter::new("test", handle);
+        let node = adapter
+            .get_by_id(&cond_id)
+            .await
+            .expect("condensed row id resolves");
+        assert_eq!(node.id(), cond_id);
+        assert_eq!(node.label(), "Theta project");
     }
 }

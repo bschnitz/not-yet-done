@@ -12,6 +12,8 @@ url: https://taiga.example.com
 name: taiga # optional human-readable label
 
 auth:
+  # `nyd config auth taiga` prints the mechanism, its fields and every
+  # provider; `nyd config build taiga` asks and writes the block.
   mechanism: password-login
   # By default the cached JWT is kept until Taiga rejects it (401). Use a
   # `session_cache: { kind: ttl, ttl_secs: 3600 }` block to expire sooner.

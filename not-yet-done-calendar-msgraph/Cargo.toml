@@ -1,0 +1,26 @@
+[package]
+name = "not-yet-done-calendar-msgraph"
+version = "0.1.0"
+edition = "2024"
+
+# Microsoft Graph calendar backend for the calendar adapter. Reads events from
+# a Microsoft 365 / Teams mailbox via `GET /me/calendarView`, authenticating
+# with a bearer token supplied by the shared credential-provider machinery
+# (e.g. `az account get-access-token`). One instance per configured
+# connection; the adapter aggregates several. Depends only on `calendar-core`
+# (the backend seam) and `content` (for the credential resolver) — never on
+# the adapter crate or the TUI.
+
+[dependencies]
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+reqwest     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+
+not-yet-done-calendar-core = { path = "../not-yet-done-calendar-core" }
+not-yet-done-content       = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+tokio = { workspace = true }

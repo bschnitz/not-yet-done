@@ -27,15 +27,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use not_yet_done_content::{AdapterFactory, ContentAdapter, HostContext, InMemoryHostBus};
 
 pub mod hooks;
 pub use hooks::{
-    fire_connected_hooks, fire_hook, fire_hook_with, HookBinding, HookConfig, HookInputs,
-    HookOutcome, HookReport, HookTarget, HookWhen,
+    HookBinding, HookConfig, HookInputs, HookOutcome, HookReport, HookTarget, HookWhen,
+    fire_connected_hooks, fire_hook, fire_hook_with,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,47 +57,81 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
     let mut factories: HashMap<String, Box<dyn AdapterFactory>> = HashMap::new();
     factories.insert(
         "jira".to_string(),
-        Box::new(not_yet_done_jira_adapter::JiraAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_jira_adapter::JiraAdapterFactory::new()),
     );
     factories.insert(
         "kimai".to_string(),
-        Box::new(not_yet_done_kimai_adapter::KimaiAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_kimai_adapter::KimaiAdapterFactory::new()),
     );
     factories.insert(
         "taiga".to_string(),
-        Box::new(not_yet_done_taiga_adapter::TaigaAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_taiga_adapter::TaigaAdapterFactory::new()),
     );
     factories.insert(
         "postgres".to_string(),
-        Box::new(not_yet_done_postgres_adapter::PostgresAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_postgres_adapter::PostgresAdapterFactory::new()),
+    );
+    factories.insert(
+        "sqlite".to_string(),
+        not_yet_done_content::typed(not_yet_done_sqlite_adapter::SqliteAdapterFactory::new()),
     );
     factories.insert(
         "confluence".to_string(),
-        Box::new(not_yet_done_confluence_adapter::ConfluenceAdapterFactory::new()),
+        not_yet_done_content::typed(
+            not_yet_done_confluence_adapter::ConfluenceAdapterFactory::new(),
+        ),
     );
     factories.insert(
         "stoat".to_string(),
-        Box::new(not_yet_done_stoat_adapter::StoatAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_stoat_adapter::StoatAdapterFactory::new()),
     );
     factories.insert(
         "tasks".to_string(),
-        Box::new(not_yet_done_local_adapter::TaskAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_local_adapter::TaskAdapterFactory::new()),
     );
     factories.insert(
         "trackings".to_string(),
-        Box::new(not_yet_done_local_adapter::TrackingAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_local_adapter::TrackingAdapterFactory::new()),
     );
     factories.insert(
         "projects".to_string(),
-        Box::new(not_yet_done_local_adapter::ProjectAdapterFactory::new()),
+        not_yet_done_content::typed(not_yet_done_local_adapter::ProjectAdapterFactory::new()),
     );
-    // Wrap every factory so that, when the run requests anonymization
-    // ([`HostContext::anonymize`]), each adapter it produces is masked — one
-    // place, inherited by every front-end. Off by default the wrapper is a
-    // transparent pass-through, so this is free in normal use.
+    factories.insert(
+        "calendar".to_string(),
+        not_yet_done_content::typed(not_yet_done_calendar_adapter::CalendarAdapterFactory::new()),
+    );
+    factories.insert(
+        "workflow".to_string(),
+        not_yet_done_content::typed(not_yet_done_workflow::WorkflowAdapterFactory::new()),
+    );
+    // Wrap every factory in three decorators, one place, inherited by every
+    // front-end:
+    //   * custom-columns (innermost): injects the user's locally-stored extra
+    //     columns onto every row and exposes the set-cell/clear-cell actions.
+    //     Inert until cells exist, so it's free in normal use.
+    //   * scripts (middle): exposes the user's view-scripts as addressable
+    //     nodes and injects the list/create/edit/delete actions, so both the
+    //     TUI and the CLI drive the same CRUD surface. Inert unless the user
+    //     invokes a script action.
+    //   * anonymizing (outermost): when the run requests anonymization
+    //     ([`HostContext::anonymize`]), masks all user-visible output — off by
+    //     default it's a transparent pass-through.
+    // Order matters: anonymizing wraps the others, so injected custom values
+    // and script names/bodies are scrubbed like any other free text in a
+    // screenshot run and a user's local note can't leak past the mask. scripts
+    // sits above custom-columns so it derives its scope from the real node
+    // types, unaffected by the injected columns.
     factories
         .into_iter()
-        .map(|(ty, factory)| (ty, not_yet_done_content::anonymizing_factory(factory)))
+        .map(|(ty, factory)| {
+            (
+                ty,
+                not_yet_done_content::anonymizing_factory(not_yet_done_scripts::scripts_factory(
+                    not_yet_done_custom_columns::custom_columns_factory(factory),
+                )),
+            )
+        })
         .collect()
 }
 
@@ -132,7 +166,12 @@ pub fn host_context() -> HostContext {
 /// anonymized mode, and a screencast is started by `NYD_ANON=1 not-yet-done`.
 fn anonymize_requested() -> bool {
     std::env::var("NYD_ANON")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -172,8 +211,20 @@ pub struct AdapterInstance {
     /// Used for adapters whose connection is expensive or unreliable
     /// (Postgres-over-SSH-tunnel, slow VPN-gated APIs). Front-ends that always
     /// connect (the CLI, Waybar) ignore it; only the TUI defers the load.
-    #[serde(default)]
+    ///
+    /// **Defaults to `true`.** Connecting is the side-effecting choice: it can
+    /// open a tunnel, spend a VPN round-trip or put a credential dialog in
+    /// front of the user before they have asked for anything. An instance that
+    /// is cheap and local (the task DB, a local SQLite file) opts back in with
+    /// an explicit `manual_connect: false`.
+    #[serde(default = "manual_connect_default")]
     pub manual_connect: bool,
+}
+
+/// Serde default for [`AdapterInstance::manual_connect`] — see the field's
+/// docs for why an unconfigured instance waits for `reload`.
+fn manual_connect_default() -> bool {
+    true
 }
 
 impl AdapterInstance {
@@ -299,10 +350,7 @@ fn read_config_string(inst: &AdapterInstance, view_path: &Path) -> Result<String
         let resolved = if Path::new(cfg_path).is_absolute() {
             PathBuf::from(cfg_path)
         } else {
-            view_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(cfg_path)
+            view_path.parent().unwrap_or(Path::new(".")).join(cfg_path)
         };
         return std::fs::read_to_string(&resolved)
             .with_context(|| format!("reading adapter config {}", resolved.display()));
@@ -320,10 +368,7 @@ fn read_config_string(inst: &AdapterInstance, view_path: &Path) -> Result<String
 /// This is the entry point the CLI and Waybar use: discover the instance from
 /// the view configs, read its config, look up the factory for its type, and
 /// construct the adapter with the given [`HostContext`].
-pub fn resolve_adapter(
-    instance_name: &str,
-    ctx: &HostContext,
-) -> Result<Box<dyn ContentAdapter>> {
+pub fn resolve_adapter(instance_name: &str, ctx: &HostContext) -> Result<Box<dyn ContentAdapter>> {
     let factories = factories();
     resolve_adapter_with(instance_name, ctx, &factories)
 }
@@ -411,6 +456,21 @@ views:
             head.adapter.config_inline.as_deref(),
             Some("database: sqlite::memory:")
         );
+        assert!(
+            head.adapter.manual_connect,
+            "an adapter block that says nothing waits for an explicit reload"
+        );
+    }
+
+    #[test]
+    fn manual_connect_can_be_switched_off_per_instance() {
+        let yaml = r#"
+adapter:
+  type: tasks
+  config_inline: "database: sqlite::memory:"
+  manual_connect: false
+"#;
+        let head: ViewFileHead = serde_yaml::from_str(yaml).unwrap();
         assert!(!head.adapter.manual_connect);
     }
 

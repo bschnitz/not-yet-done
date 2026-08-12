@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection,
-    EntityTrait, QueryFilter, Set,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
 };
 use shaku::Component;
 

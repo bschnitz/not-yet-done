@@ -1,0 +1,20 @@
+[package]
+name = "not-yet-done-workflow"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+dirs = { workspace = true }
+sea-orm = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+croner = { workspace = true }
+fieldsmith = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

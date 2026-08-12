@@ -4,8 +4,8 @@ use thiserror::Error;
 
 /// App-shell error type. The task domain owns its own richer
 /// [`not_yet_done_task_core::error::AppError`]; this slim variant covers
-/// only what the shell repositories (link / saved_query / settings /
-/// query_shortcut) and the backup service actually surface, so that core
+/// only what the shell repositories (link / settings / query_shortcut)
+/// and the backup service actually surface, so that core
 /// no longer needs to depend on task-core (C3 of the DB-split).
 #[derive(Debug, Error)]
 pub enum CoreError {

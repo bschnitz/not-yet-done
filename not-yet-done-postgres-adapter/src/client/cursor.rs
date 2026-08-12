@@ -29,7 +29,7 @@ use crate::client::sql_shape::{
     has_multiple_statements, looks_like_select_or_with, split_trailing_statement,
     strip_leading_sql_noise,
 };
-use crate::client::{quote_ident, PostgresClient, RawSqlOutcome, RowsPage};
+use crate::client::{PostgresClient, RawSqlOutcome, RowsPage, quote_ident};
 
 /// Live cursor handle. The struct is opaque to the TUI — only the
 /// adapter-level registry (Phase 3) ever touches its fields.
@@ -173,7 +173,10 @@ impl PostgresClient {
                 columns,
                 next_offset,
             };
-            Ok(OpenCursorOutcome::Cursor { session, first_page })
+            Ok(OpenCursorOutcome::Cursor {
+                session,
+                first_page,
+            })
         })
         .await
     }
@@ -202,9 +205,7 @@ impl PostgresClient {
                 } else {
                     rows
                 };
-                session.next_offset = session
-                    .next_offset
-                    .saturating_add(rows.len() as u32);
+                session.next_offset = session.next_offset.saturating_add(rows.len() as u32);
                 // Column list might have changed only if the cursor
                 // was re-declared, which we don't support; mirror the
                 // session columns for stability.
@@ -279,11 +280,7 @@ async fn collect_fetch(
             }
             SimpleQueryMessage::Row(row) => {
                 if columns.is_empty() {
-                    columns = row
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
                 }
                 let cells = (0..row.len())
                     .map(|i| row.get(i).map(|s| s.to_string()))

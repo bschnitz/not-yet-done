@@ -21,7 +21,10 @@ pub struct DateBounds {
 
 impl DateBounds {
     fn unbounded() -> Self {
-        Self { min: None, max: None }
+        Self {
+            min: None,
+            max: None,
+        }
     }
 
     /// Intersect: take the tighter of two bounds.
@@ -118,9 +121,7 @@ pub fn extract_date_bounds(expr: &FilterExpr) -> DateBounds {
             }
             result
         }
-        FilterExpr::Not(inner) => {
-            extract_date_bounds(inner).invert()
-        }
+        FilterExpr::Not(inner) => extract_date_bounds(inner).invert(),
         FilterExpr::Leaf(leaf) => extract_leaf_bounds(leaf),
     }
 }
@@ -141,11 +142,20 @@ fn extract_leaf_bounds(leaf: &FilterLeaf) -> DateBounds {
 
     match leaf.op {
         // started_at = X → min=X, max=X
-        Operator::Eq => DateBounds { min: Some(dt), max: Some(dt) },
+        Operator::Eq => DateBounds {
+            min: Some(dt),
+            max: Some(dt),
+        },
         // started_at > X or >= X → min=X
-        Operator::Gt | Operator::Gte => DateBounds { min: Some(dt), max: None },
+        Operator::Gt | Operator::Gte => DateBounds {
+            min: Some(dt),
+            max: None,
+        },
         // started_at < X or <= X → max=X
-        Operator::Lt | Operator::Lte => DateBounds { min: None, max: Some(dt) },
+        Operator::Lt | Operator::Lte => DateBounds {
+            min: None,
+            max: Some(dt),
+        },
         // Other operators don't constrain dates meaningfully.
         _ => DateBounds::unbounded(),
     }

@@ -5,8 +5,8 @@
 //! host-agnostic filter *language* lives one layer down in
 //! `not-yet-done-filter`.
 //!
-//! `not-yet-done-core` keeps the app-shell concerns (link / saved_query /
-//! settings / query_shortcut / backup) and, during the C2 transition,
+//! `not-yet-done-core` keeps the app-shell concerns (link / settings /
+//! query_shortcut / backup) and, during the C2 transition,
 //! re-exports everything below under the historic `not_yet_done_core::…`
 //! paths so consumers don't churn. C3 removes that bridge and re-points
 //! consumers here directly.

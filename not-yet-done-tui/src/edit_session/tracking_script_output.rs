@@ -15,7 +15,11 @@ pub struct ScriptOutputSession {
 
 impl ScriptOutputSession {
     pub fn new(content: String) -> Self {
-        Self { template: content, scope: SessionScope::Trackings, suffix: ".txt".to_string() }
+        Self {
+            template: content,
+            scope: SessionScope::Trackings,
+            suffix: ".txt".to_string(),
+        }
     }
 
     /// Override the action-bar scope (defaults to Trackings for legacy

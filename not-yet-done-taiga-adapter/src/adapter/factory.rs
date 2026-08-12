@@ -9,9 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use sea_orm::DatabaseConnection;
 
-use not_yet_done_content::{AdapterFactory, ContentAdapter, ContentError, Result};
+use not_yet_done_content::{
+    ContentAdapter, ContentError, MechanismSpec, Result, TypedAdapterFactory,
+};
 
-use super::{TaigaAdapter, auth_bridge::AuthBridge, config::TaigaConfig};
+use super::{
+    TaigaAdapter,
+    auth_bridge::{AuthBridge, MECHANISMS},
+    config::TaigaConfig,
+};
 use crate::cache_store::scope_id_for_url;
 
 /// Owns a per-URL connection pool. Each unique `db.url` (after defaulting)
@@ -29,10 +35,7 @@ impl TaigaAdapterFactory {
         }
     }
 
-    fn connection_for(
-        &self,
-        db_url: &str,
-    ) -> std::result::Result<Arc<DatabaseConnection>, String> {
+    fn connection_for(&self, db_url: &str) -> std::result::Result<Arc<DatabaseConnection>, String> {
         if let Some(existing) = self.connections.lock().unwrap().get(db_url).cloned() {
             return Ok(existing);
         }
@@ -58,28 +61,30 @@ impl TaigaAdapterFactory {
     }
 }
 
-impl AdapterFactory for TaigaAdapterFactory {
+impl TypedAdapterFactory for TaigaAdapterFactory {
+    type Config = TaigaConfig;
+
     fn adapter_type(&self) -> &str {
         "taiga"
     }
 
-    fn create(
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        MECHANISMS
+    }
+
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: TaigaConfig,
         _ctx: &not_yet_done_content::HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let cfg: TaigaConfig = serde_yaml::from_str(config)
-            .map_err(|e| ContentError::Other(format!("Invalid Taiga config: {e}").into()))?;
-
         cfg.auth
-            .validate()
+            .validate_against(MECHANISMS)
             .map_err(|e| ContentError::Other(format!("Invalid Taiga auth spec: {e}").into()))?;
 
         let db_url = match &cfg.db {
             Some(c) => c.url.clone(),
-            None => crate::db::default_sqlite_url()
-                .map_err(|e| ContentError::Other(e.into()))?,
+            None => crate::db::default_sqlite_url().map_err(|e| ContentError::Other(e.into()))?,
         };
         let db = self
             .connection_for(&db_url)
@@ -95,7 +100,10 @@ impl AdapterFactory for TaigaAdapterFactory {
         let connect_secs = cfg
             .connect_timeout_secs
             .unwrap_or_else(|| request_secs.min(super::config::DEFAULT_CONNECT_TIMEOUT_CAP_SECS));
-        let timeouts = crate::client::HttpTimeouts { request_secs, connect_secs };
+        let timeouts = crate::client::HttpTimeouts {
+            request_secs,
+            connect_secs,
+        };
 
         let auth = AuthBridge::new(cfg.url, Arc::clone(&db), scope_id, cfg.auth, timeouts)
             .map_err(|e| ContentError::Other(e.into()))?;

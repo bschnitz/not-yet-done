@@ -98,10 +98,7 @@ pub async fn patch_item(
     if let Some(tags) = &patch.fields.tags {
         // Send `[["name", null], ...]` so Taiga preserves/auto-assigns colors.
         // Empty array is a legitimate "clear all tags" payload.
-        let arr: Vec<Value> = tags
-            .iter()
-            .map(|name| json!([name, Value::Null]))
-            .collect();
+        let arr: Vec<Value> = tags.iter().map(|name| json!([name, Value::Null])).collect();
         body.insert("tags".into(), Value::Array(arr));
     }
     if let Some(c) = patch.comment {
@@ -113,7 +110,11 @@ pub async fn patch_item(
     http_log::log_request("PATCH", &url);
     let resp = client
         .send_retrying("PATCH", &url, || {
-            client.http.patch(&url).headers(headers.clone()).json(&payload)
+            client
+                .http
+                .patch(&url)
+                .headers(headers.clone())
+                .json(&payload)
         })
         .await?;
 
@@ -122,15 +123,16 @@ pub async fn patch_item(
     let body_text = resp.text().await.unwrap_or_default();
 
     if status.as_u16() == 412 {
-        return Ok(PatchOutcome::VersionConflict { server_message: body_text });
+        return Ok(PatchOutcome::VersionConflict {
+            server_message: body_text,
+        });
     }
     if !status.is_success() {
         let msg = format!("PATCH {url} -> {status}: {body_text}");
         http_log::log_error("PATCH", &msg);
         return Err(msg);
     }
-    let v: Value = serde_json::from_str(&body_text)
-        .map_err(|e| format!("PATCH parse: {e}"))?;
+    let v: Value = serde_json::from_str(&body_text).map_err(|e| format!("PATCH parse: {e}"))?;
     let new_version = v
         .get("version")
         .and_then(|x| x.as_u64())
@@ -184,7 +186,9 @@ pub async fn delete_comment(
     let headers = client.auth_headers()?;
     http_log::log_request("POST", &url);
     let resp = client
-        .send_retrying("POST", &url, || client.http.post(&url).headers(headers.clone()))
+        .send_retrying("POST", &url, || {
+            client.http.post(&url).headers(headers.clone())
+        })
         .await?;
     http_log::check_status("POST", &url, resp).await?;
     Ok(())

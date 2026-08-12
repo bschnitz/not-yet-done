@@ -1,24 +1,23 @@
-//! Tab-set switch popup — a small hotkey menu for choosing the active
-//! tab constellation.
+//! Single-key choice popup — a small hotkey menu for picking one entry
+//! from a fixed list. Currently drives the content view's "Group by"
+//! menu.
 //!
-//! Opened by [`GlobalAction::TabSetPopup`] (default `ctrl+x`). Unlike the
-//! fuzzy [`SearchablePopup`], this is a fixed list driven by single-key
-//! hotkeys: each constellation may declare a `shortcut`, and pressing it
-//! switches immediately. Arrow keys + Enter/Space cover sets without a
-//! shortcut and aid discovery; Esc cancels. The currently active set is
-//! marked (`●`), and the shortcut letter is underlined in the label.
+//! Unlike the fuzzy [`SearchablePopup`], this is a fixed list driven by
+//! single-key hotkeys: each entry may declare a `shortcut`, and pressing
+//! it selects immediately. Arrow keys + Enter/Space cover entries without
+//! a shortcut and aid discovery; Esc cancels. The currently active entry
+//! is marked (`●`), and the shortcut letter is underlined in the label.
 //!
 //! Renders on the shared `popup_utils` chrome — including the standard
 //! keybinding legend at the bottom — like every other menu popup.
 //!
 //! [`SearchablePopup`]: crate::components::searchable_popup::SearchablePopup
-//! [`GlobalAction::TabSetPopup`]: crate::config::keybindings::GlobalAction::TabSetPopup
 
 use std::sync::Arc;
 
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::Frame;
 
 use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
 use crate::ui::theme::Theme;
@@ -27,20 +26,18 @@ use crate::ui::theme::Theme;
 /// standard popup chrome (`popup_utils`), like the other menu popups.
 const HINTS: &[(&str, &str)] = &[("↑↓", "nav"), ("↵/Spc", "select"), ("Esc", "close")];
 
-/// One selectable constellation in the popup.
+/// One selectable entry in the popup.
 #[derive(Debug, Clone)]
 pub struct TabSetEntry {
-    /// Constellation key (under `tabs.sets`) — the value handed back on
-    /// selection / written to `active`.
+    /// Opaque key — the value handed back to the caller on selection.
     pub name: String,
-    /// Display text shown in the popup (the set's `label`, or its key
-    /// when no label is configured).
+    /// Display text shown in the popup.
     pub label: String,
     /// Optional leading glyph.
     pub icon: Option<String>,
     /// Optional single-key hotkey.
     pub shortcut: Option<String>,
-    /// Whether this is the constellation currently shown.
+    /// Whether this is the entry currently active / selected.
     pub active: bool,
 }
 
@@ -174,7 +171,11 @@ impl TabSetPopup {
         if chars.next().is_some() {
             return None;
         }
-        let icon_w = entry.icon.as_ref().map(|i| i.chars().count() + 1).unwrap_or(0);
+        let icon_w = entry
+            .icon
+            .as_ref()
+            .map(|i| i.chars().count() + 1)
+            .unwrap_or(0);
         entry
             .label
             .chars()
@@ -195,7 +196,9 @@ impl TabSetPopup {
             .map(|e| Self::row_text(e).chars().count() + 2)
             .max()
             .unwrap_or(0);
-        let popup_w = ((text_w as u16) + 4).max(28).min(area.width.saturating_sub(4));
+        let popup_w = ((text_w as u16) + 4)
+            .max(28)
+            .min(area.width.saturating_sub(4));
         let hh = hints_height(HINTS, popup_w.saturating_sub(2));
         let popup_h = self.entries.len() as u16 + 2 + hh;
 
@@ -246,7 +249,11 @@ impl TabSetPopup {
                 if cx >= inner.right() {
                     break;
                 }
-                let style = if hl_pos == Some(ci) { hl_style } else { label_style };
+                let style = if hl_pos == Some(ci) {
+                    hl_style
+                } else {
+                    label_style
+                };
                 if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
                     cell.set_char(ch);
                     cell.set_style(style);
@@ -335,7 +342,10 @@ mod tests {
         let mut p = TabSetPopup::new(theme());
         p.open(entries());
         p.handle_key("down"); // -> personal
-        assert_eq!(p.handle_key(" "), TabSetPopupMessage::Switch("personal".into()));
+        assert_eq!(
+            p.handle_key(" "),
+            TabSetPopupMessage::Switch("personal".into())
+        );
         assert!(!p.is_open());
     }
 

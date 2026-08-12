@@ -77,6 +77,18 @@ tab:
 
 adapter:
   type: trackings
+  # Optional inline config (parsed as YAML into LocalAdapterConfig; all keys
+  # optional — same struct the Tasks tab uses). The relevant key here:
+  #   tracking_marker: glyph shown in the `marker` column for a running
+  #                    tracking (flat, tree, condensed and group rows).
+  #                    Default "⏱". This is the *cell value*, not a column
+  #                    `label:`. Set "⏱️" (base + U+FE0F) for the emoji clock.
+  #                    Use the *same* value as the Tasks tab so both agree.
+  # Example: config_inline: '{ tracking_marker: "⏱️" }'
+  # `manual_connect` defaults to true (nothing connects until you press the
+  # reload key). This adapter opens a local SQLite file and never logs in, so
+  # it opts back into loading at startup.
+  manual_connect: false
 
 views:
   # Flat list of trackings. No `tree_label` / no children — every row is a

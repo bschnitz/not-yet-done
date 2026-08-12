@@ -2,18 +2,18 @@
 //!
 //! Read-only display — does not produce messages.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
-use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
-use crate::config::{GlobalAction, KeyBindingConfig};
-use std::sync::Arc;
+use crate::config::KeyBindingConfig;
 use crate::ui::theme::Theme;
+use std::sync::Arc;
 
 pub struct StatusBarComponent {
     theme: Arc<Theme>,
@@ -46,7 +46,9 @@ impl StatusBarComponent {
 
     /// Calculate how many rows the status bar needs at the given width.
     pub fn required_height(&self, available_width: u16) -> u16 {
-        if self.hints.is_empty() { return 1; }
+        if self.hints.is_empty() {
+            return 1;
+        }
         let w = available_width as usize;
         let mut lines = 1u16;
         let mut line_used = 1usize; // leading space
@@ -62,26 +64,21 @@ impl StatusBarComponent {
         lines
     }
 
+    /// Initial hints before the first frame. App overrides these every frame
+    /// via [`set_custom_hints`](Self::set_custom_hints); this just seeds the
+    /// same derived global frame (quit, cycle tabs) so the bar is never blank
+    /// on the first draw. Derived from the exhaustive
+    /// [`GlobalAction::placement`](crate::config::keybindings::GlobalAction::placement).
     fn rebuild_hints(&mut self, kb: &KeyBindingConfig) {
-        let gkb = &kb.global;
-
-        let mut hints = vec![
-            (gkb.label(&GlobalAction::Quit), "quit".to_string()),
-        ];
-
-        hints.push((
-            format!("{}/{}", gkb.label(&GlobalAction::TabNext), gkb.label(&GlobalAction::TabPrev)),
-            "cycle tabs".to_string(),
-        ));
-        hints.push((gkb.label(&GlobalAction::Quit), "quit".to_string()));
-
-        self.hints = hints;
+        self.hints = crate::config::keybindings::global_status_hints(&kb.global);
     }
 }
 
 impl Component for StatusBarComponent {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 { return; }
+        if area.height == 0 {
+            return;
+        }
         let t = &self.theme;
         let bg = t.surface();
         let buf = frame.buffer_mut();
@@ -109,7 +106,9 @@ impl Component for StatusBarComponent {
             let label = format!("⚓ marked: {marker}");
             let marker_style = Style::default().fg(t.accent()).bg(bg);
             for ch in label.chars() {
-                if x >= right || y >= area.bottom() { break; }
+                if x >= right || y >= area.bottom() {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
                     cell.set_char(ch);
                     cell.set_style(marker_style);
@@ -118,7 +117,9 @@ impl Component for StatusBarComponent {
             }
             let sep_style = Style::default().fg(t.text_med()).bg(bg);
             for ch in "  ".chars() {
-                if x >= right || y >= area.bottom() { break; }
+                if x >= right || y >= area.bottom() {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
                     cell.set_char(ch);
                     cell.set_style(sep_style);
@@ -136,7 +137,9 @@ impl Component for StatusBarComponent {
 
             let key_style = Style::default().fg(t.accent()).bg(bg);
             for ch in key_label.chars() {
-                if x >= right || y >= area.bottom() { break; }
+                if x >= right || y >= area.bottom() {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
                     cell.set_char(ch);
                     cell.set_style(key_style);
@@ -147,7 +150,9 @@ impl Component for StatusBarComponent {
             let desc_style = Style::default().fg(t.text_med()).bg(bg);
             let desc_text = format!(" {}  ", desc);
             for ch in desc_text.chars() {
-                if x >= right || y >= area.bottom() { break; }
+                if x >= right || y >= area.bottom() {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
                     cell.set_char(ch);
                     cell.set_style(desc_style);

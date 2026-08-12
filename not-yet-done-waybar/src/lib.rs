@@ -4,12 +4,12 @@ use std::rc::Rc;
 use chrono::Duration;
 use serde::Deserialize;
 use waybar_cffi::{
+    InitInfo, Module,
     gtk::{
-        glib,
+        Box as GtkBox, Label, Orientation, glib,
         prelude::{ContainerExt, LabelExt, StyleContextExt, WidgetExt},
-        Label, Orientation, Box as GtkBox,
     },
-    waybar_module, InitInfo, Module,
+    waybar_module,
 };
 
 use not_yet_done_content::{ContentAdapter, ListParams, NodeType};
@@ -36,9 +36,15 @@ struct Config {
     interval_ms: u32,
 }
 
-fn default_icon() -> String { "⏱".to_string() }
-fn default_max_chars() -> usize { 20 }
-fn default_interval_ms() -> u32 { 5000 }
+fn default_icon() -> String {
+    "⏱".to_string()
+}
+fn default_max_chars() -> usize {
+    20
+}
+fn default_interval_ms() -> u32 {
+    5000
+}
 
 // ---------------------------------------------------------------------------
 // Duration formatting: 30s, 22min, 1.5h
@@ -117,38 +123,48 @@ fn resolve_trackings_adapter(rt: &tokio::runtime::Runtime) -> Option<Box<dyn Con
 ///
 /// `root()` reloads the snapshot from the DB on every call, so a tracking
 /// started or stopped after module init is picked up on the next tick. The
-/// flat entry list marks the running tracking with a `⏱` glyph in its `marker`
-/// field and carries the elapsed time (computed at `now`) in `duration`
-/// (integer seconds).
+/// flat entry list marks the running tracking with a non-empty `marker` field
+/// (the glyph is adapter-configurable via `tracking_marker`, so we match on
+/// "non-empty" rather than a specific character) and carries the elapsed time
+/// (computed at `now`) in `duration` (integer seconds).
 fn get_active_tracking(
     rt: &tokio::runtime::Runtime,
     adapter: &dyn ContentAdapter,
 ) -> Option<(String, Duration)> {
     rt.block_on(async {
         let root = adapter.root().await.ok()?;
-        let result = root
-            .list(ListParams {
+        let result = not_yet_done_content::children::list(
+            adapter,
+            root.as_ref(),
+            ListParams {
                 node_type: tracking_entry_type(),
                 query: None,
                 sort: Vec::new(),
                 page: None,
                 download: false,
                 group_by: None,
-            })
-            .await
-            .ok()?;
+            },
+        )
+        .await
+        .ok()?;
 
         let field = |row: &not_yet_done_content::NodeSummary, key: &str| {
-            row.metadata.fields.iter().find(|f| f.key == key).map(|f| f.value.clone())
+            row.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == key)
+                .map(|f| f.value.clone())
         };
 
         let active = result
             .items
             .iter()
-            .find(|row| field(row, "marker").as_deref() == Some("⏱"))?;
+            .find(|row| field(row, "marker").is_some_and(|m| !m.is_empty()))?;
 
         let desc = field(active, "task").unwrap_or_else(|| active.label.clone());
-        let secs: i64 = field(active, "duration").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let secs: i64 = field(active, "duration")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         Some((desc, Duration::seconds(secs)))
     })
 }

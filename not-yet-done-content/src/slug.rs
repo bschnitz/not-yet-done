@@ -1,13 +1,16 @@
 //! Normalization + bidirectional slug tables.
 //!
-//! Slugs (`<prefix>-foo-bar`) replace raw values inside editable templates so
+//! Slugs (`<prefix>_foo_bar`) replace raw values inside editable templates so
 //! the buffer stays autocomplete-friendly. Each adapter picks its own prefix
-//! per field (e.g. `ll-`/`uu-` for Jira labels/users, `ss-`/`tt-`/`uu-` for
+//! per field (e.g. `ll_`/`uu_` for Jira labels/users, `ss_`/`tt_`/`uu_` for
 //! Taiga statuses/tags/members) and feeds the table `(slug_source, original)`
 //! pairs.
 //!
+//! The separator is `_` (not `-`) so a slug stays a single word-token in the
+//! editor — `-` would split it at Markdown/editor word boundaries.
+//!
 //! The slug body is derived from a normalized form of `slug_source`;
-//! collisions get deterministic `-2`, `-3`, … suffixes (lex sort by
+//! collisions get deterministic `_2`, `_3`, … suffixes (lex sort by
 //! `original`).
 
 use std::collections::BTreeMap;
@@ -15,9 +18,10 @@ use std::collections::BTreeMap;
 /// Normalize a string to a slug-body:
 /// - lowercase
 /// - German umlauts → `ae` / `oe` / `ue` / `ss`
-/// - ASCII whitespace → `-`
-/// - any other non-alphanumeric, non-`-` char dropped
-/// - consecutive `-` collapsed; leading/trailing `-` trimmed
+/// - ASCII whitespace and `-` → `_` (so a hyphenated source keeps its word
+///   boundary as an underscore instead of dropping the separator)
+/// - any other non-alphanumeric, non-`_` char dropped
+/// - consecutive `_` collapsed; leading/trailing `_` trimmed
 pub fn normalize(s: &str) -> String {
     let mut buf = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -27,25 +31,25 @@ pub fn normalize(s: &str) -> String {
             'ö' => buf.push_str("oe"),
             'ü' => buf.push_str("ue"),
             'ß' => buf.push_str("ss"),
-            c if c.is_whitespace() => buf.push('-'),
-            c if c.is_ascii_alphanumeric() || c == '-' => buf.push(c),
+            c if c.is_whitespace() || c == '-' => buf.push('_'),
+            c if c.is_ascii_alphanumeric() || c == '_' => buf.push(c),
             _ => {}
         }
     }
     let mut out = String::with_capacity(buf.len());
-    let mut prev_dash = false;
+    let mut prev_sep = false;
     for c in buf.chars() {
-        if c == '-' {
-            if !prev_dash {
+        if c == '_' {
+            if !prev_sep {
                 out.push(c);
             }
-            prev_dash = true;
+            prev_sep = true;
         } else {
             out.push(c);
-            prev_dash = false;
+            prev_sep = false;
         }
     }
-    out.trim_matches('-').to_string()
+    out.trim_matches('_').to_string()
 }
 
 /// Bidirectional map between original values and rendered slugs.
@@ -59,8 +63,8 @@ impl SlugTable {
     /// normalized into the slug body; `original` is what comes back out of
     /// `original_for(slug)`.
     ///
-    /// `prefix` is prepended to every slug (e.g. `"ll-"`, `"uu-"`). It must
-    /// end with `-` for round-trip safety in editor templates.
+    /// `prefix` is prepended to every slug (e.g. `"ll_"`, `"uu_"`). It must
+    /// end with `_` for round-trip safety in editor templates.
     pub fn build<I>(items: I, prefix: &str) -> Self
     where
         I: IntoIterator<Item = (String, String)>,
@@ -85,14 +89,17 @@ impl SlugTable {
                 let slug = if idx == 0 {
                     format!("{prefix}{norm}")
                 } else {
-                    format!("{prefix}{norm}-{}", idx + 1)
+                    format!("{prefix}{norm}_{}", idx + 1)
                 };
                 slug_to_original.insert(slug.clone(), orig.clone());
                 original_to_slug.insert(orig.clone(), slug);
             }
         }
 
-        Self { slug_to_original, original_to_slug }
+        Self {
+            slug_to_original,
+            original_to_slug,
+        }
     }
 
     pub fn slug_for(&self, original: &str) -> Option<&str> {
@@ -119,12 +126,17 @@ mod tests {
 
     #[test]
     fn normalize_basics() {
-        assert_eq!(normalize("Foo Bar"), "foo-bar");
-        assert_eq!(normalize("Schäfer, Lina"), "schaefer-lina");
+        assert_eq!(normalize("Foo Bar"), "foo_bar");
+        assert_eq!(normalize("Schäfer, Lina"), "schaefer_lina");
         assert_eq!(normalize("ÄÖÜß"), "aeoeuess");
-        assert_eq!(normalize("a---b"), "a-b");
+        assert_eq!(normalize("a___b"), "a_b");
+        assert_eq!(normalize("a   b"), "a_b");
         assert_eq!(normalize("  spaces   "), "spaces");
         assert_eq!(normalize("weird!@#chars"), "weirdchars");
+        // `-` maps to the `_` separator (word boundary preserved).
+        assert_eq!(normalize("foo-bar"), "foo_bar");
+        assert_eq!(normalize("a---b"), "a_b");
+        assert_eq!(normalize("in-progress bug"), "in_progress_bug");
     }
 
     #[test]
@@ -134,11 +146,11 @@ mod tests {
             ("Foo Bar".to_string(), "Foo Bar".to_string()),
             ("Frontend Bug".to_string(), "Frontend Bug".to_string()),
         ];
-        let t = SlugTable::build(pairs, "ll-");
-        assert_eq!(t.slug_for("bug"), Some("ll-bug"));
-        assert_eq!(t.slug_for("Foo Bar"), Some("ll-foo-bar"));
-        assert_eq!(t.original_for("ll-bug"), Some("bug"));
-        assert_eq!(t.original_for("ll-foo-bar"), Some("Foo Bar"));
+        let t = SlugTable::build(pairs, "ll_");
+        assert_eq!(t.slug_for("bug"), Some("ll_bug"));
+        assert_eq!(t.slug_for("Foo Bar"), Some("ll_foo_bar"));
+        assert_eq!(t.original_for("ll_bug"), Some("bug"));
+        assert_eq!(t.original_for("ll_foo_bar"), Some("Foo Bar"));
     }
 
     #[test]
@@ -147,17 +159,17 @@ mod tests {
             ("Foo Bar".to_string(), "Foo Bar".to_string()),
             ("foo bar".to_string(), "foo bar".to_string()),
         ];
-        let t = SlugTable::build(pairs, "ll-");
-        assert_eq!(t.slug_for("Foo Bar"), Some("ll-foo-bar"));
-        assert_eq!(t.slug_for("foo bar"), Some("ll-foo-bar-2"));
+        let t = SlugTable::build(pairs, "ll_");
+        assert_eq!(t.slug_for("Foo Bar"), Some("ll_foo_bar"));
+        assert_eq!(t.slug_for("foo bar"), Some("ll_foo_bar_2"));
     }
 
     #[test]
     fn slug_source_separate_from_original() {
         // User table: slug from display name, original is username.
         let pairs = vec![("Doe, Jane".to_string(), "JDOE1".to_string())];
-        let t = SlugTable::build(pairs, "uu-");
-        assert_eq!(t.slug_for("JDOE1"), Some("uu-doe-jane"));
-        assert_eq!(t.original_for("uu-doe-jane"), Some("JDOE1"));
+        let t = SlugTable::build(pairs, "uu_");
+        assert_eq!(t.slug_for("JDOE1"), Some("uu_doe_jane"));
+        assert_eq!(t.original_for("uu_doe_jane"), Some("JDOE1"));
     }
 }

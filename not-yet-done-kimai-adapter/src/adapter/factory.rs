@@ -4,11 +4,11 @@
 //! the bridge runs on an [`InMemorySessionStore`].
 
 use not_yet_done_content::{
-    AdapterFactory, ContentAdapter, ContentError, InMemorySessionStore, Result,
+    ContentAdapter, ContentError, InMemorySessionStore, MechanismSpec, Result, TypedAdapterFactory,
 };
 
 use super::KimaiAdapter;
-use super::auth_bridge::AuthBridge;
+use super::auth_bridge::{AuthBridge, MECHANISMS};
 use super::config::{
     DEFAULT_CONNECT_TIMEOUT_CAP_SECS, DEFAULT_LOOKBACK_DAYS, DEFAULT_REQUEST_TIMEOUT_SECS,
     KimaiConfig,
@@ -24,22 +24,25 @@ impl KimaiAdapterFactory {
     }
 }
 
-impl AdapterFactory for KimaiAdapterFactory {
+impl TypedAdapterFactory for KimaiAdapterFactory {
+    type Config = KimaiConfig;
+
     fn adapter_type(&self) -> &str {
         "kimai"
     }
 
-    fn create(
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        MECHANISMS
+    }
+
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: KimaiConfig,
         _ctx: &not_yet_done_content::HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let cfg: KimaiConfig = serde_yaml::from_str(config)
-            .map_err(|e| ContentError::Other(format!("Invalid Kimai config: {e}").into()))?;
-
         cfg.auth
-            .validate()
+            .validate_against(MECHANISMS)
             .map_err(|e| ContentError::Other(format!("Invalid Kimai auth spec: {e}").into()))?;
 
         let request_secs = cfg

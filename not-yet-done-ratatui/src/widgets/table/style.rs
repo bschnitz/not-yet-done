@@ -43,7 +43,9 @@ impl Default for TableStyle {
 }
 
 impl TableStyle {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl_widget_style_base!(TableStyle, TableStyleType);

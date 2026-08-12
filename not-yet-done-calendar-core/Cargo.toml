@@ -1,0 +1,25 @@
+[package]
+name = "not-yet-done-calendar-core"
+version = "0.1.0"
+edition = "2024"
+
+# The decoupling seam for the calendar adapter. Defines the `CalendarBackend`
+# trait (one implementation per calendar protocol — CalDAV, Microsoft Graph,
+# ICS, …), its factory, and the protocol-neutral `CalEvent` DTO the adapter
+# aggregates. Deliberately tiny and dependency-light: a backend crate depends
+# only on this, never on the aggregating adapter and never on the TUI, so
+# backends stay swappable and feature-gated.
+
+[dependencies]
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+thiserror   = { workspace = true }
+# Only for the `broadcast` channel type in `CalendarBackend::subscribe_ready`'s
+# signature — the async "data became ready" seam. No runtime is started here.
+tokio       = { workspace = true }
+# One deliberate dependency on the content layer: the mid-operation input seam
+# (`CalendarBackend::take_prompt_requests`) reuses content's `PromptRequest`
+# (built on the Action `InputSpec`/`ActionInput` vocabulary) so the whole stack
+# shares one input model instead of a parallel one. content does not depend on
+# this crate, so there is no cycle.
+not-yet-done-content = { path = "../not-yet-done-content" }

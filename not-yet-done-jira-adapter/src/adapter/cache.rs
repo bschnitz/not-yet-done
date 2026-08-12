@@ -52,7 +52,10 @@ impl JiraCache {
 
     /// Insert any label not already present. Returns the labels that were
     /// actually new (callers persist just those).
-    pub(super) fn merge_labels<I: IntoIterator<Item = String>>(&mut self, labels: I) -> Vec<String> {
+    pub(super) fn merge_labels<I: IntoIterator<Item = String>>(
+        &mut self,
+        labels: I,
+    ) -> Vec<String> {
         let mut new = Vec::new();
         for l in labels {
             if l.is_empty() {
@@ -69,7 +72,10 @@ impl JiraCache {
     /// and `email_address` overwritten; new entries get inserted. Returns
     /// the entries that were genuinely new or changed (callers persist
     /// just those).
-    pub(super) fn merge_users<I: IntoIterator<Item = JiraUser>>(&mut self, users: I) -> Vec<JiraUser> {
+    pub(super) fn merge_users<I: IntoIterator<Item = JiraUser>>(
+        &mut self,
+        users: I,
+    ) -> Vec<JiraUser> {
         let mut changed = Vec::new();
         for u in users {
             if u.name.is_empty() {
@@ -123,7 +129,11 @@ fn issue_users(detail: &JiraIssueDetail) -> Vec<JiraUser> {
         if key.is_empty() {
             continue;
         }
-        let display_name = if display.is_empty() { key.clone() } else { display.clone() };
+        let display_name = if display.is_empty() {
+            key.clone()
+        } else {
+            display.clone()
+        };
         users.push(JiraUser {
             name: key.clone(),
             display_name,
@@ -251,9 +261,7 @@ pub(super) async fn resolve_unknown_mentions(
 /// hit the persistent store directly (e.g. workflow-edge recording,
 /// which has its own row shape and doesn't merge into in-memory state).
 /// Returns `None` when the cache is configured without a backing DB.
-pub(super) fn db_handle(
-    cache: &Mutex<JiraCache>,
-) -> Option<(Arc<DatabaseConnection>, Uuid)> {
+pub(super) fn db_handle(cache: &Mutex<JiraCache>) -> Option<(Arc<DatabaseConnection>, Uuid)> {
     let c = cache.lock().unwrap();
     c.db.clone().map(|db| (db, c.scope_id))
 }
@@ -286,15 +294,21 @@ pub(super) fn hydrate_from_db(
     db: &Arc<DatabaseConnection>,
     scope_id: Uuid,
 ) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else { return; };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
     if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
         return;
     }
 
     let (labels, users, orphans) = tokio::task::block_in_place(|| {
         handle.block_on(async {
-            let labels = cache_store::load_labels(db, scope_id).await.unwrap_or_default();
-            let users = cache_store::load_users(db, scope_id).await.unwrap_or_default();
+            let labels = cache_store::load_labels(db, scope_id)
+                .await
+                .unwrap_or_default();
+            let users = cache_store::load_users(db, scope_id)
+                .await
+                .unwrap_or_default();
             let orphans = cache_store::cleanup_orphans(db, scope_id).await.ok();
             (labels, users, orphans)
         })

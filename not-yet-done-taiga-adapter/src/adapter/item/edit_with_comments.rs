@@ -13,9 +13,7 @@ use crate::client::{TaigaComment, delete_comment, edit_comment, fetch_comments};
 use super::TaigaItemNode;
 use super::edit_full::{build_tables, edit_full_fields};
 use super::slugs::build_user_table;
-use super::template::{
-    self, FieldError, Parsed3b, render_3b, render_with_errors,
-};
+use super::template::{self, FieldError, Parsed3b, render_3b, render_with_errors};
 
 const ADD_COMMENT_MARKER: &str = "--- add ---";
 const DELETE_KEYWORD_DEL: &str = "del";
@@ -199,6 +197,7 @@ impl TaigaItemNode {
             template: out,
             version: self.detail.version.to_string(),
             suffix: ".md".into(),
+            file_path: None,
         })
     }
 
@@ -238,7 +237,7 @@ impl TaigaItemNode {
             })
             .collect();
 
-        // Members table so `@uu-slug` mentions in comment bodies resolve to
+        // Members table so `@uu_slug` mentions in comment bodies resolve to
         // Taiga's wire `@username` form (the same slug system as the assignee
         // field). Existing comments render with `@username` already, so the
         // resolved body compares cleanly against the snapshot when unchanged.
@@ -261,13 +260,8 @@ impl TaigaItemNode {
             let user_body = block.body.trim();
             let snap_body = snap_by_id.get(id.as_str()).copied().unwrap_or("").trim();
             if is_delete_keyword(user_body) {
-                if let Err(e) = delete_comment(
-                    &self.client,
-                    self.detail.item_type,
-                    self.detail.id,
-                    id,
-                )
-                .await
+                if let Err(e) =
+                    delete_comment(&self.client, self.detail.item_type, self.detail.id, id).await
                 {
                     comment_errors.push(format!("delete {id}: {e}"));
                 } else {
@@ -326,12 +320,7 @@ impl TaigaItemNode {
             format!(" (errors: {})", comment_errors.join("; "))
         };
         let comment_msg = if n_updates + n_deletes + adds.len() > 0 {
-            format!(
-                ", comments: +{} ~{} -{}",
-                adds.len(),
-                n_updates,
-                n_deletes,
-            )
+            format!(", comments: +{} ~{} -{}", adds.len(), n_updates, n_deletes,)
         } else {
             String::new()
         };

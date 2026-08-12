@@ -109,6 +109,12 @@ adapter:
   #                    tasks.db). Point a Tasks and a Trackings tab at the same
   #                    file to make them coordinate live.
   #   allow_parallel:  false (default) = starting a tracking stops the others.
+  #   tracking_marker: glyph shown in the tracking marker column for a running
+  #                    task (and its collapsed ancestors). Default "⏱". This is
+  #                    the *cell value*, not a column `label:` (the header). Set
+  #                    "⏱️" (base + U+FE0F) for the emoji-presentation clock in
+  #                    terminals that render the bare codepoint as narrow text.
+  #                    The Tasks and Trackings tabs should use the *same* value.
   #   backup:          { directory, max_count } — target dir + retention for the
   #                    `backup` action below. Default dir
   #                    <data-local>/not_yet_done/backups, max_count 10. Pruning
@@ -116,6 +122,10 @@ adapter:
   #                    same dir never evict each other. Example:
   #   config_inline: '{ backup: { directory: /mnt/sync/nyd, max_count: 30 } }'
   config_inline: "{}"
+  # `manual_connect` defaults to true (nothing connects until you press the
+  # reload key). This adapter opens a local SQLite file and never logs in, so
+  # it opts back into loading at startup.
+  manual_connect: false
 
 # Lifecycle hooks (D5). A hook is a named point in the adapter's lifetime
 # (declared by `ContentAdapter::hooks()`) that this config turns into an action

@@ -16,9 +16,24 @@ use std::sync::Arc;
 
 use tokio::sync::{Notify, RwLock, watch};
 
-use not_yet_done_content::{AdapterStatus, AuthMechanism, AuthOrchestrator, AuthSpec};
+use not_yet_done_content::{
+    AdapterStatus, AuthFieldSpec, AuthOrchestrator, AuthSpec, MechanismSpec,
+};
 
 use crate::client::{ConfluenceClient, ConfluenceSession};
+
+/// What this adapter can speak against a Confluence Server /
+/// Data-Center instance. The factory publishes this table and validates
+/// the config against it; [`AuthBridge::run_login`] below implements it.
+/// The three belong together — a new mechanism is an entry here plus an
+/// arm there.
+pub(crate) const MECHANISMS: &[MechanismSpec] = &[MechanismSpec {
+    id: "cookie",
+    label: "Session cookie",
+    doc: "Send a ready-made Cookie header — what an SSO login (Crowd, SAML) leaves behind. \
+          Fetch it with a script; the adapter never talks to a browser itself.",
+    fields: &[AuthFieldSpec::required("cookie", "Cookie header", true)],
+}];
 
 pub(super) struct AuthBridge {
     base_url: String,
@@ -71,11 +86,27 @@ impl AuthBridge {
         self.orchestrator.invalidate_credentials().await;
     }
 
+    /// The cached client, unless the server has rejected its session in the
+    /// meantime — a rejected client is dropped here, which sends the caller
+    /// down the slow path where the stale cookie fails validation and
+    /// `re_authenticate` fetches a fresh one.
+    async fn live_client(&self) -> Option<Arc<ConfluenceClient>> {
+        let cached = self.client.read().await.clone()?;
+        if !cached.auth_rejected() {
+            return Some(cached);
+        }
+        let mut slot = self.client.write().await;
+        if slot.as_ref().is_some_and(|c| c.auth_rejected()) {
+            *slot = None;
+        }
+        None
+    }
+
     /// Return a live client. Fast path on cache hit; slow path drives
     /// the orchestrator and validates restored sessions, retrying with
     /// `re_authenticate` if the cached blob no longer works.
     pub(super) async fn get_client(self: &Arc<Self>) -> Result<Arc<ConfluenceClient>, String> {
-        if let Some(c) = self.client.read().await.clone() {
+        if let Some(c) = self.live_client().await {
             return Ok(c);
         }
 
@@ -111,8 +142,8 @@ impl AuthBridge {
     /// Pack the resolved credentials into a JSON session blob. No HTTP —
     /// for `cookie` the credential *is* the session.
     async fn run_login(&self, creds: HashMap<String, String>) -> Result<String, String> {
-        let session = match self.orchestrator.spec().mechanism {
-            AuthMechanism::Cookie => {
+        let session = match self.orchestrator.spec().mechanism.as_str() {
+            "cookie" => {
                 let cookie = creds
                     .get("cookie")
                     .map(|s| s.trim().to_string())
@@ -122,9 +153,12 @@ impl AuthBridge {
                     cookie: Some(cookie),
                 }
             }
+            // Unreachable via config: the factory validated the id
+            // against MECHANISMS. Kept as a defensive assertion for a
+            // spec built in code.
             other => {
                 return Err(format!(
-                    "Confluence adapter does not support mechanism {other:?}"
+                    "Confluence adapter does not support mechanism `{other}`"
                 ));
             }
         };
@@ -154,13 +188,14 @@ impl AuthBridge {
 mod tests {
     use super::*;
     use not_yet_done_content::{
-        AuthMechanism, AuthSpec, CredentialBinding, CredentialProvider, InMemorySessionStore,
-        SessionCachePolicy,
+        AuthSpec, CredentialBinding, CredentialProvider, InMemorySessionStore, SessionCachePolicy,
     };
 
     fn cookie_spec_literal(value: &str) -> AuthSpec {
         AuthSpec {
-            mechanism: AuthMechanism::Cookie,
+            mechanism: "cookie".into(),
+            script: None,
+            script_timeout_secs: 120,
             bindings: vec![CredentialBinding {
                 field: "cookie".to_string(),
                 provider: CredentialProvider::Literal {
@@ -217,7 +252,9 @@ mod tests {
     #[tokio::test]
     async fn run_login_rejects_unsupported_mechanism() {
         let spec = AuthSpec {
-            mechanism: AuthMechanism::BasicAuth,
+            mechanism: "basic-auth".into(),
+            script: None,
+            script_timeout_secs: 120,
             bindings: vec![
                 CredentialBinding {
                     field: "username".to_string(),
@@ -278,5 +315,46 @@ mod tests {
 
         bridge.invalidate_session().await;
         assert!(bridge.client.read().await.is_none());
+    }
+
+    /// The `until-rejected` promise: a cookie that expires *during* the
+    /// session must not keep being handed out. Nothing reaches the
+    /// orchestrator from the request path, so the client's own rejection
+    /// flag is what tells the bridge to drop it and log in again.
+    #[tokio::test]
+    async fn a_rejected_client_is_dropped_instead_of_handed_out_again() {
+        let bridge = AuthBridge::new(
+            "https://wiki.example.invalid".to_string(),
+            false,
+            cookie_spec_literal("JSESSIONID=x"),
+            Box::new(InMemorySessionStore::new()),
+        )
+        .expect("bridge");
+
+        let client = Arc::new(
+            ConfluenceClient::new("https://wiki.example.invalid", "JSESSIONID=x", false)
+                .expect("client"),
+        );
+        *bridge.client.write().await = Some(Arc::clone(&client));
+        assert!(
+            bridge.live_client().await.is_some(),
+            "cached client is live"
+        );
+
+        // The server rejects the session in the middle of the session.
+        let resp =
+            reqwest::Response::from(http::Response::builder().status(401).body("nope").unwrap());
+        let _ = client
+            .check_status("GET", "https://wiki.example.invalid/rest/api/space", resp)
+            .await;
+
+        assert!(
+            bridge.live_client().await.is_none(),
+            "rejected client withheld"
+        );
+        assert!(
+            bridge.client.read().await.is_none(),
+            "and evicted from the cache"
+        );
     }
 }

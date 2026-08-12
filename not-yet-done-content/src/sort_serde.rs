@@ -47,7 +47,10 @@ mod tests {
 
     #[test]
     fn round_trip_single() {
-        let keys = vec![SortKey { column: "title".into(), direction: SortDirection::Asc }];
+        let keys = vec![SortKey {
+            column: "title".into(),
+            direction: SortDirection::Asc,
+        }];
         let s = serialize(&keys);
         assert_eq!(s, "title:asc");
         assert_eq!(parse(&s), keys);
@@ -56,8 +59,14 @@ mod tests {
     #[test]
     fn round_trip_multi() {
         let keys = vec![
-            SortKey { column: "prio".into(), direction: SortDirection::Desc },
-            SortKey { column: "title".into(), direction: SortDirection::Asc },
+            SortKey {
+                column: "prio".into(),
+                direction: SortDirection::Desc,
+            },
+            SortKey {
+                column: "title".into(),
+                direction: SortDirection::Asc,
+            },
         ];
         let s = serialize(&keys);
         assert_eq!(s, "prio:desc,title:asc");
@@ -89,7 +98,19 @@ mod tests {
     fn whitespace_tolerated() {
         let parsed = parse(" title : asc , prio : desc ");
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], SortKey { column: "title".into(), direction: SortDirection::Asc });
-        assert_eq!(parsed[1], SortKey { column: "prio".into(), direction: SortDirection::Desc });
+        assert_eq!(
+            parsed[0],
+            SortKey {
+                column: "title".into(),
+                direction: SortDirection::Asc
+            }
+        );
+        assert_eq!(
+            parsed[1],
+            SortKey {
+                column: "prio".into(),
+                direction: SortDirection::Desc
+            }
+        );
     }
 }

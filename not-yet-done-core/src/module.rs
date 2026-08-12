@@ -1,12 +1,9 @@
 use shaku::module;
 
-use crate::repository::{
-    LinkRepositoryImpl, QueryShortcutRepositoryImpl, SavedQueryRepositoryImpl,
-    SettingsRepositoryImpl,
-};
+use crate::repository::{LinkRepositoryImpl, QueryShortcutRepositoryImpl, SettingsRepositoryImpl};
 use crate::service::BackupServiceImpl;
 
-// The app-shell domain (link / saved_query / settings / query_shortcut +
+// The app-shell domain (link / settings / query_shortcut +
 // backup) wired as a Shaku module. The task domain lives in its own
 // `not_yet_done_task_core::module::TaskDomainModule` (C3 of the DB-split).
 // A host that needs both — the TUI — builds both modules and resolves each
@@ -14,7 +11,6 @@ use crate::service::BackupServiceImpl;
 module! {
     pub CoreModule {
         components = [
-            SavedQueryRepositoryImpl,
             QueryShortcutRepositoryImpl,
             SettingsRepositoryImpl,
             LinkRepositoryImpl,

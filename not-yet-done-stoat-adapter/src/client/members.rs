@@ -3,7 +3,7 @@
 //! `GET /api/servers/{id}/members` returns a `members[]` array (server-
 //! specific data: nickname, roles) alongside a `users[]` array carrying
 //! the global account fields. We only need `id → username` to build the
-//! `@uu-…` completion slugs, so we read the `users[]` side. Scoped to a
+//! `@uu_…` completion slugs, so we read the `users[]` side. Scoped to a
 //! single server on purpose: completions must only offer people who are
 //! actually in the server the channel belongs to.
 

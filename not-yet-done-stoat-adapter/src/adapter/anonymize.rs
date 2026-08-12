@@ -68,9 +68,19 @@ mod tests {
         let a = StoatAnonymizer::default();
         let s = a.scrub_label(&nt("stoat:server"), "ACME Internal");
         assert!(s.ends_with("_server") && !s.contains("ACME"), "{s}");
-        assert_eq!(s, a.scrub_label(&nt("stoat:server"), "ACME Internal"), "deterministic");
-        assert!(a.scrub_label(&nt("stoat:category"), "Sales").ends_with("_category"));
-        assert!(a.scrub_label(&nt("stoat:channel"), "general").ends_with("_channel"));
+        assert_eq!(
+            s,
+            a.scrub_label(&nt("stoat:server"), "ACME Internal"),
+            "deterministic"
+        );
+        assert!(
+            a.scrub_label(&nt("stoat:category"), "Sales")
+                .ends_with("_category")
+        );
+        assert!(
+            a.scrub_label(&nt("stoat:channel"), "general")
+                .ends_with("_channel")
+        );
     }
 
     #[test]
@@ -84,7 +94,11 @@ mod tests {
     fn author_is_a_person_structural_fields_survive() {
         let a = StoatAnonymizer::default();
         assert!(!a.scrub_value("author", "John Doe").contains("Doe"));
-        for (k, v) in [("type", "text"), ("time", "2026-06-22T10:00:00Z"), ("edited", "yes")] {
+        for (k, v) in [
+            ("type", "text"),
+            ("time", "2026-06-22T10:00:00Z"),
+            ("edited", "yes"),
+        ] {
             assert_eq!(a.scrub_value(k, v), v);
         }
     }

@@ -356,7 +356,9 @@ mod tests {
         .await;
         assert_eq!(inv_rx.try_recv().unwrap(), Invalidation::All);
         assert_eq!(
-            state.read().await.channels["C0001"].last_message_id.as_deref(),
+            state.read().await.channels["C0001"]
+                .last_message_id
+                .as_deref(),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
         );
     }
@@ -500,7 +502,14 @@ mod tests {
     #[tokio::test]
     async fn non_content_event_pushes_nothing() {
         let (state, status_tx, _sr, inv_tx, mut inv_rx) = sinks();
-        handle_text(r#"{"type":"Pong","data":7}"#, &test_client(), &state, &status_tx, &inv_tx).await;
+        handle_text(
+            r#"{"type":"Pong","data":7}"#,
+            &test_client(),
+            &state,
+            &status_tx,
+            &inv_tx,
+        )
+        .await;
         assert!(inv_rx.try_recv().is_err());
     }
 }

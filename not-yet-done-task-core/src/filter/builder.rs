@@ -1,6 +1,6 @@
 use sea_orm::{
-    sea_query::{ColumnRef as SqColumnRef, Expr, SimpleExpr, Value},
     Condition, ExprTrait,
+    sea_query::{ColumnRef as SqColumnRef, Expr, SimpleExpr, Value},
 };
 
 use crate::error::AppError;
@@ -68,7 +68,7 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
 
         let simple: SimpleExpr = match &leaf.op {
             // Null-checks — no rhs needed
-            Operator::IsNull    => lhs.is_null(),
+            Operator::IsNull => lhs.is_null(),
             Operator::IsNotNull => lhs.is_not_null(),
 
             op => match &leaf.rhs {
@@ -78,12 +78,12 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
                     self.apply_op_col(op, lhs, rhs)?
                 }
                 // Column-vs-literal
-                Rhs::Lit(lit) => {
-                    self.apply_op_lit(op, lhs, lit)?
+                Rhs::Lit(lit) => self.apply_op_lit(op, lhs, lit)?,
+                Rhs::None => {
+                    return Err(AppError::FilterError(format!(
+                        "operator {op:?} requires a right-hand side"
+                    )));
                 }
-                Rhs::None => return Err(AppError::FilterError(format!(
-                    "operator {op:?} requires a right-hand side"
-                ))),
             },
         };
 
@@ -91,24 +91,21 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
     }
 
     /// Apply a binary operator where the rhs is another column expression.
-    fn apply_op_col(
-        &self,
-        op: &Operator,
-        lhs: Expr,
-        rhs: Expr,
-    ) -> Result<SimpleExpr, AppError> {
+    fn apply_op_col(&self, op: &Operator, lhs: Expr, rhs: Expr) -> Result<SimpleExpr, AppError> {
         // Use sea_query's binary() to avoid collisions with PartialEq::eq / PartialOrd::lt etc.
-        use sea_orm::sea_query::{BinOper};
+        use sea_orm::sea_query::BinOper;
         let bin_oper = match op {
-            Operator::Eq  => BinOper::Equal,
-            Operator::Ne  => BinOper::NotEqual,
-            Operator::Gt  => BinOper::GreaterThan,
+            Operator::Eq => BinOper::Equal,
+            Operator::Ne => BinOper::NotEqual,
+            Operator::Gt => BinOper::GreaterThan,
             Operator::Gte => BinOper::GreaterThanOrEqual,
-            Operator::Lt  => BinOper::SmallerThan,
+            Operator::Lt => BinOper::SmallerThan,
             Operator::Lte => BinOper::SmallerThanOrEqual,
-            other => return Err(AppError::FilterError(format!(
-                "operator {other:?} is not supported for column-vs-column comparisons"
-            ))),
+            other => {
+                return Err(AppError::FilterError(format!(
+                    "operator {other:?} is not supported for column-vs-column comparisons"
+                )));
+            }
         };
         Ok(lhs.binary(bin_oper, rhs))
     }
@@ -123,25 +120,26 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
         use sea_orm::sea_query::BinOper;
         match op {
             // Comparison operators — go through BinOper to avoid PartialEq/PartialOrd collisions
-            Operator::Eq  => Ok(lhs.binary(BinOper::Equal,              self.lit_to_value(lit)?)),
-            Operator::Ne  => Ok(lhs.binary(BinOper::NotEqual,           self.lit_to_value(lit)?)),
-            Operator::Gt  => Ok(lhs.binary(BinOper::GreaterThan,        self.lit_to_value(lit)?)),
+            Operator::Eq => Ok(lhs.binary(BinOper::Equal, self.lit_to_value(lit)?)),
+            Operator::Ne => Ok(lhs.binary(BinOper::NotEqual, self.lit_to_value(lit)?)),
+            Operator::Gt => Ok(lhs.binary(BinOper::GreaterThan, self.lit_to_value(lit)?)),
             Operator::Gte => Ok(lhs.binary(BinOper::GreaterThanOrEqual, self.lit_to_value(lit)?)),
-            Operator::Lt  => Ok(lhs.binary(BinOper::SmallerThan,        self.lit_to_value(lit)?)),
+            Operator::Lt => Ok(lhs.binary(BinOper::SmallerThan, self.lit_to_value(lit)?)),
             Operator::Lte => Ok(lhs.binary(BinOper::SmallerThanOrEqual, self.lit_to_value(lit)?)),
             // String operators — ExprTrait methods (no collision risk)
-            Operator::Like    => Ok(lhs.like(self.lit_to_string(lit)?)),
+            Operator::Like => Ok(lhs.like(self.lit_to_string(lit)?)),
             Operator::NotLike => Ok(lhs.not_like(self.lit_to_string(lit)?)),
-            Operator::Has     => Ok(lhs.like(format!("%{}%", self.lit_to_string(lit)?))),
+            Operator::Has => Ok(lhs.like(format!("%{}%", self.lit_to_string(lit)?))),
             // Set operators
-            Operator::In    => Ok(lhs.is_in(self.lit_to_value_list(lit)?)),
+            Operator::In => Ok(lhs.is_in(self.lit_to_value_list(lit)?)),
             Operator::NotIn => Ok(lhs.is_not_in(self.lit_to_value_list(lit)?)),
             // Null-checks handled above, never reach here
             Operator::IsNull | Operator::IsNotNull => unreachable!(),
             // Tree operators must be resolved before reaching the builder.
             Operator::HasAncestor | Operator::InTree => Err(AppError::FilterError(
                 "has_ancestor / in_tree must be resolved before building SQL. \
-                 Call resolve_tree_operators() first.".to_string(),
+                 Call resolve_tree_operators() first."
+                    .to_string(),
             )),
         }
     }
@@ -157,7 +155,7 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
             .ok_or_else(|| {
                 let name = match &col.table {
                     Some(t) => format!("{t}.{}", col.column),
-                    None    => format!(".{}", col.column),
+                    None => format!(".{}", col.column),
                 };
                 AppError::FilterError(format!("unknown column reference: '{name}'"))
             })?;
@@ -168,10 +166,10 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
         match lit {
             // SeaORM 2.x: Value::String(Option<String>) — no Box
             Literal::String(s) => Ok(Value::String(Some(s.clone()))),
-            Literal::Int(i)    => Ok(Value::BigInt(Some(*i))),
-            Literal::Float(f)  => Ok(Value::Double(Some(*f))),
-            Literal::Bool(b)   => Ok(Value::Bool(Some(*b))),
-            Literal::List(_)   => Err(AppError::FilterError(
+            Literal::Int(i) => Ok(Value::BigInt(Some(*i))),
+            Literal::Float(f) => Ok(Value::Double(Some(*f))),
+            Literal::Bool(b) => Ok(Value::Bool(Some(*b))),
+            Literal::List(_) => Err(AppError::FilterError(
                 "a list literal is not valid as a scalar value".to_string(),
             )),
         }

@@ -228,11 +228,8 @@ impl<'de> Deserialize<'de> for ActionChains {
                 Some(tokens) => {
                     let mut actions = Vec::with_capacity(tokens.len());
                     for token in tokens {
-                        let action = Action::from_str(&token).map_err(|e| {
-                            de::Error::custom(format!(
-                                "action_chains[{key}]: {e}"
-                            ))
-                        })?;
+                        let action = Action::from_str(&token)
+                            .map_err(|e| de::Error::custom(format!("action_chains[{key}]: {e}")))?;
                         if !action.is_chainable() {
                             return Err(de::Error::custom(format!(
                                 "action_chains[{key}]: `{token}` is not chainable in V1"
@@ -250,11 +247,7 @@ impl<'de> Deserialize<'de> for ActionChains {
 }
 
 /// Determine the current input mode from app state.
-pub fn input_mode(
-    popup_open: bool,
-    fuzzy_active: bool,
-    filter_form_open: bool,
-) -> InputMode {
+pub fn input_mode(popup_open: bool, fuzzy_active: bool, filter_form_open: bool) -> InputMode {
     if popup_open {
         InputMode::Popup
     } else if fuzzy_active {
@@ -292,8 +285,12 @@ fn resolve_popup_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action 
     for (action, binding) in &kb.form.bindings {
         if binding.matches(key) {
             match action {
-                FormAction::Next | FormAction::MultiselectNext => return Action::Form(FormAction::Next),
-                FormAction::Prev | FormAction::MultiselectPrev => return Action::Form(FormAction::Prev),
+                FormAction::Next | FormAction::MultiselectNext => {
+                    return Action::Form(FormAction::Next);
+                }
+                FormAction::Prev | FormAction::MultiselectPrev => {
+                    return Action::Form(FormAction::Prev);
+                }
             }
         }
     }
@@ -315,9 +312,15 @@ fn resolve_fuzzy_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action 
     for (action, binding) in &kb.common.bindings {
         if binding.matches(key) {
             match action {
-                CommonAction::FuzzyFilterAccept => return Action::Common(CommonAction::FuzzyFilterAccept),
-                CommonAction::FuzzyFilterClear => return Action::Common(CommonAction::FuzzyFilterClear),
-                CommonAction::FuzzyFilterCancel => return Action::Common(CommonAction::FuzzyFilterCancel),
+                CommonAction::FuzzyFilterAccept => {
+                    return Action::Common(CommonAction::FuzzyFilterAccept);
+                }
+                CommonAction::FuzzyFilterClear => {
+                    return Action::Common(CommonAction::FuzzyFilterClear);
+                }
+                CommonAction::FuzzyFilterCancel => {
+                    return Action::Common(CommonAction::FuzzyFilterCancel);
+                }
                 _ => {}
             }
         }
@@ -373,12 +376,7 @@ fn resolve_normal_key(
             // Block tab switching while a form is open.
             if form_visible {
                 match action {
-                    GlobalAction::TabJira
-                    | GlobalAction::TabTaiga
-                    | GlobalAction::TabPostgres
-                    | GlobalAction::TabConfluence
-                    | GlobalAction::TabNext
-                    | GlobalAction::TabPrev => return Action::Blocked,
+                    GlobalAction::TabNext | GlobalAction::TabPrev => return Action::Blocked,
                     _ => {}
                 }
             }
@@ -408,11 +406,16 @@ mod tests {
     #[test]
     fn normal_mode_tab_switch_blocked_while_form_open() {
         let kb = default_kb();
-        // A tab-switch global key (e.g. "3" → Jira) is blocked while a form
-        // is open. (Digit keys 1/2 are no longer fixed tab bindings since the
-        // legacy Tasks/Trackings tabs were removed.)
-        let action = resolve_key("3", InputMode::Normal, &kb, true);
-        assert_eq!(action, Action::Blocked);
+        // Tab cycling (`tab` → TabNext, `shift+tab` → TabPrev) is blocked
+        // while a form is open so the keys reach the form instead.
+        assert_eq!(
+            resolve_key("tab", InputMode::Normal, &kb, true),
+            Action::Blocked
+        );
+        assert_eq!(
+            resolve_key("shift+tab", InputMode::Normal, &kb, true),
+            Action::Blocked
+        );
     }
 
     #[test]
@@ -496,6 +499,24 @@ mod tests {
         assert_eq!(action, Action::Noop);
     }
 
+    #[test]
+    fn disabling_a_builtin_via_empty_list_makes_its_key_unresolved() {
+        // End-to-end: `quit: []` in tui.yaml disables the built-in — the
+        // former key resolves to nothing (Noop), while the surviving
+        // defaults still resolve normally.
+        let kb: KeyBindingConfig = serde_yaml::from_str("global:\n  quit: []\n").unwrap();
+        assert_eq!(
+            resolve_key("ctrl+c", InputMode::Normal, &kb, false),
+            Action::Noop,
+            "disabled quit must not fire"
+        );
+        assert_eq!(
+            resolve_key("tab", InputMode::Normal, &kb, false),
+            Action::Global(GlobalAction::TabNext),
+            "sibling defaults keep resolving"
+        );
+    }
+
     // ── Action FromStr / Display / chainable ────────────────────────────
 
     #[test]
@@ -531,7 +552,10 @@ mod tests {
     #[test]
     fn action_from_str_unknown_section_errors() {
         let err = Action::from_str("bogus.thing").unwrap_err();
-        assert!(err.contains("section") && err.contains("bogus"), "got: {err}");
+        assert!(
+            err.contains("section") && err.contains("bogus"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -616,4 +640,3 @@ mod tests {
         assert!(!Action::Global(GlobalAction::Quit).is_chainable());
     }
 }
-

@@ -12,7 +12,8 @@ use super::super::cache::fetch_issue;
 use super::super::util::{ensure_trailing_newline, normalize_blank_lines, other_err};
 use super::JiraIssueNode;
 use super::markers::{CONFLICT_BANNER_END, CONFLICT_BANNER_START};
-use super::template::{metadata_changes_to_fields, strip_banner};
+use super::template::{field_value_from_detail, metadata_changes_to_fields, strip_banner};
+use super::wiki_md::normalize_ws;
 
 /// Prepend the conflict banner to a buffer that already contains diffy's
 /// `<<<<<<< ours` / `>>>>>>> theirs` markers. Banners are stripped first so
@@ -58,7 +59,9 @@ impl JiraIssueNode {
                 let mut content = String::new();
                 content.push_str(CONFLICT_BANNER_START);
                 content.push('\n');
-                content.push_str("# Issue was modified upstream and the fresh state could not be re-fetched.\n");
+                content.push_str(
+                    "# Issue was modified upstream and the fresh state could not be re-fetched.\n",
+                );
                 content.push_str("# Save again to overwrite, or Esc to cancel.\n");
                 content.push_str(CONFLICT_BANNER_END);
                 content.push('\n');
@@ -72,8 +75,10 @@ impl JiraIssueNode {
 
         // Refresh node so render_3b uses the upstream state.
         self.replace_detail(fresh.clone());
-        let fresh_text   = ensure_trailing_newline(self.render_3b(editable_fields, &fresh, None, None));
-        let user_text_n  = ensure_trailing_newline(strip_banner(user_text).to_string());
+        let tables = self.slug_tables(&fresh).await;
+        let fresh_text =
+            ensure_trailing_newline(self.render_3b(editable_fields, &fresh, None, None, &tables));
+        let user_text_n = ensure_trailing_newline(strip_banner(user_text).to_string());
         let ancestor_raw = original_text
             .map(|t| ensure_trailing_newline(strip_banner(t).to_string()))
             .unwrap_or_else(|| fresh_text.clone());
@@ -84,8 +89,8 @@ impl JiraIssueNode {
         // ancestor and theirs as completely different, which collapses
         // into a single whole-document conflict region.
         let ancestor_n = normalize_blank_lines(&ancestor_raw);
-        let user_n     = normalize_blank_lines(&user_text_n);
-        let fresh_n    = normalize_blank_lines(&fresh_text);
+        let user_n = normalize_blank_lines(&user_text_n);
+        let fresh_n = normalize_blank_lines(&fresh_text);
 
         let mut opts = diffy::MergeOptions::new();
         opts.set_conflict_style(diffy::ConflictStyle::Merge);
@@ -134,7 +139,10 @@ impl JiraIssueNode {
         // handle_conflict has already replaced self.detail with `fresh`
         // — diff against `fresh` directly, no extra fetch needed.
         let changes = self.diff_against_current(&parsed, fresh);
-        if changes.metadata_changes.is_empty() && changes.content.is_none() {
+        if changes.metadata_changes.is_empty()
+            && changes.content.is_none()
+            && changes.status_change.is_none()
+        {
             return Ok(ActionOutcome::Done {
                 message: Some(format!(
                     "{} updated (auto-merged with upstream changes)",
@@ -159,7 +167,7 @@ impl JiraIssueNode {
                 .write_description(
                     new_content,
                     &changes.metadata_changes,
-                    Some(&new_version),
+                    Some(&fresh.description),
                     &summary_default,
                 )
                 .await
@@ -175,7 +183,10 @@ impl JiraIssueNode {
             }
         } else if !changes.metadata_changes.is_empty() {
             // Body unchanged → body PUT skipped → metadata fields need their own PUT.
-            match self.update_summary_field(&changes.metadata_changes, Some(&new_version)).await {
+            match self
+                .update_summary_field(&changes.metadata_changes, Some(fresh))
+                .await
+            {
                 Ok(()) => {}
                 Err(ContentError::Conflict(_)) => {
                     return Ok(ActionOutcome::Reopen {
@@ -188,6 +199,14 @@ impl JiraIssueNode {
         }
 
         let _ = new_version;
+
+        // A merged-in status change routes to a workflow transition, same as
+        // the non-conflict path. Baseline is `fresh` (the upstream state we
+        // merged against); no-ops when the resolved target equals it.
+        if let Some(target) = &changes.status_change {
+            self.apply_status_transition(target, fresh).await?;
+        }
+
         Ok(ActionOutcome::Done {
             message: Some(format!(
                 "{} updated (auto-merged with upstream changes)",
@@ -197,7 +216,15 @@ impl JiraIssueNode {
     }
 
     /// Write the issue description body. Returns the new version token.
-    /// Conflict detection re-fetches and compares the `updated` timestamp.
+    ///
+    /// Optimistic concurrency is checked against the **body content**, not
+    /// the `updated` version token. Jira bumps `updated` on *any* change to
+    /// the issue — including a comment we ourselves just added earlier in the
+    /// same save — so a version-token compare reports a phantom conflict for a
+    /// body that upstream never touched. Instead we re-fetch and compare the
+    /// body we based our edit on (`baseline_body`) against the current upstream
+    /// body, whitespace-normalized the same way the round-trip guard is: only a
+    /// genuine upstream body change is a conflict; a bare version bump is not.
     /// `summary_default` is what gets set on the wire when the
     /// `metadata_changes` list doesn't already include a summary update —
     /// passing it explicitly avoids any dependency on `self.detail`'s
@@ -206,20 +233,20 @@ impl JiraIssueNode {
         &mut self,
         data: &[u8],
         metadata_changes: &[(String, String)],
-        expected_version: Option<&str>,
+        baseline_body: Option<&str>,
         summary_default: &str,
     ) -> Result<String> {
-        if let Some(expected) = expected_version {
+        if let Some(baseline) = baseline_body {
             let current = fetch_issue(&self.client, &self.cache, &self.key)
                 .await
                 .map_err(other_err)?;
-            if current.updated != expected {
+            if body_changed_upstream(baseline, &current.description) {
                 return Err(ContentError::Conflict(ConflictError {
                     remote_version: current.updated.clone(),
                     remote_content: Some(current.description.as_bytes().to_vec()),
                     message: format!(
-                        "Issue {} was modified (expected version {}, remote version {})",
-                        self.key, expected, current.updated
+                        "Issue {} body was modified upstream while you were editing",
+                        self.key
                     ),
                 }));
             }
@@ -229,10 +256,7 @@ impl JiraIssueNode {
             String::from_utf8(data.to_vec()).map_err(|e| ContentError::Other(Box::new(e)))?;
 
         let mut fields = metadata_changes_to_fields(metadata_changes)?;
-        fields.insert(
-            "description".into(),
-            serde_json::Value::String(description),
-        );
+        fields.insert("description".into(), serde_json::Value::String(description));
         // Always re-include summary so a description-only PUT doesn't drop it.
         fields
             .entry("summary".to_string())
@@ -247,30 +271,57 @@ impl JiraIssueNode {
             .await
             .map_err(other_err)?;
         let new_version = refreshed.updated.clone();
-        *self = JiraIssueNode::from_detail(Arc::clone(&self.client), Arc::clone(&self.cache), refreshed);
+        *self = JiraIssueNode::from_detail(
+            Arc::clone(&self.client),
+            Arc::clone(&self.cache),
+            refreshed,
+        );
         Ok(new_version)
     }
 
     /// Update metadata fields that aren't covered by the body PUT.
     /// Handles `summary`, `labels`, and `assignee`.
+    ///
+    /// Concurrency is checked per changed field against `baseline` (the detail
+    /// the edit opened with), mirroring `write_description`: a bare version
+    /// bump (e.g. a comment we just added) is not a conflict — only a field we
+    /// are about to write having actually diverged upstream is.
     pub(super) async fn update_summary_field(
         &self,
         changes: &[(String, String)],
-        expected_version: Option<&str>,
+        baseline: Option<&JiraIssueDetail>,
     ) -> Result<()> {
-        if let Some(expected) = expected_version {
+        if let Some(baseline) = baseline {
             let current = fetch_issue(&self.client, &self.cache, &self.key)
                 .await
                 .map_err(other_err)?;
-            if current.updated != expected {
-                return Err(ContentError::Conflict(ConflictError {
-                    remote_version: current.updated.clone(),
-                    remote_content: None,
-                    message: format!(
-                        "Issue {} was modified (expected {}, remote {})",
-                        self.key, expected, current.updated
-                    ),
-                }));
+            for (key, _new) in changes {
+                let diverged = match key.as_str() {
+                    "labels" => {
+                        let mut cur: Vec<&str> =
+                            current.labels.iter().map(String::as_str).collect();
+                        cur.sort();
+                        let mut base: Vec<&str> =
+                            baseline.labels.iter().map(String::as_str).collect();
+                        base.sort();
+                        cur != base
+                    }
+                    "assignee" => current.assignee_key != baseline.assignee_key,
+                    _ => {
+                        field_value_from_detail(&current, key)
+                            != field_value_from_detail(baseline, key)
+                    }
+                };
+                if diverged {
+                    return Err(ContentError::Conflict(ConflictError {
+                        remote_version: current.updated.clone(),
+                        remote_content: None,
+                        message: format!(
+                            "Issue {} field `{key}` was modified upstream while you were editing",
+                            self.key
+                        ),
+                    }));
+                }
             }
         }
 
@@ -282,3 +333,32 @@ impl JiraIssueNode {
     }
 }
 
+/// Whether the current upstream body genuinely differs from the body the edit
+/// was based on. Compared with `normalize_ws` (per-line trim + blank-line drop)
+/// — the same normalization the wiki⇄md round-trip guard uses — so cosmetic
+/// reformatting (and the `wiki→md→wiki` skew the `edit_markdown` flow feeds
+/// through) is *not* treated as a change. A bare version bump with an untouched
+/// body therefore never conflicts.
+fn body_changed_upstream(baseline: &str, current: &str) -> bool {
+    normalize_ws(current) != normalize_ws(baseline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::body_changed_upstream;
+
+    #[test]
+    fn whitespace_only_difference_is_not_a_change() {
+        let baseline = "First line.\nSecond line.\n\nA paragraph.";
+        // Trailing spaces, extra blank-line runs, CRLF — all cosmetic.
+        let reformatted = "First line.  \r\nSecond line.\r\n\r\n\r\nA paragraph.   ";
+        assert!(!body_changed_upstream(baseline, reformatted));
+    }
+
+    #[test]
+    fn real_content_edit_is_a_change() {
+        let baseline = "First line.\nSecond line.";
+        let edited = "First line.\nSecond line.\nThird line added upstream.";
+        assert!(body_changed_upstream(baseline, edited));
+    }
+}

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Range;
 
-use crate::column::ColumnId;
 use crate::cell::CellContent;
+use crate::column::ColumnId;
 
 /// A raw data row with a typed ID and per-column cell content.
 #[derive(Debug, Clone)]

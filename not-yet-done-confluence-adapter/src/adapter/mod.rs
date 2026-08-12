@@ -15,7 +15,9 @@ use not_yet_done_content::*;
 
 mod anonymize;
 mod attachment;
-mod auth_bridge;
+// `pub(crate)` for the mechanism table alone: `crate::config` lives
+// outside this module and validates against it.
+pub(crate) mod auth_bridge;
 mod comment;
 mod conflict_banner;
 mod create_template;
@@ -26,11 +28,19 @@ mod space;
 pub use factory::ConfluenceAdapterFactory;
 
 use crate::client::ConfluenceClient;
-use attachment::attachment_actions;
+use attachment::{attachment_actions, attachment_node_type};
 use auth_bridge::AuthBridge;
-use comment::comment_actions;
-use page::{ConfluencePageNode, page_actions, page_node_type};
-use space::{ConfluenceSpaceNode, space_actions, space_node_type};
+use comment::{comment_actions, comment_node_type};
+use page::{
+    ConfluencePageNode, list_attachments, list_child_pages, list_comments, page_actions,
+    page_node_type,
+};
+use space::{ConfluenceSpaceNode, list_space_top_pages, space_actions, space_node_type};
+
+/// File-name suffix for a saved-query body: Confluence queries are CQL.
+/// Used both as the on-disk extension and as the name the external editor
+/// sees, so the two can never disagree.
+const QUERY_BODY_SUFFIX: &str = ".cql";
 
 pub struct ConfluenceAdapter {
     auth: Arc<AuthBridge>,
@@ -39,7 +49,7 @@ pub struct ConfluenceAdapter {
     base_url: String,
     db: Arc<DatabaseConnection>,
     scope_id: Uuid,
-    saved_queries: FsSavedQueryStore,
+    saved_queries: FsQueryStore,
     /// CF-16: when `Some`, the spaces listing is restricted to these keys
     /// and emitted in the configured order. `None` keeps the historic
     /// behaviour of paginating through every readable space.
@@ -69,7 +79,7 @@ impl ConfluenceAdapter {
             base_url,
             db,
             scope_id,
-            saved_queries: FsSavedQueryStore::new(queries_root),
+            saved_queries: FsQueryStore::new(queries_root, QUERY_BODY_SUFFIX),
             space_keys,
         }
     }
@@ -102,7 +112,6 @@ impl ContentAdapter for ConfluenceAdapter {
             client,
             base_url: self.base_url.clone(),
             connection_name: self.connection_name.clone(),
-            space_keys: self.space_keys.clone(),
         }))
     }
 
@@ -164,6 +173,102 @@ impl ContentAdapter for ConfluenceAdapter {
         }
     }
 
+    /// Single source of truth about a Confluence node's children. Mirrors the
+    /// legacy `Node::children_types`/sort-columns/`list` trio exactly:
+    ///
+    /// - `confluence:root` → `[space, page]`; space listing goes through
+    ///   [`list_spaces`] (honouring the adapter's `space_keys` whitelist),
+    ///   page listing through the CQL path [`list_cql_results`].
+    /// - `confluence:space` → `[page]`; the space's top-level pages via
+    ///   [`list_space_top_pages`], keyed on the space key (`node.id()`).
+    /// - `confluence:page` → `[page, comment, attachment]`, keyed on the
+    ///   numeric page id (`node.id()`).
+    /// - comment / attachment are leaves → no children.
+    ///
+    /// Every listing needs only a live client + the node's id (space key or
+    /// page id) + adapter state (`space_keys`); no concrete-node-only data is
+    /// read, so the closures reconstruct the client from `self.auth` rather
+    /// than downcasting `node`. Confluence exposes no server-side sort, so all
+    /// `columns` lists are empty.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<Child<'a>> {
+        // `node.id()` is a space key for a space node and a numeric page id for
+        // a page node — capture it up front so each closure owns its own copy.
+        let id = node.id().to_string();
+        match node.node_type().type_id.as_str() {
+            "confluence:root" => vec![
+                Child {
+                    node_type: space_node_type(),
+                    columns: Vec::new(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            list_spaces(&client, self.space_keys.as_deref(), params).await
+                        })
+                    }),
+                },
+                Child {
+                    node_type: page_node_type(),
+                    columns: Vec::new(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            list_cql_results(&client, params).await
+                        })
+                    }),
+                },
+            ],
+            "confluence:space" => vec![Child {
+                node_type: page_node_type(),
+                columns: Vec::new(),
+                list: Box::new(move |params| {
+                    Box::pin(async move {
+                        let client = self.auth.get_client().await.map_err(other_err)?;
+                        list_space_top_pages(&client, &id, params).await
+                    })
+                }),
+            }],
+            "confluence:page" => vec![
+                Child {
+                    node_type: page_node_type(),
+                    columns: Vec::new(),
+                    list: Box::new({
+                        let id = id.clone();
+                        move |params| {
+                            Box::pin(async move {
+                                let client = self.auth.get_client().await.map_err(other_err)?;
+                                list_child_pages(&client, &id, params).await
+                            })
+                        }
+                    }),
+                },
+                Child {
+                    node_type: comment_node_type(),
+                    columns: Vec::new(),
+                    list: Box::new({
+                        let id = id.clone();
+                        move |params| {
+                            Box::pin(async move {
+                                let client = self.auth.get_client().await.map_err(other_err)?;
+                                list_comments(&client, &id, params).await
+                            })
+                        }
+                    }),
+                },
+                Child {
+                    node_type: attachment_node_type(),
+                    columns: Vec::new(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            list_attachments(&client, &id, params).await
+                        })
+                    }),
+                },
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
             "confluence:space" => space_actions(),
@@ -192,6 +297,7 @@ impl ContentAdapter for ConfluenceAdapter {
             propagates_query_to_subtree: false,
             group_by_via_adapter: false,
             supports_eager_subtree: false,
+            ..Default::default()
         }
     }
 
@@ -213,6 +319,10 @@ impl ContentAdapter for ConfluenceAdapter {
         Some(&self.saved_queries)
     }
 
+    fn query_body_suffix(&self) -> &str {
+        QUERY_BODY_SUFFIX
+    }
+
     async fn load_view_sort(&self, scope: &str) -> Result<Vec<SortKey>> {
         use crate::entity::view_sort_state;
         use sea_orm::EntityTrait;
@@ -225,30 +335,61 @@ impl ContentAdapter for ConfluenceAdapter {
             .unwrap_or_default())
     }
 
-    async fn search_in_tree(
-        &self,
-        query: &str,
-        limit: u32,
-    ) -> Result<Option<TreeSearchResults>> {
+    async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
-            return Ok(Some(TreeSearchResults { hits: Vec::new(), truncated: false }));
+            return Ok(Some(TreeSearchResults {
+                hits: Vec::new(),
+                truncated: false,
+            }));
         }
         let cql = build_tree_find_cql(trimmed, self.space_keys.as_deref());
         let client = self.auth.get_client().await.map_err(other_err)?;
-        let results = client
-            .cql_search(&cql, 0, limit)
-            .await
-            .map_err(other_err)?;
+        let results = client.cql_search(&cql, 0, limit).await.map_err(other_err)?;
         let hits = sort_hits_in_tree_order(
-            results
-                .items
-                .into_iter()
-                .filter_map(row_to_hit)
-                .collect(),
+            results.items.into_iter().filter_map(row_to_hit).collect(),
             self.space_keys.as_deref(),
         );
-        Ok(Some(TreeSearchResults { hits, truncated: results.has_next }))
+        Ok(Some(TreeSearchResults {
+            hits,
+            truncated: results.has_next,
+        }))
+    }
+
+    /// Where a linked node lives in the tree, so a deep link can be
+    /// followed into a subtree that isn't expanded yet.
+    ///
+    /// A space key is already a root child — its path is itself, and no
+    /// round trip is needed to say so. A page is resolved with the
+    /// single-row CQL [`build_locate_cql`], whose `ancestors` expansion
+    /// (always requested, see [`crate::client::ConfluenceClient::cql_search`])
+    /// yields the chain from the space's top-level page down to the
+    /// parent; the path is then the same `[<space>, <ancestors…>, <page>]`
+    /// shape tree-find builds. A composite id
+    /// (`<page id>/comment/<id>`, `<page id>/attachment/<id>`) keeps its
+    /// leaf segment behind the page it hangs under.
+    ///
+    /// `Ok(None)` when the page is gone, when it is an orphan without a
+    /// space, or when its space is hidden by the `space_keys` whitelist:
+    /// in all three cases the tree has no node to reveal.
+    async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
+        match classify_id(node_id) {
+            IdKind::Space => Ok(space_is_listed(node_id, self.space_keys.as_deref())
+                .then(|| vec![node_id.to_string()])),
+            IdKind::Page { head, composite } => {
+                let client = self.auth.get_client().await.map_err(other_err)?;
+                let results = client
+                    .cql_search(&build_locate_cql(head), 0, 1)
+                    .await
+                    .map_err(other_err)?;
+                Ok(locate_path_from_row(
+                    node_id,
+                    composite,
+                    results.items.first(),
+                    self.space_keys.as_deref(),
+                ))
+            }
+        }
     }
 
     async fn save_view_sort(&self, scope: &str, sort: &[SortKey]) -> Result<()> {
@@ -296,11 +437,6 @@ struct ConfluenceRoot {
     client: Arc<ConfluenceClient>,
     base_url: String,
     connection_name: String,
-    /// CF-16: optional whitelist passed through from
-    /// [`ConfluenceAdapter::space_keys`]. `None` keeps the historic
-    /// paginate-everything behaviour; `Some(keys)` server-filters via
-    /// repeated `spaceKey=` params and reorders client-side.
-    space_keys: Option<Vec<String>>,
 }
 
 impl ConfluenceRoot {
@@ -345,20 +481,6 @@ impl Node for ConfluenceRoot {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![space_node_type(), page_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "confluence:space" => self.list_spaces(params).await,
-            "confluence:page" => self.list_cql_results(params).await,
-            other => Err(ContentError::NotSupported(format!(
-                "ConfluenceRoot does not list {other}"
-            ))),
-        }
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         // CQL-view drill: numeric ids belong to pages (and other content
         // types — for CF-8 read-only we treat them uniformly as page
@@ -396,180 +518,187 @@ impl Node for ConfluenceRoot {
     }
 }
 
-impl ConfluenceRoot {
-    async fn list_spaces(&self, params: ListParams) -> Result<ListResult> {
-        let page_req = params.page.unwrap_or(PageRequest {
-            offset: 0,
-            limit: DEFAULT_SPACE_PAGE_SIZE,
-        });
-        // CF-16: when a whitelist is configured, the server already
-        // returns ≤ |keys| rows and pagination is moot — request the
-        // whole list at once and reorder client-side. Without a
-        // whitelist, keep the historic paginated path.
-        let (spaces, page_info) = match self.space_keys.as_deref() {
-            Some(keys) if !keys.is_empty() => {
-                let limit = std::cmp::max(keys.len() as u32, page_req.limit);
-                let page = self
-                    .client
-                    .list_spaces_filtered(0, limit, keys)
-                    .await
-                    .map_err(other_err)?;
-                let ordered = reorder_spaces_by_keys(page.spaces, keys);
-                let info = PageInfo {
-                    offset: 0,
-                    limit,
-                    total: Some(ordered.len() as u64),
-                    has_next: false,
-                    has_prev: false,
-                };
-                (ordered, info)
-            }
-            _ => {
-                let page = self
-                    .client
-                    .list_spaces(page_req.offset, page_req.limit)
-                    .await
-                    .map_err(other_err)?;
-                let info = PageInfo {
-                    offset: page.start,
-                    limit: page.limit,
-                    total: None,
-                    has_next: page.has_next,
-                    has_prev: page.start > 0,
-                };
-                (page.spaces, info)
-            }
-        };
-        let items = spaces
-            .into_iter()
-            .map(|space| NodeSummary {
-                id: space.key.clone(),
-                label: space.name.clone(),
-                node_type: space_node_type(),
-                metadata: Metadata {
-                    fields: vec![
-                        MetadataField {
-                            key: "key".into(),
-                            value: space.key,
-                            display_label: "Key".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "type".into(),
-                            value: space.space_type,
-                            display_label: "Type".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "id".into(),
-                            value: space.id.to_string(),
-                            display_label: "ID".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                    ],
-                },
-                has_children: None,
-            })
-            .collect();
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(page_info),
-            batch_download_available: false,
-            downloaded: Vec::new(),
+/// Root's `confluence:space` listing body. Extracted as a free fn so both
+/// the legacy `ConfluenceRoot::list` and the adapter-level `childs` closure
+/// call the identical path. Needs only the client + the adapter's optional
+/// space-key whitelist (`self.space_keys` on the root node / adapter).
+pub(in crate::adapter) async fn list_spaces(
+    client: &ConfluenceClient,
+    space_keys: Option<&[String]>,
+    params: ListParams,
+) -> Result<ListResult> {
+    let page_req = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: DEFAULT_SPACE_PAGE_SIZE,
+    });
+    // CF-16: when a whitelist is configured, the server already
+    // returns ≤ |keys| rows and pagination is moot — request the
+    // whole list at once and reorder client-side. Without a
+    // whitelist, keep the historic paginated path.
+    let (spaces, page_info) = match space_keys {
+        Some(keys) if !keys.is_empty() => {
+            let limit = std::cmp::max(keys.len() as u32, page_req.limit);
+            let page = client
+                .list_spaces_filtered(0, limit, keys)
+                .await
+                .map_err(other_err)?;
+            let ordered = reorder_spaces_by_keys(page.spaces, keys);
+            let info = PageInfo {
+                offset: 0,
+                limit,
+                total: Some(ordered.len() as u64),
+                has_next: false,
+                has_prev: false,
+            };
+            (ordered, info)
+        }
+        _ => {
+            let page = client
+                .list_spaces(page_req.offset, page_req.limit)
+                .await
+                .map_err(other_err)?;
+            let info = PageInfo {
+                offset: page.start,
+                limit: page.limit,
+                total: None,
+                has_next: page.has_next,
+                has_prev: page.start > 0,
+            };
+            (page.spaces, info)
+        }
+    };
+    let items = spaces
+        .into_iter()
+        .map(|space| NodeSummary {
+            id: space.key.clone(),
+            label: space.name.clone(),
+            node_type: space_node_type(),
+            metadata: Metadata {
+                fields: vec![
+                    MetadataField {
+                        key: "key".into(),
+                        value: space.key,
+                        display_label: "Key".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "type".into(),
+                        value: space.space_type,
+                        display_label: "Type".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "id".into(),
+                        value: space.id.to_string(),
+                        display_label: "ID".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                ],
+            },
+            has_children: None,
         })
-    }
+        .collect();
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(page_info),
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
+}
 
-    /// CF-8 CQL listing path. `params.query` carries the saved-query
-    /// body (a raw CQL string) — the view-YAML `query.default` is the
-    /// fallback when no saved query is applied. Results are flattened
-    /// into `NodeSummary` rows with `confluence:page` node-type even
-    /// for blogposts/attachments/comments — drill-into-row uses the
-    /// page node's `get_child` to navigate further, which is correct
-    /// for pages and harmless for the others until CF-12+.
-    async fn list_cql_results(&self, params: ListParams) -> Result<ListResult> {
-        let cql = params.query.as_deref().unwrap_or(
-            // Same default the example saved-query mirrors. Kept here as
-            // the safety-net so the view always shows *something* on
-            // first load even before any saved query is applied.
-            "type = page ORDER BY lastModified DESC",
-        );
-        let page_req = params.page.unwrap_or(PageRequest {
-            offset: 0,
-            limit: DEFAULT_PAGE_PAGE_SIZE,
-        });
-        let results = self
-            .client
-            .cql_search(cql, page_req.offset, page_req.limit)
-            .await
-            .map_err(other_err)?;
-        let items = results
-            .items
-            .into_iter()
-            .map(|row| NodeSummary {
-                id: row.id.clone(),
-                label: row.title.clone(),
-                node_type: page_node_type(),
-                metadata: Metadata {
-                    fields: vec![
-                        MetadataField {
-                            key: "id".into(),
-                            value: row.id,
-                            display_label: "ID".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "title".into(),
-                            value: row.title,
-                            display_label: "Title".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "type".into(),
-                            value: row.content_type,
-                            display_label: "Type".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "space".into(),
-                            value: row.space_key,
-                            display_label: "Space".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "modified".into(),
-                            value: row.last_modified,
-                            display_label: "Modified".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                    ],
-                },
-                has_children: None,
-            })
-            .collect();
-        let page_info = PageInfo {
-            offset: results.start,
-            limit: results.limit,
-            total: None,
-            has_next: results.has_next,
-            has_prev: results.start > 0,
-        };
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(page_info),
-            batch_download_available: false,
-            downloaded: Vec::new(),
+/// CF-8 CQL listing body. `params.query` carries the saved-query body (a raw
+/// CQL string); the view-YAML `query.default` is the fallback when no saved
+/// query is applied. Extracted as a free fn shared by the legacy
+/// `ConfluenceRoot::list` and the adapter `childs` closure. Results are
+/// flattened into `NodeSummary` rows with `confluence:page` node-type even
+/// for blogposts/attachments/comments — drill-into-row uses the page node's
+/// `get_child` to navigate further, which is correct for pages and harmless
+/// for the others until CF-12+.
+pub(in crate::adapter) async fn list_cql_results(
+    client: &ConfluenceClient,
+    params: ListParams,
+) -> Result<ListResult> {
+    let cql = params.query.as_deref().unwrap_or(
+        // Same default the example saved-query mirrors. Kept here as
+        // the safety-net so the view always shows *something* on
+        // first load even before any saved query is applied.
+        "type = page ORDER BY lastModified DESC",
+    );
+    let page_req = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: DEFAULT_PAGE_PAGE_SIZE,
+    });
+    let results = client
+        .cql_search(cql, page_req.offset, page_req.limit)
+        .await
+        .map_err(other_err)?;
+    let items = results
+        .items
+        .into_iter()
+        .map(|row| NodeSummary {
+            id: row.id.clone(),
+            label: row.title.clone(),
+            node_type: page_node_type(),
+            metadata: Metadata {
+                fields: vec![
+                    MetadataField {
+                        key: "id".into(),
+                        value: row.id,
+                        display_label: "ID".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "title".into(),
+                        value: row.title,
+                        display_label: "Title".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "type".into(),
+                        value: row.content_type,
+                        display_label: "Type".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "space".into(),
+                        value: row.space_key,
+                        display_label: "Space".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "modified".into(),
+                        value: row.last_modified,
+                        display_label: "Modified".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                ],
+            },
+            has_children: None,
         })
-    }
+        .collect();
+    let page_info = PageInfo {
+        offset: results.start,
+        limit: results.limit,
+        total: None,
+        has_next: results.has_next,
+        has_prev: results.start > 0,
+    };
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(page_info),
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
 }
 
 /// Classifier output for [`classify_id`]. Splits the "is this a page-
@@ -608,13 +737,8 @@ fn classify_id(id: &str) -> IdKind<'_> {
 /// because the field-syntax `~ "..."` is a Lucene fuzzy-match where
 /// preserving operator characters would silently change semantics.
 pub(crate) fn build_tree_find_cql(query: &str, space_keys: Option<&[String]>) -> String {
-    let sanitized: String = query
-        .chars()
-        .filter(|c| *c != '"' && *c != '\\')
-        .collect();
-    let mut cql = format!(
-        "(title ~ \"{sanitized}\" OR text ~ \"{sanitized}\") AND type = page"
-    );
+    let sanitized: String = query.chars().filter(|c| *c != '"' && *c != '\\').collect();
+    let mut cql = format!("(title ~ \"{sanitized}\" OR text ~ \"{sanitized}\") AND type = page");
     if let Some(keys) = space_keys {
         if !keys.is_empty() {
             let list: Vec<String> = keys
@@ -630,10 +754,15 @@ pub(crate) fn build_tree_find_cql(query: &str, space_keys: Option<&[String]>) ->
     cql
 }
 
-/// CT-3: lift a [`crate::client::SearchResultMeta`] row into a
-/// [`TreeFindHit`]. Skips rows without a space key (orphans the tree
-/// view cannot address) and rows without an id.
-fn row_to_hit(row: crate::client::SearchResultMeta) -> Option<TreeFindHit> {
+/// Path from the tree root down to the page a CQL row describes:
+/// `[<space key>, <ancestor ids…>, <page id>]`. `None` for a row the
+/// tree cannot address — one without an id, or without a space key
+/// (an orphan).
+///
+/// Shared by tree-find ([`row_to_hit`]) and deep links
+/// ([`ContentAdapter::locate_node_path`]), so following a link expands
+/// exactly the nodes a search hit would have highlighted.
+fn tree_path(row: &crate::client::SearchResultMeta) -> Option<Vec<String>> {
     if row.id.is_empty() || row.space_key.is_empty() {
         return None;
     }
@@ -641,11 +770,66 @@ fn row_to_hit(row: crate::client::SearchResultMeta) -> Option<TreeFindHit> {
     path.push(row.space_key.clone());
     path.extend(row.ancestors.iter().map(|a| a.id.clone()));
     path.push(row.id.clone());
+    Some(path)
+}
+
+/// CT-3: lift a [`crate::client::SearchResultMeta`] row into a
+/// [`TreeFindHit`]. Skips rows the tree cannot address (see
+/// [`tree_path`]).
+fn row_to_hit(row: crate::client::SearchResultMeta) -> Option<TreeFindHit> {
+    let path = tree_path(&row)?;
     Some(TreeFindHit {
         path,
         label: row.title,
         space_key: row.space_key,
     })
+}
+
+/// CQL that resolves exactly one page by content id — the deep-link
+/// counterpart to [`build_tree_find_cql`]. Only an all-digit id reaches
+/// this (see [`classify_id`]), so there is nothing to escape.
+///
+/// `type = page` is deliberate: the tree holds pages, so a blogpost or
+/// any other content sharing the id space has no node to reveal. Saying
+/// "cannot locate" is then honest, where a path would only move the
+/// failure to the expand step.
+pub(crate) fn build_locate_cql(page_id: &str) -> String {
+    format!("id = {page_id} AND type = page")
+}
+
+/// Turn the row [`build_locate_cql`] returned into the path
+/// [`ContentAdapter::locate_node_path`] hands back. Pure, so the whole
+/// decision is unit-testable without the network-validating
+/// [`AuthBridge`]: `None` when the search found nothing (page gone),
+/// when the row is unaddressable (see [`tree_path`]), or when its space
+/// is hidden by the whitelist. A composite `node_id` keeps its leaf
+/// segment behind the page it hangs under.
+fn locate_path_from_row(
+    node_id: &str,
+    composite: bool,
+    row: Option<&crate::client::SearchResultMeta>,
+    space_keys: Option<&[String]>,
+) -> Option<Vec<String>> {
+    let row = row?;
+    if !space_is_listed(&row.space_key, space_keys) {
+        return None;
+    }
+    let mut path = tree_path(row)?;
+    if composite {
+        path.push(node_id.to_string());
+    }
+    Some(path)
+}
+
+/// CF-16: whether the tree lists a space at all. Without a whitelist
+/// every readable space appears, so anything is reachable; with one,
+/// only the configured keys are — matched exactly, like
+/// [`reorder_spaces_by_keys`] does.
+fn space_is_listed(space_key: &str, space_keys: Option<&[String]>) -> bool {
+    match space_keys {
+        Some(keys) => keys.iter().any(|k| k == space_key),
+        None => true,
+    }
 }
 
 /// CT-3: sort hits in tree-render order so the TUI can step forward /
@@ -695,13 +879,67 @@ fn reorder_spaces_by_keys(
     keys.iter().filter_map(|k| by_key.remove(k)).collect()
 }
 
+/// Build a fully-wired [`ConfluenceAdapter`] backed by an in-memory SQLite
+/// cache, for use in the crate's unit tests. Shared across the `adapter`
+/// submodule test modules (attachment / comment / page) so the child-projection
+/// free functions (`children::child_types` / `list` / `list_subtree`) can be
+/// exercised against a real adapter without each module re-deriving the auth +
+/// db boilerplate.
+#[cfg(test)]
+pub(in crate::adapter) async fn test_adapter() -> ConfluenceAdapter {
+    use not_yet_done_content::{
+        AuthSpec, CredentialBinding, CredentialProvider, InMemorySessionStore, SessionCachePolicy,
+    };
+    use sea_orm::Database;
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("open in-memory");
+    db.get_schema_registry("not_yet_done_confluence_adapter::entity::*")
+        .sync(&db)
+        .await
+        .expect("schema sync");
+    let db = Arc::new(db);
+
+    let spec = AuthSpec {
+        mechanism: "cookie".into(),
+        script: None,
+        script_timeout_secs: 120,
+        bindings: vec![CredentialBinding {
+            field: "cookie".to_string(),
+            provider: CredentialProvider::Literal {
+                value: "JSESSIONID=test".to_string(),
+            },
+            label: None,
+            masked: None,
+        }],
+        session_cache: SessionCachePolicy::UntilRejected,
+    };
+    let auth = AuthBridge::new(
+        "https://wiki.example.invalid".to_string(),
+        false,
+        spec,
+        Box::new(InMemorySessionStore::new()),
+    )
+    .expect("bridge");
+
+    ConfluenceAdapter::from_parts(
+        auth,
+        "instance-test".into(),
+        "wiki".into(),
+        "https://wiki.example.invalid".into(),
+        db,
+        Uuid::new_v4(),
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::{AncestorMeta, SearchResultMeta};
     use not_yet_done_content::{
-        AuthMechanism, AuthSpec, CredentialBinding, CredentialProvider, InMemorySessionStore,
-        SessionCachePolicy,
+        AuthSpec, CredentialBinding, CredentialProvider, InMemorySessionStore, SessionCachePolicy,
     };
     use sea_orm::Database;
 
@@ -718,7 +956,9 @@ mod tests {
 
     fn dummy_auth_bridge() -> Arc<AuthBridge> {
         let spec = AuthSpec {
-            mechanism: AuthMechanism::Cookie,
+            mechanism: "cookie".into(),
+            script: None,
+            script_timeout_secs: 120,
             bindings: vec![CredentialBinding {
                 field: "cookie".to_string(),
                 provider: CredentialProvider::Literal {
@@ -922,10 +1162,7 @@ mod tests {
 
     #[test]
     fn sort_hits_in_tree_order_no_whitelist_falls_back_to_alpha() {
-        let hits = vec![
-            mk_hit("BETA", &["1"], "b1"),
-            mk_hit("ALPHA", &["1"], "a1"),
-        ];
+        let hits = vec![mk_hit("BETA", &["1"], "b1"), mk_hit("ALPHA", &["1"], "a1")];
         let sorted = sort_hits_in_tree_order(hits, None);
         assert_eq!(sorted[0].space_key, "ALPHA");
         assert_eq!(sorted[1].space_key, "BETA");
@@ -972,14 +1209,102 @@ mod tests {
             space_key: "DEMO".into(),
             last_modified: String::new(),
             ancestors: vec![
-                AncestorMeta { id: "1000".into(), title: "Top".into() },
-                AncestorMeta { id: "1100".into(), title: "Mid".into() },
+                AncestorMeta {
+                    id: "1000".into(),
+                    title: "Top".into(),
+                },
+                AncestorMeta {
+                    id: "1100".into(),
+                    title: "Mid".into(),
+                },
             ],
         };
         let hit = row_to_hit(row).expect("non-orphan");
         assert_eq!(hit.path, vec!["DEMO", "1000", "1100", "12345"]);
         assert_eq!(hit.space_key, "DEMO");
         assert_eq!(hit.label, "Hit");
+    }
+
+    /// A page row for the deep-link tests: `DEMO` space, two ancestors.
+    fn located_row() -> SearchResultMeta {
+        SearchResultMeta {
+            id: "12345".into(),
+            content_type: "page".into(),
+            title: "Design Doc".into(),
+            webui: String::new(),
+            space_key: "DEMO".into(),
+            last_modified: String::new(),
+            ancestors: vec![
+                AncestorMeta {
+                    id: "1000".into(),
+                    title: "Top".into(),
+                },
+                AncestorMeta {
+                    id: "1100".into(),
+                    title: "Mid".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn locate_cql_pins_one_page_by_id() {
+        assert_eq!(build_locate_cql("12345"), "id = 12345 AND type = page");
+    }
+
+    /// The deep-link path is the very shape tree-find produces, so both
+    /// features expand the same nodes on the way to a page.
+    #[test]
+    fn locate_path_matches_the_tree_find_path() {
+        let row = located_row();
+        let path = locate_path_from_row("12345", false, Some(&row), None).expect("located");
+        assert_eq!(path, vec!["DEMO", "1000", "1100", "12345"]);
+        assert_eq!(path, row_to_hit(located_row()).expect("hit").path);
+    }
+
+    #[test]
+    fn a_composite_id_keeps_its_leaf_behind_the_page() {
+        let row = located_row();
+        let path =
+            locate_path_from_row("12345/comment/c1001", true, Some(&row), None).expect("located");
+        assert_eq!(
+            path,
+            vec!["DEMO", "1000", "1100", "12345", "12345/comment/c1001"]
+        );
+    }
+
+    #[test]
+    fn a_page_the_search_no_longer_finds_has_no_path() {
+        assert!(locate_path_from_row("12345", false, None, None).is_none());
+    }
+
+    /// CF-16: a whitelist that hides the space hides the page with it —
+    /// there is no space node to expand, so no path is claimed.
+    #[test]
+    fn a_page_outside_the_whitelist_has_no_path() {
+        let row = located_row();
+        let keys = vec!["OTHER".to_string()];
+        assert!(locate_path_from_row("12345", false, Some(&row), Some(&keys)).is_none());
+        let keys = vec!["DEMO".to_string()];
+        assert!(locate_path_from_row("12345", false, Some(&row), Some(&keys)).is_some());
+    }
+
+    #[test]
+    fn an_orphan_row_has_no_path() {
+        let mut row = located_row();
+        row.space_key = String::new();
+        assert!(locate_path_from_row("12345", false, Some(&row), None).is_none());
+    }
+
+    /// A space key is a root child: its own path, no round trip — but
+    /// only when the whitelist actually lists it.
+    #[tokio::test]
+    async fn locate_node_path_of_a_space_is_the_space_itself() {
+        let adapter = test_adapter().await;
+        assert_eq!(
+            adapter.locate_node_path("DEMO").await.expect("no error"),
+            Some(vec!["DEMO".to_string()])
+        );
     }
 
     #[tokio::test]

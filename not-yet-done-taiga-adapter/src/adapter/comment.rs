@@ -8,14 +8,17 @@ use async_trait::async_trait;
 use not_yet_done_content::*;
 
 use super::types::comment_type;
-use crate::client::{ItemType, TaigaClient, TaigaComment, edit_comment};
+use crate::client::{ItemType, TaigaClient, TaigaComment, delete_comment, edit_comment};
 
 /// Single-marker separator used by the comment editor template (no
 /// metadata = no need for a 3b layout).
 const COMMENT_SEPARATOR: &str = "# ─────────────────────────────────────────────────";
 
 pub(super) fn comment_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("edit_full", "edit", InputSpec::Editor)]
+    vec![
+        NodeAction::new("edit_full", "edit", InputSpec::Editor),
+        NodeAction::new("delete", "delete", InputSpec::None),
+    ]
 }
 
 pub(super) struct TaigaCommentNode {
@@ -95,13 +98,16 @@ impl Node for TaigaCommentNode {
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        // Always expose `edit`; the server rejects non-author edits with
-        // a clean error. Per-instance filtering would violate the
-        // deterministic-per-node_type contract that lets the TUI resolve
-        // hints without a `get_by_id` chain walk.
-        comment_actions()
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "delete" => Ok(ActionDispatch::DeleteSelf {
+                confirm: Some(format!(
+                    "Delete comment {} by {}? (y/n)",
+                    self.comment.id, self.comment.author
+                )),
+            }),
+            _ => Ok(ActionDispatch::Noop),
+        }
     }
 
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
@@ -116,6 +122,7 @@ impl Node for TaigaCommentNode {
                     template,
                     version: c.created.clone(),
                     suffix: ".md".into(),
+                    file_path: None,
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -124,11 +131,7 @@ impl Node for TaigaCommentNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit_full", ActionInput::Edited { text, .. }) => {
                 let body = parse_comment_buffer(&text);
@@ -147,6 +150,14 @@ impl Node for TaigaCommentNode {
                 self.comment.body = body;
                 Ok(ActionOutcome::Done {
                     message: Some(format!("comment {} updated", self.comment.id)),
+                })
+            }
+            ("delete", ActionInput::None) => {
+                delete_comment(&self.client, self.item_type, self.item_id, &self.comment.id)
+                    .await
+                    .map_err(|e| ContentError::Other(e.into()))?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("comment {} deleted", self.comment.id)),
                 })
             }
             (other, _) => Err(ContentError::NotSupported(format!(

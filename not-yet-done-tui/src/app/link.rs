@@ -1,14 +1,22 @@
 //! App-level entry point for [`NodeRef`] open-by-path dispatch.
 //!
-//! The App is the top of the routing chain. It peels the first segment
-//! off the ref (the tab key) and forwards the remaining tail to the
-//! matching tab. Tasks and Trackings consume a single UUID tail.
-//! Adapter tabs (`jira`, `taiga`) take a `<instance_id>/<node_id>`
-//! tail: the instance segment selects which content slot to switch to,
-//! the rest is handed to the pane for row-focus lookup.
+//! Every link ref has the same three-part shape, whatever produced it:
+//! `<adapter_type>/<instance_id>/<node_id>`. The first two segments
+//! pick the content slot, the rest is the adapter's own node id and
+//! stays opaque to the host (it may itself contain slashes).
 //!
-//! Postgres is intentionally excluded — its `qrow:N` IDs are per-query
-//! and meaningless after a refresh.
+//! Nothing here knows any adapter by name. What the host needs to
+//! route a link, the adapter states through the trait:
+//!
+//! - [`AdapterCapabilities::unstable_node_ids`](not_yet_done_content::AdapterCapabilities::unstable_node_ids)
+//!   — ids that don't survive a reload can't be linked at all, so such
+//!   rows are neither markable nor followable.
+//! - [`ContentAdapter::locate_node_path`] — where a node lives in the
+//!   tree, so following a link can expand a subtree that isn't loaded
+//!   yet. Optional: adapters that don't implement it simply lose deep
+//!   links (a target that happens to be on screen still works).
+//! - [`ContentAdapter::get_by_id`] — used by `:linkprune` to tell
+//!   "target is gone" from "target just isn't loaded".
 
 use std::collections::HashSet;
 
@@ -19,31 +27,46 @@ use super::App;
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
 use crate::tabs::Tab;
 
+/// Split a link ref into `(adapter_type, instance_id, node_id)`.
+///
+/// The node id is everything after the second segment and keeps its
+/// slashes — composite ids (`<db>/schemas/<s>/tables/<t>`, a Jira
+/// comment under its issue) are one opaque unit to the host.
+pub fn split_link_addr(node_ref: &NodeRef) -> Result<(&str, &str, &str), String> {
+    let raw = node_ref.as_str();
+    let mut parts = raw.splitn(3, '/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(kind), Some(instance), Some(node_id))
+            if !kind.is_empty() && !instance.is_empty() && !node_id.is_empty() =>
+        {
+            Ok((kind, instance, node_id))
+        }
+        _ => Err(format!(
+            "expected <adapter>/<instance>/<node_id>, got {raw}"
+        )),
+    }
+}
+
 /// Snapshot of "what addresses currently resolve" used by
 /// [`classify_link_ref`] for bulk staleness scanning. Computed once
-/// per `:linkprune` invocation by querying tasks / trackings / content
-/// adapters; kept as plain sets so the classifier itself stays a pure
-/// function over data.
+/// per `:linkprune` invocation; kept as plain data so the classifier
+/// itself stays a pure function.
 #[derive(Debug, Default)]
 pub struct LinkResolveContext {
-    /// Referenced task UUIDs that resolve *live* (present in a `tasks`
-    /// adapter and not soft-deleted). Populated by probing each referenced
-    /// id against the adapter — not a full table dump.
-    pub task_ids: HashSet<Uuid>,
-    /// Referenced tracking UUIDs that resolve live (present in a `trackings`
-    /// adapter and not soft-deleted).
-    pub tracking_ids: HashSet<Uuid>,
-    /// Whether a `tasks` adapter is configured at all. When `false` the host
-    /// has no way to verify task refs (the task DB lives behind the adapter),
-    /// so `tasks/<uuid>` refs are treated as live rather than pruned blind.
-    pub tasks_adapter_present: bool,
-    /// Whether a `trackings` adapter is configured at all (see above).
-    pub trackings_adapter_present: bool,
     /// `(adapter_type, instance_id)` pairs for every currently configured
-    /// content adapter, e.g. `("jira", "prod")`. A link whose head matches
-    /// `adapter_type` but whose instance segment isn't in this set counts
-    /// as stale even when the node would otherwise be navigable.
+    /// content adapter, e.g. `("jira", "prod")`. A ref whose first two
+    /// segments aren't in this set has no tab to open.
     pub adapter_instances: HashSet<(String, String)>,
+    /// Adapter types that declared
+    /// [`AdapterCapabilities::unstable_node_ids`](not_yet_done_content::AdapterCapabilities::unstable_node_ids)
+    /// — their ids are positional or per-query, so any stored ref to
+    /// them is meaningless by construction.
+    pub unstable_id_adapters: HashSet<String>,
+    /// Refs the host *proved* dead, mapped to the reason. Only positive
+    /// evidence lands here (the owning adapter answered "not found"), so
+    /// an unreachable server or an adapter that can't verify never costs
+    /// a link.
+    pub dead_refs: std::collections::HashMap<String, String>,
 }
 
 /// Pure classification: would [`App::open_link`] currently fail with
@@ -52,100 +75,58 @@ pub struct LinkResolveContext {
 /// of a live App.
 ///
 /// Returns `None` for "looks live", `Some(reason)` for "would not
-/// navigate". Postgres is always stale (its IDs are per-query and so
-/// have no place in the link table); the actual *remote* existence of
-/// a Jira/Taiga node is intentionally not probed — we only verify the
-/// instance segment matches a configured adapter.
+/// navigate". Conservative by design: a ref counts live unless its
+/// shape is broken, no configured adapter owns it, its adapter has no
+/// stable ids, or that adapter positively reported the node gone.
 pub fn classify_link_ref(raw: &str, ctx: &LinkResolveContext) -> Option<String> {
     let node_ref = match NodeRef::parse(raw) {
         Ok(r) => r,
         Err(e) => return Some(format!("parse failed: {e}")),
     };
-    let (head, tail) = node_ref.split_head();
-    match head {
-        "tasks" => {
-            let id_str = tail.ok_or("missing task id");
-            let id_str = match id_str {
-                Ok(s) => s,
-                Err(e) => return Some(e.to_string()),
-            };
-            let uuid = match Uuid::parse_str(id_str) {
-                Ok(u) => u,
-                Err(_) => return Some(format!("invalid task uuid: {id_str}")),
-            };
-            // No `tasks` adapter configured → the host can't see the task DB,
-            // so leave the ref alone rather than prune what it can't verify.
-            if !ctx.tasks_adapter_present {
-                return None;
-            }
-            if !ctx.task_ids.contains(&uuid) {
-                return Some(format!("task {uuid} not found"));
-            }
-            None
-        }
-        "tracking" => {
-            let id_str = match tail {
-                Some(s) => s,
-                None => return Some("missing tracking id".to_string()),
-            };
-            let uuid = match Uuid::parse_str(id_str) {
-                Ok(u) => u,
-                Err(_) => return Some(format!("invalid tracking uuid: {id_str}")),
-            };
-            // No `trackings` adapter configured → can't verify; keep the ref.
-            if !ctx.trackings_adapter_present {
-                return None;
-            }
-            if !ctx.tracking_ids.contains(&uuid) {
-                return Some(format!("tracking {uuid} not found"));
-            }
-            None
-        }
-        "jira" | "taiga" => {
-            let tail = match tail {
-                Some(s) => s,
-                None => return Some(format!("missing instance/node after {head}")),
-            };
-            let (instance, _node) = match tail.split_once('/') {
-                Some((a, b)) if !a.is_empty() && !b.is_empty() => (a, b),
-                _ => return Some(format!("malformed {head}/<instance>/<node>: {head}/{tail}")),
-            };
-            if !ctx
-                .adapter_instances
-                .contains(&(head.to_string(), instance.to_string()))
-            {
-                return Some(format!("no content tab for {head}/{instance}"));
-            }
-            None
-        }
-        "postgres" => Some("postgres has no stable IDs".to_string()),
-        other => Some(format!("unknown route: {other}")),
+    let (kind, instance, _node_id) = match split_link_addr(&node_ref) {
+        Ok(parts) => parts,
+        Err(e) => return Some(e),
+    };
+    if ctx.unstable_id_adapters.contains(kind) {
+        return Some(format!("{kind} has no stable node ids"));
     }
+    if !ctx
+        .adapter_instances
+        .contains(&(kind.to_string(), instance.to_string()))
+    {
+        return Some(format!("no content tab for {kind}/{instance}"));
+    }
+    ctx.dead_refs.get(raw).cloned()
 }
 
-/// Does `id` resolve to a *live* node in any of `adapters`? "Live" means
-/// some adapter returns the node from `get_by_id` AND it isn't flagged
-/// `deleted` in its metadata (the local adapters load the whole
-/// include-deleted universe but mark soft-deleted rows). Returns `false`
-/// when no adapter resolves it or every match is deleted — i.e. the ref is
-/// stale. Used by [`App::build_link_resolve_context`].
-async fn probe_ref_live(
-    adapters: &[&dyn not_yet_done_content::ContentAdapter],
-    id: &str,
-) -> bool {
-    for adapter in adapters {
-        if let Ok(node) = adapter.get_by_id(id).await {
+/// Ask `adapter` whether `node_id` still exists. `Some(reason)` means
+/// "provably gone", `None` means "live, or the adapter couldn't tell".
+///
+/// The distinction is the whole point: `:linkprune` deletes rows, so it
+/// must only act on a definite answer. A node counts gone when the
+/// adapter reports [`ContentError::NotFound`] or hands back a node
+/// flagged `deleted` in its metadata (the local adapters keep
+/// soft-deleted rows but mark them). Every other error — expired
+/// session, unreachable host, adapter that doesn't implement lookup by
+/// id — keeps the link, exactly as an unconfigured adapter does.
+async fn probe_ref_dead(
+    adapter: &dyn not_yet_done_content::ContentAdapter,
+    node_id: &str,
+) -> Option<String> {
+    match adapter.get_by_id(node_id).await {
+        Ok(node) => {
             let deleted = node
                 .metadata()
                 .fields
                 .iter()
                 .any(|f| f.key == "deleted" && f.value == "true");
-            if !deleted {
-                return true;
-            }
+            deleted.then(|| format!("{node_id} is deleted"))
         }
+        Err(not_yet_done_content::ContentError::NotFound(_)) => {
+            Some(format!("{node_id} not found"))
+        }
+        Err(_) => None,
     }
-    false
 }
 
 /// State for the `gl` link popup. The [`SearchablePopup`] carries the
@@ -221,30 +202,25 @@ impl JumpHistory {
 
 impl App {
     /// Build a [`NodeRef`] for the currently focused row in the active
-    /// tab, or `None` when nothing addressable is selected. Postgres is
-    /// intentionally excluded — its `qrow:N` IDs are per-query and
-    /// can't survive a refresh, let alone a process restart.
+    /// tab, or `None` when nothing addressable is selected — including
+    /// rows of an adapter that declared `unstable_node_ids`, whose ids
+    /// can't survive a refresh let alone a process restart.
     pub fn current_node_ref(&self) -> Option<NodeRef> {
         let Tab::Content(idx) = self.active_tab;
         let cv = self.content_view(idx)?;
         let adapter = cv.adapter.as_ref()?;
         let kind = adapter.adapter_type();
-        if kind == "postgres" {
+        if adapter.capabilities().unstable_node_ids {
             return None;
         }
         let node_id = cv.active_pane().selected_item_id()?;
-        NodeRef::parse(&format!(
-            "{}/{}/{}",
-            kind,
-            adapter.instance_id(),
-            node_id
-        ))
-        .ok()
+        NodeRef::parse(&format!("{}/{}/{}", kind, adapter.instance_id(), node_id)).ok()
     }
 
     /// Capture the current selection into [`App::marked_link`]. Notifies
     /// either the captured ref or — when the selection isn't addressable
-    /// (broken tab, empty list, postgres) — a "nothing to mark" message.
+    /// (broken tab, empty list, an adapter with `unstable_node_ids`) — a
+    /// "nothing to mark" message.
     pub fn link_mark_current(&mut self) {
         match self.current_node_ref() {
             Some(node_ref) => {
@@ -300,7 +276,10 @@ impl App {
             });
             other_by_id.insert(row.id, row.source_ref.clone());
         }
-        let title = format!("Links · {} · ↵ open · d delete · esc close", anchor.as_str());
+        let title = format!(
+            "Links · {} · ↵ open · d delete · esc close",
+            anchor.as_str()
+        );
         let theme = std::sync::Arc::clone(&self.shared_theme);
         let hints = vec![
             ("↵".to_string(), "open".to_string()),
@@ -385,8 +364,7 @@ impl App {
         };
         let repo = std::sync::Arc::clone(&self.link_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { repo.delete(id).await })
+            tokio::runtime::Handle::current().block_on(async move { repo.delete(id).await })
         });
         match result {
             Ok(()) => {
@@ -409,8 +387,9 @@ impl App {
     /// When `open_link` fails with [`LinkRouteError::Stale`] or
     /// [`LinkRouteError::UnknownRoute`] — or the ref doesn't even
     /// parse — the row is treated as stale: a confirm-delete modal
-    /// offers to drop it from the link table. `NotSupported` and
-    /// `Other` stay informational (postgres / transient I/O).
+    /// offers to drop it from the link table. `NotSupported` and `Other`
+    /// stay informational — an unstable-id adapter, a target that just
+    /// isn't loaded, or transient I/O must never cost a good link.
     pub fn link_popup_activate_selected(&mut self) {
         let Some(state) = self.link_popup.as_ref() else {
             return;
@@ -436,15 +415,13 @@ impl App {
             }
         };
         let outcome = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.open_link(&node_ref).await })
+            tokio::runtime::Handle::current().block_on(async { self.open_link(&node_ref).await })
         });
         match outcome {
             Ok(()) => {
                 self.jump_history.record_jump(anchor);
             }
-            Err(LinkRouteError::Stale(reason))
-            | Err(LinkRouteError::UnknownRoute(reason)) => {
+            Err(LinkRouteError::Stale(reason)) | Err(LinkRouteError::UnknownRoute(reason)) => {
                 self.prompt_delete_stale_link(link_id, &target, &reason);
             }
             Err(e) => {
@@ -467,8 +444,7 @@ impl App {
         };
         let label = target.as_str().to_string();
         let outcome = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.open_link(&target).await })
+            tokio::runtime::Handle::current().block_on(async { self.open_link(&target).await })
         });
         match outcome {
             Ok(()) => {
@@ -486,51 +462,18 @@ impl App {
         }
     }
 
-    /// Build a [`LinkResolveContext`] for the given link refs by probing
-    /// the configured adapters. Each `tasks/<uuid>` / `tracking/<uuid>` ref
-    /// is resolved against the matching `tasks` / `trackings` adapter via
-    /// [`ContentAdapter::get_by_id`]; an id counts live when some adapter
-    /// returns it and its node isn't flagged `deleted`. Soft-deleted tasks
-    /// and trackings therefore stay "stale" (the adapter loads the whole
-    /// include-deleted universe but exposes the `deleted` flag), preserving
-    /// the prune semantics from when the host queried the repos directly.
+    /// Build a [`LinkResolveContext`] for the given link refs by asking
+    /// each ref's *owning* adapter whether the node still exists.
     ///
-    /// The task/tracking DBs now live behind the adapters, so when no such
-    /// adapter is configured the host can't verify those refs at all — the
-    /// `*_adapter_present` flags record that and [`classify_link_ref`] then
-    /// leaves the refs untouched instead of pruning blind.
+    /// Ownership comes straight from the ref: `<adapter_type>/<instance>`
+    /// selects the adapter, the rest is its node id. Only refs that have
+    /// such an adapter and stable ids get probed, each through
+    /// [`ContentAdapter::get_by_id`] — see [`probe_ref_dead`] for why
+    /// only a definite "gone" counts. Probes run concurrently because a
+    /// remote adapter may answer in its own time and `:linkprune` blocks
+    /// the UI while it scans.
     fn build_link_resolve_context(&self, refs: &[&str]) -> LinkResolveContext {
         use not_yet_done_content::ContentAdapter;
-
-        // Partition referenced ids by scheme — we only probe ids that are
-        // actually referenced by a link row, not the whole table.
-        let mut task_uuids: HashSet<Uuid> = HashSet::new();
-        let mut tracking_uuids: HashSet<Uuid> = HashSet::new();
-        for raw in refs {
-            let Ok(node_ref) = NodeRef::parse(raw) else {
-                continue;
-            };
-            let (head, tail) = node_ref.split_head();
-            let parsed = tail.and_then(|s| Uuid::parse_str(s).ok());
-            match (head, parsed) {
-                ("tasks", Some(id)) => {
-                    task_uuids.insert(id);
-                }
-                ("tracking", Some(id)) => {
-                    tracking_uuids.insert(id);
-                }
-                _ => {}
-            }
-        }
-
-        let adapters_of = |kind: &str| -> Vec<&dyn ContentAdapter> {
-            self.content_views_iter()
-                .filter_map(|cv| cv.adapter.as_deref())
-                .filter(|a| a.adapter_type() == kind)
-                .collect()
-        };
-        let tasks_adapters = adapters_of("tasks");
-        let trackings_adapters = adapters_of("trackings");
 
         let adapter_instances: HashSet<(String, String)> = self
             .content_views_iter()
@@ -540,31 +483,66 @@ impl App {
                     .map(|a| (a.adapter_type().to_string(), a.instance_id().to_string()))
             })
             .collect();
+        let unstable_id_adapters: HashSet<String> = self
+            .content_views_iter()
+            .filter_map(|cv| cv.adapter.as_ref())
+            .filter(|a| a.capabilities().unstable_node_ids)
+            .map(|a| a.adapter_type().to_string())
+            .collect();
 
-        let (task_ids, tracking_ids) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut live_tasks = HashSet::new();
-                for id in &task_uuids {
-                    if probe_ref_live(&tasks_adapters, &id.to_string()).await {
-                        live_tasks.insert(*id);
+        // Pair each distinct ref with the adapter that owns it. Refs
+        // without an owner, or owned by an adapter whose ids don't
+        // survive a reload, are classified without probing.
+        let mut targets: Vec<(String, String, std::sync::Arc<dyn ContentAdapter>)> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for raw in refs {
+            if !seen.insert(raw) {
+                continue;
+            }
+            let Ok(node_ref) = NodeRef::parse(raw) else {
+                continue;
+            };
+            let Ok((kind, instance, node_id)) = split_link_addr(&node_ref) else {
+                continue;
+            };
+            if unstable_id_adapters.contains(kind) {
+                continue;
+            }
+            let owner = self.content_views_iter().find_map(|cv| {
+                let a = cv.adapter.as_ref()?;
+                (a.adapter_type() == kind && a.instance_id() == instance)
+                    .then(|| std::sync::Arc::clone(a))
+            });
+            if let Some(adapter) = owner {
+                targets.push((raw.to_string(), node_id.to_string(), adapter));
+            }
+        }
+
+        let dead_refs = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let mut set = tokio::task::JoinSet::new();
+                for (raw, node_id, adapter) in targets {
+                    set.spawn(async move {
+                        let verdict = probe_ref_dead(adapter.as_ref(), &node_id).await;
+                        (raw, verdict)
+                    });
+                }
+                let mut dead = std::collections::HashMap::new();
+                while let Some(joined) = set.join_next().await {
+                    // A panicking probe must not take the scan down; an
+                    // unanswered ref simply stays live.
+                    if let Ok((raw, Some(reason))) = joined {
+                        dead.insert(raw, reason);
                     }
                 }
-                let mut live_trackings = HashSet::new();
-                for id in &tracking_uuids {
-                    if probe_ref_live(&trackings_adapters, &id.to_string()).await {
-                        live_trackings.insert(*id);
-                    }
-                }
-                (live_tasks, live_trackings)
+                dead
             })
         });
 
         LinkResolveContext {
-            task_ids,
-            tracking_ids,
-            tasks_adapter_present: !tasks_adapters.is_empty(),
-            trackings_adapter_present: !trackings_adapters.is_empty(),
             adapter_instances,
+            unstable_id_adapters,
+            dead_refs,
         }
     }
 
@@ -607,10 +585,7 @@ impl App {
             if src_stale.is_some() || tgt_stale.is_some() {
                 stale_ids.push(row.id);
                 if sample.len() < 5 {
-                    let reason = src_stale
-                        .as_deref()
-                        .or(tgt_stale.as_deref())
-                        .unwrap_or("");
+                    let reason = src_stale.as_deref().or(tgt_stale.as_deref()).unwrap_or("");
                     sample.push(format!(
                         "{} → {} ({})",
                         row.source_ref, row.target_ref, reason
@@ -619,22 +594,18 @@ impl App {
             }
         }
         if stale_ids.is_empty() {
-            self.modal_message = Some(format!(
-                "Scanned {} link(s). None are stale.",
-                rows.len()
-            ));
+            self.modal_message = Some(format!("Scanned {} link(s). None are stale.", rows.len()));
             return;
         }
-        let mut body = format!(
-            "{} of {} link(s) are stale:\n",
-            stale_ids.len(),
-            rows.len()
-        );
+        let mut body = format!("{} of {} link(s) are stale:\n", stale_ids.len(), rows.len());
         for line in &sample {
             body.push_str(&format!("  {line}\n"));
         }
         if stale_ids.len() > sample.len() {
-            body.push_str(&format!("  … and {} more\n", stale_ids.len() - sample.len()));
+            body.push_str(&format!(
+                "  … and {} more\n",
+                stale_ids.len() - sample.len()
+            ));
         }
         body.push_str("Delete all? (y/n)");
         self.pending_confirmation = Some((
@@ -654,8 +625,7 @@ impl App {
         };
         let label = target.as_str().to_string();
         let outcome = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.open_link(&target).await })
+            tokio::runtime::Handle::current().block_on(async { self.open_link(&target).await })
         });
         match outcome {
             Ok(()) => {
@@ -675,11 +645,10 @@ impl App {
     /// user hits y/Enter — keeps deletion behind the same y/n gate as
     /// every other destructive confirm in the app.
     fn prompt_delete_stale_link(&mut self, link_id: Uuid, target: &str, reason: &str) {
-        let msg = format!(
-            "Stale link `{target}`\n({reason})\nDelete from link table? (y/n)"
-        );
+        let msg = format!("Stale link `{target}`\n({reason})\nDelete from link table? (y/n)");
         self.modal_message = Some(msg.clone());
-        self.pending_confirmation = Some((msg, super::PendingConfirmation::DeleteStaleLink(link_id)));
+        self.pending_confirmation =
+            Some((msg, super::PendingConfirmation::DeleteStaleLink(link_id)));
     }
 
     /// Dispatch a single key while the link popup is open. Returns
@@ -755,214 +724,221 @@ impl App {
 }
 
 impl App {
-    /// Dispatch a link-open request on the head segment.
+    /// Follow a link ref: switch to the content slot named by
+    /// `<adapter_type>/<instance_id>` and put the cursor on `<node_id>`.
     ///
-    /// Known heads: `tasks`, `tracking`, `jira`, `taiga`, `postgres`.
-    /// Unknown heads return [`LinkRouteError::UnknownRoute`].
-    // L5/L6 will wire callers (mark-and-paste flow); kept reachable so
-    // L3 changes can be exercised via the existing test surface.
-    #[allow(dead_code)]
+    /// Adapter-agnostic in every step. The node id is handed to the
+    /// adapter untouched, and reaching a row that isn't on screen goes
+    /// through [`ContentAdapter::locate_node_path`] — so an adapter gets
+    /// deep links by implementing one method, and loses nothing else by
+    /// not implementing it.
     pub async fn open_link(&mut self, node_ref: &NodeRef) -> Result<(), LinkRouteError> {
-        let (head, tail) = node_ref.split_head();
-        match head {
-            "tasks" => self.open_link_tasks(tail),
-            "tracking" => self.open_link_tracking(tail),
-            "jira" | "taiga" => self.open_link_content(head, tail),
-            "postgres" => Err(LinkRouteError::NotSupported(
-                "postgres has no stable node IDs in v1".into(),
-            )),
-            other => Err(LinkRouteError::UnknownRoute(other.to_string())),
+        let (kind, instance, node_id) = split_link_addr(node_ref).map_err(LinkRouteError::Stale)?;
+        let (kind, node_id) = (kind.to_string(), node_id.to_string());
+
+        let (slot_idx, adapter) = self
+            .content_views_indexed()
+            .find_map(|(i, cv)| {
+                let a = cv.adapter.as_ref()?;
+                (a.adapter_type() == kind && a.instance_id() == instance)
+                    .then(|| (i, std::sync::Arc::clone(a)))
+            })
+            .ok_or_else(|| {
+                LinkRouteError::UnknownRoute(format!("no content tab for {kind}/{instance}"))
+            })?;
+
+        // Refs to per-query ids can't be honoured — the row they named
+        // is long gone even if the string still parses.
+        if adapter.capabilities().unstable_node_ids {
+            return Err(LinkRouteError::NotSupported(format!(
+                "{kind} has no stable node ids"
+            )));
+        }
+
+        self.set_active_tab(Tab::Content(slot_idx));
+
+        // Cheap path: the row is already among the loaded ones.
+        if let Some(cv) = self.content_view_mut(slot_idx) {
+            if cv.active_pane_mut().focus_item_by_id(&node_id) {
+                return Ok(());
+            }
+        }
+
+        // Not loaded — ask the adapter where the node lives so the
+        // ancestors can be expanded on the way to it.
+        match adapter.locate_node_path(&node_id).await {
+            Ok(Some(path)) if !path.is_empty() => self.reveal_tree_path(slot_idx, path, &node_id),
+            Ok(_) => {
+                // No path: either the adapter can't locate nodes, or the
+                // node is gone. Only the second may offer a prune, so
+                // ask before blaming the link.
+                Err(self.classify_unreachable(&adapter, &kind, &node_id).await)
+            }
+            Err(e) => Err(LinkRouteError::Other(format!(
+                "{kind} could not locate {node_id}: {e}"
+            ))),
         }
     }
 
-    fn open_link_tasks(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
-        self.open_link_local("task", "tasks", tail)
-    }
-
-    fn open_link_tracking(&mut self, tail: Option<&str>) -> Result<(), LinkRouteError> {
-        // The link head is the singular `tracking`, but the in-process
-        // adapter reports the plural `adapter_type()` "trackings".
-        self.open_link_local("tracking", "trackings", tail)
-    }
-
-    /// Reroute a bare `<kind>/<uuid>` link into the in-process adapter tab
-    /// whose `adapter_type()` equals `adapter_type`. The legacy native
-    /// Tasks/Trackings tabs were retired in favour of the generic
-    /// ContentAdapter tabs, so the link now drives the adapter's
-    /// goto-by-id path: we switch to the tab and queue an async tree-find
-    /// with the `id:<uuid>` exact-id escape. That is robust against the
-    /// lazily-ingested tree (a synchronous focus-by-id would miss a node
-    /// in a collapsed/unloaded subtree).
-    fn open_link_local(
-        &mut self,
+    /// Turn "couldn't reach the node" into the right error kind: a
+    /// definite `NotFound` from the adapter is [`LinkRouteError::Stale`]
+    /// (the UI then offers to drop the row), everything else stays
+    /// [`LinkRouteError::NotSupported`] so a link to a node that merely
+    /// isn't loaded never gets deleted.
+    async fn classify_unreachable(
+        &self,
+        adapter: &std::sync::Arc<dyn not_yet_done_content::ContentAdapter>,
         kind: &str,
-        adapter_type: &str,
-        tail: Option<&str>,
-    ) -> Result<(), LinkRouteError> {
-        let id_str = tail.ok_or_else(|| LinkRouteError::Stale(format!("missing {kind} id")))?;
-        let uuid = Uuid::parse_str(id_str)
-            .map_err(|_| LinkRouteError::Stale(format!("invalid {kind} uuid: {id_str}")))?;
-        let slot_idx = self
-            .content_views_indexed()
-            .find(|(_, cv)| {
-                cv.adapter
-                    .as_ref()
-                    .map(|a| a.adapter_type() == adapter_type)
-                    .unwrap_or(false)
-            })
-            .map(|(i, _)| i)
-            .ok_or_else(|| {
-                LinkRouteError::UnknownRoute(format!("no content tab for {adapter_type}"))
-            })?;
-        self.tree_find_in_tab(slot_idx, None, format!("id:{uuid}"))
-            .map_err(LinkRouteError::NotSupported)
+        node_id: &str,
+    ) -> LinkRouteError {
+        match probe_ref_dead(adapter.as_ref(), node_id).await {
+            Some(reason) => LinkRouteError::Stale(reason),
+            None => LinkRouteError::NotSupported(format!(
+                "{node_id} is not among the loaded rows and {kind} can't locate it"
+            )),
+        }
     }
 
-    fn open_link_content(
+    /// Drive the tree to `path` (root → … → target) and land the cursor
+    /// on its last segment, reusing the tree-find expand walker: seed
+    /// the pane with a single synthetic hit, then let the normal
+    /// `NeedTreeExpand` → `TreeChildren` → re-poll chain do the work.
+    fn reveal_tree_path(
         &mut self,
-        head: &str,
-        tail: Option<&str>,
+        view_index: usize,
+        path: Vec<String>,
+        label: &str,
     ) -> Result<(), LinkRouteError> {
-        let tail = tail.ok_or_else(|| {
-            LinkRouteError::Stale(format!("missing instance/node id after {head}"))
-        })?;
-        let (instance_id, node_id) = match tail.split_once('/') {
-            Some((a, b)) if !a.is_empty() && !b.is_empty() => (a, b),
-            _ => {
-                return Err(LinkRouteError::Stale(format!(
-                    "expected {head}/<instance>/<node_id>, got {head}/{tail}"
+        let pane_id = {
+            let Some(cv) = self.content_view_mut(view_index) else {
+                return Err(LinkRouteError::Other("content tab vanished".into()));
+            };
+            if !cv.active_view_is_tree() {
+                return Err(LinkRouteError::NotSupported(format!(
+                    "{label} is not on the current page (flat view — no path to expand)"
                 )));
             }
+            let pane_id = cv.active_pane_id();
+            let pane = cv.active_pane_mut();
+            // The query string is only status-bar decoration here; the
+            // hit we inject is what the walker follows.
+            pane.tree_find_begin(format!("id:{label}"));
+            pane.tree_find_complete(
+                vec![not_yet_done_content::TreeFindHit {
+                    path,
+                    label: label.to_string(),
+                    space_key: String::new(),
+                }],
+                false,
+            );
+            pane_id
         };
-        let slot_idx = self
-            .content_views_indexed()
-            .find(|(_, cv)| {
-                cv.adapter
-                    .as_ref()
-                    .map(|a| a.adapter_type() == head && a.instance_id() == instance_id)
-                    .unwrap_or(false)
-            })
-            .map(|(i, _)| i)
-            .ok_or_else(|| {
-                LinkRouteError::UnknownRoute(format!("no content tab for {head}/{instance_id}"))
-            })?;
-        self.set_active_tab(Tab::Content(slot_idx));
-        if let Some(cv) = self.content_view_mut(slot_idx) {
-            cv.active_pane_mut().focus_item_by_id(node_id);
-        }
+        self.drive_tree_find_chain(view_index, pane_id);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod classify_tests {
-    use super::{classify_link_ref, LinkResolveContext};
-    use std::collections::HashSet;
-    use uuid::Uuid;
+    use super::{LinkResolveContext, classify_link_ref};
 
-    fn ctx_with(task_ids: &[Uuid], tracking_ids: &[Uuid], instances: &[(&str, &str)]) -> LinkResolveContext {
+    /// `instances` are the configured `(adapter_type, instance_id)` pairs,
+    /// `unstable` the adapter types whose ids don't survive a reload,
+    /// `dead` the refs an adapter positively reported gone.
+    fn ctx_with(
+        instances: &[(&str, &str)],
+        unstable: &[&str],
+        dead: &[(&str, &str)],
+    ) -> LinkResolveContext {
         LinkResolveContext {
-            task_ids: task_ids.iter().copied().collect(),
-            tracking_ids: tracking_ids.iter().copied().collect(),
-            // These tests exercise the verification path, so model a host
-            // that has both adapters configured.
-            tasks_adapter_present: true,
-            trackings_adapter_present: true,
             adapter_instances: instances
                 .iter()
                 .map(|(k, i)| (k.to_string(), i.to_string()))
+                .collect(),
+            unstable_id_adapters: unstable.iter().map(|s| s.to_string()).collect(),
+            dead_refs: dead
+                .iter()
+                .map(|(r, why)| (r.to_string(), why.to_string()))
                 .collect(),
         }
     }
 
     #[test]
-    fn live_task_classifies_as_none() {
-        let id = Uuid::new_v4();
-        let ctx = ctx_with(&[id], &[], &[]);
-        assert!(classify_link_ref(&format!("tasks/{id}"), &ctx).is_none());
-    }
-
-    #[test]
-    fn missing_task_uuid_is_stale() {
-        let known = Uuid::new_v4();
-        let missing = Uuid::new_v4();
-        let ctx = ctx_with(&[known], &[], &[]);
-        let reason = classify_link_ref(&format!("tasks/{missing}"), &ctx).unwrap();
-        assert!(reason.contains("not found"), "reason={reason}");
-    }
-
-    #[test]
-    fn malformed_task_uuid_is_stale() {
-        let ctx = ctx_with(&[], &[], &[]);
-        let reason = classify_link_ref("tasks/not-a-uuid", &ctx).unwrap();
-        assert!(reason.contains("invalid task uuid"), "reason={reason}");
-    }
-
-    #[test]
-    fn missing_task_tail_is_stale() {
-        let ctx = ctx_with(&[], &[], &[]);
-        let reason = classify_link_ref("tasks", &ctx).unwrap();
-        assert!(reason.contains("missing task id"), "reason={reason}");
-    }
-
-    #[test]
-    fn live_tracking_classifies_as_none() {
-        let id = Uuid::new_v4();
-        let ctx = ctx_with(&[], &[id], &[]);
-        assert!(classify_link_ref(&format!("tracking/{id}"), &ctx).is_none());
-    }
-
-    #[test]
-    fn jira_with_known_instance_is_live() {
-        let ctx = ctx_with(&[], &[], &[("jira", "prod")]);
+    fn known_instance_is_live() {
+        let ctx = ctx_with(&[("jira", "prod")], &[], &[]);
         assert!(classify_link_ref("jira/prod/PROJ-1", &ctx).is_none());
     }
 
     #[test]
-    fn jira_with_unknown_instance_is_stale() {
-        let ctx = ctx_with(&[], &[], &[("jira", "prod")]);
+    fn unknown_instance_is_stale() {
+        let ctx = ctx_with(&[("jira", "prod")], &[], &[]);
         let reason = classify_link_ref("jira/staging/PROJ-1", &ctx).unwrap();
         assert!(reason.contains("no content tab"), "reason={reason}");
     }
 
     #[test]
-    fn jira_keyed_by_taiga_instance_is_stale() {
+    fn instance_of_another_adapter_type_is_stale() {
         // adapter_type segregation: an instance configured for taiga must
         // not satisfy a jira link's instance check (or vice versa).
-        let ctx = ctx_with(&[], &[], &[("taiga", "dev")]);
+        let ctx = ctx_with(&[("taiga", "dev")], &[], &[]);
         let reason = classify_link_ref("jira/dev/PROJ-1", &ctx).unwrap();
         assert!(reason.contains("no content tab"), "reason={reason}");
     }
 
     #[test]
-    fn jira_missing_node_segment_is_stale() {
-        let ctx = ctx_with(&[], &[], &[("jira", "prod")]);
+    fn any_adapter_type_routes_without_a_whitelist() {
+        // The classifier knows no adapter names — a freshly added adapter
+        // is linkable the moment it has a configured instance.
+        let ctx = ctx_with(&[("sqlite", "local"), ("confluence", "wiki")], &[], &[]);
+        assert!(classify_link_ref("sqlite/local/main/tables/t", &ctx).is_none());
+        assert!(classify_link_ref("confluence/wiki/12345", &ctx).is_none());
+    }
+
+    #[test]
+    fn composite_node_id_keeps_its_slashes() {
+        let ctx = ctx_with(&[("taiga", "dev")], &[], &[]);
+        assert!(classify_link_ref("taiga/dev/task:42/comment/7", &ctx).is_none());
+    }
+
+    #[test]
+    fn missing_node_segment_is_stale() {
+        let ctx = ctx_with(&[("jira", "prod")], &[], &[]);
         let reason = classify_link_ref("jira/prod", &ctx).unwrap();
-        assert!(reason.contains("malformed"), "reason={reason}");
+        assert!(reason.contains("expected"), "reason={reason}");
     }
 
     #[test]
-    fn taiga_with_composite_node_id_is_live() {
-        let ctx = ctx_with(&[], &[], &[("taiga", "dev")]);
-        assert!(
-            classify_link_ref("taiga/dev/task:42/comment/7", &ctx).is_none()
-        );
-    }
-
-    #[test]
-    fn postgres_always_stale() {
-        let ctx = ctx_with(&[], &[], &[("postgres", "main")]);
-        // Even when an instance is registered, postgres refs are stale
-        // because per-query IDs aren't stable.
+    fn unstable_ids_are_always_stale() {
+        // Even with a configured instance: per-query ids can't be stored.
+        let ctx = ctx_with(&[("postgres", "main")], &["postgres"], &[]);
         let reason = classify_link_ref("postgres/main/qrow:1", &ctx).unwrap();
-        assert!(reason.contains("no stable IDs"), "reason={reason}");
+        assert!(reason.contains("no stable node ids"), "reason={reason}");
     }
 
     #[test]
-    fn unknown_head_is_stale() {
+    fn probed_dead_ref_is_stale() {
+        let ctx = ctx_with(
+            &[("tasks", "local")],
+            &[],
+            &[("tasks/local/abc", "abc is deleted")],
+        );
+        let reason = classify_link_ref("tasks/local/abc", &ctx).unwrap();
+        assert!(reason.contains("deleted"), "reason={reason}");
+    }
+
+    #[test]
+    fn unprobed_ref_stays_live() {
+        // The adapter couldn't verify (network, no lookup support) — the
+        // link survives rather than being pruned on a guess.
+        let ctx = ctx_with(&[("tasks", "local")], &[], &[]);
+        assert!(classify_link_ref("tasks/local/abc", &ctx).is_none());
+    }
+
+    #[test]
+    fn unconfigured_adapter_is_stale() {
         let ctx = LinkResolveContext::default();
-        let reason = classify_link_ref("nope/whatever", &ctx).unwrap();
-        assert!(reason.contains("unknown route"), "reason={reason}");
+        let reason = classify_link_ref("nope/inst/whatever", &ctx).unwrap();
+        assert!(reason.contains("no content tab"), "reason={reason}");
     }
 
     #[test]
@@ -973,10 +949,10 @@ mod classify_tests {
     }
 
     #[test]
-    fn default_context_has_no_known_addresses() {
-        // Defensive: a default ctx shouldn't accidentally accept anything.
+    fn default_context_accepts_nothing() {
         let ctx = LinkResolveContext::default();
-        let _: HashSet<Uuid> = ctx.task_ids;
+        assert!(ctx.adapter_instances.is_empty());
+        assert!(classify_link_ref("jira/prod/PROJ-1", &ctx).is_some());
     }
 }
 
@@ -1020,7 +996,9 @@ mod jump_history_tests {
         h.record_jump(r("tasks/aaaaaaaa-1111-1111-1111-111111111111"));
         let _ = h.pop_back(Some(r("jira/prod/PROJ-1")));
         // back: [], forward: [jira/prod/PROJ-1]
-        let t = h.pop_forward(Some(r("tasks/aaaaaaaa-1111-1111-1111-111111111111"))).unwrap();
+        let t = h
+            .pop_forward(Some(r("tasks/aaaaaaaa-1111-1111-1111-111111111111")))
+            .unwrap();
         assert_eq!(t.as_str(), "jira/prod/PROJ-1");
         assert_eq!(h.back_len(), 1);
         assert_eq!(h.forward_len(), 0);
@@ -1038,8 +1016,14 @@ mod jump_history_tests {
     #[test]
     fn pop_empty_returns_none() {
         let mut h = JumpHistory::new();
-        assert!(h.pop_back(Some(r("tasks/aaaaaaaa-1111-1111-1111-111111111111"))).is_none());
-        assert!(h.pop_forward(Some(r("tasks/aaaaaaaa-1111-1111-1111-111111111111"))).is_none());
+        assert!(
+            h.pop_back(Some(r("tasks/aaaaaaaa-1111-1111-1111-111111111111")))
+                .is_none()
+        );
+        assert!(
+            h.pop_forward(Some(r("tasks/aaaaaaaa-1111-1111-1111-111111111111")))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1055,92 +1039,57 @@ mod jump_history_tests {
 }
 
 #[cfg(test)]
-mod tests {
-    use not_yet_done_content::{LinkRouteError, NodeRef};
+mod addr_tests {
+    use super::split_link_addr;
+    use not_yet_done_content::NodeRef;
 
-    /// Classification helper that mirrors the [`App::open_link`] head
-    /// match without needing a full App instance. Covers the dispatch
-    /// table separately from the tab-internal focus logic, which lives
-    /// behind real view state.
-    fn classify(head: &str, tail: Option<&str>) -> Result<&'static str, LinkRouteError> {
-        match head {
-            "tasks" => {
-                let _ = tail.ok_or_else(|| LinkRouteError::Stale("missing task id".into()))?;
-                Ok("tasks")
-            }
-            "tracking" => {
-                let _ = tail.ok_or_else(|| LinkRouteError::Stale("missing tracking id".into()))?;
-                Ok("tracking")
-            }
-            "jira" | "taiga" => {
-                let tail = tail.ok_or_else(|| {
-                    LinkRouteError::Stale(format!("missing instance/node id after {head}"))
-                })?;
-                let _ = match tail.split_once('/') {
-                    Some((a, b)) if !a.is_empty() && !b.is_empty() => (a, b),
-                    _ => {
-                        return Err(LinkRouteError::Stale(format!(
-                            "expected {head}/<instance>/<node_id>, got {head}/{tail}"
-                        )));
-                    }
-                };
-                Ok(if head == "jira" { "jira" } else { "taiga" })
-            }
-            "postgres" => Err(LinkRouteError::NotSupported(
-                "postgres has no stable node IDs in v1".into(),
-            )),
-            other => Err(LinkRouteError::UnknownRoute(other.to_string())),
-        }
+    /// The previous version of these tests exercised a *copy* of the
+    /// routing match kept in the test module. That copy is why the ref
+    /// format could drift from what `current_node_ref` produced without
+    /// a single test failing — so the address split is now tested
+    /// through the same function the router calls.
+    fn split(raw: &str) -> Result<(String, String, String), String> {
+        let r = NodeRef::parse(raw).map_err(|e| e.to_string())?;
+        split_link_addr(&r).map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
     }
 
     #[test]
-    fn tasks_route_parses_uuid_tail() {
-        let r = NodeRef::parse("tasks/4f7c0b2e-1a55-4f5b-9e93-2b8e0a4fb111").unwrap();
-        let (head, tail) = r.split_head();
-        assert_eq!(classify(head, tail).unwrap(), "tasks");
+    fn splits_adapter_instance_and_node_id() {
+        let (kind, instance, node_id) = split("jira/prod/PROJ-1").unwrap();
+        assert_eq!(
+            (kind.as_str(), instance.as_str(), node_id.as_str()),
+            ("jira", "prod", "PROJ-1")
+        );
     }
 
     #[test]
-    fn tasks_route_missing_tail_is_stale() {
-        let r = NodeRef::parse("tasks").unwrap();
-        let (head, tail) = r.split_head();
-        assert!(matches!(classify(head, tail), Err(LinkRouteError::Stale(_))));
+    fn node_id_keeps_its_own_slashes() {
+        // Composite ids are one opaque unit: only the first two
+        // separators belong to the host.
+        let (_, _, node_id) = split("taiga/dev/task:42/comment/7").unwrap();
+        assert_eq!(node_id, "task:42/comment/7");
+        let (_, _, node_id) = split("postgres/main/db/schemas/public/tables/t").unwrap();
+        assert_eq!(node_id, "db/schemas/public/tables/t");
     }
 
     #[test]
-    fn jira_route_requires_two_tail_segments() {
-        let ok = NodeRef::parse("jira/prod/PROJ-1").unwrap();
-        let (h, t) = ok.split_head();
-        assert_eq!(classify(h, t).unwrap(), "jira");
-
-        let missing_node = NodeRef::parse("jira/prod").unwrap();
-        let (h, t) = missing_node.split_head();
-        assert!(matches!(classify(h, t), Err(LinkRouteError::Stale(_))));
+    fn missing_node_segment_is_an_error() {
+        assert!(split("jira/prod").is_err());
     }
 
     #[test]
-    fn taiga_route_with_composite_node_id() {
-        // The node_id segment is opaque to the App and may contain
-        // adapter-private slashes (e.g. comment sub-keys).
-        let r = NodeRef::parse("taiga/dev/task:42/comment/7").unwrap();
-        let (h, t) = r.split_head();
-        assert_eq!(classify(h, t).unwrap(), "taiga");
+    fn bare_adapter_head_is_an_error() {
+        assert!(split("tasks").is_err());
     }
 
     #[test]
-    fn postgres_route_is_not_supported() {
-        let r = NodeRef::parse("postgres/whatever").unwrap();
-        let (h, t) = r.split_head();
-        assert!(matches!(classify(h, t), Err(LinkRouteError::NotSupported(_))));
-    }
-
-    #[test]
-    fn unknown_head_classifies_as_unknown_route() {
-        let r = NodeRef::parse("nope/x").unwrap();
-        let (h, t) = r.split_head();
-        match classify(h, t) {
-            Err(LinkRouteError::UnknownRoute(s)) => assert_eq!(s, "nope"),
-            other => panic!("expected UnknownRoute, got {other:?}"),
-        }
+    fn uuid_node_ids_need_no_special_case() {
+        // Task refs go through the very same split — the old two-segment
+        // `tasks/<uuid>` form no longer exists anywhere.
+        let (kind, instance, node_id) =
+            split("tasks/local/4f7c0b2e-1a55-4f5b-9e93-2b8e0a4fb111").unwrap();
+        assert_eq!(kind, "tasks");
+        assert_eq!(instance, "local");
+        assert_eq!(node_id, "4f7c0b2e-1a55-4f5b-9e93-2b8e0a4fb111");
     }
 }

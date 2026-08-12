@@ -1,0 +1,163 @@
+# Example: Calendar adapter connections + credentials
+#
+# Place in: ~/.config/not_yet_done/views/calendar-adapter.yaml
+# Referenced by calendar.yaml via: adapter.config: calendar-adapter.yaml
+#
+# This adapter is multi-connection: one `connections` entry per calendar
+# source. Entries may mix backend types and include several instances of the
+# same backend — the example below connects TWO Microsoft 365 mailboxes
+# (Teams/Outlook show the same calendar), each its own connection.
+#
+# Backends are compiled in via cargo features (default: `microsoft`). A
+# connection whose `backend:` isn't compiled into the build is a startup error.
+#
+# Each connection's `config:` sub-tree is opaque to the adapter and handed
+# verbatim to that backend — so its shape is backend-specific. For
+# `backend: microsoft` it is:
+#
+#   token   — a credential provider yielding a Graph bearer token (required)
+#   name    — display label for the "Account" column (optional; defaults to id)
+#
+# Auth (first iteration) is a bearer token from a `command` credential
+# provider. The Azure CLI mints a Graph token for a logged-in account:
+#
+#   az account get-access-token \
+#     --resource https://graph.microsoft.com \
+#     --tenant <TENANT_ID> \
+#     --query accessToken -o tsv
+#
+# The token is resolved lazily and re-resolved automatically on a 401, so an
+# az-minted token (≈1 h lifetime) refreshes without a reconnect. A full
+# in-process OAuth2 device-code flow can be added later as a second `token`
+# mechanism without touching the view or this file's shape.
+#
+# For `backend: office365-web` (browser-driven; for tenants where Graph is
+# blocked by device-compliance Conditional Access and the calendar lives behind
+# Outlook on the web) the `config:` sub-tree is instead:
+#
+#   account_key   — session registry key (required). Connections sharing a key
+#                   share ONE browser session, so a single interactive login
+#                   serves them all (e.g. a calendar and a future mail backend).
+#   name          — display label for the "Account" column (optional).
+#   login_hint    — UPN to prefill on the interactive login (optional).
+#   profile_dir   — persistent browser profile directory (required); the login
+#                   and its SSO cookies survive here across restarts. `~/` is
+#                   expanded against $HOME.
+#   headless      — run the browser headless once logged in (optional; true).
+#   start_url     — entry URL (optional; defaults to the Outlook web calendar).
+#   username      — credential provider for the account UPN (optional). Used to
+#                   pick the account tile / fill the email field. Defaults to
+#                   `login_hint` when omitted.
+#   password      — credential provider for the account password (optional).
+#                   When set, the sign-in is driven unattended up to the second
+#                   factor (MFA); when omitted, the login stays fully manual.
+#   sidecar_script, node_bin — override the Playwright sidecar entry script and
+#                   Node binary (optional; the script also reads the
+#                   NYD_OFFICE365_SIDECAR env var).
+#
+# This backend drives a headless Chromium via an out-of-process Playwright
+# sidecar (Node); the first fetch on an unauthenticated profile opens a visible
+# window. With `password` configured the sidecar auto-fills the account, the
+# password, and "stay signed in", leaving only MFA for you to complete once;
+# afterwards it runs unattended. Credentials are resolved in the Rust process
+# and handed to the sidecar over its JSON protocol — never via the environment,
+# so the browser child can't leak them. Enable it with the `office365-web` cargo
+# feature (on by default).
+
+connections:
+  - id: work
+    backend: microsoft
+    config:
+      name: Work
+      token:
+        # `command` runs a shell command and uses its trimmed stdout.
+        type: command
+        script: >-
+          az account get-access-token
+          --resource https://graph.microsoft.com
+          --tenant <WORK_TENANT_ID>
+          --query accessToken -o tsv
+
+  - id: side
+    backend: microsoft
+    config:
+      name: Side project
+      token:
+        type: command
+        script: >-
+          az account get-access-token
+          --resource https://graph.microsoft.com
+          --tenant <SIDE_TENANT_ID>
+          --query accessToken -o tsv
+
+  # A tenant reachable only through the browser (Graph blocked). No token — the
+  # session authenticates itself in a real browser and persists in profile_dir.
+  # With `password` set, the sidecar signs in unattended up to MFA; drop it to
+  # log in fully by hand.
+  - id: web
+    backend: office365-web
+    config:
+      account_key: web
+      name: Web calendar
+      login_hint: user@example.com
+      profile_dir: ~/.local/state/not_yet_done/office365-web/web
+      headless: true
+      # Username defaults to `login_hint`; set it explicitly only if the tile /
+      # email differs from the hint.
+      # username:
+      #   type: literal
+      #   value: user@example.com
+      password:
+        # `command` runs a shell command and uses its trimmed stdout — here a
+        # password manager. Any credential provider works (env, file, keyring).
+        type: command
+        script: pass show example/office365/password
+
+  # A CalDAV server (backend: caldav) — mail.de, Nextcloud, Baïkal, Fastmail,
+  # iCloud, Radicale, … Auth is HTTP Basic. `url` is the entry point: a
+  # principal, a calendar-home, or a single calendar collection URL; the backend
+  # discovers the account's calendars from it and asks the server to expand
+  # recurring events into concrete instances. Enable with the `caldav` cargo
+  # feature (on by default). The `config:` sub-tree is:
+  #
+  #   url        — entry URL (required): principal / calendar-home / collection.
+  #   username   — credential provider for the Basic-auth login (required).
+  #   password   — credential provider for the Basic-auth password (required).
+  #   name       — display label for the "Account" column (optional).
+  #   calendars  — explicit collection URLs to query, skipping discovery
+  #                (optional; absolute URLs or paths relative to the server root).
+  #   danger_accept_invalid_certs — skip TLS verification for a self-signed
+  #                private server (optional; default false — leave off for
+  #                public providers).
+  #   request_timeout_secs — per-request timeout (optional; default 30).
+  - id: mailde
+    backend: caldav
+    config:
+      name: mail.de
+      url: https://kalender.mail.de/principals/user@mail.de
+      username:
+        type: literal
+        value: user@mail.de
+      password:
+        type: command
+        script: pass show example/mailde/password
+      # Pin specific calendars instead of discovering them all:
+      # calendars:
+      #   - /calendars/user@mail.de/private/
+
+# How often (seconds) the background task re-fetches every connection to detect
+# externally-made changes and refresh the view. Optional; defaults to 300.
+# poll_interval_secs: 300
+
+# Event window: how many days back / forward the listing spans, resolved
+# against "now" on every fetch. Optional; default 7 back / 30 forward.
+# window_past_days: 7
+# window_future_days: 30
+
+# Reminder lead times: how many minutes before a timed event's start the
+# adapter emits a reminder — one fire per entry, so `[15, 5]` reminds fifteen
+# *and* five minutes ahead. Accepts a bare scalar (`5`) or a list. This is only
+# the *when*; whether a tab acts on reminders and what command runs is the
+# frontend's choice — see the `reminder:` block in calendar.yaml. Optional;
+# defaults to a single 5-minute reminder. An empty list turns reminders off.
+# reminder_lead_minutes: [15, 5]

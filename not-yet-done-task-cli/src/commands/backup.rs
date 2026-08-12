@@ -19,8 +19,14 @@ pub mod cli {
         // longer reaches into the legacy `not-yet-done-core` app shell.
         let dir = backup::default_backup_dir();
         match backup::create_backup_at(crate::tasks_dsn(), &dir, super::MAX_BACKUPS) {
-            Ok(path) => { println!("✓ Backup erstellt: {}", path); 0 }
-            Err(e)   => { eprintln!("Error: {e}"); 1 }
+            Ok(path) => {
+                println!("✓ Backup erstellt: {}", path);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -39,7 +45,10 @@ pub mod cli {
                 }
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -55,7 +64,10 @@ pub mod cli {
                 println!("✓ Datenbank wiederhergestellt: {}", path);
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 }

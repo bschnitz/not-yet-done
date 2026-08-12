@@ -17,16 +17,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ContentError, EditorPrep, HintPlacement, InputSpec, ListParams,
-    ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, PageInfo,
-    PageRequest, Result,
+    ActionInput, ActionOutcome, ContentError, EditorPrep, InputSpec, ListParams, ListResult,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, PageInfo, PageRequest,
+    Result,
 };
 
 use crate::client::{ConfluenceClient, PageMeta, SpaceMeta};
 
-use super::create_template::{
-    ParsedCreate, parse_template, render_template, render_with_error,
-};
+use super::create_template::{ParsedCreate, parse_template, render_template, render_with_error};
 use super::page::{ConfluencePageNode, page_node_type};
 use super::{DEFAULT_PAGE_PAGE_SIZE, other_err};
 
@@ -45,14 +43,91 @@ pub(super) fn space_node_type() -> NodeType {
 /// TUI can populate shortcut hints without instantiating a node.
 pub(super) fn space_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("create-page", "create top-level page", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
+        NodeAction::new("create-page", "create top-level page", InputSpec::Editor),
         // open-in-browser is fire-and-forget (no input, no popup) → never
         // "active", so it stays in the status bar (default placement).
-        NodeAction::new("open-in-browser", "open in browser", InputSpec::None)
-            .with_default_key('o'),
+        NodeAction::new("open-in-browser", "open in browser", InputSpec::None),
     ]
+}
+
+/// A space's top-level page listing body. Extracted as a free fn so both the
+/// legacy `ConfluenceSpaceNode::list` and the adapter-level `childs` closure
+/// call the identical path. Keys solely on the space key (= `node.id()` for a
+/// space node) + the client — no other space state is read.
+///
+/// CT-12: list the space's top-level pages directly. Pre-CT-12 we listed the
+/// homepage's children, which hid orphan top-level pages AND broke tree_find —
+/// the `ancestors[]` chain CQL returns starts at the top-level page (Homepage
+/// or sibling), not at its children, so a homepage-children listing on level 1
+/// never contained any of those ancestors and the walker bailed out with
+/// NotInTree. `list_top_pages` returns the pages whose parent is the space
+/// itself, which matches both the web UI's tree browser AND the search-hit
+/// path shape.
+pub(in crate::adapter) async fn list_space_top_pages(
+    client: &ConfluenceClient,
+    space_key: &str,
+    params: ListParams,
+) -> Result<ListResult> {
+    let page_req = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: DEFAULT_PAGE_PAGE_SIZE,
+    });
+    let list = client
+        .list_top_pages(space_key, page_req.offset, page_req.limit)
+        .await
+        .map_err(other_err)?;
+    let items = list
+        .pages
+        .into_iter()
+        .map(|p| NodeSummary {
+            id: p.id.clone(),
+            label: p.title.clone(),
+            node_type: page_node_type(),
+            metadata: Metadata {
+                fields: vec![
+                    MetadataField {
+                        key: "id".into(),
+                        value: p.id,
+                        display_label: "ID".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "title".into(),
+                        value: p.title,
+                        display_label: "Title".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "type".into(),
+                        value: p.page_type,
+                        display_label: "Type".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                ],
+            },
+            // `children.page.size > 0` from `?expand=children.page.size`
+            // on the list call; populated for live pages, `None` for
+            // synthetic entries the lookup path constructs locally.
+            has_children: p.has_children,
+        })
+        .collect();
+    let page_info = PageInfo {
+        offset: list.start,
+        limit: list.limit,
+        total: None,
+        has_next: list.has_next,
+        has_prev: list.start > 0,
+    };
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(page_info),
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
 }
 
 pub(super) struct ConfluenceSpaceNode {
@@ -125,6 +200,7 @@ impl ConfluenceSpaceNode {
             template: render_template(),
             version: String::new(),
             suffix: ".html".into(),
+            file_path: None,
         })
     }
 
@@ -201,94 +277,6 @@ impl Node for ConfluenceSpaceNode {
     fn metadata(&self) -> &Metadata {
         &self.cached_metadata
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        space_actions()
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![page_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        if params.node_type.type_id != "confluence:page" {
-            return Err(ContentError::NotSupported(format!(
-                "ConfluenceSpaceNode only lists confluence:page, got {}",
-                params.node_type.type_id
-            )));
-        }
-        let page_req = params.page.unwrap_or(PageRequest {
-            offset: 0,
-            limit: DEFAULT_PAGE_PAGE_SIZE,
-        });
-        // CT-12: list the space's top-level pages directly. Pre-CT-12 we
-        // listed the homepage's children, which hid orphan top-level
-        // pages AND broke tree_find — the `ancestors[]` chain CQL
-        // returns starts at the top-level page (Homepage or sibling),
-        // not at its children, so a homepage-children listing on level 1
-        // never contained any of those ancestors and the walker
-        // bailed out with NotInTree. `list_top_pages` returns the
-        // pages whose parent is the space itself, which matches both
-        // the web UI's tree browser AND the search-hit path shape.
-        let list = self
-            .client
-            .list_top_pages(&self.space.key, page_req.offset, page_req.limit)
-            .await
-            .map_err(other_err)?;
-        let items = list
-            .pages
-            .into_iter()
-            .map(|p| NodeSummary {
-                id: p.id.clone(),
-                label: p.title.clone(),
-                node_type: page_node_type(),
-                metadata: Metadata {
-                    fields: vec![
-                        MetadataField {
-                            key: "id".into(),
-                            value: p.id,
-                            display_label: "ID".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "title".into(),
-                            value: p.title,
-                            display_label: "Title".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "type".into(),
-                            value: p.page_type,
-                            display_label: "Type".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                    ],
-                },
-                // `children.page.size > 0` from `?expand=children.page.size`
-                // on the list call; populated for live pages, `None` for
-                // synthetic entries the lookup path constructs locally.
-                has_children: p.has_children,
-            })
-            .collect();
-        let page_info = PageInfo {
-            offset: list.start,
-            limit: list.limit,
-            total: None,
-            has_next: list.has_next,
-            has_prev: list.start > 0,
-        };
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(page_info),
-            batch_download_available: false,
-            downloaded: Vec::new(),
-        })
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         // No dedicated `/content/{id}` round-trip in CF-4 — the child is
         // synthesized from the id alone (title = id until CF-5 lands).
@@ -316,11 +304,7 @@ impl Node for ConfluenceSpaceNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open-in-browser", ActionInput::None) => self.open_via_xdg(),
             ("create-page", ActionInput::Edited { text, .. }) => {
@@ -387,10 +371,8 @@ mod tests {
         let actions = space_actions();
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].id, "create-page");
-        assert_eq!(actions[0].default_key, Some('a'));
         assert!(matches!(actions[0].input, InputSpec::Editor));
         assert_eq!(actions[1].id, "open-in-browser");
-        assert_eq!(actions[1].default_key, Some('o'));
     }
 
     #[test]

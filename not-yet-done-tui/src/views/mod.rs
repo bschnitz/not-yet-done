@@ -7,6 +7,7 @@ pub mod content_tree;
 pub mod content_view;
 pub mod focus_node;
 pub mod group_aggregate;
+pub mod images;
 pub mod link_extract;
 pub mod markdown;
 
@@ -14,9 +15,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
-use not_yet_done_content::{CursorIntent, PageInfo, PageRequest, SortKey, SortableColumn};
+use not_yet_done_content::{ColumnSchema, CursorIntent, PageInfo, PageRequest, QueryKind, SortKey};
 
-use crate::app::SavedQuery;
 use crate::config::view_config::ChildDef;
 use crate::views::content_view::PaneId;
 
@@ -91,6 +91,13 @@ pub enum ViewRequest {
 
     // Service calls
     ToggleTracking(Uuid),
+
+    /// The focused pane's card mode was toggled (`card.key`). The view has
+    /// already flipped and distributed the choice; the App only writes the
+    /// tab's card-mode map to the settings store so it survives a restart.
+    PersistCardMode {
+        view_index: usize,
+    },
 
     // Popups (App manages these as overlays)
     OpenColumnConfig,
@@ -168,8 +175,27 @@ pub enum ViewRequest {
         editor_profile: Option<String>,
         commit_on_save: bool,
     },
-    /// Reload items for a content view (async).
+    /// Reload items for a content view (async). Always re-lists the **root**
+    /// level — use [`Self::ReloadContentCurrentLevel`] for a pane that may sit
+    /// inside a drill.
     SpawnContentLoad {
+        view_index: usize,
+        pane_id: PaneId,
+    },
+    /// Reload a content pane at whatever level it currently shows: the root
+    /// list, or the active child level under its current parent. What an
+    /// adapter's `ActionDispatch::Reload` means — the action ran against a row
+    /// of the level the user is looking at, so that level is what has to be
+    /// refetched.
+    ReloadContentCurrentLevel {
+        view_index: usize,
+        pane_id: PaneId,
+    },
+    /// Hard reload of a content view (the `r` action): asks the adapter to
+    /// `refresh()` first — abort every in-flight load and drop caches — then
+    /// re-lists from scratch. Distinct from [`Self::SpawnContentLoad`] (which
+    /// serves a warm cache) so the many soft-reload call sites stay unchanged.
+    ForceReloadContent {
         view_index: usize,
         pane_id: PaneId,
     },
@@ -182,6 +208,9 @@ pub enum ViewRequest {
         pane_id: PaneId,
         query: String,
         name: String,
+        /// Which store the body came from — the loader runs an `Extended`
+        /// body as a document instead of handing it to the adapter.
+        kind: QueryKind,
     },
     /// Toggle a content-view saved query as this tab's default —
     /// applied automatically on app start instead of the view-YAML
@@ -268,6 +297,11 @@ pub enum ViewRequest {
         pane_id: PaneId,
         save_name: Option<String>,
         is_new: bool,
+        /// Which store the body belongs in — it decides the editor's file
+        /// suffix, the template a new entry starts from, and where the
+        /// buffer is written back. It has to be stated rather than looked
+        /// up by name, because a query being created has no entry yet.
+        kind: QueryKind,
     },
     /// Open editor for an adapter-native, free-form query (e.g. raw SQL
     /// for Postgres). Triggered at a drill-down level where the active
@@ -279,41 +313,43 @@ pub enum ViewRequest {
         pane_id: PaneId,
         parent_node_id: String,
     },
-    /// Open the Postgres per-table scripts menu (the new `q` keybind
-    /// on the `tables` subtab). App parses `table_node_id`, lists the
-    /// scripts under `<instance_data_dir>/queries/<db>/<schema>/<table>/`
-    /// and calls back into the `ContentView` to populate the popup.
-    OpenPostgresScriptsMenu {
+    /// Open the per-node scripts menu (the `q` keybind on a level with
+    /// `node_scripts: true`). App lists the scripts the adapter's script
+    /// store holds for `node_id` and calls back into the `ContentView` to
+    /// populate the popup.
+    OpenNodeScriptsMenu {
         view_index: usize,
         pane_id: PaneId,
-        table_node_id: String,
+        node_id: String,
     },
-    /// Run a Postgres script for `(db, schema, table, script)` against
-    /// the adapter and display the result in the focused pane.
-    RunPostgresScript {
+    /// Run the node script `script` of `node_id` against the adapter and
+    /// display the result in the focused pane.
+    RunNodeScript {
         view_index: usize,
         pane_id: PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
     },
-    /// Re-execute a free-form Postgres custom query with a different
+    /// Re-execute a free-form adapter custom query with a different
     /// page offset. Triggered by the pane's next/prev-page keys when
     /// the pane is in custom-query mode (i.e. its items came from the
     /// Q-editor or a script run, not a regular `list()` call). The
     /// `query` is the unwrapped SQL text the user wrote; the adapter
     /// wraps it with `LIMIT/OFFSET` itself.
     ///
+    /// `node_id` is the node the query was issued against, passed back to
+    /// [`ContentAdapter::custom_query_context`](not_yet_done_content::ContentAdapter::custom_query_context)
+    /// so the adapter re-derives its own routing keys.
+    ///
     /// `cursor` opts into the cursor-pagination lifecycle (CP-5):
     /// `Some(Open)` opens a fresh server-side cursor and discards
     /// `page`; `Some(Continue { id })` fetches the next chunk from an
     /// existing cursor; `Some(Close { id })` tears the cursor down.
     /// `None` keeps the legacy LIMIT/OFFSET path.
-    RunPostgresQuery {
+    RunAdapterQuery {
         view_index: usize,
         pane_id: PaneId,
-        database: String,
+        node_id: String,
         query: String,
         page: PageRequest,
         cursor: Option<CursorIntent>,
@@ -363,43 +399,6 @@ pub enum ViewRequest {
         /// LSPs / external tools discover sibling config files.
         in_place: bool,
     },
-    /// CP-9 / DSF-4: open the cmdline pre-filled so the user types only
-    /// the new script name. `parent_rel` (DSF-4) is the rel-path of the
-    /// dir under which the script should be created — empty for root.
-    /// Emitted from `ActionDispatch::CreateChild { hint: "db_script:<db>[:<parent_rel>]" }`.
-    OpenDbScriptNewPrompt {
-        view_index: usize,
-        pane_id: PaneId,
-        database: String,
-        parent_rel: String,
-    },
-    /// DSF-4: open the cmdline pre-filled for creating a new empty
-    /// directory under `parent_rel` (empty = root). Emitted from
-    /// `ActionDispatch::CreateChild { hint: "db_script_dir:<db>[:<parent_rel>]" }`.
-    OpenDbScriptDirNewPrompt {
-        view_index: usize,
-        pane_id: PaneId,
-        database: String,
-        parent_rel: String,
-    },
-    /// CP-9 / DSF-4: confirm + delete a DB-level script file. The
-    /// `script` field carries the full rel-path (may contain `/`)
-    /// so nested scripts under directories work uniformly.
-    ConfirmDeleteAdapterDbScript {
-        view_index: usize,
-        pane_id: PaneId,
-        database: String,
-        script: String,
-    },
-    /// DSF-4: confirm + delete an (empty) DB-script directory. The
-    /// adapter rejects non-empty dirs with a "not empty (N)" error,
-    /// which the TUI surfaces via `Notify` after the delete spawn.
-    ConfirmDeleteAdapterDbScriptDir {
-        view_index: usize,
-        pane_id: PaneId,
-        database: String,
-        rel_path: String,
-    },
     /// CF-11: generic content-node delete with confirmation. Emitted
     /// from `ActionDispatch::DeleteSelf` for any adapter that hasn't
     /// claimed a typed confirm route (currently: every adapter except
@@ -448,17 +447,6 @@ pub enum ViewRequest {
         pane_id: PaneId,
         action_name: String,
     },
-    /// DSF-4: open a rename prompt for an existing script or dir.
-    /// `is_dir` lets the App pick the right storage call
-    /// (`rename_db_script_entry` is shape-agnostic but the confirm
-    /// message wording differs).
-    OpenDbScriptRenamePrompt {
-        view_index: usize,
-        pane_id: PaneId,
-        database: String,
-        rel_path: String,
-        is_dir: bool,
-    },
     /// DSF-4: stash the focused node id as the marked source for a
     /// subsequent move. App stores it in `marked_db_script_for_move`
     /// and shows a status-bar indicator until the move completes or
@@ -472,35 +460,37 @@ pub enum ViewRequest {
     PasteDbScriptMove {
         target_node_id: String,
     },
-    /// Open the SQL editor for an existing or brand-new Postgres script
-    /// under `(db, schema, table)`. When `is_new` we still create the
-    /// file on first save; otherwise it's read from disk.
-    EditPostgresScript {
+    /// Open the SQL editor for an existing or brand-new script of
+    /// `node_id`. When `is_new` we still create the file on first save;
+    /// otherwise it's read from disk.
+    EditNodeScript {
         view_index: usize,
         pane_id: PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
         is_new: bool,
     },
-    /// Remove a Postgres script `.sql` file and its sidecar shortcut.
-    DeletePostgresScript {
+    /// Remove a node script file and its sidecar shortcut.
+    DeleteNodeScript {
         view_index: usize,
         pane_id: PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
         script: String,
     },
-    /// Prompt the user for a key chord to bind to a Postgres script;
-    /// captured key is written to `.shortcuts.yaml` alongside the file.
-    PromptPostgresScriptShortcut {
+    /// Prompt the user for a key chord to bind to a node script; the
+    /// captured key is written to the `query_shortcut` table under the
+    /// node's scope.
+    PromptNodeScriptShortcut {
         view_index: usize,
         pane_id: PaneId,
-        database: String,
-        schema: String,
-        table: String,
+        node_id: String,
+        script: String,
+    },
+    /// Remove the key chord bound to a node script (script kept).
+    ClearNodeScriptShortcut {
+        view_index: usize,
+        pane_id: PaneId,
+        node_id: String,
         script: String,
     },
     /// Run a `:script`-menu script directly via its bound shortcut
@@ -586,6 +576,12 @@ pub enum ViewRequest {
         scope: String,
         name: String,
         query: String,
+    },
+    /// Remove the shortcut key bound to a content query (query kept).
+    ClearContentQueryShortcut {
+        view_index: usize,
+        scope: String,
+        name: String,
     },
     /// Rename a content query in the DB.
     RenameContentQuery {
@@ -687,13 +683,6 @@ pub enum SearchKeyResult {
     Handled,
 }
 
-/// Info returned when a favorite is activated.
-#[derive(Debug, Clone)]
-pub struct FilterActivation {
-    pub filter_json: String,
-    pub filter_name: String,
-}
-
 /// Capability: view supports text search (/).
 pub trait Searchable {
     fn search_active(&self) -> bool;
@@ -712,17 +701,10 @@ pub trait HasCmdline {
     fn cmdline_open(&mut self);
     /// Open the cmdline with `prefill` pre-typed (cursor at end). Used
     /// by adapter actions that want the user to finish a partially-
-    /// typed command (e.g. CP-9 `:db-script-new <db> ` prompt).
+    /// typed command (e.g. `:db-script new ` prompt).
     fn cmdline_open_with(&mut self, prefill: &str);
     fn cmdline_close(&mut self);
     fn cmdline_handle_key(&mut self, key: &str) -> CmdlineKeyResult;
-}
-
-/// Capability: view has filters and favorites.
-pub trait Filterable {
-    fn active_filter_name(&self) -> Option<&str>;
-    fn favorites(&self) -> &[SavedQuery];
-    fn try_activate_favorite(&mut self, key: &str) -> Option<FilterActivation>;
 }
 
 /// Capability: view manages its own popups.
@@ -736,7 +718,7 @@ pub trait HasPopups {
 /// the sort is applied server-side (adapter) or in-memory (Tasks).
 pub trait SortableView {
     /// Columns the view can sort on. Empty = no sort UI offered.
-    fn sortable_columns(&self) -> Vec<SortableColumn>;
+    fn columns(&self) -> Vec<ColumnSchema>;
 
     /// User's current desired sort. Empty = view's natural default.
     fn current_sort(&self) -> &[SortKey];

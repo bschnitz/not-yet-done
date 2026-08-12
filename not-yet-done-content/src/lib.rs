@@ -9,21 +9,35 @@ pub mod mock;
 
 pub mod anonymize;
 pub mod auth;
+pub mod children;
+pub mod describe;
 pub mod download;
 pub mod grouping;
 pub mod http_log;
 pub mod link_route;
 pub mod node_ref;
 pub mod query_vars;
+pub mod scaffold;
+pub mod script_buffer;
 pub mod slug;
 pub mod sort_serde;
+pub mod text;
 
-pub use anonymize::{anonymizing_factory, Anonymizer, StandardAnonymizer};
+pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
+pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};
+pub use describe::{
+    HELP_ACTION_ID, TypeNode, child_types_of_type, help_action, is_builtin, level_actions,
+    level_actions_for_type, render_level, render_level_for_type, run_builtin,
+};
 pub use grouping::{GroupBucket, GroupSpec};
+pub use scaffold::{
+    FileMeta as ScaffoldFileMeta, Selection as ScaffoldSelection, generate as generate_scaffold,
+};
 
 pub use auth::{
-    AuthError, AuthMechanism, AuthOrchestrator, AuthSpec, CredentialBinding, CredentialProvider,
-    InMemorySessionStore, ResolvedSession, SessionCachePolicy, SessionEntry, SessionStore,
+    AuthError, AuthFieldSpec, AuthOrchestrator, AuthSpec, CredentialBinding, CredentialProvider,
+    InMemorySessionStore, MechanismSpec, ResolvedSession, SessionCachePolicy, SessionEntry,
+    SessionStore,
 };
 pub use link_route::{LinkRoute, LinkRouteError};
 pub use node_ref::{NodeRef, NodeRefParseError};
@@ -160,12 +174,13 @@ mod metadata_tests {
 mod apply_sort_tests {
     use super::*;
 
-    fn col(key: &str, kind: SortKind) -> SortableColumn {
-        SortableColumn {
-            key: key.into(),
-            label: key.into(),
-            kind,
-        }
+    fn col(key: &str, kind: SortKind) -> ColumnSchema {
+        let value_type = match kind {
+            SortKind::Text => "text",
+            SortKind::Number => "number",
+            SortKind::DateTime => "datetime",
+        };
+        ColumnSchema::new(key, key).typed(value_type)
     }
 
     fn key(column: &str, direction: SortDirection) -> SortKey {
@@ -250,10 +265,16 @@ mod apply_sort_tests {
     }
 
     #[test]
-    fn falls_back_to_label_when_column_has_no_metadata_field() {
-        // `description`/`task`-style columns whose value lives in the label.
+    fn a_label_backed_column_sorts_from_its_field() {
+        // `description`/`summary`-style columns whose value is *also* the
+        // label. They sort because the adapter carries the field as well —
+        // not because the sort reaches into the label when a field is
+        // missing.
         let cols = [col("description", SortKind::Text)];
-        let mut items = vec![summary("Banana", &[]), summary("apple", &[])];
+        let mut items = vec![
+            summary("Banana", &[("description", "Banana")]),
+            summary("apple", &[("description", "apple")]),
+        ];
         apply_sort(&mut items, &[key("description", SortDirection::Asc)], &cols);
         // Case-insensitive: "apple" before "Banana".
         assert_eq!(ids(&items), ["apple", "Banana"]);
@@ -261,7 +282,10 @@ mod apply_sort_tests {
 
     #[test]
     fn multi_key_sort_breaks_ties_with_later_keys_and_is_stable() {
-        let cols = [col("status", SortKind::Text), col("priority", SortKind::Number)];
+        let cols = [
+            col("status", SortKind::Text),
+            col("priority", SortKind::Number),
+        ];
         let mut items = vec![
             summary("a", &[("status", "open"), ("priority", "2")]),
             summary("b", &[("status", "open"), ("priority", "1")]),
@@ -294,6 +318,92 @@ mod apply_sort_tests {
         );
         // Only the recognised key is reported as applied.
         assert_eq!(applied, vec![key("started", SortDirection::Desc)]);
+    }
+
+    #[test]
+    fn a_missing_cell_sorts_as_empty_and_never_as_the_label() {
+        // `label` is the id here, so a fallback to it would order z/a/m —
+        // exactly the wrong answer this used to give.
+        let cols = [col("status", SortKind::Text)];
+        let mut items = vec![
+            summary("z", &[("status", "open")]),
+            summary("a", &[]),
+            summary("m", &[("status", "done")]),
+        ];
+        apply_sort(&mut items, &[key("status", SortDirection::Asc)], &cols);
+        assert_eq!(ids(&items), ["a", "m", "z"]);
+    }
+
+    #[test]
+    fn a_column_that_is_not_in_rows_is_not_sorted_on() {
+        // Sortable, but the value lives server-side only: locally there is
+        // nothing to compare, so the key is dropped rather than guessed at.
+        let cols = [ColumnSchema::new("summary", "Summary").not_in_rows()];
+        let mut items = vec![summary("b", &[]), summary("a", &[])];
+        let applied = apply_sort(&mut items, &[key("summary", SortDirection::Asc)], &cols);
+        assert!(applied.is_empty());
+        assert_eq!(ids(&items), ["b", "a"]);
+    }
+
+    #[test]
+    fn an_unsortable_column_is_dropped() {
+        let cols = [ColumnSchema::new("notes", "Notes").unsortable()];
+        let mut items = vec![
+            summary("b", &[("notes", "x")]),
+            summary("a", &[("notes", "a")]),
+        ];
+        let applied = apply_sort(&mut items, &[key("notes", SortDirection::Asc)], &cols);
+        assert!(applied.is_empty());
+        assert_eq!(ids(&items), ["b", "a"]);
+    }
+
+    /// The predicate `apply_sort` sorts by, asked without sorting. This is
+    /// what lets a caller see that taking a sort over locally would *lose* a
+    /// key the backend served server-side — a column with no cell in the rows
+    /// is exactly that case — instead of finding out by having already
+    /// reordered the list.
+    #[test]
+    fn honoured_keys_are_the_ones_a_local_sort_could_compare() {
+        let cols = [
+            ColumnSchema::new("rank", "Rank"),
+            ColumnSchema::new("summary", "Summary").not_in_rows(),
+            ColumnSchema::new("notes", "Notes").unsortable(),
+        ];
+        let asked = [
+            key("summary", SortDirection::Asc),
+            key("notes", SortDirection::Asc),
+            key("rank", SortDirection::Asc),
+            key("unknown", SortDirection::Asc),
+        ];
+        let honoured = honoured_sort_keys(&asked, &cols);
+        assert_eq!(honoured.len(), 1);
+        assert_eq!(honoured[0].column, "rank");
+
+        // And it agrees with what `apply_sort` actually applies — one rule,
+        // asked two ways.
+        let mut items = vec![
+            summary("b", &[("rank", "2")]),
+            summary("a", &[("rank", "1")]),
+        ];
+        assert_eq!(apply_sort(&mut items, &asked, &cols), honoured);
+    }
+
+    #[test]
+    fn sort_kind_follows_the_value_type() {
+        assert_eq!(ColumnSchema::new("a", "A").sort_kind(), SortKind::Text);
+        assert_eq!(
+            ColumnSchema::new("a", "A").typed("number").sort_kind(),
+            SortKind::Number
+        );
+        // Durations are integer seconds — numeric, not lexical.
+        assert_eq!(
+            ColumnSchema::new("a", "A").typed("duration").sort_kind(),
+            SortKind::Number
+        );
+        assert_eq!(
+            ColumnSchema::new("a", "A").typed("datetime").sort_kind(),
+            SortKind::DateTime
+        );
     }
 }
 
@@ -330,7 +440,7 @@ pub struct ListParams {
 /// One sort key in a (potentially multi-column) sort spec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SortKey {
-    /// Column key as advertised by [`Node::sortable_columns`].
+    /// Column key as declared by [`children::columns_for`].
     pub column: String,
     pub direction: SortDirection,
 }
@@ -359,10 +469,11 @@ pub struct PageInfo {
     pub has_prev: bool,
 }
 
-/// How a column's values compare. The adapter declares this per
-/// [`SortableColumn`] so the generic [`apply_sort`] helper knows whether to
-/// compare cells lexically, numerically, or as timestamps — only the adapter
-/// knows what a given column actually holds.
+/// How a column's values compare. Derived from a column's
+/// [`ColumnSchema::value_type`] (see [`ColumnSchema::sort_kind`]) so the
+/// generic [`apply_sort`] helper knows whether to compare cells lexically,
+/// numerically, or as timestamps — only the adapter knows what a given column
+/// actually holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SortKind {
     /// Lexicographic (case-insensitive) string compare. The fallback for any
@@ -378,68 +489,186 @@ pub enum SortKind {
     DateTime,
 }
 
-/// A column that the adapter can sort on. Returned by
-/// [`Node::sortable_columns`] so the UI knows which table headers to mark
-/// sort-eligible and what label to render in hint mode.
-#[derive(Clone, Debug)]
-pub struct SortableColumn {
-    /// Stable key referenced from [`SortKey::column`] and matched against
-    /// the view config's column `key`.
+/// The one declaration of a column: what it is called, how its values are
+/// typed, whether every listed row carries it, and whether the adapter can
+/// sort on it.
+///
+/// Adapters declare their own list columns per child type
+/// ([`children::Child::columns`]); a decorator adds columns that aren't native
+/// content but are carried, typed, alongside it via
+/// [`ContentAdapter::describe_columns`] (today: the locally-stored custom
+/// columns). Both channels speak this type, and
+/// [`children::columns_for`] unions them — front-ends see one list.
+///
+/// This is also the framework's one channel for a **type flowing backend →
+/// front-end**: row metadata is otherwise stringly-typed. A front-end merges
+/// this schema over its own layout config — `value_type` is authoritative for
+/// how a value is validated, compared and rendered, while width/order/
+/// visibility stay a front-end concern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnSchema {
+    /// Stable column key — the metadata-field key the value is carried under
+    /// (when [`in_rows`](Self::in_rows)), the key referenced from
+    /// [`SortKey::column`], and the view config's column `key`.
     pub key: String,
-    /// Display label for sort hints / debug surfaces.
-    pub label: String,
-    /// How values in this column compare. See [`SortKind`].
-    pub kind: SortKind,
+    /// Optional human label. `None` lets the front-end fall back to its own
+    /// (e.g. the view YAML's `label:`).
+    pub label: Option<String>,
+    /// Canonical value type: `text` / `number` / `duration` / `datetime`.
+    /// `text` is the permissive default; the others imply parsing/validation,
+    /// typed comparison (see [`Self::sort_kind`]) and type-aware rendering
+    /// (right-aligned number, formatted duration, …).
+    pub value_type: String,
+    /// Allowed values when the column is a closed set (drives a select on the
+    /// edit side). Empty = free value.
+    pub options: Vec<String>,
+    /// The value is carried as a [`MetadataField`] under [`key`](Self::key) in
+    /// **every** listed row. That makes the column locally filterable and
+    /// locally sortable — and it is a promise the generic list path checks
+    /// (see [`children::check_rows`]).
+    ///
+    /// `false` for a column that only exists on the detail projection, or one
+    /// the backend can order by without ever shipping the value.
+    pub in_rows: bool,
+    /// The adapter undertakes to honour a [`SortKey`] on this column. *How* is
+    /// its own business — a server-side `ORDER BY` or a local [`apply_sort`];
+    /// the framework only needs to know whether to offer the column.
+    ///
+    /// Independent of [`in_rows`](Self::in_rows): a server-side sort needs no
+    /// local cell, and a column present in every row may still not be
+    /// sortable.
+    pub sortable: bool,
+}
+
+impl ColumnSchema {
+    /// A text column carried in every row and sortable — the common case for
+    /// an adapter's own list columns. Refine with the builders below.
+    pub fn new(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            label: Some(label.into()),
+            value_type: "text".into(),
+            options: Vec::new(),
+            in_rows: true,
+            sortable: true,
+        }
+    }
+
+    /// Set the canonical value type (`text` / `number` / `duration` /
+    /// `datetime`).
+    pub fn typed(mut self, value_type: impl Into<String>) -> Self {
+        self.value_type = value_type.into();
+        self
+    }
+
+    /// Restrict the column to a closed set of values.
+    pub fn with_options(mut self, options: Vec<String>) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// The column can be listed and filtered but not sorted on.
+    pub fn unsortable(mut self) -> Self {
+        self.sortable = false;
+        self
+    }
+
+    /// The value is *not* carried in list rows — the column is sortable
+    /// server-side only, or exists on the detail projection alone.
+    pub fn not_in_rows(mut self) -> Self {
+        self.in_rows = false;
+        self
+    }
+
+    /// How values in this column compare, derived from
+    /// [`value_type`](Self::value_type). Unknown types compare as text — the
+    /// permissive default that can only mis-order, never fail.
+    pub fn sort_kind(&self) -> SortKind {
+        match self.value_type.as_str() {
+            // Durations are stored as integer seconds, so they compare
+            // numerically.
+            "number" | "duration" => SortKind::Number,
+            "datetime" => SortKind::DateTime,
+            _ => SortKind::Text,
+        }
+    }
+
+    /// The label a front-end shows, falling back to the key.
+    pub fn display_label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.key)
+    }
+
+    /// Map this described column to a form field for an
+    /// [`InputSpec::ColumnForm`] editor, shared by every front-end so the
+    /// mapping stays uniform: a closed `options` set becomes a select,
+    /// anything else a text field the backend validates against `value_type`.
+    /// Always optional — an empty value clears the cell. The type is hinted in
+    /// the label for the non-`text` kinds so the user knows the expected format.
+    pub fn to_form_field(&self) -> FormFieldSpec {
+        let base = self.label.clone().unwrap_or_else(|| self.key.clone());
+        if self.options.is_empty() {
+            let label = if self.value_type == "text" {
+                base
+            } else {
+                format!("{base} ({})", self.value_type)
+            };
+            FormFieldSpec::text(self.key.clone(), label).optional()
+        } else {
+            FormFieldSpec::select(self.key.clone(), base, self.options.clone()).optional()
+        }
+    }
+}
+
+/// The value a row carries for `column`, or `None` when the row has no such
+/// cell.
+///
+/// **The** cell lookup — sorting ([`apply_sort`]) and local filtering
+/// (`not_yet_done_extended_query`) both go through it, so "filter and sort see
+/// the same value" holds by shared code rather than by comment. An absent
+/// field and a blank one are the same thing: no value. There is no fallback to
+/// any other slot of the summary; a column whose value lives in the row is
+/// declared [`ColumnSchema::in_rows`] and must be there.
+pub fn cell<'a>(summary: &'a NodeSummary, column: &str) -> Option<&'a str> {
+    summary
+        .metadata
+        .fields
+        .iter()
+        .find(|f| f.key == column)
+        .map(|f| f.value.as_str())
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// Sort `items` in place by a multi-column `sort` spec, using `columns` to
 /// resolve each requested key to a [`SortKind`].
 ///
-/// This is the generic engine that powers the `S` (sort) action across every
-/// adapter: an adapter advertises its sortable columns (with kinds) via
-/// [`Node::sortable_columns`] and calls this from its `list()` before any
-/// grouping, so the within-group order follows the requested item sort. The
-/// frontend stays adapter-agnostic — it just forwards [`SortKey`]s and renders
-/// whatever the adapter reports as applied.
+/// This is the generic engine behind the `S` (sort) action: an adapter
+/// declares its columns via [`children::Child::columns`] and calls this from
+/// its `list()` before any grouping, so the within-group order follows the
+/// requested item sort. The frontend stays adapter-agnostic — it just forwards
+/// [`SortKey`]s and renders whatever the adapter reports as applied.
 ///
-/// A cell's value is the matching [`MetadataField`] by key, falling back to
-/// the summary's `label` when the column carries no metadata field (e.g. a
-/// `description` column rendered straight from the label). Keys not present in
-/// `columns` are skipped. The sort is **stable** and applied
-/// least-significant-key-first, so a multi-key spec orders by the first key
-/// with later keys breaking ties. Returns the subset of `sort` keys that were
-/// recognised (suitable for [`ListResult::applied_sort`]).
+/// A cell's value is [`cell`]; a row without that cell sorts as empty. Keys
+/// naming a column that is unknown, not [`sortable`](ColumnSchema::sortable),
+/// or not [`in_rows`](ColumnSchema::in_rows) are **skipped** — this function
+/// only sorts on values it can actually read, and never guesses one. The sort
+/// is **stable** and applied least-significant-key-first, so a multi-key spec
+/// orders by the first key with later keys breaking ties. Returns the subset
+/// of `sort` keys that were honoured (suitable for
+/// [`ListResult::applied_sort`]).
 pub fn apply_sort(
     items: &mut [NodeSummary],
     sort: &[SortKey],
-    columns: &[SortableColumn],
+    columns: &[ColumnSchema],
 ) -> Vec<SortKey> {
-    let resolved: Vec<(&SortKey, SortKind)> = sort
-        .iter()
-        .filter_map(|k| {
-            columns
-                .iter()
-                .find(|c| c.key == k.column)
-                .map(|c| (k, c.kind))
-        })
-        .collect();
-
-    let cell = |s: &NodeSummary, key: &str| -> String {
-        s.metadata
-            .fields
-            .iter()
-            .find(|f| f.key == key)
-            .map(|f| f.value.clone())
-            .unwrap_or_else(|| s.label.clone())
-    };
+    let resolved = resolve_sort(sort, columns);
 
     // Apply keys least-significant first; a stable sort preserves the order
     // established by earlier (more significant) passes for equal elements.
     for (key, kind) in resolved.iter().rev() {
         items.sort_by(|a, b| {
-            let va = cell(a, &key.column);
-            let vb = cell(b, &key.column);
-            let ord = compare_cells(&va, &vb, *kind);
+            let va = cell(a, &key.column).unwrap_or("");
+            let vb = cell(b, &key.column).unwrap_or("");
+            let ord = compare_cells(va, vb, *kind);
             match key.direction {
                 SortDirection::Asc => ord,
                 SortDirection::Desc => ord.reverse(),
@@ -448,6 +677,31 @@ pub fn apply_sort(
     }
 
     resolved.into_iter().map(|(k, _)| k.clone()).collect()
+}
+
+/// Pair each sort key with the [`SortKind`] to compare it under, dropping the
+/// keys no local comparison can serve. The one place that rule lives.
+fn resolve_sort<'a>(sort: &'a [SortKey], columns: &[ColumnSchema]) -> Vec<(&'a SortKey, SortKind)> {
+    sort.iter()
+        .filter_map(|k| {
+            columns
+                .iter()
+                .find(|c| c.key == k.column && c.sortable && c.in_rows)
+                .map(|c| (k, c.sort_kind()))
+        })
+        .collect()
+}
+
+/// The subset of `sort` that [`apply_sort`] would honour against `columns`.
+///
+/// Same rule, asked without doing the work: a caller deciding *whether* to
+/// take a sort over locally needs to know what a local sort would achieve
+/// before it reorders anything it might have to put back.
+pub fn honoured_sort_keys(sort: &[SortKey], columns: &[ColumnSchema]) -> Vec<SortKey> {
+    resolve_sort(sort, columns)
+        .into_iter()
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 /// Compare two cell strings under a [`SortKind`]. Unparseable values under a
@@ -622,6 +876,31 @@ pub struct AdapterCapabilities {
     /// engine for them. Interactive single-node expansion always uses the
     /// cascade regardless of this flag.
     pub supports_eager_subtree: bool,
+    /// Whether the adapter offers an editable, adapter-native query
+    /// script per node — the `Q` editor and the `q` script menu.
+    ///
+    /// The host used to gate those keys on `adapter_type() == "postgres"`,
+    /// which meant a second SQL backend could not have them without the
+    /// host learning its name. Adapters that set this must also provide a
+    /// [`ScriptStore`] (via [`ContentAdapter::script_store`]) whose
+    /// node-scoped half is populated; the levels that own scripts are
+    /// declared in the view config, not here.
+    pub supports_node_query_editor: bool,
+    /// Whether this adapter's node ids are *not* stable across reloads
+    /// and processes.
+    ///
+    /// The link/mark features (`f`, `m`/`p`, saved `NodeRef`s) address
+    /// nodes by id, which only works if an id still means the same row
+    /// later. Adapters whose ids are positional or per-query — a SQL
+    /// result row is `qrow:<n>`, meaningful only inside the query that
+    /// produced it — set this and the host reports "no stable ids"
+    /// instead of following a ref that would land on an unrelated row.
+    ///
+    /// Negated on purpose: stable ids are the norm (every ticket, task
+    /// and page adapter has them), so the `Default` must be "stable" or
+    /// adding this field would silently switch linking off everywhere.
+    /// Only the exceptions opt in.
+    pub unstable_node_ids: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -776,9 +1055,10 @@ pub struct TreeFindHit {
 ///    which returns an [`ActionDispatch`] describing what UI flow to start
 ///    (open editor, execute query, create child, …).
 ///
-/// `placement` and `default_key` only influence the new shortcut path —
-/// adapters that only support the menu path can leave them at their
-/// defaults via [`NodeAction::new`].
+/// The action carries no bar-placement hint: whether a shortcut-bound action
+/// surfaces in the top action bar or the bottom status bar is a pure TUI
+/// concern, derived from the action's [`InputSpec`] and id (activatable →
+/// action bar, fire-and-forget → status bar), not declared here.
 #[derive(Clone, Debug)]
 pub struct NodeAction {
     /// Stable identifier referenced from view config (e.g. `"edit_full"`,
@@ -788,36 +1068,16 @@ pub struct NodeAction {
     pub label: String,
     /// What kind of input the action needs from the user.
     pub input: InputSpec,
-    /// Where the action's hint renders when shortcut-bound. Adapters that
-    /// only surface via the menu can leave the default (`StatusBar`).
-    pub placement: HintPlacement,
-    /// Suggested key when the YAML view config doesn't bind one. Purely
-    /// cosmetic — explicit YAML mappings always win.
-    pub default_key: Option<char>,
 }
 
 impl NodeAction {
-    /// Build a menu-only action with default placement (`StatusBar`) and
-    /// no key suggestion. Use the builder methods below for shortcut
-    /// metadata.
+    /// Build an action from its id, label, and input shape.
     pub fn new(id: impl Into<String>, label: impl Into<String>, input: InputSpec) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
             input,
-            placement: HintPlacement::StatusBar,
-            default_key: None,
         }
-    }
-
-    pub fn with_placement(mut self, placement: HintPlacement) -> Self {
-        self.placement = placement;
-        self
-    }
-
-    pub fn with_default_key(mut self, key: char) -> Self {
-        self.default_key = Some(key);
-        self
     }
 }
 
@@ -841,6 +1101,39 @@ pub enum InputSpec {
     /// for an edit flow come from [`Node::form_prep`]; static fallbacks
     /// come from each field's [`FormFieldSpec::default`].
     Form { fields: Vec<FormFieldSpec> },
+    /// A form over a **dynamic, backend-owned column set** rather than a static
+    /// field list — today: the lib-owned custom columns. A front-end builds the
+    /// fields one of two ways and prefills current values via
+    /// [`Node::form_prep`]:
+    ///
+    /// * from [`ContentAdapter::describe_columns`] (mapping each
+    ///   [`ColumnSchema`] with [`ColumnSchema::to_form_field`]) and delivering
+    ///   [`ActionInput::Form`] — the backend resolves each type from its own
+    ///   schema, so only already-defined columns are editable; or
+    /// * from the front-end's **own typed column config** (e.g. the TUI view
+    ///   YAML's `source: custom` columns with their `kind:`) and delivering
+    ///   [`ActionInput::ColumnForm`], carrying each cell's `value_type` so the
+    ///   backend can create the column on first write (type-on-first-write) —
+    ///   no `describe_columns` round-trip needed, so a column that has never
+    ///   been written still gets an input.
+    ColumnForm,
+}
+
+/// A predicate over another field's current value, gating a field's visibility
+/// in a dynamic form. The front-end re-evaluates it after every value change: a
+/// field whose condition no longer holds is hidden — dropped from the layout,
+/// skipped by focus navigation, and excluded from the submitted
+/// [`ActionInput::Form`] values (and required-checks). Comparison is against the
+/// controller's current value string (a toggle yields `"true"`/`"false"`; a
+/// select yields the option label).
+#[derive(Clone, Debug)]
+pub struct FieldCondition {
+    /// [`FormFieldSpec::key`] of the field whose value is tested.
+    pub field: String,
+    /// Visible when the controller's value equals one of these.
+    pub equals_any: Vec<String>,
+    /// Invert the match: visible when the value is *not* among `equals_any`.
+    pub negate: bool,
 }
 
 /// One field in an [`InputSpec::Form`].
@@ -860,6 +1153,14 @@ pub struct FormFieldSpec {
     /// For a toggle this is `"true"`/`"false"`; for a select it must be
     /// one of `allowed_values`.
     pub default: Option<String>,
+    /// Render the value as bullets rather than clear text — passwords, tokens,
+    /// anything that must not stand on screen. Only text fields honour it.
+    pub masked: bool,
+    /// When set, the field is only shown (and collected/validated) while this
+    /// condition holds against another field's current value — the basis for
+    /// dynamic forms whose fields change with the selection. `None` → always
+    /// visible.
+    pub visible_when: Option<FieldCondition>,
 }
 
 impl FormFieldSpec {
@@ -871,6 +1172,8 @@ impl FormFieldSpec {
             kind: FormFieldKind::Text,
             required: true,
             default: None,
+            masked: false,
+            visible_when: None,
         }
     }
 
@@ -886,6 +1189,8 @@ impl FormFieldSpec {
             kind: FormFieldKind::Select { allowed_values },
             required: true,
             default: None,
+            masked: false,
+            visible_when: None,
         }
     }
 
@@ -897,6 +1202,24 @@ impl FormFieldSpec {
             kind: FormFieldKind::Toggle,
             required: false,
             default: None,
+            masked: false,
+            visible_when: None,
+        }
+    }
+
+    /// A required natural-language date(-time) text field. `with_time` selects
+    /// whether the value carries a time-of-day (front-ends may render a live
+    /// resolved preview). The submitted value stays the raw phrase the user
+    /// typed; resolution happens in the backend.
+    pub fn datetime(key: impl Into<String>, label: impl Into<String>, with_time: bool) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind: FormFieldKind::DateTime { with_time },
+            required: true,
+            default: None,
+            masked: false,
+            visible_when: None,
         }
     }
 
@@ -906,9 +1229,50 @@ impl FormFieldSpec {
         self
     }
 
+    /// Mask the value on screen (passwords, tokens). No effect on anything but
+    /// a text field, and none on what is submitted.
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
     /// Set the static initial value.
     pub fn with_default(mut self, default: impl Into<String>) -> Self {
         self.default = Some(default.into());
+        self
+    }
+
+    /// Show this field only while `field`'s value equals `value`.
+    pub fn visible_when(mut self, field: impl Into<String>, value: impl Into<String>) -> Self {
+        self.visible_when = Some(FieldCondition {
+            field: field.into(),
+            equals_any: vec![value.into()],
+            negate: false,
+        });
+        self
+    }
+
+    /// Show this field only while `field`'s value is one of `values`.
+    pub fn visible_when_any(
+        mut self,
+        field: impl Into<String>,
+        values: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.visible_when = Some(FieldCondition {
+            field: field.into(),
+            equals_any: values.into_iter().collect(),
+            negate: false,
+        });
+        self
+    }
+
+    /// Show this field only while `field`'s value is *not* `value`.
+    pub fn hidden_when(mut self, field: impl Into<String>, value: impl Into<String>) -> Self {
+        self.visible_when = Some(FieldCondition {
+            field: field.into(),
+            equals_any: vec![value.into()],
+            negate: true,
+        });
         self
     }
 }
@@ -922,6 +1286,10 @@ pub enum FormFieldKind {
     Select { allowed_values: Vec<String> },
     /// Boolean on/off.
     Toggle,
+    /// Natural-language date(-time) text field. `with_time` distinguishes a
+    /// day-only field from one that also carries a time-of-day. The value is
+    /// the raw phrase the user typed; the backend resolves it.
+    DateTime { with_time: bool },
 }
 
 /// The user's input for an action invocation.
@@ -946,6 +1314,34 @@ pub enum ActionInput {
     /// select fields deliver their string value (possibly empty for an
     /// optional field).
     Form(std::collections::HashMap<String, String>),
+    /// `InputSpec::ColumnForm` actions delivered by a front-end that builds the
+    /// form from **its own typed column config** (rather than the backend
+    /// schema): each cell carries its `value_type`, so the backend can create a
+    /// column on first write (type-on-first-write) without a pre-existing
+    /// schema. An empty [`ColumnCellInput::value`] means "clear this cell".
+    /// (A front-end that instead builds the form from
+    /// [`ContentAdapter::describe_columns`] can still deliver the simpler
+    /// [`ActionInput::Form`], where the backend resolves each type from its own
+    /// schema.)
+    ColumnForm(Vec<ColumnCellInput>),
+}
+
+/// One typed cell delivered by an [`InputSpec::ColumnForm`] submission via
+/// [`ActionInput::ColumnForm`]. The `value_type` travels with the value so a
+/// backend that stores the column (e.g. custom columns) can bootstrap it on
+/// first write without the front-end having to define it beforehand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnCellInput {
+    /// Column key — matches the view config column `key` and the metadata-field
+    /// key the value is carried under.
+    pub key: String,
+    /// The user's value; empty means "clear this cell".
+    pub value: String,
+    /// Canonical value type from the front-end's column config
+    /// (`text`/`number`/`duration`/`datetime`). Authoritative only when the
+    /// backend has no column of this key yet; an existing column's stored type
+    /// wins (the backend may reject a conflicting type).
+    pub value_type: String,
 }
 
 /// What the adapter wants the TUI to do after executing an action.
@@ -1005,6 +1401,7 @@ pub enum ActionOutcome {
 }
 
 /// Initial state for an `InputSpec::Editor` action.
+#[derive(Default)]
 pub struct EditorPrep {
     /// Initial buffer content written to the temp file.
     pub template: String,
@@ -1013,6 +1410,15 @@ pub struct EditorPrep {
     pub version: String,
     /// File suffix for `$EDITOR` syntax highlighting (e.g. `".jira"`).
     pub suffix: String,
+    /// Optional **persistent** file the editor should open, instead of a
+    /// throwaway temp file. `Some(path)` opts into "materialised" editing:
+    /// the buffer lives at exactly this path, is *not* cleaned up when the
+    /// editor closes, and sibling files (e.g. downloaded attachments) can be
+    /// referenced by relative path from it. The adapter is responsible for
+    /// creating parent directories and seeding the file's initial content via
+    /// [`Self::template`] (the frontend writes `template` to `file_path`).
+    /// `None` (the default) keeps the classic `$TMPDIR` temp-file behaviour.
+    pub file_path: Option<std::path::PathBuf>,
 }
 
 /// A selectable option for an `InputSpec::Picker` action.
@@ -1044,14 +1450,6 @@ pub struct ValueOption {
     /// attaches `project` / `activity` clear names next to the slug token).
     /// Empty for sources with no such breakdown; frontends may ignore it.
     pub extra: std::collections::BTreeMap<String, String>,
-}
-
-/// Where a hint should render — drives the split between the highlighted
-/// action bar and the dimmer status bar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HintPlacement {
-    ActionBar,
-    StatusBar,
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,10 +1496,6 @@ pub enum ActionDispatch {
         /// the status bar.
         paged: bool,
     },
-    /// Create a new child node under the invoking node. `hint` is an
-    /// adapter-defined string that the TUI uses to prompt the user
-    /// (e.g. `"script_name"` → cmdline prompt).
-    CreateChild { hint: String },
     /// Delete the invoking node. TUI confirms before the actual delete.
     ///
     /// `confirm` lets the adapter override the confirmation prompt — e.g.
@@ -1237,6 +1631,13 @@ pub struct AuthField {
     pub label: String,
     /// If true, the frontend must mask the input (passwords).
     pub masked: bool,
+    /// If true, the frontend may accept an empty answer.
+    ///
+    /// Fields the config binds are never optional — binding one is how
+    /// the user says the value is needed. This exists for the form a
+    /// credential script describes, where the script decides which of
+    /// its own inputs it can do without.
+    pub optional: bool,
     /// Optional pre-filled value (e.g. username from YAML config).
     pub prefill: Option<String>,
 }
@@ -1245,7 +1646,9 @@ pub struct AuthField {
 /// [`ContentAdapter::subscribe_status`]. Adapters that need to surface
 /// async login progress (cookie scripts, OAuth flows) publish updates
 /// here; frontends render the current state in the relevant view.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// `Eq` is intentionally absent: `Busy.progress` is an `Option<f32>`, and `f32`
+// is only `PartialEq`. Status comparisons (change detection) use `PartialEq`.
+#[derive(Clone, Debug, PartialEq)]
 pub enum AdapterStatus {
     /// Auth has not started yet.
     Idle,
@@ -1259,8 +1662,19 @@ pub enum AdapterStatus {
     },
     /// Adapter needs interactive credentials. The frontend renders a form
     /// for `fields` and submits the collected values via
-    /// [`ContentAdapter::submit_credentials`].
-    NeedsCreds { fields: Vec<AuthField> },
+    /// [`ContentAdapter::submit_credentials`], or reports the user's
+    /// refusal via [`ContentAdapter::cancel_credentials`].
+    NeedsCreds {
+        fields: Vec<AuthField>,
+        /// What this form is for, when it is not simply "log in" — a
+        /// credential script asking to unlock a password store says so
+        /// here. Frontends use it as the dialog's title.
+        header: Option<String>,
+        /// Why the form is being shown again ("that passphrase was
+        /// rejected"). Set by a credential script that wants another try;
+        /// a fatal error ends the login instead and arrives as `Failed`.
+        error: Option<String>,
+    },
     /// Auth completed; the adapter is ready to serve requests.
     Ready,
     /// Auth gave up after exhausting retries (or hit a non-retryable
@@ -1276,11 +1690,55 @@ pub enum AdapterStatus {
     /// frontend can compute `elapsed = now − started_at` on every
     /// render-tick without a separate counter). `timeout_secs` is the
     /// adapter-configured deadline that fires the reconnect.
+    ///
+    /// `progress` is an optional best-effort completion estimate in `[0, 1]`
+    /// for loads that arrive incrementally (e.g. the calendar's browser
+    /// backend paging month by month). `Some(f)` lets the frontend render a
+    /// percentage; `None` means indeterminate (the countdown is the only cue),
+    /// which is what every non-incremental `Busy` uses.
     Busy {
         label: String,
         started_at_unix_ms: u64,
         timeout_secs: u64,
+        progress: Option<f32>,
     },
+}
+
+impl AdapterStatus {
+    /// One-line rendering of a *transient* connection state, for frontends
+    /// that only need to tell the user what the adapter is doing right now.
+    /// `None` for the two resting states (`Idle`, `Ready`) — there is
+    /// nothing to report about them.
+    ///
+    /// Shared so the TUI banner and the CLI's stderr progress line cannot
+    /// drift apart. Frontends that can say more say it themselves: the TUI
+    /// names the key that opens the credential form and renders `Busy` as a
+    /// live countdown, neither of which a one-shot line can express.
+    pub fn banner_text(&self) -> Option<String> {
+        match self {
+            Self::Connecting {
+                retry,
+                max_retries,
+                timeout_secs,
+            } => {
+                // Both details are optional in the status: an adapter with a
+                // single, open-ended attempt reports `1/1` and `0` — printing
+                // "(1/1) Timeout: 0s" would state a limit that isn't there.
+                let mut line = "Connecting…".to_string();
+                if *max_retries > 1 {
+                    line.push_str(&format!(" ({retry}/{max_retries})"));
+                }
+                if *timeout_secs > 0 {
+                    line.push_str(&format!(" Timeout: {timeout_secs}s"));
+                }
+                Some(line)
+            }
+            Self::NeedsCreds { .. } => Some("Login required".into()),
+            Self::Failed { reason } => Some(format!("Connection failed: {reason}")),
+            Self::Busy { label, .. } => Some(format!("Working: {label}")),
+            Self::Idle | Self::Ready => None,
+        }
+    }
 }
 
 /// Out-of-band signal from an adapter that its content changed and the
@@ -1355,6 +1813,96 @@ pub enum Invalidation {
     NowAnchored,
 }
 
+/// A time-anchored heads-up that a scheduled item is about to happen — the
+/// generic "reminder" event an adapter fires ahead of the moment (see
+/// [`ContentAdapter::subscribe_reminders`]).
+///
+/// The payload is deliberately adapter-agnostic: a stable id, a human title,
+/// an optional detail line, the instant the item occurs, and how far ahead
+/// this fire is. That is enough for a frontend to run a user-configured
+/// command (a desktop notification, a sound, …) **without** knowing what kind
+/// of thing it is — a calendar event, a CI window, a countdown. Which items
+/// get a reminder, and how far ahead, is the *adapter's* policy; what to *do*
+/// when one fires is the *frontend's* — this type is the seam between them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reminder {
+    /// Stable id of the underlying item (e.g. the event's global id), so a
+    /// frontend can de-dupe repeated fires and correlate with a row.
+    pub id: String,
+    /// Human-readable subject (e.g. the event title).
+    pub title: String,
+    /// Optional secondary line (location, organiser, account, …).
+    pub detail: Option<String>,
+    /// RFC3339 instant the item occurs at, rendered in local time — for
+    /// display and as a substitution value in the configured command.
+    pub when: String,
+    /// RFC3339 instant the item is *over*, rendered in local time, when the
+    /// underlying item has a defined end (e.g. a calendar event's end). Lets a
+    /// frontend keep a notification on screen until the moment has passed.
+    /// `None` for point-in-time items with no natural end.
+    pub until: Option<String>,
+    /// Whole minutes from this fire until [`when`](Self::when) (the lead
+    /// time). `0` when firing at or after the moment.
+    pub lead_minutes: i64,
+}
+
+/// A backend-initiated request for user input, raised **mid-operation** — the
+/// input-capturing counterpart to the fire-and-forget [`Reminder`] /
+/// [`Invalidation`] streams. Where a [`NodeAction`] is *user*-initiated (the
+/// user presses a key, the frontend collects input, the adapter executes), a
+/// `PromptRequest` is *adapter*-initiated: a long-running async operation
+/// (e.g. an interactive browser login) discovers that it needs the user to
+/// provide — or merely acknowledge — something before it can continue, and
+/// pushes this request up to the frontend, blocking until the answer arrives
+/// on [`respond`](Self::respond).
+///
+/// It reuses the Action input vocabulary on purpose — [`InputSpec`] describes
+/// the shape (from `None` = pure acknowledge, through `Editor`, to a
+/// multi-field `Form`) and [`ActionInput`] carries the answer back — so the
+/// frontend collects it with the *same* widgets it already uses for actions,
+/// with no parallel input machinery. The one semantic difference from an
+/// action: a prompt **always** shows its popup, even for [`InputSpec::None`]
+/// (that is the acknowledge case), because presenting [`detail`](Self::detail)
+/// — e.g. an MFA number to match — is the whole point.
+///
+/// Separation of concerns: the adapter owns *when* a prompt is raised and
+/// *what* it asks; the frontend owns *how* it is rendered. Whether an
+/// interactive frontend exists at all falls out of the channel: if none took
+/// the stream (see [`ContentAdapter::take_prompt_requests`]) or the responder
+/// is dropped unanswered, the raising side observes a closed channel and fails
+/// loudly rather than hanging.
+pub struct PromptRequest {
+    /// Human-readable label of the raising instance/connection (e.g. the
+    /// account name). Pure context for the frontend to show — it does **not**
+    /// imply any view/tab switch; the originating tab is merely the context.
+    pub source: String,
+    /// The prompt text shown to the user. Adapter-supplied and typically
+    /// user-configurable per callback.
+    pub prompt: String,
+    /// Optional read-only detail rendered above the input — e.g. the MFA
+    /// number to match, or an instruction line. Display only.
+    pub detail: Option<String>,
+    /// Shape of the expected input, reusing the [`NodeAction`] vocabulary.
+    /// [`InputSpec::None`] means "acknowledge only" — the frontend shows the
+    /// prompt and waits for a bare confirm.
+    pub input: InputSpec,
+    /// One-shot channel the frontend answers on. Sending a [`PromptAnswer`]
+    /// unblocks the raising operation; dropping it (or a send failure on the
+    /// request stream) signals "no interactive handler" to that operation.
+    pub respond: tokio::sync::oneshot::Sender<PromptAnswer>,
+}
+
+/// The frontend's answer to a [`PromptRequest`].
+pub enum PromptAnswer {
+    /// The user supplied input — reuses the same [`ActionInput`] the frontend
+    /// produces for actions. A bare acknowledge (for [`InputSpec::None`]) is
+    /// delivered as [`ActionInput::None`].
+    Provided(ActionInput),
+    /// The user dismissed the prompt without answering. The raising operation
+    /// should treat this as "user declined" and unwind (and may retry).
+    Cancelled,
+}
+
 // ---------------------------------------------------------------------------
 // Core Traits
 // ---------------------------------------------------------------------------
@@ -1397,6 +1945,37 @@ pub trait ContentAdapter: Send + Sync {
 
     /// Direct access to a node by its ID (shortcut, avoids tree traversal).
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>>;
+
+    /// The single source of truth about `node`'s children: for each child kind
+    /// its [`NodeType`], sortable columns, and a lazy fetcher. Everything a
+    /// front-end asks about children is *derived* from this via the free
+    /// functions in [`crate::children`] ([`crate::child_types`],
+    /// [`crate::sortable_columns_for`], [`crate::list`], [`crate::list_subtree`]),
+    /// so the type set, its sort columns and its fetch can never drift apart.
+    ///
+    /// Each fetcher is keyed only by `node.id()` + adapter state — no downcast.
+    /// A leaf node returns an empty vec.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<crate::children::Child<'a>>;
+
+    /// Opt-in fast path for eager subtree expansion. Returns `Some(result)`
+    /// when the adapter can build the whole expanded subtree in one pass;
+    /// `None` (the default) makes [`crate::children::list_subtree`] fall back to
+    /// its generic per-node recursion.
+    ///
+    /// This is the home for adapters that hold their tree in memory (local
+    /// Tasks/Trackings, capability [`AdapterCapabilities::supports_eager_subtree`]):
+    /// the generic recursion resolves each node via [`get_by_id`](Self::get_by_id)
+    /// and — critically — cannot carry `params.sort` below the first level, so a
+    /// sorted tree would lose its per-level sibling order. An adapter that owns
+    /// the whole structure sorts every level here in a single projection walk.
+    async fn eager_subtree(
+        &self,
+        _node: &dyn Node,
+        _params: &ListParams,
+        _depth: u32,
+    ) -> Option<Result<Subtree>> {
+        None
+    }
 
     /// Download a binary asset this adapter serves (e.g. an image
     /// attachment), by absolute URL, authenticating as the adapter needs to.
@@ -1449,10 +2028,7 @@ pub trait ContentAdapter: Send + Sync {
     /// Sync because the password/port are already resolved in adapter
     /// RAM; no I/O should be needed here. If the underlying connection
     /// is not yet open, return an empty map rather than blocking.
-    fn child_process_env(
-        &self,
-        _node: &NodeRef,
-    ) -> std::collections::HashMap<String, String> {
+    fn child_process_env(&self, _node: &NodeRef) -> std::collections::HashMap<String, String> {
         std::collections::HashMap::new()
     }
 
@@ -1529,8 +2105,7 @@ pub trait ContentAdapter: Send + Sync {
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         static READY_TX: std::sync::OnceLock<tokio::sync::watch::Sender<AdapterStatus>> =
             std::sync::OnceLock::new();
-        let tx = READY_TX
-            .get_or_init(|| tokio::sync::watch::channel(AdapterStatus::Ready).0);
+        let tx = READY_TX.get_or_init(|| tokio::sync::watch::channel(AdapterStatus::Ready).0);
         tx.subscribe()
     }
 
@@ -1550,6 +2125,64 @@ pub trait ContentAdapter: Send + Sync {
             std::sync::OnceLock::new();
         let tx = SINK_TX.get_or_init(|| tokio::sync::broadcast::channel(1).0);
         tx.subscribe()
+    }
+
+    /// Hard refresh: the user explicitly asked for a full reload (the `reload`
+    /// action, e.g. `r`). Adapters that cache and/or fetch in the background
+    /// should treat this as "abort everything in flight and start over":
+    /// cancel any running fetches, drop the cache, and let the ensuing
+    /// [`list`](Node::list) repopulate from scratch. Called by the frontend
+    /// *before* the reload's `list()`, so a cleared cache forces a cold fetch.
+    ///
+    /// Default is a no-op: a stateless pull adapter (Jira, Taiga, Postgres, …)
+    /// has nothing in flight and no cache to drop — its `list()` already hits
+    /// the backend every time — so the reload's `list()` alone suffices.
+    async fn refresh(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Subscribe to time-anchored [`Reminder`] events the adapter fires ahead
+    /// of scheduled items. Same broadcast-channel story as
+    /// [`subscribe_invalidations`](Self::subscribe_invalidations) — discrete
+    /// events (not a latest-value state), and one adapter instance can back
+    /// several views that each subscribe independently.
+    ///
+    /// This is purely a *contract*: the adapter offers a stream, owns *when*
+    /// a reminder fires (and, later, a filter for *which* items get one), and
+    /// the frontend owns *what happens* — it runs the user-configured command.
+    /// Scheduling policy stays in the adapter; side-effecting I/O stays in the
+    /// frontend.
+    ///
+    /// Default returns a receiver whose sender lives for the process and never
+    /// sends — adapters that model no schedule (Jira, Taiga, Postgres, …)
+    /// don't override, and their forwarder simply parks forever. Mirrors the
+    /// [`subscribe_invalidations`](Self::subscribe_invalidations) default's
+    /// static-`OnceLock` keepalive.
+    fn subscribe_reminders(&self) -> tokio::sync::broadcast::Receiver<Reminder> {
+        static SINK_TX: std::sync::OnceLock<tokio::sync::broadcast::Sender<Reminder>> =
+            std::sync::OnceLock::new();
+        let tx = SINK_TX.get_or_init(|| tokio::sync::broadcast::channel(1).0);
+        tx.subscribe()
+    }
+
+    /// Take the stream of backend-initiated [`PromptRequest`]s this adapter
+    /// raises mid-operation (e.g. an MFA prompt during an interactive login).
+    /// **Single-consumer** — an `mpsc` receiver, not a broadcast one — because
+    /// exactly one frontend services user input, and each request carries its
+    /// own one-shot responder that cannot be cloned. Callable once; further
+    /// calls return `None`.
+    ///
+    /// Returning `Some` is also what *installs the sending half* inside the
+    /// adapter: an adapter that raises prompts creates its sink lazily here, so
+    /// a non-interactive frontend (which never calls this) leaves the adapter
+    /// with no sink, and any prompt it would raise fails loudly instead of
+    /// hanging. This is the seam that turns "no prompt consumer configured"
+    /// into a clean error rather than a deadlock.
+    ///
+    /// Default returns `None` — adapters that never need mid-operation input
+    /// (Jira, Taiga, Postgres, …) don't override.
+    fn take_prompt_requests(&self) -> Option<tokio::sync::mpsc::Receiver<PromptRequest>> {
+        None
     }
 
     /// Recompute the adapter's currently-live rows (M9). Called by the
@@ -1635,6 +2268,19 @@ pub trait ContentAdapter: Send + Sync {
         &self,
         _fields: std::collections::HashMap<String, String>,
     ) -> Result<()> {
+        Err(ContentError::NotSupported(
+            "this adapter does not support interactive credential submission".into(),
+        ))
+    }
+
+    /// The user dismissed a [`AdapterStatus::NeedsCreds`] form without
+    /// filling it in. The adapter aborts the login it is waiting on.
+    ///
+    /// Closing the form is not enough: the login blocks until it gets an
+    /// answer, holding the auth lock, so every later attempt queues up
+    /// behind a dialog that is no longer on screen. Frontends therefore
+    /// call this whenever they take the form away for good.
+    async fn cancel_credentials(&self) -> Result<()> {
         Err(ContentError::NotSupported(
             "this adapter does not support interactive credential submission".into(),
         ))
@@ -1731,6 +2377,25 @@ pub trait ContentAdapter: Send + Sync {
         ))
     }
 
+    /// The [`CustomQueryContext`] addressing data for queries issued from
+    /// `node_id` — the routing information [`execute_custom_query`] needs
+    /// but that only the adapter can derive.
+    ///
+    /// Concretely: a SQL adapter's `database` field. The host has to fill
+    /// it in when it opens a query editor on some node, and it must not
+    /// get that value by parsing the node id — id shapes are the
+    /// adapter's own business and differ between backends (Postgres nests
+    /// tables under a schema level, a SQLite file has none). So the host
+    /// asks instead.
+    ///
+    /// Defaults to an empty context: adapters that need no addressing,
+    /// and adapters with no custom queries at all, need not override.
+    ///
+    /// [`execute_custom_query`]: ContentAdapter::execute_custom_query
+    fn custom_query_context(&self, _node_id: &str) -> CustomQueryContext {
+        CustomQueryContext::new()
+    }
+
     /// Adapter-managed persistence for named saved queries.
     ///
     /// `Some(store)` when the adapter owns a flat `(name → query body)`
@@ -1741,6 +2406,52 @@ pub trait ContentAdapter: Send + Sync {
     /// this returns `None`.
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         None
+    }
+
+    /// Adapter-managed persistence for named *extended* query documents —
+    /// Markdown files under `<instance_data_dir>/extended_queries/`.
+    ///
+    /// Unlike [`saved_query_store`](Self::saved_query_store) this needs no
+    /// adapter to do anything: the store is stateless (a root path and a
+    /// suffix), so the default builds one on demand from
+    /// [`instance_data_dir`](Self::instance_data_dir). An adapter gets
+    /// extended queries by having a normal query story at all, which is what
+    /// the `saved_query_store().is_some()` gate expresses — Postgres, whose
+    /// queries are per-table SQL scripts in its own namespace, keeps
+    /// returning `None` here without saying so twice.
+    ///
+    /// Returns an owned box rather than a borrow for the same reason: there
+    /// is no field to borrow from. Decorators need not forward this as long
+    /// as they forward `saved_query_store` and `instance_data_dir`, which
+    /// all of them do.
+    fn extended_query_store(&self) -> Option<Box<dyn ExtendedQueryStore>> {
+        self.saved_query_store()?;
+        Some(Box::new(FsQueryStore::new(
+            self.instance_data_dir().join(EXTENDED_QUERY_DIR),
+            EXTENDED_QUERY_SUFFIX,
+        )))
+    }
+
+    /// File-name suffix (with dot) for a query body when it is opened in the
+    /// external editor, so the editor picks the right syntax highlighting.
+    ///
+    /// Defaults to `.yaml` — the query DSL most adapters use is a YAML
+    /// `FilterExpr` document. Adapters whose query is a different language
+    /// override this (Jira: `.jql`, Confluence: `.cql`).
+    fn query_body_suffix(&self) -> &str {
+        ".yaml"
+    }
+
+    /// Name of the query language this adapter speaks, as an extended query
+    /// document writes it in a fence info-string (```` ```jql mentioned_in ````).
+    ///
+    /// The default derives it from
+    /// [`query_body_suffix`](Self::query_body_suffix) (`.jql` → `jql`), which
+    /// is the same information seen from the editor's side — so an adapter
+    /// that already names its language for syntax highlighting does not have
+    /// to name it twice. Override only where the two genuinely differ.
+    fn query_language(&self) -> &str {
+        self.query_body_suffix().trim_start_matches('.')
     }
 
     /// Adapter-managed persistence for editable *scripts* attached to
@@ -1771,11 +2482,34 @@ pub trait ContentAdapter: Send + Sync {
     ///
     /// The default impl returns `Ok(None)` — adapters opt in by
     /// overriding.
-    async fn search_in_tree(
-        &self,
-        _query: &str,
-        _limit: u32,
-    ) -> Result<Option<TreeSearchResults>> {
+    async fn search_in_tree(&self, _query: &str, _limit: u32) -> Result<Option<TreeSearchResults>> {
+        Ok(None)
+    }
+
+    /// Resolve a single node id to its ancestor path, for jumping to a
+    /// node that may not be loaded yet.
+    ///
+    /// Same shape as [`TreeFindHit::path`]: the chain of node ids from
+    /// the tree root down to and including `node_id`, ready to feed a
+    /// lazy-expand driver. This is the addressing counterpart to
+    /// [`Self::search_in_tree`] — no query language, no ranking, just
+    /// "where does this id live".
+    ///
+    /// The host calls it when following a stored link (see `NodeRef`)
+    /// whose target isn't among the currently loaded rows. `Ok(None)`
+    /// means the adapter cannot locate the node — either because it
+    /// doesn't offer the feature (the default) or because the id is
+    /// gone. Either way the front-end must cope: it can still focus a
+    /// node that happens to be loaded already, and otherwise reports
+    /// that the link target isn't reachable. Not implementing this
+    /// therefore costs deep-link support, nothing else.
+    ///
+    /// Adapters with a flat root level can return
+    /// `Ok(Some(vec![node_id.to_string()]))` once they confirm the node
+    /// exists; adapters with [`AdapterCapabilities::unstable_node_ids`]
+    /// should leave the default in place, since their ids don't survive
+    /// long enough to be linked in the first place.
+    async fn locate_node_path(&self, _node_id: &str) -> Result<Option<Vec<String>>> {
         Ok(None)
     }
 
@@ -1816,6 +2550,22 @@ pub trait ContentAdapter: Send + Sync {
     /// strategy.
     fn anonymizer(&self) -> std::sync::Arc<dyn anonymize::Anonymizer> {
         std::sync::Arc::new(anonymize::StandardAnonymizer::new())
+    }
+
+    /// The **dynamically** described columns for one node type, keyed by its
+    /// [`NodeType::type_id`] — columns that aren't part of the adapter's
+    /// static declaration because they have to be read from somewhere first.
+    ///
+    /// This is the second of the two channels that deliver a
+    /// [`ColumnSchema`]; the first is [`children::Child::columns`], which an
+    /// adapter fills in synchronously for its own list columns.
+    /// [`children::columns_for`] unions both, so a front-end never has to know
+    /// which channel a column came from.
+    ///
+    /// The default returns nothing. The custom-columns decorator overrides
+    /// this to expose the user's locally stored columns and their types.
+    async fn describe_columns(&self, _node_type: &str) -> Vec<ColumnSchema> {
+        Vec::new()
     }
 }
 
@@ -1882,91 +2632,13 @@ pub trait Node: Send + Sync {
         }
     }
 
-    /// Which child node types can be listed under this node.
-    fn children_types(&self) -> Vec<NodeType> {
-        Vec::new()
-    }
-
-    /// Columns the adapter can sort lists of `node_type`'s children on.
-    /// Empty (default) = no server-side sort; the UI may still sort
-    /// in-memory if it sees fit.
-    fn sortable_columns(&self, _node_type: &NodeType) -> Vec<SortableColumn> {
-        Vec::new()
-    }
-
-    /// List child nodes of a given type.
-    async fn list(&self, _params: ListParams) -> Result<ListResult> {
-        Err(ContentError::NotSupported("list not supported".into()))
-    }
-
-    /// List child nodes **and** eagerly expand their descendants up to
-    /// `depth` additional levels below the directly-listed children.
-    ///
-    /// Depth semantics (total visible levels = `depth + 1`):
-    /// - `depth == 0` — exactly [`Node::list`]: one level, every returned
-    ///   node has empty `children`. This is the default the engine requests
-    ///   for ordinary lists and interactive single-node expansion.
-    /// - `depth == 1` — the listed children plus one level beneath them.
-    /// - `depth == u32::MAX` — fully expanded (`expand_depth: all`); the
-    ///   recursion stops naturally at leaves (`has_children == Some(false)`
-    ///   or an empty `list`).
-    ///
-    /// The default implementation walks [`Node::list`] / [`Node::get_child`]
-    /// recursively, one round-trip per node per level. It is correct for any
-    /// adapter but only *fast* for adapters that hold their data in memory;
-    /// remote adapters keep [`AdapterCapabilities::supports_eager_subtree`]
-    /// `false` so the engine never drives this path for them (see that flag).
-    /// Adapters that can build the whole structure cheaply (Tasks, Trackings)
-    /// override this with a single in-memory projection walk.
-    ///
-    /// `params.query` is threaded down into every level's child `list`
-    /// (honouring [`AdapterCapabilities::propagates_query_to_subtree`]);
-    /// child levels are requested unpaginated (`page: None`).
-    async fn list_subtree(&self, params: ListParams, depth: u32) -> Result<Subtree> {
-        let query = params.query.clone();
-        let result = self.list(params).await?;
-        let page = result.page;
-        let mut items = Vec::with_capacity(result.items.len());
-        for summary in result.items {
-            // Only descend when we have budget AND the node isn't a known
-            // leaf. A node that claims children but whose get_child fails is
-            // treated as a leaf here (graceful) rather than failing the whole
-            // subtree; a genuine list error below propagates.
-            let children = if depth > 0 && summary.has_children != Some(false) {
-                match self.get_child(&summary.id).await {
-                    Ok(child) => {
-                        let mut merged = Subtree::default();
-                        for child_type in child.children_types() {
-                            let child_params = ListParams {
-                                node_type: child_type,
-                                query: query.clone(),
-                                sort: Vec::new(),
-                                page: None,
-                                download: false,
-                                group_by: None,
-                            };
-                            let mut sub = child.list_subtree(child_params, depth - 1).await?;
-                            merged.items.append(&mut sub.items);
-                            // Single child-type is the common case; keep the
-                            // first level's page. Multi-type local adapters
-                            // load all-or-nothing (page stays None).
-                            if merged.page.is_none() {
-                                merged.page = sub.page;
-                            }
-                        }
-                        merged
-                    }
-                    Err(_) => Subtree::default(),
-                }
-            } else {
-                Subtree::default()
-            };
-            items.push(SubtreeNode { summary, children });
-        }
-        Ok(Subtree { items, page })
-    }
-
     /// Navigate to a specific child by ID.
+    ///
+    /// The single-child navigation primitive an adapter's own
+    /// [`ContentAdapter::get_by_id`] walks segment-by-segment. Distinct from
+    /// the *listing* surface ([`ContentAdapter::childs`]), which is the single
+    /// source of truth about which child *types* exist, how they sort, and how
+    /// they are fetched. Default = not found (leaf nodes never navigate).
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         Err(ContentError::NotFound(id.to_string()))
     }
@@ -1974,23 +2646,6 @@ pub trait Node: Send + Sync {
     /// Read-only content body, if any.
     fn content(&self) -> Option<&dyn Content> {
         None
-    }
-
-    /// Actions this node currently supports. Empty for read-only/leaf
-    /// nodes.
-    ///
-    /// **Contract:** the returned set MUST be deterministic per
-    /// `node_type()` within an adapter session. The TUI caches the
-    /// list by node_type so that cursor navigation over a uniform
-    /// list of e.g. `postgres:table` rows doesn't trigger one
-    /// `get_by_id` walk per row. Adapters whose action availability
-    /// genuinely depends on per-instance state must flatten that
-    /// into a static superset and reject inapplicable actions at
-    /// invocation time instead (see
-    /// `not_yet_done_taiga_adapter::adapter::notification` for an
-    /// example of an idempotent action exposed unconditionally).
-    fn actions(&self) -> Vec<NodeAction> {
-        Vec::new()
     }
 
     /// Dispatch a shortcut-bound action by its `id`. Distinct from
@@ -2003,20 +2658,14 @@ pub trait Node: Send + Sync {
     /// implement this method simply have non-functional shortcuts;
     /// existing menu/picker dispatch through [`Node::execute`] is
     /// unaffected.
-    async fn invoke_action(
-        &self,
-        _name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, _name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(ActionDispatch::Noop)
     }
 
     /// Render the initial buffer for an `InputSpec::Editor` action.
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         let _ = action_id;
-        Err(ContentError::NotSupported(
-            "prepare not supported".into(),
-        ))
+        Err(ContentError::NotSupported("prepare not supported".into()))
     }
 
     /// Fetch the option list for an `InputSpec::Picker` action.
@@ -2039,15 +2688,9 @@ pub trait Node: Send + Sync {
     }
 
     /// Execute an action with the user's input.
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         let _ = (action_id, input);
-        Err(ContentError::NotSupported(
-            "execute not supported".into(),
-        ))
+        Err(ContentError::NotSupported("execute not supported".into()))
     }
 }
 
@@ -2070,7 +2713,7 @@ pub trait Content: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// SavedQueryStore
+// SavedQueryStore / ExtendedQueryStore
 // ---------------------------------------------------------------------------
 
 /// Adapter-owned persistence layer for named saved queries.
@@ -2112,29 +2755,104 @@ pub trait SavedQueryStore: Send + Sync {
     }
 }
 
-/// Filesystem-backed `SavedQueryStore` implementation. One file per
-/// query under `<root>/<name>.yaml`. Names are passed through unchanged
-/// (no escaping) — adapters that need exotic characters in query names
-/// should layer their own validation on top. The root directory is
-/// created lazily on first `save`.
-pub struct FsSavedQueryStore {
-    root: std::path::PathBuf,
+/// Adapter-owned persistence layer for named *extended* query documents.
+///
+/// Same five methods as [`SavedQueryStore`], deliberately a distinct type:
+/// the two namespaces hold bodies in different languages (an adapter-native
+/// query vs. a Markdown document combining several of them), and a value
+/// that could stand for either would defeat the whole point of recording a
+/// [`QueryKind`] alongside a stored name. `list()` is rendered 1:1 into the
+/// query menu, so a consumer holding a `dyn ExtendedQueryStore` knows,
+/// without probing, how to interpret what comes back from `load`.
+#[async_trait]
+pub trait ExtendedQueryStore: Send + Sync {
+    /// All extended-query names known to this adapter instance, sorted
+    /// for stable UI listing. Empty when nothing has been saved yet.
+    async fn list(&self) -> Result<Vec<String>>;
+
+    /// Raw document text for `name` (Markdown container). Returns
+    /// [`ContentError::NotFound`] when the entry doesn't exist.
+    async fn load(&self, name: &str) -> Result<String>;
+
+    /// Persist `body` under `name`. Creates the entry if missing,
+    /// overwrites if present. Implementations are responsible for
+    /// creating any parent directories.
+    async fn save(&self, name: &str, body: &str) -> Result<()>;
+
+    /// Remove the entry. Missing entries are not an error (idempotent
+    /// delete).
+    async fn delete(&self, name: &str) -> Result<()>;
+
+    /// Optional: the on-disk path of the entry, so the frontend can edit
+    /// the document as a file (with Markdown highlighting) instead of a
+    /// text buffer. See [`SavedQueryStore::path`].
+    fn path(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
-impl FsSavedQueryStore {
-    /// Use `<instance_data_dir>/queries/` as the storage root.
-    pub fn new(root: std::path::PathBuf) -> Self {
-        Self { root }
+/// Directory name (under [`ContentAdapter::instance_data_dir`]) holding
+/// extended-query documents. Sibling of `queries/`, not a subdirectory of
+/// it — one flat namespace per kind (plan section 4).
+pub const EXTENDED_QUERY_DIR: &str = "extended_queries";
+
+/// File-name suffix for extended-query documents. Markdown, and the same
+/// for every adapter: the container is the framework's format, not the
+/// adapter's — only the fences inside it speak the adapter's language.
+pub const EXTENDED_QUERY_SUFFIX: &str = ".md";
+
+/// Filesystem-backed query store. One file per query under
+/// `<root>/<name><suffix>`; it implements [`SavedQueryStore`] *and*
+/// [`ExtendedQueryStore`], since both are the same file layout under a
+/// different root and suffix. Which trait a given instance serves is decided
+/// by how it was constructed, not by a flag it carries.
+///
+/// For saved queries, `suffix` is the adapter's
+/// [`ContentAdapter::query_body_suffix`] — a Jira query is a `.jql` file, a
+/// Confluence one `.cql`, the FilterExpr-based adapters keep `.yaml`. Pass
+/// the *same* constant to both so the stored file and the name the external
+/// editor sees can't drift apart. For extended queries it is
+/// [`EXTENDED_QUERY_SUFFIX`].
+///
+/// Names are passed through unchanged (no escaping) — adapters that need
+/// exotic characters in query names should layer their own validation on
+/// top. The root directory is created lazily on first `save`.
+///
+/// The suffix is exact in both directions: only files carrying it are listed,
+/// loaded and deleted. Bodies stored under any other extension are invisible
+/// to this store — a breaking change against the versions that hard-coded
+/// `.yaml` for every adapter, which requires renaming those files once.
+pub struct FsQueryStore {
+    root: std::path::PathBuf,
+    /// File-name suffix *with* the leading dot, e.g. `".jql"`.
+    suffix: String,
+}
+
+impl FsQueryStore {
+    /// Use `<instance_data_dir>/queries/` as the storage root and `suffix`
+    /// (with the leading dot) as the file extension.
+    pub fn new(root: std::path::PathBuf, suffix: &str) -> Self {
+        Self {
+            root,
+            suffix: suffix.to_string(),
+        }
     }
 
     fn file_path(&self, name: &str) -> std::path::PathBuf {
-        self.root.join(format!("{name}.yaml"))
+        self.root.join(format!("{name}{}", self.suffix))
     }
-}
 
-#[async_trait]
-impl SavedQueryStore for FsSavedQueryStore {
-    async fn list(&self) -> Result<Vec<String>> {
+    /// Whether a directory entry belongs to this store. Only the configured
+    /// suffix counts — a body written under a different extension is not this
+    /// store's business, even if the store used to write `.yaml` for everyone.
+    fn is_query_file(&self, path: &std::path::Path) -> bool {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| name.ends_with(&self.suffix))
+    }
+
+    /// Shared body of both trait impls — see [`SavedQueryStore::list`].
+    async fn list_names(&self) -> Result<Vec<String>> {
         let mut rd = match tokio::fs::read_dir(&self.root).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2147,7 +2865,7 @@ impl SavedQueryStore for FsSavedQueryStore {
             .map_err(|e| ContentError::Other(Box::new(e)))?
         {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+            if !self.is_query_file(&path) {
                 continue;
             }
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -2158,9 +2876,9 @@ impl SavedQueryStore for FsSavedQueryStore {
         Ok(names)
     }
 
-    async fn load(&self, name: &str) -> Result<String> {
-        let path = self.file_path(name);
-        match tokio::fs::read_to_string(&path).await {
+    /// Shared body of both trait impls — see [`SavedQueryStore::load`].
+    async fn read(&self, name: &str) -> Result<String> {
+        match tokio::fs::read_to_string(self.file_path(name)).await {
             Ok(s) => Ok(s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(ContentError::NotFound(name.to_string()))
@@ -2169,7 +2887,8 @@ impl SavedQueryStore for FsSavedQueryStore {
         }
     }
 
-    async fn save(&self, name: &str, body: &str) -> Result<()> {
+    /// Shared body of both trait impls — see [`SavedQueryStore::save`].
+    async fn write(&self, name: &str, body: &str) -> Result<()> {
         tokio::fs::create_dir_all(&self.root)
             .await
             .map_err(|e| ContentError::Other(Box::new(e)))?;
@@ -2179,17 +2898,186 @@ impl SavedQueryStore for FsSavedQueryStore {
         Ok(())
     }
 
-    async fn delete(&self, name: &str) -> Result<()> {
+    /// Shared body of both trait impls — see [`SavedQueryStore::delete`].
+    async fn remove(&self, name: &str) -> Result<()> {
         match tokio::fs::remove_file(self.file_path(name)).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(ContentError::Other(Box::new(e))),
         }
     }
+}
+
+#[async_trait]
+impl SavedQueryStore for FsQueryStore {
+    async fn list(&self) -> Result<Vec<String>> {
+        self.list_names().await
+    }
+
+    async fn load(&self, name: &str) -> Result<String> {
+        self.read(name).await
+    }
+
+    async fn save(&self, name: &str, body: &str) -> Result<()> {
+        self.write(name, body).await
+    }
+
+    async fn delete(&self, name: &str) -> Result<()> {
+        self.remove(name).await
+    }
 
     fn path(&self, name: &str) -> Option<std::path::PathBuf> {
         Some(self.file_path(name))
     }
+}
+
+#[async_trait]
+impl ExtendedQueryStore for FsQueryStore {
+    async fn list(&self) -> Result<Vec<String>> {
+        self.list_names().await
+    }
+
+    async fn load(&self, name: &str) -> Result<String> {
+        self.read(name).await
+    }
+
+    async fn save(&self, name: &str, body: &str) -> Result<()> {
+        self.write(name, body).await
+    }
+
+    async fn delete(&self, name: &str) -> Result<()> {
+        self.remove(name).await
+    }
+
+    fn path(&self, name: &str) -> Option<std::path::PathBuf> {
+        Some(self.file_path(name))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query kinds
+// ---------------------------------------------------------------------------
+
+/// Which of the two stores owns a query body.
+///
+/// The distinction is invisible in the query menu — a name is a name, and
+/// that one of them fans out to three backend calls is the framework's
+/// business. It matters only where a *stored* reference has to find its body
+/// again: a `query_shortcut` row and the `default_query:{scope}` setting both
+/// record the kind so resolution goes straight to the owning store instead of
+/// probing both (plan section 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum QueryKind {
+    /// A single adapter-native query body, in [`SavedQueryStore`].
+    #[default]
+    Saved,
+    /// A Markdown document combining several of them, in
+    /// [`ExtendedQueryStore`].
+    Extended,
+}
+
+impl QueryKind {
+    /// Stable wire form used in DB columns and setting values.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QueryKind::Saved => "saved",
+            QueryKind::Extended => "extended",
+        }
+    }
+
+    /// Parse the wire form. Anything else is `None` — callers decide
+    /// whether that means "legacy value" or "corrupt row".
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "saved" => Some(QueryKind::Saved),
+            "extended" => Some(QueryKind::Extended),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for QueryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A named query plus the store that owns it — what the
+/// `default_query:{scope}` setting holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultQuery {
+    pub kind: QueryKind,
+    pub name: String,
+}
+
+impl DefaultQuery {
+    pub fn saved(name: impl Into<String>) -> Self {
+        Self {
+            kind: QueryKind::Saved,
+            name: name.into(),
+        }
+    }
+
+    pub fn extended(name: impl Into<String>) -> Self {
+        Self {
+            kind: QueryKind::Extended,
+            name: name.into(),
+        }
+    }
+
+    /// Encode for the settings row: `saved:Name` / `extended:Name`.
+    pub fn to_setting(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.name)
+    }
+
+    /// Decode a settings value.
+    ///
+    /// Splits at the *first* colon and accepts the prefix only when it is
+    /// exactly one of the two kinds; anything else is a value written before
+    /// kinds existed and is taken whole as a saved-query name. That is what
+    /// keeps a name containing a colon readable in both directions — the
+    /// alternative (split at the last colon, or reject unknown prefixes)
+    /// would silently lose such a default.
+    pub fn from_setting(value: &str) -> Self {
+        match value.split_once(':') {
+            Some((prefix, rest)) => match QueryKind::from_str(prefix) {
+                Some(kind) => Self {
+                    kind,
+                    name: rest.to_string(),
+                },
+                None => Self::saved(value),
+            },
+            None => Self::saved(value),
+        }
+    }
+}
+
+/// Which store, if any, already holds `name` for this adapter.
+///
+/// Names are unique across *both* stores per scope (plan section 4): two menu
+/// entries called `foo` would be meaningless to a user who cannot see the
+/// difference in the first place. Creation calls this and refuses a
+/// collision; the returned kind is what lets the frontend offer to open the
+/// existing entry instead.
+///
+/// `Ok(None)` means the name is free. A store that fails to list is an error,
+/// not a free name — reporting "free" on an unreadable directory would
+/// overwrite a body that is merely unreachable right now.
+pub async fn existing_query_kind(
+    adapter: &dyn ContentAdapter,
+    name: &str,
+) -> Result<Option<QueryKind>> {
+    if let Some(store) = adapter.saved_query_store()
+        && store.list().await?.iter().any(|n| n == name)
+    {
+        return Ok(Some(QueryKind::Saved));
+    }
+    if let Some(store) = adapter.extended_query_store()
+        && store.list().await?.iter().any(|n| n == name)
+    {
+        return Ok(Some(QueryKind::Extended));
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,7 +3149,8 @@ impl FsBookmarkStore {
         tokio::fs::create_dir_all(&self.root)
             .await
             .map_err(|e| ContentError::Other(Box::new(e)))?;
-        let body = serde_yaml::to_string(bookmarks).map_err(|e| ContentError::Other(Box::new(e)))?;
+        let body =
+            serde_yaml::to_string(bookmarks).map_err(|e| ContentError::Other(Box::new(e)))?;
         tokio::fs::write(self.file_path(), body)
             .await
             .map_err(|e| ContentError::Other(Box::new(e)))?;
@@ -2321,11 +3210,47 @@ impl BookmarkStore for FsBookmarkStore {
 ///   whatever internal coordinates it needs. These are the per-table
 ///   query scripts.
 ///
-/// All methods return [`crate::Result`]; filesystem errors surface as
+/// Most methods return [`crate::Result`]; filesystem errors surface as
 /// [`ContentError::Other`] so their `Display` (e.g. "directory not
-/// empty (3 entries)") reaches the user unchanged.
+/// empty (3 entries)") reaches the user unchanged. The path/template
+/// accessors are sync and infallible — they only compute, never touch
+/// storage.
 #[async_trait]
 pub trait ScriptStore: Send + Sync {
+    // --- Addressing and templates -------------------------------------
+    //
+    // The host needs these to open a script in an external editor: it
+    // has to know which file to hand the editor (so an LSP and the
+    // adapter agree on one path) and what to seed a brand-new script
+    // with. Both are layout decisions, so both belong to the adapter —
+    // the host asks and does not compute.
+
+    /// On-disk path of the database-level script at `rel_path` under
+    /// `database`.
+    fn db_script_path(&self, database: &str, rel_path: &str) -> std::path::PathBuf;
+
+    /// Contents to seed a brand-new database-level script with. Should
+    /// go through [`crate::script_buffer::default_buffer`] so the host's
+    /// parser finds the usual marker.
+    fn default_db_script_body(&self, database: &str, rel_path: &str) -> String;
+
+    /// On-disk path of the node-scoped script `name` attached to
+    /// `node_id`, or `None` when `node_id` names no script namespace
+    /// (e.g. a level that owns no scripts, or an id shape this adapter
+    /// does not recognise).
+    fn node_script_path(&self, node_id: &str, name: &str) -> Option<std::path::PathBuf>;
+
+    /// Contents to seed a brand-new node-scoped script for `node_id`
+    /// with — typically a starter query against whatever that node
+    /// addresses.
+    fn default_node_script_body(&self, node_id: &str) -> String;
+
+    /// Name the host opens when the user asks for "the" script of a node
+    /// without naming one (the `Q` editor's implicit script).
+    fn default_node_script_name(&self) -> &str {
+        "default"
+    }
+
     // --- Database-level (hierarchical) --------------------------------
 
     /// Whether `rel_path` under `database` is a directory. A missing
@@ -2410,6 +3335,108 @@ pub trait HostEventBus: Send + Sync {
     /// on. A `broadcast` receiver because events are discrete and one channel
     /// may have several independent subscribers.
     fn subscribe(&self, channel: &str) -> tokio::sync::broadcast::Receiver<HostEvent>;
+
+    /// How many live subscribers `channel` currently has.
+    ///
+    /// Lets an emitter that *waits for a reply* (e.g. the office365-web login
+    /// waiting for a typed MFA code) abort cleanly when nobody is listening,
+    /// instead of blocking forever on an answer that can never arrive — the
+    /// "no consumer → clean cancel" contract. Fire-and-forget publishers ignore
+    /// it. Zero is a valid transient answer (a subscriber may arm a moment
+    /// later), so treat it as advisory, not a guarantee.
+    fn receiver_count(&self, channel: &str) -> usize;
+}
+
+/// The single well-known [`HostEventBus`] channel carrying [`BusEvent`]s.
+///
+/// The DSN-keyed channels the local adapters use for [`DomainEvent`]-style
+/// coordination are a *different* payload type and a different channel space;
+/// this one is reserved for the topic-routed [`BusEvent`] traffic the TUI's
+/// rule engine consumes. Keeping it a single global channel means a subscriber
+/// arms exactly one receiver and routes purely by [`BusEvent::topic`] — no
+/// channel-name contract has to be shared between an emitter and a consumer,
+/// which is what preserves the loose coupling (an adapter that emits an event
+/// need not know which view, if any, reacts to it).
+pub const EVENT_CHANNEL: &str = "events";
+
+/// A topic-routed, self-describing event exchanged over the [`EVENT_CHANNEL`].
+///
+/// Unlike the opaque [`DomainEvent`] payloads the local adapters downcast, a
+/// `BusEvent` is a *shared* concrete type: any emitter (an adapter backend, or
+/// the host itself) fills it in, and any consumer (chiefly the TUI rule
+/// engine) matches on [`topic`](Self::topic) and reads
+/// [`payload`](Self::payload) as JSON. This is what lets an adapter drive a
+/// UI reaction — e.g. an MFA number-match prompt — without a Cargo dependency
+/// in either direction: the contract is the string topic plus a JSON shape,
+/// both of which live only in configuration and this struct.
+///
+/// Published as an [`Arc<dyn Any>`](HostEvent); consumers downcast with
+/// [`from_host_event`](BusEvent::from_host_event).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BusEvent {
+    /// Namespaced routing key, e.g. `"office365-web:mfa:number-match"`. The
+    /// rule engine matches an `event_actions` binding's `on:` against this.
+    pub topic: String,
+    /// Who emitted it — typically the emitting adapter instance's id. Lets a
+    /// consumer and any response scope to the *right* origin when several
+    /// instances of the same adapter run at once (e.g. two calendar
+    /// connections both mid-login).
+    pub source: String,
+    /// Event-specific data as JSON (e.g. `{"number": 42}`). Actions template
+    /// fields out of it; a request/response pair carries the answer back the
+    /// same way.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    /// Ties a response event to the request that prompted it. An emitter that
+    /// expects a reply sets it; the rule engine copies it onto whatever the
+    /// bound action emits, so the emitter can match the answer to its request
+    /// even with several in flight.
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+}
+
+impl BusEvent {
+    /// Construct a `BusEvent` with no correlation id (a fire-and-forget
+    /// notification or a request that expects no reply).
+    pub fn new(
+        topic: impl Into<String>,
+        source: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            topic: topic.into(),
+            source: source.into(),
+            payload,
+            correlation_id: None,
+        }
+    }
+
+    /// Builder-style: attach a correlation id (marks this as a request whose
+    /// reply must carry the same id back).
+    pub fn with_correlation(mut self, correlation_id: impl Into<String>) -> Self {
+        self.correlation_id = Some(correlation_id.into());
+        self
+    }
+
+    /// Downcast an opaque [`HostEvent`] back to a `BusEvent`. `None` for any
+    /// other payload type sharing the channel (keeps consumers total).
+    pub fn from_host_event(event: &HostEvent) -> Option<Self> {
+        event.downcast_ref::<BusEvent>().cloned()
+    }
+}
+
+/// Publish a [`BusEvent`] on the well-known [`EVENT_CHANNEL`]. Convenience
+/// wrapper over [`HostEventBus::publish`] so emitters need not import
+/// [`Arc`](std::sync::Arc) or know the channel name.
+pub fn publish_event(bus: &dyn HostEventBus, event: BusEvent) {
+    bus.publish(EVENT_CHANNEL, std::sync::Arc::new(event));
+}
+
+/// Subscribe to the well-known [`EVENT_CHANNEL`]. The receiver yields opaque
+/// [`HostEvent`]s; use [`BusEvent::from_host_event`] to recover the typed
+/// event (and ignore anything that is not a `BusEvent`).
+pub fn subscribe_events(bus: &dyn HostEventBus) -> tokio::sync::broadcast::Receiver<HostEvent> {
+    bus.subscribe(EVENT_CHANNEL)
 }
 
 /// Capabilities the host injects into every adapter at construction
@@ -2434,8 +3461,9 @@ pub struct HostContext {
 /// alive for the process, so a late subscriber to an already-used channel
 /// still works.
 pub struct InMemoryHostBus {
-    channels:
-        std::sync::Mutex<std::collections::HashMap<String, tokio::sync::broadcast::Sender<HostEvent>>>,
+    channels: std::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::broadcast::Sender<HostEvent>>,
+    >,
     capacity: usize,
 }
 
@@ -2474,13 +3502,27 @@ impl HostEventBus for InMemoryHostBus {
     fn subscribe(&self, channel: &str) -> tokio::sync::broadcast::Receiver<HostEvent> {
         self.sender(channel).subscribe()
     }
+
+    fn receiver_count(&self, channel: &str) -> usize {
+        self.channels
+            .lock()
+            .unwrap()
+            .get(channel)
+            .map(|tx| tx.receiver_count())
+            .unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // AdapterFactory (registry pattern)
 // ---------------------------------------------------------------------------
 
-/// Factory for creating adapter instances from config strings.
+/// Object-safe factory stored in the adapter registry.
+///
+/// Every concrete leaf factory is written as a [`TypedAdapterFactory`] and
+/// lifted into this facade via [`typed`]; the transparent decorators
+/// (anonymizing / custom-columns) implement it directly and forward
+/// [`config_schema`](AdapterFactory::config_schema) to their inner factory.
 pub trait AdapterFactory: Send + Sync {
     /// Adapter type name (e.g. "jira", "confluence").
     fn adapter_type(&self) -> &str;
@@ -2502,6 +3544,189 @@ pub trait AdapterFactory: Send + Sync {
         config: &str,
         ctx: &HostContext,
     ) -> Result<Box<dyn ContentAdapter>>;
+
+    /// Reflect this adapter type's configuration into a runtime schema.
+    ///
+    /// Frontends (the CLI config-template command, the TUI form) consume the
+    /// schema to render or validate a config *without* a live instance. For a
+    /// factory built from a [`TypedAdapterFactory`] this is derived
+    /// automatically from the associated `Config` type, so the schema can
+    /// never drift from what [`create`](AdapterFactory::create) deserializes.
+    fn config_schema(&self) -> fieldsmith::TypeSchema;
+
+    /// The authentication mechanisms this adapter type implements, with
+    /// the input fields each one needs.
+    ///
+    /// The empty default means "no authentication" — true for the local
+    /// adapters (tasks, trackings, projects, sqlite). Like
+    /// [`config_schema`](AdapterFactory::config_schema) this is readable
+    /// *without* a live instance, which is what lets the config wizard
+    /// offer the choices and `nyd adapter <type> help` list them from the
+    /// same source the validation uses.
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        &[]
+    }
+}
+
+/// Typed adapter factory — what every concrete adapter implements.
+///
+/// The associated [`Config`](Self::Config) type is the single source of
+/// truth: it is deserialized from the YAML config *and* reflected into the
+/// [`config_schema`](AdapterFactory::config_schema). Its
+/// [`Buildable`](fieldsmith::Buildable) bound is what makes "an adapter config
+/// always has a schema" a compile-time guarantee — a config type that does
+/// not derive `Buildable` cannot be used here. Lift an implementor into the
+/// object-safe [`AdapterFactory`] with [`typed`].
+pub trait TypedAdapterFactory: Send + Sync {
+    /// The adapter's configuration struct — `#[derive(Deserialize, Buildable)]`.
+    type Config: fieldsmith::Buildable + serde::de::DeserializeOwned;
+
+    /// Adapter type name (e.g. "jira").
+    fn adapter_type(&self) -> &str;
+
+    /// Build an adapter instance from the already-parsed config. The generic
+    /// YAML → `Config` deserialization is handled once by [`TypedFactory`], so
+    /// every factory shares identical parsing and error reporting.
+    fn build(
+        &self,
+        instance_id: &str,
+        config: Self::Config,
+        ctx: &HostContext,
+    ) -> Result<Box<dyn ContentAdapter>>;
+
+    /// The authentication mechanisms this adapter implements — its own
+    /// table, so a new mechanism never touches this crate. `build` is
+    /// expected to check the config against it with
+    /// [`AuthSpec::validate_against`]. Defaults to none, which is what
+    /// the local adapters want.
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        &[]
+    }
+}
+
+/// Object-safe adapter over a [`TypedAdapterFactory`]. A distinct concrete
+/// type (rather than a blanket impl) so it never collides with the decorators'
+/// hand-written [`AdapterFactory`] impls. Construct via [`typed`].
+pub struct TypedFactory<F: TypedAdapterFactory>(pub F);
+
+impl<F: TypedAdapterFactory> AdapterFactory for TypedFactory<F> {
+    fn adapter_type(&self) -> &str {
+        self.0.adapter_type()
+    }
+
+    fn create(
+        &self,
+        instance_id: &str,
+        config: &str,
+        ctx: &HostContext,
+    ) -> Result<Box<dyn ContentAdapter>> {
+        let cfg: F::Config = serde_yaml::from_str(config).map_err(|e| {
+            ContentError::Other(format!("Invalid {} config: {e}", self.0.adapter_type()).into())
+        })?;
+        self.0.build(instance_id, cfg, ctx)
+    }
+
+    fn config_schema(&self) -> fieldsmith::TypeSchema {
+        <F::Config as fieldsmith::Buildable>::schema()
+    }
+
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        self.0.auth_mechanisms()
+    }
+}
+
+/// Lift a [`TypedAdapterFactory`] into a boxed object-safe [`AdapterFactory`]
+/// for the registry — the single sanctioned path from a concrete factory to
+/// the registry, and where the `Config: Buildable` bound is discharged.
+pub fn typed<F: TypedAdapterFactory + 'static>(factory: F) -> Box<dyn AdapterFactory> {
+    Box::new(TypedFactory(factory))
+}
+
+// ---------------------------------------------------------------------------
+// Tests — BusEvent over the host bus
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod adapter_status_tests {
+    use super::*;
+
+    #[test]
+    fn resting_states_have_no_banner() {
+        assert!(AdapterStatus::Idle.banner_text().is_none());
+        assert!(AdapterStatus::Ready.banner_text().is_none());
+    }
+
+    #[test]
+    fn connecting_reports_retry_and_timeout_only_when_they_say_something() {
+        let bounded = AdapterStatus::Connecting {
+            retry: 2,
+            max_retries: 5,
+            timeout_secs: 30,
+        }
+        .banner_text()
+        .unwrap();
+        assert_eq!(bounded, "Connecting… (2/5) Timeout: 30s");
+
+        // A single open-ended attempt: no retry budget, no deadline to name.
+        let open = AdapterStatus::Connecting {
+            retry: 1,
+            max_retries: 1,
+            timeout_secs: 0,
+        }
+        .banner_text()
+        .unwrap();
+        assert_eq!(open, "Connecting…");
+    }
+
+    #[test]
+    fn failure_reason_reaches_the_banner() {
+        let text = AdapterStatus::Failed {
+            reason: "no route to host".into(),
+        }
+        .banner_text()
+        .unwrap();
+        assert!(text.contains("no route to host"), "got: {text}");
+    }
+}
+
+#[cfg(test)]
+mod bus_event_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_event_delivers_to_subscriber_as_bus_event() {
+        let bus = InMemoryHostBus::default();
+        let mut rx = subscribe_events(&bus);
+        publish_event(
+            &bus,
+            BusEvent::new(
+                "office365-web:mfa:number-match",
+                "conn-a",
+                serde_json::json!({ "number": 42 }),
+            )
+            .with_correlation("req-1"),
+        );
+        let got = rx.recv().await.expect("event delivered");
+        let ev = BusEvent::from_host_event(&got).expect("downcasts to BusEvent");
+        assert_eq!(ev.topic, "office365-web:mfa:number-match");
+        assert_eq!(ev.source, "conn-a");
+        assert_eq!(ev.correlation_id.as_deref(), Some("req-1"));
+        assert_eq!(ev.payload["number"], 42);
+    }
+
+    #[tokio::test]
+    async fn foreign_payload_on_channel_downcasts_to_none() {
+        // A non-BusEvent published on the same channel must be ignored, not
+        // panic — keeps consumers total if the channel is ever shared.
+        let bus = InMemoryHostBus::default();
+        let mut rx = subscribe_events(&bus);
+        bus.publish(
+            EVENT_CHANNEL,
+            std::sync::Arc::new(String::from("not a bus event")),
+        );
+        let got = rx.recv().await.expect("something delivered");
+        assert!(BusEvent::from_host_event(&got).is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2512,6 +3737,23 @@ pub trait AdapterFactory: Send + Sync {
 mod form_contract_tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The Form action `FormNode`'s type would declare via
+    /// `ContentAdapter::actions_for_type`. Kept as a free helper so the spec
+    /// test can assert on it without a full adapter.
+    fn form_node_action() -> NodeAction {
+        NodeAction::new(
+            "edit",
+            "Edit",
+            InputSpec::Form {
+                fields: vec![
+                    FormFieldSpec::text("title", "Title"),
+                    FormFieldSpec::select("status", "Status", vec!["todo".into(), "done".into()]),
+                    FormFieldSpec::toggle("urgent", "Urgent"),
+                ],
+            },
+        )
+    }
 
     /// A node that exposes a single `InputSpec::Form` action, prefills it,
     /// and records the values delivered back through `execute`.
@@ -2552,24 +3794,6 @@ mod form_contract_tests {
             &self.metadata
         }
 
-        fn actions(&self) -> Vec<NodeAction> {
-            vec![NodeAction::new(
-                "edit",
-                "Edit",
-                InputSpec::Form {
-                    fields: vec![
-                        FormFieldSpec::text("title", "Title"),
-                        FormFieldSpec::select(
-                            "status",
-                            "Status",
-                            vec!["todo".into(), "done".into()],
-                        ),
-                        FormFieldSpec::toggle("urgent", "Urgent"),
-                    ],
-                },
-            )]
-        }
-
         async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
             assert_eq!(action_id, "edit");
             let mut m = HashMap::new();
@@ -2578,11 +3802,7 @@ mod form_contract_tests {
             Ok(m)
         }
 
-        async fn execute(
-            &mut self,
-            action_id: &str,
-            input: ActionInput,
-        ) -> Result<ActionOutcome> {
+        async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
             assert_eq!(action_id, "edit");
             match input {
                 ActionInput::Form(values) => {
@@ -2598,8 +3818,7 @@ mod form_contract_tests {
 
     #[test]
     fn action_advertises_form_input_spec() {
-        let node = FormNode::new();
-        let action = node.actions().into_iter().find(|a| a.id == "edit").unwrap();
+        let action = form_node_action();
         match action.input {
             InputSpec::Form { fields } => {
                 assert_eq!(fields.len(), 3);
@@ -2609,6 +3828,35 @@ mod form_contract_tests {
             }
             _ => panic!("expected Form input spec"),
         }
+    }
+
+    #[test]
+    fn column_schema_maps_to_form_field() {
+        // A non-`text` free value becomes a text field whose label hints the
+        // expected type, and is always optional (empty clears the cell).
+        let dur = ColumnSchema::new("est", "Estimate").typed("duration");
+        let f = dur.to_form_field();
+        assert_eq!(f.key, "est");
+        assert_eq!(f.label, "Estimate (duration)");
+        assert!(matches!(f.kind, FormFieldKind::Text));
+        assert!(!f.required);
+
+        // A `text` column keeps its plain label (no type hint).
+        let txt = ColumnSchema {
+            label: None,
+            ..ColumnSchema::new("note", "")
+        };
+        assert_eq!(txt.to_form_field().label, "note");
+
+        // A closed option set drives a select.
+        let sel = ColumnSchema {
+            label: None,
+            ..ColumnSchema::new("prio", "").with_options(vec!["hi".into(), "lo".into()])
+        };
+        assert!(matches!(
+            sel.to_form_field().kind,
+            FormFieldKind::Select { .. }
+        ));
     }
 
     #[tokio::test]
@@ -2687,18 +3935,7 @@ mod mark_move_contract_tests {
             &self.metadata
         }
 
-        fn actions(&self) -> Vec<NodeAction> {
-            vec![
-                NodeAction::new("mark-move", "Mark for move", InputSpec::None),
-                NodeAction::new("paste-move", "Paste here", InputSpec::None),
-            ]
-        }
-
-        async fn invoke_action(
-            &self,
-            name: &str,
-            ctx: &ActionContext,
-        ) -> Result<ActionDispatch> {
+        async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
             match name {
                 // `mark-move` is frontend-owned (records the marked node in
                 // session state); the adapter has nothing to do → Noop.
@@ -2809,23 +4046,20 @@ mod list_subtree_default_tests {
         })
     }
 
-    /// A node backed by the shared [`Tree`]. `list` returns the edges whose
-    /// child type matches the requested `node_type`; `children_types` reports
-    /// the distinct child types in insertion order; `get_child` re-roots a
-    /// fresh node at the requested id.
+    /// A passive node addressed by id. All knowledge about children lives on
+    /// [`TreeAdapter`] (`childs` + `get_by_id`), exercising the generic
+    /// [`children::list_subtree`] recursion the way a real adapter would.
     struct MockNode {
         id: String,
         node_type: NodeType,
         metadata: Metadata,
-        tree: Arc<Tree>,
     }
 
-    fn root(tree: Arc<Tree>) -> MockNode {
+    fn node(id: &str) -> MockNode {
         MockNode {
-            id: "root".into(),
+            id: id.into(),
             node_type: nt("mock:node"),
             metadata: Metadata::default(),
-            tree,
         }
     }
 
@@ -2843,66 +4077,85 @@ mod list_subtree_default_tests {
         fn metadata(&self) -> &Metadata {
             &self.metadata
         }
+    }
 
-        fn children_types(&self) -> Vec<NodeType> {
+    /// Adapter over the shared [`Tree`]: `childs` reports the distinct child
+    /// types in insertion order, each with a fetcher over the matching edges;
+    /// `get_by_id` re-roots a fresh node at the requested id.
+    struct TreeAdapter {
+        tree: Arc<Tree>,
+    }
+
+    /// The edges under `parent` whose child type is `want`, as list rows. A
+    /// `liar` (or a genuinely childless node) reports `has_children = false`.
+    fn list_edges(tree: &Tree, parent: &str, want: &str) -> Result<ListResult> {
+        let items = tree
+            .edges
+            .get(parent)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|(_c, t)| t == want)
+                    .map(|(c, _t)| {
+                        let has = !tree.liars.contains(c)
+                            && tree.edges.get(c).map(|e| !e.is_empty()).unwrap_or(false);
+                        NodeSummary {
+                            id: c.clone(),
+                            label: c.clone(),
+                            node_type: nt(want),
+                            metadata: Metadata::default(),
+                            has_children: Some(has),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(ListResult {
+            items,
+            applied_sort: Vec::new(),
+            page: None,
+            batch_download_available: false,
+            downloaded: Vec::new(),
+        })
+    }
+
+    #[async_trait::async_trait]
+    impl ContentAdapter for TreeAdapter {
+        fn adapter_type(&self) -> &str {
+            "mock"
+        }
+        fn instance_id(&self) -> &str {
+            "mock"
+        }
+        async fn root(&self) -> Result<Box<dyn Node>> {
+            Ok(Box::new(node("root")))
+        }
+        async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
+            Ok(Box::new(node(id)))
+        }
+        fn childs<'a>(&'a self, n: &'a dyn Node) -> Vec<children::Child<'a>> {
+            let parent = n.id().to_string();
             let mut out = Vec::new();
-            let mut seen = Vec::new();
-            if let Some(edges) = self.tree.edges.get(&self.id) {
+            let mut seen: Vec<String> = Vec::new();
+            if let Some(edges) = self.tree.edges.get(&parent) {
                 for (_c, t) in edges {
-                    if !seen.contains(t) {
-                        seen.push(t.clone());
-                        out.push(nt(t));
+                    if seen.contains(t) {
+                        continue;
                     }
+                    seen.push(t.clone());
+                    let tree = self.tree.clone();
+                    let parent = parent.clone();
+                    let want = t.clone();
+                    out.push(children::Child {
+                        node_type: nt(t),
+                        columns: Vec::new(),
+                        list: Box::new(move |_params| {
+                            Box::pin(async move { list_edges(&tree, &parent, &want) })
+                        }),
+                    });
                 }
             }
             out
-        }
-
-        async fn list(&self, params: ListParams) -> Result<ListResult> {
-            let want = &params.node_type.type_id;
-            let items = self
-                .tree
-                .edges
-                .get(&self.id)
-                .map(|edges| {
-                    edges
-                        .iter()
-                        .filter(|(_c, t)| t == want)
-                        .map(|(c, _t)| {
-                            let has = !self.tree.liars.contains(c)
-                                && self
-                                    .tree
-                                    .edges
-                                    .get(c)
-                                    .map(|e| !e.is_empty())
-                                    .unwrap_or(false);
-                            NodeSummary {
-                                id: c.clone(),
-                                label: c.clone(),
-                                node_type: nt(want),
-                                metadata: Metadata::default(),
-                                has_children: Some(has),
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(ListResult {
-                items,
-                applied_sort: Vec::new(),
-                page: None,
-                batch_download_available: false,
-                downloaded: Vec::new(),
-            })
-        }
-
-        async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-            Ok(Box::new(MockNode {
-                id: id.to_string(),
-                node_type: nt("mock:node"),
-                metadata: Metadata::default(),
-                tree: self.tree.clone(),
-            }))
         }
     }
 
@@ -2928,10 +4181,17 @@ mod list_subtree_default_tests {
         ])
     }
 
+    async fn subtree(tree: Arc<Tree>, depth: u32) -> Subtree {
+        let adapter = TreeAdapter { tree };
+        let root = adapter.root().await.unwrap();
+        children::list_subtree(&adapter, root.as_ref(), params(), depth)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn depth_zero_is_single_level() {
-        let r = root(sample());
-        let st = r.list_subtree(params(), 0).await.unwrap();
+        let st = subtree(sample(), 0).await;
         assert_eq!(child_ids(&st), vec!["a", "b"]);
         // depth 0 ⇔ list(): no node is expanded.
         assert!(st.items.iter().all(|n| n.children.items.is_empty()));
@@ -2939,8 +4199,7 @@ mod list_subtree_default_tests {
 
     #[tokio::test]
     async fn depth_one_expands_exactly_one_level() {
-        let r = root(sample());
-        let st = r.list_subtree(params(), 1).await.unwrap();
+        let st = subtree(sample(), 1).await;
 
         let a = find(&st, "a");
         assert_eq!(child_ids(&a.children), vec!["a1", "a2"]);
@@ -2954,8 +4213,7 @@ mod list_subtree_default_tests {
 
     #[tokio::test]
     async fn depth_all_reaches_deepest_leaf() {
-        let r = root(sample());
-        let st = r.list_subtree(params(), u32::MAX).await.unwrap();
+        let st = subtree(sample(), u32::MAX).await;
         let a = find(&st, "a");
         let a1 = find(&a.children, "a1");
         assert_eq!(child_ids(&a1.children), vec!["a1x"]);
@@ -2975,8 +4233,7 @@ mod list_subtree_default_tests {
             edges: map,
             liars: HashSet::from(["trap".to_string()]),
         });
-        let r = root(t);
-        let st = r.list_subtree(params(), u32::MAX).await.unwrap();
+        let st = subtree(t, u32::MAX).await;
         let trap = find(&st, "trap");
         assert_eq!(trap.summary.has_children, Some(false));
         // Even at depth all, the leaf hint prevents descent.
@@ -2991,8 +4248,7 @@ mod list_subtree_default_tests {
             ("p", "x1", "mock:x"),
             ("p", "y1", "mock:y"),
         ]);
-        let r = root(t);
-        let st = r.list_subtree(params(), 1).await.unwrap();
+        let st = subtree(t, 1).await;
         let p = find(&st, "p");
         // Both typed child lists merged, child-type (insertion) order kept.
         assert_eq!(child_ids(&p.children), vec!["x1", "y1"]);
@@ -3041,7 +4297,106 @@ mod bookmark_store_tests {
         }
         // A fresh store over the same dir reads the persisted set.
         let store = FsBookmarkStore::new(dir.path().to_path_buf());
-        let ids: Vec<String> = store.list().await.unwrap().into_iter().map(|b| b.id).collect();
+        let ids: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
         assert_eq!(ids, vec!["PROJ-2", "PROJ-1", "PROJ-3"]);
+    }
+}
+
+#[cfg(test)]
+mod query_kind_tests {
+    use super::*;
+
+    #[test]
+    fn setting_round_trips_both_kinds() {
+        for d in [
+            DefaultQuery::saved("My Tickets"),
+            DefaultQuery::extended("Sprint"),
+        ] {
+            assert_eq!(DefaultQuery::from_setting(&d.to_setting()), d);
+        }
+    }
+
+    /// A value written before kinds existed is a bare name, and must keep
+    /// working as a saved-query default.
+    #[test]
+    fn legacy_value_reads_as_a_saved_name() {
+        assert_eq!(
+            DefaultQuery::from_setting("My Tickets"),
+            DefaultQuery::saved("My Tickets")
+        );
+    }
+
+    /// A legacy name may itself contain a colon. Only the two known prefixes
+    /// count as a kind — everything else is taken whole, so such a default
+    /// survives instead of decaying into a name nobody has.
+    #[test]
+    fn unknown_prefix_is_part_of_the_name() {
+        assert_eq!(
+            DefaultQuery::from_setting("urgent: mine"),
+            DefaultQuery::saved("urgent: mine")
+        );
+    }
+
+    /// Encoding splits at the *first* colon, so a name containing one comes
+    /// back intact rather than being cut at the last separator.
+    #[test]
+    fn a_colon_in_the_name_survives_encoding() {
+        let d = DefaultQuery::extended("urgent: mine");
+        assert_eq!(d.to_setting(), "extended:urgent: mine");
+        assert_eq!(DefaultQuery::from_setting(&d.to_setting()), d);
+    }
+}
+
+#[cfg(test)]
+mod fs_query_store_tests {
+    use super::*;
+
+    /// One type, two namespaces: the same names must not leak from the saved
+    /// store into the extended one, or the kind on a stored reference would
+    /// point at a body that is only accidentally there.
+    #[tokio::test]
+    async fn the_two_stores_keep_separate_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = FsQueryStore::new(dir.path().join("queries"), ".jql");
+        let extended =
+            FsQueryStore::new(dir.path().join(EXTENDED_QUERY_DIR), EXTENDED_QUERY_SUFFIX);
+
+        SavedQueryStore::save(&saved, "Mine", "assignee = currentUser()")
+            .await
+            .unwrap();
+        ExtendedQueryStore::save(&extended, "Mine", "```yaml\nquery: x\n```")
+            .await
+            .unwrap();
+
+        assert_eq!(SavedQueryStore::list(&saved).await.unwrap(), vec!["Mine"]);
+        assert_eq!(
+            ExtendedQueryStore::list(&extended).await.unwrap(),
+            vec!["Mine"]
+        );
+        assert_eq!(
+            SavedQueryStore::load(&saved, "Mine").await.unwrap(),
+            "assignee = currentUser()"
+        );
+        assert!(
+            ExtendedQueryStore::load(&extended, "Mine")
+                .await
+                .unwrap()
+                .starts_with("```yaml")
+        );
+
+        ExtendedQueryStore::delete(&extended, "Mine").await.unwrap();
+        assert_eq!(SavedQueryStore::list(&saved).await.unwrap(), vec!["Mine"]);
+        assert!(
+            ExtendedQueryStore::list(&extended)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

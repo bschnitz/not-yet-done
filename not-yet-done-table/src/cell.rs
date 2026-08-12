@@ -192,7 +192,8 @@ pub fn fit_aligned_with_highlights(
 
     // Shift highlight ranges by the left padding (in char count).
     let shift = left_pad; // spaces are 1 char each
-    let shifted: Vec<Range<usize>> = highlight_ranges.iter()
+    let shifted: Vec<Range<usize>> = highlight_ranges
+        .iter()
         .map(|r| (r.start + shift)..(r.end + shift))
         .collect();
 
@@ -269,7 +270,8 @@ mod tests {
 
     #[test]
     fn aligned_highlights_truncate() {
-        let (fitted, ranges) = fit_aligned_with_highlights("abcdefgh", 5, CellAlignment::Right, &[1..4]);
+        let (fitted, ranges) =
+            fit_aligned_with_highlights("abcdefgh", 5, CellAlignment::Right, &[1..4]);
         assert_eq!(fitted, "abcd…");
         assert_eq!(ranges, vec![1..4]);
     }

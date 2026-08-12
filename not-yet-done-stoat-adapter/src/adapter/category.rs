@@ -16,8 +16,8 @@ use tokio::sync::RwLock;
 
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, FormFieldSpec,
-    InputSpec, ListParams, ListResult, MarkedNode, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result,
+    InputSpec, ListResult, MarkedNode, Metadata, MetadataField, Node, NodeAction, NodeSummary,
+    NodeType, Result,
 };
 
 use super::server::channel_summary;
@@ -157,7 +157,11 @@ pub(super) async fn move_marked_channel(
     let channel_id = marked.node_id.as_str();
     let categories = {
         let st = state.read().await;
-        match st.channels.get(channel_id).and_then(|c| c.server.as_deref()) {
+        match st
+            .channels
+            .get(channel_id)
+            .and_then(|c| c.server.as_deref())
+        {
             Some(srv) if srv == server_id => {}
             Some(_) => {
                 return ActionDispatch::Error("Cannot move a channel to a different server".into());
@@ -260,15 +264,6 @@ impl Node for StoatCategoryNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![channel_type().clone()]
-    }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        category_actions()
-    }
-
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match action_id {
             // Two-step, because Stoat has no "create in category": make
@@ -349,36 +344,34 @@ impl Node for StoatCategoryNode {
             _ => ActionDispatch::Noop,
         })
     }
+}
 
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        if params.node_type.type_id != "stoat:channel" {
-            return Err(ContentError::NotSupported(format!(
-                "StoatCategoryNode only lists stoat:channel, got {}",
-                params.node_type.type_id
-            )));
-        }
-        let state = self.state.read().await;
-        // Resolve the category against the live snapshot, then its channel
-        // ids in declared order. A category whose server/id has vanished
-        // (reconnect race) lists empty rather than erroring.
-        let items: Vec<NodeSummary> = state
-            .servers
-            .get(&self.server_id)
-            .and_then(|s| s.categories.iter().find(|c| c.id == self.category_id))
-            .map(|cat| cat.channels.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .filter_map(|cid| state.channels.get(cid))
-            .map(|c| channel_summary(c, state.is_channel_unread(&c.id)))
-            .collect();
+/// List a category's channels (in declared order) from a state snapshot.
+/// Shared by the category node's legacy `list` and the adapter's `childs`
+/// fetcher. A category whose server/id has vanished (reconnect race) lists
+/// empty rather than erroring.
+pub(super) fn list_category_channels(
+    state: &StoatState,
+    server_id: &str,
+    category_id: &str,
+) -> ListResult {
+    let items: Vec<NodeSummary> = state
+        .servers
+        .get(server_id)
+        .and_then(|s| s.categories.iter().find(|c| c.id == category_id))
+        .map(|cat| cat.channels.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|cid| state.channels.get(cid))
+        .map(|c| channel_summary(c, state.is_channel_unread(&c.id)))
+        .collect();
 
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: Vec::new(),
-        })
+    ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: Vec::new(),
     }
 }
 
@@ -386,6 +379,7 @@ impl Node for StoatCategoryNode {
 mod tests {
     use super::*;
     use crate::gateway::protocol::{Category, Channel, Server};
+    use not_yet_done_content::{ListParams, Node, children};
 
     fn channel(id: &str, last: Option<&str>) -> Channel {
         Channel {
@@ -478,7 +472,10 @@ mod tests {
     fn split_rejects_non_category_ids() {
         // Plain channel/server ids and message composites are not categories.
         assert_eq!(split_category_composite("01ARZ3NDEKTSV4RRFFQ69G5FAV"), None);
-        assert_eq!(split_category_composite("C1/msg/01ARZ3NDEKTSV4RRFFQ69G5FAV"), None);
+        assert_eq!(
+            split_category_composite("C1/msg/01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            None
+        );
         assert_eq!(split_category_composite("/cat/x"), None);
         assert_eq!(split_category_composite("S1/cat/"), None);
     }
@@ -504,24 +501,30 @@ mod tests {
                 channel("C2", None),
             ],
         );
+        let state = Arc::new(RwLock::new(st));
         let node = StoatCategoryNode::new(
             test_client(),
-            Arc::new(RwLock::new(st)),
+            Arc::clone(&state),
             "S1".into(),
             "cat1".into(),
             "General".into(),
         );
-        let res = node
-            .list(ListParams {
+        let adapter = crate::adapter::StoatAdapter::for_test(state, test_client());
+        let node: &dyn Node = &node;
+        let res = children::list(
+            &adapter,
+            node,
+            ListParams {
                 node_type: channel_type().clone(),
                 query: None,
                 sort: Vec::new(),
                 page: None,
                 download: false,
                 group_by: None,
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         // Category order (C2 before C1), not server order.
         let ids: Vec<&str> = res.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["C2", "C1"]);

@@ -7,28 +7,25 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database,
-    DbBackend, Schema,
-};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DbBackend, Schema};
 use shaku::HasComponent;
 use uuid::Uuid;
 
 use not_yet_done_task_core::entity::{
-    global_tag, project, project_tag, task::{self, TaskStatus}, task_global_tag,
-    task_project_tag, tracking,
+    global_tag, project, project_tag,
+    task::{self, TaskStatus},
+    task_global_tag, task_project_tag, tracking,
 };
 use not_yet_done_task_core::module::TaskDomainModule;
 use not_yet_done_task_core::repository::{
-    TaskRepositoryImpl, TaskRepositoryImplParameters,
-    ProjectRepositoryImpl, ProjectRepositoryImplParameters,
-    TagRepositoryImpl, TagRepositoryImplParameters,
+    ProjectRepositoryImpl, ProjectRepositoryImplParameters, TagRepositoryImpl,
+    TagRepositoryImplParameters, TaskRepositoryImpl, TaskRepositoryImplParameters,
     TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
 use not_yet_done_task_core::service::TaskService;
 
-use super::serialize::{serialize, short_id};
 use super::diff::apply_changes;
+use super::serialize::{serialize, short_id};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -61,18 +58,18 @@ async fn setup() -> (
     }
 
     let module = TaskDomainModule::builder()
-        .with_component_parameters::<TaskRepositoryImpl>(
-            TaskRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<ProjectRepositoryImpl>(
-            ProjectRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<TagRepositoryImpl>(
-            TagRepositoryImplParameters { db: Some(db.clone()) },
-        )
-        .with_component_parameters::<TrackingRepositoryImpl>(
-            TrackingRepositoryImplParameters { db: Some(db.clone()) },
-        )
+        .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .with_component_parameters::<ProjectRepositoryImpl>(ProjectRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .with_component_parameters::<TagRepositoryImpl>(TagRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
+        .with_component_parameters::<TrackingRepositoryImpl>(TrackingRepositoryImplParameters {
+            db: Some(db.clone()),
+        })
         .build();
 
     let service: Arc<dyn TaskService> = module.resolve();
@@ -111,7 +108,9 @@ async fn all_tasks(db: &sea_orm::DatabaseConnection) -> Vec<task::Model> {
 }
 
 fn find_by_desc<'a>(tasks: &'a [task::Model], desc: &str) -> &'a task::Model {
-    tasks.iter().find(|t| t.description == desc)
+    tasks
+        .iter()
+        .find(|t| t.description == desc)
         .unwrap_or_else(|| panic!("Task '{}' not found", desc))
 }
 
@@ -128,7 +127,16 @@ async fn round_trip_no_changes() {
     let subtree = vec![root.clone(), child.clone()];
     let content = serialize(&root, &subtree);
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert_eq!(result.unwrap(), "No changes");
 }
 
@@ -141,7 +149,16 @@ async fn rename_task() {
     let sid = short_id(root.id);
     let content = format!("- [ ] New Name  (p=0  id={sid})\n");
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert!(result.unwrap().contains("updated"));
 
     let tasks = all_tasks(&db).await;
@@ -157,7 +174,16 @@ async fn toggle_status() {
     let sid = short_id(root.id);
     let content = format!("- [x] Task  (p=5  id={sid})\n");
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert!(result.unwrap().contains("updated"));
 
     let tasks = all_tasks(&db).await;
@@ -173,7 +199,16 @@ async fn create_new_child() {
     let sid = short_id(root.id);
     let content = format!("- [ ] Root  (p=0  id={sid})\n  - [ ] New child\n");
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert!(result.unwrap().contains("created"));
 
     let tasks = all_tasks(&db).await;
@@ -195,7 +230,16 @@ async fn create_nested_new_items() {
          \x20   - [x] New grandchild\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
     assert!(msg.contains("2 created"), "expected 2 created, got: {msg}");
 
@@ -221,7 +265,16 @@ async fn soft_delete_missing_item() {
     // Only root in the editor — child is removed.
     let content = format!("- [ ] Root  (p=0  id={sid})\n");
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert!(result.unwrap().contains("deleted"));
 
     let tasks = all_tasks(&db).await;
@@ -248,7 +301,16 @@ async fn reparent_task() {
          \x20   - [ ] B  (p=0  id={b_sid})\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert!(result.unwrap().contains("updated"));
 
     let tasks = all_tasks(&db).await;
@@ -265,7 +327,16 @@ async fn change_priority() {
     let sid = short_id(root.id);
     let content = format!("- [ ] Task  (p=9  id={sid})\n");
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     assert!(result.unwrap().contains("updated"));
 
     let tasks = all_tasks(&db).await;
@@ -289,7 +360,16 @@ async fn multiple_changes_at_once() {
          \x20 - [ ] Brand new\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
     // Should have updates, creates, and deletes.
     assert!(msg.contains("created"), "msg: {msg}");
@@ -316,13 +396,18 @@ async fn delete_subtree_by_removing_from_editor() {
     let (service, tracking, _tag_service, db) = setup().await;
     let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
     let child_a = insert_task(&db, "Child A", Some(root.id), TaskStatus::Todo, 0).await;
-    let grandchild_a = insert_task(&db, "Grandchild A", Some(child_a.id), TaskStatus::Todo, 0).await;
+    let grandchild_a =
+        insert_task(&db, "Grandchild A", Some(child_a.id), TaskStatus::Todo, 0).await;
     let child_b = insert_task(&db, "Child B", Some(root.id), TaskStatus::Todo, 0).await;
-    let grandchild_b = insert_task(&db, "Grandchild B", Some(child_b.id), TaskStatus::Todo, 0).await;
+    let grandchild_b =
+        insert_task(&db, "Grandchild B", Some(child_b.id), TaskStatus::Todo, 0).await;
 
     let subtree = vec![
-        root.clone(), child_a.clone(), grandchild_a.clone(),
-        child_b.clone(), grandchild_b.clone(),
+        root.clone(),
+        child_a.clone(),
+        grandchild_a.clone(),
+        child_b.clone(),
+        grandchild_b.clone(),
     ];
 
     // Remove child_a and grandchild_a from the editor — keep only root, child_b, grandchild_b.
@@ -335,7 +420,16 @@ async fn delete_subtree_by_removing_from_editor() {
          \x20   - [ ] Grandchild B  (p=0  id={gb_sid})\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
     assert!(msg.contains("deleted"), "expected deletions, got: {msg}");
 
@@ -359,17 +453,39 @@ async fn delete_items_exact_user_scenario() {
     let sub_a = insert_task(&db, "A new Subitem", Some(item_a.id), TaskStatus::Todo, 0).await;
     let item_b = insert_task(&db, "A new Item 2", Some(root.id), TaskStatus::Todo, 0).await;
     let sub_b = insert_task(&db, "A new Subitem 2", Some(item_b.id), TaskStatus::Todo, 0).await;
-    let renamed = insert_task(&db, "Build wooden frame structure renamed", Some(item_b.id), TaskStatus::Todo, 0).await;
-    let design = insert_task(&db, "Design compost bin with multiple compartments", Some(root.id), TaskStatus::Todo, 0).await;
+    let renamed = insert_task(
+        &db,
+        "Build wooden frame structure renamed",
+        Some(item_b.id),
+        TaskStatus::Todo,
+        0,
+    )
+    .await;
+    let design = insert_task(
+        &db,
+        "Design compost bin with multiple compartments",
+        Some(root.id),
+        TaskStatus::Todo,
+        0,
+    )
+    .await;
 
     let subtree = vec![
-        root.clone(), item_a.clone(), sub_a.clone(),
-        item_b.clone(), sub_b.clone(), renamed.clone(), design.clone(),
+        root.clone(),
+        item_a.clone(),
+        sub_a.clone(),
+        item_b.clone(),
+        sub_b.clone(),
+        renamed.clone(),
+        design.clone(),
     ];
 
     // Serialize original (should show all 7 items).
     let original_content = crate::tree_edit::serialize(&root, &subtree);
-    assert!(original_content.contains("A new Item"), "original should contain A new Item");
+    assert!(
+        original_content.contains("A new Item"),
+        "original should contain A new Item"
+    );
 
     // Edited: remove item_a and sub_a (keep item_b, sub_b, renamed, design).
     let r_sid = short_id(root.id);
@@ -386,7 +502,16 @@ async fn delete_items_exact_user_scenario() {
          \x20 - [ ] Design compost bin with multiple compartments  (p=0  id={d_sid})\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
     assert!(msg.contains("deleted"), "expected deletions, got: {msg}");
 
@@ -408,8 +533,11 @@ async fn delete_with_duplicate_names() {
     let child_of_b = insert_task(&db, "A new Subitem", Some(dup_b.id), TaskStatus::Todo, 0).await;
 
     let subtree = vec![
-        root.clone(), dup_a.clone(), child_of_a.clone(),
-        dup_b.clone(), child_of_b.clone(),
+        root.clone(),
+        dup_a.clone(),
+        child_of_a.clone(),
+        dup_b.clone(),
+        child_of_b.clone(),
     ];
 
     // Remove dup_a (first "A new Item") and its child.
@@ -422,7 +550,16 @@ async fn delete_with_duplicate_names() {
          \x20   - [ ] A new Subitem  (p=0  id={cb_sid})\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
     assert!(msg.contains("deleted"), "expected deletions, got: {msg}");
 
@@ -457,13 +594,28 @@ async fn restore_deleted_task_via_marker() {
          \x20 - [ ] Deleted child  (p=0  id={c_sid})\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
-    assert!(msg.contains("updated"), "expected update for restore, got: {msg}");
+    assert!(
+        msg.contains("updated"),
+        "expected update for restore, got: {msg}"
+    );
 
     let tasks = all_tasks(&db).await;
     let restored = find_by_desc(&tasks, "Deleted child");
-    assert!(!restored.deleted, "child should be restored (deleted=false)");
+    assert!(
+        !restored.deleted,
+        "child should be restored (deleted=false)"
+    );
 }
 
 /// Delete a task by changing [ ] to [D].
@@ -483,9 +635,21 @@ async fn delete_task_via_d_marker() {
          \x20 - [D] Active child  (p=0  id={c_sid})\n"
     );
 
-    let result = apply_changes(&content, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &content,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
-    assert!(msg.contains("updated"), "expected update for delete, got: {msg}");
+    assert!(
+        msg.contains("updated"),
+        "expected update for delete, got: {msg}"
+    );
 
     let tasks = all_tasks(&db).await;
     let deleted = find_by_desc(&tasks, "Active child");
@@ -503,12 +667,31 @@ async fn serialize_edit_delete_round_trip() {
     let child_a = insert_task(&db, "A new Subitem", Some(dup_a.id), TaskStatus::Todo, 0).await;
     let dup_b = insert_task(&db, "A new Item", Some(root.id), TaskStatus::Todo, 0).await;
     let child_b = insert_task(&db, "A new Subitem", Some(dup_b.id), TaskStatus::Todo, 0).await;
-    let extra = insert_task(&db, "Build wooden frame structure renamed", Some(dup_b.id), TaskStatus::Todo, 0).await;
-    let design = insert_task(&db, "Design compost bin with multiple compartments", Some(root.id), TaskStatus::Todo, 0).await;
+    let extra = insert_task(
+        &db,
+        "Build wooden frame structure renamed",
+        Some(dup_b.id),
+        TaskStatus::Todo,
+        0,
+    )
+    .await;
+    let design = insert_task(
+        &db,
+        "Design compost bin with multiple compartments",
+        Some(root.id),
+        TaskStatus::Todo,
+        0,
+    )
+    .await;
 
     let subtree = vec![
-        root.clone(), dup_a.clone(), child_a.clone(),
-        dup_b.clone(), child_b.clone(), extra.clone(), design.clone(),
+        root.clone(),
+        dup_a.clone(),
+        child_a.clone(),
+        dup_b.clone(),
+        child_b.clone(),
+        extra.clone(),
+        design.clone(),
     ];
 
     // Step 1: Serialize (what the user sees in their editor).
@@ -519,14 +702,24 @@ async fn serialize_edit_delete_round_trip() {
     // We need to find and remove the lines for dup_a and child_a by their short IDs.
     let a_sid = short_id(dup_a.id);
     let ca_sid = short_id(child_a.id);
-    let edited: String = original_content.lines()
+    let edited: String = original_content
+        .lines()
         .filter(|line| !line.contains(&a_sid) && !line.contains(&ca_sid))
         .map(|l| format!("{l}\n"))
         .collect();
     eprintln!("=== EDITED ===\n{edited}");
 
     // Step 3: Apply.
-    let result = apply_changes(&edited, &subtree, root.id, &service, &tracking, &HashSet::new(), true).await;
+    let result = apply_changes(
+        &edited,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        true,
+    )
+    .await;
     let msg = result.unwrap();
     eprintln!("=== RESULT: {msg}");
     assert!(msg.contains("deleted"), "expected deletions, got: {msg}");
@@ -619,14 +812,13 @@ async fn adapter_delete_single_leaves_children() {
     let parent = insert_task(&db, "Parent", None, TaskStatus::Todo, 0).await;
     let _child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
 
-    let adapter =
-        build_task_adapter(
-            service,
-            tracking,
-            tracking_service_for(&db),
-            _tag_service,
-            project_service_for(&db),
-        );
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tracking_service_for(&db),
+        _tag_service,
+        project_service_for(&db),
+    );
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
     // No recursive warning for the single-delete action.
@@ -634,9 +826,14 @@ async fn adapter_delete_single_leaves_children() {
         .invoke_action("delete-single", &ActionContext::default())
         .await
         .unwrap();
-    assert!(matches!(dispatch, ActionDispatch::DeleteSelf { confirm: None }));
+    assert!(matches!(
+        dispatch,
+        ActionDispatch::DeleteSelf { confirm: None }
+    ));
 
-    node.execute("delete-single", ActionInput::None).await.unwrap();
+    node.execute("delete-single", ActionInput::None)
+        .await
+        .unwrap();
 
     let tasks = all_tasks(&db).await;
     assert!(find_by_desc(&tasks, "Parent").deleted, "parent deleted");
@@ -656,14 +853,13 @@ async fn adapter_delete_recursive_warns_and_cascades() {
     let child = insert_task(&db, "Child", Some(parent.id), TaskStatus::Todo, 0).await;
     let _grandchild = insert_task(&db, "Grandchild", Some(child.id), TaskStatus::Todo, 0).await;
 
-    let adapter =
-        build_task_adapter(
-            service,
-            tracking,
-            tracking_service_for(&db),
-            _tag_service,
-            project_service_for(&db),
-        );
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tracking_service_for(&db),
+        _tag_service,
+        project_service_for(&db),
+    );
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
     // The prompt names the cascade and the subtask count (2 descendants).
@@ -682,5 +878,8 @@ async fn adapter_delete_recursive_warns_and_cascades() {
     let tasks = all_tasks(&db).await;
     assert!(find_by_desc(&tasks, "Parent").deleted, "parent deleted");
     assert!(find_by_desc(&tasks, "Child").deleted, "child cascaded");
-    assert!(find_by_desc(&tasks, "Grandchild").deleted, "grandchild cascaded");
+    assert!(
+        find_by_desc(&tasks, "Grandchild").deleted,
+        "grandchild cascaded"
+    );
 }

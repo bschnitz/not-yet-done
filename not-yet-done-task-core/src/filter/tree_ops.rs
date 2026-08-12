@@ -20,7 +20,8 @@ use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs
 pub fn resolve_tree_operators<'a>(
     expr: &'a FilterExpr,
     db: &'a DatabaseConnection,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<FilterExpr, AppError>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<FilterExpr, AppError>> + Send + 'a>>
+{
     Box::pin(async move {
         match expr {
             FilterExpr::And(children) => {
@@ -37,19 +38,13 @@ pub fn resolve_tree_operators<'a>(
                 }
                 Ok(FilterExpr::Or(resolved))
             }
-            FilterExpr::Not(inner) => {
-                Ok(FilterExpr::Not(Box::new(
-                    resolve_tree_operators(inner, db).await?,
-                )))
-            }
-            FilterExpr::Leaf(leaf) => {
-                match leaf.op {
-                    Operator::HasAncestor | Operator::InTree => {
-                        resolve_tree_leaf(leaf, db).await
-                    }
-                    _ => Ok(expr.clone()),
-                }
-            }
+            FilterExpr::Not(inner) => Ok(FilterExpr::Not(Box::new(
+                resolve_tree_operators(inner, db).await?,
+            ))),
+            FilterExpr::Leaf(leaf) => match leaf.op {
+                Operator::HasAncestor | Operator::InTree => resolve_tree_leaf(leaf, db).await,
+                _ => Ok(expr.clone()),
+            },
         }
     })
 }
@@ -60,9 +55,11 @@ async fn resolve_tree_leaf(
 ) -> Result<FilterExpr, AppError> {
     let search_str = match &leaf.rhs {
         Rhs::Lit(Literal::String(s)) => s.clone(),
-        _ => return Err(AppError::FilterError(
-            "has_ancestor / in_tree requires a string value".into(),
-        )),
+        _ => {
+            return Err(AppError::FilterError(
+                "has_ancestor / in_tree requires a string value".into(),
+            ));
+        }
     };
 
     // Find matching tasks by description — exact or LIKE if contains %.

@@ -61,6 +61,49 @@ views:
         label: Priority
         style: warning
         sizing: max
+      - key: assignee
+        label: Assignee
+        style: secondary
+        sizing: "fixed(16)"
+      # Who filed the issue (Jira's `creator`). Read-only, and sortable
+      # server-side via JQL `ORDER BY creator` like the other columns.
+      - key: creator
+        label: Creator
+        style: secondary
+        sizing: "fixed(16)"
+      # The issue's `fixVersions`, comma-separated when it carries several.
+      # Read-only, and blank for unscheduled issues. Sortable server-side —
+      # note that JQL spells the field singular (`ORDER BY fixVersion`), which
+      # the adapter translates; the column key stays plural.
+      - key: fix_versions
+        label: Fix Versions
+        sizing: max
+      # ── Custom user column (adapter-agnostic) ────────────────────────────
+      # A column the *adapter never emits*: its values are yours, stored
+      # locally and matched onto rows by node id. Declare it with
+      # `source: custom` and any `key:` you like; the value is kept in one
+      # lib-owned SQLite (`<XDG_DATA_HOME>/not_yet_done/custom_columns.sqlite`),
+      # scoped per adapter instance, and injected into the row's metadata under
+      # that same key — so it renders (and sorts, via `kind:`) exactly like a
+      # native column. The adapter is entirely uninvolved; the same mechanism
+      # works on *any* tab (Jira, Taiga, Trackings, …) and at any tree level.
+      #
+      # Set/clear a cell with the framework-synthetic actions every level gains
+      # automatically. From the CLI, on the selected row:
+      #   nyd jira do set-cell <KEY> --field column_key=estimate \
+      #                              --field value=5 --field value_type=number
+      #   nyd jira do clear-cell <KEY> --field column_key=estimate
+      # (`value_type` ∈ text | number | duration | datetime; it is stored for a
+      # later type-aware edit path — v1 renders the raw string via `kind:`.)
+      #
+      # A real field emitted by the adapter under the same key always wins, so
+      # a custom column can never shadow live data.
+      - key: estimate
+        label: Est.
+        source: custom
+        kind: number
+        style: secondary
+        sizing: max
       - key: summary
         label: Summary
         source: label
@@ -102,11 +145,17 @@ views:
       - name: edit + comments
         key: e
         type: edit
-        id: edit_with_comments # body + all comments inline; `--- add ---` to post
-      - name: edit
+        id: edit_with_comments # wiki body + all comments inline; `--- add ---` to post
+      # Edit the description AND all comments as Markdown: the Jira wiki is
+      # converted to Markdown on open and back on save. Refuses to open (with a
+      # warning) if the ticket uses wiki markup that would not survive a lossless
+      # round-trip — fall back to `edit + comments` (`e`) above, which handles
+      # any ticket. The wiki-only `edit_full` action stays available (e.g. via
+      # the `:` command line) but is unbound by default.
+      - name: edit (markdown)
         key: E
         type: edit
-        id: edit_full # Node-side action id (see jira adapter)
+        id: edit_markdown
       - name: refresh
         key: r
         type: reload
@@ -155,6 +204,19 @@ views:
       # meant for scripts via the CLI (`nyd jira do export-bundle <KEY>`); the
       # body itself comes from the generic `cat` verb. Bind a key here only if
       # you want it in the TUI action bar.
+      #
+      # `export_workspace` (InputSpec::Form, field `dir`) materialises a
+      # persistent ticket folder `<dir>/<KEY>-<slug>/` with `ticket.md`
+      # (body + comments as Markdown, image embeds resolved to local links) and
+      # an on-demand `attachments/` subfolder — the same layout the
+      # `edit (markdown)` action opens in place, but without an editor or a
+      # Jira write-back. The `dir` field is prefilled with the configured
+      # `ticket_workspace` base (see jira-adapter.yaml). No default key is
+      # bound; add one here if you want it in the TUI, e.g.:
+      #   - name: export workspace
+      #     key: W
+      #     type: custom
+      #     id: export_workspace
 
     children:
       - name: Comments
@@ -244,6 +306,15 @@ views:
     node_type: "jira:bookmark"
     key: m
 
+    # Share the `tickets` view's script source: scripts and script-
+    # shortcuts created under `tickets` (`:script` menu, Ctrl+S bindings)
+    # are also offered here, and vice versa. Without this the two subtabs
+    # would keep separate script dirs/scopes (derived from their differing
+    # root node_types), so a script written on one wouldn't appear on the
+    # other. Only the root scope segment is borrowed; drill-down levels
+    # (comments, attachments) keep their own. Must name a sibling view.
+    script_source: tickets
+
     # No `query:` block — the bookmark set is the query. There is no JQL
     # editing and no q-menu here (the one function the bookmarks subtab drops).
 
@@ -263,6 +334,10 @@ views:
         label: Priority
         style: warning
         sizing: max
+      - key: assignee
+        label: Assignee
+        style: secondary
+        sizing: "fixed(16)"
       - key: summary
         label: Summary
         source: label
@@ -298,10 +373,13 @@ views:
         key: e
         type: edit
         id: edit_with_comments
-      - name: edit
+      # `edit_full` (wiki body, no comments) stays available as an unbound
+      # action; `E` opens the Markdown editor (body + comments), `e` the wiki
+      # equivalent and round-trip fallback.
+      - name: edit (markdown)
         key: E
         type: edit
-        id: edit_full
+        id: edit_markdown
       - name: refresh
         key: r
         type: reload

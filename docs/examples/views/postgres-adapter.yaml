@@ -1,0 +1,97 @@
+# Example Postgres adapter config (referenced by postgres.yaml).
+#
+# All values below are placeholders (RFC-6761 `.invalid` hosts, a fake
+# read-only user). Replace them with your own connection details.
+#
+# The database catalogue is NOT listed here — it is fetched live from
+# `pg_database` on first list, the same way psql `\l` / DBeaver discover
+# it. There is deliberately no `databases:` block.
+
+# Optional human-readable name shown as the root label in the TUI.
+# Defaults to `postgres@<target.host>` when omitted.
+name: example-warehouse
+
+# Optional per-call timeout (seconds) for postgres operations. When the
+# deadline fires the in-flight session and any SSH tunnel are torn down
+# and the next call lazily reconnects. Omit (or null) to wait forever,
+# matching libpq's default. A short deadline lets a stalled tunnel fail
+# fast instead of hanging for minutes on a half-open socket.
+query_timeout_secs: 30
+
+# Transport block (shared with other adapters). Either connect directly
+# to `target`, or tunnel through one or more SSH hops first.
+transport:
+  mode: ssh_tunnel
+  ssh:
+    - host: bastion.example.invalid
+      user: alice
+      auth:
+        kind: public_key
+        identity: /home/alice/.ssh/id_ed25519
+  target:
+    host: db.internal.invalid
+    port: 5432
+
+# For a direct (no-tunnel) connection, drop the `ssh:` list and use:
+#
+# transport:
+#   target:
+#     host: db.example.invalid
+#     port: 5432
+
+postgres:
+  user: warehouse_ro
+  # Credential provider. `command` runs a shell command and reads the
+  # password from stdout (shown here reading from `pass`); other kinds:
+  #   type: keyring   (service + account)
+  #   type: literal   (value — avoid for real secrets)
+  password:
+    type: command
+    script: pass postgres/example-warehouse
+  # Maintenance database to connect to for the `pg_database` query.
+  # Defaults to `postgres`, which exists on every standard install.
+  admin_database: postgres
+  # Postgres sslmode: disable | prefer (default) | require.
+  sslmode: require
+
+# One credential script for the whole connection
+# ----------------------------------------------
+# `command` above is fine for a single secret out of an already unlocked
+# store. It stops being fine as soon as the store may be locked, or as
+# soon as the connection needs more than one secret: each `command` runs
+# on its own and can only fall back to whatever dialog the store itself
+# pops up — a gpg pinentry that appears behind the TUI, once per slot.
+#
+# The `auth:` block replaces that with one script for the whole
+# connection. A slot says `{ type: script-result }` to mean "the auth
+# block owns this", and the credential popup is the app's own, on top of
+# the TUI. `nyd config auth postgres` lists the mechanism and its fields;
+# the script protocol is documented in the README ("Script-driven
+# credentials").
+#
+# Which slot takes which field is positional, so at most one slot may
+# claim each: `postgres.password` takes `password`, an SSH hop's password
+# takes `ssh_password`, an SSH key's passphrase takes `ssh_key_passphrase`.
+#
+# transport:
+#   mode: ssh_tunnel
+#   ssh:
+#     - host: bastion.example.invalid
+#       user: alice
+#       auth:
+#         kind: password
+#         password: { type: script-result }
+#   target: { host: db.internal.invalid, port: 5432 }
+#
+# auth:
+#   mechanism: password
+#   script: ~/.config/not_yet_done/scripts/pass_credentials.py
+#   bindings:
+#     - field: password
+#       provider: { type: script-result }
+#     - field: ssh_password
+#       provider: { type: script-result }
+#
+# postgres:
+#   user: warehouse_ro
+#   password: { type: script-result }

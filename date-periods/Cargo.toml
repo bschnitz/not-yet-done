@@ -1,0 +1,13 @@
+[package]
+name = "date-periods"
+version = "0.1.1"
+edition = "2024"
+description = "Resolve natural-language period-boundary phrases (\"end of next week\", \"start of month\") to concrete dates, relative to a reference instant."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bschnitz/not-yet-done"
+readme = "README.md"
+keywords = ["date", "period", "parser", "chrono", "natural-language"]
+categories = ["date-and-time", "parser-implementations"]
+
+[dependencies]
+chrono = { workspace = true }

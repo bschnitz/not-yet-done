@@ -21,8 +21,8 @@ use crate::adapter::create_template::{
     ParsedCreate, parse_template, render_template, render_with_error,
 };
 
-use super::ConfluencePageNode;
 use super::super::other_err;
+use super::ConfluencePageNode;
 
 impl ConfluencePageNode {
     /// Open a fresh create-child buffer. No version stash — POST has no
@@ -35,6 +35,7 @@ impl ConfluencePageNode {
             template: render_template(),
             version: String::new(),
             suffix: ".html".into(),
+            file_path: None,
         })
     }
 
@@ -125,9 +126,15 @@ mod tests {
         // re-rendered around the cleaned buffer when parse fails again.
         let node = bare_page_node();
         let bad = "no title prefix here\n\n<p>x</p>\n";
-        let outcome = node.execute_create_child(bad).await.expect("returns outcome");
+        let outcome = node
+            .execute_create_child(bad)
+            .await
+            .expect("returns outcome");
         match outcome {
-            ActionOutcome::Reopen { content, new_version } => {
+            ActionOutcome::Reopen {
+                content,
+                new_version,
+            } => {
                 assert!(content.starts_with(CREATE_ERROR_BANNER_START));
                 assert!(new_version.is_none());
             }

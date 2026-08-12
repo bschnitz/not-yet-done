@@ -7,9 +7,9 @@ This document covers two audiences:
   and how to extend the library
 
 > **Note on design.** The conventions documented here are a starting point, not
-> a fixed specification.  If you see a better way to structure something —
+> a fixed specification. If you see a better way to structure something —
 > a cleaner API, a smarter split of concerns, a more idiomatic Rust pattern —
-> proposals and pull requests are welcome.  Good design evolves through
+> proposals and pull requests are welcome. Good design evolves through
 > discussion.
 
 > **Migration status.**
@@ -17,6 +17,7 @@ This document covers two audiences:
 > |---|---|
 > | `TextInput` | ✅ tui-realm `MockComponent` |
 > | `MultiChoice` | ✅ tui-realm `MockComponent` |
+> | `LeaderList` | ✅ tui-realm `Component` — `a → b` pairs on one line joined by a repeating filler (dot-leader / table of contents). See `examples/leader_list_demo.rs`. |
 > | `Form` | 🔄 pending migration |
 > | `TwoColumnLayout` | 🔄 pending migration |
 
@@ -43,6 +44,7 @@ This document covers two audiences:
 ## 1. User Guide
 
 Public types re-exported from the crate root:
+
 ```rust
 use not_yet_done_ratatui::{
     // tui-realm components
@@ -66,6 +68,7 @@ use not_yet_done_ratatui::{
 ### 1.1 TextInput
 
 A single-line text field.
+
 ```
 ▍ Title
 ▍ value or placeholder text
@@ -73,14 +76,16 @@ A single-line text field.
 ```
 
 `TextInput` implements:
+
 - `tuirealm::MockComponent` — low-level `view` / `perform` / `attr` / `query` / `state`
 - `tuirealm::Component<TextInputEvent, NoUserEvent>` — maps keyboard events to messages
 
-The component owns all its state.  No external state struct is needed.
+The component owns all its state. No external state struct is needed.
 
 #### Construction
 
-Create once, mount into a tuirealm `Application`.  Do not rebuild per frame.
+Create once, mount into a tuirealm `Application`. Do not rebuild per frame.
+
 ```rust
 let input = TextInput::default()
     .with_title("Username")
@@ -94,12 +99,13 @@ app.mount(Id::Username, Box::new(input), vec![])?;
 
 #### Focus and style selection
 
-The `Application` manages focus.  When it sets focus on this component,
+The `Application` manages focus. When it sets focus on this component,
 `attr(Attribute::Focus, AttrValue::Flag(true))` is called internally.
 The component then renders with `active_style` and shows the terminal cursor on
-the input row.  `inactive_style` is used otherwise.
+the input row. `inactive_style` is used otherwise.
 
 #### Reading the value
+
 ```rust
 if let Ok(State::One(StateValue::String(val))) = app.state(&Id::Username) {
     println!("current value: {}", val);
@@ -107,6 +113,7 @@ if let Ok(State::One(StateValue::String(val))) = app.state(&Id::Username) {
 ```
 
 #### Setting and clearing errors
+
 ```rust
 // Set an error:
 app.attr(
@@ -120,6 +127,7 @@ app.attr(&Id::Username, Attribute::Custom(ATTR_ERROR), AttrValue::Flag(false))?;
 ```
 
 #### Keymap
+
 ```rust
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
@@ -140,6 +148,7 @@ let keymap = TextInputKeymap {
 ```
 
 #### Events
+
 ```rust
 // In your Application::update():
 match msg {
@@ -151,14 +160,14 @@ match msg {
 
 #### `perform` command reference
 
-| `Cmd` | Effect |
-|---|---|
-| `Cmd::Move(Direction::Left)` | Move cursor left |
-| `Cmd::Move(Direction::Right)` | Move cursor right |
-| `Cmd::Delete` | Delete character before cursor (Backspace) |
-| `Cmd::Custom("delete_fwd")` | Delete character after cursor (Delete key) |
-| `Cmd::Custom("clear")` | Clear entire input |
-| `Cmd::Type(char)` | Insert character at cursor |
+| `Cmd`                         | Effect                                     |
+| ----------------------------- | ------------------------------------------ |
+| `Cmd::Move(Direction::Left)`  | Move cursor left                           |
+| `Cmd::Move(Direction::Right)` | Move cursor right                          |
+| `Cmd::Delete`                 | Delete character before cursor (Backspace) |
+| `Cmd::Custom("delete_fwd")`   | Delete character after cursor (Delete key) |
+| `Cmd::Custom("clear")`        | Clear entire input                         |
+| `Cmd::Type(char)`             | Insert character at cursor                 |
 
 Commands that change the value return
 `CmdResult::Changed(State::One(StateValue::String(new_value)))`.
@@ -168,6 +177,7 @@ Cursor-only movement returns `CmdResult::None`.
 
 Two independent `TextInputStyle` instances control appearance depending on
 focus state:
+
 ```rust
 let inactive = TextInputStyle::new()
     .prefix_color(Color::Rgb(60, 60, 120))
@@ -188,11 +198,11 @@ TextInput::default()
     .with_active_style(active)
 ```
 
-| `TextInputStyleType` | Affects |
-|---|---|
-| `Title` | Title row |
-| `Input` | Input row (text and background) |
-| `Error` | Error row |
+| `TextInputStyleType` | Affects                         |
+| -------------------- | ------------------------------- |
+| `Title`              | Title row                       |
+| `Input`              | Input row (text and background) |
+| `Error`              | Error row                       |
 
 Unset slots fall back to `Style::default()`.
 
@@ -203,12 +213,14 @@ Unset slots fall back to `Style::default()`.
 A dropdown-style multi-select widget.
 
 **Collapsed:**
+
 ```
 ▍ Protocol
 ▍ HTTP, HTTPS
 ```
 
 **Expanded** (while focused — the dropdown opens automatically on focus):
+
 ```
 ▍ Protocol
 ▍▶ HTTP
@@ -218,11 +230,13 @@ A dropdown-style multi-select widget.
 ```
 
 `MultiChoice` implements:
+
 - `tuirealm::MockComponent` — low-level `view` / `perform` / `attr` / `query` / `state`
 - `tuirealm::Component<MultiChoiceEvent, NoUserEvent>` — convenience impl for
   standalone use (see note on Application integration below)
 
 #### Construction
+
 ```rust
 let mc = MultiChoice::default()
     .with_title("Protocol")
@@ -236,13 +250,14 @@ let mc = MultiChoice::default()
 #### Focus and style selection
 
 `MultiChoice` holds two style instances, selected automatically based on focus,
-exactly like `TextInput`.  The `Application` calls `attr(Attribute::Focus, …)`
+exactly like `TextInput`. The `Application` calls `attr(Attribute::Focus, …)`
 when focus changes; no manual style switching is needed.
 
 The dropdown opens when `attr(Attribute::Focus, AttrValue::Flag(true))` is
 called, and closes on blur.
 
 #### Reading selected indices
+
 ```rust
 // Via query:
 if let Some(AttrValue::String(s)) = component.query(Attribute::Custom(ATTR_SELECTED)) {
@@ -254,11 +269,13 @@ if let State::One(StateValue::String(s)) = component.state() { /* … */ }
 ```
 
 #### Setting selected indices programmatically
+
 ```rust
 component.attr(Attribute::Custom(ATTR_SELECTED), AttrValue::String("0,2".into()));
 ```
 
 #### Keymap
+
 ```rust
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
@@ -270,6 +287,7 @@ let keymap = MultiChoiceKeymap {
 ```
 
 #### Events
+
 ```rust
 match msg {
     Some(MultiChoiceEvent::SelectionChanged(indices)) => { /* selection toggled */ }
@@ -281,15 +299,16 @@ match msg {
 
 #### `perform` command reference
 
-| `Cmd` | Effect |
-|---|---|
-| `Cmd::Move(Direction::Up)` | Move cursor up |
-| `Cmd::Move(Direction::Down)` | Move cursor down |
-| `Cmd::Custom("toggle")` | Toggle selection on cursor row |
-| `Cmd::Custom("open")` | Open dropdown |
-| `Cmd::Custom("close")` | Close dropdown |
+| `Cmd`                        | Effect                         |
+| ---------------------------- | ------------------------------ |
+| `Cmd::Move(Direction::Up)`   | Move cursor up                 |
+| `Cmd::Move(Direction::Down)` | Move cursor down               |
+| `Cmd::Custom("toggle")`      | Toggle selection on cursor row |
+| `Cmd::Custom("open")`        | Open dropdown                  |
+| `Cmd::Custom("close")`       | Close dropdown                 |
 
 #### Style
+
 ```rust
 let style = MultiChoiceStyle::new()
     .prefix_color(ACCENT)
@@ -305,23 +324,24 @@ MultiChoice::default()
     .with_active_style(active_style)
 ```
 
-| `MultiChoiceStyleType` | Affects |
-|---|---|
-| `Title` | Title row |
-| `Normal` | Item: not selected, cursor elsewhere |
-| `Active` | Item: not selected, cursor here |
-| `Selected` | Item: selected, cursor elsewhere |
-| `SelectedActive` | Item: selected and cursor here |
-| `LastLine` | Blank closing line below expanded list |
+| `MultiChoiceStyleType` | Affects                                |
+| ---------------------- | -------------------------------------- |
+| `Title`                | Title row                              |
+| `Normal`               | Item: not selected, cursor elsewhere   |
+| `Active`               | Item: not selected, cursor here        |
+| `Selected`             | Item: selected, cursor elsewhere       |
+| `SelectedActive`       | Item: selected and cursor here         |
+| `LastLine`             | Blank closing line below expanded list |
 
 Unset slots fall back to `Style::default()`.
 
 #### Note on tuirealm Application integration
 
 `Component<MultiChoiceEvent, NoUserEvent>` is a convenience impl for standalone
-use.  When using `tuirealm::Application`, components must implement
-`Component<AppMsg, UserEvent>` for the *application's* `Msg` type.  The
+use. When using `tuirealm::Application`, components must implement
+`Component<AppMsg, UserEvent>` for the _application's_ `Msg` type. The
 idiomatic pattern is a thin wrapper:
+
 ```rust
 struct ProtocolComp(MultiChoice);
 
@@ -375,6 +395,7 @@ See the previous API documentation for full usage until migration is complete.
 #### `hex_color`
 
 Parses a CSS hex string into `ratatui::style::Color::Rgb`:
+
 ```rust
 let blue = hex_color("#64B4FF");
 ```
@@ -382,6 +403,7 @@ let blue = hex_color("#64B4FF");
 #### `open_editor`
 
 Suspends the TUI, opens `$EDITOR` for the given path, then resumes:
+
 ```rust
 use not_yet_done_ratatui::{open_editor, EditorError};
 
@@ -395,6 +417,7 @@ let terminal = ratatui::init();
 ## 2. Developer Guide
 
 ### 2.1 Project layout
+
 ```
 src/
 ├── lib.rs                   — public re-exports
@@ -419,7 +442,7 @@ src/
     └── form/                — stateless ratatui (pending migration)
 ```
 
-`common/` is the only shared dependency.  Widgets must not import each other
+`common/` is the only shared dependency. Widgets must not import each other
 directly; the form layer is the only place that knows about multiple widget
 types.
 
@@ -429,28 +452,28 @@ types.
 
 **tui-realm component model.**
 Each widget implements `MockComponent` (low-level) and optionally
-`Component<Msg, UserEvent>` (high-level event-to-message mapping).  The
+`Component<Msg, UserEvent>` (high-level event-to-message mapping). The
 component owns all its mutable state; the `Application` manages focus via
 `attr(Attribute::Focus, …)`.
 
 **Focus-driven style selection.**
 Each component holds two style instances — `inactive_style` and
-`active_style`.  `view` selects between them based on `self.focused`, which
+`active_style`. `view` selects between them based on `self.focused`, which
 is kept in sync by the framework.
 
 **Render logic as a free function.**
 The actual drawing code lives in `render.rs` as a free function accepting a
-plain data struct (`*ViewData`).  This separates the render logic from the
+plain data struct (`*ViewData`). This separates the render logic from the
 framework plumbing in `component.rs`, making it independently testable.
 
 **`perform` is the single mutation point.**
-All state changes go through `perform(Cmd) → CmdResult`.  `on` (and any
+All state changes go through `perform(Cmd) → CmdResult`. `on` (and any
 direct callers) map inputs to `Cmd` values and delegate — never mutating
-`self` directly.  This keeps unit tests of `perform` reliable.
+`self` directly. This keeps unit tests of `perform` reliable.
 
 **Keymaps use tuirealm types directly.**
 Keymap fields are `tuirealm::event::KeyEvent` — no custom wrapper type is
-needed.  Comparison in `on` is a plain `==` check.
+needed. Comparison in `on` is a plain `==` check.
 
 **Events, not callbacks.**
 `Component::on` returns `Option<Msg>` rather than calling closures.
@@ -465,7 +488,7 @@ example strings must be in English.
 
 **Design is not final.**
 If you see a better approach — cleaner API, smarter module boundary, more
-idiomatic pattern — open a discussion.  These conventions exist to provide
+idiomatic pattern — open a discussion. These conventions exist to provide
 consistency, not to prevent improvement.
 
 ---
@@ -473,6 +496,7 @@ consistency, not to prevent improvement.
 ### 2.3 Anatomy of a tui-realm widget
 
 A complete widget spans five files:
+
 ```
 my_widget/
 ├── mod.rs           — struct definition + builder methods + pub re-exports
@@ -484,6 +508,7 @@ my_widget/
 ```
 
 #### `keymap.rs`
+
 ```rust
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
@@ -506,6 +531,7 @@ impl Default for MyWidgetKeymap {
 #### `state.rs`
 
 Only the event enum — no external state struct.
+
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MyWidgetEvent {
@@ -520,6 +546,7 @@ Unchanged from the original design — `repr(u8)` enum + style struct +
 `impl_widget_style_base!`.
 
 #### `render.rs`
+
 ```rust
 pub(super) struct MyWidgetViewData<'a> {
     pub title:   &'a str,
@@ -537,6 +564,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MyWidgetViewData<'_>)
 ```
 
 #### `component.rs`
+
 ```rust
 use super::{MyWidget, render::{MyWidgetViewData, render}, state::MyWidgetEvent};
 
@@ -566,6 +594,7 @@ impl tuirealm::Component<MyWidgetEvent, NoUserEvent> for MyWidget {
 ```
 
 #### `mod.rs`
+
 ```rust
 mod component;
 mod render;
@@ -603,7 +632,8 @@ impl MyWidget {
 #### Option-based slots
 
 Every style slot is `Option<Style>` (or `Option<Color>` for colour-only
-fields).  `None` means "not configured".
+fields). `None` means "not configured".
+
 ```
 resolved_style(SlotType)  → Style   — falls back to Style::default()
 style(SlotType)           → Option<&Style>  — None if not set (for merge logic)
@@ -614,19 +644,24 @@ Render code always calls `resolved_style`.
 #### `impl_widget_style_base!` macro
 
 Any style struct with these two fields:
+
 ```rust
 pub prefix_color: Option<Color>,
 pub styles: [Option<Style>; N],
 ```
+
 derives the standard accessors with:
+
 ```rust
 impl_widget_style_base!(MyWidgetStyle, MyWidgetStyleType);
 ```
+
 Generated: `prefix_color()`, `set_style()`, `style()`, `resolved_style()`.
 
 #### Per-component precedence
 
-Each component has two style instances.  Within each instance:
+Each component has two style instances. Within each instance:
+
 ```
 set_style(...)    ← highest (Some wins)
       ↓
@@ -657,7 +692,7 @@ The selection between the two instances is based on `self.focused`.
 ### 2.6 Common pitfalls
 
 **`px` advance must use display width.**
-CJK characters are 2 columns wide.  Always use `ch.width().unwrap_or(1) as u16`,
+CJK characters are 2 columns wide. Always use `ch.width().unwrap_or(1) as u16`,
 never `+= 1`.
 
 **`truncate_to_width` returns a `String`.**
@@ -674,6 +709,7 @@ This keeps unit tests of `perform` reliable.
 
 **`Cmd::Custom` keys are `&'static str`.**
 Use named constants for custom command strings to avoid silent typo mismatches:
+
 ```rust
 const CMD_DELETE_FWD: &str = "delete_fwd";
 // Cmd::Custom(CMD_DELETE_FWD)

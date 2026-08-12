@@ -1,10 +1,10 @@
 mod component;
-mod render;
 pub mod keymap;
+mod render;
 pub mod state;
 pub mod style;
 
-pub use component::ATTR_ERROR;
+pub use component::{ATTR_ERROR, CMD_END, CMD_HOME};
 pub use keymap::TextInputKeymap;
 pub use state::TextInputEvent;
 pub use style::{TextInputStyle, TextInputStyleType};
@@ -37,31 +37,37 @@ pub struct TextInput {
     pub(crate) focused: bool,
 
     // --- editing state ---
-    pub(crate) value:   String,
+    pub(crate) value: String,
     /// Byte offset of the cursor within `value`.
-    pub(crate) cursor:  usize,
-    pub(crate) error:   Option<String>,
+    pub(crate) cursor: usize,
+    pub(crate) error: Option<String>,
 
     // --- configuration (set once at construction) ---
-    pub(crate) title:           String,
-    pub(crate) placeholder:     String,
-    pub(crate) inactive_style:  TextInputStyle,
-    pub(crate) active_style:    TextInputStyle,
-    pub(crate) keymap:          TextInputKeymap,
+    pub(crate) title: String,
+    pub(crate) placeholder: String,
+    /// Render the value as bullets instead of its characters (passwords,
+    /// tokens). Only the *display* is masked — [`Attribute::Value`] and
+    /// [`state`](tuirealm::component::Component::state) still yield the real
+    /// text, because the caller needs it to submit.
+    pub(crate) masked: bool,
+    pub(crate) inactive_style: TextInputStyle,
+    pub(crate) active_style: TextInputStyle,
+    pub(crate) keymap: TextInputKeymap,
 }
 
 impl Default for TextInput {
     fn default() -> Self {
         Self {
-            focused:        false,
-            value:          String::new(),
-            cursor:         0,
-            error:          None,
-            title:          String::new(),
-            placeholder:    String::new(),
+            focused: false,
+            value: String::new(),
+            cursor: 0,
+            error: None,
+            title: String::new(),
+            placeholder: String::new(),
+            masked: false,
             inactive_style: TextInputStyle::default(),
-            active_style:   TextInputStyle::default(),
-            keymap:         TextInputKeymap::default(),
+            active_style: TextInputStyle::default(),
+            keymap: TextInputKeymap::default(),
         }
     }
 }
@@ -76,6 +82,14 @@ impl TextInput {
     /// Sets the placeholder shown when the value is empty.
     pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Masks the rendered value with bullets (`•`) — for passwords, tokens and
+    /// anything else that must not stand on screen in clear text. The stored
+    /// value is untouched.
+    pub fn with_masked(mut self, masked: bool) -> Self {
+        self.masked = masked;
         self
     }
 
@@ -105,9 +119,13 @@ impl TextInput {
     }
 
     pub(crate) fn pop_char(&mut self) {
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         let mut pos = self.cursor - 1;
-        while !self.value.is_char_boundary(pos) { pos -= 1; }
+        while !self.value.is_char_boundary(pos) {
+            pos -= 1;
+        }
         self.value.remove(pos);
         self.cursor = pos;
     }
@@ -119,17 +137,33 @@ impl TextInput {
     }
 
     pub(crate) fn move_cursor_left(&mut self) {
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         let mut pos = self.cursor - 1;
-        while !self.value.is_char_boundary(pos) { pos -= 1; }
+        while !self.value.is_char_boundary(pos) {
+            pos -= 1;
+        }
         self.cursor = pos;
     }
 
     pub(crate) fn move_cursor_right(&mut self) {
-        if self.cursor >= self.value.len() { return; }
+        if self.cursor >= self.value.len() {
+            return;
+        }
         let mut pos = self.cursor + 1;
-        while pos <= self.value.len() && !self.value.is_char_boundary(pos) { pos += 1; }
+        while pos <= self.value.len() && !self.value.is_char_boundary(pos) {
+            pos += 1;
+        }
         self.cursor = pos;
+    }
+
+    pub(crate) fn move_cursor_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub(crate) fn move_cursor_end(&mut self) {
+        self.cursor = self.value.len();
     }
 
     pub(crate) fn clear_value(&mut self) {

@@ -23,6 +23,11 @@ pub struct SavedQueryEditSession {
     name: String,
     template: String,
     label: String,
+    /// Editor file suffix, taken from the store the body lives in — the
+    /// adapter's query language, or `.md` for an extended document. The
+    /// buffer is written to `path` either way; this only decides what the
+    /// editor highlights.
+    suffix: String,
 }
 
 impl SavedQueryEditSession {
@@ -33,15 +38,23 @@ impl SavedQueryEditSession {
         path: PathBuf,
         view_index: usize,
         name: String,
+        suffix: String,
     ) -> std::io::Result<Self> {
         let template = std::fs::read_to_string(&path)?;
         let label = format!("edit query: {name}");
-        Ok(Self { path, view_index, name, template, label })
+        Ok(Self {
+            path,
+            view_index,
+            name,
+            template,
+            label,
+            suffix,
+        })
     }
 
     /// Construct a session for a brand-new saved query. No I/O happens
     /// up front; the file is created on first commit.
-    pub fn new(path: PathBuf, view_index: usize, name: String) -> Self {
+    pub fn new(path: PathBuf, view_index: usize, name: String, suffix: String) -> Self {
         let label = format!("new query: {name}");
         Self {
             path,
@@ -49,6 +62,7 @@ impl SavedQueryEditSession {
             name,
             template: String::new(),
             label,
+            suffix,
         }
     }
 }
@@ -60,7 +74,7 @@ impl EditSession for SavedQueryEditSession {
     }
 
     fn suffix(&self) -> &str {
-        ".yaml"
+        &self.suffix
     }
 
     fn scope(&self) -> SessionScope {
@@ -83,9 +97,7 @@ impl EditSession for SavedQueryEditSession {
         }
         if let Err(e) = tokio::fs::write(&self.path, text).await {
             return CommitOutcome::Reopen {
-                content: format!(
-                    "# write failed: {e}\n# (this comment will not be saved)\n{text}"
-                ),
+                content: format!("# write failed: {e}\n# (this comment will not be saved)\n{text}"),
             };
         }
         CommitOutcome::FollowUp(FollowUp::ReloadContentSavedQueries {
@@ -104,7 +116,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested").join("Foo.yaml");
         let mut session =
-            SavedQueryEditSession::new(path.clone(), 7, "Foo".to_string());
+            SavedQueryEditSession::new(path.clone(), 7, "Foo".to_string(), ".yaml".to_string());
         let outcome = session.commit("status: open\n").await;
         match outcome {
             CommitOutcome::FollowUp(FollowUp::ReloadContentSavedQueries {
@@ -126,8 +138,9 @@ mod tests {
         let path = tmp.path().join("Bar.yaml");
         tokio::fs::write(&path, "type: task\n").await.unwrap();
         let session =
-            SavedQueryEditSession::open(path, 3, "Bar".to_string()).unwrap();
+            SavedQueryEditSession::open(path, 3, "Bar".to_string(), ".yaml".to_string()).unwrap();
         assert_eq!(session.template(), "type: task\n");
         assert_eq!(session.label(), "edit query: Bar");
+        assert_eq!(session.suffix(), ".yaml");
     }
 }

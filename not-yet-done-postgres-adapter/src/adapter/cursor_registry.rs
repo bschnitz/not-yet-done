@@ -21,8 +21,8 @@
 //! long-running fetch on one cursor never blocks lookups for another.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::Mutex;
 
@@ -77,7 +77,10 @@ impl CursorRegistry {
         let gen_before = self.teardown_gen.load(Ordering::Acquire);
         let outcome = self.client.open_cursor(database, sql, page_size).await?;
         match outcome {
-            OpenCursorOutcome::Cursor { session, first_page } => {
+            OpenCursorOutcome::Cursor {
+                session,
+                first_page,
+            } => {
                 // If the transport was reset _during_ open the cursor
                 // is already dead; surface that as a load error so the
                 // TUI doesn't store a stale id.
@@ -92,9 +95,9 @@ impl CursorRegistry {
                 self.entries.lock().await.insert(id.clone(), entry);
                 Ok((id, first_page))
             }
-            OpenCursorOutcome::NonCursor(_) => Err(
-                "not a cursor query: trailing statement must be SELECT or WITH".to_string(),
-            ),
+            OpenCursorOutcome::NonCursor(_) => {
+                Err("not a cursor query: trailing statement must be SELECT or WITH".to_string())
+            }
         }
     }
 
@@ -167,8 +170,8 @@ mod tests {
     //! server live in the integration smoke tests (`docs/smoke-tests.md`)
     //! — `tokio_postgres::Client` has no public constructor so we
     //! cannot synthesize a fake [`CursorSession`] in-process.
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
     use crate::config::{PostgresAuth, SslMode};
@@ -193,6 +196,7 @@ mod tests {
                 admin_database: "postgres".to_string(),
                 sslmode: SslMode::Disable,
             },
+            None,
             None,
         ))
     }

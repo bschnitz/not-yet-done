@@ -39,11 +39,7 @@ impl Default for EnumerationOptions {
 /// If `dir` does not exist or is not a directory, an empty vec is
 /// returned — callers can detect this via the input path themselves and
 /// render an inline error.
-pub fn enumerate(
-    dir: &Path,
-    glob_patterns: &str,
-    opts: &EnumerationOptions,
-) -> Vec<PathBuf> {
+pub fn enumerate(dir: &Path, glob_patterns: &str, opts: &EnumerationOptions) -> Vec<PathBuf> {
     if !dir.is_dir() {
         return Vec::new();
     }
@@ -51,7 +47,11 @@ pub fn enumerate(
     let mut builder = GlobSetBuilder::new();
     let mut any_pattern = false;
     let mut recursive = false;
-    for raw in glob_patterns.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+    for raw in glob_patterns
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         if let Ok(g) = Glob::new(raw) {
             builder.add(g);
             any_pattern = true;
@@ -60,7 +60,11 @@ pub fn enumerate(
             }
         }
     }
-    let glob_set = if any_pattern { builder.build().ok() } else { None };
+    let glob_set = if any_pattern {
+        builder.build().ok()
+    } else {
+        None
+    };
     let max_depth = if recursive { None } else { Some(1) };
 
     let mut walk = WalkBuilder::new(dir);

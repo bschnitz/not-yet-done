@@ -36,7 +36,7 @@ impl Anonymizer for TaigaAnonymizer {
             "ref" => pseudo_ref(value),
             // People (assignee may be a comma-separated list; actor/author single).
             "assignee" => self.people_csv(value),
-            "author" | "actor" => pseudo_person(value),
+            "author" | "actor" | "creator" => pseudo_person(value),
             "filename" => pseudo_filename(value),
             // Free text (subject/body/description/tags, the project *name* on a
             // notification, and the generic `label` = subject/body — all safe
@@ -45,8 +45,8 @@ impl Anonymizer for TaigaAnonymizer {
                 self.std.scrub_value(key, value)
             }
             // Structural / addressing — verbatim.
-            "type" | "status" | "modified" | "created" | "attachments" | "size"
-            | "version" | "event" | "read" => value.to_string(),
+            "type" | "status" | "modified" | "created" | "attachments" | "size" | "version"
+            | "event" | "read" => value.to_string(),
             _ => self.std.scrub_value(key, value),
         }
     }

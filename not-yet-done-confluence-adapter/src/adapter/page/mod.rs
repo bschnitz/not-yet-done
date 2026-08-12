@@ -27,8 +27,8 @@ use tokio::sync::OnceCell;
 
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
-    HintPlacement, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, PageInfo, PageRequest, Result,
+    InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
+    NodeType, PageInfo, PageRequest, Result,
 };
 
 use crate::client::{ConfluenceClient, PageDetail, PageMeta};
@@ -36,6 +36,240 @@ use crate::client::{ConfluenceClient, PageDetail, PageMeta};
 use super::attachment::{ConfluenceAttachmentNode, attachment_node_type};
 use super::comment::{ConfluenceCommentNode, comment_node_type};
 use crate::adapter::{DEFAULT_PAGE_PAGE_SIZE, other_err};
+
+/// A page's direct child-page listing body. Extracted as a free fn so both
+/// the legacy `ConfluencePageNode::list_pages` and the adapter-level `childs`
+/// closure call the identical path. Keys solely on the page id (= `node.id()`
+/// for a page node) + the client. Always queries `/content/{id}/child/page`.
+pub(in crate::adapter) async fn list_child_pages(
+    client: &ConfluenceClient,
+    page_id: &str,
+    params: ListParams,
+) -> Result<ListResult> {
+    let page_req = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: DEFAULT_PAGE_PAGE_SIZE,
+    });
+    let list = client
+        .list_child_pages(page_id, page_req.offset, page_req.limit)
+        .await
+        .map_err(other_err)?;
+    let items = list
+        .pages
+        .into_iter()
+        .map(|p| NodeSummary {
+            id: p.id.clone(),
+            label: p.title.clone(),
+            node_type: page_node_type(),
+            metadata: Metadata {
+                fields: vec![
+                    MetadataField {
+                        key: "id".into(),
+                        value: p.id,
+                        display_label: "ID".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "title".into(),
+                        value: p.title,
+                        display_label: "Title".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                    MetadataField {
+                        key: "type".into(),
+                        value: p.page_type,
+                        display_label: "Type".into(),
+                        editable: false,
+                        allowed_values: None,
+                    },
+                ],
+            },
+            // `children.page.size > 0` from `?expand=children.page.size`
+            // on the list call. `Some(false)` lets the tree renderer
+            // pick the leaf glyph (`📄` via view-YAML `leaf_glyph`)
+            // instead of the expand marker — otherwise the static
+            // `recursive: true` ChildDef would force `▶` on every page
+            // row. Confluence Server silently drops `childTypes.page`
+            // against `/child/page`, so `children.page.size` is the
+            // only listing-side hook that reports per-row counts.
+            has_children: p.has_children,
+        })
+        .collect();
+    let page_info = PageInfo {
+        offset: list.start,
+        limit: list.limit,
+        total: None,
+        has_next: list.has_next,
+        has_prev: list.start > 0,
+    };
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(page_info),
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
+}
+
+/// A page's comment listing body. Extracted as a free fn shared by
+/// `ConfluencePageNode::list_comments` and the adapter `childs` closure.
+/// Keys on the page id + client. Always queries
+/// `/content/{id}/child/comment?expand=body.storage,version`; body XHTML
+/// rides in on the list response so the comment node never needs a per-row
+/// detail GET.
+pub(in crate::adapter) async fn list_comments(
+    client: &ConfluenceClient,
+    page_id: &str,
+    params: ListParams,
+) -> Result<ListResult> {
+    let page_req = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: DEFAULT_PAGE_PAGE_SIZE,
+    });
+    let list = client
+        .list_comments(page_id, page_req.offset, page_req.limit)
+        .await
+        .map_err(other_err)?;
+    let items = list
+        .comments
+        .into_iter()
+        .map(|c| {
+            let composite_id = format!("{}/comment/{}", page_id, c.id);
+            NodeSummary {
+                id: composite_id,
+                label: c.title.clone(),
+                node_type: comment_node_type(),
+                metadata: Metadata {
+                    fields: vec![
+                        MetadataField {
+                            key: "author".into(),
+                            value: c.author,
+                            display_label: "Author".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "created".into(),
+                            value: c.created,
+                            display_label: "Created".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "body".into(),
+                            value: c.body_storage,
+                            display_label: "Body".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                    ],
+                },
+                has_children: None,
+            }
+        })
+        .collect();
+    let page_info = PageInfo {
+        offset: list.start,
+        limit: list.limit,
+        total: None,
+        has_next: list.has_next,
+        has_prev: list.start > 0,
+    };
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(page_info),
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
+}
+
+/// A page's attachment listing body. Extracted as a free fn shared by
+/// `ConfluencePageNode::list_attachments` and the adapter `childs` closure.
+/// Keys on the page id + client. Always queries
+/// `/content/{id}/child/attachment`.
+pub(in crate::adapter) async fn list_attachments(
+    client: &ConfluenceClient,
+    page_id: &str,
+    params: ListParams,
+) -> Result<ListResult> {
+    let page_req = params.page.unwrap_or(PageRequest {
+        offset: 0,
+        limit: DEFAULT_PAGE_PAGE_SIZE,
+    });
+    let list = client
+        .list_attachments(page_id, page_req.offset, page_req.limit)
+        .await
+        .map_err(other_err)?;
+    let items = list
+        .attachments
+        .into_iter()
+        .map(|a| {
+            let composite_id = format!("{}/attachment/{}", page_id, a.id);
+            NodeSummary {
+                id: composite_id,
+                label: a.title.clone(),
+                node_type: attachment_node_type(),
+                metadata: Metadata {
+                    fields: vec![
+                        MetadataField {
+                            key: "filename".into(),
+                            value: a.title,
+                            display_label: "Filename".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "author".into(),
+                            value: a.author,
+                            display_label: "Author".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "size".into(),
+                            value: a.file_size.to_string(),
+                            display_label: "Size".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "mime_type".into(),
+                            value: a.media_type,
+                            display_label: "Type".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                        MetadataField {
+                            key: "created".into(),
+                            value: a.created,
+                            display_label: "Created".into(),
+                            editable: false,
+                            allowed_values: None,
+                        },
+                    ],
+                },
+                has_children: None,
+            }
+        })
+        .collect();
+    let page_info = PageInfo {
+        offset: list.start,
+        limit: list.limit,
+        total: None,
+        has_next: list.has_next,
+        has_prev: list.start > 0,
+    };
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(page_info),
+        batch_download_available: false,
+        downloaded: Vec::new(),
+    })
+}
 
 pub(super) fn page_node_type() -> NodeType {
     NodeType {
@@ -56,20 +290,14 @@ pub(super) fn page_node_type() -> NodeType {
 /// TUI can populate shortcut hints without instantiating a node.
 pub(super) fn page_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("edit", "edit", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('e'),
-        NodeAction::new("create-child", "create child page", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
+        NodeAction::new("edit", "edit", InputSpec::Editor),
+        NodeAction::new("create-child", "create child page", InputSpec::Editor),
         // CF-12: `c` opens an empty XHTML buffer for a new comment on
         // this page. The comment's body POSTs straight to
         // `/rest/api/content` with `type=comment, container={page_id}`;
         // editor-flow + reload-after-Done are inherited from the
         // generic CreateContentChild pipeline.
-        NodeAction::new("add-comment", "add comment", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('c'),
+        NodeAction::new("add-comment", "add comment", InputSpec::Editor),
         // CF-13: capital `A` opens the FilePicker (multi-select). Each
         // chosen file is POSTed to `/content/{id}/child/attachment` as
         // multipart; aggregate failures bubble up as a ContentError that
@@ -80,9 +308,7 @@ pub(super) fn page_actions() -> Vec<NodeAction> {
             "upload-attachment",
             "upload attachment",
             InputSpec::FilePicker { multi: true },
-        )
-        .with_placement(HintPlacement::ActionBar)
-        .with_default_key('A'),
+        ),
         // CF-14: `y` opens an editor pre-filled with the source page's
         // title (suffixed with " (Clone)") and body, then POSTs a new
         // page under the same parent in the same space. Reuses the
@@ -90,23 +316,18 @@ pub(super) fn page_actions() -> Vec<NodeAction> {
         // identical to `a: create-child`. Cross-space cloning isn't
         // exposed at adapter level — the user can move the resulting
         // page via the Confluence UI if they want it elsewhere.
-        NodeAction::new("clone", "clone", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('y'),
+        NodeAction::new("clone", "clone", InputSpec::Editor),
         // CF-11: capital `D` (Shift+D) routes through `invoke_action` →
         // [`ActionDispatch::DeleteSelf`], which the TUI stages behind a
         // confirm popup before firing the actual `Node::execute("delete")`.
         // Using capital `D` matches the destructive-action convention in
         // the codebase (lowercase `d` is reserved for non-destructive
         // operations like attachment download).
-        NodeAction::new("delete", "delete (Trash)", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('D'),
+        NodeAction::new("delete", "delete (Trash)", InputSpec::None),
         // open-in-browser is fire-and-forget (no input, no popup) → it can
-        // never be "active", so it belongs in the status bar, not the top
-        // action bar. Default `StatusBar` placement (no `with_placement`).
-        NodeAction::new("open-in-browser", "open in browser", InputSpec::None)
-            .with_default_key('o'),
+        // never be "active", so the TUI derives status-bar placement for it
+        // from its `InputSpec::None`, not the top action bar.
+        NodeAction::new("open-in-browser", "open in browser", InputSpec::None),
     ]
 }
 
@@ -176,10 +397,7 @@ impl ConfluencePageNode {
     pub(super) async fn detail(&self) -> Result<&PageDetail> {
         self.detail
             .get_or_try_init(|| async {
-                self.client
-                    .get_page(&self.page.id)
-                    .await
-                    .map_err(other_err)
+                self.client.get_page(&self.page.id).await.map_err(other_err)
             })
             .await
     }
@@ -224,229 +442,6 @@ impl ConfluencePageNode {
             Err(_) => return,
         };
         self.apply_hydrated_title(title, &webui);
-    }
-
-    /// Inner page-listing path — split out of `Node::list` so the
-    /// node-type-routing in `list()` stays readable. Always queries
-    /// `/content/{id}/child/page` for the direct children of this page.
-    async fn list_pages(&self, params: ListParams) -> Result<ListResult> {
-        let page_req = params.page.unwrap_or(PageRequest {
-            offset: 0,
-            limit: DEFAULT_PAGE_PAGE_SIZE,
-        });
-        let list = self
-            .client
-            .list_child_pages(&self.page.id, page_req.offset, page_req.limit)
-            .await
-            .map_err(other_err)?;
-        let items = list
-            .pages
-            .into_iter()
-            .map(|p| NodeSummary {
-                id: p.id.clone(),
-                label: p.title.clone(),
-                node_type: page_node_type(),
-                metadata: Metadata {
-                    fields: vec![
-                        MetadataField {
-                            key: "id".into(),
-                            value: p.id,
-                            display_label: "ID".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "title".into(),
-                            value: p.title,
-                            display_label: "Title".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                        MetadataField {
-                            key: "type".into(),
-                            value: p.page_type,
-                            display_label: "Type".into(),
-                            editable: false,
-                            allowed_values: None,
-                        },
-                    ],
-                },
-                // `children.page.size > 0` from `?expand=children.page.size`
-                // on the list call. `Some(false)` lets the tree renderer
-                // pick the leaf glyph (`📄` via view-YAML `leaf_glyph`)
-                // instead of the expand marker — otherwise the static
-                // `recursive: true` ChildDef would force `▶` on every page
-                // row. Confluence Server silently drops `childTypes.page`
-                // against `/child/page`, so `children.page.size` is the
-                // only listing-side hook that reports per-row counts.
-                has_children: p.has_children,
-            })
-            .collect();
-        let page_info = PageInfo {
-            offset: list.start,
-            limit: list.limit,
-            total: None,
-            has_next: list.has_next,
-            has_prev: list.start > 0,
-        };
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(page_info),
-            batch_download_available: false,
-            downloaded: Vec::new(),
-        })
-    }
-
-    /// Inner comment-listing path — split out of `Node::list` so the
-    /// node-type-routing in `list()` stays readable. Always queries
-    /// `/content/{id}/child/comment?expand=body.storage,version` for the
-    /// comments hanging off this page. Body XHTML rides in on the list
-    /// response so the comment node never needs a per-row detail GET.
-    async fn list_comments(&self, params: ListParams) -> Result<ListResult> {
-        let page_req = params.page.unwrap_or(PageRequest {
-            offset: 0,
-            limit: DEFAULT_PAGE_PAGE_SIZE,
-        });
-        let list = self
-            .client
-            .list_comments(&self.page.id, page_req.offset, page_req.limit)
-            .await
-            .map_err(other_err)?;
-        let items = list
-            .comments
-            .into_iter()
-            .map(|c| {
-                let composite_id = format!("{}/comment/{}", self.page.id, c.id);
-                NodeSummary {
-                    id: composite_id,
-                    label: c.title.clone(),
-                    node_type: comment_node_type(),
-                    metadata: Metadata {
-                        fields: vec![
-                            MetadataField {
-                                key: "author".into(),
-                                value: c.author,
-                                display_label: "Author".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "created".into(),
-                                value: c.created,
-                                display_label: "Created".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "body".into(),
-                                value: c.body_storage,
-                                display_label: "Body".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                        ],
-                    },
-                    has_children: None,
-                }
-            })
-            .collect();
-        let page_info = PageInfo {
-            offset: list.start,
-            limit: list.limit,
-            total: None,
-            has_next: list.has_next,
-            has_prev: list.start > 0,
-        };
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(page_info),
-            batch_download_available: false,
-            downloaded: Vec::new(),
-        })
-    }
-
-    /// Inner attachment-listing path — split out of `Node::list` so the
-    /// node-type-routing in `list()` stays readable. Always queries
-    /// `/content/{id}/child/attachment` for the attachments hanging off
-    /// this page.
-    async fn list_attachments(&self, params: ListParams) -> Result<ListResult> {
-        let page_req = params.page.unwrap_or(PageRequest {
-            offset: 0,
-            limit: DEFAULT_PAGE_PAGE_SIZE,
-        });
-        let list = self
-            .client
-            .list_attachments(&self.page.id, page_req.offset, page_req.limit)
-            .await
-            .map_err(other_err)?;
-        let items = list
-            .attachments
-            .into_iter()
-            .map(|a| {
-                let composite_id = format!("{}/attachment/{}", self.page.id, a.id);
-                NodeSummary {
-                    id: composite_id,
-                    label: a.title.clone(),
-                    node_type: attachment_node_type(),
-                    metadata: Metadata {
-                        fields: vec![
-                            MetadataField {
-                                key: "filename".into(),
-                                value: a.title,
-                                display_label: "Filename".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "author".into(),
-                                value: a.author,
-                                display_label: "Author".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "size".into(),
-                                value: a.file_size.to_string(),
-                                display_label: "Size".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "mime_type".into(),
-                                value: a.media_type,
-                                display_label: "Type".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                            MetadataField {
-                                key: "created".into(),
-                                value: a.created,
-                                display_label: "Created".into(),
-                                editable: false,
-                                allowed_values: None,
-                            },
-                        ],
-                    },
-                    has_children: None,
-                }
-            })
-            .collect();
-        let page_info = PageInfo {
-            offset: list.start,
-            limit: list.limit,
-            total: None,
-            has_next: list.has_next,
-            has_prev: list.start > 0,
-        };
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(page_info),
-            batch_download_available: false,
-            downloaded: Vec::new(),
-        })
     }
 
     /// CF-11: soft-delete the page (move to Trash) via
@@ -533,37 +528,8 @@ impl Node for ConfluencePageNode {
         // refetch; a failed fetch leaves the stub (degrades to the id).
         self.hydrate_from_detail().await;
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        page_actions()
-    }
-
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        // CF-6 added `confluence:attachment` as a second branch off every
-        // page; CF-7 adds `confluence:comment` as a third. The page-tree
-        // (`confluence:page`) stays the primary recursive branch — the
-        // View-YAML's secondary ChildDefs pull attachments and comments
-        // via the same `list()` entry point, routed by `node_type`.
-        vec![
-            page_node_type(),
-            attachment_node_type(),
-            comment_node_type(),
-        ]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "confluence:page" => self.list_pages(params).await,
-            "confluence:attachment" => self.list_attachments(params).await,
-            "confluence:comment" => self.list_comments(params).await,
-            other => Err(ContentError::NotSupported(format!(
-                "ConfluencePageNode does not list {other}",
-            ))),
-        }
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -646,27 +612,24 @@ impl Node for ConfluencePageNode {
     /// dispatch path (editor for `edit` / `create-child`, direct execute
     /// for `open-in-browser`) or no shortcut wired to it, so they all
     /// fall through to [`ActionDispatch::Noop`].
-    async fn invoke_action(
-        &self,
-        name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
             "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             _ => Ok(ActionDispatch::Noop),
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open-in-browser", ActionInput::None) => self.open_via_xdg().await,
-            ("edit", ActionInput::Edited { text, original, version }) => {
-                self.execute_edit(&text, &original, &version).await
-            }
+            (
+                "edit",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => self.execute_edit(&text, &original, &version).await,
             ("create-child", ActionInput::Edited { text, .. }) => {
                 self.execute_create_child(&text).await
             }
@@ -688,9 +651,7 @@ impl Node for ConfluencePageNode {
             // POST runs against the same space + parent the source page
             // lives under; the user can edit title/body in the buffer
             // before saving.
-            ("clone", ActionInput::Edited { text, .. }) => {
-                self.execute_clone(&text).await
-            }
+            ("clone", ActionInput::Edited { text, .. }) => self.execute_clone(&text).await,
             // CF-11 page-delete (Trash). Fired by the TUI after the user
             // confirms the popup staged from `invoke_action`. Returns the
             // page id in the notification because the row is gone from
@@ -789,11 +750,8 @@ mod tests {
             webui: String::new(),
             has_children: None,
         };
-        let node = ConfluencePageNode::new(
-            synthetic_client(),
-            "https://wiki.example.invalid",
-            page,
-        );
+        let node =
+            ConfluencePageNode::new(synthetic_client(), "https://wiki.example.invalid", page);
         assert!(node.web_url.is_empty());
     }
 
@@ -817,10 +775,7 @@ mod tests {
         );
         assert_eq!(node.label(), "12345", "starts as the bare-id stub");
 
-        node.apply_hydrated_title(
-            "Real Page Title".into(),
-            "/spaces/DEMO/pages/12345/Real",
-        );
+        node.apply_hydrated_title("Real Page Title".into(), "/spaces/DEMO/pages/12345/Real");
 
         assert_eq!(node.label(), "Real Page Title");
         let title_field = node
@@ -850,22 +805,26 @@ mod tests {
         assert_eq!(node.web_url, original_url, "blank webui leaves URL intact");
     }
 
-    #[test]
-    fn children_types_has_page_attachment_and_comment_branches() {
+    #[tokio::test]
+    async fn children_types_has_page_attachment_and_comment_branches() {
+        use not_yet_done_content::children;
+        let adapter = super::super::test_adapter().await;
         let node = ConfluencePageNode::new(
             synthetic_client(),
             "https://wiki.example.invalid",
             sample_page(),
         );
-        let types = node.children_types();
+        let types = children::child_types(&adapter, &node);
         assert_eq!(types.len(), 3);
         assert_eq!(types[0].type_id, "confluence:page");
-        assert_eq!(types[1].type_id, "confluence:attachment");
-        assert_eq!(types[2].type_id, "confluence:comment");
+        assert_eq!(types[1].type_id, "confluence:comment");
+        assert_eq!(types[2].type_id, "confluence:attachment");
     }
 
     #[tokio::test]
     async fn list_rejects_unknown_node_type() {
+        use not_yet_done_content::children;
+        let adapter = super::super::test_adapter().await;
         let node = ConfluencePageNode::new(
             synthetic_client(),
             "https://wiki.example.invalid",
@@ -885,7 +844,7 @@ mod tests {
             download: false,
             group_by: None,
         };
-        match node.list(params).await {
+        match children::list(&adapter, &node, params).await {
             Err(e) => assert!(
                 format!("{e}").contains("confluence:space"),
                 "error mentions rejected type: {e}"
@@ -965,11 +924,8 @@ mod tests {
             webui: String::new(),
             has_children: None,
         };
-        let mut node = ConfluencePageNode::new(
-            synthetic_client(),
-            "https://wiki.example.invalid",
-            page,
-        );
+        let mut node =
+            ConfluencePageNode::new(synthetic_client(), "https://wiki.example.invalid", page);
         match node.execute("open-in-browser", ActionInput::None).await {
             Err(_) => {}
             Ok(_) => panic!("empty webui must never spawn a browser"),
@@ -981,28 +937,21 @@ mod tests {
         let actions = page_actions();
         assert_eq!(actions.len(), 7);
         assert_eq!(actions[0].id, "edit");
-        assert_eq!(actions[0].default_key, Some('e'));
         assert!(matches!(actions[0].input, InputSpec::Editor));
         assert_eq!(actions[1].id, "create-child");
-        assert_eq!(actions[1].default_key, Some('a'));
         assert!(matches!(actions[1].input, InputSpec::Editor));
         assert_eq!(actions[2].id, "add-comment");
-        assert_eq!(actions[2].default_key, Some('c'));
         assert!(matches!(actions[2].input, InputSpec::Editor));
         assert_eq!(actions[3].id, "upload-attachment");
-        assert_eq!(actions[3].default_key, Some('A'));
         assert!(matches!(
             actions[3].input,
             InputSpec::FilePicker { multi: true }
         ));
         assert_eq!(actions[4].id, "clone");
-        assert_eq!(actions[4].default_key, Some('y'));
         assert!(matches!(actions[4].input, InputSpec::Editor));
         assert_eq!(actions[5].id, "delete");
-        assert_eq!(actions[5].default_key, Some('D'));
         assert!(matches!(actions[5].input, InputSpec::None));
         assert_eq!(actions[6].id, "open-in-browser");
-        assert_eq!(actions[6].default_key, Some('o'));
     }
 
     /// CF-11: `delete` is wired through the TUI's

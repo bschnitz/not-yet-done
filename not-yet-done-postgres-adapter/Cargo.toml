@@ -6,15 +6,18 @@ edition = "2024"
 [dependencies]
 tokio          = { workspace = true }
 async-trait    = { workspace = true }
+fieldsmith     = { workspace = true }
 serde          = { workspace = true }
 serde_yaml     = { workspace = true }
+serde_json     = { workspace = true }
 thiserror      = { workspace = true }
 dirs           = { workspace = true }
 not-yet-done-content   = { path = "../not-yet-done-content" }
+not-yet-done-sql-core  = { path = "../not-yet-done-sql-core" }
 not-yet-done-transport = { path = "../not-yet-done-transport" }
 tokio-postgres = "0.7"
-regex          = { workspace = true }
 
 [dev-dependencies]
 tokio          = { workspace = true }
 serde_yaml     = { workspace = true }
+tempfile       = { workspace = true }

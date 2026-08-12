@@ -12,14 +12,20 @@ pub mod cli {
         #[arg(long, help = "Optional project description")] description: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::ProjectService;
+            use shaku::HasComponent;
             let service: &dyn ProjectService = module.resolve_ref();
             service.add_project(name, description).await
         });
         match result {
-            Ok(p) => { println!("✓ Project created: [{}] {}", p.id, p.name); 0 }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Ok(p) => {
+                println!("✓ Project created: [{}] {}", p.id, p.name);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -27,13 +33,16 @@ pub mod cli {
     #[command(about = "List all projects")]
     pub fn list() -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::ProjectService;
+            use shaku::HasComponent;
             let service: &dyn ProjectService = module.resolve_ref();
             service.list_projects().await
         });
         match result {
-            Ok(projects) if projects.is_empty() => { println!("No projects found."); 0 }
+            Ok(projects) if projects.is_empty() => {
+                println!("No projects found.");
+                0
+            }
             Ok(projects) => {
                 for p in projects {
                     let desc = p.description.as_deref().unwrap_or("—");
@@ -41,7 +50,10 @@ pub mod cli {
                 }
                 0
             }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -53,17 +65,23 @@ pub mod cli {
         #[arg(long, help = "New description")] description: Option<String>,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::ProjectService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
             let id = Uuid::parse_str(&id)
                 .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn ProjectService = module.resolve_ref();
             service.edit_project(id, name, description).await
         });
         match result {
-            Ok(p) => { println!("✓ Project updated: [{}] {}", p.id, p.name); 0 }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Ok(p) => {
+                println!("✓ Project updated: [{}] {}", p.id, p.name);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 
@@ -74,17 +92,23 @@ pub mod cli {
         #[arg(long, help = "Also soft-delete all tasks assigned to this project")] cascade: bool,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use shaku::HasComponent;
             use not_yet_done_task_core::service::ProjectService;
             use sea_orm::prelude::Uuid;
+            use shaku::HasComponent;
             let id = Uuid::parse_str(&id)
                 .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(id))?;
             let service: &dyn ProjectService = module.resolve_ref();
             service.delete_project(id, cascade).await
         });
         match result {
-            Ok(()) => { println!("✓ Project deleted."); 0 }
-            Err(e) => { eprintln!("Error: {e}"); 1 }
+            Ok(()) => {
+                println!("✓ Project deleted.");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
         }
     }
 }

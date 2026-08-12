@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use sea_orm::DatabaseConnection;
 
-use not_yet_done_content::{AdapterFactory, ContentAdapter, ContentError, Result};
+use not_yet_done_content::{
+    ContentAdapter, ContentError, MechanismSpec, Result, TypedAdapterFactory,
+};
 
 use super::JiraAdapter;
-use super::auth_bridge::AuthBridge;
+use super::auth_bridge::{AuthBridge, MECHANISMS};
 use super::config::JiraConfig;
 use crate::auth_session_store::SqlAuthSessionStore;
 use crate::cache_store::scope_id_for_url;
@@ -58,28 +60,30 @@ impl JiraAdapterFactory {
     }
 }
 
-impl AdapterFactory for JiraAdapterFactory {
+impl TypedAdapterFactory for JiraAdapterFactory {
+    type Config = JiraConfig;
+
     fn adapter_type(&self) -> &str {
         "jira"
     }
 
-    fn create(
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        MECHANISMS
+    }
+
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: JiraConfig,
         _ctx: &not_yet_done_content::HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let cfg: JiraConfig = serde_yaml::from_str(config)
-            .map_err(|e| ContentError::Other(format!("Invalid Jira config: {e}").into()))?;
-
         cfg.auth
-            .validate()
+            .validate_against(MECHANISMS)
             .map_err(|e| ContentError::Other(format!("Invalid Jira auth spec: {e}").into()))?;
 
         let db_url = match &cfg.db {
             Some(c) => c.url.clone(),
-            None => crate::db::default_sqlite_url()
-                .map_err(|e| ContentError::Other(e.into()))?,
+            None => crate::db::default_sqlite_url().map_err(|e| ContentError::Other(e.into()))?,
         };
 
         let db = self
@@ -91,6 +95,7 @@ impl AdapterFactory for JiraAdapterFactory {
         let bookmark_marker = cfg
             .bookmark_marker
             .unwrap_or_else(|| super::config::DEFAULT_BOOKMARK_MARKER.to_string());
+        let ticket_workspace = cfg.ticket_workspace;
 
         let store = SqlAuthSessionStore::new(Arc::clone(&db), scope_id);
         let auth = AuthBridge::new(
@@ -118,6 +123,7 @@ impl AdapterFactory for JiraAdapterFactory {
             db,
             scope_id,
             bookmark_marker,
+            ticket_workspace,
         )))
     }
 }

@@ -158,7 +158,10 @@ mod tests {
     #[test]
     fn no_placeholders_passthrough() {
         let vars = HashMap::new();
-        assert_eq!(render("status=open&project=42", &vars), "status=open&project=42");
+        assert_eq!(
+            render("status=open&project=42", &vars),
+            "status=open&project=42"
+        );
         assert!(parse_variables("status=open&project=42").is_empty());
     }
 
@@ -215,7 +218,10 @@ mod tests {
     #[test]
     fn multiple_distinct_variables_in_order() {
         let v = parse_variables("a=${x:1}&b=${y:2}&c=${z}");
-        assert_eq!(v.iter().map(|q| q.name.as_str()).collect::<Vec<_>>(), vec!["x", "y", "z"]);
+        assert_eq!(
+            v.iter().map(|q| q.name.as_str()).collect::<Vec<_>>(),
+            vec!["x", "y", "z"]
+        );
     }
 
     #[test]
@@ -230,10 +236,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("x".to_string(), "X".to_string());
         vars.insert("y".to_string(), "Y".to_string());
-        assert_eq!(
-            render("a=${x:1}&b=${y:2}&c=${z:3}", &vars),
-            "a=X&b=Y&c=3"
-        );
+        assert_eq!(render("a=${x:1}&b=${y:2}&c=${z:3}", &vars), "a=X&b=Y&c=3");
     }
 
     /// JQL-shaped query (Jira): `key = ${key}` renders to a concrete clause.

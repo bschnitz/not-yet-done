@@ -5,6 +5,7 @@
 //! configs (`auth: { source: prompt }`) no longer parse and need to be
 //! rewritten as `auth: { mechanism: password-login, bindings: [...] }`.
 
+use fieldsmith::Buildable;
 use serde::Deserialize;
 
 use not_yet_done_content::AuthSpec;
@@ -25,9 +26,9 @@ pub(super) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 20;
 /// link where the TCP/TLS handshake legitimately needs longer).
 pub(super) const DEFAULT_CONNECT_TIMEOUT_CAP_SECS: u64 = 10;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Buildable, Debug)]
 #[serde(deny_unknown_fields)]
-pub(super) struct TaigaConfig {
+pub struct TaigaConfig {
     pub(super) url: String,
     #[serde(default)]
     pub(super) name: Option<String>,
@@ -63,16 +64,28 @@ pub(super) struct TaigaConfig {
     pub(super) connect_timeout_secs: Option<u64>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Buildable, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DbConfig {
+pub struct DbConfig {
     pub(super) url: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use not_yet_done_content::{AuthMechanism, CredentialProvider, SessionCachePolicy};
+    use crate::adapter::auth_bridge::MECHANISMS;
+    use not_yet_done_content::{CredentialProvider, SessionCachePolicy};
+
+    /// The example under `docs/examples/views/` is the first thing a user
+    /// copies, so it has to parse and validate like any real config.
+    #[test]
+    fn the_shipped_example_config_parses() {
+        let yaml = include_str!("../../../docs/examples/views/taiga-adapter.yaml");
+        let cfg: TaigaConfig = serde_yaml::from_str(yaml).expect("example parses");
+        cfg.auth
+            .validate_against(MECHANISMS)
+            .expect("example is a valid spec");
+    }
 
     #[test]
     fn parses_password_login_with_prompt_password() {
@@ -90,8 +103,10 @@ auth:
         type: prompt
 "#;
         let cfg: TaigaConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid mechanism+bindings");
-        assert_eq!(cfg.auth.mechanism, AuthMechanism::PasswordLogin);
+        cfg.auth
+            .validate_against(MECHANISMS)
+            .expect("valid mechanism+bindings");
+        assert_eq!(cfg.auth.mechanism, "password-login");
         assert_eq!(cfg.auth.session_cache, SessionCachePolicy::UntilRejected);
         assert_eq!(cfg.auth.bindings.len(), 2);
         assert!(matches!(
@@ -120,7 +135,7 @@ auth:
       provider: { type: env, var: SYNTHETIC_TAIGA_PW }
 "#;
         let cfg: TaigaConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid");
+        cfg.auth.validate_against(MECHANISMS).expect("valid");
         assert_eq!(
             cfg.auth.session_cache,
             SessionCachePolicy::Ttl { ttl_secs: 3600 }
@@ -166,5 +181,33 @@ auth:
         let with_connect = format!("{base}connect_timeout_secs: 30\n");
         let cfg: TaigaConfig = serde_yaml::from_str(&with_connect).expect("parses");
         assert_eq!(cfg.connect_timeout_secs, Some(30));
+    }
+
+    /// The config parses fine on its own — what rejects it is the
+    /// adapter's mechanism table, so a mechanism this adapter never
+    /// implements fails at build time instead of at first login.
+    #[test]
+    fn rejects_a_mechanism_this_adapter_does_not_implement() {
+        let yaml = r#"
+url: https://taiga.example.invalid
+auth:
+  mechanism: cookie
+  bindings:
+    - field: cookie
+      provider: { type: literal, value: x }
+"#;
+        let cfg: TaigaConfig = serde_yaml::from_str(yaml).expect("parses");
+        let err = cfg
+            .auth
+            .validate_against(MECHANISMS)
+            .expect_err("mechanism is not implemented here");
+        assert!(
+            err.contains("cookie"),
+            "names the rejected mechanism: {err}"
+        );
+        assert!(
+            err.contains("password-login"),
+            "names a supported one: {err}"
+        );
     }
 }

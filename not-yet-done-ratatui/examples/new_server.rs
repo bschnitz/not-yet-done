@@ -17,7 +17,7 @@ use crossterm::{
     execute,
 };
 use not_yet_done_ratatui::{
-    TextInput, TextInputEvent, TextInputStyle, TextInputStyleType, ATTR_ERROR,
+    ATTR_ERROR, TextInput, TextInputEvent, TextInputStyle, TextInputStyleType,
 };
 use tuirealm::{
     component::{AppComponent, Component},
@@ -27,27 +27,26 @@ use tuirealm::{
 };
 
 use ratatui::{
+    DefaultTerminal,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
-    DefaultTerminal,
 };
-
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 
-const BG: Color         = Color::Rgb(10, 10, 20);
-const PANEL_BG: Color   = Color::Rgb(18, 18, 35);
-const ACCENT: Color     = Color::Rgb(100, 180, 255);
-const INPUT_FG: Color   = Color::Rgb(230, 230, 255);
-const INPUT_BG: Color   = Color::Rgb(28, 28, 50);
+const BG: Color = Color::Rgb(10, 10, 20);
+const PANEL_BG: Color = Color::Rgb(18, 18, 35);
+const ACCENT: Color = Color::Rgb(100, 180, 255);
+const INPUT_FG: Color = Color::Rgb(230, 230, 255);
+const INPUT_BG: Color = Color::Rgb(28, 28, 50);
 const PLACEHOLDER: Color = Color::Rgb(80, 80, 110);
-const ERROR_FG: Color   = Color::Rgb(255, 100, 80);
+const ERROR_FG: Color = Color::Rgb(255, 100, 80);
 const ACTIVE_ACCENT: Color = Color::Rgb(140, 255, 180);
-const SUBMIT_FG: Color  = Color::Rgb(30, 30, 50);
-const SUBMIT_BG: Color  = Color::Rgb(140, 255, 180);
-const DIM: Color        = Color::Rgb(80, 80, 110);
+const SUBMIT_FG: Color = Color::Rgb(30, 30, 50);
+const SUBMIT_BG: Color = Color::Rgb(140, 255, 180);
+const DIM: Color = Color::Rgb(80, 80, 110);
 const INACTIVE_PH: Color = Color::Rgb(45, 45, 65);
 const OVERLAY_BG: Color = Color::Rgb(20, 40, 30);
 
@@ -64,16 +63,16 @@ impl Field {
     fn next(self) -> Self {
         match self {
             Self::Hostname => Self::Port,
-            Self::Port     => Self::ApiKey,
-            Self::ApiKey   => Self::Hostname,
+            Self::Port => Self::ApiKey,
+            Self::ApiKey => Self::Hostname,
         }
     }
 
     fn prev(self) -> Self {
         match self {
             Self::Hostname => Self::ApiKey,
-            Self::Port     => Self::Hostname,
-            Self::ApiKey   => Self::Port,
+            Self::Port => Self::Hostname,
+            Self::ApiKey => Self::Port,
         }
     }
 }
@@ -92,10 +91,14 @@ fn inactive_style() -> TextInputStyle {
 fn active_style() -> TextInputStyle {
     TextInputStyle::new()
         .prefix_color(ACTIVE_ACCENT)
-        .set_style(TextInputStyleType::Title,
-            Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG))
-        .set_style(TextInputStyleType::Input,
-            Style::default().fg(INPUT_FG).bg(INPUT_BG))
+        .set_style(
+            TextInputStyleType::Title,
+            Style::default().fg(ACTIVE_ACCENT).bg(INPUT_BG),
+        )
+        .set_style(
+            TextInputStyleType::Input,
+            Style::default().fg(INPUT_FG).bg(INPUT_BG),
+        )
         .placeholder_color(PLACEHOLDER)
         .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
 }
@@ -112,20 +115,20 @@ fn make_input(title: &str, placeholder: &str) -> TextInput {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 struct App {
-    active:    Field,
-    hostname:  TextInput,
-    port:      TextInput,
-    api_key:   TextInput,
+    active: Field,
+    hostname: TextInput,
+    port: TextInput,
+    api_key: TextInput,
     submitted: Option<String>,
 }
 
 impl App {
     fn new() -> Self {
         let mut app = Self {
-            active:    Field::Hostname,
-            hostname:  make_input("Hostname", "e.g. api.example.com"),
-            port:      make_input("Port", "e.g. 8080"),
-            api_key:   make_input("API Key", "min. 8 characters"),
+            active: Field::Hostname,
+            hostname: make_input("Hostname", "e.g. api.example.com"),
+            port: make_input("Port", "e.g. 8080"),
+            api_key: make_input("API Key", "min. 8 characters"),
             submitted: None,
         };
         // Grant initial focus to the first field.
@@ -137,17 +140,18 @@ impl App {
     /// components' focus attributes.
     fn set_focus(&mut self, field: Field) {
         self.hostname.attr(Attribute::Focus, AttrValue::Flag(false));
-        self.port    .attr(Attribute::Focus, AttrValue::Flag(false));
-        self.api_key .attr(Attribute::Focus, AttrValue::Flag(false));
-        self.component_mut(field).attr(Attribute::Focus, AttrValue::Flag(true));
+        self.port.attr(Attribute::Focus, AttrValue::Flag(false));
+        self.api_key.attr(Attribute::Focus, AttrValue::Flag(false));
+        self.component_mut(field)
+            .attr(Attribute::Focus, AttrValue::Flag(true));
         self.active = field;
     }
 
     fn component_mut(&mut self, field: Field) -> &mut TextInput {
         match field {
             Field::Hostname => &mut self.hostname,
-            Field::Port     => &mut self.port,
-            Field::ApiKey   => &mut self.api_key,
+            Field::Port => &mut self.port,
+            Field::ApiKey => &mut self.api_key,
         }
     }
 
@@ -155,8 +159,8 @@ impl App {
     fn value_of(&self, field: Field) -> String {
         let component = match field {
             Field::Hostname => &self.hostname,
-            Field::Port     => &self.port,
-            Field::ApiKey   => &self.api_key,
+            Field::Port => &self.port,
+            Field::ApiKey => &self.api_key,
         };
         match component.state() {
             State::Single(StateValue::String(s)) => s,
@@ -247,29 +251,30 @@ impl App {
 
 /// Converts a crossterm [`KeyEvent`](crossterm::event::KeyEvent) into a
 /// tuirealm [`Event`] so it can be dispatched to a [`Component`].
-fn to_tuirealm_event(
-    k: &crossterm::event::KeyEvent,
-) -> tuirealm::event::Event<NoUserEvent> {
+fn to_tuirealm_event(k: &crossterm::event::KeyEvent) -> tuirealm::event::Event<NoUserEvent> {
     let code = match k.code {
-        KeyCode::Char(c)  => Key::Char(c),
+        KeyCode::Char(c) => Key::Char(c),
         KeyCode::Backspace => Key::Backspace,
-        KeyCode::Delete   => Key::Delete,
-        KeyCode::Left     => Key::Left,
-        KeyCode::Right    => Key::Right,
-        KeyCode::Up       => Key::Up,
-        KeyCode::Down     => Key::Down,
-        KeyCode::Enter    => Key::Enter,
-        KeyCode::Esc      => Key::Esc,
-        KeyCode::Tab      => Key::Tab,
-        KeyCode::BackTab  => Key::BackTab,
-        KeyCode::Home     => Key::Home,
-        KeyCode::End      => Key::End,
-        KeyCode::PageUp   => Key::PageUp,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
-        KeyCode::F(n)     => Key::Function(n),
-        _                 => Key::Null,
+        KeyCode::F(n) => Key::Function(n),
+        _ => Key::Null,
     };
-    tuirealm::event::Event::Keyboard(KeyEvent { code, modifiers: k.modifiers.into() })
+    tuirealm::event::Event::Keyboard(KeyEvent {
+        code,
+        modifiers: k.modifiers.into(),
+    })
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -324,8 +329,8 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
 
     // Fields — view() selects active/inactive style internally and places the cursor.
     app.hostname.view(frame, chunks[2]);
-    app.port    .view(frame, chunks[4]);
-    app.api_key .view(frame, chunks[6]);
+    app.port.view(frame, chunks[4]);
+    app.api_key.view(frame, chunks[6]);
 
     // Submit button
     frame.render_widget(
@@ -432,7 +437,9 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                     Some(TextInputEvent::Changed(_)) => app.validate_active(),
                     Some(TextInputEvent::CursorMoved(_)) => {}
                     Some(TextInputEvent::Submitted(_)) => {}
-                    None => { redraw = false; }
+                    None => {
+                        redraw = false;
+                    }
                 }
             }
         }

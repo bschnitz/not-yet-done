@@ -36,8 +36,7 @@ pub(super) fn attachment_actions() -> Vec<NodeAction> {
     vec![
         // download is fire-and-forget (no input, no popup) → never "active",
         // so it stays in the status bar (default placement).
-        NodeAction::new("download", "download", InputSpec::None)
-            .with_default_key('d'),
+        NodeAction::new("download", "download", InputSpec::None),
     ]
 }
 
@@ -148,8 +147,7 @@ impl ConfluenceAttachmentNode {
         let mut dir = std::env::temp_dir();
         dir.push("not_yet_done");
         dir.push("confluence_attachments");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| other_err(format!("create temp dir: {e}")))?;
+        std::fs::create_dir_all(&dir).map_err(|e| other_err(format!("create temp dir: {e}")))?;
 
         let safe_name = self.attachment.title.replace(['/', '\\'], "_");
         let mut path = dir;
@@ -197,34 +195,11 @@ impl Node for ConfluenceAttachmentNode {
     fn metadata(&self) -> &Metadata {
         &self.cached_metadata
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        attachment_actions()
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![]
-    }
-
-    async fn list(&self, _params: ListParams) -> Result<ListResult> {
-        Ok(ListResult {
-            items: vec![],
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         Err(ContentError::NotFound(format!("No child: {id}")))
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("download", ActionInput::None) => self.download_and_open().await,
             (id, _) => Err(ContentError::NotSupported(format!(
@@ -280,10 +255,12 @@ mod tests {
         assert_eq!(meta.fields[5].value, "12345");
     }
 
-    #[test]
-    fn attachment_has_no_children() {
+    #[tokio::test]
+    async fn attachment_has_no_children() {
+        use not_yet_done_content::children;
+        let adapter = super::super::test_adapter().await;
         let node = ConfluenceAttachmentNode::new(synthetic_client(), sample_attachment(), "12345");
-        assert!(node.children_types().is_empty());
+        assert!(children::child_types(&adapter, &node).is_empty());
     }
 
     #[test]
@@ -291,7 +268,6 @@ mod tests {
         let actions = attachment_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].id, "download");
-        assert_eq!(actions[0].default_key, Some('d'));
         assert!(matches!(actions[0].input, InputSpec::None));
     }
 

@@ -1,18 +1,71 @@
-# Example: Jira adapter credentials
+# Example: Jira adapter connection
 #
 # Place in: ~/.config/not_yet_done/views/jira-adapter.yaml
 # Referenced by jira.yaml via: adapter.config: jira-adapter.yaml
 #
-# Authentication: use EITHER email+token (cloud) OR session_id (server).
+# `nyd config auth jira` lists the mechanisms below with their fields and
+# every provider; `nyd config build jira` asks and writes the block.
 
 url: https://jira.example.com
 
-# Jira Cloud: API token auth
-# email: you@example.com
-# token: your-api-token
+# Optional display name for this instance (tab title, status line).
+# name: Jira
 
-# Jira Server: session cookie auth (JSESSIONID + crowd tokens)
-# session_id: "JSESSIONID=abc123; crowd.token_key=xyz"
+auth:
+  # Jira Server / Data Center behind SSO: send a ready-made `Cookie:`
+  # header. The adapter never talks to a browser itself — a script hands
+  # it the finished header line (see the `command` provider below).
+  mechanism: cookie
+  bindings:
+    - field: cookie
+      provider:
+        # `command` runs a script and takes its trimmed stdout. The script
+        # must write a single line in `Cookie:`-header form, e.g.
+        # `JSESSIONID=...; crowd.token_key=...; atlassian.xsrf.token=...`.
+        type: command
+        script: /usr/local/bin/get-jira-cookie.sh
+        timeout_secs: 60
+        retries: 5
+
+        # If the login needs input the script cannot get on its own — an
+        # account to pick, a password, a one-time code — move the script up
+        # to `auth.script` and bind the field with `script-result`. The
+        # script is then run once per round: it answers with the values, or
+        # with a form it wants asked first, and the answers come back to it
+        # on stdin. The mechanism still declares just `cookie`; the
+        # questions are the script's own. See the README ("Script-driven
+        # credentials") for a full script.
+        #
+        # auth:
+        #   mechanism: cookie
+        #   script: /usr/local/bin/jira-sso-login.sh
+        #   bindings:
+        #     - field: cookie
+        #       provider: { type: script-result }
+
+# Jira Cloud, or a Server instance without SSO: HTTP Basic with an API
+# token. Swap the block above for this one.
+#
+# auth:
+#   mechanism: basic-auth
+#   bindings:
+#     - field: username
+#       provider: { type: literal, value: you@example.com }
+#     - field: token
+#       provider:
+#         type: command
+#         script: pass show services/jira/api-token
+
+# Self-signed / internal CAs: flip to true. Defaults to strict
+# verification.
+# accept_invalid_certs: false
+
+# Optional override for the cache backing store. Sea-orm-compatible URL
+# (sqlite:///path?mode=rwc, postgres://user:pw@host/db, ...). Falls back
+# to a private SQLite file under the user's local data directory when
+# omitted.
+# db:
+#   url: "sqlite:///home/me/.local/share/not_yet_done/jira-cache.sqlite?mode=rwc"
 
 # Glyph shown in the `bookmarked` marker column on the tickets list for a
 # bookmarked issue (blank otherwise). Default ★. Any string works — a star,
@@ -20,3 +73,13 @@ url: https://jira.example.com
 # wide, which can shift column alignment; a single-cell glyph keeps the
 # column width stable.
 # bookmark_marker: "★"
+
+# Base directory for the persistent per-ticket workspace used by the
+# `edit (markdown)` action (E) and the `export workspace` action. Each ticket
+# gets its own folder `<base>/<KEY>-<slug>/` containing `ticket.md` plus an
+# `attachments/` subfolder that is populated on demand (only missing files are
+# fetched; a `.attachments.json` sidecar tracks what was downloaded). Image
+# embeds in the Markdown resolve to these local files. A leading `~` is
+# expanded. When unset, defaults to
+# <data-local>/not_yet_done/jira/<instance>/tickets.
+# ticket_workspace: "~/jira-tickets"

@@ -13,7 +13,10 @@ pub struct GroupedCell {
 
 impl GroupedCell {
     pub fn new(content: impl Into<CellContent>, span: usize) -> Self {
-        Self { content: content.into(), span: span.max(1) }
+        Self {
+            content: content.into(),
+            span: span.max(1),
+        }
     }
 
     pub fn aligned(text: impl Into<String>, alignment: CellAlignment, span: usize) -> Self {
@@ -26,8 +29,8 @@ impl GroupedCell {
     /// Fit the grouped cell text to the combined width of the spanned columns
     /// plus the separators between them.
     pub fn fit(&self, col_widths: &[usize], separator_width: usize) -> String {
-        let total_width: usize = col_widths.iter().sum::<usize>()
-            + separator_width * col_widths.len().saturating_sub(1);
+        let total_width: usize =
+            col_widths.iter().sum::<usize>() + separator_width * col_widths.len().saturating_sub(1);
         fit_aligned(&self.content.text, total_width, self.content.alignment)
     }
 }

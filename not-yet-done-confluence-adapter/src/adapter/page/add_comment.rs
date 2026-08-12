@@ -16,8 +16,8 @@
 
 use not_yet_done_content::{ActionOutcome, EditorPrep, Result};
 
-use super::ConfluencePageNode;
 use super::super::conflict_banner::{CONFLICT_BANNER_END, CONFLICT_BANNER_START, strip_banner};
+use super::ConfluencePageNode;
 
 /// Initial editor template — single empty paragraph. Confluence rejects
 /// an empty body string on POST, so the template seeds something the
@@ -32,6 +32,7 @@ impl ConfluencePageNode {
             template: COMMENT_TEMPLATE.to_string(),
             version: String::new(),
             suffix: ".html".into(),
+            file_path: None,
         })
     }
 

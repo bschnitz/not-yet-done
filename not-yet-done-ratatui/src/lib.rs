@@ -2,54 +2,65 @@ pub mod utils;
 pub mod widgets;
 
 pub use utils::open_editor::{
-    open_editor, open_editor_inline, open_editor_launch, open_editor_detached,
-    open_editor_inline_in, open_editor_launch_in, open_editor_detached_in,
-    render_env_prefix, DetachedEditor, EditorError,
+    DetachedEditor, EditorError, open_editor, open_editor_detached, open_editor_detached_in,
+    open_editor_inline, open_editor_inline_in, open_editor_launch, open_editor_launch_in,
+    render_env_prefix,
 };
 
 // --- shared primitives ---
-pub use widgets::common::{hex_color, Keys, SelectionMarker, SelectionMode};
+pub use widgets::common::{Keys, SelectionMarker, SelectionMode, hex_color};
 
 // --- text_input ---
 pub use widgets::text_input::{
-    TextInput, TextInputEvent, TextInputKeymap,
-    TextInputStyle, TextInputStyleType, ATTR_ERROR,
+    ATTR_ERROR, TextInput, TextInputEvent, TextInputKeymap, TextInputStyle, TextInputStyleType,
 };
 
 // --- multi_choice ---
 pub use widgets::multi_choice::{
-    MultiChoice, MultiChoiceEvent, MultiChoiceKeymap,
-    MultiChoiceStyle, MultiChoiceStyleType, ATTR_SELECTED,
+    ATTR_SELECTED, MultiChoice, MultiChoiceEvent, MultiChoiceKeymap, MultiChoiceStyle,
+    MultiChoiceStyleType,
+};
+
+// --- toggle ---
+pub use widgets::toggle::{Toggle, ToggleStyle, ToggleStyleType};
+
+// --- form ---
+#[cfg(feature = "natural-date")]
+pub use widgets::form::datetime_preview;
+pub use widgets::form::{
+    FieldCondition, Form, FormEvent, FormFieldKind, FormFieldSpec, FormNotice, FormOptions,
+    FormPalette, FormStyle, SelectStyle,
 };
 
 // --- select_list ---
 pub use widgets::select_list::{
-    SelectList, SelectListEvent, SelectListKeymap,
-    SelectListStyle, SelectListStyleType,
-    SelectListItemData,
-    ATTR_ITEMS, ATTR_SELECTED as SELECT_LIST_ATTR_SELECTED,
+    ATTR_ITEMS, ATTR_SELECTED as SELECT_LIST_ATTR_SELECTED, SelectList, SelectListEvent,
+    SelectListItemData, SelectListKeymap, SelectListStyle, SelectListStyleType,
 };
 
 // --- table ---
 pub use widgets::table::{
-    Table, JumpPhase, LinkHopOutcome, LinkMatch, LinkPhase, TableEvent, TableKeymap,
-    TableStyle, TableStyleType,
-    TableWidgetCell, TableWidgetLine, TableWidgetRow, ColumnStyles, StyleMap,
+    ColumnStyles, ImageDraw, ImageLineRef, ImagePainter, JumpPhase, LinkHopOutcome, LinkMatch,
+    LinkPhase, StyleMap, Table, TableEvent, TableKeymap, TableStyle, TableStyleType,
+    TableWidgetCell, TableWidgetLine, TableWidgetRow,
 };
 
 // --- file_picker ---
 pub use widgets::file_picker::{
-    enumerate, EnumerationOptions, FilePicker, FilePickerEvent,
-    FilePickerFocus, FilePickerKeymap, FilePickerStyle,
+    EnumerationOptions, FilePicker, FilePickerEvent, FilePickerFocus, FilePickerKeymap,
+    FilePickerStyle, enumerate,
 };
 
 // --- grid ---
 pub use widgets::grid::{
-    Grid, GridEvent, GridKeymap, GridChild,
-    BorderPos, BorderChars, GapPos, CellGroup, TextAnchor,
-    BORDER_SIMPLE, BORDER_SIMPLE_EXTENDED,
-    BORDER_DOUBLE_EXTENDED, BORDER_THICK_EXTENDED,
-    BORDER_ROUNDED, BORDER_ROUNDED_EXTENDED,
-    BORDER_DASHED, BORDER_DASHED_EXTENDED,
-    BORDER_DOTTED, BORDER_DOTTED_EXTENDED,
+    BORDER_DASHED, BORDER_DASHED_EXTENDED, BORDER_DOTTED, BORDER_DOTTED_EXTENDED,
+    BORDER_DOUBLE_EXTENDED, BORDER_ROUNDED, BORDER_ROUNDED_EXTENDED, BORDER_SIMPLE,
+    BORDER_SIMPLE_EXTENDED, BORDER_THICK_EXTENDED, BorderChars, BorderPos, CellGroup, GapPos, Grid,
+    GridChild, GridEvent, GridKeymap, TextAnchor,
+};
+
+// --- leader_list ---
+pub use widgets::leader_list::{
+    LeaderEntry, LeaderList, LeaderListEvent, LeaderListKeymap, LeaderListStyle,
+    LeaderListStyleType, LeaderWidth,
 };

@@ -21,12 +21,13 @@
 
 use std::path::PathBuf;
 
+use fieldsmith::Buildable;
 use serde::Deserialize;
 
 use not_yet_done_content::CredentialProvider;
 
 /// Top-level transport block.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Buildable, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TransportConfig {
     #[serde(default)]
@@ -43,7 +44,7 @@ pub struct TransportConfig {
     pub target: Endpoint,
 }
 
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Deserialize, Buildable, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportMode {
     #[default]
@@ -51,7 +52,7 @@ pub enum TransportMode {
     SshTunnel,
 }
 
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Buildable, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     pub host: String,
@@ -61,7 +62,7 @@ pub struct Endpoint {
 /// One SSH hop in the chain. The first hop's `host:port` is resolved
 /// locally; every subsequent hop's `host:port` is resolved by the
 /// preceding hop.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Buildable, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SshHop {
     pub host: String,
@@ -76,7 +77,7 @@ fn default_ssh_port() -> u16 {
 }
 
 /// SSH authentication strategy.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Buildable, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SshAuth {
     /// Password auth. The value comes from any [`CredentialProvider`]
@@ -102,16 +103,13 @@ impl TransportConfig {
         match self.mode {
             TransportMode::Direct => {
                 if !self.ssh.is_empty() {
-                    return Err(
-                        "transport.mode=direct must not include any `ssh:` hops".into(),
-                    );
+                    return Err("transport.mode=direct must not include any `ssh:` hops".into());
                 }
             }
             TransportMode::SshTunnel => {
                 if self.ssh.is_empty() {
                     return Err(
-                        "transport.mode=ssh_tunnel requires at least one entry under `ssh:`"
-                            .into(),
+                        "transport.mode=ssh_tunnel requires at least one entry under `ssh:`".into(),
                     );
                 }
             }
@@ -225,7 +223,10 @@ target:
         cfg.validate().expect("valid");
         match &cfg.ssh[0].auth {
             SshAuth::PublicKey { passphrase, .. } => {
-                assert!(matches!(passphrase, Some(CredentialProvider::Command { .. })));
+                assert!(matches!(
+                    passphrase,
+                    Some(CredentialProvider::Command { .. })
+                ));
             }
             other => panic!("unexpected auth: {other:?}"),
         }

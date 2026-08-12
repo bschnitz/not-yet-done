@@ -7,6 +7,7 @@ edition = "2024"
 sea-orm     = { workspace = true }
 tokio       = { workspace = true }
 async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
 uuid        = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
@@ -17,6 +18,8 @@ diffy       = "0.5.0"
 not-yet-done-content = { path = "../not-yet-done-content" }
 
 [dev-dependencies]
+# Only to build a synthetic 401 response in the auth-bridge tests.
+http        = "1"
 tokio       = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }

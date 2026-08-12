@@ -2,17 +2,22 @@
 //! endpoint, optional DB override.
 //!
 //! Auth lives in the unified `AuthSpec` from `not-yet-done-content` —
-//! mechanism + bindings + session-cache policy. Pre-orchestrator configs
-//! (`auth: { type: cookie-script, script: ... }`) no longer parse and
-//! need to be rewritten as `auth: { mechanism: cookie, bindings: [...] }`.
+//! mechanism + bindings + session-cache policy. Which mechanisms this
+//! adapter implements, and which fields each needs, is published from
+//! `auth_bridge::MECHANISMS` and listed by `nyd config auth jira`.
+//!
+//! Pre-orchestrator configs (`auth: { type: cookie-script, script: ... }`)
+//! no longer parse and need to be rewritten as
+//! `auth: { mechanism: cookie, bindings: [...] }`.
 
+use fieldsmith::Buildable;
 use serde::Deserialize;
 
 use not_yet_done_content::AuthSpec;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Buildable)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JiraConfig {
+pub struct JiraConfig {
     pub(super) url: String,
     #[serde(default)]
     pub(super) name: Option<String>,
@@ -30,21 +35,42 @@ pub(super) struct JiraConfig {
     /// plain ASCII like `*`.
     #[serde(default)]
     pub(super) bookmark_marker: Option<String>,
+    /// Base directory under which the `edit (markdown)` and `export workspace`
+    /// actions materialise a persistent per-ticket folder
+    /// (`<base>/<KEY>-<slug>/ticket.md` + `attachments/`). A leading `~` is
+    /// expanded. When unset, defaults to `<data-local>/not_yet_done/jira/
+    /// <instance>/tickets`.
+    #[serde(default)]
+    pub(super) ticket_workspace: Option<String>,
 }
 
 /// Default `bookmarked`-column glyph when `bookmark_marker` is unset.
 pub(super) const DEFAULT_BOOKMARK_MARKER: &str = "★";
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Buildable, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DbConfig {
+pub struct DbConfig {
     pub(super) url: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use not_yet_done_content::{AuthMechanism, CredentialProvider, SessionCachePolicy};
+    use crate::adapter::auth_bridge::MECHANISMS;
+    use not_yet_done_content::{CredentialProvider, SessionCachePolicy};
+
+    /// The example under `docs/examples/views/` is the first thing a user
+    /// copies, so it has to parse and validate like any real config. It
+    /// once documented fields (`email`, `session_id`) this struct had long
+    /// stopped having — nothing caught that until someone tried it.
+    #[test]
+    fn the_shipped_example_config_parses() {
+        let yaml = include_str!("../../../docs/examples/views/jira-adapter.yaml");
+        let cfg: JiraConfig = serde_yaml::from_str(yaml).expect("example parses");
+        cfg.auth
+            .validate_against(MECHANISMS)
+            .expect("example is a valid spec");
+    }
 
     #[test]
     fn parses_cookie_via_command_provider() {
@@ -61,8 +87,8 @@ auth:
         retries: 5
 "#;
         let cfg: JiraConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid spec");
-        assert_eq!(cfg.auth.mechanism, AuthMechanism::Cookie);
+        cfg.auth.validate_against(MECHANISMS).expect("valid spec");
+        assert_eq!(cfg.auth.mechanism, "cookie");
         assert_eq!(cfg.auth.bindings.len(), 1);
         match &cfg.auth.bindings[0].provider {
             CredentialProvider::Command {
@@ -92,13 +118,14 @@ auth:
       provider: { type: literal, value: synthetic-token }
 "#;
         let cfg: JiraConfig = serde_yaml::from_str(yaml).expect("parses");
-        cfg.auth.validate().expect("valid spec");
-        assert_eq!(cfg.auth.mechanism, AuthMechanism::BasicAuth);
+        cfg.auth.validate_against(MECHANISMS).expect("valid spec");
+        assert_eq!(cfg.auth.mechanism, "basic-auth");
     }
 
     #[test]
     fn rejects_legacy_cookie_script_shape() {
-        let yaml = "url: https://jira.example.invalid\nauth:\n  type: cookie-script\n  script: /s\n";
+        let yaml =
+            "url: https://jira.example.invalid\nauth:\n  type: cookie-script\n  script: /s\n";
         let res: Result<JiraConfig, _> = serde_yaml::from_str(yaml);
         assert!(
             res.is_err(),
@@ -121,5 +148,50 @@ foo: bar
             .err()
             .expect("must reject unknown top-level field");
         assert!(err.to_string().contains("foo"), "error mentions foo: {err}");
+    }
+
+    /// The `config_schema()` hook derives its template from the same
+    /// `type Config` the factory parses, so the two can never drift. Here
+    /// we assert the reflected schema renders a non-empty YAML template
+    /// that names the config's top-level fields and is itself valid YAML.
+    #[test]
+    fn schema_renders_a_valid_yaml_template() {
+        use fieldsmith::Buildable;
+
+        let template = fieldsmith::yaml_template(&JiraConfig::schema());
+        assert!(!template.trim().is_empty(), "template must not be empty");
+        assert!(
+            template.contains("url") && template.contains("auth"),
+            "template should mention the config's fields:\n{template}"
+        );
+        serde_yaml::from_str::<serde_yaml::Value>(&template)
+            .expect("rendered template must be valid YAML");
+    }
+
+    /// The config parses fine on its own — what rejects it is the
+    /// adapter's mechanism table, so a mechanism this adapter never
+    /// implements fails at build time instead of at first login.
+    #[test]
+    fn rejects_a_mechanism_this_adapter_does_not_implement() {
+        let yaml = r#"
+url: https://jira.example.invalid
+auth:
+  mechanism: password-login
+  bindings:
+    - field: username
+      provider: { type: literal, value: alice }
+    - field: password
+      provider: { type: prompt }
+"#;
+        let cfg: JiraConfig = serde_yaml::from_str(yaml).expect("parses");
+        let err = cfg
+            .auth
+            .validate_against(MECHANISMS)
+            .expect_err("mechanism is not implemented here");
+        assert!(
+            err.contains("password-login"),
+            "names the rejected mechanism: {err}"
+        );
+        assert!(err.contains("cookie"), "names a supported one: {err}");
     }
 }

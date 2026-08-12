@@ -26,7 +26,10 @@ use not_yet_done_content::NodeSummary;
 /// Single-segment matcher: either substring or regex.
 #[derive(Debug)]
 enum Pattern {
-    Substring { needle: String, case_insensitive: bool },
+    Substring {
+        needle: String,
+        case_insensitive: bool,
+    },
     Regex(regex::Regex),
 }
 
@@ -48,10 +51,14 @@ impl Pattern {
 
     fn matches(&self, text: &str) -> bool {
         match self {
-            Pattern::Substring { needle, case_insensitive: true } => text
-                .to_lowercase()
-                .contains(&needle.to_lowercase()),
-            Pattern::Substring { needle, case_insensitive: false } => text.contains(needle),
+            Pattern::Substring {
+                needle,
+                case_insensitive: true,
+            } => text.to_lowercase().contains(&needle.to_lowercase()),
+            Pattern::Substring {
+                needle,
+                case_insensitive: false,
+            } => text.contains(needle),
             Pattern::Regex(rx) => rx.is_match(text),
         }
     }
@@ -109,8 +116,11 @@ pub fn parse_path(raw: &str, case_insensitive: bool) -> Result<Vec<FocusSegment>
             }
             None => (None, raw_seg),
         };
-        let pattern = Pattern::parse(pattern_str, case_insensitive)
-            .map_err(|msg| FocusError::BadRegex { seg: raw_seg.to_string(), msg })?;
+        let pattern =
+            Pattern::parse(pattern_str, case_insensitive).map_err(|msg| FocusError::BadRegex {
+                seg: raw_seg.to_string(),
+                msg,
+            })?;
         segs.push(FocusSegment {
             column,
             pattern,
@@ -162,7 +172,9 @@ pub fn focus_in_flat_items(
         }
     }
     match matches.len() {
-        0 => Err(FocusError::NotFound { seg: seg.raw.clone() }),
+        0 => Err(FocusError::NotFound {
+            seg: seg.raw.clone(),
+        }),
         1 => Ok(matches.into_iter().next().unwrap()),
         _ => {
             let preview: Vec<String> = matches.iter().take(5).cloned().collect();

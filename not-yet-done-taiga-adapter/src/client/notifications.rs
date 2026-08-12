@@ -170,15 +170,14 @@ pub async fn fetch_notifications_page(
             "{}/api/v1/web-notifications?page={page}&page_size={sz}",
             client.base_url
         ),
-        None => format!(
-            "{}/api/v1/web-notifications?page={page}",
-            client.base_url
-        ),
+        None => format!("{}/api/v1/web-notifications?page={page}", client.base_url),
     };
     let headers = client.auth_headers()?;
     http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || client.http.get(&url).headers(headers.clone()))
+        .send_retrying("GET", &url, || {
+            client.http.get(&url).headers(headers.clone())
+        })
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     let body = resp
@@ -218,8 +217,14 @@ fn map_one(raw: RawNotification) -> Option<TaigaNotification> {
     // We can't render or cross-link it in an item-centric list, so drop it.
     let obj = raw.data.obj?;
     let item_type = ItemType::parse(&obj.content_type).ok();
-    let actor = raw.data.user.unwrap_or(RawUser { name: String::new(), username: String::new() });
-    let project = raw.data.project.unwrap_or(RawProject { name: String::new(), slug: String::new() });
+    let actor = raw.data.user.unwrap_or(RawUser {
+        name: String::new(),
+        username: String::new(),
+    });
+    let project = raw.data.project.unwrap_or(RawProject {
+        name: String::new(),
+        slug: String::new(),
+    });
     Some(TaigaNotification {
         id: raw.id,
         event: NotificationEvent::from_code(raw.event_type),
@@ -268,10 +273,7 @@ pub async fn fetch_all_web_notifications(
 
 /// Mark one notification as read. Idempotent — Taiga returns 200 even if
 /// the notification was already marked read.
-pub async fn mark_notification_as_read(
-    client: &TaigaClient,
-    id: u64,
-) -> Result<(), String> {
+pub async fn mark_notification_as_read(client: &TaigaClient, id: u64) -> Result<(), String> {
     let url = format!(
         "{}/api/v1/web-notifications/{id}/set-as-read",
         client.base_url,
@@ -281,7 +283,11 @@ pub async fn mark_notification_as_read(
     http_log::log_request("PATCH", &url);
     let resp = client
         .send_retrying("PATCH", &url, || {
-            client.http.patch(&url).headers(headers.clone()).json(&payload)
+            client
+                .http
+                .patch(&url)
+                .headers(headers.clone())
+                .json(&payload)
         })
         .await?;
     http_log::check_status("PATCH", &url, resp).await?;
@@ -295,8 +301,14 @@ mod tests {
     #[test]
     fn event_code_mapping() {
         assert_eq!(NotificationEvent::from_code(1), NotificationEvent::Assigned);
-        assert_eq!(NotificationEvent::from_code(5), NotificationEvent::Commented);
-        assert_eq!(NotificationEvent::from_code(6), NotificationEvent::Mentioned);
+        assert_eq!(
+            NotificationEvent::from_code(5),
+            NotificationEvent::Commented
+        );
+        assert_eq!(
+            NotificationEvent::from_code(6),
+            NotificationEvent::Mentioned
+        );
         match NotificationEvent::from_code(99) {
             NotificationEvent::Other(99) => {}
             other => panic!("unexpected: {other:?}"),
@@ -350,7 +362,8 @@ mod tests {
                 "user": { "name": "Pat Example", "username": "pat" },
                 "project": { "name": "Sample", "slug": "sample" }
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(map_one(raw).is_none());
     }
 
@@ -366,7 +379,8 @@ mod tests {
                 "user": null,
                 "project": null
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let n = map_one(raw).expect("notification with obj should map");
         assert!(n.obj.item_type.is_none());
         assert_eq!(n.obj.raw_content_type, "wiki_page");

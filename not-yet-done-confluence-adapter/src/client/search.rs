@@ -144,7 +144,10 @@ impl From<SearchResultWire> for SearchResultMeta {
             ancestors: w
                 .ancestors
                 .into_iter()
-                .map(|a| AncestorMeta { id: a.id, title: a.title })
+                .map(|a| AncestorMeta {
+                    id: a.id,
+                    title: a.title,
+                })
                 .collect(),
         }
     }
@@ -201,7 +204,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url_for_log, e))?;
-        let resp = http_log::check_status("GET", &url_for_log, resp).await?;
+        let resp = self.check_status("GET", &url_for_log, resp).await?;
         let body = resp
             .text()
             .await
@@ -209,7 +212,11 @@ impl ConfluenceClient {
         let env: SearchEnvelope = serde_json::from_str(&body)
             .map_err(|e| format!("Failed to parse /content/search response: {e}"))?;
         Ok(SearchResults {
-            items: env.results.into_iter().map(SearchResultMeta::from).collect(),
+            items: env
+                .results
+                .into_iter()
+                .map(SearchResultMeta::from)
+                .collect(),
             start: env.start,
             limit: env.limit,
             size: env.size,
@@ -253,8 +260,11 @@ mod tests {
             "_links": { "next": "/rest/api/content/search?cql=...&start=25&limit=25" }
         }"#;
         let env: SearchEnvelope = serde_json::from_str(body).expect("parses");
-        let items: Vec<SearchResultMeta> =
-            env.results.into_iter().map(SearchResultMeta::from).collect();
+        let items: Vec<SearchResultMeta> = env
+            .results
+            .into_iter()
+            .map(SearchResultMeta::from)
+            .collect();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].id, "12345");
         assert_eq!(items[0].content_type, "page");
@@ -288,8 +298,11 @@ mod tests {
             "_links": {}
         }"#;
         let env: SearchEnvelope = serde_json::from_str(body).expect("parses");
-        let items: Vec<SearchResultMeta> =
-            env.results.into_iter().map(SearchResultMeta::from).collect();
+        let items: Vec<SearchResultMeta> = env
+            .results
+            .into_iter()
+            .map(SearchResultMeta::from)
+            .collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "1");
         assert!(items[0].webui.is_empty());

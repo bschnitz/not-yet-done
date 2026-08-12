@@ -65,11 +65,20 @@ impl CredentialProvider {
                 Duration::from_secs(*timeout_secs),
                 *retries,
             ))),
-            CredentialProvider::Keyring { service, account } => Ok(Box::new(
-                KeyringResolver::new(service.clone(), account.clone()),
-            )),
+            CredentialProvider::Keyring { service, account } => Ok(Box::new(KeyringResolver::new(
+                service.clone(),
+                account.clone(),
+            ))),
+            // Both need a frontend in the loop (see
+            // `CredentialProvider::needs_frontend`), which only the
+            // orchestrator can reach.
             CredentialProvider::Prompt { .. } => Err(
                 "prompt provider must be wired up by the auth orchestrator, \
+                 not from build_resolver"
+                    .into(),
+            ),
+            CredentialProvider::ScriptResult => Err(
+                "script-result provider must be wired up by the auth orchestrator, \
                  not from build_resolver"
                     .into(),
             ),
@@ -164,13 +173,14 @@ impl CredentialResolver for FileResolver {
         if let Some(v) = self.cache.read().await.clone() {
             return Ok(v);
         }
-        let bytes = tokio::fs::read(&self.path).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => CredentialError::Unavailable(format!(
-                "file not found: {}",
-                self.path.display()
-            )),
-            _ => CredentialError::ProviderError(format!("read {}: {e}", self.path.display())),
-        })?;
+        let bytes = tokio::fs::read(&self.path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    CredentialError::Unavailable(format!("file not found: {}", self.path.display()))
+                }
+                _ => CredentialError::ProviderError(format!("read {}: {e}", self.path.display())),
+            })?;
         let value = String::from_utf8(bytes).map_err(|e| {
             CredentialError::ProviderError(format!(
                 "{}: not valid UTF-8 ({e})",
@@ -310,9 +320,8 @@ impl CredentialResolver for KeyringResolver {
         // The keyring crate is sync (DBus roundtrips block); spawn_blocking
         // keeps the tokio runtime non-blocking.
         let result = tokio::task::spawn_blocking(move || {
-            let entry = keyring::Entry::new(&service, &account).map_err(|e| {
-                format!("keyring entry [{service}/{account}]: {e}")
-            })?;
+            let entry = keyring::Entry::new(&service, &account)
+                .map_err(|e| format!("keyring entry [{service}/{account}]: {e}"))?;
             entry.get_password().map_err(|e| match e {
                 keyring::Error::NoEntry => {
                     format!("no keyring entry for [{service}/{account}]")
@@ -392,7 +401,9 @@ mod tests {
     async fn file_resolver_reads_and_trims() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("token");
-        tokio::fs::write(&path, b"  secret-synthetic\n").await.unwrap();
+        tokio::fs::write(&path, b"  secret-synthetic\n")
+            .await
+            .unwrap();
         let r = FileResolver::new(path, true);
         assert_eq!(r.resolve().await.unwrap(), "secret-synthetic");
     }
@@ -439,11 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_resolver_runs_script_and_caches() {
-        let r = CommandResolver::new(
-            "echo synthetic-stdout".into(),
-            Duration::from_secs(5),
-            1,
-        );
+        let r = CommandResolver::new("echo synthetic-stdout".into(), Duration::from_secs(5), 1);
         assert_eq!(r.resolve().await.unwrap(), "synthetic-stdout");
         // Cache holds across calls.
         assert_eq!(r.resolve().await.unwrap(), "synthetic-stdout");
@@ -515,10 +522,17 @@ mod tests {
         .unwrap();
     }
 
+    /// Both interactive providers need a frontend the resolver layer
+    /// cannot reach; the orchestrator wires them up instead.
     #[test]
-    fn build_resolver_for_prompt_errors() {
-        let p = CredentialProvider::Prompt { prefill: None };
-        assert!(p.build_resolver().is_err());
+    fn build_resolver_for_interactive_providers_errors() {
+        for p in [
+            CredentialProvider::Prompt { prefill: None },
+            CredentialProvider::ScriptResult,
+        ] {
+            assert!(p.needs_frontend());
+            assert!(p.build_resolver().is_err(), "must not build: {p:?}");
+        }
     }
 
     #[test]

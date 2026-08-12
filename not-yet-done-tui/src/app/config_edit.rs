@@ -234,8 +234,9 @@ impl App {
     }
 
     /// Re-read `tui.yaml` and rebuild the theme + keybindings-bound
-    /// components. Tasks/Trackings views are recreated, so their loaded
-    /// data is wiped — `spawn_load` re-fills them right after.
+    /// components. Every content view is recreated, so its loaded data and
+    /// its post-construction wiring are wiped — [`App::wire_content_views`]
+    /// puts both back before we return.
     fn reload_tui_config(&mut self) -> Result<String, String> {
         let new_config = TuiConfigService::load().map_err(|e| e.to_string())?;
         let new_keybindings = new_config.keybindings.clone();
@@ -252,8 +253,8 @@ impl App {
             .collect();
         let tab_bar = crate::components::tab_bar::TabBarComponent::new(
             Arc::clone(&shared_theme),
-            &new_keybindings,
             &content_tab_infos,
+            new_config.tabs.subtabs_own_line,
         );
         let status_bar = crate::components::status_bar::StatusBarComponent::new(
             Arc::clone(&shared_theme),
@@ -264,6 +265,20 @@ impl App {
                 &shared_theme,
             ));
         notification_bar.set_max_lines(new_config.notifications.max_lines);
+        notification_bar.set_max_messages(new_config.notifications.max_messages);
+        notification_bar.set_history_limit(new_config.notifications.history_limit);
+        let bar_hint = super::notification_bar_hint(&new_keybindings.global);
+        notification_bar.set_hint(bar_hint.clone());
+        // Rebuilding the bar must not swallow undismissed messages or the log.
+        notification_bar.adopt_state(&self.notification_bar);
+        let mut alert_bar = crate::components::notification_bar::NotificationBarComponent::new(
+            Arc::clone(&shared_theme),
+        );
+        alert_bar.set_prominent(true);
+        alert_bar.set_max_lines(new_config.notifications.alert_max_lines);
+        alert_bar.set_history_limit(new_config.notifications.history_limit);
+        alert_bar.set_hint(bar_hint);
+        alert_bar.adopt_state(&self.alert_bar);
 
         // Rebuild content views too — they hold keybinding/theme refs.
         let factories = (self.adapter_factory_builder)();
@@ -282,6 +297,7 @@ impl App {
         self.tab_bar = tab_bar;
         self.status_bar = status_bar;
         self.notification_bar = notification_bar;
+        self.alert_bar = alert_bar;
         self.content_views = new_content_views;
         // The `tabs:` section and/or the view set may have changed.
         self.rebuild_tab_layout();
@@ -289,8 +305,54 @@ impl App {
         // Refill data the rebuild dropped. (Tracking state is read live
         // from each adapter, so there is nothing to refresh here.)
         self.reload_link_refs();
+        // The rebuilt views are bare: no saved queries, no column config, no
+        // jump alphabet, no adapter watchers and no data. Re-run the exact
+        // wiring startup applies, otherwise rebinding a key leaves every tab
+        // empty and half-wired until the next restart.
+        self.wire_content_views();
 
         Ok("tui.yaml reloaded".to_string())
+    }
+
+    /// Parse-and-validate `text` as the config that would live at `path`,
+    /// WITHOUT mutating any in-memory state or touching adapters. The
+    /// safety net for the interactive keybinding editor: an edit that would
+    /// make the file unloadable is rejected *before* it reaches disk, so a
+    /// bad rewrite can never silently corrupt a file and drop its tab on the
+    /// next startup (the `views[*].key` list-vs-scalar regression). Mirrors
+    /// the parse/validate steps of [`Self::reload_single_view`] for view
+    /// files and [`TuiConfigService`]'s deserialize for `tui.yaml` — the only
+    /// two file kinds the binding editor writes.
+    pub fn validate_config_text(&self, path: &Path, text: &str) -> Result<(), String> {
+        use crate::config::view_config::ViewFileConfig;
+
+        // `tui.yaml` at the config root → must deserialize into the full
+        // TuiConfig (same parse the startup loader performs).
+        if path.file_name().and_then(|n| n.to_str()) == Some("tui.yaml") {
+            serde_yaml::from_str::<crate::config::TuiConfig>(text)
+                .map(|_| ())
+                .map_err(|e| format!("tui.yaml parse: {e}"))?;
+            return Ok(());
+        }
+
+        // Otherwise a view file: parse + inherit + validate exactly as the
+        // granular reload does, so the edit is judged identically.
+        let raw: serde_yaml::Value =
+            serde_yaml::from_str(text).map_err(|e| format!("YAML parse: {e}"))?;
+        if raw.get("tab").is_none() || raw.get("adapter").is_none() {
+            return Err(format!(
+                "{} is missing `tab:` and/or `adapter:` — not a view config",
+                path.display()
+            ));
+        }
+        let mut config: ViewFileConfig =
+            serde_yaml::from_str(text).map_err(|e| format!("view-config parse: {e}"))?;
+        config.inherit_tree_columns();
+        config.inherit_tree_actions();
+        if let Err(errors) = config.validate(&self.keybindings, &self.config.editors) {
+            return Err(format!("view-config validation:\n{}", errors.join("\n")));
+        }
+        Ok(())
     }
 
     /// Replace a single view slot by re-parsing its YAML. Preserves the
@@ -367,6 +429,12 @@ impl App {
 
         self.content_views[slot_idx] = crate::app::ContentSlot::Working(view);
 
+        // A fresh `ContentView` is bare — startup wires it after building it.
+        // Without the same wiring here, rebinding a key (which reloads the
+        // owning view) would drop its saved queries, column config, jump
+        // alphabet, adapter watchers and data until the next restart.
+        self.wire_content_view(slot_idx);
+
         // Rebuild the tab-bar names — `tab.name` may have changed.
         let content_tab_infos: Vec<crate::components::tab_bar::ContentTabInfo> = self
             .content_views
@@ -378,10 +446,10 @@ impl App {
             .collect();
         self.tab_bar = crate::components::tab_bar::TabBarComponent::new(
             Arc::clone(&self.shared_theme),
-            &self.keybindings,
             &content_tab_infos,
+            self.config.tabs.subtabs_own_line,
         );
-        // `tab.name` may have changed → re-resolve the constellation.
+        // `tab.name` may have changed → re-resolve the tab order.
         self.rebuild_tab_layout();
 
         Ok(format!(
@@ -415,11 +483,14 @@ impl App {
             .collect();
         self.tab_bar = crate::components::tab_bar::TabBarComponent::new(
             Arc::clone(&self.shared_theme),
-            &self.keybindings,
             &content_tab_infos,
+            self.config.tabs.subtabs_own_line,
         );
-        // View set / names may have changed → re-resolve the constellation.
+        // View set / names may have changed → re-resolve the tab order.
         self.rebuild_tab_layout();
+        // Rebuilt views are bare — re-run the startup wiring (see
+        // `reload_tui_config`).
+        self.wire_content_views();
 
         Ok("All content views reloaded".to_string())
     }

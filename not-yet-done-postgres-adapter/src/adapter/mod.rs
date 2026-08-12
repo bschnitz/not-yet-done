@@ -1,34 +1,48 @@
 //! Postgres ContentAdapter: navigates the live catalogue
 //!   root → database → "Schemas" → schema → "Tables" → table
-//! mirroring DBeaver's tree. The two intermediate group nodes
-//! ("Schemas", "Tables") have no per-instance state — they exist for
-//! visual structure and to give a stable place to attach future
-//! sibling groups (Views, Functions, …).
+//!                                        → "Views"  → view → rows
+//! mirroring DBeaver's tree. The intermediate group nodes ("Schemas",
+//! "Tables", "Views") have no per-instance state — they exist for visual
+//! structure and to give a stable place to attach further sibling groups
+//! (Functions, …).
+//!
+//! Tables and views are separate node types rather than one type with a
+//! flag: a view carries editable SQL and a table does not, and a node type
+//! is what `actions_for_type` keys the definition editor off. Everything
+//! else they share — rows below them are listed by the same code, told
+//! apart only by the group segment in the id.
 //!
 //! For convenience, `DatabaseNode` also lists `postgres:schema`
-//! directly (and `SchemaNode` lists `postgres:table` directly), so a
-//! YAML view can drill through without the group nodes. The emitted
-//! IDs still encode the full path (`<db>/schemas/<s>/tables/<t>`),
-//! which keeps `get_by_id`'s walker happy — it always traverses the
-//! group nodes internally.
+//! directly (and `SchemaNode` lists `postgres:table`/`postgres:view`
+//! directly), so a YAML view can drill through without the group nodes.
+//! The emitted IDs still encode the full path
+//! (`<db>/schemas/<s>/tables/<t>`), which keeps `get_by_id`'s walker
+//! happy — it always traverses the group nodes internally.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use not_yet_done_content::{
-    ActionContext, ActionDispatch, AdapterCapabilities, AdapterStatus, ContentAdapter,
-    ContentError, CursorIntent, CustomQueryContext, CustomQueryResult, HintPlacement, InputSpec,
-    ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeRef, NodeSummary,
-    NodeType, PageInfo, PageRequest, Result,
+    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterStatus,
+    ContentAdapter, ContentError, CursorIntent, CustomQueryContext, CustomQueryResult, EditorPrep,
+    InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeRef,
+    NodeSummary, NodeType, PageInfo, PageRequest, Result, script_buffer,
 };
 
-use crate::client::{DatabaseEntry, PostgresClient, SchemaEntry, TableEntry};
+use not_yet_done_sql_core::db_script_nodes::{DB_SCRIPTS_GROUP_ID, DbScriptTree};
+use not_yet_done_sql_core::script_completions as completions;
+use not_yet_done_sql_core::{RowKeySpec, RowSnapshot};
+use not_yet_done_sql_core::{quote_ident, row_edit, view_ddl};
+
+use crate::client::{DatabaseEntry, PostgresClient, RelationKind, SchemaEntry, TableEntry};
 
 mod anonymize;
+pub(crate) mod auth;
 mod cursor_registry;
 mod factory;
 
+pub use auth::PostgresCredentials;
 pub use cursor_registry::{CursorId, CursorRegistry};
 pub use factory::PostgresAdapterFactory;
 
@@ -37,7 +51,16 @@ pub struct PostgresAdapter {
     cursor_registry: Arc<CursorRegistry>,
     connection_name: String,
     instance_id: String,
-    script_store: crate::script_store::PostgresScriptStore,
+    /// The `DB Scripts` branch below each database — nodes, actions and
+    /// the [`SqlScriptStore`](not_yet_done_sql_core::SqlScriptStore) they
+    /// write through, all shared with the other SQL adapters. Held as an
+    /// `Arc` so every node in the branch borrows the same store instead
+    /// of rebuilding one per action.
+    db_scripts: Arc<DbScriptTree>,
+    /// The `auth:` block, when the config has one. The client resolves
+    /// through it; the adapter only needs it for the frontend's half of
+    /// the conversation — answering, cancelling, forgetting.
+    credentials: Option<Arc<PostgresCredentials>>,
 }
 
 impl PostgresAdapter {
@@ -45,6 +68,7 @@ impl PostgresAdapter {
         client: Arc<PostgresClient>,
         connection_name: String,
         instance_id: String,
+        credentials: Option<Arc<PostgresCredentials>>,
     ) -> Self {
         let cursor_registry = Arc::new(CursorRegistry::new(Arc::clone(&client)));
         // Resolve the same per-instance data dir the trait's default
@@ -56,14 +80,17 @@ impl PostgresAdapter {
             .join("not_yet_done")
             .join("postgres")
             .join(&instance_id);
-        let script_store =
-            crate::script_store::PostgresScriptStore::new(instance_data_dir);
+        let db_scripts = Arc::new(DbScriptTree::new(
+            crate::script_store::postgres_script_store(instance_data_dir),
+            "postgres",
+        ));
         Self {
             client,
             cursor_registry,
             connection_name,
             instance_id,
-            script_store,
+            db_scripts,
+            credentials,
         }
     }
 
@@ -150,10 +177,7 @@ impl PostgresAdapter {
     /// completion comment. Errors are swallowed and reported as an
     /// empty list so a failing catalog query never blocks the editor
     /// from opening — the user can still type SQL by hand.
-    pub async fn list_completion_tables(
-        &self,
-        database: &str,
-    ) -> Vec<(String, String)> {
+    pub async fn list_completion_tables(&self, database: &str) -> Vec<(String, String)> {
         self.client
             .list_tables_in_database(database)
             .await
@@ -225,13 +249,56 @@ fn table_node_type() -> NodeType {
     }
 }
 
-fn row_node_type() -> NodeType {
+fn views_group_node_type() -> NodeType {
     NodeType {
-        type_id: "postgres:row".into(),
+        type_id: "postgres:views".into(),
         mime_type: "".into(),
         syntax: None,
         file_extension: "".into(),
+        display_name: "Views".into(),
+    }
+}
+
+/// A view is its own type rather than a table with a flag: it is the one
+/// catalogue object that carries editable SQL, and giving it a type is what
+/// lets `actions_for_type` offer the definition editor on views alone.
+/// `syntax`/`file_extension` are set for that editor's buffer.
+fn view_node_type() -> NodeType {
+    NodeType {
+        type_id: "postgres:view".into(),
+        mime_type: "".into(),
+        syntax: Some("sql".into()),
+        file_extension: ".sql".into(),
+        display_name: "View".into(),
+    }
+}
+
+fn row_node_type() -> NodeType {
+    NodeType {
+        type_id: "postgres:row".into(),
+        // The row editor's buffer is a YAML mapping, so an editor that
+        // picks its syntax from the node gets YAML highlighting.
+        mime_type: "application/yaml".into(),
+        syntax: Some("yaml".into()),
+        file_extension: ".yaml".into(),
         display_name: "Row".into(),
+    }
+}
+
+/// Addressing waypoint for the `rows` segment of a row id
+/// (`<db>/schemas/<s>/tables/<t>/rows/<offset>`).
+///
+/// Never rendered and never bound in a view config: rows are listed
+/// through the relation's own fetcher in [`PostgresAdapter::childs`], and
+/// this type exists only so `get_by_id` can walk *to* a row — which is what
+/// the row editor needs, since an edit session resolves its node by id.
+fn rows_group_node_type() -> NodeType {
+    NodeType {
+        type_id: "postgres:rows".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Rows".into(),
     }
 }
 
@@ -245,35 +312,10 @@ fn script_node_type() -> NodeType {
     }
 }
 
-fn db_scripts_group_node_type() -> NodeType {
-    NodeType {
-        type_id: "postgres:db_scripts".into(),
-        mime_type: "".into(),
-        syntax: None,
-        file_extension: "".into(),
-        display_name: "DB Scripts".into(),
-    }
-}
-
-fn db_script_node_type() -> NodeType {
-    NodeType {
-        type_id: "postgres:db_script".into(),
-        mime_type: "text/x-sql".into(),
-        syntax: Some("sql".into()),
-        file_extension: "sql".into(),
-        display_name: "DB Script".into(),
-    }
-}
-
-fn db_script_dir_node_type() -> NodeType {
-    NodeType {
-        type_id: "postgres:db_script_dir".into(),
-        mime_type: "".into(),
-        syntax: None,
-        file_extension: "".into(),
-        display_name: "DB Script Folder".into(),
-    }
-}
+// The three `postgres:db_script*` types are not built here: the whole
+// DB-Scripts branch comes from [`DbScriptTree`], which prefixes them with
+// this adapter's type at construction time. Read them off
+// `self.db_scripts.types()`.
 
 // ---------------------------------------------------------------------------
 // Metadata helpers
@@ -309,44 +351,21 @@ fn script_metadata(entry: &crate::query::ScriptEntry) -> Metadata {
     }
 }
 
-/// Metadata for a single DB-level script row. `script_label` is what the
-/// list view should display in the `script` column — typically the leaf
-/// name (`"audit"`) rather than the full rel_path (`"util/audit"`), so a
-/// long folder chain doesn't crowd out the other columns.
-fn db_script_metadata(database: &str, script_label: &str) -> Metadata {
-    Metadata {
-        fields: vec![
-            field("script", "Script", script_label),
-            field("database", "Database", database),
-        ],
-    }
-}
-
-/// Metadata for a folder row under DB Scripts. Mirrors
-/// [`db_script_metadata`] so a generic table view can render both kinds
-/// against the same column set; the `script` field carries the folder
-/// name. DSF-4 will surface a distinct icon via `tree_label` in YAML.
-fn db_script_dir_metadata(database: &str, dir_label: &str) -> Metadata {
-    Metadata {
-        fields: vec![
-            field("script", "Script", dir_label),
-            field("database", "Database", database),
-        ],
-    }
-}
-
+/// Metadata for a table or a view. The estimated row count is a table-only
+/// column: `pg_class.reltuples` is `-1` for a view, and rendering that as a
+/// row estimate would be worse than leaving the cell empty.
 fn table_metadata(entry: &TableEntry) -> Metadata {
+    let estimated_rows = match entry.kind {
+        RelationKind::Table => entry.estimated_rows.to_string(),
+        RelationKind::View => String::new(),
+    };
     Metadata {
         fields: vec![
             field("name", "Name", &entry.name),
             field("database", "Database", &entry.database),
             field("schema", "Schema", &entry.schema),
             field("owner", "Owner", &entry.owner),
-            field(
-                "estimated_rows",
-                "Rows (est.)",
-                &entry.estimated_rows.to_string(),
-            ),
+            field("estimated_rows", "Rows (est.)", &estimated_rows),
         ],
     }
 }
@@ -366,80 +385,40 @@ fn field(key: &str, label: &str, value: &str) -> MetadataField {
 // impls return for a fresh instance — exposed as free functions so the
 // adapter-level `actions_for_type` (instance-free, no DB walk) can serve
 // shortcut-hint rendering without a `get_by_id` chain walk per cursor move.
+// The DB-Scripts branch's three sets live in
+// [`not_yet_done_sql_core::db_script_nodes`] and are reached through
+// [`DbScriptTree::actions_for_type`].
 // ---------------------------------------------------------------------------
-
-fn db_scripts_group_actions() -> Vec<NodeAction> {
-    // YAML `shortcuts:` on the `postgres:db_scripts` ChildDef:
-    //   a: add-script → :db-script new prompt
-    //   A: add-dir    → :db-script new-dir prompt (DSF-2)
-    vec![
-        NodeAction::new("add-script", "add", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
-        NodeAction::new("add-dir", "add-dir", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('A'),
-    ]
-}
-
-fn db_script_dir_actions() -> Vec<NodeAction> {
-    // YAML `shortcuts:` on the `postgres:db_script_dir` ChildDef:
-    //   a/A: add-script/add-dir | r: rename
-    //   m/p: mark/paste move | d: delete-dir
-    vec![
-        NodeAction::new("add-script", "add", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('a'),
-        NodeAction::new("add-dir", "add-dir", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('A'),
-        NodeAction::new("rename", "rename", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('r'),
-        NodeAction::new("mark-move", "mark", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('m'),
-        NodeAction::new("paste-move", "paste", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('p'),
-        NodeAction::new("delete-dir", "del-dir", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('d'),
-    ]
-}
-
-fn db_script_actions() -> Vec<NodeAction> {
-    // YAML `shortcuts:` on the `postgres:db_script` ChildDef:
-    //   x: execute | e: edit | r: rename | m: mark-move | d: delete
-    // Only `edit` lands in the (highlighted) action bar — editor-action
-    // convention (see ~/.claude memory feedback_bar_placement).
-    vec![
-        NodeAction::new("execute", "exec", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('x'),
-        NodeAction::new("edit", "edit", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('e'),
-        NodeAction::new("rename", "rename", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('r'),
-        NodeAction::new("mark-move", "mark", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('m'),
-        NodeAction::new("delete", "del", InputSpec::None)
-            .with_placement(HintPlacement::StatusBar)
-            .with_default_key('d'),
-    ]
-}
 
 fn table_actions() -> Vec<NodeAction> {
     // YAML `shortcuts:` on the `postgres:tables` (Q on table row) or
     // `postgres:rows` (Q: parent:edit_sql when drilled in) ChildDef.
-    vec![
-        NodeAction::new("edit_sql", "sql", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar)
-            .with_default_key('Q'),
-    ]
+    vec![NodeAction::new("edit_sql", "sql", InputSpec::None)]
+}
+
+/// A view does everything a table does, plus edit its own definition.
+///
+/// `InputSpec::Editor` has to be bound from YAML as
+/// `actions: [{type: edit, id: edit_view}]` — not as a `shortcuts:` entry,
+/// which routes through `invoke_action` and cannot open an editor.
+fn view_actions() -> Vec<NodeAction> {
+    let mut actions = table_actions();
+    actions.push(NodeAction::new(
+        EDIT_VIEW_ACTION,
+        "definition",
+        InputSpec::Editor,
+    ));
+    actions
+}
+
+/// One action on a data row: edit it. Like `edit_view` this is an
+/// `InputSpec::Editor` action and has to be bound from YAML as
+/// `actions: [{type: edit, id: edit_row}]`.
+///
+/// Deliberately *not* `edit_sql`: the query editor belongs to the relation,
+/// and a row level reaches it through `parent:edit_sql`.
+fn row_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new(EDIT_ROW_ACTION, "row", InputSpec::Editor)]
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +436,7 @@ impl ContentAdapter for PostgresAdapter {
     }
 
     fn script_store(&self) -> Option<&dyn not_yet_done_content::ScriptStore> {
-        Some(&self.script_store)
+        Some(self.db_scripts.store())
     }
 
     /// Realism anonymizer: catalogue names become `<adjective>_<noun>`
@@ -472,11 +451,45 @@ impl ContentAdapter for PostgresAdapter {
         self.client.subscribe_status()
     }
 
+    /// The frontend's answer to a `NeedsCreds` the auth block put up.
+    /// Without an auth block nothing can be waiting for one, which is a
+    /// programming error rather than a user-facing state.
+    async fn submit_credentials(
+        &self,
+        fields: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        match &self.credentials {
+            Some(c) => c
+                .submit(fields)
+                .await
+                .map_err(|e| ContentError::Other(e.into())),
+            None => Err(ContentError::Other(
+                "this connection asks for no credentials".into(),
+            )),
+        }
+    }
+
+    async fn cancel_credentials(&self) -> Result<()> {
+        match &self.credentials {
+            Some(c) => c.cancel().await.map_err(|e| ContentError::Other(e.into())),
+            None => Ok(()),
+        }
+    }
+
+    /// Forget the resolved secrets so the next connect asks again — the
+    /// user's way out when a rotated password is cached.
+    async fn invalidate_credentials(&self) -> Result<()> {
+        if let Some(c) = &self.credentials {
+            c.invalidate().await;
+        }
+        Ok(())
+    }
+
     async fn root(&self) -> Result<Box<dyn Node>> {
         Ok(Box::new(PostgresRoot {
-            client: Arc::clone(&self.client),
             connection_name: self.connection_name.clone(),
-            instance_data_dir: self.instance_data_dir(),
+            client: Arc::clone(&self.client),
+            db_scripts: Arc::clone(&self.db_scripts),
         }))
     }
 
@@ -496,6 +509,194 @@ impl ContentAdapter for PostgresAdapter {
         Ok(node)
     }
 
+    /// Single source of truth about a node's children. Reads the node's
+    /// FULL composite `id()` (the addressability invariant restored in this
+    /// refactor), parses it exactly as `get_by_id`'s segment walker would,
+    /// and hands each child type a lazy fetcher onto the shared `*_impl`
+    /// listing functions. No downcast — every fact comes from `node.id()`
+    /// and `node.node_type()`.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+        use not_yet_done_content::Child;
+        // Composite id, parsed the same way the walker consumes it.
+        let id = node.id().to_string();
+        let segs: Vec<String> = id.split('/').map(|s| s.to_string()).collect();
+
+        // Small constructors so each arm reads as `child(type, fetcher)`.
+        macro_rules! child {
+            ($nt:expr, $fetch:expr) => {
+                Child {
+                    node_type: $nt,
+                    columns: Vec::new(),
+                    list: Box::new($fetch),
+                }
+            };
+        }
+
+        match node.node_type().type_id.as_str() {
+            "postgres:root" => vec![
+                child!(database_node_type(), move |_p| {
+                    Box::pin(async move { list_databases_impl(&self.client).await })
+                }),
+                child!(table_node_type(), move |_p| {
+                    Box::pin(async move {
+                        list_all_relations_impl(&self.client, RelationKind::Table).await
+                    })
+                }),
+                child!(view_node_type(), move |_p| {
+                    Box::pin(async move {
+                        list_all_relations_impl(&self.client, RelationKind::View).await
+                    })
+                }),
+                child!(script_node_type(), move |_p| {
+                    let dir = self.instance_data_dir();
+                    Box::pin(async move { list_all_scripts_impl(&dir).await })
+                }),
+            ],
+            "postgres:database" => {
+                // id = `<db>`
+                let db = id.clone();
+                let db2 = db.clone();
+                let db3 = db.clone();
+                let db4 = db.clone();
+                vec![
+                    child!(schemas_group_node_type(), move |_p| {
+                        Box::pin(async move { Ok(list_schemas_group_impl(&db)) })
+                    }),
+                    child!(schema_node_type(), move |_p| {
+                        Box::pin(async move { list_schemas_impl(&self.client, &db2).await })
+                    }),
+                    child!(self.db_scripts.types().group.clone(), move |_p| {
+                        Box::pin(async move { Ok(self.db_scripts.group_summary(&db3)) })
+                    }),
+                    // db_script_dir + db_script direct shortcuts. The
+                    // direct-shortcut list only surfaces scripts (matching
+                    // the legacy `DatabaseNode::list` `postgres:db_script`
+                    // arm); the `db_script_dir` shortcut yields nothing on
+                    // its own (legacy `DatabaseNode::list` had no arm for
+                    // it — its `NotSupported` would produce no rows).
+                    child!(self.db_scripts.types().dir.clone(), move |_p| {
+                        Box::pin(async move {
+                            Err(ContentError::NotSupported(
+                                "database has no direct db_script_dir shortcut".into(),
+                            ))
+                        })
+                    }),
+                    child!(self.db_scripts.types().script.clone(), move |_p| {
+                        Box::pin(async move { self.db_scripts.list_scripts_flat(&db4).await })
+                    }),
+                ]
+            }
+            "postgres:schemas" => {
+                // id = `<db>/schemas`
+                let db = segs.first().cloned().unwrap_or_default();
+                vec![child!(schema_node_type(), move |_p| {
+                    Box::pin(async move { list_schemas_impl(&self.client, &db).await })
+                })]
+            }
+            "postgres:schema" => {
+                // id = `<db>/schemas/<s>`
+                let db = segs.first().cloned().unwrap_or_default();
+                let schema = segs.get(2).cloned().unwrap_or_default();
+                let (db2, schema2) = (db.clone(), schema.clone());
+                let (db3, schema3) = (db.clone(), schema.clone());
+                let (db4, schema4) = (db.clone(), schema.clone());
+                vec![
+                    child!(tables_group_node_type(), move |_p| {
+                        Box::pin(async move {
+                            Ok(list_relations_group_impl(&db, &schema, RelationKind::Table))
+                        })
+                    }),
+                    child!(table_node_type(), move |_p| {
+                        Box::pin(async move {
+                            list_relations_impl(&self.client, &db2, &schema2, RelationKind::Table)
+                                .await
+                        })
+                    }),
+                    child!(views_group_node_type(), move |_p| {
+                        Box::pin(async move {
+                            Ok(list_relations_group_impl(
+                                &db3,
+                                &schema3,
+                                RelationKind::View,
+                            ))
+                        })
+                    }),
+                    child!(view_node_type(), move |_p| {
+                        Box::pin(async move {
+                            list_relations_impl(&self.client, &db4, &schema4, RelationKind::View)
+                                .await
+                        })
+                    }),
+                ]
+            }
+            "postgres:tables" | "postgres:views" => {
+                // id = `<db>/schemas/<s>/tables` or `<db>/schemas/<s>/views`
+                let db = segs.first().cloned().unwrap_or_default();
+                let schema = segs.get(2).cloned().unwrap_or_default();
+                let kind = match node.node_type().type_id.as_str() {
+                    "postgres:views" => RelationKind::View,
+                    _ => RelationKind::Table,
+                };
+                let node_type = match kind {
+                    RelationKind::View => view_node_type(),
+                    RelationKind::Table => table_node_type(),
+                };
+                vec![child!(node_type, move |_p| {
+                    Box::pin(
+                        async move { list_relations_impl(&self.client, &db, &schema, kind).await },
+                    )
+                })]
+            }
+            "postgres:table" | "postgres:view" => {
+                // id = `<db>/schemas/<s>/tables/<t>` or `…/views/<v>`. The
+                // group segment is read off the id rather than assumed, so
+                // one row lister serves both branches and `get_by_id`
+                // walks back to whichever node minted the row.
+                let db = segs.first().cloned().unwrap_or_default();
+                let schema = segs.get(2).cloned().unwrap_or_default();
+                let group = segs.get(3).cloned().unwrap_or_default();
+                let table = segs.get(4).cloned().unwrap_or_default();
+                let kind = match node.node_type().type_id.as_str() {
+                    "postgres:view" => RelationKind::View,
+                    _ => RelationKind::Table,
+                };
+                vec![child!(row_node_type(), move |p: ListParams| {
+                    Box::pin(async move {
+                        list_rows_impl(&self.client, &db, &schema, &group, &table, kind, &p).await
+                    })
+                })]
+            }
+            "postgres:db_scripts" | "postgres:db_script_dir" => {
+                // id = `<db>/db_scripts` (group) or
+                //      `<db>/db_scripts/<rel_path...>` (dir).
+                let db = segs.first().cloned().unwrap_or_default();
+                let rel_path = if segs.len() > 2 {
+                    segs[2..].join("/")
+                } else {
+                    String::new()
+                };
+                let db2 = db.clone();
+                let rel2 = rel_path.clone();
+                vec![
+                    child!(self.db_scripts.types().dir.clone(), move |_p| {
+                        Box::pin(async move {
+                            self.db_scripts
+                                .list_entries(&db, &rel_path, true, false)
+                                .await
+                        })
+                    }),
+                    child!(self.db_scripts.types().script.clone(), move |_p| {
+                        Box::pin(async move {
+                            self.db_scripts.list_entries(&db2, &rel2, false, true).await
+                        })
+                    }),
+                ]
+            }
+            // Leaves: postgres:row, postgres:db_script, postgres:script.
+            _ => Vec::new(),
+        }
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             supports_create: false,
@@ -507,15 +708,38 @@ impl ContentAdapter for PostgresAdapter {
             propagates_query_to_subtree: false,
             group_by_via_adapter: false,
             supports_eager_subtree: false,
+            // Per-table SQL scripts: the `q` menu and the `Q` editor.
+            supports_node_query_editor: true,
+            // Row ids are `qrow:<n>` — an offset into one specific query's
+            // result set, meaningless once the query or its ordering
+            // changes. Nothing here can be linked or marked.
+            unstable_node_ids: true,
         }
     }
 
+    /// Every node id this adapter mints starts with the database name
+    /// (`<db>`, `<db>/schemas/…`, `<db>/db_scripts/…`), which is exactly
+    /// the routing key `execute_custom_query` needs — `dbname` is fixed at
+    /// connect time, so a query has to be told which session to run on.
+    fn custom_query_context(&self, node_id: &str) -> CustomQueryContext {
+        let database = node_id
+            .split('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.client.admin_database());
+        CustomQueryContext::new().with("database", database.to_string())
+    }
+
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        // The DB-Scripts branch answers for its own three types; the
+        // catalogue types are this adapter's own.
+        if let Some(actions) = self.db_scripts.actions_for_type(&node_type.type_id) {
+            return actions;
+        }
         match node_type.type_id.as_str() {
-            "postgres:db_scripts" => db_scripts_group_actions(),
-            "postgres:db_script_dir" => db_script_dir_actions(),
-            "postgres:db_script" => db_script_actions(),
             "postgres:table" => table_actions(),
+            "postgres:view" => view_actions(),
+            "postgres:row" => row_actions(),
             _ => Vec::new(),
         }
     }
@@ -537,10 +761,7 @@ impl ContentAdapter for PostgresAdapter {
     /// database-list view itself, or a tasks-tab spawn that never
     /// reaches this adapter), we fall back to the configured admin
     /// database — same default `tokio_postgres` would pick.
-    fn child_process_env(
-        &self,
-        node: &NodeRef,
-    ) -> std::collections::HashMap<String, String> {
+    fn child_process_env(&self, node: &NodeRef) -> std::collections::HashMap<String, String> {
         let segs: Vec<&str> = node.segments().collect();
         let Some(mut env) = self.client.child_env_base() else {
             not_yet_done_content::http_log::log_debug(
@@ -582,12 +803,8 @@ impl ContentAdapter for PostgresAdapter {
     /// segment's extension. Enumeration failures yield no line (the editor
     /// still opens). The append is idempotent: any stale completion line is
     /// stripped first.
-    async fn augment_editor_buffer(
-        &self,
-        node: &NodeRef,
-        buffer: String,
-    ) -> String {
-        let stripped = crate::script_completions::strip_completions_line(&buffer);
+    async fn augment_editor_buffer(&self, node: &NodeRef, buffer: String) -> String {
+        let stripped = completions::strip_completions_line(&buffer);
         let script = node.segments().last().unwrap_or("");
         if !crate::query::is_sql_extension(script) {
             return stripped;
@@ -596,16 +813,15 @@ impl ContentAdapter for PostgresAdapter {
             return stripped;
         };
         let tables = self.list_completion_tables(db).await;
-        match crate::script_completions::build_completions_line(&tables) {
-            Some(line) => {
-                crate::script_completions::append_completions_line(&stripped, &line)
-            }
+        let entries = crate::script_completions::completions_for_tables(&tables);
+        match completions::build_completions_line(&entries) {
+            Some(line) => completions::append_completions_line(&stripped, &line),
             None => stripped,
         }
     }
 
     fn strip_editor_hints(&self, text: &str) -> String {
-        crate::script_completions::strip_completions_line(text)
+        completions::strip_completions_line(text)
     }
 
     /// Free-form SQL (potentially multi-statement). The
@@ -631,11 +847,14 @@ impl ContentAdapter for PostgresAdapter {
         // enumerate tables leaves the query unchanged — Postgres then
         // surfaces the literal token in its own error.
         let owned_query;
-        let query_ref = if query.contains("tt_") {
-            let tables = self.client.list_tables_in_database(database).await
+        let query_ref = if completions::may_contain_tokens(query) {
+            let tables = self
+                .client
+                .list_tables_in_database(database)
+                .await
                 .unwrap_or_default();
-            owned_query =
-                crate::script_completions::substitute_table_tokens(query, &tables);
+            let entries = crate::script_completions::completions_for_tables(&tables);
+            owned_query = completions::substitute_tokens(query, &entries);
             owned_query.as_str()
         } else {
             query
@@ -669,8 +888,12 @@ impl ContentAdapter for PostgresAdapter {
         let (display_rows, page_info) = match page_request {
             Some(req) => {
                 let has_next = outcome.rows.len() > req.limit as usize;
-                let trimmed: Vec<_> =
-                    outcome.rows.iter().take(req.limit as usize).cloned().collect();
+                let trimmed: Vec<_> = outcome
+                    .rows
+                    .iter()
+                    .take(req.limit as usize)
+                    .cloned()
+                    .collect();
                 let info = PageInfo {
                     offset: req.offset,
                     limit: req.limit,
@@ -709,10 +932,7 @@ impl PostgresAdapter {
         intent: &CursorIntent,
     ) -> Result<CustomQueryResult> {
         const CURSOR_PAGE_DEFAULT: u32 = 100;
-        let page_size = context
-            .page
-            .map(|p| p.limit)
-            .unwrap_or(CURSOR_PAGE_DEFAULT);
+        let page_size = context.page.map(|p| p.limit).unwrap_or(CURSOR_PAGE_DEFAULT);
         let offset = context.page.map(|p| p.offset).unwrap_or(0);
 
         match intent {
@@ -780,10 +1000,7 @@ impl PostgresAdapter {
 /// Map raw column-and-rows output to the `qrow:<i>` `NodeSummary` shape
 /// the TUI's custom-query pane consumes. Shared between the LIMIT/OFFSET
 /// branch and the cursor branch of `execute_custom_query`.
-fn rows_to_summaries(
-    columns: &[String],
-    rows: &[Vec<Option<String>>],
-) -> Vec<NodeSummary> {
+fn rows_to_summaries(columns: &[String], rows: &[Vec<Option<String>>]) -> Vec<NodeSummary> {
     let row_type = row_node_type();
     rows.iter()
         .enumerate()
@@ -811,26 +1028,16 @@ fn rows_to_summaries(
 }
 
 /// Wrap a SELECT/WITH query with `LIMIT/OFFSET` for automatic
-/// pagination. Returns `None` (caller runs the original) when the
-/// query isn't a paginable shape: not SELECT/WITH, multi-statement,
-/// or already contains an outer `LIMIT`/`OFFSET` we'd rather not
-/// fight with. We fetch one extra row (`limit + 1`) so the caller
-/// can decide `has_next` without a second round trip.
+/// pagination. Returns `None` (caller runs the original) when the query
+/// isn't a paginable shape: not SELECT/WITH, or multi-statement. We
+/// fetch one extra row (`limit + 1`) so the caller can decide `has_next`
+/// without a second round trip.
+///
+/// The shape check and the wrapping itself are dialect-independent and
+/// live in `not-yet-done-sql-core`; all this adds is the derived-table
+/// alias.
 fn wrap_for_pagination(query: &str, page: PageRequest) -> Option<String> {
-    use crate::client::sql_shape::{has_multiple_statements, looks_like_select_or_with};
-    let trimmed = query.trim().trim_end_matches(';').trim();
-    if !looks_like_select_or_with(trimmed) {
-        return None;
-    }
-    if has_multiple_statements(trimmed) {
-        return None;
-    }
-    Some(format!(
-        "SELECT * FROM ({}) AS _nyd_pg LIMIT {} OFFSET {}",
-        trimmed,
-        page.limit.saturating_add(1),
-        page.offset,
-    ))
+    not_yet_done_sql_core::sql_shape::wrap_for_pagination(query, page.limit, page.offset, "_nyd_pg")
 }
 
 // ---------------------------------------------------------------------------
@@ -838,9 +1045,14 @@ fn wrap_for_pagination(query: &str, page: PageRequest) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 struct PostgresRoot {
-    client: Arc<PostgresClient>,
     connection_name: String,
-    instance_data_dir: std::path::PathBuf,
+    /// Only one node below the root actually queries through this handle
+    /// ([`ViewNode`], whose `prepare`/`execute` read and replace a view's
+    /// definition). Everything else lists through the adapter's `childs`
+    /// fetchers — but a node's own action methods have no other way to
+    /// reach the database, so the client is threaded down the walk.
+    client: Arc<PostgresClient>,
+    db_scripts: Arc<DbScriptTree>,
 }
 
 #[async_trait]
@@ -863,136 +1075,17 @@ impl Node for PostgresRoot {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![database_node_type(), table_node_type(), script_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "postgres:database" => {
-                let entries = self
-                    .client
-                    .list_databases()
-                    .await
-                    .map_err(|e| ContentError::Other(e.into()))?;
-                let items = entries
-                    .into_iter()
-                    .map(|e| NodeSummary {
-                        id: e.name.clone(),
-                        label: e.name.clone(),
-                        node_type: database_node_type(),
-                        metadata: database_metadata(&e),
-                        has_children: None,
-                    })
-                    .collect();
-                Ok(ListResult {
-                    items,
-                    applied_sort: Vec::new(),
-                    page: None,
-                    batch_download_available: false,
-                    downloaded: vec![],
-                })
-            }
-            // Cross-DB / cross-schema flat list. IDs still use the
-            // composite `<db>/schemas/<s>/tables/<t>` form so a future
-            // drilldown to rows would resolve via the existing
-            // `get_by_id` walker without needing a separate code path.
-            "postgres:table" => {
-                let entries = self
-                    .client
-                    .list_all_tables()
-                    .await
-                    .map_err(|e| ContentError::Other(e.into()))?;
-                let items = entries
-                    .into_iter()
-                    .map(|e| NodeSummary {
-                        id: format!(
-                            "{}/{SCHEMAS_GROUP_ID}/{}/{TABLES_GROUP_ID}/{}",
-                            e.database, e.schema, e.name
-                        ),
-                        label: e.name.clone(),
-                        node_type: table_node_type(),
-                        metadata: table_metadata(&e),
-                        has_children: None,
-                    })
-                    .collect();
-                Ok(ListResult {
-                    items,
-                    applied_sort: Vec::new(),
-                    page: None,
-                    batch_download_available: false,
-                    downloaded: vec![],
-                })
-            }
-            // Filesystem-backed flat list of every saved SQL script.
-            // Mixes two roots:
-            //  • `<instance_data_dir>/queries/` (table-level, four path
-            //    segments). ID `script/<db>/<schema>/<table>/<script>`.
-            //  • `<instance_data_dir>/db_scripts/` (DB-level, two path
-            //    segments). ID `db_script/<db>/<script>`.
-            // DB-level scripts surface with empty schema/table metadata
-            // fields so a single column set can render both kinds.
-            "postgres:script" => {
-                let table_scripts = crate::query::list_all_scripts(&self.instance_data_dir)
-                    .await
-                    .map_err(|e| ContentError::Other(Box::new(e)))?;
-                let db_scripts = crate::query::list_all_db_scripts(&self.instance_data_dir)
-                    .await
-                    .map_err(|e| ContentError::Other(Box::new(e)))?;
-                let mut items: Vec<NodeSummary> = table_scripts
-                    .into_iter()
-                    .map(|e| NodeSummary {
-                        id: format!(
-                            "script/{}/{}/{}/{}",
-                            e.database, e.schema, e.table, e.script
-                        ),
-                        label: e.script.clone(),
-                        node_type: script_node_type(),
-                        metadata: script_metadata(&e),
-                        has_children: None,
-                    })
-                    .collect();
-                items.extend(db_scripts.into_iter().map(|e| NodeSummary {
-                    id: format!("db_script/{}/{}", e.database, e.script),
-                    label: e.script.clone(),
-                    node_type: script_node_type(),
-                    metadata: Metadata {
-                        fields: vec![
-                            field("script", "Script", &e.script),
-                            field("database", "Database", &e.database),
-                            // The legacy flat list shares a column set with
-                            // `postgres:script`; leave schema/table empty for
-                            // DB-level scripts so one renderer fits both.
-                            field("schema", "Schema", ""),
-                            field("table", "Table", ""),
-                        ],
-                    },
-                    has_children: None,
-                }));
-                Ok(ListResult {
-                    items,
-                    applied_sort: Vec::new(),
-                    page: None,
-                    batch_download_available: false,
-                    downloaded: vec![],
-                })
-            }
-            other => Err(ContentError::NotSupported(format!(
-                "unknown child type: {other}"
-            ))),
-        }
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         // Lazy construction: skip the `list_databases` round trip that the
         // old code used purely to populate owner/encoding metadata. During a
         // `get_by_id` walk through `<db>/...` the database node is only
-        // traversed, never rendered (its NodeSummary comes from `root.list()`
-        // with full metadata), so the cheap path is correct.
+        // traversed, never rendered (its NodeSummary comes from the root's
+        // `childs` database fetcher with full metadata), so the cheap path
+        // is correct.
         Ok(Box::new(DatabaseNode::new(
-            Arc::clone(&self.client),
             id.to_string(),
-            self.instance_data_dir.clone(),
+            Arc::clone(&self.client),
+            Arc::clone(&self.db_scripts),
         )))
     }
 }
@@ -1006,21 +1099,17 @@ impl Node for PostgresRoot {
 // during navigation — keeping the constructor free of a `list_databases`
 // round trip on every `get_by_id` walk through a `<db>/...` path.
 struct DatabaseNode {
-    client: Arc<PostgresClient>,
     name: String,
-    instance_data_dir: std::path::PathBuf,
+    client: Arc<PostgresClient>,
+    db_scripts: Arc<DbScriptTree>,
 }
 
 impl DatabaseNode {
-    fn new(
-        client: Arc<PostgresClient>,
-        name: String,
-        instance_data_dir: std::path::PathBuf,
-    ) -> Self {
+    fn new(name: String, client: Arc<PostgresClient>, db_scripts: Arc<DbScriptTree>) -> Self {
         Self {
-            client,
             name,
-            instance_data_dir,
+            client,
+            db_scripts,
         }
     }
 }
@@ -1045,146 +1134,287 @@ impl Node for DatabaseNode {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![
-            schemas_group_node_type(),
-            schema_node_type(),
-            db_scripts_group_node_type(),
-            db_script_dir_node_type(),
-            db_script_node_type(),
-        ]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            // Original DBeaver-style group: a single virtual "Schemas"
-            // folder. Kept for views that want a place to attach
-            // sibling groups (Views, Functions, …).
-            "postgres:schemas" => Ok(ListResult {
-                items: vec![NodeSummary {
-                    id: format!("{}/{}", self.name, SCHEMAS_GROUP_ID),
-                    label: "Schemas".into(),
-                    node_type: schemas_group_node_type(),
-                    metadata: Metadata { fields: vec![] },
-                    has_children: None,
-                }],
-                applied_sort: Vec::new(),
-                page: None,
-                batch_download_available: false,
-                downloaded: vec![],
-            }),
-            // Direct shortcut: skip the group node so a view can drill
-            // database → schema in one step. Composite IDs still go
-            // through the group segment so `get_by_id`'s walker stays
-            // unchanged.
-            "postgres:schema" => {
-                let entries = self
-                    .client
-                    .list_schemas(&self.name)
-                    .await
-                    .map_err(|e| ContentError::Other(e.into()))?;
-                let db = &self.name;
-                let items = entries
-                    .into_iter()
-                    .map(|e| NodeSummary {
-                        id: format!("{db}/{SCHEMAS_GROUP_ID}/{}", e.name),
-                        label: e.name.clone(),
-                        node_type: schema_node_type(),
-                        metadata: schema_metadata(&e),
-                        has_children: None,
-                    })
-                    .collect();
-                Ok(ListResult {
-                    items,
-                    applied_sort: Vec::new(),
-                    page: None,
-                    batch_download_available: false,
-                    downloaded: vec![],
-                })
-            }
-            // Sibling group node, lives next to "Schemas". Stable place
-            // to hang the per-database script directory.
-            "postgres:db_scripts" => Ok(ListResult {
-                items: vec![NodeSummary {
-                    id: format!("{}/{}", self.name, DB_SCRIPTS_GROUP_ID),
-                    label: "DB Scripts".into(),
-                    node_type: db_scripts_group_node_type(),
-                    metadata: Metadata { fields: vec![] },
-                    has_children: None,
-                }],
-                applied_sort: Vec::new(),
-                page: None,
-                batch_download_available: false,
-                downloaded: vec![],
-            }),
-            // Direct shortcut analogous to `postgres:schema`: skips the
-            // group node so a view can drill database → db_script in one
-            // step. Composite IDs still embed the group segment so the
-            // `get_by_id` walker resolves both routes.
-            "postgres:db_script" => {
-                let scripts = crate::query::list_db_scripts_in_database(
-                    &self.instance_data_dir,
-                    &self.name,
-                )
-                .await
-                .map_err(|e| ContentError::Other(Box::new(e)))?;
-                let db = &self.name;
-                let items = scripts
-                    .into_iter()
-                    .map(|script| NodeSummary {
-                        id: format!("{db}/{DB_SCRIPTS_GROUP_ID}/{script}"),
-                        label: script.clone(),
-                        node_type: db_script_node_type(),
-                        metadata: db_script_metadata(db, &script),
-                        has_children: None,
-                    })
-                    .collect();
-                Ok(ListResult {
-                    items,
-                    applied_sort: Vec::new(),
-                    page: None,
-                    batch_download_available: false,
-                    downloaded: vec![],
-                })
-            }
-            other => Err(ContentError::NotSupported(format!(
-                "unknown child type: {other}"
-            ))),
-        }
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         match id {
             SCHEMAS_GROUP_ID => Ok(Box::new(SchemasGroupNode {
+                database: self.name.clone(),
                 client: Arc::clone(&self.client),
-                database: self.name.clone(),
+                node_id: format!("{}/{SCHEMAS_GROUP_ID}", self.name),
             })),
-            DB_SCRIPTS_GROUP_ID => Ok(Box::new(DbScriptsGroupNode {
-                database: self.name.clone(),
-                instance_data_dir: self.instance_data_dir.clone(),
-            })),
+            DB_SCRIPTS_GROUP_ID => Ok(DbScriptTree::group_node(&self.db_scripts, &self.name)),
             other => Err(ContentError::NotFound(other.into())),
         }
     }
 }
 
 const SCHEMAS_GROUP_ID: &str = "schemas";
-const TABLES_GROUP_ID: &str = "tables";
-const DB_SCRIPTS_GROUP_ID: &str = "db_scripts";
+pub(crate) const TABLES_GROUP_ID: &str = "tables";
+pub(crate) const VIEWS_GROUP_ID: &str = "views";
+const ROWS_GROUP_ID: &str = "rows";
+const EDIT_VIEW_ACTION: &str = "edit_view";
+const EDIT_ROW_ACTION: &str = "edit_row";
+
+// ---------------------------------------------------------------------------
+// Shared listing logic. Each of these is the single implementation of one
+// per-node `list` body, keyed by the parsed path parts + the pieces of
+// adapter/node state it needs. BOTH the legacy `Node::list` match arms AND
+// the `PostgresAdapter::childs` fetch closures call these — no duplication.
+// ---------------------------------------------------------------------------
+
+fn empty_list(items: Vec<NodeSummary>) -> ListResult {
+    ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    }
+}
+
+/// `postgres:database` list under root.
+async fn list_databases_impl(client: &PostgresClient) -> Result<ListResult> {
+    let entries = client
+        .list_databases()
+        .await
+        .map_err(|e| ContentError::Other(e.into()))?;
+    let items = entries
+        .into_iter()
+        .map(|e| NodeSummary {
+            id: e.name.clone(),
+            label: e.name.clone(),
+            node_type: database_node_type(),
+            metadata: database_metadata(&e),
+            has_children: None,
+        })
+        .collect();
+    Ok(empty_list(items))
+}
+
+/// Cross-DB / cross-schema flat `postgres:table` (or `postgres:view`) list
+/// under root. IDs use the composite `<db>/schemas/<s>/<group>/<name>` form.
+async fn list_all_relations_impl(
+    client: &PostgresClient,
+    kind: RelationKind,
+) -> Result<ListResult> {
+    let entries = match kind {
+        RelationKind::Table => client.list_all_tables().await,
+        RelationKind::View => client.list_all_views().await,
+    }
+    .map_err(|e| ContentError::Other(e.into()))?;
+    Ok(empty_list(relation_summaries(entries, kind)))
+}
+
+/// The group segment and node type one [`RelationKind`] renders as.
+fn relation_shape(kind: RelationKind) -> (&'static str, NodeType) {
+    match kind {
+        RelationKind::Table => (TABLES_GROUP_ID, table_node_type()),
+        RelationKind::View => (VIEWS_GROUP_ID, view_node_type()),
+    }
+}
+
+/// Catalogue entries → node summaries. Shared by the flat root list and
+/// the per-schema one so an id is minted in exactly one place.
+fn relation_summaries(entries: Vec<TableEntry>, kind: RelationKind) -> Vec<NodeSummary> {
+    let (group, node_type) = relation_shape(kind);
+    entries
+        .into_iter()
+        .map(|e| NodeSummary {
+            id: format!(
+                "{}/{SCHEMAS_GROUP_ID}/{}/{group}/{}",
+                e.database, e.schema, e.name
+            ),
+            label: e.name.clone(),
+            node_type: node_type.clone(),
+            metadata: table_metadata(&e),
+            has_children: None,
+        })
+        .collect()
+}
+
+/// Filesystem-backed flat `postgres:script` list under root (mixes
+/// table-level `queries/` and DB-level `db_scripts/`).
+async fn list_all_scripts_impl(instance_data_dir: &std::path::Path) -> Result<ListResult> {
+    let table_scripts = crate::query::list_all_scripts(instance_data_dir)
+        .await
+        .map_err(|e| ContentError::Other(Box::new(e)))?;
+    let db_scripts = crate::query::list_all_db_scripts(instance_data_dir)
+        .await
+        .map_err(|e| ContentError::Other(Box::new(e)))?;
+    let mut items: Vec<NodeSummary> = table_scripts
+        .into_iter()
+        .map(|e| NodeSummary {
+            id: format!(
+                "script/{}/{}/{}/{}",
+                e.database, e.schema, e.table, e.script
+            ),
+            label: e.script.clone(),
+            node_type: script_node_type(),
+            metadata: script_metadata(&e),
+            has_children: None,
+        })
+        .collect();
+    items.extend(db_scripts.into_iter().map(|e| NodeSummary {
+        id: format!("db_script/{}/{}", e.database, e.script),
+        label: e.script.clone(),
+        node_type: script_node_type(),
+        metadata: Metadata {
+            fields: vec![
+                field("script", "Script", &e.script),
+                field("database", "Database", &e.database),
+                field("schema", "Schema", ""),
+                field("table", "Table", ""),
+            ],
+        },
+        has_children: None,
+    }));
+    Ok(empty_list(items))
+}
+
+/// The single virtual "Schemas" group folder under a database.
+fn list_schemas_group_impl(database: &str) -> ListResult {
+    empty_list(vec![NodeSummary {
+        id: format!("{database}/{SCHEMAS_GROUP_ID}"),
+        label: "Schemas".into(),
+        node_type: schemas_group_node_type(),
+        metadata: Metadata { fields: vec![] },
+        has_children: None,
+    }])
+}
+
+/// `postgres:schema` instances under a database (composite IDs go through
+/// the `schemas` group segment so `get_by_id` resolves both routes).
+async fn list_schemas_impl(client: &PostgresClient, database: &str) -> Result<ListResult> {
+    let entries = client
+        .list_schemas(database)
+        .await
+        .map_err(|e| ContentError::Other(e.into()))?;
+    let items = entries
+        .into_iter()
+        .map(|e| NodeSummary {
+            id: format!("{database}/{SCHEMAS_GROUP_ID}/{}", e.name),
+            label: e.name.clone(),
+            node_type: schema_node_type(),
+            metadata: schema_metadata(&e),
+            has_children: None,
+        })
+        .collect();
+    Ok(empty_list(items))
+}
+
+/// The single virtual "Tables" (or "Views") group folder under a schema.
+fn list_relations_group_impl(database: &str, schema: &str, kind: RelationKind) -> ListResult {
+    let (group, _) = relation_shape(kind);
+    let node_type = match kind {
+        RelationKind::Table => tables_group_node_type(),
+        RelationKind::View => views_group_node_type(),
+    };
+    empty_list(vec![NodeSummary {
+        id: format!("{database}/{SCHEMAS_GROUP_ID}/{schema}/{group}"),
+        label: node_type.display_name.clone(),
+        node_type,
+        metadata: Metadata { fields: vec![] },
+        has_children: None,
+    }])
+}
+
+/// `postgres:table` / `postgres:view` instances under a schema.
+async fn list_relations_impl(
+    client: &PostgresClient,
+    database: &str,
+    schema: &str,
+    kind: RelationKind,
+) -> Result<ListResult> {
+    let entries = match kind {
+        RelationKind::Table => client.list_tables(database, schema).await,
+        RelationKind::View => client.list_views(database, schema).await,
+    }
+    .map_err(|e| ContentError::Other(e.into()))?;
+    Ok(empty_list(relation_summaries(entries, kind)))
+}
+
+/// `postgres:row` instances under a table or a view (paginated `SELECT *`).
+///
+/// `group` is the id segment the parent was addressed by (`tables` or
+/// `views`) so the row ids stay under the node that listed them.
+#[allow(clippy::too_many_arguments)]
+async fn list_rows_impl(
+    client: &PostgresClient,
+    database: &str,
+    schema: &str,
+    group: &str,
+    table: &str,
+    kind: RelationKind,
+    params: &ListParams,
+) -> Result<ListResult> {
+    let (offset, limit) = match params.page {
+        Some(p) if p.limit > 0 => (p.offset, p.limit),
+        _ => (0, 100),
+    };
+    let page = client
+        .query_rows(database, schema, table, kind, offset, limit)
+        .await
+        .map_err(|e| ContentError::Other(e.into()))?;
+
+    let id_prefix = format!("{database}/{SCHEMAS_GROUP_ID}/{schema}/{group}/{table}");
+    let items = page
+        .rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let row_offset = offset as u64 + i as u64;
+            let fields = page
+                .columns
+                .iter()
+                .zip(row.iter())
+                .map(|(col, val)| MetadataField {
+                    key: col.clone(),
+                    value: val.clone().unwrap_or_else(|| "(null)".into()),
+                    display_label: col.clone(),
+                    editable: false,
+                    allowed_values: None,
+                })
+                .collect();
+            NodeSummary {
+                id: format!("{id_prefix}/rows/{row_offset}"),
+                label: format!("row {row_offset}"),
+                node_type: row_node_type(),
+                metadata: Metadata { fields },
+                has_children: None,
+            }
+        })
+        .collect();
+
+    Ok(ListResult {
+        items,
+        applied_sort: Vec::new(),
+        page: Some(PageInfo {
+            offset,
+            limit,
+            total: None,
+            has_next: page.has_more,
+            has_prev: offset > 0,
+        }),
+        batch_download_available: false,
+        downloaded: vec![],
+    })
+}
 
 // ---------------------------------------------------------------------------
 // "Schemas" group — children are individual schemas
 // ---------------------------------------------------------------------------
 
 struct SchemasGroupNode {
-    client: Arc<PostgresClient>,
     database: String,
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas` — the addressability invariant:
+    /// equals the id `get_by_id` consumes to rebuild this node.
+    node_id: String,
 }
 
 #[async_trait]
 impl Node for SchemasGroupNode {
     fn id(&self) -> &str {
-        SCHEMAS_GROUP_ID
+        &self.node_id
     }
 
     fn label(&self) -> &str {
@@ -1201,458 +1431,13 @@ impl Node for SchemasGroupNode {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![schema_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        if params.node_type.type_id != "postgres:schema" {
-            return Err(ContentError::NotSupported(format!(
-                "unknown child type: {}",
-                params.node_type.type_id
-            )));
-        }
-        let entries = self
-            .client
-            .list_schemas(&self.database)
-            .await
-            .map_err(|e| ContentError::Other(e.into()))?;
-        let db = &self.database;
-        let items = entries
-            .into_iter()
-            .map(|e| NodeSummary {
-                id: format!("{db}/{SCHEMAS_GROUP_ID}/{}", e.name),
-                label: e.name.clone(),
-                node_type: schema_node_type(),
-                metadata: schema_metadata(&e),
-                has_children: None,
-            })
-            .collect();
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         // Lazy: see comment on `PostgresAdapter::get_child`.
         Ok(Box::new(SchemaNode::new(
-            Arc::clone(&self.client),
             self.database.clone(),
             id.to_string(),
+            Arc::clone(&self.client),
         )))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// "DB Scripts" group — children are individual DB-level scripts loaded
-// from `<instance_data_dir>/db_scripts/<database>/<script>.sql`. Sits
-// alongside the `Schemas` branch so a view can mix both at the
-// database level (multi-tree-continuation, MT-1).
-// ---------------------------------------------------------------------------
-
-struct DbScriptsGroupNode {
-    database: String,
-    instance_data_dir: std::path::PathBuf,
-}
-
-#[async_trait]
-impl Node for DbScriptsGroupNode {
-    fn id(&self) -> &str {
-        DB_SCRIPTS_GROUP_ID
-    }
-
-    fn label(&self) -> &str {
-        "DB Scripts"
-    }
-
-    fn node_type(&self) -> &NodeType {
-        static T: std::sync::LazyLock<NodeType> =
-            std::sync::LazyLock::new(db_scripts_group_node_type);
-        &T
-    }
-
-    fn metadata(&self) -> &Metadata {
-        static EMPTY: Metadata = Metadata { fields: vec![] };
-        &EMPTY
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![db_script_dir_node_type(), db_script_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        // After DSF-1/DSF-2 the group lists BOTH folders and scripts;
-        // a YAML view binds either child type to its own ChildDef and
-        // the filter below decides which set surfaces in this call.
-        let want_dirs = params.node_type.type_id == "postgres:db_script_dir";
-        let want_scripts = params.node_type.type_id == "postgres:db_script";
-        if !want_dirs && !want_scripts {
-            return Err(ContentError::NotSupported(format!(
-                "unknown child type: {}",
-                params.node_type.type_id
-            )));
-        }
-        let entries = crate::query::list_db_script_entries(
-            &self.instance_data_dir,
-            &self.database,
-            std::path::Path::new(""),
-        )
-        .await
-        .map_err(|e| ContentError::Other(Box::new(e)))?;
-        let db = &self.database;
-        let mut items = Vec::new();
-        for e in entries {
-            let name = e.name().to_string();
-            match e {
-                crate::query::DbScriptTreeEntry::Dir { .. } if want_dirs => {
-                    items.push(NodeSummary {
-                        id: format!("{db}/{DB_SCRIPTS_GROUP_ID}/{name}"),
-                        label: name.clone(),
-                        node_type: db_script_dir_node_type(),
-                        metadata: db_script_dir_metadata(db, &name),
-                        has_children: None,
-                    });
-                }
-                crate::query::DbScriptTreeEntry::Script { .. } if want_scripts => {
-                    items.push(NodeSummary {
-                        id: format!("{db}/{DB_SCRIPTS_GROUP_ID}/{name}"),
-                        label: name.clone(),
-                        node_type: db_script_node_type(),
-                        metadata: db_script_metadata(db, &name),
-                        has_children: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
-    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        // Disambiguate dir vs script with a filesystem probe — same
-        // strategy `DbScriptDirNode::get_child` uses, kept identical so
-        // both root-flat and nested resolutions behave the same. Dir
-        // probe wins on collision (shouldn't happen because mkdir/touch
-        // would refuse anyway, but order matters for correctness).
-        let child_rel = std::path::PathBuf::from(id);
-        let dir_abs =
-            crate::query::db_script_dir_path(&self.instance_data_dir, &self.database, &child_rel);
-        if tokio::fs::metadata(&dir_abs).await.map(|m| m.is_dir()).unwrap_or(false) {
-            return Ok(Box::new(DbScriptDirNode {
-                database: self.database.clone(),
-                rel_path: child_rel.to_string_lossy().into_owned(),
-                name: id.to_string(),
-                instance_data_dir: self.instance_data_dir.clone(),
-                metadata: db_script_dir_metadata(&self.database, id),
-            }));
-        }
-        let file_abs =
-            crate::query::db_script_path(&self.instance_data_dir, &self.database, &child_rel);
-        if tokio::fs::metadata(&file_abs).await.map(|m| m.is_file()).unwrap_or(false) {
-            return Ok(Box::new(DbScriptNode {
-                database: self.database.clone(),
-                rel_path: child_rel.to_string_lossy().into_owned(),
-                name: id.to_string(),
-                instance_data_dir: self.instance_data_dir.clone(),
-                metadata: db_script_metadata(&self.database, id),
-            }));
-        }
-        Err(ContentError::NotFound(format!("db script or folder {id}")))
-    }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        db_scripts_group_actions()
-    }
-
-    async fn invoke_action(
-        &self,
-        name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
-        match name {
-            // `hint` carries the database (and empty parent_rel) for the
-            // TUI's cmdline prompt — see `dispatch_to_view_request` for
-            // the CreateChild arm. The legacy "add" alias keeps any
-            // out-of-tree caller working through one release.
-            "add-script" | "add" => Ok(ActionDispatch::CreateChild {
-                hint: format!("db_script:{}", self.database),
-            }),
-            "add-dir" => Ok(ActionDispatch::CreateChild {
-                hint: format!("db_script_dir:{}", self.database),
-            }),
-            other => Err(ContentError::NotSupported(format!(
-                "db_scripts group action '{other}' is not supported"
-            ))),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DbScriptDirNode — a folder inside the DB-Scripts tree. Holds its full
-// rel_path from the database root so list/get_child can compose absolute
-// node ids (`<db>/db_scripts/<rel_path>/<seg>`). Empty rel_path is the
-// database root and is represented by [`DbScriptsGroupNode`] instead —
-// keeping the two distinct lets the group node carry its own action set.
-// ---------------------------------------------------------------------------
-
-struct DbScriptDirNode {
-    database: String,
-    /// Full path relative to `db_scripts/<db>/`, joined with `/`. Never
-    /// empty (root is handled by [`DbScriptsGroupNode`]).
-    rel_path: String,
-    /// Last segment of `rel_path`; the segment walker hands this to
-    /// `get_child` so we keep a copy for [`Node::id`] without a string
-    /// scan on every poll.
-    name: String,
-    instance_data_dir: std::path::PathBuf,
-    metadata: Metadata,
-}
-
-#[async_trait]
-impl Node for DbScriptDirNode {
-    fn id(&self) -> &str {
-        &self.name
-    }
-
-    fn label(&self) -> &str {
-        &self.name
-    }
-
-    fn node_type(&self) -> &NodeType {
-        static T: std::sync::LazyLock<NodeType> =
-            std::sync::LazyLock::new(db_script_dir_node_type);
-        &T
-    }
-
-    fn metadata(&self) -> &Metadata {
-        &self.metadata
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![db_script_dir_node_type(), db_script_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        let want_dirs = params.node_type.type_id == "postgres:db_script_dir";
-        let want_scripts = params.node_type.type_id == "postgres:db_script";
-        if !want_dirs && !want_scripts {
-            return Err(ContentError::NotSupported(format!(
-                "unknown child type: {}",
-                params.node_type.type_id
-            )));
-        }
-        let entries = crate::query::list_db_script_entries(
-            &self.instance_data_dir,
-            &self.database,
-            std::path::Path::new(&self.rel_path),
-        )
-        .await
-        .map_err(|e| ContentError::Other(Box::new(e)))?;
-        let db = &self.database;
-        let prefix = &self.rel_path;
-        let mut items = Vec::new();
-        for e in entries {
-            let name = e.name().to_string();
-            match e {
-                crate::query::DbScriptTreeEntry::Dir { .. } if want_dirs => {
-                    items.push(NodeSummary {
-                        id: format!("{db}/{DB_SCRIPTS_GROUP_ID}/{prefix}/{name}"),
-                        label: name.clone(),
-                        node_type: db_script_dir_node_type(),
-                        metadata: db_script_dir_metadata(db, &name),
-                        has_children: None,
-                    });
-                }
-                crate::query::DbScriptTreeEntry::Script { .. } if want_scripts => {
-                    items.push(NodeSummary {
-                        id: format!("{db}/{DB_SCRIPTS_GROUP_ID}/{prefix}/{name}"),
-                        label: name.clone(),
-                        node_type: db_script_node_type(),
-                        metadata: db_script_metadata(db, &name),
-                        has_children: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
-    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        let child_rel = std::path::PathBuf::from(&self.rel_path).join(id);
-        let dir_abs =
-            crate::query::db_script_dir_path(&self.instance_data_dir, &self.database, &child_rel);
-        if tokio::fs::metadata(&dir_abs).await.map(|m| m.is_dir()).unwrap_or(false) {
-            return Ok(Box::new(DbScriptDirNode {
-                database: self.database.clone(),
-                rel_path: child_rel.to_string_lossy().into_owned(),
-                name: id.to_string(),
-                instance_data_dir: self.instance_data_dir.clone(),
-                metadata: db_script_dir_metadata(&self.database, id),
-            }));
-        }
-        let file_abs =
-            crate::query::db_script_path(&self.instance_data_dir, &self.database, &child_rel);
-        if tokio::fs::metadata(&file_abs).await.map(|m| m.is_file()).unwrap_or(false) {
-            return Ok(Box::new(DbScriptNode {
-                database: self.database.clone(),
-                rel_path: child_rel.to_string_lossy().into_owned(),
-                name: id.to_string(),
-                instance_data_dir: self.instance_data_dir.clone(),
-                metadata: db_script_metadata(&self.database, id),
-            }));
-        }
-        Err(ContentError::NotFound(format!("db script or folder {id}")))
-    }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        db_script_dir_actions()
-    }
-
-    async fn invoke_action(
-        &self,
-        name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
-        match name {
-            // `db_script:<db>:<parent_rel>` lets the TUI prompt scope to
-            // this folder and pre-fill the parent path.
-            "add-script" => Ok(ActionDispatch::CreateChild {
-                hint: format!("db_script:{}:{}", self.database, self.rel_path),
-            }),
-            "add-dir" => Ok(ActionDispatch::CreateChild {
-                hint: format!("db_script_dir:{}:{}", self.database, self.rel_path),
-            }),
-            // Empty-check happens inside the TUI handler which calls
-            // `delete_db_script_dir` — surface the not-empty error via
-            // Notify in DSF-4. Returning DeleteSelf keeps the same shape
-            // as the script-leaf delete; the TUI tells them apart by the
-            // node_type before picking which confirm popup to show.
-            "delete-dir" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
-            // rename / mark-move / paste-move are pure TUI flows: the
-            // adapter has no work to do until the user supplies the new
-            // name (rename) or pastes (paste-move). DSF-4 wires the
-            // dispatcher on action name + node_type.
-            "rename" | "mark-move" | "paste-move" => Ok(ActionDispatch::Noop),
-            other => Err(ContentError::NotSupported(format!(
-                "db_script_dir action '{other}' is not supported"
-            ))),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Leaf node for a single DB-level script. The actual SQL body lives in
-// the filesystem; load/save go through
-// [`PostgresAdapter::load_db_script_file`] / `save_db_script_file`.
-// ---------------------------------------------------------------------------
-
-struct DbScriptNode {
-    database: String,
-    /// Full path relative to `db_scripts/<db>/`, joined with `/`. For a
-    /// flat root script this equals `name`; for a nested script it looks
-    /// like `util/audit`. The on-disk file is `<rel_path>.sql` —
-    /// [`crate::query::db_script_path`] does the append.
-    rel_path: String,
-    /// Last segment of `rel_path`. Returned by [`Node::id`] /
-    /// [`Node::label`] so the row label stays compact in tree views.
-    name: String,
-    /// Needed so [`Self::invoke_action`] can read the on-disk script body
-    /// without an adapter handle. Populated by
-    /// [`DbScriptsGroupNode::get_child`] / [`DbScriptDirNode::get_child`].
-    instance_data_dir: std::path::PathBuf,
-    metadata: Metadata,
-}
-
-#[async_trait]
-impl Node for DbScriptNode {
-    fn id(&self) -> &str {
-        &self.name
-    }
-
-    fn label(&self) -> &str {
-        &self.name
-    }
-
-    fn node_type(&self) -> &NodeType {
-        static T: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(db_script_node_type);
-        &T
-    }
-
-    fn metadata(&self) -> &Metadata {
-        &self.metadata
-    }
-
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![]
-    }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        db_script_actions()
-    }
-
-    async fn invoke_action(
-        &self,
-        name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
-        match name {
-            "execute" => {
-                let body = crate::query::read_db_script(
-                    &self.instance_data_dir,
-                    &self.database,
-                    &self.rel_path,
-                )
-                .await
-                .map_err(|e| ContentError::Other(Box::new(e)))?;
-                let sql = crate::query::parse_query_area(&body).trim().to_string();
-                if sql.is_empty() {
-                    return Ok(ActionDispatch::Error(format!(
-                        "script '{}' has no SQL below the marker",
-                        self.rel_path
-                    )));
-                }
-                Ok(ActionDispatch::ExecuteQuery {
-                    database: self.database.clone(),
-                    sql,
-                    paged: true,
-                })
-            }
-            "edit" => Ok(ActionDispatch::OpenEditor {
-                session_kind: "script_editor".into(),
-                // `script` carries the FULL rel_path (may contain `/`).
-                // `PostgresDbScriptSession` resolves the on-disk file via
-                // `db_script_file_path(..., &script)`, which already
-                // accepts slashes (it's a `PathBuf::join`).
-                params: std::collections::HashMap::from([
-                    ("database".into(), self.database.clone()),
-                    ("script".into(), self.rel_path.clone()),
-                ]),
-            }),
-            "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
-            // TUI-owned flows; DSF-4 inspects action name + node_type and
-            // emits the right ViewRequest. Adapter has no work here.
-            "rename" | "mark-move" => Ok(ActionDispatch::Noop),
-            other => Err(ContentError::NotSupported(format!(
-                "db_script action '{other}' is not supported"
-            ))),
-        }
     }
 }
 
@@ -1660,19 +1445,25 @@ impl Node for DbScriptNode {
 // Schema node — single virtual child "Tables"
 // ---------------------------------------------------------------------------
 
-// Holds only the schema name; same rationale as [`DatabaseNode`].
+// Holds only the schema name; same rationale as [`DatabaseNode`]. Table
+// listing runs through the adapter's `childs` fetcher (which owns the
+// live client), so the node itself no longer needs a client handle.
 struct SchemaNode {
-    client: Arc<PostgresClient>,
     database: String,
     name: String,
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas/<s>`.
+    node_id: String,
 }
 
 impl SchemaNode {
-    fn new(client: Arc<PostgresClient>, database: String, name: String) -> Self {
+    fn new(database: String, name: String, client: Arc<PostgresClient>) -> Self {
+        let node_id = format!("{database}/{SCHEMAS_GROUP_ID}/{name}");
         Self {
-            client,
             database,
             name,
+            client,
+            node_id,
         }
     }
 }
@@ -1680,7 +1471,7 @@ impl SchemaNode {
 #[async_trait]
 impl Node for SchemaNode {
     fn id(&self) -> &str {
-        &self.name
+        &self.node_id
     }
 
     fn label(&self) -> &str {
@@ -1697,72 +1488,28 @@ impl Node for SchemaNode {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![tables_group_node_type(), table_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "postgres:tables" => Ok(ListResult {
-                items: vec![NodeSummary {
-                    id: format!(
-                        "{}/{SCHEMAS_GROUP_ID}/{}/{TABLES_GROUP_ID}",
-                        self.database, self.name
-                    ),
-                    label: "Tables".into(),
-                    node_type: tables_group_node_type(),
-                    metadata: Metadata { fields: vec![] },
-                    has_children: None,
-                }],
-                applied_sort: Vec::new(),
-                page: None,
-                batch_download_available: false,
-                downloaded: vec![],
-            }),
-            "postgres:table" => {
-                let entries = self
-                    .client
-                    .list_tables(&self.database, &self.name)
-                    .await
-                    .map_err(|e| ContentError::Other(e.into()))?;
-                let db = &self.database;
-                let schema = &self.name;
-                let items = entries
-                    .into_iter()
-                    .map(|e| NodeSummary {
-                        id: format!(
-                            "{db}/{SCHEMAS_GROUP_ID}/{schema}/{TABLES_GROUP_ID}/{}",
-                            e.name
-                        ),
-                        label: e.name.clone(),
-                        node_type: table_node_type(),
-                        metadata: table_metadata(&e),
-                        has_children: None,
-                    })
-                    .collect();
-                Ok(ListResult {
-                    items,
-                    applied_sort: Vec::new(),
-                    page: None,
-                    batch_download_available: false,
-                    downloaded: vec![],
-                })
-            }
-            other => Err(ContentError::NotSupported(format!(
-                "unknown child type: {other}"
-            ))),
-        }
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        if id != TABLES_GROUP_ID {
-            return Err(ContentError::NotFound(id.into()));
+        match id {
+            TABLES_GROUP_ID => Ok(Box::new(TablesGroupNode {
+                database: self.database.clone(),
+                schema: self.name.clone(),
+                client: Arc::clone(&self.client),
+                node_id: format!(
+                    "{}/{SCHEMAS_GROUP_ID}/{}/{TABLES_GROUP_ID}",
+                    self.database, self.name
+                ),
+            })),
+            VIEWS_GROUP_ID => Ok(Box::new(ViewsGroupNode {
+                database: self.database.clone(),
+                schema: self.name.clone(),
+                client: Arc::clone(&self.client),
+                node_id: format!(
+                    "{}/{SCHEMAS_GROUP_ID}/{}/{VIEWS_GROUP_ID}",
+                    self.database, self.name
+                ),
+            })),
+            other => Err(ContentError::NotFound(other.into())),
         }
-        Ok(Box::new(TablesGroupNode {
-            client: Arc::clone(&self.client),
-            database: self.database.clone(),
-            schema: self.name.clone(),
-        }))
     }
 }
 
@@ -1771,15 +1518,18 @@ impl Node for SchemaNode {
 // ---------------------------------------------------------------------------
 
 struct TablesGroupNode {
-    client: Arc<PostgresClient>,
     database: String,
     schema: String,
+    /// Handed down to the table so its rows can be read for editing.
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas/<s>/tables`.
+    node_id: String,
 }
 
 #[async_trait]
 impl Node for TablesGroupNode {
     fn id(&self) -> &str {
-        TABLES_GROUP_ID
+        &self.node_id
     }
 
     fn label(&self) -> &str {
@@ -1796,53 +1546,13 @@ impl Node for TablesGroupNode {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![table_node_type()]
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        if params.node_type.type_id != "postgres:table" {
-            return Err(ContentError::NotSupported(format!(
-                "unknown child type: {}",
-                params.node_type.type_id
-            )));
-        }
-        let entries = self
-            .client
-            .list_tables(&self.database, &self.schema)
-            .await
-            .map_err(|e| ContentError::Other(e.into()))?;
-        let db = &self.database;
-        let schema = &self.schema;
-        let items = entries
-            .into_iter()
-            .map(|e| NodeSummary {
-                id: format!(
-                    "{db}/{SCHEMAS_GROUP_ID}/{schema}/{TABLES_GROUP_ID}/{}",
-                    e.name
-                ),
-                label: e.name.clone(),
-                node_type: table_node_type(),
-                metadata: table_metadata(&e),
-                has_children: None,
-            })
-            .collect();
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         // Lazy: see comment on `PostgresAdapter::get_child`.
         Ok(Box::new(TableNode::new(
-            Arc::clone(&self.client),
             self.database.clone(),
             self.schema.clone(),
             id.to_string(),
+            Arc::clone(&self.client),
         )))
     }
 }
@@ -1854,26 +1564,27 @@ impl Node for TablesGroupNode {
 // as table columns.
 // ---------------------------------------------------------------------------
 
-// Holds only the table name; same rationale as [`DatabaseNode`].
+// Row *listing* runs through the adapter's `childs` fetcher (which owns the
+// live client). The client handle here is for the other direction: walking
+// down to a single row, which the row editor does by id.
 struct TableNode {
-    client: Arc<PostgresClient>,
     database: String,
     schema: String,
     name: String,
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas/<s>/tables/<t>`.
+    node_id: String,
 }
 
 impl TableNode {
-    fn new(
-        client: Arc<PostgresClient>,
-        database: String,
-        schema: String,
-        name: String,
-    ) -> Self {
+    fn new(database: String, schema: String, name: String, client: Arc<PostgresClient>) -> Self {
+        let node_id = format!("{database}/{SCHEMAS_GROUP_ID}/{schema}/{TABLES_GROUP_ID}/{name}");
         Self {
-            client,
             database,
             schema,
             name,
+            client,
+            node_id,
         }
     }
 }
@@ -1881,7 +1592,7 @@ impl TableNode {
 #[async_trait]
 impl Node for TableNode {
     fn id(&self) -> &str {
-        &self.name
+        &self.node_id
     }
 
     fn label(&self) -> &str {
@@ -1898,19 +1609,20 @@ impl Node for TableNode {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![row_node_type()]
+    /// Only the `rows` waypoint — a table has no other addressable child,
+    /// and the rows themselves are listed by the adapter's fetcher.
+    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        rows_group_child(
+            id,
+            &self.database,
+            &self.schema,
+            TABLES_GROUP_ID,
+            &self.name,
+            &self.client,
+        )
     }
 
-    fn actions(&self) -> Vec<NodeAction> {
-        table_actions()
-    }
-
-    async fn invoke_action(
-        &self,
-        name: &str,
-        _ctx: &ActionContext,
-    ) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
             "edit_sql" => Ok(ActionDispatch::OpenEditor {
                 session_kind: "query_editor".into(),
@@ -1929,71 +1641,638 @@ impl Node for TableNode {
             ))),
         }
     }
+}
 
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        if params.node_type.type_id != "postgres:row" {
-            return Err(ContentError::NotSupported(format!(
-                "unknown child type: {}",
-                params.node_type.type_id
-            )));
-        }
-        let (offset, limit) = match params.page {
-            Some(p) if p.limit > 0 => (p.offset, p.limit),
-            _ => (0, 100),
-        };
-        let page = self
-            .client
-            .query_rows(&self.database, &self.schema, &self.name, offset, limit)
-            .await
-            .map_err(|e| ContentError::Other(e.into()))?;
+// ---------------------------------------------------------------------------
+// The `rows` waypoint and the row itself
+// ---------------------------------------------------------------------------
 
-        let id_prefix = format!(
-            "{}/{SCHEMAS_GROUP_ID}/{}/{TABLES_GROUP_ID}/{}",
-            self.database, self.schema, self.name,
-        );
-        let items = page
-            .rows
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let row_offset = offset as u64 + i as u64;
-                let fields = page
-                    .columns
-                    .iter()
-                    .zip(row.iter())
-                    .map(|(col, val)| MetadataField {
-                        key: col.clone(),
-                        value: val.clone().unwrap_or_else(|| "(null)".into()),
-                        display_label: col.clone(),
-                        editable: false,
-                        allowed_values: None,
-                    })
-                    .collect();
-                NodeSummary {
-                    id: format!("{id_prefix}/rows/{row_offset}"),
-                    label: format!("row {row_offset}"),
-                    node_type: row_node_type(),
-                    metadata: Metadata { fields },
-                    has_children: None,
-                }
-            })
-            .collect();
+/// The `rows` segment below a table or a view. Shared by both, because a
+/// view's rows are addressed exactly like a table's — only the group
+/// segment of the id differs.
+fn rows_group_child(
+    id: &str,
+    database: &str,
+    schema: &str,
+    group: &str,
+    table: &str,
+    client: &Arc<PostgresClient>,
+) -> Result<Box<dyn Node>> {
+    if id != ROWS_GROUP_ID {
+        return Err(ContentError::NotFound(id.into()));
+    }
+    Ok(Box::new(RowsGroupNode {
+        database: database.to_string(),
+        schema: schema.to_string(),
+        group: group.to_string(),
+        table: table.to_string(),
+        client: Arc::clone(client),
+        node_id: format!("{database}/{SCHEMAS_GROUP_ID}/{schema}/{group}/{table}/{ROWS_GROUP_ID}"),
+    }))
+}
 
-        Ok(ListResult {
-            items,
-            applied_sort: Vec::new(),
-            page: Some(PageInfo {
-                offset,
-                limit,
-                total: None,
-                has_next: page.has_more,
-                has_prev: offset > 0,
-            }),
-            batch_download_available: false,
-            downloaded: vec![],
-        })
+/// Pure addressing node: it exists so `get_by_id` can walk through the
+/// `rows` segment of a row id. See [`rows_group_node_type`].
+struct RowsGroupNode {
+    database: String,
+    schema: String,
+    group: String,
+    table: String,
+    client: Arc<PostgresClient>,
+    node_id: String,
+}
+
+#[async_trait]
+impl Node for RowsGroupNode {
+    fn id(&self) -> &str {
+        &self.node_id
+    }
+
+    fn label(&self) -> &str {
+        "Rows"
+    }
+
+    fn node_type(&self) -> &NodeType {
+        static T: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(rows_group_node_type);
+        &T
+    }
+
+    fn metadata(&self) -> &Metadata {
+        static EMPTY: Metadata = Metadata { fields: vec![] };
+        &EMPTY
+    }
+
+    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        let offset: u32 = id.parse().map_err(|_| {
+            ContentError::NotFound(format!("`{id}` is not a row offset in {}", self.table))
+        })?;
+        Ok(Box::new(RowNode::new(
+            self.database.clone(),
+            self.schema.clone(),
+            self.group.clone(),
+            self.table.clone(),
+            offset,
+            Arc::clone(&self.client),
+        )))
     }
 }
+
+/// One data row, editable as a YAML mapping of its cells.
+///
+/// The offset in the id is only how the row was *found* — it is the key
+/// values read at `prepare` time that every statement afterwards uses, so a
+/// page that shifted underneath cannot redirect the write. See
+/// [`row_edit`](not_yet_done_sql_core::row_edit) for the buffer protocol,
+/// which is shared with every other SQL adapter.
+struct RowNode {
+    database: String,
+    schema: String,
+    table: String,
+    offset: u32,
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas/<s>/<group>/<table>/rows/<offset>`.
+    node_id: String,
+}
+
+impl RowNode {
+    /// `group` (`tables` or `views`) only shapes the node's own id, so that
+    /// it matches the id the listing minted for this row.
+    fn new(
+        database: String,
+        schema: String,
+        group: String,
+        table: String,
+        offset: u32,
+        client: Arc<PostgresClient>,
+    ) -> Self {
+        let node_id = format!(
+            "{database}/{SCHEMAS_GROUP_ID}/{schema}/{group}/{table}/{ROWS_GROUP_ID}/{offset}"
+        );
+        Self {
+            database,
+            schema,
+            table,
+            offset,
+            client,
+            node_id,
+        }
+    }
+
+    /// Reject the save without losing the user's text — same contract as
+    /// the view editor's rejection: the message becomes a banner above
+    /// their own buffer, which the editor reopens.
+    fn reject(buffer: &str, message: &str) -> ActionOutcome {
+        ActionOutcome::Reopen {
+            content: row_edit::render_with_error(buffer, message),
+            new_version: None,
+        }
+    }
+
+    /// `schema.table`, as a statement has to spell it.
+    fn qualified(&self) -> String {
+        format!("{}.{}", quote_ident(&self.schema), quote_ident(&self.table))
+    }
+
+    fn label_for_header(&self) -> String {
+        format!(
+            "Row {} of {}.{} in {}",
+            self.offset, self.schema, self.table, self.database
+        )
+    }
+
+    async fn key_spec(&self) -> Result<RowKeySpec> {
+        self.client
+            .row_key_spec(&self.database, &self.schema, &self.table)
+            .await
+            .map_err(ContentError::NotSupported)
+    }
+}
+
+#[async_trait]
+impl Node for RowNode {
+    fn id(&self) -> &str {
+        &self.node_id
+    }
+
+    fn label(&self) -> &str {
+        &self.table
+    }
+
+    fn node_type(&self) -> &NodeType {
+        static T: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(row_node_type);
+        &T
+    }
+
+    fn metadata(&self) -> &Metadata {
+        // The values the tree renders come from the listing's summaries;
+        // this node is only ever resolved to be edited.
+        static EMPTY: Metadata = Metadata { fields: vec![] };
+        &EMPTY
+    }
+
+    /// Read the row, render it, and remember what it looked like: the
+    /// `version` token carries both the cell values (to detect a concurrent
+    /// change on save) and the key values (so the `UPDATE` addresses the row
+    /// that was actually shown, not whatever now sits at the same offset).
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id != EDIT_ROW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a row has no editor action `{action_id}`"
+            )));
+        }
+        let keys = self.key_spec().await?;
+        let read = self
+            .client
+            .read_row_at(
+                &self.database,
+                &self.schema,
+                &self.table,
+                &keys,
+                self.offset,
+            )
+            .await
+            .map_err(|e| ContentError::Other(e.into()))?
+            .ok_or_else(|| {
+                ContentError::NotFound(format!(
+                    "row {} of {}.{} — the table has fewer rows than that now",
+                    self.offset, self.schema, self.table
+                ))
+            })?;
+
+        let row = RowSnapshot::new(read.cells);
+        Ok(EditorPrep {
+            template: row_edit::edit_buffer(
+                &self.label_for_header(),
+                &keys.note(),
+                POSTGRES_WRITE_NOTE,
+                &row,
+            ),
+            version: row_edit::version_token(&read.key_values, &row),
+            suffix: ".yaml".into(),
+            file_path: None,
+        })
+    }
+
+    /// Everything that can go wrong reopens the editor with a banner
+    /// instead of failing the action: the buffer is the only copy of what
+    /// the user typed, and a rejected edit is usually one keystroke away
+    /// from a good one. When the statement itself is refused, the statement
+    /// is shown next to the complaint — a type or constraint error is far
+    /// easier to place with the `UPDATE` in front of you.
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id != EDIT_ROW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a row has no editor action `{action_id}`"
+            )));
+        }
+        let ActionInput::Edited { text, version, .. } = input else {
+            return Err(ContentError::NotSupported(
+                "editing a row needs the editor's saved buffer".into(),
+            ));
+        };
+        // A banner from the previous attempt must reach neither the
+        // database nor the next buffer.
+        let buffer = row_edit::strip_error_banner(&text).to_string();
+        let (key_values, original) = row_edit::parse_version_token(&version).ok_or_else(|| {
+            ContentError::Other(
+                "the editor session lost the row it opened on"
+                    .to_string()
+                    .into(),
+            )
+        })?;
+
+        let edited = match row_edit::parse_row_buffer(&buffer) {
+            Ok(edited) => edited,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        let changes = match row_edit::changed_cells(&original, &edited) {
+            Ok(changes) => changes,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        if changes.is_empty() {
+            return Ok(ActionOutcome::NoChanges);
+        }
+
+        let keys = self.key_spec().await?;
+        let where_sql = row_edit::render_where(&key_values);
+
+        // Re-read before writing, exactly as the view editor does: the row
+        // may have changed since the editor opened, and overwriting that
+        // silently would drop somebody's change without anyone noticing.
+        let current = self
+            .client
+            .read_rows_where(&self.database, &self.schema, &self.table, &keys, &where_sql)
+            .await
+            .map_err(|e| ContentError::Other(e.into()))?;
+        match current.len() {
+            0 => {
+                return Ok(Self::reject(
+                    &buffer,
+                    &format!(
+                        "no row of {}.{} matches {where_sql} any more — it was deleted, or its \
+                         key changed, since this editor opened. Nothing was written.",
+                        self.schema, self.table
+                    ),
+                ));
+            }
+            1 => {
+                let now = RowSnapshot::new(current[0].cells.clone());
+                if now.version_token() != original.version_token() {
+                    return Ok(ActionOutcome::Reopen {
+                        content: row_edit::render_with_error(
+                            &buffer,
+                            "this row changed in the database since the editor opened. Your \
+                             text is unchanged above; saving again overwrites the new values \
+                             with it.",
+                        ),
+                        new_version: Some(row_edit::version_token(&key_values, &now)),
+                    });
+                }
+            }
+            _ => {
+                return Ok(Self::reject(
+                    &buffer,
+                    &format!(
+                        "{where_sql} matches more than one row of {}.{}, so a single row \
+                         cannot be changed through it — use a DB script with a WHERE that is \
+                         unique.",
+                        self.schema, self.table
+                    ),
+                ));
+            }
+        }
+
+        let statement = row_edit::build_update(&self.qualified(), &changes, &key_values);
+        match self.client.execute_write(&self.database, &statement).await {
+            // The re-read above proved the key matches exactly one row, so
+            // a count other than 1 would mean the row moved between the two
+            // statements — rare, but the user should hear about it rather
+            // than see a success message for nothing.
+            Ok(1) => Ok(ActionOutcome::Done {
+                message: Some(format!(
+                    "{} of {}.{} updated",
+                    row_edit::plural_columns(changes.len()),
+                    self.schema,
+                    self.table
+                )),
+            }),
+            Ok(affected) => Ok(Self::reject(
+                &buffer,
+                &format!("the statement changed {affected} rows instead of one:\n{statement}"),
+            )),
+            Err(message) => Ok(Self::reject(
+                &buffer,
+                &format!("{message}\n\nThe statement that failed:\n{statement}"),
+            )),
+        }
+    }
+}
+
+/// What saving a row does, for the buffer header. Worth saying that the
+/// values go in as text: Postgres converts a literal to the column's type,
+/// so a number, a date or a JSON document does not have to be spelled in
+/// any particular way beyond what that type accepts.
+const POSTGRES_WRITE_NOTE: &str = "On save one UPDATE is built from the columns that changed and run on its own.\n\
+     Values are written as text literals; the column's type converts them.";
+
+// ---------------------------------------------------------------------------
+// "Views" group — children are individual views
+// ---------------------------------------------------------------------------
+
+struct ViewsGroupNode {
+    database: String,
+    schema: String,
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas/<s>/views`.
+    node_id: String,
+}
+
+#[async_trait]
+impl Node for ViewsGroupNode {
+    fn id(&self) -> &str {
+        &self.node_id
+    }
+
+    fn label(&self) -> &str {
+        "Views"
+    }
+
+    fn node_type(&self) -> &NodeType {
+        static T: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(views_group_node_type);
+        &T
+    }
+
+    fn metadata(&self) -> &Metadata {
+        static EMPTY: Metadata = Metadata { fields: vec![] };
+        &EMPTY
+    }
+
+    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        // Lazy: see comment on `PostgresAdapter::get_child`.
+        Ok(Box::new(ViewNode::new(
+            self.database.clone(),
+            self.schema.clone(),
+            id.to_string(),
+            Arc::clone(&self.client),
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View node — a table node that can also edit what defines it
+// ---------------------------------------------------------------------------
+
+/// Rows below a view work exactly as they do below a table; what a view
+/// adds is that its whole content *is* SQL, so it can be edited like a
+/// stored script: [`Node::prepare`] hands out the `CREATE OR REPLACE VIEW …`
+/// statement, [`Node::execute`] takes the edited buffer back.
+struct ViewNode {
+    database: String,
+    schema: String,
+    name: String,
+    client: Arc<PostgresClient>,
+    /// Full composite id `<db>/schemas/<s>/views/<v>`.
+    node_id: String,
+}
+
+impl ViewNode {
+    fn new(database: String, schema: String, name: String, client: Arc<PostgresClient>) -> Self {
+        let node_id = format!("{database}/{SCHEMAS_GROUP_ID}/{schema}/{VIEWS_GROUP_ID}/{name}");
+        Self {
+            database,
+            schema,
+            name,
+            client,
+            node_id,
+        }
+    }
+
+    /// Reject the save without losing the user's text: the message becomes
+    /// a banner above their own buffer, which the editor reopens.
+    fn reject(buffer: &str, message: &str) -> ActionOutcome {
+        ActionOutcome::Reopen {
+            content: script_buffer::render_with_error(buffer, message),
+            new_version: None,
+        }
+    }
+
+    async fn stored_definition(&self) -> Result<Option<String>> {
+        self.client
+            .view_definition(&self.database, &self.schema, &self.name)
+            .await
+            .map_err(|e| ContentError::Other(e.into()))
+    }
+
+    /// `schema.name`, as the statement has to spell it.
+    fn qualified(&self) -> String {
+        format!("{}.{}", self.schema, self.name)
+    }
+}
+
+#[async_trait]
+impl Node for ViewNode {
+    fn id(&self) -> &str {
+        &self.node_id
+    }
+
+    fn label(&self) -> &str {
+        &self.name
+    }
+
+    fn node_type(&self) -> &NodeType {
+        static T: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(view_node_type);
+        &T
+    }
+
+    fn metadata(&self) -> &Metadata {
+        static EMPTY: Metadata = Metadata { fields: vec![] };
+        &EMPTY
+    }
+
+    /// A view's rows are addressed exactly like a table's; only the group
+    /// segment of the id differs.
+    async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
+        rows_group_child(
+            id,
+            &self.database,
+            &self.schema,
+            VIEWS_GROUP_ID,
+            &self.name,
+            &self.client,
+        )
+    }
+
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            // Same per-node SQL scripts a table has — a view is queryable
+            // the same way, so `Q` has to work the same way.
+            "edit_sql" => Ok(ActionDispatch::OpenEditor {
+                session_kind: "query_editor".into(),
+                params: std::collections::HashMap::from([
+                    ("database".into(), self.database.clone()),
+                    ("schema".into(), self.schema.clone()),
+                    ("table".into(), self.name.clone()),
+                ]),
+            }),
+            // `edit_view` is an `InputSpec::Editor` action and never
+            // arrives here: it goes through `prepare`/`execute` below.
+            other => Err(ContentError::NotSupported(format!(
+                "view node action '{other}' is not supported"
+            ))),
+        }
+    }
+
+    /// The buffer is the statement postgres re-prints for the view, and
+    /// `version` is that same text — so a concurrent change is detectable
+    /// by comparison alone, without a modification timestamp postgres does
+    /// not keep for a relation.
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id != EDIT_VIEW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a view has no editor action `{action_id}`"
+            )));
+        }
+        let definition = self
+            .stored_definition()
+            .await?
+            .ok_or_else(|| ContentError::NotFound(format!("view {}", self.qualified())))?;
+        Ok(EditorPrep {
+            template: view_ddl::edit_buffer(&self.qualified(), &definition, POSTGRES_REPLACE_NOTE),
+            version: definition,
+            suffix: ".sql".into(),
+            file_path: None,
+        })
+    }
+
+    /// Every way this can go wrong reopens the editor with a banner rather
+    /// than failing the action: the user's text is the only copy of what
+    /// they wrote, and a rejected definition is usually one edit away from
+    /// a good one.
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id != EDIT_VIEW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a view has no editor action `{action_id}`"
+            )));
+        }
+        let ActionInput::Edited { text, version, .. } = input else {
+            return Err(ContentError::NotSupported(
+                "editing a view definition needs the editor's saved buffer".into(),
+            ));
+        };
+        // A banner from the previous attempt must reach neither the
+        // database nor the next buffer.
+        let buffer = script_buffer::strip_error_banner(&text).to_string();
+
+        let parsed = match view_ddl::parse_create_view(script_buffer::parse_query_area(&buffer)) {
+            Ok(parsed) => parsed,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        if !view_ddl::same_object_name(&parsed.name, &self.name) {
+            return Ok(Self::reject(
+                &buffer,
+                &format!(
+                    "this editor edits {}, but the statement creates {} — saving it would \
+                     leave {} in place beside a second view. Rename it back, or create the \
+                     other view from a DB script.",
+                    self.qualified(),
+                    parsed.name,
+                    self.name
+                ),
+            ));
+        }
+        // The qualifier is not decoration here: an unqualified name
+        // resolves against the session's `search_path`, so dropping it
+        // could put the definition in a different schema than the one
+        // being edited — see `PostgresClient::replace_view`.
+        match parsed.qualifier.as_deref() {
+            Some(q) if view_ddl::same_object_name(q, &self.schema) => {}
+            Some(q) => {
+                return Ok(Self::reject(
+                    &buffer,
+                    &format!(
+                        "the statement names schema {q}, but this editor edits {} — saving it \
+                         would write to a different schema. Use a DB script for that.",
+                        self.qualified()
+                    ),
+                ));
+            }
+            None => {
+                return Ok(Self::reject(
+                    &buffer,
+                    &format!(
+                        "the view has to stay schema-qualified as {}: an unqualified name \
+                         follows the connection's search_path and could land in another schema.",
+                        self.qualified()
+                    ),
+                ));
+            }
+        }
+        if view_ddl::same_definition(&parsed.sql, &version) {
+            return Ok(ActionOutcome::NoChanges);
+        }
+
+        // Re-read before writing: the view may have changed since the
+        // editor opened (another session, a DB script), and replacing it
+        // silently would drop that change without anyone noticing. The
+        // fresh text becomes the new `version`, so saving again is a
+        // deliberate overwrite.
+        match self.stored_definition().await? {
+            Some(current) if !view_ddl::same_definition(&current, &version) => {
+                return Ok(ActionOutcome::Reopen {
+                    content: script_buffer::render_with_error(
+                        &buffer,
+                        &format!(
+                            "the definition of {} changed in the database since this editor \
+                             opened. Your text is unchanged above; saving again replaces the \
+                             new definition with it.",
+                            self.qualified()
+                        ),
+                    ),
+                    new_version: Some(current),
+                });
+            }
+            None => {
+                return Ok(ActionOutcome::Reopen {
+                    content: script_buffer::render_with_error(
+                        &buffer,
+                        &format!(
+                            "the view {} no longer exists — it was dropped since this editor \
+                             opened. Saving again re-creates it from your text.",
+                            self.qualified()
+                        ),
+                    ),
+                    // Empty token: the view is gone, so the next save has
+                    // nothing to conflict with.
+                    new_version: Some(String::new()),
+                });
+            }
+            Some(_) => {}
+        }
+
+        match self
+            .client
+            .replace_view(&self.database, &self.schema, &self.name, &parsed.sql)
+            .await
+        {
+            Ok(()) => Ok(ActionOutcome::Done {
+                message: Some(format!("view {} replaced", self.qualified())),
+            }),
+            // Postgres' own complaint — a missing table, an unknown
+            // column, a changed column list, a missing privilege — is
+            // exactly what the user needs to see, next to the text that
+            // caused it.
+            Err(message) => Ok(Self::reject(&buffer, &message)),
+        }
+    }
+}
+
+/// How postgres swaps a definition, for the buffer header. Both halves are
+/// worth saying: nothing is dropped (so dependent views and grants
+/// survive), but in exchange the result columns are fixed.
+const POSTGRES_REPLACE_NOTE: &str = "On save the definition is replaced in place — nothing is dropped, so\n\
+     dependent views and privileges survive.\n\
+     The result columns have to stay as they are; postgres only allows\n\
+     appending new ones. Restructure a view from a DB script instead.";
 
 #[cfg(test)]
 mod pagination_tests {
@@ -2006,14 +2285,20 @@ mod pagination_tests {
     #[test]
     fn wraps_simple_select() {
         let got = wrap_for_pagination("SELECT * FROM t", page(0, 100)).unwrap();
-        assert_eq!(got, "SELECT * FROM (SELECT * FROM t) AS _nyd_pg LIMIT 101 OFFSET 0");
+        assert_eq!(
+            got,
+            "SELECT * FROM (SELECT * FROM t) AS _nyd_pg LIMIT 101 OFFSET 0"
+        );
     }
 
     #[test]
     fn wraps_select_with_quoted_identifiers() {
         let q = r#"SELECT * FROM "public"."01_Sample_Item";"#;
         let got = wrap_for_pagination(q, page(0, 100));
-        assert!(got.is_some(), "quoted identifiers must not block pagination");
+        assert!(
+            got.is_some(),
+            "quoted identifiers must not block pagination"
+        );
         let wrapped = got.unwrap();
         assert!(wrapped.contains("LIMIT 101"));
         assert!(wrapped.contains("OFFSET 0"));
@@ -2050,7 +2335,10 @@ mod pagination_tests {
     #[test]
     fn semicolon_inside_string_does_not_count_as_multi_statement() {
         let got = wrap_for_pagination("SELECT ';' FROM t", page(0, 100));
-        assert!(got.is_some(), "single-statement SELECT with quoted ; should wrap");
+        assert!(
+            got.is_some(),
+            "single-statement SELECT with quoted ; should wrap"
+        );
     }
 
     #[test]
@@ -2089,37 +2377,66 @@ mod pagination_tests {
     }
 }
 
-/// DSF-2 tests: exercise the DB-script tree at the Node trait level
-/// (no Postgres client required — the group node only needs an
-/// `instance_data_dir` for its file ops).
+/// Wiring tests for the DB-Scripts branch: the branch itself (nodes,
+/// actions, CRUD) is tested in `not_yet_done_sql_core::db_script_nodes`;
+/// what has to hold *here* is that this adapter hangs it off the right
+/// parents, under the `postgres:` type prefix, and reachable through
+/// `childs`. No Postgres client required — the branch is filesystem-only.
 #[cfg(test)]
 mod db_script_tree_tests {
     use super::*;
+    use not_yet_done_content::children;
     use std::path::{Path, PathBuf};
 
-    fn unique_tmpdir() -> PathBuf {
+    /// Build an offline [`PostgresAdapter`] whose `instance_data_dir()`
+    /// resolves to a fresh unique directory, and return both. The
+    /// db-script listing is filesystem-only, so no live Postgres client
+    /// is needed — the adapter's `childs` fetchers read the returned dir.
+    fn build_adapter() -> (PostgresAdapter, PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!(
-            "nyd-adapter-test-{nanos}-{n}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        // Unique instance id → unique per-instance data dir (the default
+        // `<data_local>/not_yet_done/postgres/<instance_id>` layout).
+        let instance_id = format!("test-{nanos}-{n}-{}", std::process::id());
+        let client = crate::client::PostgresClient::new(
+            not_yet_done_transport::TransportConfig {
+                mode: not_yet_done_transport::TransportMode::Direct,
+                ssh: vec![],
+                target: not_yet_done_transport::Endpoint {
+                    host: "db.invalid".into(),
+                    port: 5432,
+                },
+            },
+            crate::config::PostgresAuth {
+                user: "u".into(),
+                password: not_yet_done_content::CredentialProvider::Literal { value: "x".into() },
+                admin_database: "postgres".into(),
+                sslmode: crate::config::SslMode::Disable,
+            },
+            None,
+            None,
+        );
+        let adapter =
+            PostgresAdapter::from_client(Arc::new(client), "test-conn".into(), instance_id, None);
+        let dir = adapter.instance_data_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        (adapter, dir)
     }
 
-    fn list_params(type_id: &str) -> ListParams {
+    // Build ListParams for a given child type. Uses the canonical
+    // NodeType constructor (not a stripped-down placeholder) so it
+    // matches by full-struct equality inside `children::list`, which
+    // locates the `Child` by `NodeType == NodeType` rather than only
+    // the `type_id` the removed `Node::list` match arms keyed on.
+    fn list_params(node_type: NodeType) -> ListParams {
         ListParams {
-            node_type: NodeType {
-                type_id: type_id.into(),
-                mime_type: "".into(),
-                syntax: None,
-                file_extension: "".into(),
-                display_name: "".into(),
-            },
+            node_type,
             query: None,
             sort: Vec::new(),
             page: None,
@@ -2128,30 +2445,52 @@ mod db_script_tree_tests {
         }
     }
 
-    async fn build_group(database: &str, instance: &Path) -> DbScriptsGroupNode {
-        DbScriptsGroupNode {
-            database: database.to_string(),
-            instance_data_dir: instance.to_path_buf(),
-        }
+    /// Walk root → database → `db_scripts`, the same route `get_by_id`
+    /// takes. Proves the group node is reachable from the catalogue side.
+    async fn group_of(adapter: &PostgresAdapter, database: &str) -> Box<dyn Node> {
+        adapter
+            .get_by_id(&format!("{database}/{DB_SCRIPTS_GROUP_ID}"))
+            .await
+            .expect("db_scripts group")
+    }
+
+    #[tokio::test]
+    async fn database_walk_reaches_the_group_under_the_postgres_prefix() {
+        let (adapter, tmp) = build_adapter();
+        let g = group_of(&adapter, "mydb").await;
+        assert_eq!(g.id(), "mydb/db_scripts");
+        assert_eq!(g.node_type().type_id, "postgres:db_scripts");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
     async fn group_lists_dirs_and_scripts_separately() {
-        let tmp = unique_tmpdir();
+        let (adapter, tmp) = build_adapter();
         // Layout: root has a folder `util`, a SQL script, and a Python
         // script — the second one verifies that the listing is no longer
         // gated on the `.sql` extension.
-        crate::query::create_db_script_dir(&tmp, "mydb", Path::new("util")).await.unwrap();
-        crate::query::write_db_script(&tmp, "mydb", "audit.sql", "SELECT 1;").await.unwrap();
-        crate::query::write_db_script(&tmp, "mydb", "migrate.py", "print('hi')").await.unwrap();
-        let g = build_group("mydb", &tmp).await;
+        crate::query::create_db_script_dir(&tmp, "mydb", Path::new("util"))
+            .await
+            .unwrap();
+        crate::query::write_db_script(&tmp, "mydb", "audit.sql", "SELECT 1;")
+            .await
+            .unwrap();
+        crate::query::write_db_script(&tmp, "mydb", "migrate.py", "print('hi')")
+            .await
+            .unwrap();
+        let g = group_of(&adapter, "mydb").await;
+        let types = adapter.db_scripts.types();
 
-        let dirs = g.list(list_params("postgres:db_script_dir")).await.unwrap();
+        let dirs = children::list(&adapter, g.as_ref(), list_params(types.dir.clone()))
+            .await
+            .unwrap();
         let dir_names: Vec<&str> = dirs.items.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(dir_names, vec!["util"]);
         assert_eq!(dirs.items[0].node_type.type_id, "postgres:db_script_dir");
 
-        let scripts = g.list(list_params("postgres:db_script")).await.unwrap();
+        let scripts = children::list(&adapter, g.as_ref(), list_params(types.script.clone()))
+            .await
+            .unwrap();
         let script_names: Vec<&str> = scripts.items.iter().map(|n| n.label.as_str()).collect();
         // Labels carry the extension so the user sees what type each
         // file is at a glance.
@@ -2162,41 +2501,38 @@ mod db_script_tree_tests {
     }
 
     #[tokio::test]
-    async fn group_get_child_resolves_dir_vs_script() {
-        let tmp = unique_tmpdir();
-        crate::query::create_db_script_dir(&tmp, "mydb", Path::new("util")).await.unwrap();
-        crate::query::write_db_script(&tmp, "mydb", "audit.sql", "SELECT 1;").await.unwrap();
-        let g = build_group("mydb", &tmp).await;
-
-        let dir_node = g.get_child("util").await.unwrap();
-        assert_eq!(dir_node.node_type().type_id, "postgres:db_script_dir");
-        // get_child takes the rel-path segment including extension —
-        // that's how it disambiguates from a folder of the same stem.
-        let script_node = g.get_child("audit.sql").await.unwrap();
-        assert_eq!(script_node.node_type().type_id, "postgres:db_script");
-        assert!(g.get_child("nope").await.is_err());
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[tokio::test]
     async fn dir_node_lists_nested_children_with_full_ids() {
-        let tmp = unique_tmpdir();
-        crate::query::create_db_script_dir(&tmp, "mydb", Path::new("util/inner")).await.unwrap();
-        crate::query::write_db_script(&tmp, "mydb", "util/helper.sql", "SELECT 1;").await.unwrap();
-        let g = build_group("mydb", &tmp).await;
+        let (adapter, tmp) = build_adapter();
+        crate::query::create_db_script_dir(&tmp, "mydb", Path::new("util/inner"))
+            .await
+            .unwrap();
+        crate::query::write_db_script(&tmp, "mydb", "util/helper.sql", "SELECT 1;")
+            .await
+            .unwrap();
+        let g = group_of(&adapter, "mydb").await;
         let dir_node_box = g.get_child("util").await.unwrap();
-        // get_child returns Box<dyn Node>; the runtime type is DbScriptDirNode
-        // but we exercise it via the Node trait.
+        let types = adapter.db_scripts.types();
 
-        let scripts = dir_node_box.list(list_params("postgres:db_script")).await.unwrap();
+        let scripts = children::list(
+            &adapter,
+            dir_node_box.as_ref(),
+            list_params(types.script.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(scripts.items.len(), 1);
         assert_eq!(scripts.items[0].label, "helper.sql");
         // Node id encodes the full path so the segment walker can later
         // resolve it back via root → database → db_scripts → util → helper.sql.
         assert_eq!(scripts.items[0].id, "mydb/db_scripts/util/helper.sql");
 
-        let dirs = dir_node_box.list(list_params("postgres:db_script_dir")).await.unwrap();
+        let dirs = children::list(
+            &adapter,
+            dir_node_box.as_ref(),
+            list_params(types.dir.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(dirs.items.len(), 1);
         assert_eq!(dirs.items[0].label, "inner");
         assert_eq!(dirs.items[0].id, "mydb/db_scripts/util/inner");
@@ -2204,119 +2540,500 @@ mod db_script_tree_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// The database level also offers its scripts flat, skipping the
+    /// group node — a view spec can drill straight from database to
+    /// script. Folders never show up in that list.
     #[tokio::test]
-    async fn group_action_set_includes_add_script_and_add_dir() {
-        let tmp = unique_tmpdir();
-        let g = build_group("mydb", &tmp).await;
-        let names: Vec<String> = g.actions().into_iter().map(|a| a.id).collect();
-        assert!(names.iter().any(|n| n == "add-script"));
-        assert!(names.iter().any(|n| n == "add-dir"));
+    async fn database_offers_a_flat_script_shortcut() {
+        let (adapter, tmp) = build_adapter();
+        crate::query::create_db_script_dir(&tmp, "mydb", Path::new("util"))
+            .await
+            .unwrap();
+        crate::query::write_db_script(&tmp, "mydb", "audit.sql", "SELECT 1;")
+            .await
+            .unwrap();
+        crate::query::write_db_script(&tmp, "mydb", "util/deep.sql", "SELECT 1;")
+            .await
+            .unwrap();
+        let db = adapter.get_by_id("mydb").await.unwrap();
+        let types = adapter.db_scripts.types();
+
+        let flat = children::list(&adapter, db.as_ref(), list_params(types.script.clone()))
+            .await
+            .unwrap();
+        assert_eq!(flat.items.len(), 1);
+        assert_eq!(flat.items[0].id, "mydb/db_scripts/audit.sql");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// `actions_for_type` must answer for the branch's three types
+    /// without a node walk — that's what renders the shortcut hints.
     #[tokio::test]
-    async fn dir_action_set_covers_full_set() {
-        let dir = DbScriptDirNode {
-            database: "mydb".into(),
-            rel_path: "util".into(),
-            name: "util".into(),
-            instance_data_dir: unique_tmpdir(),
-            metadata: db_script_dir_metadata("mydb", "util"),
+    async fn actions_for_type_covers_the_branch_and_the_catalogue() {
+        let (adapter, tmp) = build_adapter();
+        let types = adapter.db_scripts.types();
+        let ids = |nt: &NodeType| -> Vec<String> {
+            adapter
+                .actions_for_type(nt)
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
         };
-        let names: Vec<String> = dir.actions().into_iter().map(|a| a.id).collect();
-        for want in ["add-script", "add-dir", "rename", "mark-move", "paste-move", "delete-dir"] {
-            assert!(names.iter().any(|n| n == want), "missing action: {want}");
-        }
-        let _ = std::fs::remove_dir_all(&dir.instance_data_dir);
+        assert!(ids(&types.group).iter().any(|n| n == "add-script"));
+        assert!(ids(&types.dir).iter().any(|n| n == "delete-dir"));
+        assert!(ids(&types.script).iter().any(|n| n == "execute"));
+        assert!(ids(&table_node_type()).iter().any(|n| n == "edit_sql"));
+        // A row carries exactly one action: its own editor. Not `edit_sql`
+        // — the query editor belongs to the relation, and a row config
+        // reaches it via `parent:edit_sql`.
+        assert_eq!(ids(&row_node_type()), vec![EDIT_ROW_ACTION.to_string()]);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// The definition editor is what makes a view its own node type, so it
+    /// has to be offered on views and only there. A view keeps the table's
+    /// `edit_sql` too — it is queryable the same way.
     #[tokio::test]
-    async fn leaf_action_set_extended_with_rename_and_mark_move() {
-        let leaf = DbScriptNode {
-            database: "mydb".into(),
-            rel_path: "util/audit".into(),
-            name: "audit".into(),
-            instance_data_dir: unique_tmpdir(),
-            metadata: db_script_metadata("mydb", "audit"),
+    async fn only_a_view_offers_the_definition_editor() {
+        let (adapter, tmp) = build_adapter();
+        let ids = |nt: &NodeType| -> Vec<String> {
+            adapter
+                .actions_for_type(nt)
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
         };
-        let names: Vec<String> = leaf.actions().into_iter().map(|a| a.id).collect();
-        for want in ["execute", "edit", "rename", "mark-move", "delete"] {
-            assert!(names.iter().any(|n| n == want), "missing action: {want}");
-        }
-        let _ = std::fs::remove_dir_all(&leaf.instance_data_dir);
+        assert!(
+            ids(&view_node_type())
+                .iter()
+                .any(|id| id == EDIT_VIEW_ACTION)
+        );
+        assert!(ids(&view_node_type()).iter().any(|id| id == "edit_sql"));
+        assert!(
+            !ids(&table_node_type())
+                .iter()
+                .any(|id| id == EDIT_VIEW_ACTION)
+        );
+        // …and it has to be an editor action: bound from YAML as
+        // `type: edit`, never as a `shortcuts:` entry.
+        let editor = adapter
+            .actions_for_type(&view_node_type())
+            .into_iter()
+            .find(|a| a.id == EDIT_VIEW_ACTION)
+            .expect("the view offers its definition editor");
+        assert!(matches!(editor.input, InputSpec::Editor));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Unit-level round trip for the catalogue branch's composition
+    /// (`*Node::new` composes the id purely — no Postgres round trip).
+    #[test]
+    fn table_node_id_round_trips() {
+        let (adapter, tmp) = build_adapter();
+        let schema = SchemaNode::new("mydb".into(), "public".into(), Arc::clone(&adapter.client));
+        assert_eq!(schema.id(), "mydb/schemas/public");
+        assert_eq!(schema.label(), "public");
+        let table = TableNode::new(
+            "mydb".into(),
+            "public".into(),
+            "users".into(),
+            Arc::clone(&adapter.client),
+        );
+        assert_eq!(table.id(), "mydb/schemas/public/tables/users");
+        assert_eq!(table.label(), "users");
+        let view = ViewNode::new(
+            "mydb".into(),
+            "public".into(),
+            "v_balance".into(),
+            Arc::clone(&adapter.client),
+        );
+        assert_eq!(view.id(), "mydb/schemas/public/views/v_balance");
+        assert_eq!(view.label(), "v_balance");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A view is reachable through its own group segment, and the walk is
+    /// lazy — no catalogue query is needed to address one, which is also
+    /// what lets the tests below run against an unreachable database.
     #[tokio::test]
-    async fn dir_add_actions_emit_create_child_with_parent_rel_in_hint() {
-        let dir = DbScriptDirNode {
-            database: "mydb".into(),
-            rel_path: "util/inner".into(),
-            name: "inner".into(),
-            instance_data_dir: unique_tmpdir(),
-            metadata: db_script_dir_metadata("mydb", "inner"),
-        };
-        let ctx = ActionContext::default();
-        match dir.invoke_action("add-script", &ctx).await.unwrap() {
-            ActionDispatch::CreateChild { hint } => {
-                assert_eq!(hint, "db_script:mydb:util/inner");
+    async fn a_view_is_addressable_through_its_own_group() {
+        let (adapter, tmp) = build_adapter();
+        let node = adapter
+            .get_by_id("mydb/schemas/public/views/v_balance")
+            .await
+            .expect("the views group resolves");
+        assert_eq!(node.node_type().type_id, "postgres:view");
+        assert_eq!(node.id(), "mydb/schemas/public/views/v_balance");
+        // The group itself, too — a YAML view can list it as a folder.
+        let group = adapter
+            .get_by_id("mydb/schemas/public/views")
+            .await
+            .expect("the views group node resolves");
+        assert_eq!(group.node_type().type_id, "postgres:views");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Rows of a view are minted under `views/<v>`, not under `tables/` —
+    /// otherwise `get_by_id` would walk a row back to a table that may not
+    /// even exist. Only the id shape is asserted here; fetching the rows
+    /// themselves needs a live server.
+    #[test]
+    fn view_rows_stay_under_the_view_id() {
+        let (_adapter, tmp) = build_adapter();
+        let summaries = relation_summaries(
+            vec![TableEntry {
+                database: "mydb".into(),
+                schema: "public".into(),
+                name: "v_balance".into(),
+                kind: RelationKind::View,
+                owner: "u".into(),
+                estimated_rows: -1,
+            }],
+            RelationKind::View,
+        );
+        assert_eq!(summaries[0].id, "mydb/schemas/public/views/v_balance");
+        assert_eq!(summaries[0].node_type.type_id, "postgres:view");
+        // `reltuples` is meaningless for a view — the cell stays empty
+        // rather than claiming -1 rows.
+        let estimated = summaries[0]
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == "estimated_rows")
+            .expect("the column exists for both kinds");
+        assert_eq!(estimated.value, "");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Everything a save can be rejected for, before any statement
+    /// reaches the database: the buffer comes back with a banner and the
+    /// user's own text, never an error that loses it.
+    ///
+    /// These run against an unreachable host on purpose — each rejection
+    /// has to happen *before* the network, and the test proves it does by
+    /// completing at all.
+    #[tokio::test]
+    async fn rejections_reopen_the_buffer_before_touching_the_database() {
+        let (adapter, tmp) = build_adapter();
+        let stored = "CREATE OR REPLACE VIEW \"public\".\"v_balance\" AS\n SELECT 1;";
+        let save = |sql: &str| {
+            let mut node = ViewNode::new(
+                "mydb".into(),
+                "public".into(),
+                "v_balance".into(),
+                Arc::clone(&adapter.client),
+            );
+            let text = view_ddl::edit_buffer("public.v_balance", sql, POSTGRES_REPLACE_NOTE);
+            async move {
+                node.execute(
+                    EDIT_VIEW_ACTION,
+                    ActionInput::Edited {
+                        text,
+                        original: stored.to_string(),
+                        version: stored.to_string(),
+                    },
+                )
+                .await
+                .expect("a rejected save is an outcome, not an error")
             }
-            other => panic!("expected CreateChild, got {other:?}"),
-        }
-        match dir.invoke_action("add-dir", &ctx).await.unwrap() {
-            ActionDispatch::CreateChild { hint } => {
-                assert_eq!(hint, "db_script_dir:mydb:util/inner");
+        };
+
+        for (sql, needle) in [
+            // A rename would leave the old view in place beside a new one.
+            (
+                "CREATE OR REPLACE VIEW public.v_balance_renamed AS SELECT 1",
+                "Rename it back",
+            ),
+            // A second statement would change something else entirely.
+            (
+                "CREATE OR REPLACE VIEW public.v_balance AS SELECT 1; DROP TABLE t;",
+                "second statement",
+            ),
+            // Another schema is another object, same as another name.
+            (
+                "CREATE OR REPLACE VIEW other.v_balance AS SELECT 1",
+                "different schema",
+            ),
+            // Unqualified, the target depends on the session search_path.
+            (
+                "CREATE OR REPLACE VIEW v_balance AS SELECT 1",
+                "search_path",
+            ),
+        ] {
+            match save(sql).await {
+                ActionOutcome::Reopen {
+                    content,
+                    new_version,
+                } => {
+                    assert!(content.contains(needle), "{sql} → {content}");
+                    // The user's own statement survives above the banner.
+                    assert!(content.contains("SELECT 1"), "{sql} → {content}");
+                    assert!(new_version.is_none(), "a rejection keeps the old token");
+                }
+                other => panic!("{sql} should reopen, got {}", outcome_name(&other)),
             }
-            other => panic!("expected CreateChild, got {other:?}"),
         }
-        let _ = std::fs::remove_dir_all(&dir.instance_data_dir);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Saving an untouched buffer must not replace the view: postgres
+    /// re-prints the definition without the trailing `;` the buffer ends
+    /// in, so comparing verbatim would report a change on every save.
     #[tokio::test]
-    async fn leaf_edit_action_passes_full_rel_path_in_script_param() {
-        let leaf = DbScriptNode {
-            database: "mydb".into(),
-            rel_path: "util/audit".into(),
-            name: "audit".into(),
-            instance_data_dir: unique_tmpdir(),
-            metadata: db_script_metadata("mydb", "audit"),
-        };
-        let ctx = ActionContext::default();
-        match leaf.invoke_action("edit", &ctx).await.unwrap() {
-            ActionDispatch::OpenEditor { session_kind, params } => {
-                assert_eq!(session_kind, "script_editor");
-                assert_eq!(params.get("database").map(String::as_str), Some("mydb"));
-                // Full rel_path including slashes so the session opens
-                // the nested file, not a sibling at root.
-                assert_eq!(params.get("script").map(String::as_str), Some("util/audit"));
-            }
-            other => panic!("expected OpenEditor, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&leaf.instance_data_dir);
+    async fn an_untouched_buffer_reports_no_changes() {
+        let (adapter, tmp) = build_adapter();
+        let stored = "CREATE OR REPLACE VIEW \"public\".\"v_balance\" AS\n SELECT 1";
+        let mut node = ViewNode::new(
+            "mydb".into(),
+            "public".into(),
+            "v_balance".into(),
+            Arc::clone(&adapter.client),
+        );
+        let outcome = node
+            .execute(
+                EDIT_VIEW_ACTION,
+                ActionInput::Edited {
+                    text: view_ddl::edit_buffer("public.v_balance", stored, POSTGRES_REPLACE_NOTE),
+                    original: stored.to_string(),
+                    version: stored.to_string(),
+                },
+            )
+            .await
+            .expect("outcome");
+        assert!(
+            matches!(outcome, ActionOutcome::NoChanges),
+            "got {}",
+            outcome_name(&outcome)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ── The row editor ──────────────────────────────────────────────────
+    //
+    // Reading a row needs a live server, so what is testable offline is the
+    // addressing and everything the save decides *before* the network. That
+    // is also where the interesting contract sits: a rejected save must come
+    // back as a buffer, and the statement must address the row the editor
+    // opened on rather than whatever now sits at its offset.
+
+    /// The row's own snapshot and the keys that address it — the pair a
+    /// session token carries.
+    fn row_session() -> (Vec<(String, Option<String>)>, RowSnapshot) {
+        use not_yet_done_sql_core::RowCell;
+        (
+            vec![("id".to_string(), Some("1".to_string()))],
+            RowSnapshot::new(vec![
+                RowCell::editable("id", Some("1".into())),
+                RowCell::editable("email", Some("someone@example.invalid".into())),
+                RowCell::editable("note", None),
+            ]),
+        )
+    }
+
+    fn users_row(adapter: &PostgresAdapter, offset: u32) -> RowNode {
+        RowNode::new(
+            "mydb".into(),
+            "public".into(),
+            TABLES_GROUP_ID.into(),
+            "users".into(),
+            offset,
+            Arc::clone(&adapter.client),
+        )
+    }
+
+    /// A row id has to walk through its `rows` waypoint: the edit session
+    /// resolves the node it opened by id, so without that segment the whole
+    /// editor would be unreachable.
     #[tokio::test]
-    async fn dir_mark_paste_rename_return_noop() {
-        let dir = DbScriptDirNode {
-            database: "mydb".into(),
-            rel_path: "util".into(),
-            name: "util".into(),
-            instance_data_dir: unique_tmpdir(),
-            metadata: db_script_dir_metadata("mydb", "util"),
-        };
-        let ctx = ActionContext::default();
-        for name in ["rename", "mark-move", "paste-move"] {
-            assert!(matches!(
-                dir.invoke_action(name, &ctx).await.unwrap(),
-                ActionDispatch::Noop
-            ));
+    async fn a_row_id_resolves_through_its_waypoint() {
+        let (adapter, tmp) = build_adapter();
+        let node = adapter
+            .get_by_id("mydb/schemas/public/tables/users/rows/7")
+            .await
+            .expect("a row resolves without touching the database");
+        assert_eq!(node.node_type().type_id, "postgres:row");
+        assert_eq!(node.id(), "mydb/schemas/public/tables/users/rows/7");
+
+        // A view's rows stay under `views/`, so the walk never lands on a
+        // table of the same name.
+        let of_view = adapter
+            .get_by_id("mydb/schemas/public/views/v_balance/rows/0")
+            .await
+            .expect("a view row resolves too");
+        assert_eq!(of_view.id(), "mydb/schemas/public/views/v_balance/rows/0");
+
+        // The waypoint itself is addressable — that is what makes the walk
+        // work — but it is not a row.
+        let waypoint = adapter
+            .get_by_id("mydb/schemas/public/tables/users/rows")
+            .await
+            .expect("the waypoint resolves");
+        assert_eq!(waypoint.node_type().type_id, "postgres:rows");
+
+        // Anything that is not an offset is not a row.
+        assert!(
+            adapter
+                .get_by_id("mydb/schemas/public/tables/users/rows/last")
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Both halves of the seam answer only their own action, so a
+    /// misconfigured `id:` in a view YAML says what is wrong instead of
+    /// opening an editor on nothing.
+    #[tokio::test]
+    async fn a_row_answers_only_its_own_editor_action() {
+        let (adapter, tmp) = build_adapter();
+        let mut node = users_row(&adapter, 0);
+        assert!(node.prepare("edit_full").await.is_err());
+        assert!(
+            node.execute(
+                "edit_full",
+                ActionInput::Edited {
+                    text: String::new(),
+                    original: String::new(),
+                    version: String::new(),
+                },
+            )
+            .await
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Without the token there are no key values, so there is no row to
+    /// write to — that is an error, not a rejection: the buffer cannot be
+    /// fixed by editing it.
+    #[tokio::test]
+    async fn a_save_without_its_session_token_is_refused() {
+        let (adapter, tmp) = build_adapter();
+        let mut node = users_row(&adapter, 0);
+        let outcome = node
+            .execute(
+                EDIT_ROW_ACTION,
+                ActionInput::Edited {
+                    text: "id: 1\n".into(),
+                    original: String::new(),
+                    version: "not a token".into(),
+                },
+            )
+            .await;
+        assert!(outcome.is_err(), "a lost session cannot be saved");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Everything the save can refuse before the network, against an
+    /// unreachable host on purpose: each case has to be decided from the
+    /// buffer alone, and the test proves it is by completing at all.
+    #[tokio::test]
+    async fn rejections_reopen_the_row_buffer_before_touching_the_database() {
+        let (adapter, tmp) = build_adapter();
+        let (keys, row) = row_session();
+        let version = row_edit::version_token(&keys, &row);
+
+        for (buffer, needle) in [
+            // Not YAML at all.
+            ("id: 1\n  email: broken\n", "line"),
+            // A column this row has not got — a typo, most likely.
+            ("id: 1\nemial: someone@example.invalid\n", "emial"),
+        ] {
+            let mut node = users_row(&adapter, 0);
+            let outcome = node
+                .execute(
+                    EDIT_ROW_ACTION,
+                    ActionInput::Edited {
+                        text: buffer.to_string(),
+                        original: String::new(),
+                        version: version.clone(),
+                    },
+                )
+                .await
+                .expect("a rejected save is an outcome, not an error");
+            match outcome {
+                ActionOutcome::Reopen {
+                    content,
+                    new_version,
+                } => {
+                    assert!(content.contains(needle), "{buffer} → {content}");
+                    // The user's own text survives above the banner.
+                    assert!(content.contains("id: 1"), "{buffer} → {content}");
+                    assert!(new_version.is_none(), "a rejection keeps the old token");
+                }
+                other => panic!("{buffer} should reopen, got {}", outcome_name(&other)),
+            }
         }
-        // delete-dir takes the same DeleteSelf path as leaf delete; the
-        // TUI tells them apart via node_type.
-        assert!(matches!(
-            dir.invoke_action("delete-dir", &ctx).await.unwrap(),
-            ActionDispatch::DeleteSelf { .. }
-        ));
-        let _ = std::fs::remove_dir_all(&dir.instance_data_dir);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Saving an untouched row must not build a statement at all — the
+    /// unreachable host is what proves it does not.
+    #[tokio::test]
+    async fn an_untouched_row_buffer_reports_no_changes() {
+        let (adapter, tmp) = build_adapter();
+        let (keys, row) = row_session();
+        let mut node = users_row(&adapter, 0);
+        let outcome = node
+            .execute(
+                EDIT_ROW_ACTION,
+                ActionInput::Edited {
+                    text: row_edit::edit_buffer("Row 0", "keyed by id", POSTGRES_WRITE_NOTE, &row),
+                    original: String::new(),
+                    version: row_edit::version_token(&keys, &row),
+                },
+            )
+            .await
+            .expect("outcome");
+        assert!(
+            matches!(outcome, ActionOutcome::NoChanges),
+            "got {}",
+            outcome_name(&outcome)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The statement is schema-qualified and quoted, and it addresses the
+    /// row by the key values the editor read — not by the offset in the id,
+    /// which is only how the row was found.
+    #[test]
+    fn the_update_addresses_the_row_it_opened_on() {
+        let (adapter, tmp) = build_adapter();
+        let node = users_row(&adapter, 42);
+        assert_eq!(node.qualified(), "\"public\".\"users\"");
+
+        let sql = row_edit::build_update(
+            &node.qualified(),
+            &[row_edit::CellChange {
+                column: "email".into(),
+                value: Some("other@example.invalid".into()),
+            }],
+            &[("id".to_string(), Some("1".to_string()))],
+        );
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"users\" SET\n    \"email\" = 'other@example.invalid'\n  \
+             WHERE \"id\" = '1'"
+        );
+        assert!(
+            !sql.contains("42"),
+            "the offset never reaches the statement"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `ActionOutcome` has no `Debug`, so a failing assertion needs a name
+    /// by hand.
+    fn outcome_name(outcome: &ActionOutcome) -> &'static str {
+        match outcome {
+            ActionOutcome::Done { .. } => "Done",
+            ActionOutcome::Reopen { .. } => "Reopen",
+            ActionOutcome::NoChanges => "NoChanges",
+            ActionOutcome::Navigate { .. } => "Navigate",
+            ActionOutcome::OpenExternal { .. } => "OpenExternal",
+            ActionOutcome::OpenEditor { .. } => "OpenEditor",
+        }
     }
 }
 
@@ -2351,11 +3068,12 @@ mod child_process_env_tests {
                 sslmode,
             },
             None,
+            None,
         ))
     }
 
     fn adapter(client: Arc<PostgresClient>) -> PostgresAdapter {
-        PostgresAdapter::from_client(client, "test-conn".into(), "test".into())
+        PostgresAdapter::from_client(client, "test-conn".into(), "test".into(), None)
     }
 
     #[test]
@@ -2406,7 +3124,9 @@ mod child_process_env_tests {
             let a = adapter(client);
             let nref = NodeRef::parse("postgres/anydb").unwrap();
             assert_eq!(
-                a.child_process_env(&nref).get("PGSSLMODE").map(String::as_str),
+                a.child_process_env(&nref)
+                    .get("PGSSLMODE")
+                    .map(String::as_str),
                 Some(expect)
             );
         }

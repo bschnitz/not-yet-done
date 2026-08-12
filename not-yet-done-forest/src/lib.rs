@@ -21,8 +21,8 @@ use std::ops::Range;
 
 // Re-export table-generic types so existing consumers don't break.
 pub use not_yet_done_table::{
-    ColSizer, ColStrategy, ColumnId, FixedColSizer, MixedColSizer,
-    fit_to_width, fit_to_width_with_highlights,
+    ColSizer, ColStrategy, ColumnId, FixedColSizer, MixedColSizer, fit_to_width,
+    fit_to_width_with_highlights,
 };
 
 // =============================================================================
@@ -37,7 +37,10 @@ pub struct TreeNode<T> {
 
 impl<T> TreeNode<T> {
     pub fn new(element: T) -> Self {
-        TreeNode { element, children: Vec::new() }
+        TreeNode {
+            element,
+            children: Vec::new(),
+        }
     }
 }
 
@@ -154,7 +157,11 @@ where
             }
         }
 
-        Forest { roots, item_to_root, flat_items }
+        Forest {
+            roots,
+            item_to_root,
+            flat_items,
+        }
     }
 
     pub fn roots(&self) -> &[TreeNode<T>] {
@@ -342,10 +349,7 @@ where
     Self::Item: TreeDisplay,
 {
     /// Render every node visible (legacy behaviour).
-    fn tree_rows<Id>(
-        &self,
-        query: &Q,
-    ) -> Vec<TreeCellRow<Id>>
+    fn tree_rows<Id>(&self, query: &Q) -> Vec<TreeCellRow<Id>>
     where
         Self::Item: IntoRow<Id = Id>,
         Id: Eq + Hash + Clone,
@@ -398,9 +402,7 @@ where
                 let shifted_ranges: Vec<Range<usize>> = ghost
                     .highlight_ranges
                     .iter()
-                    .map(|r| {
-                        (r.start + connector_char_len)..(r.end + connector_char_len)
-                    })
+                    .map(|r| (r.start + connector_char_len)..(r.end + connector_char_len))
                     .collect();
 
                 let mut tree_cell = match desc {
@@ -428,8 +430,7 @@ where
                 }
 
                 let n = ghost.children.len();
-                let next_prefix =
-                    forest_child_prefix(depth, is_last, has_desc, &prefix);
+                let next_prefix = forest_child_prefix(depth, is_last, has_desc, &prefix);
                 for (i, child) in ghost.children.iter().enumerate().rev() {
                     stack.push((child, depth + 1, i == n - 1, next_prefix.clone()));
                 }
@@ -508,21 +509,26 @@ where
         &layout.separator,
     );
 
-    let fit_row = |id: Id, tree_cell: Option<&str>, connector_chars: usize, data: &Row<Id>| -> TableRow<Id> {
-        let cells: Vec<String> = cols
-            .iter()
-            .zip(widths.iter())
-            .map(|(col_id, &w)| {
-                let raw = if col_id == &tree_col_id {
-                    tree_cell.unwrap_or("").to_string()
-                } else {
-                    data.cells.get(col_id).cloned().unwrap_or_default()
-                };
-                fit_to_width(&raw, w)
-            })
-            .collect();
-        TableRow { id, cells, connector_chars }
-    };
+    let fit_row =
+        |id: Id, tree_cell: Option<&str>, connector_chars: usize, data: &Row<Id>| -> TableRow<Id> {
+            let cells: Vec<String> = cols
+                .iter()
+                .zip(widths.iter())
+                .map(|(col_id, &w)| {
+                    let raw = if col_id == &tree_col_id {
+                        tree_cell.unwrap_or("").to_string()
+                    } else {
+                        data.cells.get(col_id).cloned().unwrap_or_default()
+                    };
+                    fit_to_width(&raw, w)
+                })
+                .collect();
+            TableRow {
+                id,
+                cells,
+                connector_chars,
+            }
+        };
 
     let rendered_header = header.map(|h| {
         let dummy_tree = h.cells.get(&tree_col_id).map(|s| s.as_str()).unwrap_or("");
@@ -530,8 +536,7 @@ where
     });
 
     let mut rows = Vec::with_capacity(tree_rows.len());
-    let mut highlights: HashMap<Id, Vec<Range<usize>>> =
-        HashMap::with_capacity(tree_rows.len());
+    let mut highlights: HashMap<Id, Vec<Range<usize>>> = HashMap::with_capacity(tree_rows.len());
 
     for (tr, dr) in tree_rows.into_iter().zip(data_rows.into_iter()) {
         let id = tr.id.clone();
@@ -541,7 +546,11 @@ where
         rows.push(fit_row(id, Some(&tr.tree_cell), tr.connector_chars, &dr));
     }
 
-    RenderedTable { header: rendered_header, rows, highlights }
+    RenderedTable {
+        header: rendered_header,
+        rows,
+        highlights,
+    }
 }
 
 // =============================================================================
@@ -583,8 +592,7 @@ where
                 max_width = max_width.max(connector.width());
 
                 let n = ghost.children.len();
-                let next_prefix =
-                    forest_child_prefix(depth, is_last, has_desc, &prefix);
+                let next_prefix = forest_child_prefix(depth, is_last, has_desc, &prefix);
                 for (i, child) in ghost.children.iter().enumerate().rev() {
                     stack.push((child, depth + 1, i == n - 1, next_prefix.clone()));
                 }
@@ -622,10 +630,10 @@ pub fn forest_connector(spec: ConnectorSpec<'_>) -> String {
         String::new()
     } else {
         match (has_description || !has_children, is_last) {
-            (true, false)  => format!("{}├── ", prefix),
-            (true, true)   => format!("{}└── ", prefix),
+            (true, false) => format!("{}├── ", prefix),
+            (true, true) => format!("{}└── ", prefix),
             (false, false) => format!("{}├───┐", prefix),
-            (false, true)  => format!("{}└───┐", prefix),
+            (false, true) => format!("{}└───┐", prefix),
         }
     };
 
@@ -696,7 +704,9 @@ where
     S: Eq + Hash,
     T: HasTreeShape<S>,
 {
-    let children: Vec<GhostNode<'a, T>> = node.children.iter()
+    let children: Vec<GhostNode<'a, T>> = node
+        .children
+        .iter()
         .filter_map(|child| prune_ghost_node(child, interesting))
         .collect();
 
@@ -748,9 +758,8 @@ where
     R: Clone,
 {
     // Phase 1: compute results bottom-up.
-    let result_trees: Vec<FoldResultNode<S, R>> = ghosts.iter()
-        .map(|g| fold_compute(g, f))
-        .collect();
+    let result_trees: Vec<FoldResultNode<S, R>> =
+        ghosts.iter().map(|g| fold_compute(g, f)).collect();
 
     // Phase 2: flatten to pre-order with tree connectors.
     let mut output = Vec::new();
@@ -769,7 +778,9 @@ where
     T: HasTreeShape<S> + TreeDisplay,
     R: Clone,
 {
-    let children: Vec<FoldResultNode<S, R>> = ghost.children.iter()
+    let children: Vec<FoldResultNode<S, R>> = ghost
+        .children
+        .iter()
         .map(|child| fold_compute(child, f))
         .collect();
 
@@ -837,27 +848,42 @@ mod tests {
 
     impl Item {
         fn new(id: u32, parent: Option<u32>, desc: &str) -> Self {
-            Self { id, parent_id: parent, desc: desc.to_string() }
+            Self {
+                id,
+                parent_id: parent,
+                desc: desc.to_string(),
+            }
         }
     }
 
     impl HasTreeShape<u32> for Item {
-        fn id(&self) -> u32 { self.id }
-        fn parent_id(&self) -> Option<u32> { self.parent_id }
+        fn id(&self) -> u32 {
+            self.id
+        }
+        fn parent_id(&self) -> Option<u32> {
+            self.parent_id
+        }
     }
 
     impl TreeDisplay for Item {
-        fn description(&self) -> Option<&str> { Some(&self.desc) }
+        fn description(&self) -> Option<&str> {
+            Some(&self.desc)
+        }
     }
 
     impl ForestItem<()> for Item {
-        fn matches_filter(&self, _query: &()) -> bool { true }
+        fn matches_filter(&self, _query: &()) -> bool {
+            true
+        }
     }
 
     impl IntoRow for Item {
         type Id = u32;
         fn into_row(&self) -> Row<u32> {
-            Row { id: self.id, cells: HashMap::new() }
+            Row {
+                id: self.id,
+                cells: HashMap::new(),
+            }
         }
     }
 
@@ -1055,9 +1081,8 @@ mod tests {
         }
         // No glyph either (all_visible uses Some(true) → ▼ for parents).
         // Parents A, B, C, G should have ▼; leaves D, E, F, H should not.
-        let cell_for = |id: u32| -> &str {
-            rows.iter().find(|r| r.id == id).unwrap().tree_cell.as_str()
-        };
+        let cell_for =
+            |id: u32| -> &str { rows.iter().find(|r| r.id == id).unwrap().tree_cell.as_str() };
         // all_visible passes is_expanded=true for parents; tree_rows_with_options
         // emits ▼ for parents and no glyph for leaves.
         assert!(cell_for(1).contains('\u{25BC}'), "A is parent → ▼ glyph");
@@ -1089,10 +1114,19 @@ mod tests {
 
         // `(N)` suffix uses unfiltered child count from the map.
         let cell_a = &rows.iter().find(|r| r.id == 1).unwrap().tree_cell;
-        assert!(cell_a.contains("(2)"), "A shows (2) for its 2 children: {cell_a:?}");
-        assert!(cell_a.contains('\u{25B6}'), "A shows ▶ glyph when collapsed: {cell_a:?}");
+        assert!(
+            cell_a.contains("(2)"),
+            "A shows (2) for its 2 children: {cell_a:?}"
+        );
+        assert!(
+            cell_a.contains('\u{25B6}'),
+            "A shows ▶ glyph when collapsed: {cell_a:?}"
+        );
         let cell_g = &rows.iter().find(|r| r.id == 7).unwrap().tree_cell;
-        assert!(cell_g.contains("(1)"), "G shows (1) for its 1 child: {cell_g:?}");
+        assert!(
+            cell_g.contains("(1)"),
+            "G shows (1) for its 1 child: {cell_g:?}"
+        );
     }
 
     /// Depth-based expansion mimicking `default_expand_depth`. With

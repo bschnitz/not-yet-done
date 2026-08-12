@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection,
-    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
 use shaku::Component;
 use uuid::Uuid;
@@ -23,11 +23,7 @@ pub trait LinkRepository: shaku::Interface {
     /// Create a link `source → target`. Idempotent: if the same
     /// directed pair already exists the existing row is returned
     /// instead of duplicating it.
-    async fn create(
-        &self,
-        source: &NodeRef,
-        target: &NodeRef,
-    ) -> Result<link::Model, CoreError>;
+    async fn create(&self, source: &NodeRef, target: &NodeRef) -> Result<link::Model, CoreError>;
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<link::Model>, CoreError>;
 
@@ -57,11 +53,7 @@ pub struct LinkRepositoryImpl {
 
 #[async_trait]
 impl LinkRepository for LinkRepositoryImpl {
-    async fn create(
-        &self,
-        source: &NodeRef,
-        target: &NodeRef,
-    ) -> Result<link::Model, CoreError> {
+    async fn create(&self, source: &NodeRef, target: &NodeRef) -> Result<link::Model, CoreError> {
         let db = self.db.as_ref().expect("DB nicht initialisiert");
         let source_s = source.as_str().to_string();
         let target_s = target.as_str().to_string();
@@ -147,7 +139,9 @@ mod tests {
         db.execute(&schema.create_table_from_entity(link::Entity))
             .await
             .expect("create link table");
-        let repo = LinkRepositoryImpl { db: Some(db.clone()) };
+        let repo = LinkRepositoryImpl {
+            db: Some(db.clone()),
+        };
         (repo, db)
     }
 

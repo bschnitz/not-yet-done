@@ -7,9 +7,9 @@
 //!       <child_id>_<child_desc>.md
 //!       ...
 
+use not_yet_done_task_core::entity::task::Model as Task;
 use std::path::PathBuf;
 use uuid::Uuid;
-use not_yet_done_task_core::entity::task::Model as Task;
 
 /// Base directory for task notes.
 pub fn notes_dir() -> PathBuf {
@@ -212,7 +212,9 @@ pub fn unmark_notes_deleted(task: &Task, all_tasks: &[Task]) {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with(&prefix) { continue; }
+            if !name.starts_with(&prefix) {
+                continue;
+            }
             if let Some(del_pos) = name.find("_deleted_at_") {
                 let base = &name[..del_pos];
                 if name.ends_with(".md") {

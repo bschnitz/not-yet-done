@@ -16,7 +16,10 @@ use super::util::other_err;
 const COMMENT_SEPARATOR: &str = "# ─────────────────────────────────────────────────";
 
 pub(super) fn comment_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("edit_full", "edit", InputSpec::Editor)]
+    vec![
+        NodeAction::new("edit_full", "edit", InputSpec::Editor),
+        NodeAction::new("delete", "delete", InputSpec::None),
+    ]
 }
 
 pub(super) struct JiraCommentNode {
@@ -29,11 +32,7 @@ pub(super) struct JiraCommentNode {
 }
 
 impl JiraCommentNode {
-    pub(super) fn new(
-        client: Arc<JiraClient>,
-        comment: JiraComment,
-        issue_key: String,
-    ) -> Self {
+    pub(super) fn new(client: Arc<JiraClient>, comment: JiraComment, issue_key: String) -> Self {
         let cached_metadata = Metadata {
             fields: vec![
                 MetadataField {
@@ -76,11 +75,7 @@ impl JiraCommentNode {
         }
     }
 
-    async fn write_body(
-        &mut self,
-        data: &[u8],
-        expected_version: Option<&str>,
-    ) -> Result<String> {
+    async fn write_body(&mut self, data: &[u8], expected_version: Option<&str>) -> Result<String> {
         if let Some(expected) = expected_version {
             if self.comment.updated != expected {
                 return Err(ContentError::Conflict(ConflictError {
@@ -128,20 +123,6 @@ impl Node for JiraCommentNode {
         &self.cached_metadata
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![]
-    }
-
-    async fn list(&self, _params: ListParams) -> Result<ListResult> {
-        Ok(ListResult {
-            items: vec![],
-            applied_sort: Vec::new(),
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         Err(ContentError::NotFound(format!("No child: {id}")))
     }
@@ -149,13 +130,22 @@ impl Node for JiraCommentNode {
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        // Always expose `edit`; the server rejects non-author edits and
-        // the user gets a clean error. Per-instance filtering would
-        // violate the deterministic-per-node_type contract that lets
-        // the TUI resolve hints without a `get_by_id` chain walk.
-        comment_actions()
+    /// `delete` opts into the frontend's generic delete plumbing: returning
+    /// [`ActionDispatch::DeleteSelf`] makes the TUI show a `(y/n)` prompt and,
+    /// on confirm, call `execute("delete", None)` here — which performs the
+    /// REST delete and lets the pane reload. The adapter authors the prompt
+    /// because only it knows the comment's author. Foreign-author deletes are
+    /// rejected by the server at execute time (same contract as `edit`).
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "delete" => Ok(ActionDispatch::DeleteSelf {
+                confirm: Some(format!(
+                    "Delete comment {} by {}? (y/n)",
+                    self.comment.id, self.comment.author
+                )),
+            }),
+            _ => Ok(ActionDispatch::Noop),
+        }
     }
 
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
@@ -170,6 +160,7 @@ impl Node for JiraCommentNode {
                     template,
                     version: self.comment.updated.clone(),
                     suffix: ".jira".into(),
+                    file_path: None,
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -178,21 +169,30 @@ impl Node for JiraCommentNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit_full", ActionInput::Edited { text, version, .. }) => {
                 let body = parse_comment_buffer(&text);
                 if body == self.comment.body.trim() {
                     return Ok(ActionOutcome::NoChanges);
                 }
-                let expected = if version.is_empty() { None } else { Some(version.as_str()) };
+                let expected = if version.is_empty() {
+                    None
+                } else {
+                    Some(version.as_str())
+                };
                 self.write_body(body.as_bytes(), expected).await?;
                 Ok(ActionOutcome::Done {
                     message: Some(format!("Comment {} updated", self.comment.id)),
+                })
+            }
+            ("delete", ActionInput::None) => {
+                self.client
+                    .delete_comment(&self.issue_key, &self.comment.id)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("Comment {} deleted", self.comment.id)),
                 })
             }
             (other, _) => Err(ContentError::NotSupported(format!(
@@ -256,9 +256,7 @@ mod tests {
     use super::*;
 
     fn test_client() -> Arc<JiraClient> {
-        Arc::new(
-            JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap(),
-        )
+        Arc::new(JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap())
     }
 
     fn sample_comment() -> JiraComment {
@@ -294,19 +292,21 @@ mod tests {
         assert_eq!(text, "This needs a fix ASAP.");
     }
 
-    #[test]
-    fn comment_node_has_no_children() {
+    #[tokio::test]
+    async fn comment_node_has_no_children() {
+        let adapter = crate::adapter::test_adapter().await;
         let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
-        assert!(node.children_types().is_empty());
+        assert!(not_yet_done_content::children::child_types(&adapter, &node).is_empty());
     }
 
     #[test]
     fn comment_node_declares_actions() {
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
-        let actions = node.actions();
-        assert_eq!(actions.len(), 1);
+        let actions = comment_actions();
+        assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].id, "edit_full");
         assert!(matches!(actions[0].input, InputSpec::Editor));
+        assert_eq!(actions[1].id, "delete");
+        assert!(matches!(actions[1].input, InputSpec::None));
     }
 
     #[test]
@@ -316,8 +316,25 @@ mod tests {
         // author. Foreign-author edits are rejected by the server at
         // execute time instead.
         let actions = comment_actions();
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].id, "edit_full");
+        assert_eq!(actions[1].id, "delete");
+    }
+
+    #[tokio::test]
+    async fn delete_requests_confirmation_with_author_and_id() {
+        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let dispatch = node
+            .invoke_action("delete", &ActionContext::default())
+            .await
+            .unwrap();
+        match dispatch {
+            ActionDispatch::DeleteSelf { confirm: Some(p) } => {
+                assert!(p.contains("10042"), "{p}");
+                assert!(p.contains("bob"), "{p}");
+            }
+            other => panic!("expected DeleteSelf with a prompt, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ pub mod tree_ops;
 // (FilterBuilder/ColumnRegistry, tree_ops) stays here because it is tied
 // to SeaORM and the task entity.
 pub use not_yet_done_filter::query_filter;
-pub use not_yet_done_filter::{extract_date_bounds, DateBounds};
 pub use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+pub use not_yet_done_filter::{DateBounds, extract_date_bounds};
 
 pub use builder::{ColumnRegistry, FilterBuilder};

@@ -6,8 +6,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use super::{ColumnStyles, StyleMap, TableWidgetCell, TableWidgetRow};
 use super::style::{TableStyle, TableStyleType as ST};
+use super::{ColumnStyles, ImageDraw, ImagePainter, StyleMap, TableWidgetCell, TableWidgetRow};
 
 pub(super) struct RenderData<'a> {
     pub fixed_header_rows: &'a [TableWidgetRow],
@@ -48,20 +48,38 @@ pub(super) struct RenderData<'a> {
     pub link_matches: &'a [(usize, usize, usize, String)],
     /// Whether link-hop labels are being shown (dims non-link lines).
     pub link_showing: bool,
+    /// Draws inline images, if the consumer supplied one. `None` = images
+    /// are simply not painted; their reserved lines stay blank.
+    pub image_painter: Option<&'a mut dyn ImagePainter>,
 }
 
-pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
-    if area.height == 0 || area.width == 0 { return; }
+pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
 
     let fixed_top = data.fixed_header_rows.len() as u16;
     let fixed_bottom = data.fixed_footer_rows.len() as u16;
-    let data_height = area.height.saturating_sub(fixed_top).saturating_sub(fixed_bottom);
+    let data_height = area
+        .height
+        .saturating_sub(fixed_top)
+        .saturating_sub(fixed_bottom);
+
+    // Top of the scrollable region — the origin inline images are placed
+    // against, so a picture can never bleed into a fixed header.
+    let data_top = area.top() + fixed_top;
 
     // Fixed header rows at top.
     let mut y = area.top();
     for row in data.fixed_header_rows {
-        if y >= area.bottom() { break; }
-        let row_area = Rect { y, height: 1, ..area };
+        if y >= area.bottom() {
+            break;
+        }
+        let row_area = Rect {
+            y,
+            height: 1,
+            ..area
+        };
         render_fixed_row(buf, row_area, row, data);
         y += 1;
     }
@@ -71,11 +89,14 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
     // paints them top-to-bottom and advances `y` by the row's height.
     let data_bottom = area.bottom().saturating_sub(fixed_bottom);
     let _ = data_height;
-    for (vi, row) in data.rows.iter()
-        .skip(data.scroll_offset)
-        .enumerate()
-    {
-        if y >= data_bottom { break; }
+    // Inline images located while walking the lines below. Collected rather
+    // than drawn on the spot: a later line's background pre-fill would paint
+    // straight over the graphics.
+    let mut image_draws: Vec<ImageDraw> = Vec::new();
+    for (vi, row) in data.rows.iter().skip(data.scroll_offset).enumerate() {
+        if y >= data_bottom {
+            break;
+        }
         let row_idx = data.scroll_offset + vi;
         let is_selected = data.focused && row_idx == data.selected_row;
 
@@ -98,21 +119,46 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
         };
 
         for (li, line) in row.lines.iter().enumerate().skip(skip_lines) {
-            if y >= data_bottom { break; }
-            let row_area = Rect { y, height: 1, ..area };
+            if y >= data_bottom {
+                break;
+            }
+            let row_area = Rect {
+                y,
+                height: 1,
+                ..area
+            };
             // A line opts out of selection styling via `highlight_on_select`
             // (e.g. a spacer line stays "outside" the selection block).
             let line_selected = is_selected && line.highlight_on_select && !dim_row;
             render_data_row(buf, row_area, &line.cells, row_idx, line_selected, data);
+
+            // First visible line of a picture: `row_in_image` says how much of
+            // it already scrolled past the top, which puts the full picture's
+            // top edge at `y - row_in_image` (possibly above the area). Every
+            // further line of the same picture is already covered by that one
+            // placement.
+            if let Some(img) = line.image {
+                if !image_draws.iter().any(|d| d.key == img.key) {
+                    image_draws.push(ImageDraw {
+                        key: img.key,
+                        x: img.col,
+                        y: y as i32 - data_top as i32 - img.row_in_image as i32,
+                        width: img.width,
+                        height: img.height,
+                    });
+                }
+            }
 
             // Dim non-matching rows during jump (all physical lines).
             if dim_row {
                 for x in area.left()..area.right() {
                     if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
                         let base = data.style.resolved_style(ST::Row);
-                        cell.set_style(Style::default()
-                            .fg(base.fg.unwrap_or_default())
-                            .bg(base.bg.unwrap_or_default()));
+                        cell.set_style(
+                            Style::default()
+                                .fg(base.fg.unwrap_or_default())
+                                .bg(base.bg.unwrap_or_default()),
+                        );
                     }
                 }
             }
@@ -179,13 +225,37 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
         }
     }
 
+    // Inline images, once the text is complete. Clipped to the scrollable
+    // region so a picture stops at the header/footer edge; the footers below
+    // are painted afterwards and win over anything that still reached them.
+    if !image_draws.is_empty() {
+        if let Some(painter) = data.image_painter.as_deref_mut() {
+            let image_area = Rect {
+                y: data_top,
+                height: data_bottom.saturating_sub(data_top),
+                ..area
+            };
+            if image_area.height > 0 {
+                for draw in &image_draws {
+                    painter.paint(draw, image_area, buf);
+                }
+            }
+        }
+    }
+
     // Fixed footer rows — directly below the last data row, but pinned
     // to the bottom if the data would push them off-screen.
     let max_footer_y = area.bottom().saturating_sub(fixed_bottom);
     let mut fy = y.min(max_footer_y);
     for row in data.fixed_footer_rows {
-        if fy >= area.bottom() { break; }
-        let row_area = Rect { y: fy, height: 1, ..area };
+        if fy >= area.bottom() {
+            break;
+        }
+        let row_area = Rect {
+            y: fy,
+            height: 1,
+            ..area
+        };
         render_fixed_row(buf, row_area, row, data);
         fy += 1;
     }
@@ -198,8 +268,12 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData) {
 fn render_scroll_indicators(buf: &mut Buffer, area: Rect, data: &RenderData) {
     let has_left = data.scroll_col_offset > 0;
     let has_right = data.has_more_right;
-    if !has_left && !has_right { return; }
-    if area.width == 0 { return; }
+    if !has_left && !has_right {
+        return;
+    }
+    if area.width == 0 {
+        return;
+    }
 
     let style = data.style.resolved_style(ST::ScrollIndicator);
     let header_bg = data.style.resolved_style(ST::Header).bg.unwrap_or_default();
@@ -224,12 +298,7 @@ fn render_scroll_indicators(buf: &mut Buffer, area: Rect, data: &RenderData) {
 }
 
 /// Render a fixed (header/footer) row — uses Header style, no selection.
-fn render_fixed_row(
-    buf: &mut Buffer,
-    area: Rect,
-    row: &TableWidgetRow,
-    data: &RenderData,
-) {
+fn render_fixed_row(buf: &mut Buffer, area: Rect, row: &TableWidgetRow, data: &RenderData) {
     let header_style = data.style.resolved_style(ST::Header);
     let bg = header_style.bg.unwrap_or_default();
     let hl_style = data.style.resolved_style(ST::Highlight);
@@ -253,12 +322,18 @@ fn render_fixed_row(
             continue;
         }
         if !first_rendered {
-            spans.push(Span::styled(data.separator.to_string(), Style::default().bg(bg)));
+            spans.push(Span::styled(
+                data.separator.to_string(),
+                Style::default().bg(bg),
+            ));
         }
         first_rendered = false;
 
         let col_fg = resolve_cell_fg(cell, cell_col, data);
-        let normal = Style::default().fg(col_fg).bg(bg).add_modifier(Modifier::BOLD);
+        let normal = Style::default()
+            .fg(col_fg)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
         let highlight = Style::default()
             .fg(hl_style.fg.unwrap_or(col_fg))
             .bg(bg)
@@ -267,7 +342,12 @@ fn render_fixed_row(
         if cell.highlights.is_empty() {
             spans.push(Span::styled(cell.text.clone(), normal));
         } else {
-            spans.extend(spans_with_highlights(&cell.text, &cell.highlights, normal, highlight));
+            spans.extend(spans_with_highlights(
+                &cell.text,
+                &cell.highlights,
+                normal,
+                highlight,
+            ));
         }
     }
     Paragraph::new(Line::from(spans)).render(area, buf);
@@ -319,7 +399,10 @@ fn render_data_row(
             continue;
         }
         if !first_rendered {
-            spans.push(Span::styled(data.separator.to_string(), Style::default().bg(row_bg)));
+            spans.push(Span::styled(
+                data.separator.to_string(),
+                Style::default().bg(row_bg),
+            ));
         }
         first_rendered = false;
 
@@ -381,7 +464,9 @@ fn render_data_row(
 
             spans.push(Span::styled(prefix, cell_prefix_style));
 
-            let shifted: Vec<std::ops::Range<usize>> = cell.highlights.iter()
+            let shifted: Vec<std::ops::Range<usize>> = cell
+                .highlights
+                .iter()
                 .filter_map(|r| {
                     let start = r.start.checked_sub(cell.prefix_len)?;
                     let end = r.end.saturating_sub(cell.prefix_len);
@@ -389,9 +474,19 @@ fn render_data_row(
                 })
                 .collect();
 
-            spans.extend(spans_with_highlights(&rest, &shifted, normal_style, cell_hl_style));
+            spans.extend(spans_with_highlights(
+                &rest,
+                &shifted,
+                normal_style,
+                cell_hl_style,
+            ));
         } else if !cell.highlights.is_empty() {
-            spans.extend(spans_with_highlights(&cell.text, &cell.highlights, normal_style, cell_hl_style));
+            spans.extend(spans_with_highlights(
+                &cell.text,
+                &cell.highlights,
+                normal_style,
+                cell_hl_style,
+            ));
         } else {
             spans.push(Span::styled(cell.text.clone(), normal_style));
         }
@@ -399,7 +494,11 @@ fn render_data_row(
     Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
-fn resolve_cell_fg(cell: &TableWidgetCell, col_idx: usize, data: &RenderData) -> ratatui::style::Color {
+fn resolve_cell_fg(
+    cell: &TableWidgetCell,
+    col_idx: usize,
+    data: &RenderData,
+) -> ratatui::style::Color {
     if let Some(style_id) = cell.style_id {
         if let Some(style) = data.style_map.get(style_id) {
             if let Some(fg) = style.fg {
@@ -452,13 +551,200 @@ fn spans_with_highlights<'a>(
 }
 
 #[cfg(test)]
+mod image_placement_tests {
+    use super::super::{ImageLineRef, TableWidgetCell, TableWidgetLine, TableWidgetRow};
+    use super::*;
+
+    /// Records what it was asked to draw instead of drawing it.
+    #[derive(Default)]
+    struct RecordingPainter {
+        draws: Vec<(ImageDraw, Rect)>,
+    }
+
+    impl ImagePainter for RecordingPainter {
+        fn paint(&mut self, draw: &ImageDraw, area: Rect, _buf: &mut Buffer) {
+            self.draws.push((*draw, area));
+        }
+    }
+
+    /// A row whose body is `height` reserved image lines, all pointing at
+    /// the same picture — the shape [`crate::TableWidgetLine::with_image`]
+    /// is built for.
+    fn image_row(key: u64, height: u16) -> TableWidgetRow {
+        let lines = (0..height)
+            .map(|row_in_image| {
+                TableWidgetLine::new(vec![TableWidgetCell::plain(String::new())]).with_image(
+                    ImageLineRef {
+                        key,
+                        col: 0,
+                        width: 6,
+                        height,
+                        row_in_image,
+                    },
+                )
+            })
+            .collect();
+        TableWidgetRow::multiline(lines)
+    }
+
+    fn text_row(text: &str) -> TableWidgetRow {
+        TableWidgetRow::new(vec![TableWidgetCell::plain(text.to_string())])
+    }
+
+    fn run(
+        rows: &[TableWidgetRow],
+        headers: &[TableWidgetRow],
+        scroll_offset: usize,
+        scroll_sub_line: usize,
+        height: u16,
+    ) -> Vec<(ImageDraw, Rect)> {
+        let col_styles = ColumnStyles::default();
+        let style_map = StyleMap::default();
+        let style = TableStyle::new();
+        let mut painter = RecordingPainter::default();
+        {
+            let mut data = RenderData {
+                fixed_header_rows: headers,
+                rows,
+                fixed_footer_rows: &[],
+                selected_row: 0,
+                selected_column: None,
+                scroll_offset,
+                scroll_sub_line,
+                scroll_col_offset: 0,
+                scrolled_chars: 0,
+                has_more_right: false,
+                separator: "  ",
+                col_styles: &col_styles,
+                style_map: &style_map,
+                style: &style,
+                focused: false,
+                jump_matches: &[],
+                jump_showing_labels: false,
+                jump_input: "",
+                link_matches: &[],
+                link_showing: false,
+                image_painter: Some(&mut painter),
+            };
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height,
+            };
+            let mut buf = Buffer::empty(area);
+            render(&mut buf, area, &mut data);
+        }
+        painter.draws
+    }
+
+    #[test]
+    fn one_draw_per_picture_at_its_top_line() {
+        // One text row, then a 3-line picture: the picture's top sits on the
+        // second line of the data region, and the three reserved lines
+        // collapse into a single draw.
+        let rows = vec![text_row("hello"), image_row(7, 3)];
+        let draws = run(&rows, &[], 0, 0, 10);
+        assert_eq!(draws.len(), 1, "one placement per picture, not per line");
+        let (draw, _) = draws[0];
+        assert_eq!(draw.key, 7);
+        assert_eq!(draw.y, 1);
+        assert_eq!(draw.height, 3);
+    }
+
+    #[test]
+    fn scrolled_off_top_yields_a_negative_offset() {
+        // Smooth scroll clipped the picture's first two lines: the painter is
+        // told the FULL picture starts two lines above the area, which is
+        // what lets it clip instead of squashing.
+        let rows = vec![image_row(7, 4)];
+        let draws = run(&rows, &[], 0, 2, 10);
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].0.y, -2);
+        assert_eq!(
+            draws[0].0.height, 4,
+            "the full height, not the visible part"
+        );
+    }
+
+    #[test]
+    fn placement_is_relative_to_the_scrollable_region() {
+        // A fixed header must not shift the picture: the paint area starts
+        // below the header and `y` counts from there, so a picture on the
+        // first data line is at y = 0.
+        let rows = vec![image_row(7, 2)];
+        let headers = vec![text_row("Col")];
+        let draws = run(&rows, &headers, 0, 0, 10);
+        assert_eq!(draws.len(), 1);
+        let (draw, area) = draws[0];
+        assert_eq!(draw.y, 0);
+        assert_eq!(area.y, 1, "paint area starts below the fixed header");
+        assert_eq!(area.height, 9);
+    }
+
+    #[test]
+    fn pictures_scrolled_out_of_view_are_not_drawn() {
+        // The viewport shows only the text row below the picture.
+        let rows = vec![image_row(7, 3), text_row("after")];
+        let draws = run(&rows, &[], 1, 0, 4);
+        assert!(draws.is_empty());
+    }
+
+    #[test]
+    fn without_a_painter_nothing_panics() {
+        let rows = vec![image_row(7, 3)];
+        let col_styles = ColumnStyles::default();
+        let style_map = StyleMap::default();
+        let style = TableStyle::new();
+        let mut data = RenderData {
+            fixed_header_rows: &[],
+            rows: &rows,
+            fixed_footer_rows: &[],
+            selected_row: 0,
+            selected_column: None,
+            scroll_offset: 0,
+            scroll_sub_line: 0,
+            scroll_col_offset: 0,
+            scrolled_chars: 0,
+            has_more_right: false,
+            separator: "  ",
+            col_styles: &col_styles,
+            style_map: &style_map,
+            style: &style,
+            focused: false,
+            jump_matches: &[],
+            jump_showing_labels: false,
+            jump_input: "",
+            link_matches: &[],
+            link_showing: false,
+            image_painter: None,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 5,
+        };
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut data);
+    }
+}
+
+#[cfg(test)]
 mod fg_precedence_tests {
     use super::super::{TableWidgetCell, TableWidgetLine, TableWidgetRow};
     use super::*;
     use ratatui::style::Color;
 
-    fn render_one(rows: &[TableWidgetRow], style: &TableStyle, col_styles: &ColumnStyles, style_map: &StyleMap, focused: bool, height: u16) -> Buffer {
-        let data = RenderData {
+    fn render_one(
+        rows: &[TableWidgetRow],
+        style: &TableStyle,
+        col_styles: &ColumnStyles,
+        style_map: &StyleMap,
+        focused: bool,
+        height: u16,
+    ) -> Buffer {
+        let mut data = RenderData {
             fixed_header_rows: &[],
             rows,
             fixed_footer_rows: &[],
@@ -479,10 +765,16 @@ mod fg_precedence_tests {
             jump_input: "",
             link_matches: &[],
             link_showing: false,
+            image_painter: None,
         };
-        let area = Rect { x: 0, y: 0, width: 10, height };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height,
+        };
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &data);
+        render(&mut buf, area, &mut data);
         buf
     }
 
@@ -494,7 +786,9 @@ mod fg_precedence_tests {
         let style = TableStyle::new().set_style(ST::Row, Style::default().fg(Color::Red));
         let col_styles = ColumnStyles::new(vec![Style::default().fg(Color::Green)]);
         let style_map = StyleMap::new(vec![]);
-        let rows = vec![TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())])];
+        let rows = vec![TableWidgetRow::new(vec![TableWidgetCell::plain(
+            "Hi".to_string(),
+        )])];
         let buf = render_one(&rows, &style, &col_styles, &style_map, false, 1);
         assert_eq!(buf.cell(Position::new(0, 0)).unwrap().fg, Color::Green);
     }
@@ -528,7 +822,9 @@ mod fg_precedence_tests {
             );
         let col_styles = ColumnStyles::new(vec![Style::default().fg(Color::Green)]);
         let style_map = StyleMap::new(vec![]);
-        let rows = vec![TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())])];
+        let rows = vec![TableWidgetRow::new(vec![TableWidgetCell::plain(
+            "Hi".to_string(),
+        )])];
         let buf = render_one(&rows, &style, &col_styles, &style_map, true, 1);
         let cell = buf.cell(Position::new(0, 0)).unwrap();
         assert_eq!(cell.fg, Color::Green, "column color kept");
@@ -547,8 +843,10 @@ mod fg_precedence_tests {
             );
         let col_styles = ColumnStyles::new(vec![Style::default().fg(Color::Green)]);
         let style_map = StyleMap::new(vec![]);
-        let rows = vec![TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())])];
-        let data = RenderData {
+        let rows = vec![TableWidgetRow::new(vec![TableWidgetCell::plain(
+            "Hi".to_string(),
+        )])];
+        let mut data = RenderData {
             fixed_header_rows: &[],
             rows: &rows,
             fixed_footer_rows: &[],
@@ -569,10 +867,16 @@ mod fg_precedence_tests {
             jump_input: "",
             link_matches: &[],
             link_showing: false,
+            image_painter: None,
         };
-        let area = Rect { x: 0, y: 0, width: 10, height: 1 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 1,
+        };
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &data);
+        render(&mut buf, area, &mut data);
         assert_eq!(buf.cell(Position::new(0, 0)).unwrap().fg, Color::Yellow);
     }
 }

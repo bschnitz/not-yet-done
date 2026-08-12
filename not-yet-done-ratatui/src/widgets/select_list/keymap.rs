@@ -23,17 +23,17 @@ pub struct SelectListKeymap {
 impl Default for SelectListKeymap {
     fn default() -> Self {
         Self {
-            move_up:             Keys::ctrl(Key::Char('k')),
-            move_down:           Keys::ctrl(Key::Char('j')),
-            toggle:              Keys::plain(Key::Char(' ')),
-            confirm:             Keys::plain(Key::Enter),
-            cancel:              Keys::plain(Key::Esc),
-            select_all:          Keys::ctrl(Key::Char('a')),
-            select_none:         Keys::ctrl(Key::Char('n')),
-            filter_cursor_left:  Keys::plain(Key::Left),
+            move_up: Keys::ctrl(Key::Char('k')),
+            move_down: Keys::ctrl(Key::Char('j')),
+            toggle: Keys::plain(Key::Char(' ')),
+            confirm: Keys::plain(Key::Enter),
+            cancel: Keys::plain(Key::Esc),
+            select_all: Keys::ctrl(Key::Char('a')),
+            select_none: Keys::ctrl(Key::Char('n')),
+            filter_cursor_left: Keys::plain(Key::Left),
             filter_cursor_right: Keys::plain(Key::Right),
-            filter_delete:       Keys::plain(Key::Backspace),
-            filter_clear:        Keys::ctrl(Key::Char('u')),
+            filter_delete: Keys::plain(Key::Backspace),
+            filter_clear: Keys::ctrl(Key::Char('u')),
         }
     }
 }

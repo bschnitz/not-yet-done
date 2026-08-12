@@ -13,8 +13,7 @@ pub fn default_sqlite_url() -> Result<String, String> {
     let dir: PathBuf = dirs::data_local_dir()
         .ok_or_else(|| "cannot resolve XDG data-local dir".to_string())?
         .join("not_yet_done");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("taiga-cache.sqlite");
     Ok(format!("sqlite://{}?mode=rwc", path.display()))
 }

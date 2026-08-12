@@ -8,10 +8,7 @@ pub fn setup() -> (TempDir, String) {
     let db_path = dir.path().join("test.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
-    nyd(&db_url)
-        .args(["db", "sync"])
-        .assert()
-        .success();
+    nyd(&db_url).args(["db", "sync"]).assert().success();
 
     (dir, db_url)
 }

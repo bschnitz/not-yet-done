@@ -42,6 +42,9 @@ pub struct MessageView {
 /// One uploaded file on a message, resolved for display.
 #[derive(Debug, Clone)]
 pub struct Attachment {
+    /// Autumn file id — stable per upload and the last segment of the
+    /// download URL. Used as the attachment node's id component.
+    pub id: String,
     pub filename: String,
     /// Absolute download URL (`{autumn}/{tag}/{id}/{filename}`), or `None`
     /// when the autumn base URL hasn't been discovered yet.
@@ -49,6 +52,11 @@ pub struct Attachment {
     /// True for image attachments (metadata `type: Image` or an
     /// `image/*` content type) — drives the 🖼 vs 📎 placeholder glyph.
     pub is_image: bool,
+    /// Declared content type (`image/png`, …); empty when the server
+    /// didn't send one.
+    pub content_type: String,
+    /// File size in bytes as reported by the server; `None` when absent.
+    pub size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +103,8 @@ struct RawFile {
     #[serde(default)]
     content_type: String,
     #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
     metadata: RawFileMetadata,
 }
 
@@ -110,8 +120,7 @@ impl RawFile {
     /// the autumn base when known: `{autumn}/{tag}/{id}/{filename}` with the
     /// filename percent-encoded so spaces/unicode stay a valid URL.
     fn into_attachment(self, autumn: Option<&str>) -> Attachment {
-        let is_image =
-            self.metadata.kind == "Image" || self.content_type.starts_with("image/");
+        let is_image = self.metadata.kind == "Image" || self.content_type.starts_with("image/");
         let tag = if self.tag.is_empty() {
             "attachments"
         } else {
@@ -127,9 +136,12 @@ impl RawFile {
             )
         });
         Attachment {
+            id: self.id,
             filename: self.filename,
             url,
             is_image,
+            content_type: self.content_type,
+            size: self.size,
         }
     }
 }
@@ -217,11 +229,8 @@ impl StoatClient {
             .await
             .map_err(|e| format!("parse messages: {e}"))?;
 
-        let names: std::collections::HashMap<String, String> = body
-            .users
-            .into_iter()
-            .map(|u| (u.id, u.username))
-            .collect();
+        let names: std::collections::HashMap<String, String> =
+            body.users.into_iter().map(|u| (u.id, u.username)).collect();
         let name_of = |id: &str| names.get(id).filter(|n| !n.is_empty()).cloned();
 
         let autumn = self.autumn_url();
@@ -242,13 +251,33 @@ impl StoatClient {
     /// instance: a body of just `{content}` is accepted), and the gateway
     /// echoes the new message back as a live event regardless.
     pub async fn send_message(&self, channel_id: &str, content: &str) -> Result<String, String> {
+        self.send_message_with_attachments(channel_id, content, &[])
+            .await
+    }
+
+    /// Post a message that references already-uploaded autumn file ids
+    /// (see [`StoatClient::upload_attachment`](super::StoatClient::upload_attachment)).
+    /// The API accepts a message with attachments and an empty body, so
+    /// `content` may be `""`; the `attachments` key is omitted entirely
+    /// when the list is empty so the plain-text path stays byte-identical
+    /// to what the live instance was verified against.
+    pub async fn send_message_with_attachments(
+        &self,
+        channel_id: &str,
+        content: &str,
+        attachment_ids: &[String],
+    ) -> Result<String, String> {
         let url = format!("{}/api/channels/{}/messages", self.base_url(), channel_id);
         http_log::log_request("POST", &url);
+        let mut body = serde_json::json!({ "content": content });
+        if !attachment_ids.is_empty() {
+            body["attachments"] = serde_json::json!(attachment_ids);
+        }
         let resp = self
             .http
             .post(&url)
             .headers(self.auth_headers()?)
-            .json(&serde_json::json!({ "content": content }))
+            .json(&body)
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
@@ -289,11 +318,7 @@ impl StoatClient {
     }
 
     /// Delete a message. Returns `Ok(())` on the API's `204 No Content`.
-    pub async fn delete_message(
-        &self,
-        channel_id: &str,
-        message_id: &str,
-    ) -> Result<(), String> {
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<(), String> {
         let url = format!(
             "{}/api/channels/{}/messages/{}",
             self.base_url(),
@@ -459,8 +484,11 @@ mod tests {
         let names: std::collections::HashMap<String, String> =
             body.users.into_iter().map(|u| (u.id, u.username)).collect();
         let name_of = |id: &str| names.get(id).cloned();
-        let mut views: Vec<MessageView> =
-            body.messages.into_iter().map(|m| m.into_view(&name_of, None)).collect();
+        let mut views: Vec<MessageView> = body
+            .messages
+            .into_iter()
+            .map(|m| m.into_view(&name_of, None))
+            .collect();
         views.reverse();
         // Reversed → oldest first.
         assert_eq!(views[0].author_name, "alice");

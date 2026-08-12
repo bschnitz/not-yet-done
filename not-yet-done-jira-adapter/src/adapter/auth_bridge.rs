@@ -16,9 +16,34 @@ use std::sync::Arc;
 
 use tokio::sync::{Notify, RwLock, watch};
 
-use not_yet_done_content::{AdapterStatus, AuthMechanism, AuthOrchestrator, AuthSpec};
+use not_yet_done_content::{
+    AdapterStatus, AuthFieldSpec, AuthOrchestrator, AuthSpec, MechanismSpec,
+};
 
 use crate::client::{JiraClient, JiraSession};
+
+/// What this adapter can speak against a Jira Server / Data-Center
+/// instance. The factory publishes this table and validates the config
+/// against it; [`AuthBridge::run_login`] below implements it. The three
+/// belong together — a new mechanism is an entry here plus an arm there.
+pub(crate) const MECHANISMS: &[MechanismSpec] = &[
+    MechanismSpec {
+        id: "cookie",
+        label: "Session cookie",
+        doc: "Send a ready-made Cookie header — what an SSO login (Crowd, SAML) leaves behind. \
+              Fetch it with a script; the adapter never talks to a browser itself.",
+        fields: &[AuthFieldSpec::required("cookie", "Cookie header", true)],
+    },
+    MechanismSpec {
+        id: "basic-auth",
+        label: "Username and API token",
+        doc: "HTTP Basic with a username (or e-mail) and an API token.",
+        fields: &[
+            AuthFieldSpec::required("username", "Username or e-mail", false),
+            AuthFieldSpec::required("token", "API token", true),
+        ],
+    },
+];
 
 pub(super) struct AuthBridge {
     base_url: String,
@@ -71,11 +96,27 @@ impl AuthBridge {
         self.orchestrator.invalidate_credentials().await;
     }
 
+    /// The cached client, unless the server has rejected its session in the
+    /// meantime — a rejected client is dropped here, which sends the caller
+    /// down the slow path where the stale session fails validation and
+    /// `re_authenticate` fetches a fresh one.
+    async fn live_client(&self) -> Option<Arc<JiraClient>> {
+        let cached = self.client.read().await.clone()?;
+        if !cached.auth_rejected() {
+            return Some(cached);
+        }
+        let mut slot = self.client.write().await;
+        if slot.as_ref().is_some_and(|c| c.auth_rejected()) {
+            *slot = None;
+        }
+        None
+    }
+
     /// Return a live client. Fast path on cache hit; slow path drives
     /// the orchestrator and validates restored sessions, retrying with
     /// `re_authenticate` if the cached blob no longer works.
     pub(super) async fn get_client(self: &Arc<Self>) -> Result<Arc<JiraClient>, String> {
-        if let Some(c) = self.client.read().await.clone() {
+        if let Some(c) = self.live_client().await {
             return Ok(c);
         }
 
@@ -111,8 +152,8 @@ impl AuthBridge {
     /// Pack the resolved credentials into a JSON session blob. No HTTP —
     /// for `cookie`/`basic-auth` the credential *is* the session.
     async fn run_login(&self, creds: HashMap<String, String>) -> Result<String, String> {
-        let session = match self.orchestrator.spec().mechanism {
-            AuthMechanism::Cookie => {
+        let session = match self.orchestrator.spec().mechanism.as_str() {
+            "cookie" => {
                 let cookie = creds
                     .get("cookie")
                     .map(|s| s.trim().to_string())
@@ -123,7 +164,7 @@ impl AuthBridge {
                     ..JiraSession::default()
                 }
             }
-            AuthMechanism::BasicAuth => {
+            "basic-auth" => {
                 let email = creds
                     .get("username")
                     .map(|s| s.trim().to_string())
@@ -140,10 +181,11 @@ impl AuthBridge {
                     ..JiraSession::default()
                 }
             }
+            // Unreachable via config: the factory validated the id
+            // against MECHANISMS. Kept as a defensive assertion for a
+            // spec built in code.
             other => {
-                return Err(format!(
-                    "Jira adapter does not support mechanism {other:?}"
-                ));
+                return Err(format!("Jira adapter does not support mechanism `{other}`"));
             }
         };
         serde_json::to_string(&session).map_err(|e| format!("serialize session: {e}"))

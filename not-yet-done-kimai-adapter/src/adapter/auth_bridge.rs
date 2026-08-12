@@ -12,9 +12,35 @@ use std::sync::Arc;
 
 use tokio::sync::{RwLock, watch};
 
-use not_yet_done_content::{AdapterStatus, AuthMechanism, AuthOrchestrator, AuthSpec};
+use not_yet_done_content::{
+    AdapterStatus, AuthFieldSpec, AuthOrchestrator, AuthSpec, MechanismSpec,
+};
 
 use crate::client::{HttpTimeouts, KimaiClient, KimaiSession};
+
+/// What this adapter can speak against a Kimai instance. The factory
+/// publishes this table and validates the config against it;
+/// [`AuthBridge::run_login`] below implements it. The three belong
+/// together — a new mechanism is an entry here plus an arm there.
+pub(crate) const MECHANISMS: &[MechanismSpec] = &[
+    MechanismSpec {
+        id: "user-api-token",
+        label: "Username and API password",
+        doc: "Kimai's classic API user: the username plus the separate API password from the \
+              user's API settings. Sent as X-AUTH-USER / X-AUTH-TOKEN.",
+        fields: &[
+            AuthFieldSpec::required("username", "Username", false),
+            AuthFieldSpec::required("token", "API password", true),
+        ],
+    },
+    MechanismSpec {
+        id: "bearer-token",
+        label: "API token",
+        doc: "A personal API token from Kimai 2.14 and newer, sent as an Authorization: Bearer \
+              header. No username needed.",
+        fields: &[AuthFieldSpec::required("token", "API token", true)],
+    },
+];
 
 pub(super) struct AuthBridge {
     base_url: String,
@@ -42,6 +68,28 @@ impl AuthBridge {
 
     pub(super) fn subscribe_status(&self) -> watch::Receiver<AdapterStatus> {
         self.orchestrator.subscribe_status()
+    }
+
+    /// Hand a frontend's answers back to the login that is waiting for
+    /// them — a `prompt` binding, or a form the auth block's `script`
+    /// asked for.
+    pub(super) async fn submit_credentials(
+        &self,
+        fields: HashMap<String, String>,
+    ) -> Result<(), String> {
+        self.orchestrator
+            .submit_credentials(fields)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// The user closed the dialog. Dropping the pending sender fails the
+    /// waiting login instead of leaving it holding the auth mutex.
+    pub(super) async fn cancel_credentials(&self) -> Result<(), String> {
+        self.orchestrator
+            .cancel_prompt()
+            .await
+            .map_err(|e| e.to_string())
     }
 
     pub(super) async fn invalidate_session(&self) {
@@ -94,8 +142,8 @@ impl AuthBridge {
     /// Pack the resolved credentials into a JSON session blob. No HTTP —
     /// for both supported mechanisms the credential *is* the session.
     async fn run_login(&self, creds: HashMap<String, String>) -> Result<String, String> {
-        let session = match self.orchestrator.spec().mechanism {
-            AuthMechanism::UserApiToken => {
+        let session = match self.orchestrator.spec().mechanism.as_str() {
+            "user-api-token" => {
                 let username = creds
                     .get("username")
                     .map(|s| s.trim().to_string())
@@ -111,7 +159,7 @@ impl AuthBridge {
                     token,
                 }
             }
-            AuthMechanism::BearerToken => {
+            "bearer-token" => {
                 let token = creds
                     .get("token")
                     .map(|s| s.trim().to_string())
@@ -122,8 +170,13 @@ impl AuthBridge {
                     token,
                 }
             }
+            // Unreachable via config: the factory validated the id
+            // against MECHANISMS. Kept as a defensive assertion for a
+            // spec built in code.
             other => {
-                return Err(format!("Kimai adapter does not support mechanism {other:?}"));
+                return Err(format!(
+                    "Kimai adapter does not support mechanism `{other}`"
+                ));
             }
         };
         serde_json::to_string(&session).map_err(|e| format!("serialize session: {e}"))

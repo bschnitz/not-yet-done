@@ -76,10 +76,8 @@ impl LocalAnonymizer {
             // case a tag symbol is ever configured as plain text.
             "tag_symbols" => self.std.scrub_value(key, value),
             // Structural / addressing columns — verbatim.
-            "tracking" | "tracking_rollup" | "status" | "priority" | "notes"
-            | "created" | "updated" | "last_tracked" | "id" | "deleted" | "tag_ids" => {
-                value.to_string()
-            }
+            "tracking" | "tracking_rollup" | "status" | "priority" | "notes" | "created"
+            | "updated" | "last_tracked" | "id" | "deleted" | "tag_ids" => value.to_string(),
             // Unknown future column → safe fallback, never a leak.
             _ => self.std.scrub_value(key, value),
         }
@@ -347,7 +345,8 @@ mod tests {
     #[test]
     fn ancestors_json_scrubs_descriptions_keeps_ids() {
         let a = LocalAnonymizer::task();
-        let input = r#"[{"id":"abc","description":"Real Root"},{"id":"def","description":"Real Child"}]"#;
+        let input =
+            r#"[{"id":"abc","description":"Real Root"},{"id":"def","description":"Real Child"}]"#;
         let out = a.scrub_value("ancestors", input);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let arr = v.as_array().unwrap();

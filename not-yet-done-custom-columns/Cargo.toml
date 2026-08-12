@@ -1,0 +1,18 @@
+[package]
+name = "not-yet-done-custom-columns"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sea-orm     = { workspace = true }
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
+dirs        = { workspace = true }
+chrono      = { workspace = true }
+serde_json  = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content", features = ["mock"] }

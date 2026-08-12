@@ -1,0 +1,277 @@
+# Example: Calendar view configuration
+#
+# Place in: ~/.config/not_yet_done/views/calendar.yaml
+# Connections + credentials live in the adapter config referenced below —
+# see calendar-adapter.yaml next to this file.
+#
+# One adapter, many calendars: the `calendar` adapter aggregates events from
+# every configured connection (see calendar-adapter.yaml) into a single flat,
+# time-sorted list — the calendar counterpart of the trackings tab. Rows from
+# all accounts are merged; the `account` column shows each event's origin.
+#
+# Grouping is engine-side, exactly like the trackings / Kimai views: `group_by`
+# buckets the rows by day on the (local-time) `start`, `zg` cycles the bucket
+# (Day/Week/Month/Year/None) at runtime, and `S` opens the item-sort picker
+# over the adapter's sortable columns (start, end, account, show_as, title).
+#
+# Filtering is the same saved-query mechanism the trackings tab uses (see the
+# `query:` block on the view below): a `FilterExpr` body, evaluated in memory
+# against the loaded events. Natural-language dates on `start`/`end` resolve
+# exactly as on trackings (`[start, gte, "next monday"]`), and title search is
+# `[title, has, "standup"]` (case-insensitive substring). Columns:
+# `title`/`subject`, `start`, `end`, `account`/`calendar`, `location`,
+# `organizer`, `show_as`/`status`, `body`, `all_day`. The query only narrows
+# the already-loaded time window (`window_*_days` in the adapter config), so a
+# date bound outside that window matches nothing until the window is widened.
+#
+# Read-only for now. Live update is automatic and decoupled: the adapter polls
+# every connection in the background (`poll_interval_secs` in the adapter
+# config) and, when it detects an externally-made change, refreshes the view on
+# its own — no key press needed. `r` forces an immediate refresh.
+#
+# Load mode — two choices, set by `adapter.manual_connect` below:
+#   * `false`: the calendar loads as soon as the app starts, opening the
+#     connection(s) up front. The background poll then keeps it fresh. Best
+#     when connecting is cheap and you always want it live — but a backend
+#     that needs an answer to log in will raise its dialog at startup, over
+#     whatever tab you are on.
+#   * omitted / `true` (default): nothing connects until you focus the tab and press `r` (the
+#     `reload` action). Until then the tab shows a "press r to connect" banner
+#     and no connection — and no browser, for the browser-backed backends — is
+#     opened. The background poll also stays dormant until that first load, so
+#     the browser only ever appears on demand. Best for expensive or
+#     interactive-login backends (e.g. office365-web) you don't want spun up on
+#     every launch.
+
+tab:
+  name: Calendar
+  order: 8
+  icon: "󰃰"
+
+adapter:
+  type: calendar
+  config: calendar-adapter.yaml
+  # Load only when you focus the tab and press `r` — this is the default, and
+  # spelled out here because it is the interesting half of the choice above.
+  # Set it to `false` to load the calendar immediately at startup instead.
+  manual_connect: true
+
+# Reminders (optional). The adapter decides *when* a reminder fires — a fixed
+# lead time before each timed event's start (`reminder_lead_minutes` in the
+# adapter config, default 5). This block decides whether this tab acts on those
+# reminders at all and what runs when one fires. Omit it and the tab ignores
+# reminders entirely.
+#
+# `command` runs through `sh -c`, detached, once per fired reminder. The event's
+# fields arrive as environment variables — never spliced into the string, so an
+# event title can't be interpreted as shell:
+#   NYD_REMINDER_ID            stable event id
+#   NYD_REMINDER_TITLE         event title
+#   NYD_REMINDER_DETAIL        "Account · Location" (location omitted if absent)
+#   NYD_REMINDER_WHEN          event start, local-time RFC3339
+#   NYD_REMINDER_UNTIL         event end, local-time RFC3339 (empty if none)
+#   NYD_REMINDER_LEAD_MINUTES  whole minutes until start when it fired
+#
+# The example below uses `herald`, a single top-edge Wayland banner: `--until`
+# keeps it on screen until the event is over, and `--animation lava` gives it the
+# lava-lamp backdrop. A plain desktop notification works just as well, e.g.:
+#   command: >-
+#     notify-send "$NYD_REMINDER_TITLE"
+#     "in $NYD_REMINDER_LEAD_MINUTES min — $NYD_REMINDER_DETAIL"
+reminder:
+  enabled: true
+  command: >-
+    herald --animation lava --until "$NYD_REMINDER_UNTIL"
+    --title "$NYD_REMINDER_TITLE" --detail "$NYD_REMINDER_DETAIL"
+
+views:
+  - name: events
+    node_type: "calendar:event"
+    default: true
+
+    # Saved-query filter — same mechanism as the trackings tab. The body is a
+    # `FilterExpr` evaluated in memory against each loaded event. `menu_key: q`
+    # opens the query menu (list / apply / ctrl+e edit / ctrl+s bind a shortcut);
+    # `editable: true` keeps the top-level `Q` binding to edit the active query
+    # directly. Queries persist one file per name under the adapter's data dir
+    # (`<data>/not_yet_done/calendar/<id>/queries/<name>.yaml`).
+    #
+    # Dates on start/end accept relative phrases ("today", "tomorrow",
+    # "2 weeks", "next monday" — note NO "in" prefix), period boundaries
+    # ("start of day", "end of week", "end of next week", "start of month",
+    # "end of quarter", "end of year"), and ISO dates (2026-07-20).
+    #
+    # Examples (write via `Q` or `:query new`):
+    #   query:
+    #     [title, has, standup]              # title substring (case-insensitive)
+    #   query:
+    #     and:
+    #       - [start, gte, "start of day"]
+    #       - [start, lte, "end of next week"]
+    #       - [show_as, =, busy]
+    #
+    # No `default:` here — the adapter's time window is the only baseline filter,
+    # so the tab opens showing everything in the window. Add a `default:` block
+    # (like trackings) to start time-boxed.
+    #
+    # `template:` (below) seeds the editor when you create a *new* query — it is
+    # never applied as a live filter, so it may be entirely commented examples.
+    # (`default`, by contrast, IS the active baseline filter.) The trailing
+    # match-everything line is a harmless starting point you replace.
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the loaded calendar events. Replace the query below, or
+        # uncomment one of the examples. Columns: title/subject, start, end,
+        # account/calendar, location, organizer, show_as/status, body, all_day.
+        #
+        # Dates on start/end accept:
+        #   - relative:  today, tomorrow, "2 weeks", "3 days", "next monday"
+        #                (note: NO "in" prefix — "2 weeks", not "in 2 weeks")
+        #   - period boundaries: "start of day", "end of week", "end of next week",
+        #                "start of month", "end of quarter", "end of year", …
+        #   - ISO dates: 2026-07-20
+        #
+        #   query:
+        #     [title, has, standup]            # title substring (case-insensitive)
+        #
+        #   query:
+        #     and:
+        #       - [start, gte, "start of day"]
+        #       - [start, lte, "end of next week"]
+        #       - [show_as, =, busy]
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [title, has, ""]
+
+    # Day buckets, soonest first. (Flip to `desc` to put upcoming days on
+    # top; there is no per-day aggregate here — events aren't durations to
+    # sum, unlike timesheets.)
+    group_by:
+      column: start
+      bucket: day
+      order: asc
+
+    columns:
+      - key: start
+        label: Start
+        kind: datetime
+        style: text_high
+        sizing: max
+      - key: end
+        label: End
+        kind: datetime
+        style: secondary
+        sizing: max
+      - key: account
+        label: Account
+        style: tertiary
+        sizing: "fixed(16)"
+      - key: show_as
+        label: Show as
+        style: secondary
+        sizing: "fixed(10)"
+      - key: location
+        label: Location
+        style: secondary
+        sizing: "fixed(20)"
+      # Event creator/organizer. Populated for meetings that carry an ORGANIZER
+      # (Teams/Outlook invites via the microsoft/office365-web backends); empty
+      # for personal CalDAV events that have no organizer.
+      - key: organizer
+        label: Organizer
+        style: secondary
+        sizing: "fixed(18)"
+      # Event title; falls back to "(no title)" for an untitled event.
+      - key: title
+        label: Title
+        source: label
+        style: text_med
+        sizing: "flex(1)"
+
+    # `p` opens a horizontal split showing the selected event's full detail
+    # (Markdown: when/where/organizer + body) rendered from the node content.
+    preview:
+      enabled: true
+      source: content
+      split: horizontal
+      ratio: 50
+      keybinding: p
+
+    # Bus event → action bindings (rule engine). When the office365-web backend
+    # hits a Microsoft Authenticator *number-match* challenge during an
+    # interactive sign-in, it publishes `office365-web:mfa:number-match` with the
+    # digits to tap. Bind it to the `show auth number` action below so the
+    # number appears in the notification bar; the same action auto-clears when
+    # the login completes (`office365-web:mfa:resolved`). No key is pressed —
+    # this is a purely event-driven reaction. Only relevant for the
+    # office365-web calendar backend; harmless for msgraph connections (they
+    # never publish it).
+    event_actions:
+      - on: "office365-web:mfa:number-match"
+        run: show auth number
+
+    actions:
+      # Event-only notify (no `key:`): fired by the `event_actions` binding
+      # above. `{number}` is filled from the event payload. `on_event` retracts
+      # the message once the sign-in resolves, scoped to the same connection so
+      # one account's completion never clears another's prompt.
+      - name: show auth number
+        type: notify
+        # `prominent: true` routes this to the loud top alert bar (theme
+        # alert_fg/alert_bg) so the number can't be missed. Drop it (or set
+        # `notifications.alert_enabled: false` in tui.yaml) to use the ordinary
+        # bottom notification bar instead.
+        prominent: true
+        message: "Microsoft Authenticator: tap number {number} to approve sign-in"
+        on_event:
+          "office365-web:mfa:resolved": close
+      # Local filter-while-typing over the loaded rows.
+      # Create a calendar event (form popup → `execute("create", …)`). The
+      # adapter advertises this action on the calendar root with a full
+      # Title/Start/End/All-day/Show-as/Location/Notes form (plus a Calendar
+      # picker when more than one connection is configured). `on_container:
+      # true` dispatches it against the adapter root, so `a` works at the
+      # un-drilled event list where there is no selected row.
+      #
+      # NOTE: the write path is not wired yet — `execute` currently validates
+      # the form (including the natural-language start/end) and reports the
+      # event it *would* create, without touching a backend. The shortcut and
+      # form are fully live; only the final PUT/POST is pending.
+      - name: create
+        key: a
+        type: custom
+        id: create
+        on_container: true
+        # Per-action form styling. Overrides the generic form popup's classic
+        # look (single column, no field bar, dropdown selects) for THIS action
+        # only. Colours are NOT set here — they live in the theme's `form:`
+        # block (`tui-theme.yaml`), which falls back to the base app theme. The
+        # field bar is only visible once `form.field_bg` is set there.
+        form:
+          # 1 (default) or 2 columns. The event form is wide, so two columns.
+          columns: 2
+          # Explicit per-column field placement by field key (outer list =
+          # columns left→right; unlisted keys stay in column 0 in spec order).
+          # `account` only exists with >1 connection — listing it is harmless
+          # when it is absent. Omit `column_assignment` to auto-balance.
+          column_assignment:
+            - [title, account, start, end, all_day]
+            - [show_as, location, body]
+          # Draw a filled bar behind the focused field (needs theme
+          # `form.field_bg` to be visible).
+          field_bar: true
+          # `inline` = radio list, every option visible (Show as / Calendar
+          # render as inline radios); `dropdown` (default) = collapsed.
+          select_style: inline
+      # Local filter-while-typing over the loaded rows.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [title, account, location]
+      - name: refresh
+        key: r
+        type: reload

@@ -2,17 +2,17 @@
 //! generic `not_yet_done_content::slug::SlugTable`.
 //!
 //! Prefixes:
-//! - `ss-` status (slug source: status name; original: status name)
-//! - `uu-` user (slug source: full_name fallback username; original: username)
-//! - `tt-` tag (slug source: tag name; original: tag name)
+//! - `ss_` status (slug source: status name; original: status name)
+//! - `uu_` user (slug source: full_name fallback username; original: username)
+//! - `tt_` tag (slug source: tag name; original: tag name)
 
 use not_yet_done_content::slug::SlugTable;
 
 use crate::client::{TaigaMember, TaigaStatus};
 
-pub(super) const STATUS_PREFIX: &str = "ss-";
-pub(super) const USER_PREFIX: &str = "uu-";
-pub(super) const TAG_PREFIX: &str = "tt-";
+pub(super) const STATUS_PREFIX: &str = "ss_";
+pub(super) const USER_PREFIX: &str = "uu_";
+pub(super) const TAG_PREFIX: &str = "tt_";
 
 pub(super) struct TaigaSlugTables {
     pub(super) statuses: SlugTable,
@@ -46,8 +46,5 @@ pub(super) fn build_user_table(members: &[TaigaMember]) -> SlugTable {
 }
 
 pub(super) fn build_tag_table(tags: &[String]) -> SlugTable {
-    SlugTable::build(
-        tags.iter().map(|t| (t.clone(), t.clone())),
-        TAG_PREFIX,
-    )
+    SlugTable::build(tags.iter().map(|t| (t.clone(), t.clone())), TAG_PREFIX)
 }

@@ -1,7 +1,7 @@
 //! Integration tests using CharBuf rendering.
 
-use std::collections::HashMap;
 use not_yet_done_table::*;
+use std::collections::HashMap;
 
 fn config(max_width: usize, strategies: Vec<(&str, ColStrategy)>) -> TableConfig {
     let mut m = HashMap::new();
@@ -18,10 +18,10 @@ fn config(max_width: usize, strategies: Vec<(&str, ColStrategy)>) -> TableConfig
 #[test]
 fn render_simple_table() {
     let cols = vec![ColumnId::new("name"), ColumnId::new("age")];
-    let cfg = config(25, vec![
-        ("name", ColStrategy::Flex(1)),
-        ("age", ColStrategy::Max),
-    ]);
+    let cfg = config(
+        25,
+        vec![("name", ColStrategy::Flex(1)), ("age", ColStrategy::Max)],
+    );
 
     let rows = vec![
         Row::new(1u32).cell("name", "Alice").cell("age", "30"),
@@ -42,10 +42,13 @@ fn render_simple_table() {
 #[test]
 fn render_right_aligned() {
     let cols = vec![ColumnId::new("desc"), ColumnId::new("num")];
-    let cfg = config(20, vec![
-        ("desc", ColStrategy::Fixed(10)),
-        ("num", ColStrategy::Fixed(6)),
-    ]);
+    let cfg = config(
+        20,
+        vec![
+            ("desc", ColStrategy::Fixed(10)),
+            ("num", ColStrategy::Fixed(6)),
+        ],
+    );
 
     let rows = vec![
         Row::new(1u32)
@@ -87,9 +90,7 @@ fn truncation_preserves_alignment() {
     let cols = vec![ColumnId::new("a")];
     let cfg = config(8, vec![("a", ColStrategy::Fixed(8))]);
 
-    let rows = vec![
-        Row::new(1u32).cell("a", "A very long description"),
-    ];
+    let rows = vec![Row::new(1u32).cell("a", "A very long description")];
 
     let table = compute_table(&rows, &cfg, &cols, None);
     let mut buf = CharBuf::new(8, 1);
@@ -103,9 +104,10 @@ fn center_aligned_column() {
     let cols = vec![ColumnId::new("title")];
     let cfg = config(20, vec![("title", ColStrategy::Fixed(20))]);
 
-    let rows = vec![
-        Row::new(1u32).cell("title", CellContent::aligned("Hello", CellAlignment::Center)),
-    ];
+    let rows = vec![Row::new(1u32).cell(
+        "title",
+        CellContent::aligned("Hello", CellAlignment::Center),
+    )];
 
     let table = compute_table(&rows, &cfg, &cols, None);
     let mut buf = CharBuf::new(20, 1);
@@ -120,12 +122,12 @@ fn right_aligned_with_highlights_shifts_ranges() {
     let cols = vec![ColumnId::new("val")];
     let cfg = config(10, vec![("val", ColStrategy::Fixed(10))]);
 
-    let content = CellContent::aligned("42", CellAlignment::Right)
-        .with_spans(vec![StyledSpan { range: 0..2, style_id: 0 }]);
+    let content = CellContent::aligned("42", CellAlignment::Right).with_spans(vec![StyledSpan {
+        range: 0..2,
+        style_id: 0,
+    }]);
 
-    let rows = vec![
-        Row::new(1u32).cell("val", content),
-    ];
+    let rows = vec![Row::new(1u32).cell("val", content)];
 
     let table = compute_table(&rows, &cfg, &cols, None);
     // "42" right-aligned in 10 → "        42"

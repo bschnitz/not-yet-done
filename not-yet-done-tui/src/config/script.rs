@@ -98,7 +98,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn default_pause_tui() -> bool {

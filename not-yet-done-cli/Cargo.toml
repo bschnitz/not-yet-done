@@ -12,10 +12,23 @@ not-yet-done-filter  = { path = "../not-yet-done-filter" }
 # verbs work for every adapter, not just the built-in task commands.
 not-yet-done-host    = { path = "../not-yet-done-host" }
 not-yet-done-content = { path = "../not-yet-done-content" }
+# Run a stored *extended* query (`ls --query-name`): the Markdown document
+# combining several adapter-native queries is executed by this crate, which
+# sits above the adapter and is shared with the TUI.
+not-yet-done-extended-query = { path = "../not-yet-done-extended-query" }
+# Render an adapter's connection-config schema to a YAML template
+# (`config template`) or build it interactively (`config build`, needs the
+# `stdin` driver). Schema comes from `AdapterFactory::config_schema()`.
+fieldsmith           = { workspace = true, features = ["stdin"] }
 sea-orm              = { workspace = true }
 shaku                = { workspace = true }
 tokio                = { workspace = true }
 anyhow               = { workspace = true }
+async-trait          = { workspace = true }
+# Terminal credential prompt (masked password input on stderr) for adapters
+# that report `AdapterStatus::NeedsCreds` — the CLI counterpart to the TUI's
+# credential popup. Same major as fieldsmith's copy, so one build.
+dialoguer            = "0.11"
 tusks                = "2.1"
 chrono               = { workspace = true }
 serde                = { workspace = true }
@@ -24,3 +37,6 @@ serde_yaml           = { workspace = true }
 tempfile             = { workspace = true }
 # `--path /A/B` segment matching: substring by default, `re:` opt-in regex.
 regex                = { workspace = true }
+# Terminal Markdown rendering for the built-in `help` action (TTY only; piped
+# output stays raw Markdown). Canop/termimad — actively maintained.
+termimad             = "0.35"

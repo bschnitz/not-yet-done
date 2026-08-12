@@ -16,7 +16,7 @@ use chrono::DateTime;
 
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
-    HintPlacement, InputSpec, Metadata, MetadataField, Node, NodeAction, NodeType, Result,
+    InputSpec, Metadata, MetadataField, Node, NodeAction, NodeType, Result,
 };
 use tokio::sync::RwLock;
 
@@ -47,13 +47,22 @@ fn format_ts(ms: Option<u64>) -> String {
     }
 }
 
-/// Append one placeholder line per attachment to a message body. The
-/// terminal can't render an image inline, so each file shows as a
-/// markdown link `[🖼 filename](url)` (📎 for non-images) — the generic
-/// link-hop (`f`) then labels and opens it via xdg-open, exactly like any
-/// other URL in the pane. When the autumn URL wasn't known the placeholder
-/// degrades to plain `🖼 filename` (no link). An image-only message (empty
-/// body) starts directly with its placeholders, no leading blank line.
+/// Append one placeholder line per attachment to a message body.
+///
+/// An **image** becomes a markdown *image* (`![🖼 filename](url)`), a
+/// non-image a markdown *link* (`[📎 filename](url)`). The one-character
+/// difference is what a frontend that can draw terminal graphics keys off:
+/// it resolves the image line to real pixels and paints them between the
+/// messages, while a frontend without that ability falls back to the
+/// renderer's `[image: 🖼 filename]` text. Either way the generic link-hop
+/// (`f`) still labels the file — it searches for the link *text*, which is
+/// a substring of both forms — so `f` keeps opening the file via xdg-open
+/// in the fallback, and the rendered picture speaks for itself otherwise.
+///
+/// When the autumn URL wasn't known the placeholder degrades to plain
+/// `🖼 filename` (no link, nothing to resolve). An image-only message
+/// (empty body) starts directly with its placeholders, no leading blank
+/// line.
 fn render_body_with_attachments(body: &str, attachments: &[crate::client::Attachment]) -> String {
     if attachments.is_empty() {
         return body.to_string();
@@ -62,8 +71,9 @@ fn render_body_with_attachments(body: &str, attachments: &[crate::client::Attach
         .iter()
         .map(|att| {
             let icon = if att.is_image { "🖼" } else { "📎" };
+            let bang = if att.is_image { "!" } else { "" };
             match &att.url {
-                Some(url) => format!("[{icon} {}]({})", att.filename, url),
+                Some(url) => format!("{bang}[{icon} {}]({})", att.filename, url),
                 None => format!("{icon} {}", att.filename),
             }
         })
@@ -97,14 +107,12 @@ const REACTION_EMOJI: &[(&str, &str)] = &[
 /// execute time, not filtered here.
 pub(super) fn message_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("edit_message", "edit", InputSpec::Editor)
-            .with_placement(HintPlacement::ActionBar),
+        NodeAction::new("edit_message", "edit", InputSpec::Editor),
         NodeAction::new("delete_message", "delete", InputSpec::None),
         NodeAction::new("react", "react", InputSpec::Picker),
         // Downloads the message's image attachments and opens the first in
         // the OS viewer (the rest sit in the same temp dir for navigation).
-        NodeAction::new("open-images", "images", InputSpec::None)
-            .with_placement(HintPlacement::ActionBar),
+        NodeAction::new("open-images", "images", InputSpec::None),
     ]
 }
 
@@ -267,14 +275,12 @@ impl StoatMessageNode {
         if downloadable.is_empty() {
             let has_images = self.attachments.iter().any(|a| a.is_image);
             return Ok(ActionOutcome::Done {
-                message: Some(
-                    if has_images {
-                        // Images exist but autumn wasn't discovered → no URL.
-                        "Image server URL not available — cannot download".to_string()
-                    } else {
-                        "No images in this message".to_string()
-                    },
-                ),
+                message: Some(if has_images {
+                    // Images exist but autumn wasn't discovered → no URL.
+                    "Image server URL not available — cannot download".to_string()
+                } else {
+                    "No images in this message".to_string()
+                }),
             });
         }
         let dir = image_temp_dir(&self.message_id).map_err(|e| other_err(e.to_string()))?;
@@ -320,11 +326,6 @@ impl Node for StoatMessageNode {
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        message_actions()
-    }
-
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             // `mark-read` is the engine's cursor-reach-end hook target
@@ -352,7 +353,7 @@ impl Node for StoatMessageNode {
 
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         match action_id {
-            // Edit opens the body with mentions as `@uu-…` slugs plus the
+            // Edit opens the body with mentions as `@uu_…` slugs plus the
             // CACHE section. No header is stripped — chat messages are
             // Markdown and may legitimately begin with `#`.
             "edit_message" => {
@@ -366,6 +367,7 @@ impl Node for StoatMessageNode {
                     // and the API offers no etag/if-match).
                     version: String::new(),
                     suffix: ".md".into(),
+                    file_path: None,
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -374,7 +376,10 @@ impl Node for StoatMessageNode {
         }
     }
 
-    async fn picker_options(&self, action_id: &str) -> Result<Vec<not_yet_done_content::ActionOption>> {
+    async fn picker_options(
+        &self,
+        action_id: &str,
+    ) -> Result<Vec<not_yet_done_content::ActionOption>> {
         match action_id {
             "react" => Ok(REACTION_EMOJI
                 .iter()
@@ -390,7 +395,7 @@ impl Node for StoatMessageNode {
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit_message", ActionInput::Edited { text, .. }) => {
-                // Drop the CACHE section, then translate `@uu-slug`
+                // Drop the CACHE section, then translate `@uu_slug`
                 // mentions back to the wire `<@ID>` form before saving.
                 let body = mentions::strip_cache_section(&text);
                 let table = mentions::user_table(&self.users);
@@ -588,8 +593,7 @@ mod tests {
 
     #[test]
     fn declares_edit_delete_react_actions() {
-        let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
-        let actions = node.actions();
+        let actions = message_actions();
         let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -637,7 +641,12 @@ mod tests {
         assert_eq!(opts.len(), REACTION_EMOJI.len());
         assert_eq!(opts[0].value, "👍");
         // A non-react action surfaces no options.
-        assert!(node.picker_options("edit_message").await.unwrap().is_empty());
+        assert!(
+            node.picker_options("edit_message")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn users_with_alice() -> Arc<HashMap<String, String>> {
@@ -661,7 +670,12 @@ mod tests {
 
     #[test]
     fn display_resolves_mention_in_label_and_content() {
-        let node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
+        let node = StoatMessageNode::new(
+            test_client(),
+            mention_view(),
+            users_with_alice(),
+            no_state(),
+        );
         // Label and the markdown `content` field both show `@alice`.
         assert_eq!(node.label(), "hi @alice");
         let content = node
@@ -675,12 +689,17 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_edit_renders_mention_as_slug_with_cache() {
-        let node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
+        let node = StoatMessageNode::new(
+            test_client(),
+            mention_view(),
+            users_with_alice(),
+            no_state(),
+        );
         let prep = node.prepare("edit_message").await.unwrap();
-        // The wire `<@ID>` becomes a `@uu-…` slug in the buffer …
-        assert!(prep.template.starts_with("hi @uu-alice"));
+        // The wire `<@ID>` becomes a `@uu_…` slug in the buffer …
+        assert!(prep.template.starts_with("hi @uu_alice"));
         // … and the CACHE section advertises it.
-        assert!(prep.template.contains("@uu-alice"));
+        assert!(prep.template.contains("@uu_alice"));
         assert!(prep.template.contains(mentions::CACHE_MARKER));
     }
 
@@ -688,7 +707,12 @@ mod tests {
     async fn unchanged_edit_roundtrips_slug_back_to_code() {
         // Editing with the slug form (and the CACHE section appended) must
         // resolve back to the original `<@ID>` body → a no-op.
-        let mut node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
+        let mut node = StoatMessageNode::new(
+            test_client(),
+            mention_view(),
+            users_with_alice(),
+            no_state(),
+        );
         let prep = node.prepare("edit_message").await.unwrap();
         let outcome = node
             .execute(
@@ -705,32 +729,43 @@ mod tests {
     }
 
     #[test]
-    fn attachments_render_as_placeholder_links() {
+    fn attachments_render_as_placeholder_images_and_links() {
         use crate::client::Attachment;
         let img = Attachment {
+            id: "F1".into(),
             filename: "diagram.png".into(),
             url: Some("https://autumn.example/attachments/F1/diagram.png".into()),
             is_image: true,
+            content_type: "image/png".into(),
+            size: Some(1234),
         };
         let doc = Attachment {
+            id: "F2".into(),
             filename: "notes.pdf".into(),
             url: Some("https://autumn.example/attachments/F2/notes.pdf".into()),
             is_image: false,
+            content_type: "application/pdf".into(),
+            size: Some(4321),
         };
-        // Image → 🖼 markdown link, non-image → 📎; appended below the body.
+        // Image → markdown IMAGE (leading `!`, the inline-render marker),
+        // non-image → plain markdown link; appended below the body.
         let out = render_body_with_attachments("hello", std::slice::from_ref(&img));
         assert_eq!(
             out,
-            "hello\n[🖼 diagram.png](https://autumn.example/attachments/F1/diagram.png)"
+            "hello\n![🖼 diagram.png](https://autumn.example/attachments/F1/diagram.png)"
         );
-        // Non-image gets the paperclip glyph.
+        // Non-image gets the paperclip glyph and stays a LINK — nothing to
+        // draw, and `f` must keep opening it.
         let out = render_body_with_attachments("hello", std::slice::from_ref(&doc));
         assert!(out.contains("[📎 notes.pdf]("));
-        // Empty body → placeholders lead, no orphan newline.
+        assert!(!out.contains("!["), "non-image must not become an image");
+        // Empty body → placeholders lead, no orphan newline. The image line
+        // stands alone, which is what makes the renderer treat it as an image
+        // block rather than inline text.
         let out = render_body_with_attachments("", std::slice::from_ref(&img));
         assert_eq!(
             out,
-            "[🖼 diagram.png](https://autumn.example/attachments/F1/diagram.png)"
+            "![🖼 diagram.png](https://autumn.example/attachments/F1/diagram.png)"
         );
         // No attachments → body verbatim.
         assert_eq!(render_body_with_attachments("hi", &[]), "hi");
@@ -764,9 +799,12 @@ mod tests {
         // An image whose autumn URL never resolved → cannot download.
         let mut view = sample_view();
         view.attachments = vec![Attachment {
+            id: "F1".into(),
             filename: "x.png".into(),
             url: None,
             is_image: true,
+            content_type: "image/png".into(),
+            size: None,
         }];
         let node = StoatMessageNode::new(test_client(), view, no_users(), no_state());
         let outcome = node.open_images().await.unwrap();
@@ -783,9 +821,12 @@ mod tests {
         use crate::client::Attachment;
         // Before autumn discovery the url is None → no link, just the glyph.
         let att = Attachment {
+            id: "F1".into(),
             filename: "photo.jpg".into(),
             url: None,
             is_image: true,
+            content_type: "image/jpeg".into(),
+            size: None,
         };
         assert_eq!(
             render_body_with_attachments("caption", &[att]),
@@ -795,19 +836,24 @@ mod tests {
 
     #[tokio::test]
     async fn edit_rejects_unknown_mention_slug() {
-        let mut node = StoatMessageNode::new(test_client(), mention_view(), users_with_alice(), no_state());
+        let mut node = StoatMessageNode::new(
+            test_client(),
+            mention_view(),
+            users_with_alice(),
+            no_state(),
+        );
         let result = node
             .execute(
                 "edit_message",
                 ActionInput::Edited {
-                    text: "ping @uu-ghost".into(),
+                    text: "ping @uu_ghost".into(),
                     original: "hi <@01AAA>".into(),
                     version: String::new(),
                 },
             )
             .await;
         match result {
-            Err(e) => assert!(format!("{e}").contains("uu-ghost")),
+            Err(e) => assert!(format!("{e}").contains("uu_ghost")),
             Ok(_) => panic!("expected an error for the unknown slug"),
         }
     }

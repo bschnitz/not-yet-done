@@ -154,5 +154,8 @@ fn stop_all_stops_multiple_active_trackings() {
 
     let stdout = String::from_utf8(output).unwrap();
     let stopped_count = stdout.matches("✓ Tracking stopped:").count();
-    assert_eq!(stopped_count, 2, "Expected 2 stopped trackings, got:\n{stdout}");
+    assert_eq!(
+        stopped_count, 2,
+        "Expected 2 stopped trackings, got:\n{stdout}"
+    );
 }

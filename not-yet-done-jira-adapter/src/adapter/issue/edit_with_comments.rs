@@ -12,17 +12,18 @@ use super::super::cache::{fetch_comments, fetch_issue, resolve_unknown_mentions}
 use super::super::util::{other_err, short_ts};
 use super::JiraIssueNode;
 use super::markers::{
-    ADD_COMMENT_MARKER, DELETE_KEYWORD_DEL, DELETE_KEYWORD_DELETE,
-    FOREIGN_BANNER_END, FOREIGN_BANNER_START,
+    ADD_COMMENT_MARKER, DELETE_KEYWORD_DEL, DELETE_KEYWORD_DELETE, FOREIGN_BANNER_END,
+    FOREIGN_BANNER_START,
 };
 use super::slugs::{
-    build_slug_tables, parse_user_mentions, render_user_mentions,
-    resolve_slugs_inplace,
+    SlugTables, build_slug_tables, canonicalize_labels_via_jira, parse_user_mentions,
+    render_user_mentions, resolve_slugs_inplace,
 };
 use super::template::{
-    FieldError, Parsed3b, edit_full_fields, render_3b_from_parsed,
-    render_cache_section, strip_banner, strip_cache_section,
+    FieldError, Parsed3b, edit_full_fields, render_3b_from_parsed, render_cache_section,
+    strip_banner, strip_cache_section,
 };
+use super::wiki_md::normalize_ws;
 
 /// Section in the `edit_with_comments` buffer.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,14 +57,42 @@ pub(super) struct ParsedWithComments {
 enum CommentDecision {
     NoChange,
     /// User edited their own comment — PUT.
-    Update { id: String, new_body: String },
+    Update {
+        id: String,
+        new_body: String,
+    },
     /// User wrote `del`/`delete` — DELETE.
-    Delete { id: String },
+    Delete {
+        id: String,
+    },
     /// Foreign user edited; user accepted the new content (user.body == fresh.body).
     AcceptForeign,
     /// Foreign user edited; user kept the snapshot (user.body == snapshot.body).
     /// No write needed; next prepare will pick up the fresh body.
     DropOurs,
+}
+
+/// Decide whether a comment was authored by the current user, for the
+/// per-author edit/delete gate. Prefers the stable account username (the
+/// `name` field, the same value that appears inside `[~name]`) over the
+/// display name, which can be ambiguous or reformatted. Falls back to the
+/// display name only when either side lacks a username, and defaults to
+/// permissive (`true`) when we don't know who we are.
+fn comment_is_own(
+    author: &str,
+    author_key: &str,
+    current_display: Option<&str>,
+    current_username: Option<&str>,
+) -> bool {
+    if let Some(me) = current_username {
+        if !me.is_empty() && !author_key.is_empty() {
+            return author_key == me;
+        }
+    }
+    match current_display {
+        Some(u) => author == u,
+        None => true,
+    }
 }
 
 /// Build the per-comment header line for `edit_with_comments`, e.g.
@@ -171,6 +200,302 @@ pub(super) fn parse_with_comments_text(
     Ok(ParsedWithComments { header, blocks })
 }
 
+// ───────────────── canonical ⇄ markdown comment buffer ─────────────────
+//
+// `edit_markdown` reuses the whole `edit_with_comments` pipeline but presents
+// the buffer in Markdown: the header as two GFM tables, the body as Markdown,
+// and each comment under a `### … <!-- jira comment … -->` heading below a
+// `## Comments <!-- jira comments section -->` divider. These two functions
+// translate between that Markdown shape and the canonical `edit_with_comments`
+// buffer (`--- @author ts (id=N) ---` headers, wiki-markup bodies) so the
+// classify/diff/apply logic below never has to know which editor produced it.
+
+/// Divider between the issue body and the comment list in the Markdown buffer.
+const MD_COMMENTS_SECTION: &str = "## Comments <!-- jira comments section -->";
+/// Substring identifying the section divider, tolerant of heading-text edits.
+const MD_COMMENTS_SECTION_MARK: &str = "<!-- jira comments section -->";
+/// New-comment placeholder heading in the Markdown buffer. The visible
+/// `Add Comment` text is cosmetic — `parse_md_comment_heading` keys the Add
+/// block off the `<!-- jira comment add -->` marker and ignores the heading
+/// text, so a user may rewrite or keep it and the round-trip is unaffected.
+const MD_COMMENT_ADD: &str = "### Add Comment <!-- jira comment add -->";
+
+/// Extract the `@author timestamp` prefix from a canonical comment header
+/// (`--- @author ts (id=N) ---`), dropping the `--- ` fence and `(id=N)` tail.
+fn canonical_header_middle(line: &str) -> String {
+    let t = line.trim_end();
+    let inner = t
+        .strip_prefix("--- ")
+        .and_then(|s| s.strip_suffix(" ---"))
+        .unwrap_or(t);
+    match inner.rfind("(id=") {
+        Some(p) => inner[..p].trim().to_string(),
+        None => inner.trim().to_string(),
+    }
+}
+
+/// Match a Markdown comment heading `### <middle> <!-- jira comment (add|id=N) -->`.
+/// Returns the block kind plus the `<middle>` author/timestamp text.
+fn parse_md_comment_heading(line: &str) -> Option<(CommentBlockKind, String)> {
+    let t = line.trim();
+    let rest = t.strip_prefix("###")?.trim_start();
+    let cmt_start = rest.find("<!--")?;
+    let middle = rest[..cmt_start].trim().to_string();
+    let inner = rest[cmt_start..]
+        .strip_prefix("<!--")?
+        .trim()
+        .strip_suffix("-->")?
+        .trim()
+        .strip_prefix("jira comment")?
+        .trim();
+    if inner == "add" {
+        Some((CommentBlockKind::Add, middle))
+    } else {
+        inner
+            .strip_prefix("id=")
+            .map(|id| (CommentBlockKind::Existing(id.trim().to_string()), middle))
+    }
+}
+
+/// Join body lines, dropping leading/trailing blank lines.
+fn join_trim(mut lines: Vec<&str>) -> String {
+    while lines.first().is_some_and(|l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Split the comment region of a *canonical* buffer into
+/// `(kind, middle, body)` blocks, keyed off the `--- add ---` /
+/// `--- @author ts (id=N) ---` header lines.
+fn split_canonical_blocks(lines: &[&str]) -> Vec<(CommentBlockKind, String, String)> {
+    let mut blocks: Vec<(CommentBlockKind, String, String)> = Vec::new();
+    let mut cur: Option<(CommentBlockKind, String, Vec<&str>)> = None;
+    let flush = |cur: Option<(CommentBlockKind, String, Vec<&str>)>,
+                 blocks: &mut Vec<(CommentBlockKind, String, String)>| {
+        if let Some((k, m, b)) = cur {
+            blocks.push((k, m, join_trim(b)));
+        }
+    };
+    for line in lines {
+        let t = line.trim_end();
+        if t == ADD_COMMENT_MARKER {
+            flush(cur.take(), &mut blocks);
+            cur = Some((CommentBlockKind::Add, String::new(), Vec::new()));
+        } else if let Some(id) = parse_comment_header_id(t) {
+            flush(cur.take(), &mut blocks);
+            cur = Some((
+                CommentBlockKind::Existing(id.to_string()),
+                canonical_header_middle(t),
+                Vec::new(),
+            ));
+        } else if let Some((_, _, body)) = cur.as_mut() {
+            body.push(line);
+        }
+    }
+    flush(cur.take(), &mut blocks);
+    blocks
+}
+
+/// Split the comment region of a *Markdown* buffer into `(kind, middle, body)`
+/// blocks, keyed off the `### … <!-- jira comment … -->` headings.
+fn split_md_comment_blocks(lines: &[&str]) -> Vec<(CommentBlockKind, String, String)> {
+    let mut blocks: Vec<(CommentBlockKind, String, String)> = Vec::new();
+    let mut cur: Option<(CommentBlockKind, String, Vec<&str>)> = None;
+    let flush = |cur: Option<(CommentBlockKind, String, Vec<&str>)>,
+                 blocks: &mut Vec<(CommentBlockKind, String, String)>| {
+        if let Some((k, m, b)) = cur {
+            blocks.push((k, m, join_trim(b)));
+        }
+    };
+    for line in lines {
+        if let Some((kind, middle)) = parse_md_comment_heading(line) {
+            flush(cur.take(), &mut blocks);
+            cur = Some((kind, middle, Vec::new()));
+        } else if let Some((_, _, body)) = cur.as_mut() {
+            body.push(line);
+        }
+    }
+    flush(cur.take(), &mut blocks);
+    blocks
+}
+
+/// Convert a canonical `edit_with_comments` buffer to the Markdown shape used
+/// by `edit_markdown`: header → GFM tables, body → Markdown, and each comment
+/// under a `### … <!-- jira comment … -->` heading below the section divider.
+/// The trailing CACHE section is preserved verbatim. With no comment markers
+/// (no `--- add ---`, no `(id=)` headers) this degrades to plain body-only
+/// Markdown, matching the pre-comments `edit_markdown` behaviour.
+pub(super) fn comments_canonical_to_md(canonical: &str) -> String {
+    use super::markers::CACHE_MARKER;
+    use super::wiki_md::{header_to_md, map_3b_body, wiki_to_md};
+
+    let lines: Vec<&str> = canonical.split('\n').collect();
+    let cache_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == CACHE_MARKER)
+        .unwrap_or(lines.len());
+    let first_marker = lines[..cache_idx].iter().position(|l| {
+        let t = l.trim_end();
+        t == ADD_COMMENT_MARKER || parse_comment_header_id(t).is_some()
+    });
+
+    let Some(first_marker) = first_marker else {
+        return header_to_md(&map_3b_body(canonical, wiki_to_md));
+    };
+
+    let header_body = lines[..first_marker].join("\n");
+    let header_md = header_to_md(&map_3b_body(&header_body, wiki_to_md));
+    let blocks = split_canonical_blocks(&lines[first_marker..cache_idx]);
+
+    let mut out: Vec<String> = Vec::new();
+    out.push(header_md.trim_end().to_string());
+    out.push(String::new());
+    out.push(MD_COMMENTS_SECTION.to_string());
+    for (kind, middle, body) in &blocks {
+        out.push(String::new());
+        match kind {
+            CommentBlockKind::Add => out.push(MD_COMMENT_ADD.to_string()),
+            CommentBlockKind::Existing(id) => out.push(if middle.is_empty() {
+                format!("### <!-- jira comment id={id} -->")
+            } else {
+                format!("### {middle} <!-- jira comment id={id} -->")
+            }),
+        }
+        if !body.trim().is_empty() {
+            out.push(String::new());
+            out.push(wiki_to_md(body));
+        }
+    }
+    if cache_idx < lines.len() {
+        out.push(String::new());
+        out.extend(lines[cache_idx..].iter().map(|s| s.to_string()));
+    }
+    out.join("\n")
+}
+
+/// Reverse of [`comments_canonical_to_md`]: turn the Markdown `edit_markdown`
+/// buffer back into a canonical `edit_with_comments` buffer the classify/diff
+/// pipeline understands. With no `## Comments` divider this degrades to the
+/// plain body-only reverse.
+pub(super) fn comments_md_to_canonical(md: &str) -> String {
+    use super::markers::CACHE_MARKER;
+    use super::wiki_md::{header_from_md, map_3b_body, md_to_wiki, rejoin_wrapped_html_markers};
+
+    // An editor may have hard-wrapped a long structural marker (a comment
+    // heading, the section divider, a panel opener) across several lines;
+    // stitch every such `<!-- … -->` back onto one line before parsing so a
+    // purely re-wrapped buffer keeps its comment/section structure intact.
+    let md = rejoin_wrapped_html_markers(md);
+    // The trailing read-only CACHE divider is a plain `#### … ####` heading
+    // (no HTML marker), so the pass above leaves it alone; reassemble it here
+    // too, or a narrow editor wrap would fold the whole CACHE block into the
+    // last comment's body and misclassify it as an edit.
+    let md = rejoin_wrapped_cache_marker(&md);
+    let md = md.as_str();
+    let lines: Vec<&str> = md.split('\n').collect();
+    let cache_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == CACHE_MARKER)
+        .unwrap_or(lines.len());
+    let section_idx = lines[..cache_idx]
+        .iter()
+        .position(|l| l.trim().contains(MD_COMMENTS_SECTION_MARK));
+
+    let Some(section_idx) = section_idx else {
+        return map_3b_body(&header_from_md(md), md_to_wiki);
+    };
+
+    let header_body_md = lines[..section_idx].join("\n");
+    let header_body_wiki = map_3b_body(&header_from_md(&header_body_md), md_to_wiki);
+    let blocks = split_md_comment_blocks(&lines[section_idx + 1..cache_idx]);
+
+    let mut out: Vec<String> = Vec::new();
+    out.push(header_body_wiki.trim_end().to_string());
+    for (kind, middle, body) in &blocks {
+        out.push(String::new());
+        match kind {
+            CommentBlockKind::Add => out.push(ADD_COMMENT_MARKER.to_string()),
+            CommentBlockKind::Existing(id) => {
+                // The canonical parser requires the header to start with `@`,
+                // so re-attach it if the user blanked the author.
+                let m = if middle.is_empty() {
+                    "@?".to_string()
+                } else if middle.starts_with('@') {
+                    middle.clone()
+                } else {
+                    format!("@{middle}")
+                };
+                out.push(format!("--- {m} (id={id}) ---"));
+            }
+        }
+        if !body.trim().is_empty() {
+            out.push(String::new());
+            out.push(md_to_wiki(body));
+        }
+    }
+    if cache_idx < lines.len() {
+        out.push(String::new());
+        out.extend(lines[cache_idx..].iter().map(|s| s.to_string()));
+    }
+    out.join("\n")
+}
+
+/// Reassemble an editor-wrapped CACHE divider back onto one line.
+///
+/// The divider is the fixed [`CACHE_MARKER`] string; a narrow editor wrap can
+/// split it across several physical lines. We match strictly against the known
+/// constant (a run of lines whose space-join is a growing prefix of it), so
+/// this can never merge unrelated content — only the real, wrapped marker.
+fn rejoin_wrapped_cache_marker(md: &str) -> String {
+    use super::markers::CACHE_MARKER;
+    let lines: Vec<&str> = md.split('\n').collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        let is_fragment =
+            t != CACHE_MARKER && t.starts_with("#### CACHE") && CACHE_MARKER.starts_with(t);
+        if !is_fragment {
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+        // `t` is a strict prefix of the marker — join following fragments
+        // until the whole marker is reconstructed (or the run diverges).
+        let mut joined = t.to_string();
+        let mut j = i + 1;
+        let mut matched = false;
+        while j < lines.len() {
+            let nxt = lines[j].trim();
+            if nxt.is_empty() {
+                break;
+            }
+            joined.push(' ');
+            joined.push_str(nxt);
+            j += 1;
+            if joined == CACHE_MARKER {
+                matched = true;
+                break;
+            }
+            if !CACHE_MARKER.starts_with(&joined) {
+                break;
+            }
+        }
+        if matched {
+            out.push(CACHE_MARKER.to_string());
+            i = j;
+        } else {
+            out.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+    out.join("\n")
+}
+
 /// True if `body` is a sole-body delete keyword — case-insensitive,
 /// no other non-blank lines.
 pub(super) fn is_delete_keyword(body: &str) -> bool {
@@ -187,11 +512,7 @@ pub(super) fn is_delete_keyword(body: &str) -> bool {
 
 /// DELETE a Jira comment. Wrapper around the client method that converts
 /// the raw String error into the `ContentError` layer used by the adapter.
-async fn delete_comment(
-    client: &Arc<JiraClient>,
-    issue_key: &str,
-    comment_id: &str,
-) -> Result<()> {
+async fn delete_comment(client: &Arc<JiraClient>, issue_key: &str, comment_id: &str) -> Result<()> {
     client
         .delete_comment(issue_key, comment_id)
         .await
@@ -207,11 +528,11 @@ impl JiraIssueNode {
         editable_fields: &[String],
         detail: &JiraIssueDetail,
         comments: &[JiraComment],
+        tables: &SlugTables,
     ) -> String {
-        let tables = build_slug_tables(&self.cache);
         // Render the 3b header without the CACHE section — we append it
         // once at the very end after the comment list.
-        let mut out = self.render_3b_full(editable_fields, detail, None, None, false);
+        let mut out = self.render_3b_full(editable_fields, detail, None, None, false, tables);
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -234,7 +555,7 @@ impl JiraIssueNode {
             out.push('\n');
         }
 
-        out.push_str(&render_cache_section(&tables));
+        out.push_str(&render_cache_section(tables));
         out
     }
 
@@ -286,6 +607,7 @@ impl JiraIssueNode {
         // (b2) Translate slugs / mentions back to their wire form, so the
         // diff and the PUT/POST work in the same encoding the server uses.
         let tables = build_slug_tables(&self.cache);
+        canonicalize_labels_via_jira(&self.client, &self.cache, &tables, &mut user.header).await;
         let mut header_errors = self.validate_3b(&user.header, &editable_fields);
         resolve_slugs_inplace(&mut user.header, &tables, &mut header_errors);
 
@@ -325,14 +647,33 @@ impl JiraIssueNode {
             .map_err(other_err)?;
         // Pre-resolve any `[~KEY]` mention we don't yet know about — keeps
         // `render_user_mentions` synchronous and ensures the foreign-reopen
-        // banner lands with proper @uu-slugs everywhere.
+        // banner lands with proper @uu_slugs everywhere.
         let mut mention_sources: Vec<&str> =
             fresh_comments.iter().map(|c| c.body.as_str()).collect();
         for block in &user.blocks {
             mention_sources.push(block.body.as_str());
         }
         resolve_unknown_mentions(&self.client, &self.cache, &mention_sources).await;
+        // Identity for the per-author "is this comment mine?" gate. We fetch
+        // both the display name and the stable account username: display names
+        // can be ambiguous or reformatted, so we prefer matching the username
+        // (the `name` field, same value that appears inside `[~name]`) and only
+        // fall back to the display name when either side lacks a username.
         let current_user = self.client.current_user().await.ok().map(|s| s.to_string());
+        let current_username = self
+            .client
+            .current_username()
+            .await
+            .ok()
+            .map(|s| s.to_string());
+        let is_own_comment = |c: &JiraComment| -> bool {
+            comment_is_own(
+                &c.author,
+                &c.author_key,
+                current_user.as_deref(),
+                current_username.as_deref(),
+            )
+        };
 
         // Build a snapshot id→body map and a fresh id→comment map for quick lookup.
         let snap_by_id: std::collections::HashMap<&str, &str> = snapshot
@@ -361,18 +702,16 @@ impl JiraIssueNode {
                     let snapshot_body = snap_by_id.get(id.as_str()).copied().unwrap_or("");
                     let fresh = fresh_by_id.get(id.as_str()).copied();
 
-                    let is_own = match (current_user.as_deref(), fresh) {
-                        (Some(u), Some(c)) => c.author == u,
-                        // Permissive default when we don't know the user.
-                        (None, _) => true,
+                    let is_own = match fresh {
+                        Some(c) => is_own_comment(c),
                         // Comment vanished upstream — owner check moot, error below.
-                        (_, None) => false,
+                        None => false,
                     };
                     let is_delete = is_delete_keyword(user_body);
 
                     let Some(fresh) = fresh else {
                         // Comment was deleted upstream while we edited.
-                        if user_body == snapshot_body {
+                        if normalize_ws(user_body) == normalize_ws(snapshot_body) {
                             // We didn't touch it either — silently drop.
                             decisions.push(CommentDecision::DropOurs);
                         } else {
@@ -385,8 +724,17 @@ impl JiraIssueNode {
                         continue;
                     };
 
-                    let foreign_changed = fresh.body.trim() != snapshot_body.trim();
-                    let user_changed = user_body != snapshot_body.trim();
+                    // Compare with the same whitespace normalization the
+                    // round-trip guard uses, not a raw `.trim()`. In markdown
+                    // mode the snapshot baseline is round-tripped
+                    // (`md→wiki(wiki→md(upstream))`) while `fresh.body` is raw
+                    // upstream wiki; the round-trip is only guaranteed stable
+                    // modulo whitespace, so a raw compare would flag unchanged
+                    // comments as foreign edits (e.g. image lines the editor
+                    // re-wrapped).
+                    let snap_norm = normalize_ws(snapshot_body);
+                    let foreign_changed = normalize_ws(&fresh.body) != snap_norm;
+                    let user_changed = normalize_ws(user_body) != snap_norm;
 
                     match (foreign_changed, user_changed) {
                         (false, false) => decisions.push(CommentDecision::NoChange),
@@ -422,7 +770,7 @@ impl JiraIssueNode {
                         }
                         (true, false) => decisions.push(CommentDecision::DropOurs),
                         (true, true) => {
-                            if user_body == fresh.body.trim() {
+                            if normalize_ws(user_body) == normalize_ws(&fresh.body) {
                                 // User explicitly accepted upstream (e.g. after a prior reopen).
                                 decisions.push(CommentDecision::AcceptForeign);
                             } else {
@@ -445,7 +793,10 @@ impl JiraIssueNode {
 
         // (f) Removed comments: in snapshot but not in user buffer (and not in errors).
         for (snap_id, _) in &snap_by_id {
-            let still_present = user.blocks.iter().any(|b| matches!(&b.kind, CommentBlockKind::Existing(id) if id == snap_id));
+            let still_present = user
+                .blocks
+                .iter()
+                .any(|b| matches!(&b.kind, CommentBlockKind::Existing(id) if id == snap_id));
             if !still_present {
                 let restore = fresh_by_id
                     .get(snap_id)
@@ -461,7 +812,16 @@ impl JiraIssueNode {
 
         // (g) If any structural / foreign-edit errors: reopen with restored buffer + banner.
         if !errors.is_empty() {
-            let content = self.render_foreign_reopen(&user, &fresh_issue, &fresh_comments, &errors);
+            // Async status-aware tables so the reopened header shows the `ss_`
+            // status slug and the CACHE legend matches the transition menu.
+            let display_tables = self.slug_tables(&fresh_issue).await;
+            let content = self.render_foreign_reopen(
+                &user,
+                &fresh_issue,
+                &fresh_comments,
+                &errors,
+                &display_tables,
+            );
             return Ok(ActionOutcome::Reopen {
                 content,
                 new_version: Some(fresh_issue.updated.clone()),
@@ -485,7 +845,10 @@ impl JiraIssueNode {
             }
         }
         for body in &adds {
-            self.client.add_comment(&issue_key, body).await.map_err(other_err)?;
+            self.client
+                .add_comment(&issue_key, body)
+                .await
+                .map_err(other_err)?;
         }
 
         // (i) Apply issue-header changes via the existing edit_full pipeline.
@@ -516,9 +879,7 @@ impl JiraIssueNode {
 
         let comment_msg = match (n_updates, n_deletes, n_adds) {
             (0, 0, 0) => String::new(),
-            _ => format!(
-                ", comments: +{n_adds} ~{n_updates} -{n_deletes}",
-            ),
+            _ => format!(", comments: +{n_adds} ~{n_updates} -{n_deletes}",),
         };
 
         Ok(match header_outcome {
@@ -545,16 +906,11 @@ impl JiraIssueNode {
         fresh_issue: &JiraIssueDetail,
         fresh_comments: &[JiraComment],
         errors: &[(String, String, String)],
+        tables: &SlugTables,
     ) -> String {
         // Header: re-render the 3b layout with the user's editable values
         // and body, but read-only fields refreshed from fresh_issue.
-        let tables = build_slug_tables(&self.cache);
-        let header = render_3b_from_parsed(
-            &user.header,
-            &edit_full_fields(),
-            fresh_issue,
-            &tables,
-        );
+        let header = render_3b_from_parsed(&user.header, &edit_full_fields(), fresh_issue, &tables);
 
         // Comments: rebuild newest→oldest from fresh_comments (so removed
         // ones come back), preserving user-add blocks.
@@ -606,5 +962,178 @@ impl JiraIssueNode {
 
         out.push_str(&render_cache_section(&tables));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::comment_is_own;
+
+    #[test]
+    fn own_by_username_ignores_display_name_mismatch() {
+        // The stable username matches even though the display name differs
+        // (renamed profile) — the comment is still ours.
+        assert!(comment_is_own(
+            "Alice B.",
+            "abecker",
+            Some("Alice Becker"),
+            Some("abecker"),
+        ));
+    }
+
+    #[test]
+    fn foreign_by_username_despite_shared_display_name() {
+        // Two people share a display name; the username disambiguates them so
+        // a colleague's comment is not treated as ours.
+        assert!(!comment_is_own(
+            "Alex Smith",
+            "asmith2",
+            Some("Alex Smith"),
+            Some("asmith1"),
+        ));
+    }
+
+    #[test]
+    fn falls_back_to_display_name_when_username_missing() {
+        // Jira returned no author username; the display name decides.
+        assert!(comment_is_own("Carol", "", Some("Carol"), Some("cjones")));
+        assert!(!comment_is_own("Dave", "", Some("Carol"), Some("cjones")));
+    }
+
+    #[test]
+    fn permissive_when_identity_unknown() {
+        // We couldn't resolve who we are → don't block the user.
+        assert!(comment_is_own("Anyone", "anyone", None, None));
+    }
+
+    // --- editor-wrap robustness of the comment/CACHE structure ---
+    //
+    // A user's editor may hard-wrap long lines on save. Structural lines — the
+    // comment headings and the trailing CACHE divider — must survive that so
+    // the comment classifier does not mistake a purely re-wrapped buffer for
+    // an edit of a foreign comment. All fixtures below are invented.
+
+    use super::super::markers::CACHE_MARKER;
+    use super::{
+        CommentBlockKind, comments_md_to_canonical, rejoin_wrapped_cache_marker,
+        split_canonical_blocks,
+    };
+
+    /// Editor hard-wrap: break each line at the last space ≤ width, dropping
+    /// the break space (the common `$EDITOR`/`gq` behaviour).
+    fn hard_wrap(md: &str, width: usize) -> String {
+        let mut out: Vec<String> = Vec::new();
+        for line in md.split('\n') {
+            let mut rest = line.to_string();
+            loop {
+                if rest.chars().count() <= width {
+                    out.push(rest);
+                    break;
+                }
+                let cut = rest
+                    .char_indices()
+                    .take(width + 1)
+                    .filter(|(_, c)| *c == ' ')
+                    .last()
+                    .map(|(b, _)| b);
+                match cut {
+                    Some(b) if b > 0 => {
+                        out.push(rest[..b].to_string());
+                        rest = rest[b + 1..].to_string();
+                    }
+                    _ => {
+                        out.push(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        out.join("\n")
+    }
+
+    /// id → canonical (wiki) body for the comment region of a canonical buffer.
+    fn comment_bodies(canonical: &str) -> std::collections::HashMap<String, String> {
+        let lines: Vec<&str> = canonical.split('\n').collect();
+        let cache_idx = lines
+            .iter()
+            .position(|l| l.trim_end() == CACHE_MARKER)
+            .unwrap_or(lines.len());
+        let mut m = std::collections::HashMap::new();
+        for (kind, _middle, body) in split_canonical_blocks(&lines[..cache_idx]) {
+            if let CommentBlockKind::Existing(id) = kind {
+                m.insert(id, body);
+            }
+        }
+        m
+    }
+
+    /// A synthetic edit buffer: body, a comments section with one existing
+    /// comment whose heading is deliberately long, and the read-only CACHE
+    /// divider followed by a scaffold block.
+    fn synthetic_buffer() -> String {
+        format!(
+            "Some description body.\n\
+             \n\
+             ## Comments <!-- jira comments section -->\n\
+             \n\
+             ### @averylongdisplayname_department_extern 2022-11-09T10:00 <!-- jira comment id=987654 -->\n\
+             \n\
+             A short comment body that must round-trip unchanged.\n\
+             \n\
+             {CACHE_MARKER}\n\
+             h1. labels: ll_alpha, ll_beta, ll_gamma\n\
+             h1. statuses: ss_open, ss_done"
+        )
+    }
+
+    #[test]
+    fn wrapped_comment_heading_survives_editor_wrap() {
+        let buf = synthetic_buffer();
+        let baseline = comment_bodies(&comments_md_to_canonical(&buf));
+        assert!(
+            baseline.contains_key("987654"),
+            "fixture must have the comment"
+        );
+        for width in [40usize, 50, 60, 66, 72, 80] {
+            let wrapped = comments_md_to_canonical(&hard_wrap(&buf, width));
+            let got = comment_bodies(&wrapped);
+            assert!(
+                got.contains_key("987654"),
+                "width {width}: comment heading wrap lost the comment"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_cache_divider_not_absorbed_into_last_comment() {
+        let buf = synthetic_buffer();
+        let base_body = comment_bodies(&comments_md_to_canonical(&buf))
+            .remove("987654")
+            .unwrap();
+        for width in [40usize, 50, 60] {
+            // These widths wrap the 66-char CACHE divider.
+            let got = comment_bodies(&comments_md_to_canonical(&hard_wrap(&buf, width)));
+            let body = got.get("987654").expect("comment present");
+            assert!(
+                !body.contains("labels:") && !body.contains("statuses:"),
+                "width {width}: CACHE block leaked into comment body"
+            );
+            assert_eq!(
+                super::super::wiki_md::normalize_ws(body),
+                super::super::wiki_md::normalize_ws(&base_body),
+                "width {width}: comment body changed by wrapping"
+            );
+        }
+    }
+
+    #[test]
+    fn rejoin_wrapped_cache_marker_reassembles_only_the_marker() {
+        // A wrapped marker is rejoined; unrelated `#### CACHE …` prose is not.
+        let wrapped = "#### CACHE / available labels, users &\nstatuses (do not edit) ####";
+        assert_eq!(rejoin_wrapped_cache_marker(wrapped), CACHE_MARKER);
+        let whole = format!("{CACHE_MARKER}\nrest");
+        assert_eq!(rejoin_wrapped_cache_marker(&whole), whole);
+        let unrelated = "#### CACHE OF THE ATLANTIC\nis a documentary";
+        assert_eq!(rejoin_wrapped_cache_marker(unrelated), unrelated);
     }
 }

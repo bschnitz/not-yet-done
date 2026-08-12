@@ -1,0 +1,16 @@
+[package]
+name = "not-yet-done-extended-query"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+not-yet-done-filter = { path = "../not-yet-done-filter" }
+not-yet-done-content = { path = "../not-yet-done-content" }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

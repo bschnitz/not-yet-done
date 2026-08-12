@@ -41,7 +41,10 @@ fn summary_output_contains_total_line() {
     let (_dir, db_url) = common::setup();
     let task_id = common::create_task(&db_url, "Total task");
     common::start_tracking(&db_url, &task_id);
-    common::nyd(&db_url).args(["track", "stop"]).assert().success();
+    common::nyd(&db_url)
+        .args(["track", "stop"])
+        .assert()
+        .success();
 
     common::nyd(&db_url)
         .args(["track", "summary"])
@@ -71,7 +74,14 @@ fn summary_from_after_to_fails() {
     let (_dir, db_url) = common::setup();
 
     common::nyd(&db_url)
-        .args(["track", "summary", "--from", "2026-03-22", "--to", "2026-03-01"])
+        .args([
+            "track",
+            "summary",
+            "--from",
+            "2026-03-22",
+            "--to",
+            "2026-03-01",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--from must not be after --to"));
@@ -84,11 +94,21 @@ fn summary_with_explicit_range_containing_no_trackings_prints_empty_message() {
     let (_dir, db_url) = common::setup();
     let task_id = common::create_task(&db_url, "Out of range task");
     common::start_tracking(&db_url, &task_id);
-    common::nyd(&db_url).args(["track", "stop"]).assert().success();
+    common::nyd(&db_url)
+        .args(["track", "stop"])
+        .assert()
+        .success();
 
     // Query a range far in the past
     common::nyd(&db_url)
-        .args(["track", "summary", "--from", "2000-01-01", "--to", "2000-01-02"])
+        .args([
+            "track",
+            "summary",
+            "--from",
+            "2000-01-01",
+            "--to",
+            "2000-01-02",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("No tracked time found"));
@@ -110,7 +130,10 @@ fn summary_task_id_filter_shows_only_matching_task() {
         .args(["track", "start", "--parallel", &task_b])
         .assert()
         .success();
-    common::nyd(&db_url).args(["track", "stop"]).assert().success();
+    common::nyd(&db_url)
+        .args(["track", "stop"])
+        .assert()
+        .success();
 
     common::nyd(&db_url)
         .args(["track", "summary", "--task-id", &task_a])
@@ -147,7 +170,10 @@ fn summary_shows_multiple_tasks() {
         .args(["track", "start", "--parallel", &task_b])
         .assert()
         .success();
-    common::nyd(&db_url).args(["track", "stop"]).assert().success();
+    common::nyd(&db_url)
+        .args(["track", "stop"])
+        .assert()
+        .success();
 
     common::nyd(&db_url)
         .args(["track", "summary"])

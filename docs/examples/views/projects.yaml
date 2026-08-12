@@ -59,6 +59,10 @@ adapter:
   # `config_inline: "{}"` is the empty config (all defaults); the host needs a
   # `config_inline` or a `config:` path to build the instance.
   config_inline: "{}"
+  # `manual_connect` defaults to true (nothing connects until you press the
+  # reload key). This adapter opens a local SQLite file and never logs in, so
+  # it opts back into loading at startup.
+  manual_connect: false
 
 views:
   - name: projects

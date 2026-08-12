@@ -7,15 +7,19 @@ use not_yet_done_core::config::ConfigServiceImpl;
 use not_yet_done_core::db;
 use not_yet_done_task_core::module::TaskDomainModule;
 use not_yet_done_task_core::repository::{
-    ProjectRepositoryImpl, ProjectRepositoryImplParameters,
-    TagRepositoryImpl, TagRepositoryImplParameters,
-    TaskRepositoryImpl, TaskRepositoryImplParameters,
+    ProjectRepositoryImpl, ProjectRepositoryImplParameters, TagRepositoryImpl,
+    TagRepositoryImplParameters, TaskRepositoryImpl, TaskRepositoryImplParameters,
     TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
 
 mod adapter_cli;
+mod adapter_connect;
+mod adapter_query;
 mod cli_config;
 mod commands;
+mod config_auth;
+mod config_gen;
+mod config_template;
 
 static MODULE: OnceLock<Arc<TaskDomainModule>> = OnceLock::new();
 
@@ -24,7 +28,10 @@ where
     F: FnOnce(Arc<TaskDomainModule>) -> Fut,
     Fut: Future<Output = T>,
 {
-    let module = MODULE.get().expect("TaskDomainModule nicht initialisiert").clone();
+    let module = MODULE
+        .get()
+        .expect("TaskDomainModule nicht initialisiert")
+        .clone();
     tokio::runtime::Runtime::new()
         .expect("tokio Runtime konnte nicht erstellt werden")
         .block_on(f(module))
@@ -95,22 +102,24 @@ fn main() -> std::process::ExitCode {
 
     let module = Arc::new(
         TaskDomainModule::builder()
-            .with_component_parameters::<TaskRepositoryImpl>(
-                TaskRepositoryImplParameters { db: Some(db.clone()) },
-            )
-            .with_component_parameters::<ProjectRepositoryImpl>(
-                ProjectRepositoryImplParameters { db: Some(db.clone()) },
-            )
-            .with_component_parameters::<TrackingRepositoryImpl>(
-                TrackingRepositoryImplParameters { db: Some(db.clone()) },
-            )
-            .with_component_parameters::<TagRepositoryImpl>(
-                TagRepositoryImplParameters { db: Some(db) },
-            )
+            .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<ProjectRepositoryImpl>(ProjectRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<TrackingRepositoryImpl>(TrackingRepositoryImplParameters {
+                db: Some(db.clone()),
+            })
+            .with_component_parameters::<TagRepositoryImpl>(TagRepositoryImplParameters {
+                db: Some(db),
+            })
             .build(),
     );
 
-    MODULE.set(module).unwrap_or_else(|_| panic!("MODULE bereits gesetzt"));
+    MODULE
+        .set(module)
+        .unwrap_or_else(|_| panic!("MODULE bereits gesetzt"));
 
     std::process::ExitCode::from(cli::exec_cli().unwrap_or(0))
 }

@@ -40,7 +40,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 /// Built-in aliases, always available unless overridden by `cli.yaml`. They
@@ -48,34 +48,37 @@ use serde::Deserialize;
 /// instances aren't configured the alias still expands, then fails at dispatch
 /// with a clear "no adapter instance" error.
 ///
-/// An alias name must not collide with a built-in `tusks` subcommand (`tag`,
-/// `backup`, `help`) or a configured adapter instance — both are matched
-/// *before* aliases, so a colliding name is unreachable. The former task-core
-/// commands (`task`/`project`/`track`/`query`/`db`) were removed in D3b, so
-/// those names are now free for aliases (e.g. the `track` toggle below).
+/// An alias name must not collide with a top-level command (`adapter`,
+/// `config`, `tag`, `backup`, `help`) — those are matched *before* aliases, so
+/// a colliding name is unreachable. Adapter instances are no longer top-level
+/// (they live under `adapter <instance>`), so an instance name never shadows an
+/// alias. Aliases expand to a full `adapter …` invocation (see the defaults
+/// below).
 pub const DEFAULT_ALIASES: &[(&str, &[&str])] = &[
     // Open the new-task editor buffer (or supply it inline with `-m`, where the
     // first line is the title and the rest the description — the same Markdown
-    // buffer the TUI's add action uses).
-    ("add", &["tasks", "do", "add"]),
-    // Edit a task's buffer: `nyd edit <id>`.
-    ("edit", &["tasks", "do", "edit", "{0}"]),
+    // buffer the TUI's add action uses). The action is the last positional and
+    // the type path selects the level, so a root action carries no id.
+    ("add", &["adapter", "tasks", "add"]),
+    // Edit a task's buffer: `nyd edit <id>` → `adapter tasks <id> edit`.
+    ("edit", &["adapter", "tasks", "{0}", "edit"]),
     // Delete a task (needs `--yes`): `nyd rm <id> --yes`.
-    ("rm", &["tasks", "do", "delete", "{0}"]),
+    ("rm", &["adapter", "tasks", "{0}", "delete"]),
     // Toggle time tracking on a task: `nyd track <id>`. The adapter exposes a
     // single `toggle-tracking` action (start when stopped, stop when running),
     // so the legacy `track start`/`track stop` pair collapses into one verb.
     // `toggle` stays as a back-compat synonym.
-    ("track", &["tasks", "do", "toggle-tracking", "{0}"]),
-    ("toggle", &["tasks", "do", "toggle-tracking", "{0}"]),
+    ("track", &["adapter", "tasks", "{0}", "toggle-tracking"]),
+    ("toggle", &["adapter", "tasks", "{0}", "toggle-tracking"]),
     // The task forest as a tree: `nyd tree`.
-    ("tree", &["tasks", "ls", "--tree"]),
+    ("tree", &["adapter", "tasks", "ls", "--tree"]),
     // Tracked time rolled up per task, bucketed by day (newest first) — the
     // generic stand-in for the legacy `track summary`. Add `--query` after it
     // (spliced) to time-box, e.g. `nyd summary --query 'started_at gt last week'`.
     (
         "summary",
         &[
+            "adapter",
             "trackings",
             "ls",
             "--tree",
@@ -133,8 +136,8 @@ pub fn load() -> Result<CliConfig> {
     if path.exists() {
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let file: CliConfigFile = serde_yaml::from_str(&raw)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let file: CliConfigFile =
+            serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         for (name, toks) in file.aliases {
             aliases.insert(name, toks);
         }
@@ -159,10 +162,7 @@ fn split_args(user_args: &[String]) -> (Vec<String>, HashMap<String, String>) {
         if let Some(rest) = a.strip_prefix("--") {
             if let Some((k, v)) = rest.split_once('=') {
                 named.insert(k.to_string(), v.to_string());
-            } else if user_args
-                .get(i + 1)
-                .is_some_and(|n| !n.starts_with("--"))
-            {
+            } else if user_args.get(i + 1).is_some_and(|n| !n.starts_with("--")) {
                 named.insert(rest.to_string(), user_args[i + 1].clone());
                 i += 1;
             } else {
@@ -243,21 +243,40 @@ pub fn expand(template: &[String], user_args: &[String]) -> Result<Vec<String>> 
 // `nyd config edit [target]`
 // ---------------------------------------------------------------------------
 
-/// Handle `nyd config <sub> [target]`. The only subcommand is `edit` (the
-/// default when omitted), which opens a config file in `$EDITOR`:
+/// Handle `nyd config <sub> [target]`. Subcommands:
 ///
-/// * `cli`            → `cli.yaml` (seeded with a documented template)
-/// * `tui`            → `tui.yaml`
-/// * `<name>`         → `views/<name>.yaml`
-/// * *(no target)*    → `cli`
+/// * `edit` (default) — open a config file in `$EDITOR`:
+///   * `cli`      → `cli.yaml` (seeded with a documented template)
+///   * `tui`      → `tui.yaml`
+///   * `<name>`   → `views/<name>.yaml`
+///   * *(none)*   → `cli`
+/// * `generate` / `gen` — scaffold a view config from an adapter's protocol
+///   description to stdout (see [`crate::config_gen`]).
+/// * `template` / `tpl` — print an adapter type's connection-config YAML
+///   template from its declared schema, no connection (see
+///   [`crate::config_template`]).
+/// * `build` / `new` — interactively fill an adapter type's connection config
+///   from its schema and print the completed YAML (see
+///   [`crate::config_template::run_build`]).
+/// * `auth` — list the auth mechanisms an adapter type implements and the
+///   fields each one needs (see [`crate::config_auth`]).
 pub fn run_config(args: &[String]) -> Result<()> {
     // args = ["nyd", "config", <sub?>, <target?>]
     let sub = args.get(2).map(String::as_str).unwrap_or("edit");
-    if sub != "edit" {
-        return Err(anyhow!(
-            "unknown config subcommand '{sub}' (only `edit` is supported)"
-        ));
+    match sub {
+        "edit" => run_config_edit(args),
+        "generate" | "gen" => crate::config_gen::run(args),
+        "template" | "tpl" => crate::config_template::run(args),
+        "build" | "new" => crate::config_template::run_build(args),
+        "auth" => crate::config_auth::run(args),
+        other => Err(anyhow!(
+            "unknown config subcommand '{other}' (use `edit`, `generate`, `template`, `build`, or `auth`)"
+        )),
     }
+}
+
+/// `nyd config edit [target]` — open a config file in `$EDITOR`.
+fn run_config_edit(args: &[String]) -> Result<()> {
     let target = args.get(3).map(String::as_str).unwrap_or("cli");
     let path = config_target_path(target)?;
     if !path.exists() {
@@ -300,9 +319,7 @@ fn list_view_names() -> Vec<String> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let p = e.path();
-            let is_yaml = p
-                .extension()
-                .is_some_and(|x| x == "yaml" || x == "yml");
+            let is_yaml = p.extension().is_some_and(|x| x == "yaml" || x == "yml");
             is_yaml
                 .then(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
                 .flatten()
@@ -412,8 +429,11 @@ mod tests {
 
     #[test]
     fn expand_splices_all_positionals() {
-        let out = expand(&v(&["tasks", "ls", "--query", "{@}"]), &v(&["status=open", "p=1"]))
-            .unwrap();
+        let out = expand(
+            &v(&["tasks", "ls", "--query", "{@}"]),
+            &v(&["status=open", "p=1"]),
+        )
+        .unwrap();
         assert_eq!(out, v(&["tasks", "ls", "--query", "status=open", "p=1"]));
     }
 
@@ -425,8 +445,10 @@ mod tests {
 
     #[test]
     fn expand_named_placeholder() {
-        let out = expand(&v(&["tasks", "do", "add", "--value", "{parent}"]),
-            &v(&["--parent", "root1"]))
+        let out = expand(
+            &v(&["tasks", "do", "add", "--value", "{parent}"]),
+            &v(&["--parent", "root1"]),
+        )
         .unwrap();
         assert_eq!(out, v(&["tasks", "do", "add", "--value", "root1"]));
     }
@@ -454,7 +476,7 @@ mod tests {
     #[test]
     fn default_track_alias_toggles_tracking() {
         let out = expand(&default_template("track"), &v(&["abc123"])).unwrap();
-        assert_eq!(out, v(&["tasks", "do", "toggle-tracking", "abc123"]));
+        assert_eq!(out, v(&["adapter", "tasks", "abc123", "toggle-tracking"]));
     }
 
     #[test]
@@ -464,6 +486,7 @@ mod tests {
         assert_eq!(
             out,
             v(&[
+                "adapter",
                 "trackings",
                 "ls",
                 "--tree",

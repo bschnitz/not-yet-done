@@ -26,10 +26,10 @@ use not_yet_done_content::{ActionOutcome, ContentError, EditorPrep, Result};
 use crate::adapter::create_template::{parse_template, render_filled, render_with_error};
 use crate::client::UpdatePageError;
 
-use super::ConfluencePageNode;
-use super::format::format_xhtml;
 use super::super::conflict_banner::strip_banner;
 use super::super::other_err;
+use super::ConfluencePageNode;
+use super::format::format_xhtml;
 
 impl ConfluencePageNode {
     /// Render the initial editor buffer: lazy-hydrate the page detail,
@@ -43,6 +43,7 @@ impl ConfluencePageNode {
             template: render_filled(&detail.title, &body),
             version: detail.version.to_string(),
             suffix: ".html".into(),
+            file_path: None,
         })
     }
 

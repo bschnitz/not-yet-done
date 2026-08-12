@@ -20,7 +20,7 @@ use not_yet_done_content::*;
 use crate::client::{KimaiActivity, KimaiClient, KimaiProject, KimaiTimesheet};
 
 mod auth_bridge;
-mod config;
+pub mod config;
 mod factory;
 mod template;
 
@@ -112,13 +112,33 @@ impl ContentAdapter for KimaiAdapter {
         Ok(Box::new(KimaiRoot {
             client,
             connection_name: self.connection_name.clone(),
-            lookback_days: self.lookback_days,
         }))
     }
 
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
         let client = self.auth.get_client().await.map_err(other_err)?;
         fetch_timesheet_node(&client, id).await
+    }
+
+    /// The single source of truth about what lives under a Kimai node: the
+    /// root lists `kimai:timesheet` rows; a timesheet is a leaf. The `list`
+    /// callback fetches lazily through the same [`list_timesheets`] the root's
+    /// legacy `list` delegates to, so type set, sort columns, and fetcher can
+    /// never disagree.
+    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<Child<'a>> {
+        match node.node_type().type_id.as_str() {
+            "kimai:root" => vec![Child {
+                node_type: timesheet_node_type(),
+                columns: timesheet_columns(),
+                list: Box::new(move |params| {
+                    Box::pin(async move {
+                        let client = self.auth.get_client().await.map_err(other_err)?;
+                        list_timesheets(&client, self.lookback_days, params).await
+                    })
+                }),
+            }],
+            _ => Vec::new(),
+        }
     }
 
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
@@ -141,8 +161,7 @@ impl ContentAdapter for KimaiAdapter {
             "entry_combos" => {
                 let client = self.auth.get_client().await.map_err(other_err)?;
                 let (projects, activities) =
-                    tokio::try_join!(client.projects(), client.activities())
-                        .map_err(other_err)?;
+                    tokio::try_join!(client.projects(), client.activities()).map_err(other_err)?;
                 let projects: HashMap<u64, KimaiProject> =
                     projects.into_iter().map(|p| (p.id, p)).collect();
                 let activities: HashMap<u64, KimaiActivity> =
@@ -169,6 +188,23 @@ impl ContentAdapter for KimaiAdapter {
         self.auth.subscribe_status()
     }
 
+    async fn submit_credentials(
+        &self,
+        fields: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.auth
+            .submit_credentials(fields)
+            .await
+            .map_err(|e| ContentError::Other(e.into()))
+    }
+
+    async fn cancel_credentials(&self) -> Result<()> {
+        self.auth
+            .cancel_credentials()
+            .await
+            .map_err(|e| ContentError::Other(e.into()))
+    }
+
     async fn invalidate_session(&self) -> Result<()> {
         self.auth.invalidate_session().await;
         Ok(())
@@ -193,8 +229,7 @@ async fn fetch_timesheet_node(client: &Arc<KimaiClient>, id: &str) -> Result<Box
         client.activities()
     )
     .map_err(other_err)?;
-    let projects: HashMap<u64, KimaiProject> =
-        projects.into_iter().map(|p| (p.id, p)).collect();
+    let projects: HashMap<u64, KimaiProject> = projects.into_iter().map(|p| (p.id, p)).collect();
     let activities: HashMap<u64, KimaiActivity> =
         activities.into_iter().map(|a| (a.id, a)).collect();
     Ok(Box::new(KimaiTimesheetNode::new(
@@ -208,7 +243,6 @@ async fn fetch_timesheet_node(client: &Arc<KimaiClient>, id: &str) -> Result<Box
 struct KimaiRoot {
     client: Arc<KimaiClient>,
     connection_name: String,
-    lookback_days: u32,
 }
 
 #[async_trait]
@@ -237,34 +271,9 @@ impl Node for KimaiRoot {
         &EMPTY
     }
 
-    fn children_types(&self) -> Vec<NodeType> {
-        vec![timesheet_node_type()]
-    }
-
-    fn sortable_columns(&self, node_type: &NodeType) -> Vec<SortableColumn> {
-        match node_type.type_id.as_str() {
-            "kimai:timesheet" => timesheet_sortable_columns(),
-            _ => Vec::new(),
-        }
-    }
-
-    async fn list(&self, params: ListParams) -> Result<ListResult> {
-        match params.node_type.type_id.as_str() {
-            "kimai:timesheet" => self.list_timesheets(params).await,
-            other => Err(ContentError::NotSupported(format!(
-                "Unknown node type: {other}"
-            ))),
-        }
-    }
-
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         fetch_timesheet_node(&self.client, id).await
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        root_actions()
-    }
-
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(fields)) => self.execute_create(fields).await,
@@ -317,61 +326,61 @@ impl KimaiRoot {
             message: Some(format!("timesheet {}: created", created.id)),
         })
     }
-
-    /// One bulk listing: timesheets since the lookback boundary plus both
-    /// lookup tables, fetched concurrently. Sorting is always local —
-    /// Kimai's server order (begin desc) is just the input order.
-    async fn list_timesheets(&self, params: ListParams) -> Result<ListResult> {
-        let begin_local = Local::now()
-            .checked_sub_days(Days::new(self.lookback_days as u64))
-            .unwrap_or_else(Local::now)
-            .format("%Y-%m-%dT%H:%M:%S")
-            .to_string();
-
-        let (timesheets, projects, activities) = tokio::try_join!(
-            self.client.timesheets_since(&begin_local),
-            self.client.projects(),
-            self.client.activities()
-        )
-        .map_err(other_err)?;
-
-        let projects: HashMap<u64, KimaiProject> =
-            projects.into_iter().map(|p| (p.id, p)).collect();
-        let activities: HashMap<u64, KimaiActivity> =
-            activities.into_iter().map(|a| (a.id, a)).collect();
-
-        let mut items: Vec<NodeSummary> = timesheets
-            .into_iter()
-            .map(|ts| timesheet_summary(ts, &projects, &activities))
-            .collect();
-
-        let applied_sort = apply_sort(&mut items, &params.sort, &timesheet_sortable_columns());
-
-        Ok(ListResult {
-            items,
-            applied_sort,
-            page: None,
-            batch_download_available: false,
-            downloaded: vec![],
-        })
-    }
 }
 
-fn timesheet_sortable_columns() -> Vec<SortableColumn> {
+/// List the timesheet rows for the lookback window — the single fetch source
+/// behind both the root's `list` and the adapter's [`ContentAdapter::childs`]
+/// declaration. Sorting is always local; Kimai's server order (begin desc) is
+/// just the input order.
+async fn list_timesheets(
+    client: &Arc<KimaiClient>,
+    lookback_days: u32,
+    params: ListParams,
+) -> Result<ListResult> {
+    let begin_local = Local::now()
+        .checked_sub_days(Days::new(lookback_days as u64))
+        .unwrap_or_else(Local::now)
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+
+    let (timesheets, projects, activities) = tokio::try_join!(
+        client.timesheets_since(&begin_local),
+        client.projects(),
+        client.activities()
+    )
+    .map_err(other_err)?;
+
+    let projects: HashMap<u64, KimaiProject> = projects.into_iter().map(|p| (p.id, p)).collect();
+    let activities: HashMap<u64, KimaiActivity> =
+        activities.into_iter().map(|a| (a.id, a)).collect();
+
+    let mut items: Vec<NodeSummary> = timesheets
+        .into_iter()
+        .map(|ts| timesheet_summary(ts, &projects, &activities))
+        .collect();
+
+    let applied_sort = apply_sort(&mut items, &params.sort, &timesheet_columns());
+
+    Ok(ListResult {
+        items,
+        applied_sort,
+        page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    })
+}
+
+fn timesheet_columns() -> Vec<ColumnSchema> {
     [
-        ("project", "Project", SortKind::Text),
-        ("customer", "Customer", SortKind::Text),
-        ("activity", "Activity", SortKind::Text),
-        ("duration", "Duration", SortKind::Number),
-        ("begin", "Begin", SortKind::DateTime),
-        ("end", "End", SortKind::DateTime),
+        ("project", "Project", "text"),
+        ("customer", "Customer", "text"),
+        ("activity", "Activity", "text"),
+        ("duration", "Duration", "number"),
+        ("begin", "Begin", "datetime"),
+        ("end", "End", "datetime"),
     ]
     .into_iter()
-    .map(|(key, label, kind)| SortableColumn {
-        key: key.into(),
-        label: label.into(),
-        kind,
-    })
+    .map(|(key, label, value_type)| ColumnSchema::new(key, label).typed(value_type))
     .collect()
 }
 
@@ -430,15 +439,14 @@ fn timesheet_summary(
         field("project", project, "Project"),
         field("customer", customer, "Customer"),
         field("activity", activity, "Activity"),
-        field(
-            "duration",
-            ts.duration.unwrap_or(0).to_string(),
-            "Duration",
-        ),
+        field("duration", ts.duration.unwrap_or(0).to_string(), "Duration"),
         field("begin", normalize_iso_offset(&ts.begin), "Begin"),
         field(
             "end",
-            ts.end.as_deref().map(normalize_iso_offset).unwrap_or_default(),
+            ts.end
+                .as_deref()
+                .map(normalize_iso_offset)
+                .unwrap_or_default(),
             "End",
         ),
         field("description", description, "Description"),
@@ -513,21 +521,17 @@ impl KimaiTimesheetNode {
             });
         }
 
-        let plan = match template::build_edit_plan(
-            &parsed,
-            &fresh,
-            &self.projects,
-            &self.activities,
-        ) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => return Ok(ActionOutcome::NoChanges),
-            Err(errors) => {
-                return Ok(ActionOutcome::Reopen {
-                    content: template::render_with_errors(text, &errors),
-                    new_version: None,
-                });
-            }
-        };
+        let plan =
+            match template::build_edit_plan(&parsed, &fresh, &self.projects, &self.activities) {
+                Ok(Some(plan)) => plan,
+                Ok(None) => return Ok(ActionOutcome::NoChanges),
+                Err(errors) => {
+                    return Ok(ActionOutcome::Reopen {
+                        content: template::render_with_errors(text, &errors),
+                        new_version: None,
+                    });
+                }
+            };
 
         self.client
             .patch_timesheet(self.ts.id, &plan.patch)
@@ -561,11 +565,6 @@ impl Node for KimaiTimesheetNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        timesheet_actions()
-    }
-
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         match action_id {
             "edit" => Ok(EditorPrep {
@@ -576,6 +575,7 @@ impl Node for KimaiTimesheetNode {
                 ),
                 version: template::version_token(&self.ts),
                 suffix: ".md".into(),
+                file_path: None,
             }),
             other => Err(ContentError::NotSupported(format!(
                 "prepare: unknown action {other}"

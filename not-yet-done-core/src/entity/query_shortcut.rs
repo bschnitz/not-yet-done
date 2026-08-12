@@ -22,8 +22,8 @@
 //!
 //! Path-segment form mirrors the app-wide `NodeRef` convention so a
 //! shortcut row can in principle live on any level of the hierarchy,
-//! identified by its full path. There is no FK to `saved_query` because
-//! the body lives outside the DB entirely; an orphan shortcut (whose
+//! identified by its full path. There is no FK to the body because it
+//! lives outside the DB entirely; an orphan shortcut (whose
 //! target query was deleted from the filesystem) is silently ignored by
 //! the frontend when it builds the menu.
 use sea_orm::Set;
@@ -37,6 +37,17 @@ pub struct Model {
     pub scope: String,
     pub name: String,
     pub shortcut: String,
+    /// Which store owns the body: `saved` (adapter-native query, in the
+    /// adapter's `SavedQueryStore`) or `extended` (Markdown document
+    /// combining several, in its `ExtendedQueryStore`). Names are unique
+    /// across both stores per scope, so this does not disambiguate the
+    /// *name* — it says which store to ask, instead of probing both.
+    /// Rows written before extended queries existed migrate to `saved`.
+    ///
+    /// Script shortcuts share this table (see the scope forms above) and
+    /// keep the default: their body lives in a `ScriptStore` and is found
+    /// through the scope, so nothing ever reads their kind.
+    pub kind: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

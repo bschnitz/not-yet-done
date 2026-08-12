@@ -41,7 +41,11 @@ impl FileEditSession {
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
         let template = std::fs::read_to_string(&path)?;
         let label = label_for(&path);
-        Ok(Self { path, template, label })
+        Ok(Self {
+            path,
+            template,
+            label,
+        })
     }
 
     /// Like [`Self::open`] but prepends an error banner to the buffer.
@@ -52,12 +56,19 @@ impl FileEditSession {
         let raw = std::fs::read_to_string(&path)?;
         let template = render_with_error(strip_error_banner(&raw), &error);
         let label = label_for(&path);
-        Ok(Self { path, template, label })
+        Ok(Self {
+            path,
+            template,
+            label,
+        })
     }
 }
 
 fn label_for(path: &std::path::Path) -> String {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("config");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config");
     format!("edit {stem}")
 }
 
@@ -138,9 +149,8 @@ mod tests {
 
     #[test]
     fn strip_removes_banner_block() {
-        let with_banner = format!(
-            "{ERROR_BANNER_START}\n# • boom\n{ERROR_BANNER_END}\nkey: value\n"
-        );
+        let with_banner =
+            format!("{ERROR_BANNER_START}\n# • boom\n{ERROR_BANNER_END}\nkey: value\n");
         assert_eq!(strip_error_banner(&with_banner), "key: value\n");
     }
 
@@ -164,12 +174,11 @@ mod tests {
         // Mirrors what `commit()` does: pass strip_error_banner() output
         // into render_with_error so banners stack to exactly one, never two.
         let with_banner = render_with_error("key: value\n", "first error");
-        let with_banner_twice =
-            render_with_error(strip_error_banner(&with_banner), "second error");
+        let with_banner_twice = render_with_error(strip_error_banner(&with_banner), "second error");
         assert_eq!(strip_error_banner(&with_banner_twice), "key: value\n");
     }
 
-#[tokio::test]
+    #[tokio::test]
     async fn commit_writes_stripped_buffer_to_disk() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
@@ -209,9 +218,6 @@ mod tests {
             label_for(std::path::Path::new("/x/y/jira.yaml")),
             "edit jira"
         );
-        assert_eq!(
-            label_for(std::path::Path::new("/x/tui.yaml")),
-            "edit tui"
-        );
+        assert_eq!(label_for(std::path::Path::new("/x/tui.yaml")), "edit tui");
     }
 }

@@ -111,17 +111,11 @@ impl From<AttachmentWire> for AttachmentMeta {
         let (author, created) = w
             .version
             .map(|v| {
-                let author = v
-                    .by
-                    .and_then(|b| b.display_name)
-                    .unwrap_or_default();
+                let author = v.by.and_then(|b| b.display_name).unwrap_or_default();
                 (author, v.when.unwrap_or_default())
             })
             .unwrap_or((String::new(), String::new()));
-        let download_path = w
-            .links
-            .and_then(|l| l.download)
-            .unwrap_or_default();
+        let download_path = w.links.and_then(|l| l.download).unwrap_or_default();
         AttachmentMeta {
             id: w.id,
             title: w.title,
@@ -193,7 +187,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()
             .await
@@ -245,7 +239,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        let resp = http_log::check_status("POST", &url, resp).await?;
+        let resp = self.check_status("POST", &url, resp).await?;
         let body = resp
             .text()
             .await
@@ -276,7 +270,7 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         resp.bytes()
             .await
             .map(|b| b.to_vec())
@@ -432,7 +426,10 @@ mod tests {
             false,
         )
         .expect("client");
-        let err = client.download_attachment("").await.expect_err("must error");
+        let err = client
+            .download_attachment("")
+            .await
+            .expect_err("must error");
         assert!(err.contains("download"), "error mentions download: {err}");
     }
 }

@@ -59,9 +59,8 @@ pub fn create_backup_at(
     let db_path = extract_db_path(db_url)?;
     let original = original_filename(&db_path)?;
 
-    fs::create_dir_all(backup_dir).map_err(|e| {
-        AppError::BackupFailed(format!("Failed to create backup directory: {e}"))
-    })?;
+    fs::create_dir_all(backup_dir)
+        .map_err(|e| AppError::BackupFailed(format!("Failed to create backup directory: {e}")))?;
 
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let backup_filename = format!("{timestamp}-{original}");
@@ -237,7 +236,10 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
-        let tasks = remaining.iter().filter(|n| n.ends_with("-tasks.db")).count();
+        let tasks = remaining
+            .iter()
+            .filter(|n| n.ends_with("-tasks.db"))
+            .count();
         // Pruned to the cap…
         assert_eq!(tasks, 2);
         // …without ever touching the unrelated database's backup.
@@ -252,11 +254,23 @@ mod tests {
         let nyd = fake_db(tmp.path(), "nyd.db", b"n");
 
         // First call of the day backs up; the second is a no-op.
-        assert!(ensure_daily_backup_at(&tasks, &backup_dir, 10).unwrap().is_some());
-        assert!(ensure_daily_backup_at(&tasks, &backup_dir, 10).unwrap().is_none());
+        assert!(
+            ensure_daily_backup_at(&tasks, &backup_dir, 10)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            ensure_daily_backup_at(&tasks, &backup_dir, 10)
+                .unwrap()
+                .is_none()
+        );
 
         // A *different* database's backup today does not satisfy nyd.db's
         // daily check — the suffix differs.
-        assert!(ensure_daily_backup_at(&nyd, &backup_dir, 10).unwrap().is_some());
+        assert!(
+            ensure_daily_backup_at(&nyd, &backup_dir, 10)
+                .unwrap()
+                .is_some()
+        );
     }
 }

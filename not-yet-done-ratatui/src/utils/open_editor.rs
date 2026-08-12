@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use tempfile::NamedTempFile;
 
@@ -166,8 +166,7 @@ fn debug_log_env(template: &str, file: &Path, env: &HashMap<String, String>) {
     if std::env::var_os("NYD_DEBUG").is_none() {
         return;
     }
-    let path = std::env::var("NYD_DEBUG_LOG")
-        .unwrap_or_else(|_| "/tmp/nyd-debug.log".to_string());
+    let path = std::env::var("NYD_DEBUG_LOG").unwrap_or_else(|_| "/tmp/nyd-debug.log".to_string());
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -236,6 +235,40 @@ fn create_tmpfile(
     Ok(tmpfile)
 }
 
+/// Resolve the file the editor will operate on.
+///
+/// `persistent = Some(path)` opts into **materialised** editing: the buffer
+/// lives at exactly `path`, is created (parents included), seeded with
+/// `initial_content`, and — crucially — is *not* wrapped in a
+/// [`NamedTempFile`], so it survives after the editor closes. The returned
+/// `Option<NamedTempFile>` is `None` in that case.
+///
+/// `persistent = None` reproduces the classic throwaway temp-file behaviour
+/// via [`create_tmpfile`]; the returned guard must be kept alive for the
+/// editor's lifetime.
+fn resolve_edit_target(
+    suffix: Option<&str>,
+    initial_content: &str,
+    dir: Option<&Path>,
+    prefix: Option<&str>,
+    persistent: Option<&Path>,
+) -> Result<(PathBuf, Option<NamedTempFile>), EditorError> {
+    match persistent {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, initial_content.as_bytes())?;
+            Ok((path.to_owned(), None))
+        }
+        None => {
+            let tmp = create_tmpfile(suffix, initial_content, dir, prefix)?;
+            let path = tmp.path().to_owned();
+            Ok((path, Some(tmp)))
+        }
+    }
+}
+
 fn pause_tui() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
@@ -262,7 +295,15 @@ pub fn open_editor_inline(
     initial_content: &str,
     suffix: Option<&str>,
 ) -> Result<String, EditorError> {
-    open_editor_inline_in(command, initial_content, suffix, None, None, &HashMap::new())
+    open_editor_inline_in(
+        command,
+        initial_content,
+        suffix,
+        None,
+        None,
+        &HashMap::new(),
+        None,
+    )
 }
 
 /// Variant of [`open_editor_inline`] that places the temp file in a
@@ -280,9 +321,11 @@ pub fn open_editor_inline_in(
     dir: Option<&Path>,
     prefix: Option<&str>,
     env: &HashMap<String, String>,
+    persistent: Option<&Path>,
 ) -> Result<String, EditorError> {
-    let tmpfile = create_tmpfile(suffix, initial_content, dir, prefix)?;
-    let path = tmpfile.path().to_owned();
+    // `_tmpfile` guard is kept alive until the function returns (temp mode);
+    // in persistent mode it is `None` and the file lives on at `path`.
+    let (path, _tmpfile) = resolve_edit_target(suffix, initial_content, dir, prefix, persistent)?;
 
     pause_tui()?;
 
@@ -309,7 +352,15 @@ pub fn open_editor_launch(
     initial_content: &str,
     suffix: Option<&str>,
 ) -> Result<DetachedEditor, EditorError> {
-    open_editor_launch_in(command, initial_content, suffix, None, None, &HashMap::new())
+    open_editor_launch_in(
+        command,
+        initial_content,
+        suffix,
+        None,
+        None,
+        &HashMap::new(),
+        None,
+    )
 }
 
 pub fn open_editor_launch_in(
@@ -319,9 +370,10 @@ pub fn open_editor_launch_in(
     dir: Option<&Path>,
     prefix: Option<&str>,
     env: &HashMap<String, String>,
+    persistent: Option<&Path>,
 ) -> Result<DetachedEditor, EditorError> {
-    let tmpfile = create_tmpfile(suffix, initial_content, dir, prefix)?;
-    let path = tmpfile.path().to_owned();
+    let (path, tmpfile) = resolve_edit_target(suffix, initial_content, dir, prefix, persistent)?;
+    let persistent_path = persistent.map(Path::to_owned);
     let done_path = done_path_for(&path);
 
     pause_tui()?;
@@ -337,12 +389,15 @@ pub fn open_editor_launch_in(
         return Err(EditorError::EditorFailed(status));
     }
 
-    let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
     Ok(DetachedEditor {
         file_path: path,
         done_path,
         last_mtime: mtime,
         _tmpfile: tmpfile,
+        persistent_path,
     })
 }
 
@@ -353,7 +408,15 @@ pub fn open_editor_detached(
     initial_content: &str,
     suffix: Option<&str>,
 ) -> Result<DetachedEditor, EditorError> {
-    open_editor_detached_in(command, initial_content, suffix, None, None, &HashMap::new())
+    open_editor_detached_in(
+        command,
+        initial_content,
+        suffix,
+        None,
+        None,
+        &HashMap::new(),
+        None,
+    )
 }
 
 pub fn open_editor_detached_in(
@@ -363,9 +426,10 @@ pub fn open_editor_detached_in(
     dir: Option<&Path>,
     prefix: Option<&str>,
     env: &HashMap<String, String>,
+    persistent: Option<&Path>,
 ) -> Result<DetachedEditor, EditorError> {
-    let tmpfile = create_tmpfile(suffix, initial_content, dir, prefix)?;
-    let path = tmpfile.path().to_owned();
+    let (path, tmpfile) = resolve_edit_target(suffix, initial_content, dir, prefix, persistent)?;
+    let persistent_path = persistent.map(Path::to_owned);
     let done_path = done_path_for(&path);
 
     let template = resolve_command(command);
@@ -375,12 +439,15 @@ pub fn open_editor_detached_in(
         .stdin(Stdio::null())
         .spawn()?;
 
-    let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
     Ok(DetachedEditor {
         file_path: path,
         done_path,
         last_mtime: mtime,
         _tmpfile: tmpfile,
+        persistent_path,
     })
 }
 
@@ -396,7 +463,14 @@ pub struct DetachedEditor {
     done_path: PathBuf,
     /// Last known mtime — used to detect saves.
     last_mtime: Option<std::time::SystemTime>,
-    _tmpfile: NamedTempFile,
+    /// Temp-file guard: `Some` in throwaway mode (deleted on drop), `None`
+    /// in persistent mode (the file at [`Self::file_path`] must survive).
+    _tmpfile: Option<NamedTempFile>,
+    /// When set, this editor is materialised: the buffer must persist at
+    /// this path after the editor closes. Because the detached editor
+    /// template typically `mv`s the file to `{file}.done` on exit, cleanup
+    /// restores the final content back to this path instead of deleting it.
+    persistent_path: Option<PathBuf>,
 }
 
 impl DetachedEditor {
@@ -410,9 +484,28 @@ impl DetachedEditor {
         read_file(&self.done_path)
     }
 
-    /// Clean up the `.done` file after reading.
+    /// Clean up after the editor closed and its content was read.
+    ///
+    /// Throwaway mode: delete the `{file}.done` marker (the temp file itself
+    /// is removed when [`Self::_tmpfile`] drops).
+    ///
+    /// Persistent mode: the editor template `mv`d the real file to
+    /// `{file}.done`, so the persisted path no longer exists. Restore it by
+    /// renaming `.done` back to the real path (which also removes the marker),
+    /// leaving the final saved content at [`Self::persistent_path`]. If the
+    /// rename fails (e.g. the template `cp`'d instead of `mv`d, so the marker
+    /// and the real file coexist), fall back to removing the marker.
     pub fn cleanup(&self) {
-        let _ = std::fs::remove_file(&self.done_path);
+        match &self.persistent_path {
+            Some(dst) => {
+                if std::fs::rename(&self.done_path, dst).is_err() {
+                    let _ = std::fs::remove_file(&self.done_path);
+                }
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.done_path);
+            }
+        }
     }
 
     /// Check if the file has been modified since the last check (i.e. `:w`).
@@ -449,10 +542,7 @@ impl DetachedEditor {
 // Legacy compat
 // ---------------------------------------------------------------------------
 
-pub fn open_editor(
-    editor: Option<&str>,
-    initial_content: &str,
-) -> Result<String, EditorError> {
+pub fn open_editor(editor: Option<&str>, initial_content: &str) -> Result<String, EditorError> {
     open_editor_inline(editor, initial_content, None)
 }
 

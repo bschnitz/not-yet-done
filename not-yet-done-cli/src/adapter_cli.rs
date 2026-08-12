@@ -1,30 +1,38 @@
 //! Generic, adapter-driven CLI front-end (Block D).
 //!
-//! Every configured adapter instance (a `views/*.yaml` file) is addressable on
-//! the command line as `nyd <instance> <verb> …`, where the verbs drive the
-//! frontend-agnostic [`ContentAdapter`] protocol directly. Because nothing here
-//! knows about tasks, Jira, Postgres, … specifically, the same verbs work for
-//! *every* adapter:
+//! Adapters are addressed under a single `adapter` command, by a **type path**
+//! that names a *level* in the content tree — the instance id, then one local
+//! child-type name per level of descent, joined by `:`:
 //!
 //! ```text
-//! nyd <inst> ls   [ID] [--type T] [--query Q] [--tree [--depth N]] [--sort S] [--group-by G] [-o table|json]
-//! nyd <inst> show  ID                                                                         [-o table|json]
-//! nyd <inst> actions (ID | --type T)                                                          [-o table|json]
-//! nyd <inst> values  SOURCE                                                                   [-o table|json]
-//! nyd <inst> do    ACTION [ID] [input flags] [--yes]
+//! nyd adapter <inst>[:<child>[:<grandchild>…]] [ID] <command> [flags]
 //! ```
 //!
-//! Any verb that targets a node by id accepts `--path /A/B/C` instead: a
-//! generic front-end walk that descends one label per segment from the root.
-//! A segment matches a child label by substring, or by regex when prefixed
-//! `re:`; `-i` makes the match case-insensitive. The walk uses only the
-//! protocol's per-level `list`, so it works for *every* adapter — the same way
-//! the TUI lets you drill in by name without knowing opaque ids.
+//! The **command is the last positional**. It is either a framework verb or an
+//! adapter action id; `help`/`ls` need no id, an action on a concrete node
+//! takes its (self-contained) node id in the slot before the command:
 //!
-//! The **read** verbs (`ls`/`show`/`actions`/`values`) came in D2a; the
-//! mutating **`do`** verb (D2b) drives the same protocol the TUI's
-//! shortcut/menu paths use. It looks up the action's [`InputSpec`] to decide
-//! how to source input from the command line:
+//! ```text
+//! nyd adapter jira help                              # document the root level
+//! nyd adapter jira:issue:comment help                # document the comment level (by type, no fetch)
+//! nyd adapter jira:issue <issue-id> ls [--type T]    # list a node's children
+//! nyd adapter jira:issue:comment <comment-id> delete # run an action on a node
+//! nyd adapter jira:issue <id> show                   # [-o table|json]
+//! nyd adapter jira values <source>                   # list value options
+//! ```
+//!
+//! `help` is special: with no id it documents the level **by type alone**
+//! (walking [`not_yet_done_content::child_types_of_type`] down the path and
+//! rendering [`not_yet_done_content::render_level_for_type`]), so no node is
+//! fetched — the id-free navigation the `childs` single-source refactor enables.
+//! With an id it renders the concrete node's level ([`render_level`]).
+//!
+//! Any id-taking command also accepts `--path /A/B/C` instead of an id: a label
+//! walk that descends one child label per segment from the root (substring, or
+//! regex with `re:`; `-i` folds case).
+//!
+//! Adapter actions look up the action's [`InputSpec`] to decide how to source
+//! input from the command line:
 //!
 //! ```text
 //! Editor      → -m <text>  (or $EDITOR on a seeded temp file)
@@ -38,31 +46,28 @@
 //! here: `Reload`/`Noop` report success, `Error` fails, `Confirm` and
 //! `DeleteSelf` require `--yes` (a confirmed `DeleteSelf` then runs
 //! `execute(action, None)`, mirroring the TUI's confirm→delete plumbing), and
-//! the interactive-only dispatches (`CreateChild`/`OpenEditor`/`ExecuteQuery`)
+//! the interactive-only dispatches (`OpenEditor`/`ExecuteQuery`)
 //! report that they need a full frontend.
 //!
-//! Dispatch is intercepted before the legacy `tusks` command tree in
-//! `main.rs`: a first argument that names a configured adapter instance (and
-//! is not a built-in subcommand) routes here; everything else falls through
-//! unchanged.
+//! Dispatch is intercepted before the legacy `tusks` command tree in `main.rs`:
+//! `adapter …` routes here, `config …` to the config editor, the top level
+//! (no args / `help`) prints the overview (with the configured instances), and
+//! everything else is tried as a `cli.yaml` alias before falling through to the
+//! remaining `tusks` built-ins (`tag`/`backup`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+
+use crate::adapter_connect;
+use crate::adapter_query;
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, ContentError,
     FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction, NodeSummary,
-    NodeType, SortDirection, SortKey, Subtree, ValueOption,
+    NodeType, SortDirection, SortKey, Subtree, ValueOption, children,
 };
-
-/// Built-in `tusks` subcommands. A first argument matching one of these is
-/// never treated as an adapter instance, so an adapter accidentally named like
-/// a built-in can't shadow it. Only `tag`/`backup` remain (plus `help`); the
-/// former `task`/`project`/`track`/`query`/`db` names were freed when those
-/// commands moved to the adapter protocol (D3b), so they are now usable as
-/// adapter instance names or `cli.yaml` alias names.
-const BUILTIN_COMMANDS: &[&str] = &["tag", "backup", "help"];
 
 /// Output format for the read verbs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,16 +76,33 @@ enum Output {
     Json,
 }
 
-/// Parsed generic invocation: `nyd <instance> <verb> [positionals…] [flags]`.
+/// Parsed generic invocation: `nyd adapter <inst>[:child…] [ID] <command> [flags]`.
 struct Invocation {
+    /// First segment of the type path — the adapter instance to resolve.
     instance: String,
+    /// The child-type names after the instance (`jira:issue:comment` →
+    /// `["issue", "comment"]`). Selects the level for type-addressed `help`.
+    child_path: Vec<String>,
+    /// The framework verb the command resolved to (`ls`/`show`/`cat`/`actions`/
+    /// `values`/`help`), or `"do"` when the command is an adapter action id.
     verb: String,
     /// Positional arguments. Their meaning is verb-specific: a node id/prefix
     /// or value source for the read verbs (at most one), and `ACTION [ID]` for
     /// `do` (the action id, then an optional target node id).
     positionals: Vec<String>,
     type_filter: Option<String>,
+    /// `--query`: a query body typed on the command line, in the adapter's own
+    /// query language.
     query: Option<String>,
+    /// `--query-name`: a *stored* query, named. Which of the two stores holds
+    /// the name decides whether the body is one native query or an extended
+    /// document (see [`crate::adapter_query`]); mutually exclusive with
+    /// `--query`, since a body and a reference to one are different things.
+    query_name: Option<String>,
+    /// `--var k=v` (repeatable): bindings for the query's variables. The CLI
+    /// cannot prompt, so a variable without a binding *and* without a default
+    /// is an error rather than a guess.
+    vars: Vec<(String, String)>,
     tree: bool,
     depth: Option<u32>,
     sort: Vec<SortKey>,
@@ -106,47 +128,59 @@ struct Invocation {
     files: Vec<PathBuf>,
     /// `--yes`/`-y`: pre-confirm a `Confirm`/`DeleteSelf`-gated action.
     yes: bool,
+    /// `--full`: on `help`, print the full level reference (capabilities, child
+    /// types, sort columns) instead of the default CLI-usage view.
+    full: bool,
 }
 
-/// Try to handle `args` as a generic adapter invocation. Returns `Some(code)`
-/// when this module took over (the first argument names a configured adapter
-/// instance, a `cli.yaml` alias, or the `config` subcommand), or `None` to let
-/// the legacy `tusks` path handle it.
+/// Route the top-level argv. Returns `Some(code)` when this module handled it
+/// (`adapter …`, `config …`, the overview, or a `cli.yaml` alias that expands
+/// to one of those), or `None` to let the legacy `tusks` path handle the two
+/// remaining built-ins (`tag`/`backup`).
 ///
-/// Discovery is cheap (it reads the view-config headers only) and side-effect
-/// free, so probing here before the task-core path costs nothing for the
-/// built-in commands.
+/// Adapter instances are **not** top-level commands anymore — they live under
+/// `adapter <instance>[:child…]`. That frees the top level so an alias name can
+/// never be shadowed by an instance, and lets the overview list the instances
+/// (the plain `tusks` help never could).
 pub fn try_dispatch(args: &[String]) -> Option<ExitCode> {
-    let first = args.get(1)?;
-    if first.starts_with('-') {
-        return None;
-    }
-
-    // `nyd config edit …` — manage config files. Reserved word; a configured
-    // adapter instance named "config" can't be addressed (rename it).
-    if first == "config" {
-        return Some(finish(crate::cli_config::run_config(args)));
-    }
-
-    if BUILTIN_COMMANDS.contains(&first.as_str()) {
-        return None;
-    }
-
-    // A configured adapter instance takes precedence over an alias of the same
-    // name, so a user alias can never shadow a real adapter.
-    let instances = not_yet_done_host::discover_instances();
-    if instances.iter().any(|d| d.instance_id() == first) {
-        return Some(finish(run(args)));
-    }
-
-    // Otherwise: a `cli.yaml` alias? Expand it and re-enter the generic path.
-    match expand_alias(args) {
-        Some(Ok(expanded)) => Some(finish(run(&expanded))),
-        Some(Err(e)) => {
-            eprintln!("nyd: {e:#}");
-            Some(ExitCode::FAILURE)
+    match args.get(1).map(String::as_str) {
+        // No args or an explicit top-level help request → our own overview,
+        // which lists the configured adapter instances.
+        None | Some("help") | Some("-h") | Some("--help") => {
+            print_top_level_help();
+            Some(ExitCode::SUCCESS)
         }
-        None => None,
+        Some("config") => Some(finish(crate::cli_config::run_config(args))),
+        Some("adapter") => Some(finish(run_adapter(args))),
+        // Legacy `tusks` built-ins keep their own dispatch + help.
+        Some("tag") | Some("backup") => None,
+        // Anything else: try a `cli.yaml` alias (which expands to a full
+        // `adapter …`/`config …` argv), else fall through to `tusks`.
+        Some(_) => match expand_alias(args) {
+            Some(Ok(expanded)) => Some(dispatch_expanded(&expanded)),
+            Some(Err(e)) => {
+                eprintln!("nyd: {e:#}");
+                Some(ExitCode::FAILURE)
+            }
+            None => None,
+        },
+    }
+}
+
+/// Route an alias-expanded argv. Aliases expand to a full `adapter …` (or
+/// `config …`) invocation, so only those two targets are valid here — a
+/// re-entry into [`try_dispatch`] could otherwise re-expand and loop.
+fn dispatch_expanded(args: &[String]) -> ExitCode {
+    match args.get(1).map(String::as_str) {
+        Some("adapter") => finish(run_adapter(args)),
+        Some("config") => finish(crate::cli_config::run_config(args)),
+        other => {
+            eprintln!(
+                "nyd: alias expanded to unsupported command '{}' (aliases must expand to `adapter …`)",
+                other.unwrap_or("")
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -174,9 +208,7 @@ fn expand_alias(args: &[String]) -> Option<Result<Vec<String>>> {
     let template = cfg.alias(name)?.to_vec();
     let expanded = match crate::cli_config::expand(&template, &args[2..]) {
         Ok(toks) => toks,
-        Err(e) => {
-            return Some(Err(e.context(format!("expanding alias '{name}'"))))
-        }
+        Err(e) => return Some(Err(e.context(format!("expanding alias '{name}'")))),
     };
     let mut argv = Vec::with_capacity(expanded.len() + 1);
     argv.push(args.first().cloned().unwrap_or_else(|| "nyd".to_string()));
@@ -184,47 +216,209 @@ fn expand_alias(args: &[String]) -> Option<Result<Vec<String>>> {
     Some(Ok(argv))
 }
 
-/// Parse + execute a generic invocation on its own tokio runtime (adapter
-/// construction is sync, but the read verbs are async).
-fn run(args: &[String]) -> Result<()> {
-    let inv = parse(args)?;
+/// Handle an `adapter …` invocation: `args[1] == "adapter"`.
+///
+/// `adapter` on its own lists the configured instances; `adapter help` prints
+/// the adapter-interface help; otherwise `args[2]` is the type path and the rest
+/// is parsed + executed on a tokio runtime (adapter construction is sync, the
+/// verbs async).
+fn run_adapter(args: &[String]) -> Result<()> {
+    let Some(path) = args.get(2) else {
+        return list_instances();
+    };
+    if matches!(path.as_str(), "help" | "-h" | "--help") {
+        print_adapter_help();
+        return Ok(());
+    }
+
+    let inv = parse_adapter(args)?;
 
     let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
     rt.block_on(async move {
         let ctx = not_yet_done_host::host_context();
-        let adapter = not_yet_done_host::resolve_adapter(&inv.instance, &ctx)?;
+        let adapter: Arc<dyn ContentAdapter> =
+            Arc::from(not_yet_done_host::resolve_adapter(&inv.instance, &ctx)?);
         // The adapter just connected (we built it): fire its `connected` hook.
         // No-op unless this instance's view file configures one; throttled via
         // the host state file, so e.g. an auto-backup runs at most once a day
         // however often the CLI is invoked. Best-effort — never blocks the verb.
         not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected").await;
-        match inv.verb.as_str() {
-            "ls" | "list" => cmd_ls(adapter.as_ref(), &inv).await,
-            "show" | "get" => cmd_show(adapter.as_ref(), &inv).await,
-            "cat" | "read" => cmd_cat(adapter.as_ref(), &inv).await,
-            "actions" => cmd_actions(adapter.as_ref(), &inv).await,
-            "values" => cmd_values(adapter.as_ref(), &inv).await,
-            "do" => cmd_do(adapter.as_ref(), &inv).await,
-            other => Err(anyhow!(
-                "unknown verb '{other}' (expected ls | show | cat | actions | values | do)"
-            )),
+
+        // `help` is answered from the adapter's static description — no
+        // connection, no credentials, so it stays usable when the backend is
+        // down or not configured yet.
+        if inv.verb == "help" {
+            return cmd_help(adapter.as_ref(), &inv).await;
         }
+
+        // `queries` reads the two stores, which live next to the instance's
+        // config — asking a locked or unreachable backend for credentials just
+        // to print local file names would be a connection nobody asked for.
+        if inv.verb == "queries" {
+            return cmd_queries(adapter.as_ref(), &inv).await;
+        }
+
+        // Everything else talks to the backend. Watch the connection for the
+        // rest of the command: report progress on stderr, ask for credentials
+        // on the terminal, and give up loudly when neither is possible — see
+        // `adapter_connect`.
+        let mut sup = adapter_connect::Supervisor::start(Arc::clone(&adapter));
+        // Addressing the root is what makes an adapter start connecting (the
+        // TUI's `r` does the same thing). Cheap and side-effect free for the
+        // adapters that are already connected.
+        let a = Arc::clone(&adapter);
+        sup.guard(async move { a.root().await.map_err(|e| anyhow!("{e}")) })
+            .await
+            .with_context(|| format!("connecting to '{}'", inv.instance))?;
+        // Only then run the verb: an adapter that builds its connection in the
+        // background would otherwise serve an empty snapshot, and an empty
+        // list is indistinguishable from "there is nothing there".
+        sup.guard(adapter_connect::wait_until_connected(adapter.as_ref()))
+            .await
+            .with_context(|| format!("connecting to '{}'", inv.instance))?;
+
+        let verb = async {
+            match inv.verb.as_str() {
+                "ls" | "list" => cmd_ls(adapter.as_ref(), &inv).await,
+                "show" | "get" => cmd_show(adapter.as_ref(), &inv).await,
+                "cat" | "read" => cmd_cat(adapter.as_ref(), &inv).await,
+                "actions" => cmd_actions(adapter.as_ref(), &inv).await,
+                "values" => cmd_values(adapter.as_ref(), &inv).await,
+                "do" => cmd_do(adapter.as_ref(), &inv).await,
+                other => Err(anyhow!("unknown command '{other}'")),
+            }
+        };
+        sup.guard(verb).await
     })
+}
+
+/// The concise top-level help, printed for no-args / `help`. Lists only the
+/// top-level commands; the adapter interface (instances, level commands,
+/// examples) is documented one level down under `adapter help`.
+fn print_top_level_help() {
+    const PROG: &str = "not-yet-done-cli";
+    println!("not-yet-done — task & time tracking\n");
+    println!("Usage:");
+    println!("  {PROG} <command> …\n");
+    println!("Commands:");
+    println!("  adapter <…>   work with adapter instances (tasks, jira, trackings, …)");
+    println!("  tag <…>       manage tags");
+    println!("  backup <…>    create a backup");
+    println!("  config <…>    edit config files, `config generate <inst>`,");
+    println!("                `config build <type>` (interactive connection config),");
+    println!("                `config template <type>` (static skeleton),");
+    println!("                or `config auth <type>` (the type's auth mechanisms)");
+    println!("  help          show this help");
+    println!();
+    println!("Run `{PROG} adapter help` for the adapter interface,");
+    println!("or `{PROG} adapter` to list the configured instances.");
+}
+
+/// The adapter-interface help, printed for `adapter help`. Documents the type
+/// path grammar, enumerates the configured instances, and lists the commands
+/// available at any level — the entry point everything adapter-side hangs off.
+fn print_adapter_help() {
+    const PROG: &str = "not-yet-done-cli";
+    println!("not-yet-done — adapter interface\n");
+    println!("Usage:");
+    println!("  {PROG} adapter <inst>[:child…] [ID] <command> [flags]");
+    println!("  {PROG} adapter                    list configured instances");
+    println!();
+    println!("Adapter instances (address as `adapter <instance>[:child…]`):");
+    print_instance_lines("  ");
+    println!();
+    println!("Commands at a level (the last positional):");
+    println!("  help [--full]       how to drive this level (--full: capabilities, sort columns)");
+    println!("  ls                  list children (of the root, or of a node given by id)");
+    println!("  show | cat          print a node's row / its raw content");
+    println!("  queries             list the stored queries (`ls --query-name NAME` runs one)");
+    println!("  actions             list the actions available here");
+    println!("  values <source>     list the option values for a source key");
+    println!("  <action> [flags]    run an adapter action (e.g. delete, edit_markdown)");
+    println!();
+    println!("Examples:");
+    println!("  {PROG} adapter jira help");
+    println!("  {PROG} adapter jira:issue:comment help");
+    println!("  {PROG} adapter tasks add -m 'buy milk'");
+    println!("  {PROG} adapter jira:issue:comment <comment-id> delete --yes");
+}
+
+/// List the configured adapter instances — the target of bare `adapter`.
+fn list_instances() -> Result<()> {
+    let instances = not_yet_done_host::discover_instances();
+    if instances.is_empty() {
+        println!(
+            "no adapter instances configured (add a views/*.yaml with `tab:` + `adapter:` keys)"
+        );
+    } else {
+        print_instance_lines("");
+    }
+    Ok(())
+}
+
+/// Print one `<instance>  (type: <adapter_type>)` line per discovered instance,
+/// id column aligned, each prefixed by `indent`.
+fn print_instance_lines(indent: &str) {
+    let instances = not_yet_done_host::discover_instances();
+    if instances.is_empty() {
+        println!("{indent}(none configured)");
+        return;
+    }
+    let width = instances
+        .iter()
+        .map(|d| d.instance_id().len())
+        .max()
+        .unwrap_or(0);
+    for d in &instances {
+        println!(
+            "{indent}{:width$}  (type: {})",
+            d.instance_id(),
+            d.adapter.adapter_type,
+            width = width
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-fn parse(args: &[String]) -> Result<Invocation> {
-    let instance = args[1].clone();
-    let verb = args.get(2).cloned().ok_or_else(|| {
-        anyhow!("missing verb for '{instance}' (try: ls | show | actions | values | do)")
-    })?;
+/// Framework verbs — the command names handled by the content layer / generic
+/// front-end rather than routed to the adapter as an action. Any command not in
+/// this set is treated as an adapter action id.
+fn is_framework_verb(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "help" | "ls" | "list" | "show" | "get" | "cat" | "read" | "actions" | "values" | "queries"
+    )
+}
+
+/// The local (unqualified) name of a type id — the part after the last `:`, so
+/// `jira:comment` → `comment`, `tracking:tree-group` → `tree-group`. Type-path
+/// segments match against this (or the full type id).
+fn type_local_name(type_id: &str) -> &str {
+    type_id.rsplit(':').next().unwrap_or(type_id)
+}
+
+/// Parse an `adapter <inst>[:child…] [ID] <command> [flags]` invocation.
+/// `args[2]` is the type path; flags start at `args[3]`.
+///
+/// The command is the last bare positional; the one before it (if any) is the
+/// node id / value source. More than one leading positional is an error — a
+/// node is addressed by its (self-contained) id, not an id chain.
+fn parse_adapter(args: &[String]) -> Result<Invocation> {
+    let mut segments = args[2].split(':').map(str::to_string);
+    let instance = segments
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("empty adapter path — expected <instance>[:child…]"))?;
+    let child_path: Vec<String> = segments.collect();
 
     let mut positionals: Vec<String> = Vec::new();
     let mut type_filter = None;
     let mut query = None;
+    let mut query_name = None;
+    let mut vars: Vec<(String, String)> = Vec::new();
     let mut tree = false;
     let mut depth = None;
     let mut sort = Vec::new();
@@ -238,6 +432,7 @@ fn parse(args: &[String]) -> Result<Invocation> {
     let mut text = None;
     let mut files: Vec<PathBuf> = Vec::new();
     let mut yes = false;
+    let mut full = false;
 
     let mut i = 3;
     while i < args.len() {
@@ -251,6 +446,14 @@ fn parse(args: &[String]) -> Result<Invocation> {
         match a.as_str() {
             "--type" | "-t" => type_filter = Some(take_value(&mut i, "--type")?),
             "--query" | "-q" => query = Some(take_value(&mut i, "--query")?),
+            "--query-name" => query_name = Some(take_value(&mut i, "--query-name")?),
+            "--var" => {
+                let kv = take_value(&mut i, "--var")?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| anyhow!("--var expects name=value, got '{kv}'"))?;
+                vars.push((k.to_string(), v.to_string()));
+            }
             "--tree" => tree = true,
             "--depth" => {
                 let v = take_value(&mut i, "--depth")?;
@@ -285,6 +488,7 @@ fn parse(args: &[String]) -> Result<Invocation> {
             "--text" => text = Some(take_value(&mut i, "--text")?),
             "--file" => files.push(PathBuf::from(take_value(&mut i, "--file")?)),
             "--yes" | "-y" => yes = true,
+            "--full" => full = true,
             other if other.starts_with('-') => {
                 return Err(anyhow!("unknown flag '{other}'"));
             }
@@ -298,12 +502,46 @@ fn parse(args: &[String]) -> Result<Invocation> {
         tree = true;
     }
 
+    // One query per listing. Silently preferring one of the two would run a
+    // query the command line does not read as asking for.
+    if query.is_some() && query_name.is_some() {
+        return Err(anyhow!(
+            "--query and --query-name are mutually exclusive — pass a body or the name of a stored one"
+        ));
+    }
+
+    // The command is the last bare positional; an optional single positional
+    // before it is the node id (or value source for `values`). A bare
+    // `adapter <path>` with no command documents the level (`help`).
+    let command = positionals.pop();
+    let id = positionals.pop();
+    if !positionals.is_empty() {
+        return Err(anyhow!(
+            "too many positionals — expected `[ID] <command>` (a node is addressed by one self-contained id)"
+        ));
+    }
+    let command = command.unwrap_or_else(|| "help".to_string());
+
+    // Map the command onto the verb + positional layout the handlers expect.
+    // Framework verbs read a single leading id (or source); an adapter action
+    // reuses the `do` handler, which wants `[action, id]`.
+    let (verb, positionals) = if is_framework_verb(&command) {
+        (command, id.into_iter().collect())
+    } else {
+        let mut p = vec![command];
+        p.extend(id);
+        ("do".to_string(), p)
+    };
+
     Ok(Invocation {
         instance,
+        child_path,
         verb,
         positionals,
         type_filter,
         query,
+        query_name,
+        vars,
         tree,
         depth,
         sort,
@@ -317,7 +555,160 @@ fn parse(args: &[String]) -> Result<Invocation> {
         text,
         files,
         yes,
+        full,
     })
+}
+
+/// `help` — document a level. By default it prints the compact CLI-usage view
+/// (`print_level_usage`): how to drive *this* level. `--full` swaps in the
+/// content layer's complete Markdown reference (capabilities, child types, sort
+/// columns). With an id (or `--path`) it documents the concrete node's level;
+/// otherwise the level named by the type path alone, fetching nothing (the
+/// id-free path the `childs` refactor enables).
+async fn cmd_help(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+    if let Some(mut node) =
+        resolve_target(adapter, inv, inv.positionals.first().map(String::as_str)).await?
+    {
+        node.hydrate().await;
+        if inv.full {
+            print_markdown(
+                &not_yet_done_content::render_level(adapter, node.as_ref(), false).await,
+            );
+        } else {
+            let actions = not_yet_done_content::level_actions(adapter, node.as_ref());
+            let kids: Vec<String> = adapter
+                .childs(node.as_ref())
+                .iter()
+                .map(|c| type_local_name(&c.node_type.type_id).to_string())
+                .collect();
+            print_level_usage(inv, &actions, &kids, false);
+        }
+    } else {
+        let (nt, is_root) = resolve_type_level(adapter, &inv.child_path).await?;
+        if inv.full {
+            print_markdown(
+                &not_yet_done_content::render_level_for_type(adapter, &nt, is_root).await,
+            );
+        } else {
+            let actions = not_yet_done_content::level_actions_for_type(adapter, &nt);
+            let kids: Vec<String> = not_yet_done_content::child_types_of_type(adapter, &nt)
+                .iter()
+                .map(|k| type_local_name(&k.type_id).to_string())
+                .collect();
+            print_level_usage(inv, &actions, &kids, is_root);
+        }
+    }
+    Ok(())
+}
+
+/// The default `help` view: how to drive *this level* from the CLI — its
+/// address, the read verbs, the concrete actions here (each with the flag that
+/// feeds its input), and how to descend into child levels. Copy-pasteable full
+/// commands; `--full` swaps in the content layer's complete reference.
+fn print_level_usage(
+    inv: &Invocation,
+    actions: &[NodeAction],
+    child_locals: &[String],
+    is_root: bool,
+) {
+    const PROG: &str = "not-yet-done-cli";
+    let addr = if inv.child_path.is_empty() {
+        inv.instance.clone()
+    } else {
+        format!("{}:{}", inv.instance, inv.child_path.join(":"))
+    };
+    let base = format!("{PROG} adapter {addr}");
+
+    println!("Usage — adapter `{addr}`\n");
+
+    println!("Inspect (read-only):");
+    println!("  {base} ls               list children of the root");
+    println!("  {base} <id> ls          list a node's children");
+    println!("  {base} <id> show        print a node's row");
+    println!("  {base} <id> cat         print its raw content");
+    println!("  {base} queries          list the stored queries of this instance");
+    println!("  {base} actions          list the actions here");
+    println!();
+    println!("Filter a listing:");
+    println!("  ls -q '<body>'          a query in this adapter's own language");
+    println!("  ls --query-name NAME    a stored query (`queries`); may be an extended document");
+    println!("  ls --var name=value     bind a query variable (repeatable)");
+    println!("  {base} help --full      full reference (capabilities, sort columns)");
+    println!();
+
+    // Adapter actions — drop the built-in `help` (covered by the line above).
+    let acts: Vec<&NodeAction> = actions.iter().filter(|a| a.id != "help").collect();
+    if !acts.is_empty() {
+        if is_root {
+            println!("Actions here (the action is the last word):");
+        } else {
+            println!("Actions here (a node id comes before the action):");
+        }
+        let w = acts.iter().map(|a| a.id.len()).max().unwrap_or(0);
+        let target = if is_root { "" } else { "<id> " };
+        for a in &acts {
+            println!(
+                "  {base} {target}{id:<w$}   {label}  [{hint}]",
+                id = a.id,
+                label = a.label,
+                hint = action_flag_hint(a),
+                w = w,
+            );
+        }
+        println!();
+    }
+
+    if child_locals.is_empty() {
+        println!("Descend into: leaf level — nothing below.");
+    } else {
+        println!("Descend into child levels:");
+        for c in child_locals {
+            println!("  {base}:{c} help");
+        }
+    }
+}
+
+/// The CLI flag that feeds an action's input, keyed by its [`InputSpec`]. Shown
+/// per action in [`print_level_usage`] so the user knows how to supply input.
+fn action_flag_hint(a: &NodeAction) -> &'static str {
+    use not_yet_done_content::InputSpec;
+    match &a.input {
+        InputSpec::None => "no input; --yes to skip a confirm",
+        InputSpec::Editor => "editor: -m TEXT | --file FILE (else $EDITOR)",
+        InputSpec::Picker => "picker: --value V (see `values`)",
+        InputSpec::FilePicker { multi: true } => "files: --file PATH (repeatable)",
+        InputSpec::FilePicker { multi: false } => "file: --file PATH",
+        InputSpec::Form { .. } | InputSpec::ColumnForm => "form: --field K=V (repeatable)",
+    }
+}
+
+/// Walk the child-type path from the adapter root, resolving each segment
+/// against the child types of the current level (by local name or full type
+/// id). Returns the resolved [`NodeType`] and whether it is the root level.
+async fn resolve_type_level(
+    adapter: &dyn ContentAdapter,
+    child_path: &[String],
+) -> Result<(NodeType, bool)> {
+    let root = adapter.root().await?;
+    let mut nt = root.node_type().clone();
+    for seg in child_path {
+        let kids = not_yet_done_content::child_types_of_type(adapter, &nt);
+        match kids
+            .iter()
+            .find(|k| type_local_name(&k.type_id) == seg.as_str() || &k.type_id == seg)
+        {
+            Some(found) => nt = found.clone(),
+            None => {
+                let avail: Vec<&str> = kids.iter().map(|k| type_local_name(&k.type_id)).collect();
+                return Err(anyhow!(
+                    "no child '{seg}' at level '{}' (available: {})",
+                    nt.type_id,
+                    avail.join(", ")
+                ));
+            }
+        }
+    }
+    Ok((nt, child_path.is_empty()))
 }
 
 /// Parse a `--sort col[:asc|desc],col2[:dir]` spec into [`SortKey`]s. An
@@ -368,7 +759,7 @@ fn parse_group_by(spec: &str) -> Result<GroupSpec> {
             other => {
                 return Err(anyhow!(
                     "--group-by: unknown qualifier '{other}' (expected day|week|month|year or asc|desc)"
-                ))
+                ));
             }
         }
     }
@@ -390,7 +781,7 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
             None => adapter.root().await?,
         };
 
-    let child_types = parent.children_types();
+    let child_types = children::child_types(adapter, parent.as_ref());
     if child_types.is_empty() {
         return Err(anyhow!(
             "node '{}' has no listable child types",
@@ -406,9 +797,50 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
         );
     }
 
+    // A query is either typed here or named in one of the stores; the store
+    // decides its kind, the way the TUI's merged menu list does.
+    let query = match (&inv.query_name, &inv.query) {
+        (Some(name), _) => Some(adapter_query::load(adapter, name).await?),
+        (None, Some(text)) => Some(adapter_query::StoredQuery {
+            text: text.clone(),
+            kind: not_yet_done_content::QueryKind::Saved,
+        }),
+        (None, None) => None,
+    };
+    let bindings = adapter_query::bindings(&inv.vars);
+
+    if let Some(document) = query
+        .as_ref()
+        .filter(|q| q.kind == not_yet_done_content::QueryKind::Extended)
+    {
+        // A subtree is one adapter call for every level at once, and an
+        // extended document is not one query — the TUI has the same limit and
+        // loads such a tree level by level.
+        if inv.tree {
+            return Err(anyhow!(
+                "--tree cannot run an extended query — list one level at a time"
+            ));
+        }
+        let res = adapter_query::run_extended(
+            adapter,
+            parent.as_ref(),
+            node_type.clone(),
+            &document.text,
+            &bindings,
+            &inv.sort,
+            inv.group_by.clone(),
+        )
+        .await?;
+        output_list(&res.items, inv.output);
+        return Ok(());
+    }
+
     let params = ListParams {
         node_type: node_type.clone(),
-        query: inv.query.clone(),
+        query: query
+            .as_ref()
+            .map(|q| adapter_query::render_native(adapter, &q.text, &bindings))
+            .transpose()?,
         sort: inv.sort.clone(),
         page: None,
         download: false,
@@ -417,11 +849,43 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
 
     if inv.tree {
         let depth = inv.depth.unwrap_or(u32::MAX);
-        let sub = parent.list_subtree(params, depth).await?;
+        let sub = children::list_subtree(adapter, parent.as_ref(), params, depth).await?;
         output_tree(&sub, inv.output);
     } else {
-        let res = parent.list(params).await?;
+        let res = children::list(adapter, parent.as_ref(), params).await?;
         output_list(&res.items, inv.output);
+    }
+    Ok(())
+}
+
+/// `queries` — the stored queries of this adapter instance, both kinds.
+///
+/// The discovery half of `--query-name`: without it the names live only on
+/// disk (and in the TUI's menu), and a script has nothing to name.
+async fn cmd_queries(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+    let entries = adapter_query::list(adapter).await?;
+    if entries.is_empty() {
+        if inv.output == Output::Json {
+            println!("[]");
+        } else {
+            println!("(no stored queries)");
+        }
+        return Ok(());
+    }
+    match inv.output {
+        Output::Json => {
+            let rows: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|(name, kind)| serde_json::json!({ "name": name, "kind": kind.as_str() }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        Output::Table => {
+            let w = entries.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            for (name, kind) in &entries {
+                println!("{name:<w$}  {kind}", w = w);
+            }
+        }
     }
     Ok(())
 }
@@ -454,11 +918,15 @@ async fn cmd_cat(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
 }
 
 async fn cmd_actions(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+    // Route through the content layer's `level_actions*` seam so the built-in
+    // `help` action shows up alongside the adapter's own actions on every
+    // level, without the adapter declaring it.
     let actions: Vec<NodeAction> = if let Some(id) = inv.positionals.first() {
-        resolve_node(adapter, id).await?.actions()
+        let node = resolve_node(adapter, id).await?;
+        not_yet_done_content::level_actions(adapter, node.as_ref())
     } else if let Some(t) = &inv.type_filter {
         let nt = find_node_type(adapter, t).await?;
-        adapter.actions_for_type(&nt)
+        not_yet_done_content::level_actions_for_type(adapter, &nt)
     } else {
         return Err(anyhow!("actions requires a node id or --type <type>"));
     };
@@ -493,22 +961,37 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
         .ok_or_else(|| anyhow!("do requires an action id (list them with `actions`)"))?
         .clone();
 
-    let mut node: Box<dyn Node> =
-        match resolve_target(adapter, inv, inv.positionals.get(1).map(String::as_str)).await? {
-            Some(node) => node,
-            None => adapter.root().await?,
-        };
+    // Was a target id given, or do we fall back to the adapter root? The root
+    // is where `help` documents the adapter-wide capabilities.
+    let target_id = inv.positionals.get(1).map(String::as_str);
+    let is_root = target_id.is_none();
+    let mut node: Box<dyn Node> = match resolve_target(adapter, inv, target_id).await? {
+        Some(node) => node,
+        None => adapter.root().await?,
+    };
 
-    // Resolve the action so we know its input shape. Prefer the node's own
-    // list, fall back to the type-level list (the source the TUI's shortcut
-    // hints use).
-    let action = find_action(node.as_ref(), adapter, &action_id).ok_or_else(|| {
-        let mut avail: Vec<String> = node.actions().into_iter().map(|a| a.id).collect();
-        for a in adapter.actions_for_type(node.node_type()) {
-            if !avail.contains(&a.id) {
-                avail.push(a.id);
-            }
+    // Framework built-in actions (currently just `help`) are handled by the
+    // content layer, not the adapter: `help` documents the current level as
+    // Markdown, rendered to the terminal when stdout is a TTY (raw Markdown
+    // otherwise, so `> file.md` / pipes stay clean).
+    if not_yet_done_content::is_builtin(&action_id) {
+        if let Some(ActionOutcome::Done { message }) =
+            not_yet_done_content::run_builtin(&action_id, adapter, node.as_ref(), is_root).await
+        {
+            print_markdown(&message.unwrap_or_default());
         }
+        return Ok(());
+    }
+
+    // Resolve the action so we know its input shape, from the adapter's
+    // type-level set — the single source of truth the TUI's shortcut hints and
+    // id-free help share.
+    let action = find_action(node.as_ref(), adapter, &action_id).ok_or_else(|| {
+        let avail: Vec<String> = adapter
+            .actions_for_type(node.node_type())
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
         if avail.is_empty() {
             anyhow!("node '{}' exposes no action '{action_id}'", node.id())
         } else {
@@ -523,38 +1006,54 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     match action.input {
         InputSpec::Editor => do_editor(node.as_mut(), &action_id, inv).await,
         InputSpec::Form { fields } => do_form(node.as_mut(), &action_id, &fields, inv).await,
+        InputSpec::ColumnForm => {
+            // Fields are the columns the adapter describes for this node's
+            // type; map them the same way every front-end does, then reuse the
+            // ordinary form path.
+            let node_type = node.node_type().type_id.clone();
+            let fields: Vec<not_yet_done_content::FormFieldSpec> = adapter
+                .describe_columns(&node_type)
+                .await
+                .iter()
+                .map(|c| c.to_form_field())
+                .collect();
+            do_form(node.as_mut(), &action_id, &fields, inv).await
+        }
         InputSpec::Picker => do_picker(node.as_mut(), &action_id, inv).await,
         InputSpec::FilePicker { multi } => do_files(node.as_mut(), &action_id, multi, inv).await,
         InputSpec::None => do_dispatch(node.as_mut(), &action_id, inv).await,
     }
 }
 
-/// Find an action by id: the node's own [`Node::actions`] first, then the
-/// adapter's type-level [`ContentAdapter::actions_for_type`].
+/// Find an action by id from the adapter's type-level
+/// [`ContentAdapter::actions_for_type`] — the sole action-set source.
 fn find_action(node: &dyn Node, adapter: &dyn ContentAdapter, id: &str) -> Option<NodeAction> {
-    node.actions()
+    adapter
+        .actions_for_type(node.node_type())
         .into_iter()
         .find(|a| a.id == id)
-        .or_else(|| {
-            adapter
-                .actions_for_type(node.node_type())
-                .into_iter()
-                .find(|a| a.id == id)
-        })
 }
 
 /// `InputSpec::Editor`: seed a buffer from [`Node::prepare`], let the user
-/// fill it (inline via `-m`, else `$EDITOR`), then [`Node::execute`] with
-/// [`ActionInput::Edited`]. The template is passed back as `original` so the
-/// adapter can diff/merge exactly as it does for the TUI editor session.
+/// fill it, then [`Node::execute`] with [`ActionInput::Edited`]. The template
+/// is passed back as `original` so the adapter can diff/merge exactly as it
+/// does for the TUI editor session.
+///
+/// The edited text is taken, in order: `-m -` reads stdin; `-m <text>` uses the
+/// inline value; `--file <path>` reads that file; otherwise `$EDITOR` is
+/// launched. The stdin/file paths make it practical to feed a whole document
+/// (e.g. `jira do from_markdown KEY --file ticket.md`) without shell-quoting it.
 async fn do_editor(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
     let prep = node
         .prepare(action_id)
         .await
         .with_context(|| format!("preparing editor for '{action_id}'"))?;
-    let text = match &inv.message {
-        Some(m) => m.clone(),
-        None => edit_in_editor(&prep.template, &prep.suffix)?,
+    let text = match (&inv.message, inv.files.first()) {
+        (Some(m), _) if m == "-" => read_stdin_to_string()?,
+        (Some(m), _) => m.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading edited text from {}", path.display()))?,
+        (None, None) => edit_in_editor(&prep.template, &prep.suffix)?,
     };
     let input = ActionInput::Edited {
         text,
@@ -616,7 +1115,9 @@ async fn do_files(
     inv: &Invocation,
 ) -> Result<()> {
     if inv.files.is_empty() {
-        return Err(anyhow!("action '{action_id}' needs at least one --file <path>"));
+        return Err(anyhow!(
+            "action '{action_id}' needs at least one --file <path>"
+        ));
     }
     if !multi && inv.files.len() > 1 {
         return Err(anyhow!("action '{action_id}' accepts only one --file"));
@@ -666,32 +1167,43 @@ async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> 
         // Generic confirm gate. With `--yes` we already passed
         // `confirmed: true`, so the adapter does the work instead of asking;
         // a `Confirm` here means `--yes` was absent.
-        ActionDispatch::Confirm { prompt } => Err(anyhow!(
-            "{prompt}\n  (re-run with --yes to confirm)"
-        )),
+        ActionDispatch::Confirm { prompt } => {
+            Err(anyhow!("{prompt}\n  (re-run with --yes to confirm)"))
+        }
         // The adapter wants the frontend's delete-confirm flow, which on
         // "yes" runs `execute(action, None)`. We mirror that: `--yes` →
         // perform the delete; otherwise surface the (adapter-authored) prompt.
         ActionDispatch::DeleteSelf { confirm } => {
             if !inv.yes {
-                let prompt =
-                    confirm.unwrap_or_else(|| format!("Delete '{}'? (y/n)", node.label()));
+                let prompt = confirm.unwrap_or_else(|| format!("Delete '{}'? (y/n)", node.label()));
                 return Err(anyhow!("{prompt}\n  (re-run with --yes to confirm)"));
             }
             let outcome = node.execute(action_id, ActionInput::None).await?;
             report_outcome(outcome, action_id)
         }
-        // Interactive-only dispatches: they drive a UI flow (name prompt,
-        // editor session, paginated result pane) the CLI can't stand in for.
-        ActionDispatch::CreateChild { hint } => Err(anyhow!(
-            "action '{action_id}' creates a child interactively (hint '{hint}') — use the TUI"
-        )),
+        // Interactive-only dispatches: they drive a UI flow (editor
+        // session, paginated result pane) the CLI can't stand in for.
         ActionDispatch::OpenEditor { session_kind, .. } => Err(anyhow!(
             "action '{action_id}' opens an interactive '{session_kind}' editor — use the TUI"
         )),
         ActionDispatch::ExecuteQuery { .. } => Err(anyhow!(
             "action '{action_id}' runs a query result pane — use the TUI"
         )),
+    }
+}
+
+/// Print Markdown to stdout: rendered with termimad when stdout is a terminal
+/// (headers, lists, inline code get styling/colour), raw otherwise so piping
+/// or redirecting (`help > level.md`) keeps clean, parseable Markdown.
+fn print_markdown(md: &str) {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        termimad::print_text(md);
+    } else {
+        print!("{md}");
+        if !md.ends_with('\n') {
+            println!();
+        }
     }
 }
 
@@ -723,13 +1235,23 @@ fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
             println!("{target}");
             Ok(())
         }
-        ActionOutcome::Reopen { content, .. } => Err(anyhow!(
-            "'{action_id}' rejected the input:\n{content}"
-        )),
+        ActionOutcome::Reopen { content, .. } => {
+            Err(anyhow!("'{action_id}' rejected the input:\n{content}"))
+        }
         ActionOutcome::OpenEditor { action_id: next } => Err(anyhow!(
             "'{action_id}' opens an interactive editor for '{next}' — use the TUI"
         )),
     }
+}
+
+/// Read all of stdin into a string — the `-m -` editor-input source.
+fn read_stdin_to_string() -> Result<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("reading edited text from stdin")?;
+    Ok(buf)
 }
 
 /// Open `$EDITOR` (falling back to `$VISUAL`) on a temp file seeded with
@@ -788,9 +1310,7 @@ async fn resolve_target(
     id: Option<&str>,
 ) -> Result<Option<Box<dyn Node>>> {
     match (inv.path.as_deref(), id) {
-        (Some(_), Some(_)) => Err(anyhow!(
-            "give a node id or --path, not both"
-        )),
+        (Some(_), Some(_)) => Err(anyhow!("give a node id or --path, not both")),
         (Some(p), None) => Ok(Some(resolve_path(adapter, p, inv.case_insensitive).await?)),
         (None, Some(id)) => Ok(Some(resolve_node(adapter, id).await?)),
         (None, None) => Ok(None),
@@ -801,7 +1321,10 @@ async fn resolve_target(
 /// the segment was written `re:<pattern>`. Case folding (from `-i`) is baked
 /// in at construction so matching is a plain predicate.
 enum SegMatch {
-    Substring { needle: String, case_insensitive: bool },
+    Substring {
+        needle: String,
+        case_insensitive: bool,
+    },
     Regex(regex::Regex),
 }
 
@@ -815,7 +1338,11 @@ impl SegMatch {
             Ok(SegMatch::Regex(re))
         } else {
             Ok(SegMatch::Substring {
-                needle: if case_insensitive { seg.to_lowercase() } else { seg.to_string() },
+                needle: if case_insensitive {
+                    seg.to_lowercase()
+                } else {
+                    seg.to_string()
+                },
                 case_insensitive,
             })
         }
@@ -823,7 +1350,10 @@ impl SegMatch {
 
     fn matches(&self, label: &str) -> bool {
         match self {
-            SegMatch::Substring { needle, case_insensitive } => {
+            SegMatch::Substring {
+                needle,
+                case_insensitive,
+            } => {
                 if *case_insensitive {
                     label.to_lowercase().contains(needle)
                 } else {
@@ -852,7 +1382,7 @@ async fn resolve_path(
     for seg in segments {
         let matcher = SegMatch::parse(seg, case_insensitive)?;
         let mut matches: Vec<NodeSummary> = Vec::new();
-        for nt in current.children_types() {
+        for nt in children::child_types(adapter, current.as_ref()) {
             let params = ListParams {
                 node_type: nt,
                 query: None,
@@ -861,7 +1391,10 @@ async fn resolve_path(
                 download: false,
                 group_by: None,
             };
-            for item in current.list(params).await?.items {
+            for item in children::list(adapter, current.as_ref(), params)
+                .await?
+                .items
+            {
                 if matcher.matches(&item.label) {
                     matches.push(item);
                 }
@@ -919,7 +1452,7 @@ async fn resolve_node(adapter: &dyn ContentAdapter, input: &str) -> Result<Box<d
                 return adapter
                     .get_by_id(&matches[0])
                     .await
-                    .map_err(|e| anyhow!("{e}"))
+                    .map_err(|e| anyhow!("{e}"));
             }
             n if n > 1 => {
                 let preview: Vec<&str> = matches.iter().take(10).map(String::as_str).collect();
@@ -943,7 +1476,10 @@ async fn resolve_node(adapter: &dyn ContentAdapter, input: &str) -> Result<Box<d
 /// `actions --type`.
 async fn find_node_type(adapter: &dyn ContentAdapter, type_id: &str) -> Result<NodeType> {
     let root = adapter.root().await?;
-    if let Some(nt) = root.children_types().into_iter().find(|nt| nt.type_id == type_id) {
+    if let Some(nt) = children::child_types(adapter, root.as_ref())
+        .into_iter()
+        .find(|nt| nt.type_id == type_id)
+    {
         return Ok(nt);
     }
     let summaries = survey(adapter).await?;
@@ -966,7 +1502,7 @@ async fn survey(adapter: &dyn ContentAdapter) -> Result<Vec<NodeSummary>> {
     };
     let root = adapter.root().await?;
     let mut out = Vec::new();
-    for nt in root.children_types() {
+    for nt in children::child_types(adapter, root.as_ref()) {
         let params = ListParams {
             node_type: nt,
             query: None,
@@ -975,7 +1511,7 @@ async fn survey(adapter: &dyn ContentAdapter) -> Result<Vec<NodeSummary>> {
             download: false,
             group_by: None,
         };
-        let sub = root.list_subtree(params, depth).await?;
+        let sub = children::list_subtree(adapter, root.as_ref(), params, depth).await?;
         collect_summaries(&sub, &mut out);
     }
     Ok(out)
@@ -1048,7 +1584,11 @@ fn output_tree(sub: &Subtree, output: Output) {
 fn tree_lines(sub: &Subtree, depth: usize, out: &mut Vec<String>) {
     for node in &sub.items {
         let indent = "  ".repeat(depth);
-        out.push(format!("{indent}{}  [{}]", node.summary.label, short(&node.summary.id)));
+        out.push(format!(
+            "{indent}{}  [{}]",
+            node.summary.label,
+            short(&node.summary.id)
+        ));
         tree_lines(&node.children, depth + 1, out);
     }
 }
@@ -1082,7 +1622,11 @@ fn output_node(node: &dyn Node, output: Output) {
             println!("type:  {}", node.node_type().type_id);
             if !node.metadata().fields.is_empty() {
                 println!();
-                let cols = vec!["field".to_string(), "value".to_string(), "editable".to_string()];
+                let cols = vec![
+                    "field".to_string(),
+                    "value".to_string(),
+                    "editable".to_string(),
+                ];
                 let rows: Vec<Vec<String>> = node
                     .metadata()
                     .fields
@@ -1091,7 +1635,11 @@ fn output_node(node: &dyn Node, output: Output) {
                         vec![
                             f.display_label.clone(),
                             f.value.clone(),
-                            if f.editable { "yes".into() } else { "no".into() },
+                            if f.editable {
+                                "yes".into()
+                            } else {
+                                "no".into()
+                            },
                         ]
                     })
                     .collect();
@@ -1111,24 +1659,16 @@ fn output_actions(actions: &[NodeAction], output: Output) {
                         "id": a.id,
                         "label": a.label,
                         "input": input_kind(a),
-                        "default_key": a.default_key.map(|c| c.to_string()),
                     })
                 })
                 .collect();
             print_json(&serde_json::Value::Array(arr));
         }
         Output::Table => {
-            let cols = vec!["id".to_string(), "label".to_string(), "input".to_string(), "key".to_string()];
+            let cols = vec!["id".to_string(), "label".to_string(), "input".to_string()];
             let rows: Vec<Vec<String>> = actions
                 .iter()
-                .map(|a| {
-                    vec![
-                        a.id.clone(),
-                        a.label.clone(),
-                        input_kind(a),
-                        a.default_key.map(|c| c.to_string()).unwrap_or_default(),
-                    ]
-                })
+                .map(|a| vec![a.id.clone(), a.label.clone(), input_kind(a)])
                 .collect();
             print_table(&cols, &rows);
         }
@@ -1181,9 +1721,14 @@ fn input_kind(a: &NodeAction) -> String {
         InputSpec::Editor => "editor".into(),
         InputSpec::Picker => "picker".into(),
         InputSpec::FilePicker { multi } => {
-            if *multi { "files".into() } else { "file".into() }
+            if *multi {
+                "files".into()
+            } else {
+                "file".into()
+            }
         }
         InputSpec::Form { fields } => format!("form({})", fields.len()),
+        InputSpec::ColumnForm => "form(columns)".into(),
     }
 }
 
@@ -1261,7 +1806,11 @@ fn print_table(cols: &[String], rows: &[Vec<String>]) {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let pad = widths.get(i).copied().unwrap_or(0).saturating_sub(c.chars().count());
+                let pad = widths
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(c.chars().count());
                 format!("{c}{}", " ".repeat(pad))
             })
             .collect::<Vec<_>>()
@@ -1299,11 +1848,24 @@ mod tests {
 
     #[test]
     fn parse_reads_verb_positional_and_flags() {
-        let args: Vec<String> = ["nyd", "tasks", "ls", "abc123", "--type", "task:item", "--tree", "--depth", "2", "-o", "json"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let inv = parse(&args).unwrap();
+        let args: Vec<String> = [
+            "nyd",
+            "adapter",
+            "tasks",
+            "abc123",
+            "ls",
+            "--type",
+            "task:item",
+            "--tree",
+            "--depth",
+            "2",
+            "-o",
+            "json",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let inv = parse_adapter(&args).unwrap();
         assert_eq!(inv.instance, "tasks");
         assert_eq!(inv.verb, "ls");
         assert_eq!(inv.positionals, vec!["abc123".to_string()]);
@@ -1314,14 +1876,77 @@ mod tests {
     }
 
     #[test]
-    fn parse_do_reads_action_node_and_input_flags() {
+    fn parse_reads_a_named_query_with_its_variable_bindings() {
         let args: Vec<String> = [
-            "nyd", "tasks", "do", "edit", "abc123", "-m", "new body", "--yes",
+            "nyd",
+            "adapter",
+            "jira",
+            "ls",
+            "--query-name",
+            "my board",
+            "--var",
+            "who=me",
+            "--var",
+            "when=today",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let inv = parse(&args).unwrap();
+        let inv = parse_adapter(&args).unwrap();
+        assert_eq!(inv.verb, "ls");
+        assert_eq!(inv.query_name.as_deref(), Some("my board"));
+        assert_eq!(inv.query, None);
+        assert_eq!(
+            inv.vars,
+            vec![
+                ("who".to_string(), "me".to_string()),
+                ("when".to_string(), "today".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_body_and_a_query_name_together_are_refused() {
+        let args: Vec<String> = [
+            "nyd",
+            "adapter",
+            "jira",
+            "ls",
+            "-q",
+            "assignee = me",
+            "--query-name",
+            "mine",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let err = parse_adapter(&args)
+            .err()
+            .expect("a body and a name together must not parse")
+            .to_string();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn queries_is_a_framework_verb_not_an_adapter_action() {
+        let args: Vec<String> = ["nyd", "adapter", "jira", "queries"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let inv = parse_adapter(&args).unwrap();
+        assert_eq!(inv.verb, "queries");
+        assert!(inv.positionals.is_empty());
+    }
+
+    #[test]
+    fn parse_do_reads_action_node_and_input_flags() {
+        let args: Vec<String> = [
+            "nyd", "adapter", "tasks", "abc123", "edit", "-m", "new body", "--yes",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let inv = parse_adapter(&args).unwrap();
         assert_eq!(inv.verb, "do");
         assert_eq!(
             inv.positionals,
@@ -1334,13 +1959,27 @@ mod tests {
     #[test]
     fn parse_do_collects_fields_files_and_value() {
         let args: Vec<String> = [
-            "nyd", "pg", "do", "create", "--field", "name=report", "--field", "db=live",
-            "--value", "v1", "--text", "hello", "--file", "/tmp/a.sql", "--file", "/tmp/b.sql",
+            "nyd",
+            "adapter",
+            "pg",
+            "create",
+            "--field",
+            "name=report",
+            "--field",
+            "db=live",
+            "--value",
+            "v1",
+            "--text",
+            "hello",
+            "--file",
+            "/tmp/a.sql",
+            "--file",
+            "/tmp/b.sql",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let inv = parse(&args).unwrap();
+        let inv = parse_adapter(&args).unwrap();
         assert_eq!(
             inv.fields,
             vec![
@@ -1355,31 +1994,31 @@ mod tests {
 
     #[test]
     fn parse_field_without_equals_errors() {
-        let args: Vec<String> = ["nyd", "pg", "do", "create", "--field", "noeq"]
+        let args: Vec<String> = ["nyd", "adapter", "pg", "create", "--field", "noeq"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(parse(&args).is_err());
+        assert!(parse_adapter(&args).is_err());
     }
 
     #[test]
     fn depth_without_tree_implies_tree() {
-        let args: Vec<String> = ["nyd", "tasks", "ls", "--depth", "1"]
+        let args: Vec<String> = ["nyd", "adapter", "tasks", "ls", "--depth", "1"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let inv = parse(&args).unwrap();
+        let inv = parse_adapter(&args).unwrap();
         assert!(inv.tree);
         assert_eq!(inv.depth, Some(1));
     }
 
     #[test]
     fn unknown_flag_errors() {
-        let args: Vec<String> = ["nyd", "tasks", "ls", "--bogus"]
+        let args: Vec<String> = ["nyd", "adapter", "tasks", "ls", "--bogus"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(parse(&args).is_err());
+        assert!(parse_adapter(&args).is_err());
     }
 
     #[test]
@@ -1411,12 +2050,20 @@ mod tests {
     #[test]
     fn parse_reads_group_by_path_and_case_flag() {
         let args: Vec<String> = [
-            "nyd", "trk", "ls", "--group-by", "started_at:day", "--path", "/Work/Report", "-i",
+            "nyd",
+            "adapter",
+            "trk",
+            "ls",
+            "--group-by",
+            "started_at:day",
+            "--path",
+            "/Work/Report",
+            "-i",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let inv = parse(&args).unwrap();
+        let inv = parse_adapter(&args).unwrap();
         assert_eq!(inv.group_by.unwrap().bucket, Some(GroupBucket::Day));
         assert_eq!(inv.path.as_deref(), Some("/Work/Report"));
         assert!(inv.case_insensitive);

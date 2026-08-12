@@ -22,13 +22,11 @@
 
 use not_yet_done_content::{ActionOutcome, EditorPrep, Result};
 
-use crate::adapter::create_template::{
-    ParsedCreate, parse_template, render_with_error,
-};
+use crate::adapter::create_template::{ParsedCreate, parse_template, render_with_error};
 
+use super::super::other_err;
 use super::ConfluencePageNode;
 use super::format::format_xhtml;
-use super::super::other_err;
 
 impl ConfluencePageNode {
     /// Render a clone-buffer pre-filled with the source page's title +
@@ -58,6 +56,7 @@ impl ConfluencePageNode {
             // POST has no optimistic-lock token — clone is a fresh create.
             version: String::new(),
             suffix: ".html".into(),
+            file_path: None,
         })
     }
 
@@ -107,9 +106,7 @@ impl ConfluencePageNode {
 #[cfg(test)]
 mod tests {
     use super::super::ConfluencePageNode;
-    use crate::adapter::create_template::{
-        CREATE_ERROR_BANNER_START, parse_template,
-    };
+    use crate::adapter::create_template::{CREATE_ERROR_BANNER_START, parse_template};
     use crate::client::{ConfluenceClient, PageMeta};
     use not_yet_done_content::{ActionOutcome, EditorPrep};
     use std::sync::Arc;
@@ -156,12 +153,12 @@ mod tests {
         // re-rendered around the cleaned buffer when parse fails again.
         let node = bare_page_node();
         let bad = "no title prefix here\n\n<p>x</p>\n";
-        let outcome = node
-            .execute_clone(bad)
-            .await
-            .expect("returns outcome");
+        let outcome = node.execute_clone(bad).await.expect("returns outcome");
         match outcome {
-            ActionOutcome::Reopen { content, new_version } => {
+            ActionOutcome::Reopen {
+                content,
+                new_version,
+            } => {
                 assert!(content.starts_with(CREATE_ERROR_BANNER_START));
                 assert!(new_version.is_none());
             }

@@ -1,0 +1,16 @@
+[package]
+name = "natural-date"
+version = "0.1.1"
+edition = "2024"
+description = "Resolve natural-language date/time and offset phrases (\"tomorrow morning\", \"in 2 hours\", \"end of next week\", \"eod\", \"+90min\") to concrete instants, relative to a reference time. App-agnostic."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bschnitz/not-yet-done"
+readme = "README.md"
+keywords = ["date", "datetime", "parser", "chrono", "natural-language"]
+categories = ["date-and-time", "parser-implementations"]
+
+[dependencies]
+chrono         = { workspace = true }
+chrono-english = { workspace = true }
+dateparser     = { workspace = true }
+date-periods   = { path = "../date-periods", version = "0.1.1" }

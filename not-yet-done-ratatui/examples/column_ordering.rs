@@ -18,8 +18,7 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use not_yet_done_ratatui::{
-    Keys, MultiChoice, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType,
-    SelectionMarker,
+    Keys, MultiChoice, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType, SelectionMarker,
 };
 use tuirealm::{
     command::Cmd,
@@ -29,11 +28,11 @@ use tuirealm::{
 };
 
 use ratatui::{
+    DefaultTerminal,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
-    DefaultTerminal,
 };
 
 // ── Colours ──────────────────────────────────────────────────────────────────
@@ -54,22 +53,52 @@ const CURSOR_BG: Color = Color::Rgb(35, 40, 60);
 fn active_style() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(GREEN)
-        .set_style(MultiChoiceStyleType::Title, Style::default().fg(GREEN).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(TEXT).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Active, Style::default().fg(TEXT).bg(CURSOR_BG))
-        .set_style(MultiChoiceStyleType::Selected, Style::default().fg(SELECTED_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(SELECTED_FG).bg(CURSOR_BG))
-        .set_style(MultiChoiceStyleType::LastLine, Style::default().bg(PANEL_BG))
-        .set_style(MultiChoiceStyleType::Footer, Style::default().fg(DIM).bg(INPUT_BG))
+        .set_style(
+            MultiChoiceStyleType::Title,
+            Style::default().fg(GREEN).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(TEXT).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Active,
+            Style::default().fg(TEXT).bg(CURSOR_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(SELECTED_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(SELECTED_FG).bg(CURSOR_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::LastLine,
+            Style::default().bg(PANEL_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Footer,
+            Style::default().fg(DIM).bg(INPUT_BG),
+        )
 }
 
 fn inactive_style() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(ACCENT)
         .set_style(MultiChoiceStyleType::Title, Style::default().fg(ACCENT))
-        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(TEXT_MUTED))
-        .set_style(MultiChoiceStyleType::Selected, Style::default().fg(SELECTED_FG))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(SELECTED_FG))
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(TEXT_MUTED),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(SELECTED_FG),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(SELECTED_FG),
+        )
 }
 
 // ── Keymap ───────────────────────────────────────────────────────────────────
@@ -77,10 +106,10 @@ fn inactive_style() -> MultiChoiceStyle {
 fn demo_keymap() -> MultiChoiceKeymap {
     use tuirealm::event::Key;
     MultiChoiceKeymap {
-        move_up:    Keys::plain(Key::Up).or_ctrl(Key::Char('k')),
-        move_down:  Keys::plain(Key::Down).or_ctrl(Key::Char('j')),
-        toggle:     Keys::plain(Key::Char(' ')).or_ctrl(Key::Char(' ')),
-        order_up:   Keys::ctrl(Key::Char('d')),
+        move_up: Keys::plain(Key::Up).or_ctrl(Key::Char('k')),
+        move_down: Keys::plain(Key::Down).or_ctrl(Key::Char('j')),
+        toggle: Keys::plain(Key::Char(' ')).or_ctrl(Key::Char(' ')),
+        order_up: Keys::ctrl(Key::Char('d')),
         order_down: Keys::ctrl(Key::Char('f')),
         ..MultiChoiceKeymap::default()
     }
@@ -92,9 +121,17 @@ fn make_columns() -> MultiChoice {
     MultiChoice::default()
         .with_title("Table Columns")
         .with_choices(vec![
-            "Status", "Priority", "Tracking", "Description",
-            "Created", "Updated", "Tags", "Project",
-            "Assignee", "Due Date", "Estimate",
+            "Status",
+            "Priority",
+            "Tracking",
+            "Description",
+            "Created",
+            "Updated",
+            "Tags",
+            "Project",
+            "Assignee",
+            "Due Date",
+            "Estimate",
         ])
         .with_placeholder("Select columns…")
         .with_marker(SelectionMarker::Checkbox)
@@ -111,11 +148,20 @@ fn make_toppings() -> MultiChoice {
     MultiChoice::default()
         .with_title("Pizza Toppings (reorder)")
         .with_choices(vec![
-            "Mozzarella", "Pepperoni", "Mushrooms", "Olives",
-            "Basil", "Onions", "Peppers", "Anchovies",
+            "Mozzarella",
+            "Pepperoni",
+            "Mushrooms",
+            "Olives",
+            "Basil",
+            "Onions",
+            "Peppers",
+            "Anchovies",
         ])
         .with_placeholder("Build your pizza…")
-        .with_marker(SelectionMarker::Custom { selected: "● ", unselected: "○ " })
+        .with_marker(SelectionMarker::Custom {
+            selected: "● ",
+            unselected: "○ ",
+        })
         .with_ordering(true)
         .with_show_order(false)
         .with_show_filter(true)
@@ -194,26 +240,42 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     let panel = Rect::new(px, py, panel_w, panel_h);
     frame.render_widget(Block::default().style(Style::default().bg(PANEL_BG)), panel);
 
-    let inner = Rect::new(panel.x + 2, panel.y + 1, panel.width.saturating_sub(4), panel.height.saturating_sub(3));
+    let inner = Rect::new(
+        panel.x + 2,
+        panel.y + 1,
+        panel.width.saturating_sub(4),
+        panel.height.saturating_sub(3),
+    );
 
     // Heading
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("✦ ", Style::default().fg(GREEN)),
-            Span::styled("MultiChoice Ordering", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "MultiChoice Ordering",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
         ])),
         Rect { height: 1, ..inner },
     );
 
     // Two dropdowns side by side
-    let content = Rect { y: inner.y + 2, height: inner.height.saturating_sub(4), ..inner };
+    let content = Rect {
+        y: inner.y + 2,
+        height: inner.height.saturating_sub(4),
+        ..inner
+    };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(content);
 
     for (i, &col) in cols.iter().enumerate() {
-        let mc_area = Rect { x: col.x + 1, width: col.width.saturating_sub(2), ..col };
+        let mc_area = Rect {
+            x: col.x + 1,
+            width: col.width.saturating_sub(2),
+            ..col
+        };
         app.dropdowns[i].view(frame, mc_area);
     }
 
@@ -221,15 +283,30 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     let help_y = panel.y + panel.height.saturating_sub(2);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" C-l/h", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " C-l/h",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" switch  ", Style::default().fg(DIM)),
-            Span::styled("C-j/k", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "C-j/k",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" nav  ", Style::default().fg(DIM)),
-            Span::styled("C-d/f", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "C-d/f",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" reorder  ", Style::default().fg(DIM)),
-            Span::styled("Spc", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Spc",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" toggle  ", Style::default().fg(DIM)),
-            Span::styled("Esc", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" quit", Style::default().fg(DIM)),
         ])),
         Rect::new(panel.x + 2, help_y, panel.width.saturating_sub(4), 1),
@@ -251,7 +328,9 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
 
         let event = crossterm::event::read()?;
         let Event::Key(k) = event else { continue };
-        if k.kind != KeyEventKind::Press { continue; }
+        if k.kind != KeyEventKind::Press {
+            continue;
+        }
 
         match (k.code, k.modifiers) {
             (KeyCode::Esc, KeyModifiers::NONE) => {
@@ -266,7 +345,11 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
                 app.set_focus((app.active + 1) % NUM);
             }
             (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-                app.set_focus(if app.active == 0 { NUM - 1 } else { app.active - 1 });
+                app.set_focus(if app.active == 0 {
+                    NUM - 1
+                } else {
+                    app.active - 1
+                });
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 let i = app.active;

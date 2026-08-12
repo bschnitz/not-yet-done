@@ -92,11 +92,17 @@ pub struct ColRef {
 
 impl ColRef {
     pub fn unqualified(column: impl Into<String>) -> Self {
-        Self { table: None, column: column.into() }
+        Self {
+            table: None,
+            column: column.into(),
+        }
     }
 
     pub fn qualified(table: impl Into<String>, column: impl Into<String>) -> Self {
-        Self { table: Some(table.into()), column: column.into() }
+        Self {
+            table: Some(table.into()),
+            column: column.into(),
+        }
     }
 }
 
@@ -210,10 +216,18 @@ fn is_col_ref(s: &str) -> bool {
 
 /// Parse a YAML scalar value as a [`Literal`].
 fn parse_literal_str(s: &str) -> Literal {
-    if let Ok(i) = s.parse::<i64>() { return Literal::Int(i); }
-    if let Ok(f) = s.parse::<f64>() { return Literal::Float(f); }
-    if s == "true"  { return Literal::Bool(true); }
-    if s == "false" { return Literal::Bool(false); }
+    if let Ok(i) = s.parse::<i64>() {
+        return Literal::Int(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Literal::Float(f);
+    }
+    if s == "true" {
+        return Literal::Bool(true);
+    }
+    if s == "false" {
+        return Literal::Bool(false);
+    }
     Literal::String(s.to_string())
 }
 
@@ -228,8 +242,12 @@ fn yaml_value_to_rhs(v: &serde_yaml::Value) -> Result<Rhs, String> {
             }
         }
         serde_yaml::Value::Number(n) => {
-            if let Some(i) = n.as_i64() { return Ok(Rhs::Lit(Literal::Int(i))); }
-            if let Some(f) = n.as_f64() { return Ok(Rhs::Lit(Literal::Float(f))); }
+            if let Some(i) = n.as_i64() {
+                return Ok(Rhs::Lit(Literal::Int(i)));
+            }
+            if let Some(f) = n.as_f64() {
+                return Ok(Rhs::Lit(Literal::Float(f)));
+            }
             Err(format!("unrepresentable number: {n}"))
         }
         serde_yaml::Value::Bool(b) => Ok(Rhs::Lit(Literal::Bool(*b))),
@@ -238,7 +256,9 @@ fn yaml_value_to_rhs(v: &serde_yaml::Value) -> Result<Rhs, String> {
                 .iter()
                 .map(|item| match yaml_value_to_rhs(item)? {
                     Rhs::Lit(l) => Ok(l),
-                    Rhs::Col(_) => Err("column references inside lists are not supported".to_string()),
+                    Rhs::Col(_) => {
+                        Err("column references inside lists are not supported".to_string())
+                    }
                     Rhs::None => unreachable!(),
                 })
                 .collect();
@@ -278,7 +298,7 @@ impl<'de> Visitor<'de> for FilterExprVisitor {
 
         let expr = match key.as_str() {
             "and" => FilterExpr::And(map.next_value::<Vec<FilterExpr>>()?),
-            "or"  => FilterExpr::Or(map.next_value::<Vec<FilterExpr>>()?),
+            "or" => FilterExpr::Or(map.next_value::<Vec<FilterExpr>>()?),
             "not" => FilterExpr::Not(Box::new(map.next_value::<FilterExpr>()?)),
             other => return Err(de::Error::unknown_field(other, &["and", "or", "not"])),
         };
@@ -459,7 +479,9 @@ and:
     - [priority, =, 5]
 ";
         let expr = parse(yaml);
-        let FilterExpr::And(children) = expr else { panic!("expected And") };
+        let FilterExpr::And(children) = expr else {
+            panic!("expected And")
+        };
         assert_eq!(children.len(), 2);
         assert!(matches!(children[1], FilterExpr::Or(_)));
     }

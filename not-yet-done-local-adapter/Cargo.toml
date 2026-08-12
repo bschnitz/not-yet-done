@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tokio       = { workspace = true }
 async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 serde       = { workspace = true }
@@ -14,10 +15,9 @@ serde_yaml  = { workspace = true }
 dirs        = { workspace = true }
 slug        = "0.1"
 # Human-friendly datetime / offset parsing for the trackings adapter's
-# `split`/`move` actions, which receive their time points as Form strings
-# (mirrors the CLI's `track split`/`track move` parsing).
-chrono-english = { workspace = true }
-dateparser     = { workspace = true }
+# `split`/`move` actions, which receive their time points as Form strings.
+# The grammar itself lives in the shared, app-agnostic `natural-date` crate.
+natural-date   = { path = "../natural-date" }
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-task-core = { path = "../not-yet-done-task-core" }
 not-yet-done-filter  = { path = "../not-yet-done-filter" }

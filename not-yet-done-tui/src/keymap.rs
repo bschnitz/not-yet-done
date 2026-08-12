@@ -24,6 +24,7 @@
 
 use crate::config::keybindings::{
     CommonAction, ContentAction, GlobalAction, KeyBinding, KeyBindingConfig, WindowAction,
+    binding_steps,
 };
 use crate::config::view_config::{ChildDef, ViewDef, ViewFileConfig};
 
@@ -131,12 +132,13 @@ pub enum KeySource {
         view: String,
         name: String,
     },
-    /// Shortcut bound to a Postgres per-table script (per `query_shortcut`
-    /// row scoped to `postgres/<inst>/<db>/schemas/<schema>/tables/<table>`).
-    /// Live only while the focused pane has that exact table node in scope
-    /// (selected item on the tables list, or parent of a rows pane).
-    PostgresTableScriptShortcut {
-        table_node_id: String,
+    /// Shortcut bound to a per-node script (per `query_shortcut` row
+    /// scoped to `<adapter>/<inst>/<node_id>`, e.g.
+    /// `postgres/<inst>/<db>/schemas/<schema>/tables/<table>`). Live only
+    /// while the focused pane has that exact node in scope (selected item
+    /// on a `node_scripts: true` level, or parent of a drilled pane).
+    NodeScriptShortcut {
+        node_id: String,
         script: String,
     },
     /// Shortcut bound to a `:script`-menu script (per `query_shortcut` row
@@ -157,6 +159,14 @@ pub enum KeySource {
         view: String,
         child_path: Vec<String>,
     },
+    /// `card.key` on a YAML view or child — toggles card mode on that level.
+    /// Claimed statically like the preview key so a collision with an
+    /// `actions:` key (or a chord whose prefix is taken) is reported at
+    /// config load instead of silently losing the toggle at runtime.
+    YamlCardKey {
+        view: String,
+        child_path: Vec<String>,
+    },
     /// Top-level `views[*].key` — switches subtab inside an adapter tab.
     YamlSubtab {
         view: String,
@@ -170,8 +180,15 @@ pub enum KeySource {
     },
     /// Search-result jump key (next or previous) configured by a `search`
     /// action's `next_key` / `prev_key`. Default n / N. Live only while
-    /// the underlying search has matches.
+    /// the underlying search has matches. `view` / `child_path` / `action`
+    /// identify the owning search action so the editor can route to its
+    /// `search.next_key` / `search.prev_key` in the view file. They are
+    /// empty when the owning action is not known (a runtime-only claim that
+    /// predates the identity being stashed) — such a claim stays read-only.
     PaneSearchJump {
+        view: String,
+        child_path: Vec<String>,
+        action: String,
         direction: SearchJump,
     },
     /// User-defined `action_chains:` entry. `scope_path` identifies the
@@ -180,8 +197,31 @@ pub enum KeySource {
     /// - `[view]` — `views[*].action_chains`
     /// - `[view, child, ...]` — `children[*].action_chains` somewhere
     ///   in the drill-down tree of `view`
+    ///
+    /// `key` is the entry's key chord (the map key) — the binding itself,
+    /// so the editor drops the whole entry to free it.
     AppActionChain {
         scope_path: Vec<String>,
+        key: String,
+    },
+    /// Top-level tab-switch shortcut, identified by the tab's display name
+    /// (`tab.name`). Its binding lives in that view file's `tab.key`; when
+    /// that is absent the tab falls back to its positional autonumber digit
+    /// (`1`..`9`, then `0`). Editable from the shortcut menu; Global scope.
+    TabSwitch {
+        tab: String,
+    },
+    /// A per-node `shortcuts:` entry (a single key mapped to an adapter
+    /// action verb, e.g. `s: toggle-tracking`). Lives in the view file's
+    /// `shortcuts:` map at the view (`child_path` empty) or a drill-down
+    /// child. `key` is the single-character surface form; `action` is the
+    /// verb, kept for display. The map key *is* the binding, so the editor
+    /// can only drop the whole entry (not rebind it in place).
+    NodeShortcut {
+        view: String,
+        child_path: Vec<String>,
+        key: String,
+        action: String,
     },
 }
 
@@ -215,11 +255,8 @@ impl KeySource {
             Self::SavedQueryShortcut { view, name } => {
                 format!("views.{view}.saved_query[{name}]")
             }
-            Self::PostgresTableScriptShortcut {
-                table_node_id,
-                script,
-            } => {
-                format!("postgres.script[{table_node_id}/{script}]")
+            Self::NodeScriptShortcut { node_id, script } => {
+                format!("node.script[{node_id}/{script}]")
             }
             Self::ScriptShortcut { scope, name } => {
                 format!("script[{scope}/{name}]")
@@ -235,6 +272,13 @@ impl KeySource {
                     )
                 }
             }
+            Self::YamlCardKey { view, child_path } => {
+                if child_path.is_empty() {
+                    format!("views.{view}.card.key")
+                } else {
+                    format!("views.{view}.children.{}.card.key", child_path.join("."))
+                }
+            }
             Self::YamlSubtab { view } => format!("views.{view}.key"),
             Self::YamlChildKeybinding {
                 view,
@@ -246,18 +290,118 @@ impl KeySource {
                     child_path.join(".")
                 )
             }
-            Self::PaneSearchJump { direction } => match direction {
+            Self::PaneSearchJump { direction, .. } => match direction {
                 SearchJump::Next => "pane.search_next".into(),
                 SearchJump::Prev => "pane.search_prev".into(),
             },
-            Self::AppActionChain { scope_path } => {
+            Self::AppActionChain { scope_path, key } => {
                 if scope_path.is_empty() {
-                    "action_chains[global]".into()
+                    format!("action_chains[{key}]")
                 } else {
-                    format!("action_chains[{}]", scope_path.join("."))
+                    format!("action_chains.{}[{key}]", scope_path.join("."))
+                }
+            }
+            Self::TabSwitch { tab } => format!("tab[{tab}].key"),
+            Self::NodeShortcut {
+                view,
+                child_path,
+                key,
+                ..
+            } => {
+                if child_path.is_empty() {
+                    format!("views.{view}.shortcuts[{key}]")
+                } else {
+                    format!(
+                        "views.{view}.children.{}.shortcuts[{key}]",
+                        child_path.join(".")
+                    )
                 }
             }
         }
+    }
+
+    /// True for the four built-in `tui.yaml` sections (global / common /
+    /// content / window), whose bindings have a compiled-in default that
+    /// [`crate::config::keybinding_edit::remove_binding`] can restore.
+    pub fn is_builtin(&self) -> bool {
+        matches!(
+            self,
+            Self::Global(_) | Self::Common(_) | Self::Content(_) | Self::Window(_)
+        )
+    }
+
+    /// True when "restore default" (Ctrl+R in the shortcut menu) is
+    /// meaningful: the built-in sections *plus* tab-switch keys, whose
+    /// compiled-in default is the positional autonumber digit — recovered
+    /// by removing the `tab.key` override. View actions and DB/script
+    /// sources have no default, so restore is suppressed for them.
+    pub fn has_compiled_default(&self) -> bool {
+        self.is_builtin() || matches!(self, Self::TabSwitch { .. })
+    }
+
+    /// The subtab (`views[*]`) this shortcut is *specific to*, if any.
+    ///
+    /// Only one subtab of an adapter tab is foregrounded at a time, so two
+    /// shortcuts that each belong to a *different* subtab can never fire for
+    /// the same key press — they don't conflict. The [`KeyScope::Pane`] scope
+    /// only tracks the tab (not the subtab), so the conflict check uses this
+    /// to tell sibling subtabs apart. Returns `None` for tab-wide/global
+    /// sources (built-ins, the subtab-switch keys themselves, tab switches,
+    /// DB/script scopes) — those apply across subtabs and must still collide.
+    pub fn subtab_view(&self) -> Option<&str> {
+        match self {
+            Self::YamlAction { view, .. }
+            | Self::SavedQueryShortcut { view, .. }
+            | Self::YamlMenuKey { view }
+            | Self::YamlPreviewKey { view, .. }
+            | Self::YamlChildKeybinding { view, .. }
+            | Self::PaneSearchJump { view, .. }
+            | Self::NodeShortcut { view, .. } => Some(view.as_str()),
+            _ => None,
+        }
+    }
+
+    /// A friendly, human-facing action name for the shortcut menu — as
+    /// opposed to [`human`], which yields the diagnostic config path used
+    /// in conflict messages. YAML/query/script sources use their declared
+    /// name; built-ins are the title-cased action identifier.
+    ///
+    /// [`human`]: KeySource::human
+    pub fn action_name(&self) -> String {
+        match self {
+            Self::Global(a) => title_case(&a.to_string()),
+            Self::Common(a) => title_case(&a.to_string()),
+            Self::Content(a) => title_case(&a.to_string()),
+            Self::Window(a) => title_case(&a.to_string()),
+            Self::YamlAction { name, .. } => name.clone(),
+            Self::SavedQueryShortcut { name, .. } => format!("{name} (saved query)"),
+            Self::NodeScriptShortcut { script, .. } => format!("{script} (script)"),
+            Self::ScriptShortcut { name, .. } => format!("{name} (script)"),
+            Self::YamlMenuKey { .. } => "Saved-query menu".into(),
+            Self::YamlPreviewKey { .. } => "Toggle preview".into(),
+            Self::YamlCardKey { .. } => "Toggle card mode".into(),
+            Self::YamlSubtab { view } => format!("Switch to {view}"),
+            Self::YamlChildKeybinding { action, .. } => title_case(action),
+            Self::PaneSearchJump { direction, .. } => match direction {
+                SearchJump::Next => "Search next".into(),
+                SearchJump::Prev => "Search prev".into(),
+            },
+            Self::AppActionChain { .. } => "Action chain".into(),
+            Self::TabSwitch { tab } => format!("Switch to {tab}"),
+            Self::NodeShortcut { action, .. } => title_case(action),
+        }
+    }
+}
+
+/// Turns a `snake_case` identifier into a `Title case` label: underscores
+/// become spaces and the first letter is capitalised (`tab_set_popup` →
+/// `Tab set popup`).
+fn title_case(snake: &str) -> String {
+    let spaced = snake.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -334,10 +478,15 @@ impl KeyMap {
     /// genuine config error and stays flagged. For multi-key built-in
     /// bindings (e.g. `down`/`j`) only the forced key is stripped; the
     /// claim survives with its remaining keys.
+    ///
+    /// Stripping is prefix-aware, mirroring [`Self::validate`]: forcing `c`
+    /// also takes the built-in `c c` chord out of the way, because a YAML
+    /// action on the leader key makes the chord unreachable either way.
     pub fn force_override_keys(&mut self, keys: &[String]) {
         if keys.is_empty() {
             return;
         }
+        let forced: Vec<Vec<String>> = keys.iter().map(|k| binding_steps(k)).collect();
         self.claims.retain_mut(|c| {
             let is_builtin = matches!(
                 c.source,
@@ -349,13 +498,25 @@ impl KeyMap {
             if !is_builtin {
                 return true;
             }
-            c.key.0.retain(|k| !keys.iter().any(|fk| fk == k));
+            c.key.0.retain(|k| {
+                let steps = binding_steps(k);
+                !forced.iter().any(|f| {
+                    let n = f.len().min(steps.len());
+                    f[..n] == steps[..n]
+                })
+            });
             !c.key.0.is_empty()
         });
     }
 
     /// Find every pair of `Handler` claims that share at least one key
-    /// string and whose scopes overlap. Reported once per pair.
+    /// and whose scopes overlap. Reported once per pair.
+    ///
+    /// "Share" includes chord *prefixes*, not just identical strings: the
+    /// dispatcher stashes a pending prefix before it resolves single keys,
+    /// so a plain `c` next to a `c c` chord makes one of the two
+    /// unreachable — exactly the silent shadowing this validator exists to
+    /// prevent.
     pub fn validate(&self) -> Vec<Conflict> {
         let mut conflicts = Vec::new();
         let handlers: Vec<(usize, &KeyClaim)> = self
@@ -371,7 +532,14 @@ impl KeyMap {
                     .key
                     .0
                     .iter()
-                    .filter(|k| b.key.0.iter().any(|kb| kb == *k))
+                    .filter(|k| {
+                        let ka = binding_steps(k);
+                        b.key.0.iter().any(|kb| {
+                            let kb = binding_steps(kb);
+                            let n = ka.len().min(kb.len());
+                            ka[..n] == kb[..n]
+                        })
+                    })
                     .cloned()
                     .collect();
                 if shared.is_empty() {
@@ -442,6 +610,90 @@ pub struct ViewLeafMap {
 /// user's actual bindings rather than only the built-ins.
 pub fn build_view_leaf_maps(config: &ViewFileConfig, kb: &KeyBindingConfig) -> Vec<ViewLeafMap> {
     build_leaf_maps(&TabRef::new(&config.tab.name), &config.views, kb)
+}
+
+/// Like [`build_view_leaf_maps`], but from the parts a `ContentView`
+/// retains at runtime (`tab_name` + `view_defs`) rather than the original
+/// [`ViewFileConfig`]. Used by the shortcut menu to enumerate the keys of
+/// the currently loaded tabs.
+pub fn build_leaf_maps_for(
+    tab_name: &str,
+    views: &[ViewDef],
+    kb: &KeyBindingConfig,
+) -> Vec<ViewLeafMap> {
+    build_leaf_maps(&TabRef::new(tab_name), views, kb)
+}
+
+// ---------------------------------------------------------------------------
+// Shortcut inventory — projection of claims for the shortcut menu
+// ---------------------------------------------------------------------------
+
+/// One row in the shortcut menu: an action `name`, the `keys` that trigger
+/// it, and the `scope` (tab / drilldown level) it is active in.
+///
+/// `source` / `key_scope` carry the originating claim so the interactive
+/// editor can route an edit (rebind / disable / delete) back to the config
+/// file that owns the binding. They are `None` for synthetic rows that no
+/// config entry backs (e.g. autonumber tab-switch keys) — such rows are
+/// read-only in the menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutRow {
+    pub name: String,
+    pub keys: String,
+    pub scope: String,
+    pub source: Option<KeySource>,
+    pub key_scope: Option<KeyScope>,
+}
+
+/// Human-readable scope label for a leaf, e.g. `Jira` (root) or
+/// `Jira › comments` (drilled in).
+pub fn leaf_scope_label(tab: &str, child_path: &[String]) -> String {
+    if child_path.is_empty() {
+        tab.to_string()
+    } else {
+        format!("{tab} › {}", child_path.join(" › "))
+    }
+}
+
+/// Projects a keymap's `Handler` claims into shortcut-menu rows tagged
+/// with `scope`. `Swallow` claims are skipped; keyless handlers (actions
+/// with no bound key) are kept with an empty `keys` so the menu lists them
+/// too. Rows with the same `(name, keys)` are de-duplicated (order
+/// preserved).
+pub fn shortcut_rows(keymap: &KeyMap, scope: &str) -> Vec<ShortcutRow> {
+    shortcut_rows_with(keymap, |_| scope.to_string())
+}
+
+/// Like [`shortcut_rows`], but the scope label is derived *per claim* from
+/// `scope_of` rather than fixed for the whole keymap. The shortcut menu's
+/// "all" view uses this to tag each row with the scope the shortcut is
+/// actually active in (`Global` / tab / leaf) instead of the leaf it was
+/// enumerated in — so a global or tab-wide shortcut, which `push_tab_wide`
+/// files into *every* leaf, collapses to a single row on dedup instead of
+/// appearing once per drilldown level.
+pub fn shortcut_rows_with<F>(keymap: &KeyMap, scope_of: F) -> Vec<ShortcutRow>
+where
+    F: Fn(&KeyClaim) -> String,
+{
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for claim in &keymap.claims {
+        if claim.kind != KeyClaimKind::Handler {
+            continue;
+        }
+        let keys = claim.key.0.join(" / ");
+        let name = claim.source.action_name();
+        if seen.insert((name.clone(), keys.clone())) {
+            rows.push(ShortcutRow {
+                name,
+                keys,
+                scope: scope_of(claim),
+                source: Some(claim.source.clone()),
+                key_scope: Some(claim.scope.clone()),
+            });
+        }
+    }
+    rows
 }
 
 /// Internal builder working from the parts a `ContentView` retains at
@@ -591,12 +843,12 @@ fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig, window_op
     // conflict reported. Claiming them tab-wide makes that collision a
     // hard error (escape hatch: `force: true` on the action, which strips
     // the matching built-in claim — see `KeyMap::force_override_keys`).
-    // `JumpMode` (`p`) and `TrackingToggle` (`s`) are intentionally NOT
-    // here: `p` is the usual preview key on content tabs and `s` is a
-    // no-op there, so claiming them would manufacture false conflicts.
+    // `JumpMode` (`p`) is intentionally NOT here: `p` is the usual preview
+    // key on content tabs, so claiming it would manufacture false conflicts.
     let app_fallback_common = [
         CommonAction::ColumnConfig,
         CommonAction::SortMode,
+        CommonAction::SortMenu,
         CommonAction::CommandLineOpen,
     ];
     for action in app_fallback_common {
@@ -626,6 +878,88 @@ fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig, window_op
                 KeySource::Window(action.clone()),
             ));
         }
+    }
+}
+
+/// Collect a `Handler` claim for every per-node `shortcuts:` entry (a single
+/// key → adapter action verb) across `views` and their drill-down children.
+///
+/// These are real, live bindings but they are deliberately **not** filed into
+/// the leaf maps that feed the load-time validator / saved-query check: a
+/// node shortcut legitimately overrides a content built-in or subtab key on
+/// its key (e.g. `Q` overriding `edit_query`), which the validator would
+/// otherwise flag as a hard error. Instead the interactive keybinding editor
+/// folds these claims into its own conflict check (via
+/// [`crate::app::App`]), so a newly-recorded binding that collides with a
+/// node shortcut is caught and offered for resolution.
+pub fn node_shortcut_claims(tab: &str, views: &[ViewDef]) -> Vec<KeyClaim> {
+    let tref = TabRef::new(tab);
+    let mut out = Vec::new();
+    for view in views {
+        collect_node_shortcuts(
+            &tref,
+            &view.name,
+            &[],
+            &view.shortcuts,
+            &view.children,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// The [`KeyScope`] a per-node `shortcuts:` binding lives in, given the
+/// drilldown depth of the level that declares it. Mirrors the profile
+/// [`collect_node_shortcuts`] stamps on the claims it builds, so a
+/// synthesised (still-unbound) adapter-action row shares the exact scope a
+/// bound one would — the conflict check and the binding writer then treat
+/// the two identically.
+pub fn node_shortcut_scope(tab: &str, child_path: &[String]) -> KeyScope {
+    let profile = if child_path.is_empty() {
+        root_profile()
+    } else {
+        drilled_profile()
+    };
+    KeyScope::Pane(TabRef::new(tab), profile)
+}
+
+fn collect_node_shortcuts(
+    tab: &TabRef,
+    view_name: &str,
+    child_path: &[String],
+    shortcuts: &std::collections::HashMap<char, crate::config::view_config::ShortcutDef>,
+    children: &[crate::config::view_config::ChildDef],
+    out: &mut Vec<KeyClaim>,
+) {
+    let profile = if child_path.is_empty() {
+        root_profile()
+    } else {
+        drilled_profile()
+    };
+    for (ch, def) in shortcuts {
+        let key = ch.to_string();
+        out.push(KeyClaim::handler(
+            KeyBinding::new(&key),
+            KeyScope::Pane(tab.clone(), profile.clone()),
+            KeySource::NodeShortcut {
+                view: view_name.to_string(),
+                child_path: child_path.to_vec(),
+                key,
+                action: def.action().to_string(),
+            },
+        ));
+    }
+    for child in children {
+        let mut path = child_path.to_vec();
+        path.push(child.name.clone());
+        collect_node_shortcuts(
+            tab,
+            view_name,
+            &path,
+            &child.shortcuts,
+            &child.children,
+            out,
+        );
     }
 }
 
@@ -751,8 +1085,11 @@ fn push_leaf_content_keys(
 fn push_subtab_keys(km: &mut KeyMap, tab: &TabRef, views: &[ViewDef]) {
     for v in views {
         if let Some(k) = &v.key {
+            if k.0.is_empty() {
+                continue;
+            }
             km.push(KeyClaim::handler(
-                KeyBinding::new(k.clone()),
+                k.clone(),
                 KeyScope::Tab(tab.clone()),
                 KeySource::YamlSubtab {
                     view: v.name.clone(),
@@ -789,13 +1126,23 @@ fn push_view_actions(km: &mut KeyMap, tab: &TabRef, view: &ViewDef, is_root: boo
         if let Some(k) = &preview.keybinding {
             km.push(KeyClaim::handler(
                 KeyBinding::new(k.clone()),
-                KeyScope::Pane(tab.clone(), profile),
+                KeyScope::Pane(tab.clone(), profile.clone()),
                 KeySource::YamlPreviewKey {
                     view: view.name.clone(),
                     child_path: Vec::new(),
                 },
             ));
         }
+    }
+    if let Some(key) = view.card.as_ref().and_then(|c| c.key.as_ref()) {
+        km.push(KeyClaim::handler(
+            key.clone(),
+            KeyScope::Pane(tab.clone(), profile),
+            KeySource::YamlCardKey {
+                view: view.name.clone(),
+                child_path: Vec::new(),
+            },
+        ));
     }
 }
 
@@ -814,13 +1161,23 @@ fn push_child_actions(
         if let Some(k) = &preview.keybinding {
             km.push(KeyClaim::handler(
                 KeyBinding::new(k.clone()),
-                KeyScope::Pane(tab.clone(), profile),
+                KeyScope::Pane(tab.clone(), profile.clone()),
                 KeySource::YamlPreviewKey {
                     view: view.name.clone(),
                     child_path: child_path.to_vec(),
                 },
             ));
         }
+    }
+    if let Some(key) = child.card.as_ref().and_then(|c| c.key.as_ref()) {
+        km.push(KeyClaim::handler(
+            key.clone(),
+            KeyScope::Pane(tab.clone(), profile),
+            KeySource::YamlCardKey {
+                view: view.name.clone(),
+                child_path: child_path.to_vec(),
+            },
+        ));
     }
 }
 
@@ -831,7 +1188,7 @@ fn forced_keys(actions: &[crate::config::view_config::ActionDef]) -> Vec<String>
     actions
         .iter()
         .filter(|a| a.force)
-        .map(|a| a.key.clone())
+        .flat_map(|a| a.key_strings().iter().cloned())
         .collect()
 }
 
@@ -843,8 +1200,16 @@ fn push_action_claims(
     child_path: &[String],
     action: &crate::config::view_config::ActionDef,
 ) {
+    // Actions with no key still run via the action menu / rule engine, not
+    // a keypress. We record them with an *empty* key binding so the shortcut
+    // menu can list them (with a blank keys column) as a complete inventory.
+    // An empty binding is inert for the validator (shares no key, so never
+    // conflicts) and this keymap is not the dispatch path. Their
+    // search/next-prev sub-keys below are irrelevant (those action types
+    // always carry a key).
+    let binding = action.key.clone().unwrap_or_else(|| KeyBinding(Vec::new()));
     km.push(KeyClaim::handler(
-        KeyBinding::new(action.key.clone()),
+        binding,
         KeyScope::Pane(tab.clone(), profile.clone()),
         KeySource::YamlAction {
             view: view.to_string(),
@@ -858,6 +1223,9 @@ fn push_action_claims(
                 KeyBinding::new(k.clone()),
                 KeyScope::Pane(tab.clone(), profile.clone()),
                 KeySource::PaneSearchJump {
+                    view: view.to_string(),
+                    child_path: child_path.to_vec(),
+                    action: action.name.clone(),
                     direction: SearchJump::Next,
                 },
             ));
@@ -867,6 +1235,9 @@ fn push_action_claims(
                 KeyBinding::new(k.clone()),
                 KeyScope::Pane(tab.clone(), profile),
                 KeySource::PaneSearchJump {
+                    view: view.to_string(),
+                    child_path: child_path.to_vec(),
+                    action: action.name.clone(),
                     direction: SearchJump::Prev,
                 },
             ));
@@ -923,9 +1294,12 @@ fn push_action_chain_claims(
             }
         };
         km.push(KeyClaim::handler(
-            KeyBinding::new(key_str),
+            KeyBinding::new(key_str.clone()),
             KeyScope::Pane(tab.clone(), profile.clone()),
-            KeySource::AppActionChain { scope_path },
+            KeySource::AppActionChain {
+                scope_path,
+                key: key_str,
+            },
         ));
     }
 }
@@ -1079,6 +1453,163 @@ pub fn validate_view_file(config: &ViewFileConfig, kb: &KeyBindingConfig) -> Vec
 }
 
 // ---------------------------------------------------------------------------
+// Generalised conflict check for a *proposed* binding (interactive editor)
+// ---------------------------------------------------------------------------
+
+/// How a proposed binding collides with an existing claim. All three are
+/// genuine conflicts — a chord and its prefix cannot coexist because the
+/// shorter one dispatches before the longer one can complete.
+//
+// Wired into the interactive keybinding editor in a later phase; until then
+// only the test suite exercises the conflict primitives below.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// Both bind the exact same completed step sequence.
+    Same,
+    /// The proposed sequence is a strict prefix of the existing chord, so
+    /// pressing it fires the proposal and the longer existing chord becomes
+    /// unreachable.
+    ProposedShadowsExisting,
+    /// An existing (shorter) binding is a strict prefix of the proposed
+    /// chord, so the existing key fires first and the proposal is
+    /// unreachable.
+    ExistingShadowsProposed,
+}
+
+/// One collision between a proposed binding and an existing [`KeyClaim`].
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct BindingConflict {
+    /// The claim the proposal collides with — locate/rebind/delete via this.
+    pub source: KeySource,
+    pub scope: KeyScope,
+    /// The proposed alternative (step list) that collides.
+    pub proposed_seq: Vec<String>,
+    /// The existing claim's colliding alternative (step list).
+    pub existing_seq: Vec<String>,
+    pub kind: ConflictKind,
+}
+
+/// Whether two completed step sequences collide, and how. Sequences collide
+/// when one is a prefix of (or equal to) the other — they share the shorter
+/// sequence's full length. `a` is the proposed side, `b` the existing side,
+/// which fixes the direction of the shadowing verdict.
+#[allow(dead_code)]
+fn sequence_conflict(a: &[String], b: &[String]) -> Option<ConflictKind> {
+    let n = a.len().min(b.len());
+    if a[..n] != b[..n] {
+        return None;
+    }
+    Some(match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => ConflictKind::Same,
+        std::cmp::Ordering::Less => ConflictKind::ProposedShadowsExisting,
+        std::cmp::Ordering::Greater => ConflictKind::ExistingShadowsProposed,
+    })
+}
+
+/// Every way `proposed` (active in `scope`) collides with a `Handler` claim
+/// in `claims`. This is the single conflict primitive the interactive
+/// keybinding editor calls before writing a binding.
+///
+// Wired into the interactive keybinding editor in a later phase; until then
+// only the test suite exercises it.
+#[allow(dead_code)]
+///
+/// * Multi-step chords and prefixes are handled: `w` collides with `w v`,
+///   and `ctrl+k l` collides with `ctrl+k`.
+/// * Alternatives are expanded on both sides — a proposed `[a, w v]` is
+///   checked as two sequences, and a claim bound to `[j, down]` as two.
+/// * Scope gates the check: different tabs never collide (see
+///   [`KeyScope::overlaps_with`]).
+/// * `own` is the source being (re)bound; a claim from the same source is
+///   skipped so rebinding an action onto a key it already holds is not a
+///   self-conflict.
+/// * An empty `proposed` (the disable form, `key: []`) collides with
+///   nothing.
+///
+/// At most one conflict is reported per distinct existing sequence of a
+/// claim; the caller typically dedups further by `source`.
+pub fn binding_conflicts(
+    proposed: &KeyBinding,
+    scope: &KeyScope,
+    claims: &[KeyClaim],
+    own: Option<&KeySource>,
+) -> Vec<BindingConflict> {
+    let mut out = Vec::new();
+    let proposed_seqs = proposed.step_lists();
+    if proposed_seqs.is_empty() {
+        return out;
+    }
+    for claim in claims {
+        if claim.kind != KeyClaimKind::Handler {
+            continue;
+        }
+        if own == Some(&claim.source) {
+            continue;
+        }
+        if !scope.overlaps_with(&claim.scope) {
+            continue;
+        }
+        // Sibling subtabs of the same tab are never active at the same time.
+        // The `Pane` scope only tracks the tab, so without this two shortcuts
+        // that each belong to a *different* subtab would falsely collide.
+        if let (Some(a), Some(b)) = (
+            own.and_then(KeySource::subtab_view),
+            claim.source.subtab_view(),
+        ) {
+            if a != b {
+                continue;
+            }
+        }
+        for existing in claim.key.step_lists() {
+            if existing.is_empty() {
+                continue;
+            }
+            if let Some((p, kind)) = proposed_seqs
+                .iter()
+                .find_map(|p| sequence_conflict(p, &existing).map(|k| (p.clone(), k)))
+            {
+                out.push(BindingConflict {
+                    source: claim.source.clone(),
+                    scope: claim.scope.clone(),
+                    proposed_seq: p,
+                    existing_seq: existing,
+                    kind,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Conflicts for a proposed binding on an action inside one YAML view file,
+/// checked against every leaf of that file (each carries the built-in
+/// global/common/content/window claims folded in). Deduplicated by
+/// conflicting `source`. `own` is the source being rebound. Since a view
+/// file is one tab and different tabs never overlap, this is the complete
+/// set of collisions for a view-action binding.
+#[allow(dead_code)]
+pub fn view_file_binding_conflicts(
+    config: &ViewFileConfig,
+    kb: &KeyBindingConfig,
+    proposed: &KeyBinding,
+    scope: &KeyScope,
+    own: Option<&KeySource>,
+) -> Vec<BindingConflict> {
+    let mut all = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for leaf in build_view_leaf_maps(config, kb) {
+        for c in binding_conflicts(proposed, scope, &leaf.keymap.claims, own) {
+            if seen.insert(c.source.clone()) {
+                all.push(c);
+            }
+        }
+    }
+    all
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1149,6 +1680,113 @@ mod tests {
         let cs = km.validate();
         assert_eq!(cs.len(), 1, "expected exactly one conflict, got {cs:?}");
         assert_eq!(cs[0].keys, vec!["f".to_string()]);
+    }
+
+    #[test]
+    fn conflict_between_pane_action_and_tab_wide_builtin() {
+        // A view action's `Pane` scope overlaps its own tab's tab-wide
+        // built-ins (e.g. `common.scroll_page_down`). Binding the action to a
+        // key the built-in already holds must be reported — the shortcut menu
+        // relies on this to prompt before saving.
+        let builtin = KeyClaim::handler(
+            KeyBinding::new("ctrl+f"),
+            KeyScope::Tab(tab("Jira")),
+            KeySource::Common(CommonAction::ScrollPageDown),
+        );
+        let own = KeySource::YamlAction {
+            view: "tickets".into(),
+            child_path: Vec::new(),
+            name: "free text".into(),
+        };
+        let scope = KeyScope::Pane(tab("Jira"), root());
+        let cs = binding_conflicts(
+            &KeyBinding::new("ctrl+f"),
+            &scope,
+            std::slice::from_ref(&builtin),
+            Some(&own),
+        );
+        assert_eq!(
+            cs.len(),
+            1,
+            "pane action must conflict with a same-tab tab-wide built-in: {cs:?}"
+        );
+
+        // Regression precondition: the runtime keymap used to file context
+        // claims under a placeholder `Pane(TabRef(""), …)`, whose empty tab
+        // fails `overlaps_with` against the real-tab built-in — so the
+        // collision slipped past the menu's check and only the reload
+        // validator caught it. `add_binding_from_menu` now repairs the tab
+        // before checking; this documents why that repair is necessary.
+        let placeholder = KeyScope::Pane(TabRef::new(""), root());
+        let missed = binding_conflicts(
+            &KeyBinding::new("ctrl+f"),
+            &placeholder,
+            std::slice::from_ref(&builtin),
+            Some(&own),
+        );
+        assert!(
+            missed.is_empty(),
+            "empty-tab placeholder scope misses the conflict (why the repair is needed): {missed:?}"
+        );
+    }
+
+    #[test]
+    fn no_conflict_between_node_shortcuts_in_different_subtabs() {
+        // The Trackings tab has sibling subtabs "trackings" and "condensed".
+        // Only one is foregrounded at a time, so binding `s` to
+        // toggle-tracking in one must NOT collide with the same key in the
+        // other — even though both share the tab-level `Pane` scope.
+        let existing = KeyClaim::handler(
+            KeyBinding::new("s"),
+            node_shortcut_scope("Trackings", &[]),
+            KeySource::NodeShortcut {
+                view: "condensed".into(),
+                child_path: Vec::new(),
+                key: "s".into(),
+                action: "toggle-tracking".into(),
+            },
+        );
+        let own = KeySource::NodeShortcut {
+            view: "trackings".into(),
+            child_path: Vec::new(),
+            key: String::new(),
+            action: "toggle-tracking".into(),
+        };
+        let cs = binding_conflicts(
+            &KeyBinding::new("s"),
+            &node_shortcut_scope("Trackings", &[]),
+            std::slice::from_ref(&existing),
+            Some(&own),
+        );
+        assert!(cs.is_empty(), "sibling subtabs must not conflict: {cs:?}");
+    }
+
+    #[test]
+    fn conflict_between_node_shortcuts_in_the_same_subtab() {
+        // Same subtab, same key, different action → a genuine conflict.
+        let existing = KeyClaim::handler(
+            KeyBinding::new("s"),
+            node_shortcut_scope("Trackings", &[]),
+            KeySource::NodeShortcut {
+                view: "trackings".into(),
+                child_path: Vec::new(),
+                key: "s".into(),
+                action: "start".into(),
+            },
+        );
+        let own = KeySource::NodeShortcut {
+            view: "trackings".into(),
+            child_path: Vec::new(),
+            key: String::new(),
+            action: "toggle-tracking".into(),
+        };
+        let cs = binding_conflicts(
+            &KeyBinding::new("s"),
+            &node_shortcut_scope("Trackings", &[]),
+            std::slice::from_ref(&existing),
+            Some(&own),
+        );
+        assert_eq!(cs.len(), 1, "same subtab must still conflict");
     }
 
     #[test]
@@ -1431,9 +2069,11 @@ views:
     }
 
     /// An `actions:` entry on `c` collides with the App-level column-config
-    /// fallback (`common.column_config`, default `c`), which is now claimed
-    /// tab-wide. Binding it without `force` is a hard error — exactly the
-    /// case that previously slipped through (jira's `c` = comments shadowed
+    /// fallback (`common.column_config`, default `c c`), which is claimed
+    /// tab-wide. Since the default moved to a chord the collision is a
+    /// *prefix* one: taking the leader key leaves the chord unreachable.
+    /// Binding it without `force` is a hard error — exactly the case that
+    /// previously slipped through (jira's `c` = comments shadowed
     /// column-config silently).
     #[test]
     fn action_c_conflicts_with_column_config_fallback() {
@@ -1450,7 +2090,7 @@ views:
         let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
         assert!(
             errs.iter()
-                .any(|e| e.contains("\"c\"") && e.contains("column_config")),
+                .any(|e| e.contains("\"c c\"") && e.contains("column_config")),
             "expected a 'c' / column_config conflict, got: {errs:?}"
         );
     }
@@ -1471,7 +2111,10 @@ views:
 "#;
         let cfg = yaml_str(yaml);
         let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
-        assert!(errs.is_empty(), "force should suppress conflict, got: {errs:?}");
+        assert!(
+            errs.is_empty(),
+            "force should suppress conflict, got: {errs:?}"
+        );
     }
 
     /// `force` only overrides *built-in* claims — two YAML actions on the
@@ -1549,6 +2192,57 @@ views:
                 .any(|e| e.contains("Rows") && e.contains("\"q\"")),
             "expected a Rows / 'q' menu_key conflict, got: {errs:?}"
         );
+    }
+
+    /// `card.key` is claimed statically like the preview key, so a collision
+    /// with an `actions:` key on the same level is reported at config load
+    /// instead of silently losing the toggle at runtime.
+    #[test]
+    fn validate_view_file_flags_card_key_vs_action_key() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+    columns: [{ key: a }, { key: b }]
+    card:
+      key: C
+      fields: [a, b]
+      columns: 2
+    actions:
+      - { name: comments, key: C, type: custom, id: comments }
+"#;
+        let cfg = yaml_str(yaml);
+        let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("card.key") && e.contains("\"C\"")),
+            "expected a card.key / 'C' conflict, got: {errs:?}"
+        );
+    }
+
+    /// A card chord whose *prefix* is a free key stays clean — that is what
+    /// makes `v c` usable next to an action on `v`-less levels.
+    #[test]
+    fn validate_view_file_accepts_card_chord_with_free_prefix() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tickets
+    node_type: t
+    columns: [{ key: a }, { key: b }]
+    card:
+      key: 'v c'
+      fields: [a, b]
+      columns: 2
+    actions:
+      - { name: comments, key: C, type: custom, id: comments }
+"#;
+        let cfg = yaml_str(yaml);
+        let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
+        assert!(errs.is_empty(), "chord should not collide, got: {errs:?}");
     }
 
     /// Phase 5: a global `action_chains:` binding collides with a
@@ -1786,5 +2480,187 @@ views:
     fn sq_conflict_allows_free_keys() {
         assert_eq!(sq_conflict("m", &[]), None);
         assert_eq!(sq_conflict("ctrl+o", &[]), None);
+    }
+
+    // --- shortcut inventory ------------------------------------------------
+
+    #[test]
+    fn title_case_snake_to_label() {
+        assert_eq!(title_case("tab_set_popup"), "Tab set popup");
+        assert_eq!(title_case("quit"), "Quit");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn action_name_prefers_yaml_name_over_diagnostic_path() {
+        let src = KeySource::YamlAction {
+            view: "tables".into(),
+            child_path: vec!["Rows".into()],
+            name: "edit sql".into(),
+        };
+        assert_eq!(src.action_name(), "edit sql");
+        // `human` still returns the diagnostic path for conflict messages.
+        assert!(src.human().contains("actions[edit sql]"));
+    }
+
+    #[test]
+    fn leaf_scope_label_root_and_drilled() {
+        assert_eq!(leaf_scope_label("Jira", &[]), "Jira");
+        assert_eq!(
+            leaf_scope_label("Jira", &["comments".to_string()]),
+            "Jira › comments"
+        );
+    }
+
+    #[test]
+    fn shortcut_rows_names_builtins_and_yaml_actions() {
+        let yaml = r#"
+tab: { name: Postgres }
+adapter: { type: x }
+views:
+  - name: tables
+    node_type: t
+    actions:
+      - name: run query
+        key: r
+        type: custom
+        id: run
+"#;
+        let cfg = yaml_str(yaml);
+        let kb = KeyBindingConfig::default();
+        let leaves = build_view_leaf_maps(&cfg, &kb);
+        let root = leaves
+            .iter()
+            .find(|l| l.child_path.is_empty())
+            .expect("root leaf");
+        let rows = shortcut_rows(&root.keymap, &leaf_scope_label("Postgres", &[]));
+
+        // The YAML action carries its declared name and key.
+        let run = rows
+            .iter()
+            .find(|r| r.name == "run query")
+            .expect("YAML action row present");
+        assert_eq!(run.keys, "r");
+        assert_eq!(run.scope, "Postgres");
+
+        // A built-in global (quit / ctrl+c) is title-cased.
+        assert!(
+            rows.iter()
+                .any(|r| r.name == "Quit" && r.keys.contains("ctrl+c")),
+            "expected a title-cased Quit row, got: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn tab_switch_source_names_and_restore_default() {
+        let s = KeySource::TabSwitch {
+            tab: "Tasks".to_string(),
+        };
+        assert_eq!(s.action_name(), "Switch to Tasks");
+        assert_eq!(s.human(), "tab[Tasks].key");
+        // Not one of the four built-in sections …
+        assert!(!s.is_builtin());
+        // … but it does have a compiled default (the autonumber digit).
+        assert!(s.has_compiled_default());
+    }
+
+    #[test]
+    fn shortcut_rows_dedup_keeps_keyless_skips_swallow() {
+        let mut km = KeyMap::new();
+        // Two identical (name, keys) claims → one row.
+        for _ in 0..2 {
+            km.push(KeyClaim::handler(
+                KeyBinding::new("g"),
+                KeyScope::Global,
+                KeySource::Global(GlobalAction::Quit),
+            ));
+        }
+        // A keyless handler is kept, with an empty keys column.
+        km.push(KeyClaim::handler(
+            KeyBinding(vec![]),
+            KeyScope::Global,
+            KeySource::Global(GlobalAction::TabNext),
+        ));
+        // A Swallow claim is skipped.
+        km.push(KeyClaim::swallow(
+            KeyBinding::new("x"),
+            KeyScope::Global,
+            KeySource::Global(GlobalAction::TabPrev),
+        ));
+        let rows = shortcut_rows(&km, "S");
+        assert_eq!(
+            rows.len(),
+            2,
+            "dedup + keyless kept + swallow skipped, got: {rows:?}"
+        );
+        assert_eq!(rows[0].name, "Quit");
+        assert_eq!(rows[0].keys, "g");
+        // The keyless handler survives with an empty keys string.
+        let keyless = rows.iter().find(|r| r.keys.is_empty());
+        assert!(keyless.is_some(), "keyless row should be present: {rows:?}");
+    }
+
+    // --- generalised proposed-binding conflict check --------------------
+
+    fn pane_scope() -> KeyScope {
+        KeyScope::Pane(
+            tab("postgres"),
+            PaneStateProfile::Normal { drilldown: None },
+        )
+    }
+
+    #[test]
+    fn proposed_binding_flags_exact_and_prefix_and_shadow() {
+        let claims = vec![
+            yaml_action("t", "edit", "e"),
+            yaml_action("t", "window", "w v"), // a two-step chord
+        ];
+
+        // Exact clash with `e`.
+        let same = binding_conflicts(&KeyBinding::new("e"), &pane_scope(), &claims, None);
+        assert_eq!(same.len(), 1);
+        assert_eq!(same[0].kind, ConflictKind::Same);
+        assert!(matches!(&same[0].source, KeySource::YamlAction { name, .. } if name == "edit"));
+
+        // Proposing the leader `w` shadows the existing `w v` chord.
+        let shadow = binding_conflicts(&KeyBinding::new("w"), &pane_scope(), &claims, None);
+        assert_eq!(shadow.len(), 1);
+        assert_eq!(shadow[0].kind, ConflictKind::ProposedShadowsExisting);
+
+        // Proposing the longer `e x` is shadowed by the existing `e`.
+        let shadowed = binding_conflicts(&KeyBinding::new("e x"), &pane_scope(), &claims, None);
+        assert_eq!(shadowed.len(), 1);
+        assert_eq!(shadowed[0].kind, ConflictKind::ExistingShadowsProposed);
+    }
+
+    #[test]
+    fn proposed_binding_skips_own_source_and_disjoint_scope() {
+        let own = KeySource::YamlAction {
+            view: "t".into(),
+            child_path: Vec::new(),
+            name: "edit".into(),
+        };
+        let claims = vec![yaml_action("t", "edit", "e")];
+        // Rebinding the same action onto its own key is not a conflict.
+        assert!(
+            binding_conflicts(&KeyBinding::new("e"), &pane_scope(), &claims, Some(&own)).is_empty()
+        );
+        // A claim on a different tab never collides.
+        let other_tab = KeyScope::Pane(tab("jira"), PaneStateProfile::Normal { drilldown: None });
+        assert!(binding_conflicts(&KeyBinding::new("e"), &other_tab, &claims, None).is_empty());
+    }
+
+    #[test]
+    fn proposed_disable_and_alternatives() {
+        let claims = vec![yaml_action("t", "edit", "e")];
+        // The disable form (empty list) collides with nothing.
+        assert!(
+            binding_conflicts(&KeyBinding(Vec::new()), &pane_scope(), &claims, None).is_empty()
+        );
+        // A list of alternatives is expanded — the `e` alternative clashes.
+        let alts = KeyBinding::multi(vec!["x", "e"]);
+        let hits = binding_conflicts(&alts, &pane_scope(), &claims, None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].proposed_seq, vec!["e".to_string()]);
     }
 }

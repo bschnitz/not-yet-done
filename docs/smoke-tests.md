@@ -806,9 +806,9 @@ postgres:
 - [ ] **`retries: 0` (Default)**: Gleiches Setup ohne `retries:` —
       Banner zeigt nur einen Versuch, sofort _"Fetch failed: …"_
       ohne `Retrying`.
-- [ ] **Manual-Connect (`adapter.manual_connect: true`)**: Auf
-      `views/postgres.yaml` im `adapter:` Block
-      `manual_connect: true` setzen. TUI starten. Erwartet: Postgres-
+- [ ] **Manual-Connect (`adapter.manual_connect: true`, Default)**: Auf
+      `views/postgres.yaml` im `adapter:` Block `manual_connect`
+      weglassen **oder** auf `true` setzen. TUI starten. Erwartet: Postgres-
       Tab zeigt sofort _"Auto-connect disabled — press `r` to
       connect"_ als Banner; **keine** Connection-Versuche, keine
       Timeouts in Logs/Wartezeit. Subtab-Wechsel `d`/`t`/`s` triggert
@@ -825,9 +825,8 @@ postgres:
       _"Auto-connect disabled — no `reload` action configured for
       this view"_; der Tab bleibt dauerhaft leer (Soft-Fehler, kein
       Crash).
-- [ ] **Manual-Connect off (Default)**: `manual_connect` nicht
-      setzen / `false` → Tab lädt automatisch beim Start wie
-      bisher; keine Regression.
+- [ ] **Manual-Connect off**: `manual_connect: false` → Tab lädt
+      automatisch beim Start; keine Regression.
 - [ ] **Ohne `query_timeout_secs`**: Bisheriges Verhalten — Banner
       zeigt nur Elapsed (`… (3s)`), kein Auto-Reset. (Optional, nur
       für Regression.)
@@ -1487,7 +1486,7 @@ Im `postgres.yaml` sind die per-node Shortcuts gesetzt:
     - name: DB Script
       node_type: "postgres:db_script"
       shortcuts:
-        x: execute
+        X: execute
         e: edit
         d: delete
       children:
@@ -1848,6 +1847,42 @@ Task).
 - [ ] Soft-deleted Tasks/Trackings zählen als stale: Task löschen
       (lower-d) → `:linkprune` listet die Links darauf; nach `y`
       verschwinden sie.
+
+### Deep-Link in einen zugeklappten Subtree (Confluence)
+
+Hintergrund: ein Link zeigt auf eine Seite, die gerade nicht geladen
+ist. Der Host fragt dann den Adapter über `locate_node_path`, wo der
+Knoten liegt, und klappt den Pfad auf. Confluence liefert dafür
+`[<space key>, <ancestor ids…>, <page id>]` — genau die Pfadform, die
+auch `tree find` benutzt.
+
+Voraussetzung: Confluence-Tab im Tree-Mode, eine Seite mindestens zwei
+Ebenen unter dem Space-Homepage.
+
+- [ ] Tiefe Confluence-Seite ansteuern, `glm` → Pill _"⚓ marked:
+      confluence/<inst>/<pageid>"_ (Confluence hat stabile IDs, also
+      **kein** _"Nothing to mark"_ wie bei Postgres/SQLite).
+- [ ] In Tasks auf eine Task → `glp` → Link angelegt.
+- [ ] Confluence-Tab: **alles zuklappen** (`zm`) und Tab wechseln, damit
+      die Zielzeile sicher nicht geladen ist.
+- [ ] Auf der Task `glo` → `Enter` → Confluence-Tab wird aktiv, Space
+      und alle Ancestor-Seiten klappen auf, Cursor steht auf der
+      Zielseite. Kein _"is not among the loaded rows"_.
+- [ ] Gegenprobe flache Ansicht: im Confluence-Tab auf einen Sub-Tab
+      ohne Tree-Mode wechseln, dann demselben Link folgen →
+      Notification _"… is not on the current page (flat view — no path
+      to expand)"_.
+- [ ] Space-Whitelist: in `views/confluence-adapter.yaml` die
+      `space_keys` so setzen, dass der Space der Zielseite **fehlt** →
+      TUI neu starten, Link folgen → kein Aufklappen, Notification
+      _"…can't locate it"_ (der Baum hat dort keinen Knoten). Whitelist
+      danach zurücksetzen.
+- [ ] Seite im Confluence-Web in den Trash verschieben → Link folgen →
+      Stale-Confirm-Modal (nicht _NotSupported_), `n` lässt die Zeile
+      stehen.
+- [ ] Kommentar-Ziel: auf einem Kommentar einer tiefen Seite `glm` →
+      linken → folgen → Pfad endet auf der Seite, der Kommentar selbst
+      wird nur fokussiert, wenn der Sub-Tab Kommentare als Kinder zeigt.
 
 ## In-App Config-Editor (`:config`)
 
@@ -2414,7 +2449,7 @@ gefetcht und gecached. Race-frei via Cache-Key = `node_id`.
       runter-cursorn. Cursor auf einer DB-Scripts-Gruppen-Row →
       Action-Bar zeigt `a: add`.
 - [ ] Tree-expand der Scripts-Gruppe (`l`/`Enter`) → Cursor auf einer
-      einzelnen DB-Script-Leaf → Action-Bar zeigt `x: execute`,
+      einzelnen DB-Script-Leaf → Action-Bar zeigt `X: execute`,
       `e: edit`, `d: delete` — `a: add` ist NICHT mehr sichtbar
       (Leaf hat kein `add` in `actions()`).
 - [ ] Erster Cursor-Move auf neuer Zeile: Hints können kurz fehlen,
@@ -3214,13 +3249,19 @@ Beide `messages`-Level haben `smooth_scroll: true`. In einen Channel mit vielen
 - [ ] **Zeilenweise statt sprunghaft:** ↓ scrollt den Inhalt um **eine
       physische Zeile** nach oben — eine hohe Nachricht oben wird dabei
       sukzessive angeschnitten, nicht als ganzer Block weggeschoben.
-- [ ] **Sticky Highlight, kein Snapping:** Der Highlight bleibt auf _seiner_
-      Nachricht und **gleitet mit** dem Inhalt mit (darf am Rand angeschnitten
-      sein). Er springt **nicht** bei jedem Schritt an den oberen Rand.
-- [ ] **Späte Übergabe:** Erst wenn die hervorgehobene Nachricht **vollständig**
-      über den oberen Rand verschwindet, rückt der Highlight um genau eine
-      Nachricht zur jetzt obersten sichtbaren weiter. Beim Hochscrollen
-      analog am unteren Rand.
+- [ ] **Kein Snapping:** Der Highlight gleitet mit dem Inhalt mit (darf am Rand
+      angeschnitten sein) und springt **nicht** bei jedem Schritt an den oberen
+      Rand.
+- [ ] **Übergabe, sobald die nächste Nachricht sichtbar ist:** Ist die nächste
+      Nachricht bereits auf dem Schirm, rückt der Highlight bei `j` sofort um
+      **genau eine** Nachricht weiter (nicht an den unteren Rand). Beim
+      Hochscrollen analog nach oben.
+- [ ] **Lange Nachricht:** Bei einer Nachricht, die höher ist als der
+      verbleibende Platz, bleibt der Highlight stehen und `j` scrollt nur —
+      bis die erste Zeile der nächsten Nachricht unten auftaucht.
+- [ ] **Kein unsichtbarer Cursor:** Beim Hochscrollen springt der Highlight
+      nicht schon dann auf die vorige Nachricht, wenn nur deren Leerzeile
+      sichtbar ist — der Cursor ist bei jedem Schritt zu sehen.
 - [ ] **Aktionen treffen die hervorgehobene Nachricht:** `e`/`d`/`+`/`p`
       operieren auf genau der aktuell hervorgehobenen Nachricht (auch wenn sie
       gerade angeschnitten am Rand sitzt).
@@ -3274,6 +3315,172 @@ Server-Channel öffnen, in dem Nachrichten mit Erwähnungen existieren.
 > Bekannte Schnitte: Member-Liste wird einmal pro Server pro Session gecacht
 > (kein Live-Refresh bei Beitritt/Austritt); Slug-Source ist der Username
 > (Server-Nickname noch nicht berücksichtigt).
+
+## Stoat-Adapter — Typ-Symbole im Tree (`icon:`) + leerer Channel
+
+Zwei Dinge, die zusammen aufgefallen sind: unkategorisierte Channels und
+Kategorien teilen sich die Server-Ebene und sahen identisch aus; und ein
+Channel, dessen letzte Nachricht gelöscht wurde, behielt Aufklapp-Pfeil und
+Ungelesen-Marker (Stoat räumt `last_message_id` nicht auf). `icon:` steht pro
+Ebene in `stoat.yaml` (💬 Channel, 📁 Kategorie), der Ungelesen-Marker ist
+deshalb auf `🔔` umgestellt.
+
+- [ ] **Server aufklappen:** Unkategorisierte Channels tragen `💬`, Kategorien
+      `📁` — auf einen Blick unterscheidbar, gleiche Einrückung wie vorher.
+- [ ] **Channel in Kategorie:** trägt dasselbe `💬` wie im uncategorized-Zweig.
+- [ ] **Ungelesen:** Ein Channel mit neuen Nachrichten zeigt `🔔 💬 name`
+      (Marker zuerst, dann Typ-Symbol), beides in der Ungelesen-Farbe; nach
+      dem Lesen bleibt nur `💬 name`.
+- [ ] **Fuzzy-Suche:** `/` + Teilstring → der Treffer-Highlight sitzt weiterhin
+      exakt auf dem gematchten Teil des **Labels** (nicht um die Glyph-Breite
+      verschoben).
+- [ ] **Leerer Channel heilt sich:** Einen Channel öffnen, dessen letzte
+      Nachricht gelöscht wurde → die Liste ist leer, und im Baum verschwindet
+      danach **ohne** `r` der Aufklapp-Pfeil samt Ungelesen-Marker (die
+      Nachrichten-Abfrage korrigiert `last_message_id`).
+- [ ] **Gegenprobe:** Ein Channel mit echten Nachrichten behält Pfeil und
+      Liste; eine neue Nachricht bringt Pfeil/Marker sofort zurück.
+
+## Stoat-Adapter — Ungelesen-Marker in der Tab-Leiste
+
+Der Ungelesen-Zustand endet bisher am Rand der View: ein Stoat-Tab im
+Hintergrund sah aus wie jeder andere. Jetzt trägt das Tab-Label selbst den
+Marker (`tab.unread_marker`, Default = `unread_marker` der View) und wird
+hervorgehoben (`tab.unread_style`, Default fett). Gezählt wird nur, was eine
+Pane **gerade** hält.
+
+- [ ] **Marker erscheint:** In einem anderen Tab stehen, während im Stoat-Baum
+      eine neue Nachricht eintrifft → das Tab wird zu `🔔 💬 9 Stoat`, fett,
+      ohne Tastendruck.
+- [ ] **Marker verschwindet:** Channel öffnen und bis zur neuesten Nachricht
+      scrollen (Ack) → Marker und Fettschrift gehen im selben Moment weg, das
+      Label ist wieder `💬 9 Stoat`.
+- [ ] **Andere Tabs unberührt:** Jira/Tasks/… zeigen nie einen Marker (ihre
+      Zeilen tragen kein `unread`-Feld).
+- [ ] **Breite:** Die Leiste rutscht beim Auftauchen des Markers um die
+      Emoji-Breite weiter, ohne Zeichenmüll; bei schmalem Terminal darf sie in
+      die zweite Zeile umbrechen.
+- [ ] **Konfiguration:** In `stoat.yaml` `tab.unread_style: [italic]` setzen →
+      Label kursiv statt fett; `tab.unread_marker: ""` → nur die Hervorhebung,
+      kein Glyph.
+
+## Stoat-Adapter — Cursor auf der ersten ungelesenen Nachricht (`cursor_on_open`)
+
+Beim Öffnen eines Channels stand der Cursor auf der **ältesten** geladenen
+Nachricht — man musste sich erst zu der Stelle runterscrollen, an der man
+aufgehört hatte. `cursor_on_open: first_unread` auf der `messages`-Ebene setzt
+ihn stattdessen auf die erste ungelesene Nachricht, oben am Rand verankert, so
+dass die ungelesenen darunter stehen.
+
+- [ ] **Sprung:** Channel mit mehreren ungelesenen Nachrichten öffnen → der
+      Cursor steht auf der **ältesten ungelesenen**, und zwar oben im Pane; die
+      ungelesenen Nachrichten stehen darunter, der gelesene Verlauf ist
+      weggescrollt.
+- [ ] **Alles gelesen:** Channel ohne Ungelesenes öffnen → Cursor auf der
+      **neuesten** Nachricht (unten), nicht oben.
+- [ ] **Leerer Channel:** Channel ohne Nachrichten öffnen → kein Sprung, kein
+      Panic; trifft danach die erste Nachricht ein, landet der Cursor auf ihr.
+- [ ] **Reload verschiebt nicht:** Im Channel nach oben scrollen, dann `r`
+      drücken bzw. eine Nachricht von außen schicken → der Cursor bleibt, wo er
+      war (der Sprung gehört zum Öffnen, nicht zum Laden).
+- [ ] **Zusammenspiel mit dem Ack:** Vom Sprungziel bis zur letzten Nachricht
+      durchscrollen → `mark_read_on_reach_end` greift wie gehabt, Marker in Baum
+      und Tab-Leiste gehen weg.
+- [ ] **Ack springt nicht weg:** Eine gelesene Nachricht anwählen (der Ack löst
+      einen Reload aus) → der Cursor bleibt auf **derselben** Nachricht, auch
+      wenn zwischenzeitlich eine neue eingetroffen ist und alle Zeilen um eine
+      Position hochgerutscht sind.
+- [ ] **Gelöschte Zeile:** Die angewählte Nachricht von außen löschen, dann
+      reloaden → kein Panic, der Cursor bleibt an derselben Stelle im Pane.
+- [ ] **Zweiter Zweig:** Beides auch für einen Channel **in einer Kategorie**
+      prüfen (die `messages`-Ebene ist in `stoat.yaml` zweimal konfiguriert).
+
+## Stoat-Adapter — Dateien hochladen (`A` / `attach`)
+
+`A` auf einer Channel-Zeile öffnet den File-Picker (Mehrfachauswahl), lädt jede
+Datei hoch und postet sie als Nachricht mit leerem Body. Revolt erlaubt 5
+Dateien pro Nachricht, größere Auswahlen werden auf mehrere Nachrichten
+verteilt. Für die Tests reichen ein paar kleine Wegwerf-Dateien aus `/tmp`.
+
+- [ ] **Eine Datei:** `A` auf einem Channel → Picker → eine Datei wählen →
+      Notification „Attached 1 file(s) to #channel", die Nachricht taucht live
+      in der offenen Liste auf.
+- [ ] **Mehrfachauswahl:** 3 Dateien auf einmal → **eine** Nachricht mit allen
+      dreien.
+- [ ] **Über dem Limit:** 6+ Dateien → **mehrere** Nachrichten (5 + Rest), keine
+      Fehlermeldung vom Server.
+- [ ] **Picker abgebrochen:** Picker ohne Auswahl schließen → nichts passiert,
+      keine leere Nachricht.
+- [ ] **Ungelesen bleibt sauber:** Nach dem Upload ist der Channel **nicht**
+      als ungelesen markiert (der Adapter ackt den eigenen Post).
+- [ ] **Caption nachtragen:** `e` auf der geposteten Nachricht → Text ergänzen →
+      `:w` → Text steht über/bei den Dateien, die Anhänge bleiben erhalten.
+- [ ] **Beide Zweige:** Auch für einen Channel **in einer Kategorie** prüfen.
+- [ ] **Kaputter Pfad:** Eine Datei ohne Leserecht mitauswählen → die anderen
+      werden trotzdem gepostet, die Meldung nennt die fehlgeschlagene.
+
+## Stoat-Adapter — Anhänge als Knoten (`stoat:attachment`)
+
+Jede hochgeladene Datei ist auch ein Knoten unter ihrer Nachricht. Enter auf
+einer Nachricht **mit** Anhängen drillt in die Dateiliste.
+
+- [ ] **Drilldown:** Enter auf einer Nachricht mit Anhängen → Liste mit
+      Dateiname, Größe und Typ.
+- [ ] **Ohne Anhänge:** Enter auf einer normalen Nachricht → kein Drilldown,
+      keine leere Liste (die Nachricht meldet `has_children` nur mit Dateien).
+- [ ] **`o` öffnet:** Datei anwählen, `o` → OS-Viewer geht auf. Alle Dateien der
+      Nachricht liegen im selben Temp-Verzeichnis, der Viewer kann durchblättern.
+- [ ] **Zweites `o` lädt nicht neu:** Viewer schließen, `o` erneut → geht sofort
+      auf (die Bytes liegen schon im Temp-Verzeichnis).
+- [ ] **`D` speichert alles:** `D` → Zielverzeichnis eingeben (auch mit `~`, auch
+      ein noch nicht existierendes) → **alle** Dateien der Nachricht liegen dort.
+- [ ] **Zielverzeichnis ist eine Datei:** Pfad einer existierenden Datei angeben
+      → klare Fehlermeldung, kein Teil-Download.
+- [ ] **Kein Löschen:** Es gibt bewusst keine Delete-Action auf dieser Ebene
+      (Revolt kann einzelne Dateien nicht aus einer Nachricht entfernen).
+- [ ] **Beide Zweige:** Auch unter einem Channel **in einer Kategorie** prüfen.
+
+## Inline-Bilder im Terminal (`images:` in `tui.yaml`)
+
+Eine Markdown-Spalte (`markdown: true`) zeichnet `![alt](url)` als **echtes
+Bild** zwischen den Textzeilen, wenn das Terminal Grafik kann (Kitty, iTerm2,
+Sixel — beim Start automatisch erkannt). Im Stoat-Chat kommen die Bilder aus
+den Bild-Anhängen, die der Adapter als Markdown-Bilder in den Body rendert.
+Getestet wird in einem Channel mit mindestens einem Screenshot-Anhang.
+
+- [ ] **Bild erscheint:** Channel öffnen → das Bild wird an der Stelle
+      gezeichnet, an der der Anhang im Body steht, nicht als `[image: …]`-Text.
+- [ ] **Nachladen:** Direkt nach dem Öffnen steht kurz der Platzhalter, dann
+      erscheint das Bild von selbst — ohne Tastendruck, ohne `r`.
+- [ ] **Einmal laden:** Mehrfach über die Nachricht scrollen bzw. `r` drücken →
+      das Bild wird **nicht** erneut heruntergeladen (kein Flackern, keine
+      neuen Requests im `NYD_DEBUG=1`-Log).
+- [ ] **Scroll-Clipping:** Mit `j`/`k` durch die Nachricht scrollen → das Bild
+      wird an der Pane-Kante sauber abgeschnitten und wächst wieder herein; es
+      malt **nicht** über die Nachbarzeilen oder über den Rand hinaus.
+- [ ] **Split:** Im gekoppelten Chat-Pane (80 %) prüfen, dass das Bild an der
+      Pane-Grenze endet und nicht in den Channel-Baum links läuft.
+- [ ] **Höhen-Cap:** Ein hoher Screenshot (Handy-Format) belegt höchstens
+      `max_height` Zeilen (Default 20) — der Rest der Unterhaltung bleibt
+      sichtbar. Wert in `tui.yaml` ändern → nach Neustart greift er.
+- [ ] **Breite:** Terminal schmaler ziehen → das Bild skaliert mit der
+      Spaltenbreite, das Seitenverhältnis bleibt.
+- [ ] **Resize:** Während ein Bild sichtbar ist, das Terminal umgroßziehen →
+      kein Geisterbild, keine Artefakte im Text.
+- [ ] **Fallback ohne Grafik:** Dieselbe Ansicht in einem Terminal ohne
+      Grafik-Support (z. B. `xterm`) → jede Zeile bleibt Text
+      (`[image: …]`), sonst ändert sich nichts.
+- [ ] **Abgeschaltet:** `images: { enabled: false }` in `tui.yaml` → wie oben,
+      und beim Start wird das Terminal gar nicht erst abgefragt.
+- [ ] **Kaputte URL / kein Bild:** Ein Anhang, der nicht ladbar oder nicht
+      dekodierbar ist → Platzhalter-Text bleibt stehen, kein Panic, und es wird
+      **nicht** in einer Schleife erneut versucht.
+- [ ] **Nicht-Bild-Anhänge:** Eine PDF/ZIP im Body erscheint als Link
+      (`📎 name`), nicht als Bildplatzhalter.
+- [ ] **`i` bleibt:** `i` auf der Nachricht öffnet die Bilder weiterhin im
+      OS-Viewer — inline und extern schließen sich nicht aus.
+- [ ] **Andere Views unberührt:** Ein Jira-Ticket mit Markdown-Body rendert
+      unverändert (keine reservierten Leerzeilen, kein Versatz).
 
 ## Taiga-Adapter — Edit-Hang-Fix (Timeout + nicht-blockierender Editor)
 
@@ -3343,7 +3550,8 @@ Voraussetzung: Postgres-Tab erreichbar machen/kappen, sodass der erste
 
 ## Postgres — `manual_connect` (kein Auto-Connect, nur `r`)
 
-`adapter.manual_connect: true` in `postgres.yaml`.
+`adapter.manual_connect: true` in `postgres.yaml` — das ist der Default,
+der Test gilt also auch ohne die Zeile.
 
 - [ ] App-Start: Postgres-Tab lädt **nicht** automatisch; Banner
       „Press `r` to connect".
@@ -3351,50 +3559,84 @@ Voraussetzung: Postgres-Tab erreichbar machen/kappen, sodass der erste
       Auto-Load aus.
 - [ ] `r` baut Verbindung + SSH-Tunnel auf und lädt.
 
-## Tab-Konstellationen + Autonummerierung
+## `manual_connect` — Default und Startup-Login
 
-`tabs:`-Sektion in `tui.yaml` (`active: default`, `sets: { default: [...] }`).
+`adapter.manual_connect` steht per Default auf `true`. Getestet wird der
+Default selbst und das, was ein explizites `false` beim Start auslöst.
 
-- [ ] Tab-Bar zeigt nur die Tabs der aktiven Konstellation, in
-      Listenreihenfolge, mit Ziffern `1`,`2`,`3`,… als Key-Hint.
-- [ ] Ziffern wechseln den Tab (auch `7` für einen 7. Tab wie Stoat, der
+- [ ] **Default greift**: In einer View-Datei mit Adapter die Zeile
+      `manual_connect` **ganz entfernen**. TUI starten → der Tab lädt
+      nicht, Banner „Auto-connect disabled — press `r` to connect".
+- [ ] **Lokale Tabs opten zurück**: `views/tasks.yaml`,
+      `trackings.yaml`, `projects.yaml`, `sqlite.yaml` tragen
+      `manual_connect: false`; diese Tabs sind beim Start wie bisher
+      sofort gefüllt.
+- [ ] **Login eines eager Tabs kommt sofort**: In einer View mit
+      Anmeldung (z. B. `kimai.yaml`) `manual_connect: false` setzen,
+      Passwortspeicher sperren (`gpgconf --kill gpg-agent`), TUI
+      starten. Erwartet: das Credential-Popup steht **sofort** da,
+      obwohl der Tasks-Tab aktiv ist; der Titel beginnt mit dem
+      Tab-Namen (`Kimai: …`). Enter → Popup schließt, Kimai lädt im
+      Hintergrund; Tasks bleibt der aktive Tab.
+- [ ] **Escape**: Statt Enter `Esc` → Popup weg, kein zweites Popup
+      poppt nach, die TUI ist normal bedienbar. Der Kimai-Tab zeigt beim
+      Öffnen den Fehler-/Connect-Banner; `r` startet den Login neu.
+- [ ] **Zwei eager Logins**: Zwei Views mit Anmeldung auf
+      `manual_connect: false`. Erwartet: **ein** Popup zur Zeit, das
+      zweite überschreibt es nicht. Nach Beantworten/Abbrechen des
+      ersten kommt das zweite spätestens beim Öffnen seines Tabs.
+- [ ] **Manual-Connect-Tab bleibt still**: Ein Tab mit
+      `manual_connect: true` (oder ohne die Zeile) zeigt beim App-Start
+      **kein** Popup — erst `r` auf diesem Tab fragt nach.
+
+## Postgres — `auth:`-Block statt gpg-Pinentry
+
+Voraussetzung: `postgres-adapter.yaml` auf die delegierende Form umstellen
+(siehe `docs/examples/views/postgres-adapter.yaml`, Abschnitt „One
+credential script for the whole connection"): `auth.mechanism: password`
+mit `script:`, Bindings `password` + `ssh_password`, und beide Slots
+(`postgres.password`, `transport.ssh[0].auth.password`) auf
+`{ type: script-result }`. gpg-Agent vorher entsperrt **und** in einem
+zweiten Durchgang gesperrt (`gpgconf --kill gpg-agent`).
+
+- [ ] Entsperrter Store: Tab öffnen → Verbindung kommt ohne jede
+      Rückfrage; **kein** gpg-Pinentry-Fenster.
+- [ ] Gesperrter Store: Tab öffnen → **unser** Credential-Popup mitten in
+      der TUI (Header aus dem Skript, Passphrase maskiert). Enter →
+      Tunnel und DB-Verbindung kommen aus **einem** Skript-Lauf, also
+      genau **ein** Dialog für beide Secrets.
+- [ ] Escape im Popup → Load bricht mit Meldung ab, keine
+      Wiederholungs-Dialoge; `r` fragt erneut.
+- [ ] Falsche Passphrase → Skript zeigt das Formular erneut mit seiner
+      Fehlermeldung, nicht ein neuer leerer Dialog.
+- [ ] `query_timeout_secs` klein setzen (z. B. 5) und im Popup länger
+      warten → Timeout läuft **nicht** während der Eingabe (die
+      Credentials werden vor der Uhr geholt).
+- [ ] Config-Fehler werden beim Lesen abgewiesen, nicht beim Connect:
+      Binding `ssh_password` entfernen, aber den Hop delegieren lassen →
+      Start-Fehler nennt `transport.ssh[0].auth.password`; zweiten Hop
+      ebenfalls auf `script-result` setzen → Fehler nennt `ssh[1]`.
+
+## Tab-Reihenfolge + Autonummerierung
+
+`tabs.order`-Liste in `tui.yaml` (Tab-Namen in Anzeigereihenfolge).
+
+- [ ] Tab-Bar zeigt die Tabs in Listenreihenfolge, mit Ziffern
+      `1`,`2`,`3`,… als Key-Hint.
+- [ ] Ziffern wechseln den Tab (auch `9` für einen 9. Tab wie Stoat, der
       vorher keine Taste hatte). `0` = 10. Tab; ab dem 11. keine Ziffer.
-- [ ] Eine nicht in der Konstellation genannte View ist verborgen (aber
-      nicht entladen) — taucht wieder auf, sobald ihr Name ergänzt wird.
+- [ ] Eine nicht in `order` genannte View ist verborgen (aber nicht
+      entladen) — taucht wieder auf, sobald ihr Name ergänzt wird.
 - [ ] `Tab` / `Shift+Tab` zykeln nur durch die sichtbaren Tabs.
-- [ ] Nicht belegte Ziffer (mehr Ziffern als Tabs) tut nichts — springt
-      **nicht** über eine alte feste `tab_*`-Bindung auf einen
-      versteckten Tab.
-- [ ] `tabs:`-Sektion entfernen → Legacy-Verhalten: alle Tabs nach
-      `order`, feste Tasten `1`..`6`.
+- [ ] Nicht belegte Ziffer (mehr Ziffern als Tabs) tut nichts.
+- [ ] `Ctrl+X` tut nichts mehr (Tab-Gruppen-Umschalter wurde entfernt).
+- [ ] `tabs.order` leeren/entfernen → alle Tabs in natürlicher
+      Slot-Reihenfolge, gleich autonummeriert.
 - [ ] Zwei Tabs mit gleichem `tab.name` → **harte Fehlermeldung** als
-      Start-Modal; App fällt auf Legacy-Layout zurück, bleibt bedienbar.
-- [ ] `:config` / `tui.yaml` editieren + Reload → Konstellation wird neu
+      Start-Modal; App zeigt alle Tabs und bleibt bedienbar.
+- [ ] `:config` / `tui.yaml` editieren + Reload → Reihenfolge wird neu
       aufgelöst (aktiver Tab snappt auf den ersten sichtbaren, falls er
       rausfiel).
-
-## Tab-Set-Popup (Laufzeit-Umschalten)
-
-`Ctrl+X` (`tab_set_popup`) öffnet ein Popup mit allen Konstellationen.
-Sets können `icon` + `shortcut` definieren (Voll-Form mit `tabs:`).
-
-- [ ] `Ctrl+X` öffnet das Popup; jede Konstellation steht mit Icon und
-      Shortcut-Hinweis in der Liste, die **aktive** ist markiert und
-      vorausgewählt.
-- [ ] Drücken eines Set-Shortcuts (z. B. `w`) wechselt sofort zu diesem
-      Set, baut die Tab-Bar neu auf und schließt das Popup.
-- [ ] Pfeiltasten + `Enter` wählen auch ein Set ohne Shortcut.
-- [ ] `Esc` schließt ohne Wechsel.
-- [ ] Eine nicht belegte Taste im Popup tut nichts (kein Durchschlagen
-      auf Tab-Ziffern dahinter).
-- [ ] Ohne konfigurierte `sets` → `Ctrl+X` zeigt nur eine Notification
-      („No tab sets configured").
-- [ ] Wechsel ist **session-only**: nach Neustart ist wieder das in
-      `tui.yaml` gesetzte `active` aktiv.
-- [ ] Mischung Kurz-/Voll-Form unter `sets:` parst fehlerfrei (Kurz-Form
-      = ohne Icon/Shortcut, nur via Pfeil+Enter erreichbar).
-- [ ] Shortcut mit mehr als einem Zeichen → Parse-Fehler (sichtbar als
-      Config-Validierungsfehler).
 
 ## TaskAdapter (adapterisierter Tasks-Tab) — A1b + A1c-1 + A1c-2
 
@@ -4166,6 +4408,717 @@ davon, ob der Server das eigene Ack als `ChannelAck` zurückspielt.
       kein erneutes Ack-Flackern (idempotent: Zeile ist nun gelesen).
 - [ ] In einem bereits gelesenen Channel drillen und ans Ende fahren → keine
       Änderung (nichts zu acken).
+
+## Shortcut-Menü — Keybinding-Editor (Ctrl+Y)
+
+Nutzer-Doku: [`keybinding-editor.md`](keybinding-editor.md). Nach jeder
+Edit-Aktion greift Sofort-Reload; Kommentar-/Format-Erhalt in der
+betroffenen YAML **immer** mitprüfen (`git diff`).
+
+- [ ] `Ctrl+Y` öffnet das Menü; `Tab` wechselt Context ↔ alle Tabs;
+      Tippen filtert; keyless Actions werden mitgelistet.
+- [ ] `Ctrl+N` auf einer View-Action → aufnehmen, Einzeltaste, `Return` →
+      "Bound …"; Taste feuert sofort; `views/*.yaml` bekommt `key:` dazu,
+      Kommentare bleiben.
+- [ ] `Ctrl+N` Chord (`Ctrl+K` dann `L`) → gespeichert als
+      `key: "ctrl+k l"`; `Backspace` verwirft letzten Schritt; `Esc`
+      bricht ab (keine Änderung).
+- [ ] `Ctrl+N` auf einer read-only-Zeile (Saved-Query/Script) → Hinweis,
+      keine Aufnahme.
+- [ ] Zweites Binding auf dieselbe Action → Liste `key: [alt1, alt2]`
+      (Alternative angehängt, alte Taste bleibt).
+- [ ] `Ctrl+D` bei einer einzigen Bindung → weg (`[]` bei Built-in in
+      `tui.yaml`, Default feuert nicht mehr).
+- [ ] `Ctrl+D` bei mehreren Bindungen → Picker, Auswahl, `Return` →
+      Restliste geschrieben; `Esc` bricht ab.
+- [ ] `Ctrl+R` auf Built-in → `tui.yaml`-Override verschwindet, Default
+      gilt wieder; auf View-Action → no-op.
+- [ ] Konflikt: Binding aufnehmen, das eine überlappende Bindung belegt
+      (inkl. globalem Built-in / Präfix `k` vs `k l`) → `y/n`-Prompt.
+      `n`/`Esc` → nichts passiert. `y` → andere Bindung verliert die
+      Taste, neue greift; beide Dateien reloaded.
+- [ ] Konflikt gegen read-only-Shortcut → als unauflösbar gemeldet,
+      Binding abgelehnt.
+- [ ] Verschiedene Tabs kollidieren nie (gleiche Taste in Tab A und B →
+      kein Prompt).
+
+## Benachrichtigungsleiste — Anzeigelimit + Log im Editor (`f10`)
+
+`notifications.max_messages` begrenzt, wie viele Meldungen die **untere**
+Leiste gleichzeitig zeigt (`0` = unbegrenzt); `notifications.history_limit`
+begrenzt das mitlaufende Log beider Leisten.
+
+- [ ] `max_messages: 1` in `tui.yaml`: zwei Meldungen nacheinander auslösen
+      → unten steht nur die **neuere**; die ältere ist verdrängt.
+- [ ] Obere Alert-Leiste bleibt unberührt: mehrere `prominent`-Meldungen
+      stehen weiterhin alle gleichzeitig oben.
+- [ ] `f10` öffnet das Log read-only im Editor: alle Meldungen beider
+      Leisten chronologisch, mit Zeitstempel, Alert-Zeilen mit `!` markiert;
+      Speichern/Schließen ändert nichts.
+- [ ] `Z` (dismiss) leert die Leisten, das Log bleibt: `f10` zeigt die
+      verworfenen Meldungen weiterhin.
+- [ ] Ohne jede Meldung: `f10` → "No notifications yet", kein Editor.
+- [ ] Hint rechts unten nennt die echten Tasten (`[Z] dismiss  [f10] open`)
+      und folgt einem Rebind der beiden Actions.
+- [ ] `:config`-Reload (tui.yaml speichern) verliert weder offene Meldungen
+      noch das Log.
+
+## Builtin-Editor (`builtin: true`, Crate `vimrealm`)
+
+Ein Editor-Profil mit `builtin: true` editiert in einem Pane der TUI statt
+einen `$EDITOR`-Prozess zu starten. Profil in `tui.yaml`, z.B.:
+
+```yaml
+editors:
+  compose-builtin:
+    builtin: true
+    height: "30%"
+    line_numbers: false
+```
+
+Verdrahtet über das `editor:`-Feld einer Action (Stoat: `views/stoat.yaml`,
+Actions `new`/`edit`). Zurück auf den echten nvim = `editor: compose-below`.
+
+- [ ] Stoat-Kanal → `n`: Pane erscheint **unten** über den Meldungsleisten,
+      Titel nennt die Action; Tab-/Action-/Statusleiste bleiben stehen.
+- [ ] Normal-Mode funktioniert: `i a o`, `hjkl`, `w b e`, `0 ^ $`, `dd`, `cw`,
+      `x`, `p`, `u` / `Ctrl+R`, Counts (`3w`, `2dd`).
+- [ ] `q` allein beendet die **App nicht** mehr, solange das Pane offen ist;
+      `:q!` schließt das Pane, danach quittet `q` wieder normal.
+- [ ] `:w` sendet die Nachricht (`commit_on_save: true`), Pane bleibt offen,
+      Statuszeile zeigt `written`; ein zweites `:w` ohne Änderung tut nichts.
+- [ ] `:wq` sendet und schließt; die neue Nachricht erscheint in der Liste.
+- [ ] `:q` bei ungespeicherter Änderung verweigert mit `E37`, `:q!` verwirft.
+- [ ] Kein zweiter Editor: bei offenem Pane erneut `n` → "Editor is already
+      open".
+- [ ] Umschalten auf `editor: compose-below` in `stoat.yaml` + `:config`-Reload
+      → wieder echter nvim im Kitty-Split, unverändert wie vorher.
+- [ ] Lange Nachricht: Softwrap im Pane, `j`/`k` bewegen sich logisch
+      (nicht pro Bildschirmzeile), Scrollen folgt dem Cursor.
+- [ ] Kleines Terminal: Pane nimmt höchstens zwei Drittel der Höhe, die
+      Zeilenliste bleibt sichtbar.
+
+### Phase 3: Register, Text-Objekte, Visual, Suche, Dot-Repeat, Theming
+
+- [ ] Register: `"ayy` in Zeile 1, Cursor in Zeile 2, `"ap` fügt Zeile 1 ein;
+      `"Ayy` hängt an, `"add` löscht ohne den unnamed Register zu überschreiben
+      (danach `p` fügt weiterhin das vorher Gejankte ein).
+- [ ] Text-Objekte: `ciw` mitten im Wort ersetzt das ganze Wort, `daw` nimmt
+      auch das Leerzeichen mit, `di"` leert einen String, `da(` löscht Klammern
+      samt Inhalt — auch mehrzeilig und bei geschachtelten Klammern.
+- [ ] Visual charwise: `v` + `w`/`l`/`j` markiert sichtbar (Cursor bleibt im
+      markierten Bereich erkennbar), `d` löscht die Markierung, `y` + `p` fügt
+      sie ein, `c` löscht und landet in Insert.
+- [ ] Visual linewise: `V` markiert ganze Zeilen (inkl. der Zelle am
+      Zeilenende), `j` nimmt Zeilen dazu, `d` löscht sie ganz.
+- [ ] Visual: `o` springt an das andere Ende und erweitert von dort; `v` beendet,
+      `V` schaltet auf linewise um, `Esc` verwirft; `viw` markiert das Wort.
+- [ ] Suche: `/wort` + Enter springt zum nächsten Treffer, `n`/`N` weiter und
+      zurück, Wrap meldet „search hit BOTTOM, continuing at TOP"; `/nichtsda`
+      meldet `E486`, ohne den Cursor zu bewegen; `n` ohne vorherige Suche → `E35`.
+- [ ] Dot-Repeat: `ciwfoo<Esc>` dann `w` `.` ersetzt das nächste Wort ebenso;
+      `dw` `.` `.` löscht drei Wörter; `2.` wiederholt zweimal; `u` und `.`
+      selbst werden nicht als „letzte Änderung" aufgenommen.
+- [ ] Cursor: im Normal-Mode Blockcursor über dem Zeichen; nach `i` ist es der
+      **echte** Terminal-Cursor (Form/Blinken wie im Query-Menü), kein Block
+      mehr; `Esc` zurück zum Block. Bei `A` steht er hinter dem letzten Zeichen.
+- [ ] Insert-Grenze: `i` in „ab", zweimal Pfeil rechts → Cursor steht hinter
+      `b`; ein getipptes Zeichen hängt an (`abc`), überschreibt nichts. Ebenso
+      mit `End`. Im Normal-Mode bleiben `l`/`Pfeil rechts`/`$`/`End` auf `b`.
+- [ ] Cursor im Command-Mode: nach `:` sitzt der Terminal-Cursor **in** der
+      Kommandozeile hinter dem Getippten (wandert beim Tippen mit), nicht im
+      Text; `Esc` bringt ihn zurück in den Puffer.
+- [ ] Theming: leerer/fehlender `vim:`-Block in `tui-theme.yaml` sieht aus wie
+      bisher. Dann z.B. `vim: {selection_bg: "#504945", gutter: "#928374"}`
+      setzen + `:config`-Reload und neu öffnen → nur diese beiden Rollen ändern
+      sich. `cursor_bg` setzen → Cursor hat feste Farbe statt Reverse (und ist
+      innerhalb einer Markierung immer noch zu sehen).
+
+## Card-Modus (`card:` pro Ebene, Umschalttaste + Persistenz)
+
+Setup: den `card:`-Block aus
+[`examples/views/cards.yaml`](examples/views/cards.yaml) in eine echte
+Content-Ebene mit sechs Spalten übernehmen (`columns: 3`, `weights: [1, 1, 2]`,
+`key: C`, `gap: 1`) — Doku: [`generic-view-spec.md`](generic-view-spec.md),
+Abschnitt `card:`.
+
+- [ ] Ohne `card:`-Block bleibt `C` auf der Ebene eine gewöhnliche Taste (nichts
+      passiert / bestehende Bindung greift weiter), und die Status-Leiste zeigt
+      keinen Card-Hinweis.
+- [ ] Mit `card:`-Block: Ebene startet als **Tabelle** (Deklaration allein
+      schaltet nicht um), Status-Leiste zeigt `C cards`.
+- [ ] `C` → jede Zeile wird eine gerahmte Card mit **zwei** Zeilen à drei
+      Feldern (Zeilenzahl abgeleitet, kein `rows:` in der Config); Hinweis
+      wechselt auf `C table`.
+- [ ] Rechte Kante: **alle** Card-Zeilen enden exakt auf derselben Spalte, auch
+      der dritte (breitere) Slot; Terminal schmaler/breiter ziehen → bleibt
+      bündig.
+- [ ] Labels: `labels: inline` zeigt `Label: Wert`; auf `none` umstellen →
+      nur Werte; auf `above` → Labels auf eigener Zeile, Card doppelt so hoch.
+- [ ] `gap: 1` → Leerzeile zwischen zwei Cards, und diese Leerzeile bekommt beim
+      Auswählen **keinen** Highlight (die Cards lesen sich als Blöcke).
+- [ ] Rahmen/Labels in Theme-Farben: `card_border` / `card_label` in `tui.yaml`
+      ändern + `:config`-Reload → Rahmen bzw. Labels ändern sich, Werte nicht.
+      Danach `border_style:` / `label_style:` in der View setzen → gewinnt über
+      die Theme-Slots. `border: plain` → eckige Ecken, `border: none` → kein
+      Rahmen.
+- [ ] Cursor/Selektion: `j`/`k` springen von Card zu Card (nicht Zeile für
+      Zeile), die ganze Card bekommt den Auswahl-Hintergrund. `/`-Suche
+      markiert die Treffer weiterhin **im Wert** der Card.
+- [ ] Spalten-Popup (`c`): ein Card-Feld ausblenden → das Feld verschwindet aus
+      der Card, das Raster rückt nach (keine Lücke, keine Verschiebung der
+      rechten Kante). Wieder einblenden → Feld ist zurück.
+- [ ] `card_mode` überlebt den Neustart: `C` an, TUI beenden, neu starten →
+      Ebene öffnet direkt als Cards. `C` aus (= zurück auf den Config-Default),
+      neu starten → Tabelle. (Gespeichert wird pro Ebene unter
+      `card_mode:<tab>`; der Eintrag wird beim Zurückschalten auf den Default
+      wieder gelöscht.)
+- [ ] `default: true` in der Config → Ebene startet als Cards; `C` schaltet auf
+      Tabelle und **das** überlebt ebenfalls den Neustart.
+- [ ] Split-Pane: mit `wv` eine zweite Pane derselben Ebene öffnen → beide
+      zeigen denselben Modus, `C` in einer schaltet beide um.
+- [ ] Gruppierung: auf einer Ebene mit `group_by:` → im Card-Modus keine
+      Gruppen-Kopfzeilen/Summen; zurück auf Tabelle → Gruppierung ist wieder da.
+- [ ] Grenzen (erwartetes Nein): Tree-Ebene und `record_detail:`-Follower bieten
+      `C` nicht an. Ein `markdown: true`-Feld in `card.fields` → harter
+      Config-Fehler beim Start mit klarer Meldung (kein stiller Fallback).
+- [ ] Chord-Taste (`key: 'v c'`, so live im Jira-Tab konfiguriert): `v` allein
+      tut nichts und wartet, `v c` schaltet um. `v` + Esc bricht ab, ohne dass
+      `c` danach das Spalten-Popup öffnet. Ein `c` **ohne** vorheriges `v`
+      öffnet weiterhin normal das Spalten-Popup.
+- [ ] Kollisionsprüfung: `card.key` versehentlich auf eine belegte Taste der
+      Ebene setzen (im Jira-Tab z. B. `t`) → Fehler beim Start, der
+      `views.tickets.card.key` und die kollidierende Action nennt. Danach
+      zurücksetzen.
+- [ ] Keybinding-Editor (Ctrl+Y) listet die Card-Taste als „Toggle card mode"
+      und schreibt eine Änderung nach `views[*].card.key` in die View-YAML.
+- [ ] `fields:` weglassen → die Card zeigt **alle** Spalten der Ebene in der
+      Reihenfolge der Tabelle (auch die, die man in einer expliziten Liste
+      leicht vergisst); Zeilenzahl entsprechend `Spalten ÷ columns`. Eine
+      Spalte im Popup (`c`) ausblenden → sie fällt auch hier raus. Eine
+      `markdown: true`-Spalte wird still übersprungen (kein Config-Fehler —
+      der gilt nur für eine **explizit** aufgeführte Markdown-Spalte).
+
+## Creator-Spalte (Jira + Taiga)
+
+Voraussetzung: `creator` steht als Spalte in der jeweiligen View-YAML
+(`docs/examples/views/jira.yaml` / `taiga.yaml` zeigen die Blöcke; in einer
+bestehenden privaten Config muss sie nachgetragen werden — sonst liefert der
+Adapter das Feld, die Tabelle zeigt es nur nicht).
+
+- [ ] Jira-Tickets: Spalte „Creator" ist gefüllt und weicht bei Tickets, die
+      jemand anders gestellt hat, sichtbar von „Assignee" ab.
+- [ ] Bookmarks-Subtab (`m`) zeigt die Spalte ebenfalls.
+- [ ] Taiga-Liste: dasselbe für alle vier Item-Typen. Ein Item, dessen Creator
+      **nicht** (mehr) Projektmitglied ist, zeigt den Namen aus dem Payload
+      bzw. `user-<id>` — nicht leer.
+- [ ] Sortieren mit `S` → `creator` steht in der Spaltenliste (Jira sortiert
+      per JQL server-seitig, Taiga client-seitig). Aufsteigend landen Zeilen
+      ohne Creator am **Ende**, nicht oben.
+- [ ] Ticket mit `e` öffnen: unterhalb des `---`-Markers steht eine
+      `creator:`-Zeile im Read-only-Block. Datei ohne Änderung speichern und
+      schließen → kein Konflikt-Banner (der Round-Trip-Guard ignoriert
+      unbekannte Read-only-Keys).
+- [ ] Nach dem Speichern eines Tickets bleibt die Creator-Spalte der Zeile
+      gefüllt (Post-Edit-Row-Patch mit demselben Key).
+- [ ] Anon-Modus: Creator erscheint pseudonymisiert, nicht im Klartext.
+
+## Fix-Versions-Spalte (Jira)
+
+Spaltenschlüssel ist `fix_versions` (Plural wie Jiras Feld); JQL kennt nur den
+Singular `fixVersion`, den der Adapter beim Sortieren einsetzt. Auch hier muss
+die Spalte in der privaten View-YAML stehen — in `jira.yaml` in **beiden**
+Spaltenlisten (tickets + bookmarks) und, falls genutzt, in `card.fields`.
+
+- [ ] Ticketliste: Spalte „Fix Versions" ist bei eingeplanten Tickets gefüllt
+      und bei den übrigen leer (kein `-`, kein `0`). Ein Ticket mit mehreren
+      Versionen zeigt sie komma-getrennt in einer Zelle.
+- [ ] Bookmarks-Subtab (`m`) zeigt die Spalte ebenfalls.
+- [ ] Sortieren mit `S` → `fix_versions` steht in der Liste; aufsteigend
+      kommen die eingeplanten Tickets zuerst (Jiras Versions-Reihenfolge, nicht
+      alphabetisch), absteigend zuletzt. Kein JQL-Fehler-Banner — das wäre das
+      Symptom, wenn der Plural statt `fixVersion` gesendet würde.
+- [ ] Ticket mit `e` öffnen: `fix_versions:`-Zeile im Read-only-Block unter dem
+      `---`-Marker. Unverändert speichern → kein Konflikt-/Änderungs-Banner.
+- [ ] Nach dem Speichern bleibt die Spalte der Zeile gefüllt
+      (Post-Edit-Row-Patch).
+- [ ] Card-Modus (`v c`): das Feld erscheint als „Fix Versions" mit Label.
+- [ ] Anon-Modus: Versionsnamen erscheinen ersetzt (sie können Produkt-/
+      Kundenbegriffe enthalten), nicht verbatim.
+
+## Kommentar-Vorschau: Kürzung auf Zeichen, nicht Bytes
+
+Regression: die Vorschau in der Kommentar-Liste kürzte auf 80 **Bytes**; lag
+die Grenze in einem Mehrbyte-Zeichen, riss der Panic den tokio-Worker mit.
+
+- [ ] Ticket mit einem längeren Kommentar in einer Sprache mit Umlauten
+      auswählen und `C` drücken → Liste öffnet, kein Crash, lange Vorschauen
+      enden auf `…`.
+- [ ] Kommentar, der genau um die Grenze herum ein Mehrbyte-Zeichen hat
+      (Umlaut, Emoji, CJK) → Vorschau bricht direkt hinter dem Zeichen ab,
+      keine kaputten Bytes in der Zelle.
+- [ ] Ein Server-Fehler mit nicht-ASCII-Fehlerseite (z. B. abgelaufene
+      Session) → Fehlermeldung/HTTP-Log erscheinen normal; das gekürzte
+      Body-Snippet crasht nicht beim _Melden_ des Fehlers.
+
+## Freie Suche (Taiga `text_search`) — Treffer + Aktiv-Markierung
+
+Zwei Regressionen: (1) das Query-Template deckte `userstory` nicht ab und
+enthielt einen `ref:`-Block, den Taiga ignoriert (Antwort = komplette
+ungefilterte Liste); (2) der Hint der Suche erlosch, sobald sie wirkte.
+
+- [ ] Freie Suche öffnen (Taste der `text_search`-Action, im Beispiel-Config
+      `s`) und eine reine Ref-Nummer eingeben (z. B.
+      `112`) → genau die Items mit dieser Ref erscheinen, quer über alle
+      Typen inkl. User Story; **keine** Flut nicht passender Zeilen.
+- [ ] Dieselbe Nummer mit führendem `#` (`#112`) → identisches Ergebnis.
+- [ ] Ein Wort aus einem Betreff eingeben → Volltextsuche über Task,
+      Issue, Epic und User Story.
+- [ ] Während des Tippens: der Hint der freien Suche ist markiert, der
+      Hint der lokalen `/`-Suche **nicht**.
+- [ ] Nach Enter (Ergebnisliste steht): der Hint bleibt markiert, solange
+      die Ergebnisliste angezeigt wird.
+- [ ] Andere Query anwenden (Query-Menü, Default-Query, Query-Editor) →
+      Markierung erlischt.
+- [ ] Pane splitten, während die Suche aktiv ist → das neue Pane erbt
+      Query **und** Markierung.
+
+## SQLite-Tab — Dateien, Tabellen, Skripte
+
+Voraussetzung: `docs/examples/views/sqlite.yaml` +
+`docs/examples/views/sqlite-adapter.yaml` nach
+`~/.config/not_yet_done/views/` kopieren und in der Adapter-Config die
+`sources:`-Globs auf eigene `.db`-Dateien zeigen lassen. Der Tab kommt ohne
+Login und ohne Server — was fehlschlagen kann, ist das Globbing und die
+Adressierung.
+
+### Dateien und Zeilen (`sources:`-Globs)
+
+- [ ] Tab öffnen → eine Zeile je getroffener Datei, mit Größe und Pfad.
+- [ ] Ein `**`-Pattern nimmt Dateien aus Unterverzeichnissen mit; ein
+      Pattern ohne Treffer ist kein Fehler, sondern liefert nichts.
+- [ ] Zwei gleichnamige Dateien in verschiedenen Ordnern erscheinen als
+      **zwei** Zeilen (Key trägt den Pfad-Hash) und teilen sich weder
+      Tabellen noch Skript-Verzeichnis.
+- [ ] Neue `.db`-Datei anlegen → `r` → sie ist da, ohne Neustart.
+- [ ] Durchdrillen bis `Rows`, blättern (`>`/`<`), `o` öffnet das
+      Record-Detail-Pane; eine Tabelle mit BLOB-Spalte rendert lesbar
+      statt zu brechen.
+
+### Per-Tabelle-Skripte (`q` / `Q`)
+
+- [ ] `Q` auf einer Tabelle → Editor mit Template `SELECT * FROM "t";`.
+      Speichern, ausführen, blättern.
+- [ ] `q` nach dem ersten Speichern → das Skript steht im Menü.
+- [ ] `Q` eine Ebene tiefer (in `Rows`) adressiert weiterhin die Tabelle
+      darüber, nicht die Zeile.
+- [ ] Mehr-Statement-Skript → läuft, aber ohne Seiteninfo (nicht
+      paginierbare Form).
+- [ ] Ein `UPDATE` → scheitert mit dem Hinweis auf `read_only: false`.
+
+### Skript-Ast unter der Datenbank (`Scripts`)
+
+Derselbe Ast wie im Postgres-Tab (geteilter Code in `sql-core`), nur mit
+`sqlite:`-Typen — deshalb hier vor allem prüfen, dass er **überhaupt** hängt
+und auf die richtige Datei zeigt.
+
+- [ ] `Scripts` steht neben `Tables` unter jeder Datenbank, auch wenn noch
+      kein Skript existiert.
+- [ ] `a` legt ein Skript an, `A` einen Ordner; Ordner nesten beliebig tief.
+- [ ] Filesystem-Check:
+      `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…` —
+      `<key>` ist der gehashte Datei-Key, nicht der Pfad.
+- [ ] `e` editiert in-place (Tempfile mit `.nyd_tmp_`-Prefix **im**
+      Skript-Verzeichnis), `r` umbenennt (Endung bleibt), `M` verschiebt.
+- [ ] `d` auf einem nicht-leeren Ordner verweigert mit "not empty".
+- [ ] **`x` führt aus und paginiert per LIMIT/OFFSET** — das ist die
+      Abweichung von Postgres: das Ergebnis-Pane steht auf
+      `pagination: mode: server`. Kein Fehler wie "sqlite has no cursor
+      pagination"; `>`/`<` blättern.
+- [ ] Ein Skript unter Datei A greift auf eine Tabelle zu, die nur in
+      Datei B existiert → Fehler von SQLite (belegt, dass gegen die
+      richtige Datei gelaufen wird, nicht gegen die zuletzt geöffnete).
+
+### Table-Completions im SQLite-Skript-Editor
+
+Mechanismus wie im Postgres-Tab (siehe TC-1 … TC-5), aber **einstufige**
+Tokens — eine Datei hat keinen Schema-Namensraum.
+
+- [ ] `e` auf einem `.sql`-Skript → letzte Zeile ist
+      `-- table completions: tt_<tabelle>, …` mit **allen** Tabellen _und
+      Views_ der Datei, ohne `sqlite_`-Interna.
+- [ ] Token benutzen: `SELECT * FROM tt_<tabelle>;` → `x` liefert Zeilen
+      (expandiert zu `"<tabelle>"`).
+- [ ] Speichern, dann `cat` des Skripts unter
+      `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…`:
+      **keine** Completion-Zeile auf Platte. Erneutes `e` zeigt sie wieder,
+      genau einmal (nicht gestapelt).
+- [ ] `e` auf einem `.py`-Skript im selben Ast → keine Completion-Zeile.
+- [ ] Zwei Dateien mit gleichnamiger Tabelle: die Zeile unter Datei A listet
+      A's Tabellen (Beleg, dass der Key aus der Node-ID kommt).
+- [ ] Unbekannter Token (`tt_gibtsnicht`) → SQLite-Fehler nennt den
+      literalen Token, kein stiller Ersatz.
+
+## DB-Views editieren (`E` → `edit_view`, SQLite + Postgres)
+
+Views sind ein **eigener Node-Type** (`sqlite:view` / `postgres:view`) in einem
+eigenen `Views`-Ast neben `Tables`. Zeilen lesen sie wie eine Tabelle; dazu
+kommt `E`: das öffnet die `CREATE VIEW`-Anweisung im Editor, Speichern ersetzt
+die View. Voraussetzung: die `Views`-Äste aus
+`docs/examples/views/{sqlite,postgres}.yaml` in der eigenen Config, und für
+SQLite `read_only: false` in `sqlite-adapter.yaml`.
+
+Die Bindung ist bewusst eine `actions:`-Zeile mit `type: edit, id: edit_view`
+und **keine** `shortcuts:`-Zeile — deshalb ist der erste Punkt kein Detail,
+sondern der Beleg, dass die Verdrahtung stimmt.
+
+### Gemeinsam (beide Adapter)
+
+- [ ] `Views` steht neben `Tables` (SQLite unter der Datenbank, Postgres unter
+      dem Schema), auch wenn die DB keine View hat.
+- [ ] Durchdrillen bis `Rows` → Zeilen der View, `>`/`<` blättert, `o` öffnet
+      das Record-Detail-Pane. `Q`/`q` adressieren die View wie eine Tabelle.
+- [ ] `E` auf einer View → Editor mit der kompletten `CREATE VIEW`-Anweisung,
+      Kopfkommentar erklärt, was Speichern tut. Puffer-Endung `.sql`
+      (Syntax-Highlighting im Editor-Profil).
+- [ ] Ohne Änderung speichern → Meldung "no changes", die View wird **nicht**
+      angefasst. Nur Semikolon/Whitespace am Ende ändern zählt ebenfalls als
+      keine Änderung; Umformatieren zählt als Änderung.
+- [ ] Rumpf ändern (z. B. `WHERE` ergänzen) → Meldung "view … replaced", danach
+      zeigt `Rows` die neuen Zeilen und ein erneutes `E` die neue Definition
+      (der Puffer ist re-baselined, kein Konflikt-Warnhinweis).
+- [ ] View **umbenennen** → Ablehnung im Editor, Text bleibt erhalten, Hinweis
+      "rename it back, or create the other view from a DB script".
+- [ ] Zweites Statement anhängen (`; DROP TABLE …`) → Ablehnung, nichts läuft.
+- [ ] Kaputtes SQL (`SELECT * FROM gibtsnicht`) → Fehler des Servers/der Datei
+      **oben im Puffer** als Banner, der eigene Text darunter unverändert.
+      Erneutes Speichern nach der Korrektur entfernt das Banner (es wird nicht
+      mit gespeichert).
+- [ ] Die View parallel von außen ändern (zweites `sqlite3` / `psql`), dann
+      speichern → Konflikt-Hinweis mit der fremden Definition im Puffer statt
+      stillem Überschreiben.
+- [ ] View von außen löschen, dann speichern → nachvollziehbare Meldung, kein
+      Panic.
+- [ ] Flache `views`-Ansicht (`v`) → alle Views; `E` dort editiert ohne
+      Durchdrillen und ohne die Baumansicht zu benutzen.
+
+### Nur SQLite
+
+- [ ] `read_only: true` (Default) → `E` öffnet, Speichern scheitert mit dem
+      Hinweis auf `read_only: false`. Die View bleibt unverändert **da** —
+      der Drop passiert in derselben Transaktion wie das Create.
+- [ ] Erfolgreiches Speichern behält die verbatime Form:
+      `sqlite3 <datei> "SELECT sql FROM sqlite_master WHERE name='<view>'"`
+      zeigt genau den gespeicherten Text (SQLite formatiert nicht nach).
+- [ ] Eine View, die eine andere View benutzt: die abhängige View bleibt nach
+      dem Ersetzen benutzbar (SQLite löst Rümpfe erst beim Zugriff auf — der
+      `SELECT … LIMIT 0`-Test in der Transaktion ist die eigentliche Prüfung).
+- [ ] Der `Tables`-Ast listet **keine** Views mehr (und die `kind`-Spalte ist
+      dort weg, weil sie konstant wäre).
+
+### Nur Postgres
+
+- [ ] Speichern läuft als `CREATE OR REPLACE VIEW`: eine abhängige View und
+      ein gesetztes `GRANT` überleben (`\dp` vor/nach vergleichen). Nichts
+      wird gedroppt.
+- [ ] **Spaltenliste ändern** (Spalte umbenennen oder entfernen) → Postgres
+      lehnt ab, Fehler landet im Banner; anhängen einer neuen Spalte am Ende
+      funktioniert. Kein automatisches `DROP … CASCADE`.
+- [ ] Schema-Qualifier aus dem Kopf entfernen (`CREATE OR REPLACE VIEW v AS …`)
+      → Ablehnung mit dem Hinweis auf den `search_path`; nichts läuft.
+- [ ] Kopf auf ein **anderes** Schema zeigen lassen → Ablehnung ("different
+      schema").
+- [ ] Nach einer Ablehnung **weiterarbeiten**: eine normale Query auf demselben
+      Tab läuft noch. (Belegt, dass keine gecachte Session in aborted state
+      hängt — es gibt bewusst keinen `BEGIN`-Block.)
+- [ ] Blättern in `Rows` einer View ohne eigenes `ORDER BY` kann Zeilen
+      wiederholen/auslassen; mit `ORDER BY` im Rumpf ist es stabil. Erwartetes
+      Verhalten: eine View hat kein `ctid`, nach dem sortiert werden könnte.
+- [ ] Materialized View (`relkind = 'm'`) erscheint **nicht** im `Views`-Ast.
+- [ ] Table-Completions im DB-Skript-Editor listen auch Views.
+
+## Datenzeilen editieren (`e` → `edit_row`, SQLite + Postgres)
+
+`e` auf einer Zeile öffnet den konfigurierten Editor mit der Zeile als
+YAML-Mapping — eine `spaltenname: wert`-Zeile pro Zelle. Speichern baut aus den
+Spalten, die sich tatsächlich geändert haben, **ein** `UPDATE` und führt sonst
+nichts aus. Scheitert das Statement, öffnet sich der Editor wieder mit der
+Fehlermeldung **und** dem gebauten `UPDATE` als Banner über dem eigenen Text.
+
+Voraussetzung: die `e`-Bindung auf den `Rows`-Ebenen aus
+`docs/examples/views/{sqlite,postgres}.yaml`, und für SQLite `read_only: false`
+in `sqlite-adapter.yaml`. Wie beim View-Editor ist es eine `actions:`-Zeile mit
+`type: edit, id: edit_row` und **keine** `shortcuts:`-Zeile.
+
+Der Kern des Tests: die Zeile wird über die **Schlüsselwerte adressiert, die
+beim Öffnen gelesen wurden** — nicht über den Offset in der Baumzeile. Der
+Offset ist nur, _wie_ die Zeile gefunden wurde; eine Seite, die sich darunter
+verschiebt, darf das Schreiben nicht umlenken.
+
+### Gemeinsam (beide Adapter)
+
+- [ ] `e` auf einer Tabellenzeile → Editor mit allen Zellen als YAML, Endung
+      `.yaml` (Syntax-Highlighting im Editor-Profil). Kopfkommentar nennt
+      Tabelle, Offset und **wodurch** die Zeile adressiert wird.
+- [ ] Ohne Änderung speichern → "no changes", kein Statement läuft.
+- [ ] Eine Zelle ändern → Meldung nennt die Tabelle und "1 column"; die
+      Tabellenansicht zeigt den neuen Wert nach `r`. Von außen prüfen
+      (`sqlite3` / `psql`): **nur** diese Spalte wurde geschrieben.
+- [ ] Zwei Zellen ändern → "2 columns", ein einziges `UPDATE`.
+- [ ] Eine Zelle auf `null` setzen (YAML-`null`, nicht die Zeichenkette) → die
+      Spalte ist danach SQL-NULL. Umgekehrt: `"null"` in Anführungszeichen
+      schreibt den Text.
+- [ ] Eine Zeile aus dem Puffer **löschen** → diese Spalte bleibt unangetastet
+      (Auslassen heißt "nicht ändern", nicht "auf NULL setzen").
+- [ ] Spaltenname vertippen → Ablehnung im Puffer, die echten Spaltennamen
+      stehen in der Meldung, der eigene Text bleibt erhalten.
+- [ ] Kaputtes YAML → Ablehnung mit Zeilenangabe, Text erhalten.
+- [ ] Mehrzeiligen Text schreiben (Block-Scalar `|`), Sonderzeichen
+      (`: `, `#`, führende Leerzeichen, Emoji) → kommt unverändert in der
+      Datenbank an und beim nächsten `e` unverändert zurück.
+- [ ] **Schlüsselspalte selbst ändern** (z. B. `id`) → das `UPDATE` adressiert
+      die Zeile über den **alten** Wert, benennt sie also um statt eine zweite
+      anzulegen.
+- [ ] Zeile parallel von außen ändern, dann speichern → Konflikt-Hinweis mit
+      dem eigenen Text unverändert im Puffer; **erneutes** Speichern
+      überschreibt bewusst.
+- [ ] Zeile von außen löschen, dann speichern → nachvollziehbare Meldung
+      ("nothing was written"), kein Panic.
+- [ ] Statement scheitert (Unique-Verletzung, Typfehler, Trigger) → Banner
+      enthält die Fehlermeldung **und** darunter "The statement that failed:"
+      mit dem `UPDATE`. Nach der Korrektur speichern → das Banner ist weg und
+      wird nicht mitgeschrieben.
+- [ ] Cursor auf eine Zeile stellen, dann von außen eine Zeile **davor**
+      löschen, dann `e` → es wird die Zeile editiert, die der Editor gelesen
+      hat (bzw. sauber abgelehnt), nie eine benachbarte.
+- [ ] Im Record-Detail-Pane (`o`) → `e` editiert dieselbe Zeile (das Pane ist
+      dieselbe Zeile transponiert).
+- [ ] Flache `tables`-Ansicht → `e` funktioniert dort genauso.
+- [ ] `Rows` einer **View**: `e` ist dort bewusst **nicht** gebunden. Wird es
+      testweise gebunden, lehnt der Adapter mit dem Hinweis auf die
+      zugrundeliegende Tabelle ab — kein Editor öffnet sich.
+
+### Nur SQLite
+
+- [ ] `read_only: true` (Default) → `e` öffnet, Speichern scheitert mit dem
+      Hinweis auf `read_only: false`; die Zeile bleibt unverändert.
+- [ ] Tabelle **ohne** Primary Key → Kopfkommentar sagt, dass über den
+      impliziten `rowid` adressiert wird; Schreiben funktioniert.
+- [ ] Tabelle mit zusammengesetztem Primary Key → `WHERE` nennt alle Spalten.
+- [ ] **BLOB-Zelle** → im Puffer nur als Kommentar (`#   spalte: <blob, N
+bytes>`). Zeile einkommentieren und speichern → Ablehnung ("cannot be
+      written from here"); die Bytes bleiben unangetastet.
+- [ ] Zeile mit `NULL` in einer Schlüsselspalte einer PK-losen Tabelle → über
+      `rowid` adressiert, funktioniert trotzdem.
+
+### Nur Postgres
+
+- [ ] Tabelle mit Primary Key → Kopf nennt ihn; Schreiben funktioniert.
+- [ ] Tabelle **ohne** PK, aber mit Unique-Index über NOT-NULL-Spalten → Kopf
+      nennt den Index **namentlich**; Schreiben funktioniert.
+- [ ] Tabelle ohne PK und ohne solchen Index → `e` lehnt mit der Begründung ab
+      (kein Editor). `ctid` wird bewusst **nicht** als Ersatz benutzt, weil er
+      sich bei jedem `UPDATE` verschiebt.
+- [ ] Unique-Index über eine **NULLable** Spalte zählt nicht als Schlüssel
+      (zwei NULLs kollidieren nicht) → dieselbe Ablehnung.
+- [ ] Nicht-Text-Typen (`int`, `numeric`, `timestamptz`, `jsonb`, `bytea`,
+      Array) → der Wert kommt als Text im Puffer, wird als Text-Literal
+      geschrieben und vom Spaltentyp konvertiert; Round-Trip verändert nichts.
+      `bytea` erscheint als `\x…` und kommt als dieselben Bytes zurück.
+- [ ] Nach einer Ablehnung **weiterarbeiten**: eine normale Query auf demselben
+      Tab läuft noch (keine Session in aborted state).
+
+## View-Skripte auf den SQL-Zeilenebenen (`x`), DB-Skripte auf `X`
+
+Auf den SQL-Tabs treffen drei verschiedene "Skript"-Begriffe aufeinander. Der
+Test soll vor allem belegen, dass sie sich nicht mehr in die Quere kommen:
+
+| Sorte            | was es ist                          | Taste     |
+| ---------------- | ----------------------------------- | --------- |
+| Node-Skripte     | SQL, gehört der Tabelle/View        | `Q` / `q` |
+| DB-Skripte       | SQL, gehört der Datenbankdatei      | `X`/Enter |
+| **View-Skripte** | beliebiges Programm, JSON auf stdin | `x`       |
+
+`x` liegt jetzt auf **jeder** Zeilenebene (Baum-`Table`, Baum-`View`, und in den
+flachen `tables`/`views`-Ansichten). Weil alle diese Ebenen denselben Node-Type
+haben (`sqlite:row` / `postgres:row`), teilen sie **ein** Skript-Verzeichnis:
+`~/.local/share/not_yet_done/scripts/<tab>/<root>/<row-type>/`. Die flachen
+Ansichten brauchen dafür `script_source: databases`, sonst wäre ihr eigener
+Node-Type die Wurzel und dieselben Skripte müssten dreimal existieren.
+
+- [ ] `x` auf einem **Datenbank**-Knoten (Wurzelebene) öffnet das Menü für
+      `scripts/sqlite/sqlite_database/`. Leeres Verzeichnis → Hinweis "No
+      scripts in …, Type +name then Enter to create one", kein stilles
+      Nichts. Nutzlast ist `{"node": {…}}` mit `fields.path` auf die Datei.
+- [ ] Dank `inherit: true` liegt dasselbe `x` auch auf den Ebenen **unter**
+      der Datenbank (`Tables`, eine Tabelle, `Views`, eine View, der
+      `Scripts`-Ast) — und zwar auf demselben Verzeichnis, nicht auf einem
+      pro Ebene. Ohne `inherit` gilt eine `actions:`-Zeile nur für ihre
+      eigene Ebene; das war der Grund, warum `x` erst nur auf der obersten
+      Zeile ansprang.
+- [ ] Ein ausführbares Test-Skript in
+      `~/.local/share/not_yet_done/scripts/sqlite/sqlite_database/sqlite_row/`
+      ablegen, das stdin nach `/tmp` schreibt. `x` auf einer Tabellenzeile →
+      Menü zeigt es, Auswahl führt es aus.
+- [ ] Die Nutzlast enthält die angezeigte Seite plus Cursor-Kontext:
+      `rows[]` (`id`, `label`, `fields`), `query`, `selected_index`,
+      `selected_field` — `selected_field` folgt dem Spalten-Cursor.
+- [ ] Dasselbe Skript erscheint ohne Zutun auch unter `x` auf einer
+      **View**-Zeile und in den flachen `tables`/`views`-Ansichten (ein
+      Verzeichnis, nicht drei).
+- [ ] Postgres-Tab: `x` auf einer Zeile im `Views`-Ast zeigt dieselben Skripte
+      wie im `Table`-Ast.
+- [ ] Im `Scripts`-Ast: Cursor auf einem DB-Skript → Action-Bar zeigt
+      `X: execute` (nicht `x`), `X` führt aus, Enter genauso. `x` dort tut
+      **nichts** Falsches (kein Ausführen des Skripts als Nebeneffekt).
+- [ ] Kein Kollisions-Warnhinweis beim Config-Laden (`f10`-Log leer bzgl.
+      Keybindings auf den SQL-Tabs).
+
+## CLI: Verbindungsstatus und Credential-Prompt
+
+Die CLI verhält sich wie die TUI, nur ohne `r`: sie verbindet sofort, meldet
+den Fortschritt auf **stderr** (stdout bleibt pipebar) und fragt Credentials
+auf dem Terminal ab. Eine leere Liste heißt danach wirklich „nichts da".
+
+- [ ] `nyd adapter <chat-instanz> ls` im Terminal → `nyd: Connecting…` auf
+      stderr, danach die Server-Zeilen. **Nie** eine leere Liste mit Exit 0,
+      während die Verbindung noch steht.
+- [ ] Dasselbe gepipet (`… ls | cat`) → die Statuszeile landet auf stderr,
+      die Tabelle unverändert auf stdout.
+- [ ] Lokaler Adapter ohne Hintergrund-Verbindung (`nyd adapter tasks ls`) →
+      keine Statuszeile, keine spürbare Verzögerung.
+- [ ] Instanz mit `provider: { type: prompt }` und gelöschter Session im
+      Terminal → Passwort-Abfrage (maskiert, auf stderr), danach das Ergebnis.
+- [ ] Dieselbe Instanz ohne TTY (`… ls < /dev/null | cat`) → Fehlermeldung,
+      die die fehlenden Felder nennt und auf env/file/command/keyring
+      verweist, Exit ≠ 0 — keine leere Liste.
+- [ ] Backend nicht erreichbar → `Connection failed: …` und Exit ≠ 0; hängt
+      die Verbindung, bricht der Befehl nach 60 s mit Timeout-Meldung ab.
+- [ ] `nyd adapter <instanz> help` funktioniert **ohne** Verbindung und ohne
+      Credential-Abfrage.
+
+## CLI: Auth-Mechanismen im Config-Assistenten (`config auth` / `config build`)
+
+Welche Mechanismen es gibt, weiß seit dem Deskriptor-Umbau nur noch der
+Adapter. Assistent und Auflistung lesen dieselbe Tabelle wie die Validierung —
+was hier angeboten wird, muss die Factory also auch akzeptieren.
+
+- [ ] `nyd config auth jira` → `cookie` und `basic-auth` mit Label, Doku und
+      Feldern; keine Verbindung, keine Credential-Abfrage.
+- [ ] `nyd config auth tasks` → „has no authentication", kein leeres Menü.
+- [ ] `nyd config auth gibtsnicht` → Fehler mit der Liste der bekannten Typen.
+- [ ] `nyd config build kimai` im Terminal → nach den normalen Feldern eine
+      Legende + Menü für `auth.mechanism` (kein Freitext), danach je Feld ein
+      Provider-Menü mit dem Feldnamen im Prompt (`auth.token: choose variant`).
+- [ ] Das erzeugte YAML hat `auth:` an der Stelle, an der der Config-Typ es
+      deklariert (bei kimai direkt nach `url:`), nicht angehängt am Ende.
+- [ ] Ein Feld, dessen Label die Namensheuristik verfehlt (kimai `token` →
+      „API password"), bekommt ein `label:`; `masked:` fehlt, wo die Heuristik
+      ohnehin richtig liegt.
+- [ ] Mechanismus mit optionalem Feld → Abfrage „bind the optional field …?"
+      mit Default **nein**; abgelehnt taucht das Feld nicht im YAML auf.
+- [ ] Escape/Ctrl-C in der Mechanismus-Auswahl → „aborted — no config
+      written.", **nichts** auf stdout (auch nicht die schon beantworteten
+      Felder).
+- [ ] Das erzeugte YAML als `adapter.config` einer View eintragen → Adapter
+      startet ohne Beanstandung der Auth-Sektion.
+- [ ] `nyd config template kimai` → Hinweiszeile auf `nyd config auth kimai`
+      auf stderr, stdout bleibt reines YAML.
+
+## Skriptgetriebene Credentials (`auth.script` + `script-result`)
+
+Ein Skript liefert **mehrere** Felder auf einmal und fragt nur dann etwas,
+wenn es muss. Pro Runde ein frischer Prozess: `{"request": […], "input": {…}}`
+auf stdin, genau eines von `result` / `form` / `error` auf stdout; `input`
+sammelt die Antworten über die Runden hinweg. Testskript (ohne Server, nur das
+Protokoll — erste Runde fragt, zweite liefert):
+
+```sh
+#!/bin/sh
+in=$(cat)
+case "$in" in
+  *'"pin"'*) printf '{"result":{"username":"demo","token":"t-%s"}}' "$$" ;;
+  *) printf '{"form":{"header":"Demo-Login","fields":[{"name":"account","label":"Account"},{"name":"pin","masked":true,"optional":true}]}}' ;;
+esac
+```
+
+- [ ] `auth.script: <pfad>` + zwei Bindings mit `provider: { type:
+script-result }` in einer View → beim Verbinden erscheinen **die Felder
+      des Skripts** (Account, Pin), nicht die Mechanismus-Felder.
+- [ ] Der Formular-`header` steht als Popup-Titel da (TUI) bzw. über den
+      Fragen (CLI), nicht der generische „Login: <tab>".
+- [ ] TUI: Pin leer lassen (`optional`) → Enter reicht ab; Account leer →
+      „Required: Account", kein Absenden.
+- [ ] Beide Felder aus einer einzigen Skript-Antwort → das Skript läuft
+      **einmal** pro Runde, nicht je Binding einmal (am `$$`-Suffix im Token
+      bzw. am Skript-Log erkennbar).
+- [ ] CLI (`nyd adapter …`) im Terminal → dieselben Fragen, Pin darf leer
+      bleiben, Account nicht.
+- [ ] CLI in einer Pipe (`nyd adapter … | cat`) → „no terminal to ask on" mit
+      den Feldnamen, kein stilles leeres Ergebnis.
+- [ ] Skript antwortet `{"error":"…"}` → Login scheitert mit genau dieser
+      Meldung, kein Formular.
+- [ ] Skript liefert ein `result`, in dem ein angefragtes Feld fehlt → Login
+      scheitert mit dem fehlenden Namen, kein Login mit leerem Wert.
+- [ ] Skript wiederholt sein Formular mit `error: "…"` → dasselbe Formular
+      kommt erneut, die Meldung steht dran, und die vorherigen Antworten
+      sind im `input` der nächsten Runde enthalten.
+- [ ] Skript, das **immer** ein Formular schickt → nach 5 Runden Abbruch mit
+      Hinweis auf das Rundenlimit, keine Endlosschleife.
+- [ ] Escape im Formular (TUI) bzw. Abbruch (CLI) → Login scheitert sofort
+      mit „cancelled"; ein **zweiter** Verbindungsversuch danach kommt wieder
+      bis zum Formular (der Auth-Mutex hängt nicht).
+- [ ] Reconnect nach 401 → das Skript läuft erneut, das Formular kommt erneut
+      (der Wert ist bewusst kurzlebig), nicht der gecachte alte Wert.
+- [ ] Konfig-Prüfung: `script-result` ohne `auth.script` **und** `auth.script`
+      ohne `script-result`-Binding werden beide beim Lesen der View
+      abgelehnt — mit Nennung der fehlenden Hälfte.
+- [ ] `nyd config auth <typ>` listet `script-result` in der Provider-Liste;
+      `nyd config build <typ>` bietet es im Provider-Menü und fragt danach
+      **genau einmal** nach `auth.script`, egal wie viele Felder es nutzen.
+
+## Abgelaufener Cookie mitten in der Sitzung (Jira / Confluence)
+
+`session_cache: until-rejected` heißt: die Session gilt, bis der Server sie
+ablehnt. Ein 401 (oder ein SSO-Bounce in den Login-Flow) markiert den Client
+als abgelehnt; der nächste Zugriff wirft ihn weg und loggt neu ein — beim
+`command`-Provider läuft dabei das Cookie-Skript erneut.
+
+- [ ] Verbinden, Liste laden, dann den Cookie serverseitig ungültig machen
+      (im Browser ausloggen / Session beenden) → nächster Zugriff meldet
+      einmal den 401.
+- [ ] Danach Reload (`r`) → Adapter loggt neu ein und liefert Daten, ohne
+      dass `invalidate_session` von Hand aufgerufen werden muss.
+- [ ] Provider `command`: das Skript wird beim Neuanmelden erneut ausgeführt
+      (am Skript-Log / an einer Passwort-Abfrage erkennbar), nicht der alte
+      Wert wiederverwendet.
+- [ ] Seite ohne Berechtigung öffnen (403) → normale Fehlermeldung, **kein**
+      Neuanmelden, kein erneuter Skript-/Passwort-Prompt.
+
+## Sortier-Menü (`c s`) und Spalten-Menü auf `c c`
+
+Das Sortier-Menü ist ein zweiter UI-Pfad auf dieselbe Sortierung wie `S`;
+`c` ist jetzt Chord-Leader für beide Tabellen-Menüs.
+
+- [ ] `c c` öffnet das Spalten-Menü (vorher `c`), `c s` das Sortier-Menü.
+      Ein einzelnes `c` tut nichts und wartet auf den zweiten Anschlag.
+- [ ] Im Sortier-Menü stehen **alle** sortierbaren Spalten: die sortierten
+      oben in Sortierreihenfolge mit `asc`/`desc`, die unsortierten darunter.
+- [ ] `j`/`k` bewegen den Cursor, `ctrl+j`/`ctrl+k` verschieben den markierten
+      Eintrag **innerhalb** des sortierten Blocks; auf einem unsortierten
+      Eintrag passiert nichts.
+- [ ] `a`/`d` auf einer unsortierten Spalte hängt sie hinten an den sortierten
+      Block an, `0` nimmt sie wieder heraus (sie landet an ihrer natürlichen
+      Position darunter).
+- [ ] `Enter` wendet an: genau **ein** Reload, Notification nennt die Spalten;
+      `Esc` verwirft, die Tabelle bleibt unverändert.
+- [ ] Mit `S` gesetzte Sortierung ist im Menü sichtbar und umgekehrt — die
+      Sortierung überlebt einen Tab-Wechsel (wird wie bisher gespeichert).
+- [ ] Ebene ohne sortierbare Spalten: `c s` meldet „No sortable columns"
+      statt ein leeres Popup zu zeigen.
+- [ ] View-YAML mit einer `actions:`-Bindung auf `c` wird beim Laden als
+      Konflikt gemeldet (Prefix-Kollision mit `c c`/`c s`), `force: true`
+      unterdrückt sie weiterhin.
 
 ## Refinements / Deferred Tasks
 

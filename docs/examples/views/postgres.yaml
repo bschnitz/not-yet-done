@@ -1,0 +1,552 @@
+# Example Postgres tab (view spec).
+#
+# The `postgres` adapter browses a live server as a tree:
+#   database → schemas → schema → table → rows,
+# plus a parallel "Scripts" branch for stored `.sql` files. Row and
+# script-result levels are wide, flat tables — ideal for the coupled
+# record-detail split (`o`) and the window/split operations (`w` leader).
+#
+# `Views` is a sibling branch of `Tables` under a schema and behaves the
+# same way — a view is queryable and has rows — plus one thing a table has
+# not: its whole content is the `CREATE VIEW` statement, so `E` opens that
+# statement in the editor and saving replaces the view in place.
+#
+# The database catalogue is discovered live from `pg_database`; there is
+# no `databases:` list here. Connection details live in the referenced
+# adapter config (see postgres-adapter.yaml).
+
+tab:
+  name: Postgres
+  order: 5
+  icon: "🐘"
+
+adapter:
+  type: postgres
+  config: postgres-adapter.yaml
+  # Don't connect on startup or subtab switch — the DB connection (and any
+  # SSH tunnel) is only established when you trigger the `r` reload action.
+  # Avoids hanging/timeouts when the tunnel target is unreachable. This is
+  # the default; it is written out because it matters most for this adapter.
+  manual_connect: true
+
+views:
+  # ── Tree view: database → schemas → tables → rows (+ scripts) ──────────
+  - name: databases
+    key: d
+    node_type: "postgres:database"
+    default: true
+    # Enable the `w` window-leader chords on this view. Opt-in because it
+    # defaults off (so `w` stays a free ordinary key elsewhere). With it on:
+    #   wv / ws  split the focused pane right / down
+    #   wq       close the focused pane
+    #   wh / wl  focus parent / child pane
+    #   w<tag>   jump focus to the pane wearing that letter tag
+    # Enable it wherever a view offers a coupled child `split:` or a
+    # `record_detail:` split — you need it to move focus into the follower.
+    window_ops: true
+    tree_label: name
+    # No ├──/└── guide lines in the drill — the expand markers (▶/▼) stay.
+    tree_lines: false
+    retries: 2
+
+    columns:
+      - key: name
+        label: Name
+        style: accent
+        sizing: max
+      - key: owner
+        label: Owner
+        sizing: max
+      - key: encoding
+        label: Encoding
+        sizing: max
+
+    actions:
+      - name: refresh
+        key: r
+        type: reload
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [name]
+
+    children:
+      # First tree branch under a database: a "Schemas" group node the user
+      # expands to see individual schemas. The adapter always returns this
+      # single virtual entry (node_type postgres:schemas, plural) so the
+      # branch is visible even before any schema has loaded.
+      - name: Schemas
+        node_type: "postgres:schemas"
+        tree_label: name
+        columns:
+          - key: name
+            label: Name
+            style: accent
+            sizing: max
+        children:
+          - name: Schema
+            node_type: "postgres:schema"
+            tree_label: name
+            columns:
+              - key: name
+                label: Name
+                style: accent
+                sizing: max
+              - key: owner
+                label: Owner
+                sizing: max
+            children:
+              - name: Table
+                node_type: "postgres:table"
+                tree_label: name
+                # These rows own per-node SQL scripts: `Q` opens the query
+                # editor for the selected table, `q` its scripts menu. The
+                # keys stay live one level deeper (inside `Rows`) and then
+                # address this table. Nothing about Postgres is hardcoded in
+                # the host — this flag is what turns the keys on.
+                node_scripts: true
+                shortcuts:
+                  Q: edit_sql
+                columns:
+                  - key: name
+                    label: Name
+                    style: accent
+                    sizing: max
+                  - key: owner
+                    label: Owner
+                    sizing: max
+                  - key: estimated_rows
+                    label: "Rows (est.)"
+                    sizing: max
+                children:
+                  # Flat, wide row list — the record-detail target. `o`
+                  # opens a coupled follower to the right transposing the
+                  # selected row into a field/value table (needs
+                  # window_ops on the view to focus into it).
+                  - name: Rows
+                    node_type: "postgres:row"
+                    shortcuts:
+                      Q: "parent:edit_sql"
+                    split:
+                      direction: right
+                      ratio: 0.8
+                      coupled: true
+                    pagination:
+                      mode: server
+                      page_size: 100
+                    column_cursor: true
+                    record_detail: true
+                    # `scope: table` hands the script the whole displayed
+                    # page plus cursor context:
+                    #   {rows:[{id,label,fields}…], query,
+                    #    selected_index, selected_field}
+                    # selected_field follows the column cursor. The same
+                    # action serves the coupled record-detail split, where
+                    # each row is a field/value pair.
+                    actions:
+                      - name: script
+                        key: x
+                        type: script
+                        scope: table
+                      # The row editor. Like the view definition below it has
+                      # to be an `actions:` entry with `type: edit` — a
+                      # `shortcuts:` line dispatches through `invoke_action`,
+                      # which cannot open an editor.
+                      #
+                      # The buffer is the row as YAML, one `column: value`
+                      # per cell; saving builds an UPDATE from the columns
+                      # that actually changed and runs nothing else. Values
+                      # go in as text literals and the column's type converts
+                      # them, which is why every cell is editable here (unlike
+                      # SQLite's BLOBs): postgres' text output is valid text
+                      # input for the same type.
+                      #
+                      # The row is addressed by the key values as they were
+                      # when the editor opened — the primary key, or the
+                      # narrowest unique index over NOT NULL columns when
+                      # there is none (the buffer header names which) — not
+                      # by the offset in the tree, so a page that shifted
+                      # underneath cannot redirect the write. `ctid` is
+                      # deliberately not a fallback: it moves on every UPDATE.
+                      # If the statement is refused (a constraint, a type, a
+                      # trigger), the editor reopens with the reason *and* the
+                      # built UPDATE on top; the text is never lost.
+                      - name: row
+                        key: e
+                        type: edit
+                        id: edit_row
+                    keybindings:
+                      back: null
+                    # `ctrl+n`/`ctrl+p`: step the parent table cursor and
+                    # re-open, keeping the coupled row pane focused — walk
+                    # rows without leaving the follower.
+                    action_chains:
+                      "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+                      "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+              # Sibling branch of Table inside the same schema: the
+              # schema's views. Same shape as the Table level (rows,
+              # per-node scripts, coupled record split) — a view is
+              # queryable exactly like a table — with one addition below.
+              # A view is its own node type because only it can be edited.
+              - name: Views
+                node_type: "postgres:views"
+                tree_label: name
+                columns:
+                  - key: name
+                    label: Name
+                    style: accent
+                    sizing: max
+                children:
+                  - name: View
+                    node_type: "postgres:view"
+                    tree_label: name
+                    node_scripts: true
+                    shortcuts:
+                      Q: edit_sql
+                    # The definition editor. It has to be an `actions:` entry
+                    # with `type: edit`, NOT a `shortcuts:` line: a shortcut
+                    # dispatches through `invoke_action`, which cannot open an
+                    # editor, and the host answers such a binding with an
+                    # error. `id:` names the adapter action; without it the
+                    # entry would mean `edit_full`.
+                    #
+                    # Saving runs `CREATE OR REPLACE VIEW`, so nothing is
+                    # dropped and dependent views and privileges survive —
+                    # but the result columns have to stay as they are
+                    # (postgres only allows appending new ones). The buffer
+                    # keeps the schema qualifier for a reason: without it the
+                    # statement would follow the connection's search_path and
+                    # could replace a view in another schema. A rejected
+                    # definition comes back in the editor with the reason on
+                    # top instead of being lost.
+                    actions:
+                      - name: definition
+                        key: E
+                        type: edit
+                        id: edit_view
+                    columns:
+                      - key: name
+                        label: Name
+                        style: accent
+                        sizing: max
+                      - key: owner
+                        label: Owner
+                        sizing: max
+                    children:
+                      # Same row level as under Table, minus a stable sort:
+                      # a view has no `ctid` to order by, so paging is only
+                      # as stable as the view's own `ORDER BY`.
+                      - name: Rows
+                        node_type: "postgres:row"
+                        shortcuts:
+                          Q: "parent:edit_sql"
+                        split:
+                          direction: right
+                          ratio: 0.8
+                          coupled: true
+                        pagination:
+                          mode: server
+                          page_size: 100
+                        column_cursor: true
+                        record_detail: true
+                        # Same view scripts as under Table — both levels are
+                        # `postgres:row`, so both read the directory
+                        # `postgres/postgres_database/postgres_row/`.
+                        #
+                        # No `e` here on purpose: a view has no key of its own
+                        # to address a single row by, so the adapter refuses
+                        # the editor ("… is a view, which has no key to
+                        # address a single row by — edit the row in the
+                        # underlying table instead"). Binding it would only
+                        # put a key in the action bar that always ends in that
+                        # message.
+                        actions:
+                          - name: script
+                            key: x
+                            type: script
+                            scope: table
+                        keybindings:
+                          back: null
+                        action_chains:
+                          "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+                          "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+      # Second tree branch under a database (parallel to Schemas): a
+      # "Scripts" group node for stored `.sql` files under the adapter's
+      # db-scripts directory. Always visible even when empty, so there's a
+      # stable cursor target for `add-script` (a) / `add-dir` (A).
+      - name: Scripts
+        node_type: "postgres:db_scripts"
+        tree_label: name
+        shortcuts:
+          a: add-script
+          A: add-dir
+        columns:
+          - key: name
+            label: Name
+            style: accent
+            sizing: max
+        children:
+          # Recursive folder branch. `recursive: true` makes this ChildDef
+          # an implicit member of its own `children:`, so folders can nest
+          # arbitrarily deep. Group/dir nodes list dirs first, then scripts.
+          - name: DB Script Dir
+            node_type: "postgres:db_script_dir"
+            tree_label: name
+            recursive: true
+            shortcuts:
+              a: add-script
+              A: add-dir
+              r: rename
+              M: move       # adapter-executed move (prompts for target folder)
+              d: delete-dir
+            columns:
+              - key: name
+                label: Name
+                style: accent
+                sizing: max
+            children:
+              - name: DB Script
+                node_type: "postgres:db_script"
+                tree_label: script
+                enter_action: execute
+                # `edit` (e) opens the tempfile *inside* the real db-scripts
+                # directory (with a `.nyd_tmp_` prefix) so a SQL language
+                # server discovers sibling config by walking up from the
+                # buffer path — instead of editing in $TMPDIR with no context.
+                editor_in_place: true
+                shortcuts:
+                  # `X`, not `x`: the row levels bind `x` to the view
+                  # scripts (see `type: script` above), and that binding
+                  # wins tab-wide. Enter runs the script as well
+                  # (`enter_action`), so the shifted key is the rare path.
+                  X: execute
+                  e: edit
+                  r: rename
+                  M: move
+                  d: delete
+                columns:
+                  - key: script
+                    label: Script
+                    style: accent
+                    sizing: max
+                children:
+                  - name: DB Script Result
+                    node_type: "postgres:db_script_result"
+                    split:
+                      direction: right
+                      ratio: 0.8
+                      coupled: true
+                    pagination:
+                      mode: cursor
+                      page_size: 100
+                    column_cursor: true
+                    record_detail: true
+                    keybindings:
+                      back: null
+          # Flat-root scripts (files directly under the db-scripts dir,
+          # not in a folder), fanned out in parallel with DB Script Dir.
+          - name: DB Script
+            node_type: "postgres:db_script"
+            tree_label: script
+            enter_action: execute
+            editor_in_place: true
+            shortcuts:
+              X: execute
+              e: edit
+              r: rename
+              M: move
+              d: delete
+            columns:
+              - key: script
+                label: Script
+                style: accent
+                sizing: max
+            children:
+              # Result pane for `x` (execute). Synthetic node_type — the
+              # adapter never lists nodes of this type; the entry only
+              # anchors the split + pagination config for the auto-opened
+              # result pane.
+              - name: DB Script Result
+                node_type: "postgres:db_script_result"
+                split:
+                  direction: right
+                  ratio: 0.8
+                  coupled: true
+                pagination:
+                  mode: cursor
+                  page_size: 100
+                column_cursor: true
+                record_detail: true
+                keybindings:
+                  back: null
+
+  # ── Flat view: all tables across the server, jump straight to rows ─────
+  - name: tables
+    key: t
+    node_type: "postgres:table"
+    window_ops: true
+    retries: 2
+    # Flat table list — same per-node script ownership as the `Table`
+    # level inside the `databases` tree. See `node_scripts:` there.
+    node_scripts: true
+    shortcuts:
+      Q: edit_sql
+
+    columns:
+      - key: name
+        label: Name
+        style: accent
+        sizing: max
+      - key: database
+        label: Database
+        sizing: max
+      - key: schema
+        label: Schema
+        sizing: max
+      - key: estimated_rows
+        label: "Rows (est.)"
+        sizing: max
+
+    actions:
+      - name: refresh
+        key: r
+        type: reload
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name, database, schema]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [name, database, schema]
+
+    children:
+      - name: Rows
+        node_type: "postgres:row"
+        shortcuts:
+          Q: "parent:edit_sql"
+        split:
+          direction: right
+          ratio: 0.8
+          coupled: true
+        pagination:
+          mode: server
+          page_size: 100
+        column_cursor: true
+        record_detail: true
+        # Same row editor as in the tree — see the `Rows` level under `Table`
+        # there for what saving does.
+        actions:
+          - name: row
+            key: e
+            type: edit
+            id: edit_row
+        keybindings:
+          back: null
+        action_chains:
+          "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+          "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+  # ── Flat view: all views across the server ─────────────────────────────
+  # The counterpart to `tables`, and the quickest way to reach a definition:
+  # `E` edits the selected view without drilling through database and schema.
+  - name: views
+    key: v
+    node_type: "postgres:view"
+    window_ops: true
+    retries: 2
+    node_scripts: true
+    shortcuts:
+      Q: edit_sql
+
+    columns:
+      - key: name
+        label: Name
+        style: accent
+        sizing: max
+      - key: database
+        label: Database
+        sizing: max
+      - key: schema
+        label: Schema
+        sizing: max
+      - key: owner
+        label: Owner
+        sizing: max
+
+    actions:
+      - name: definition
+        key: E
+        type: edit
+        id: edit_view
+      - name: refresh
+        key: r
+        type: reload
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name, database, schema]
+      - name: search
+        key: /
+        type: search
+        search:
+          fields: [name, database, schema]
+
+    children:
+      - name: Rows
+        node_type: "postgres:row"
+        shortcuts:
+          Q: "parent:edit_sql"
+        split:
+          direction: right
+          ratio: 0.8
+          coupled: true
+        pagination:
+          mode: server
+          page_size: 100
+        column_cursor: true
+        record_detail: true
+        # No `e`: these are a view's rows — see the tree's `Views` branch.
+        keybindings:
+          back: null
+        action_chains:
+          "ctrl+n": [window.focus_parent, common.list_next, content.open, window.focus_child]
+          "ctrl+p": [window.focus_parent, common.list_prev, content.open, window.focus_child]
+
+  # ── Flat view: all stored scripts across the server ────────────────────
+  - name: scripts
+    key: s
+    node_type: "postgres:script"
+    window_ops: true
+    retries: 2
+
+    actions:
+      - name: refresh
+        key: r
+        type: reload
+
+    columns:
+      - key: database
+        label: Database
+        sizing: max
+      - key: schema
+        label: Schema
+        sizing: max
+      - key: table
+        label: Table
+        sizing: max
+      - key: script
+        label: Script
+        style: accent
+        sizing: "flex(1)"

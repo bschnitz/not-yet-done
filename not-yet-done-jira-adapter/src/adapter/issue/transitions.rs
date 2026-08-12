@@ -14,14 +14,16 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use not_yet_done_content::slug::normalize;
 use not_yet_done_content::{ActionOption, ActionOutcome, Result};
 
 use crate::cache_store::{self, WorkflowEdgeRow};
 use crate::client::{JiraIssueDetail, JiraTransition};
 
-use super::JiraIssueNode;
 use super::super::cache::{db_handle, fetch_issue};
 use super::super::util::other_err;
+use super::JiraIssueNode;
+use super::slugs::{STATUS_PREFIX, SlugTables, build_slug_tables, build_status_table};
 
 /// Hop limit for multi-hop enumeration. Picked empirically — Jira
 /// workflows in practice are 3–5 statuses wide, so anything beyond
@@ -71,7 +73,10 @@ pub(crate) fn enumerate_paths(
         if e.from_status_id == e.to_status_id {
             continue;
         }
-        adjacency.entry(e.from_status_id.as_str()).or_default().push(e);
+        adjacency
+            .entry(e.from_status_id.as_str())
+            .or_default()
+            .push(e);
         if e.from_status_id == start_status_id {
             start_name = e.from_status_name.as_str();
         }
@@ -117,7 +122,9 @@ fn dfs<'a>(
     if remaining == 0 {
         return;
     }
-    let Some(neighbors) = adjacency.get(current) else { return; };
+    let Some(neighbors) = adjacency.get(current) else {
+        return;
+    };
     for edge in neighbors {
         if visited_status.iter().any(|s| s == &edge.to_status_id) {
             continue;
@@ -125,7 +132,11 @@ fn dfs<'a>(
         path.push(edge);
         visited_status.push(edge.to_status_id.clone());
 
-        out.push(materialize_path(path, visited_status[0].as_str(), start_name));
+        out.push(materialize_path(
+            path,
+            visited_status[0].as_str(),
+            start_name,
+        ));
 
         dfs(
             adjacency,
@@ -142,11 +153,7 @@ fn dfs<'a>(
     }
 }
 
-fn materialize_path(
-    edges: &[&WorkflowEdgeRow],
-    start_id: &str,
-    start_name: &str,
-) -> WorkflowPath {
+fn materialize_path(edges: &[&WorkflowEdgeRow], start_id: &str, start_name: &str) -> WorkflowPath {
     let mut transition_ids = Vec::with_capacity(edges.len());
     let mut transition_names = Vec::with_capacity(edges.len());
     let mut status_ids = Vec::with_capacity(edges.len());
@@ -199,10 +206,7 @@ impl JiraIssueNode {
         transitions: &[JiraTransition],
     ) -> Vec<WorkflowEdgeRow> {
         let project = self.project_key();
-        if project.is_empty()
-            || detail.status_id.is_empty()
-            || detail.issue_type_id.is_empty()
-        {
+        if project.is_empty() || detail.status_id.is_empty() || detail.issue_type_id.is_empty() {
             return Vec::new();
         }
         transitions
@@ -228,7 +232,9 @@ impl JiraIssueNode {
         if edges.is_empty() {
             return;
         }
-        let Some((db, scope_id)) = db_handle(&self.cache) else { return; };
+        let Some((db, scope_id)) = db_handle(&self.cache) else {
+            return;
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -254,6 +260,26 @@ impl JiraIssueNode {
         detail: &JiraIssueDetail,
         transitions: &[JiraTransition],
     ) -> Vec<ActionOption> {
+        let paths = self.combined_paths(detail, transitions).await;
+        if paths.is_empty() {
+            // No status_id, empty cache, or unknown start — fall back to the
+            // raw direct transitions so the picker is never empty when the
+            // server returned at least one option.
+            return fallback_options(transitions);
+        }
+        paths_to_options(&paths)
+    }
+
+    /// Record the just-observed direct edges into the cache, then enumerate
+    /// every simple path (direct or indirect, up to `MAX_PATH_DEPTH`) from the
+    /// issue's current status over the union of (cached edges, observed edges).
+    /// Shared by the transition picker and the editable-status resolver so both
+    /// offer exactly the same set of reachable statuses.
+    async fn combined_paths(
+        &self,
+        detail: &JiraIssueDetail,
+        transitions: &[JiraTransition],
+    ) -> Vec<WorkflowPath> {
         let observed = self.build_observed_edges(detail, transitions);
         self.persist_observed_edges(&observed).await;
 
@@ -271,16 +297,70 @@ impl JiraIssueNode {
         };
 
         let combined = merge_edges(cached, observed);
-        let paths = enumerate_paths(&combined, &detail.status_id, MAX_PATH_DEPTH);
+        enumerate_paths(&combined, &detail.status_id, MAX_PATH_DEPTH)
+    }
 
-        if paths.is_empty() {
-            // No status_id, empty cache, or unknown start — fall back to the
-            // raw direct transitions so the picker is never empty when the
-            // server returned at least one option.
-            return fallback_options(transitions);
+    /// The transition paths reachable from `detail`'s status, using the live
+    /// transitions plus the workflow-edge cache — the exact set the transition
+    /// menu offers. A failed `get_transitions` degrades to cache-only (still
+    /// useful: indirect edges recorded on earlier menu opens survive).
+    async fn known_status_paths(&self, detail: &JiraIssueDetail) -> Vec<WorkflowPath> {
+        let transitions = self
+            .client
+            .get_transitions(&self.key)
+            .await
+            .unwrap_or_default();
+        self.combined_paths(detail, &transitions).await
+    }
+
+    /// Slug tables for the editor surface: labels/users from the cache plus a
+    /// status table seeded with the current status and every reachable status
+    /// (so the editable `status` field renders as an `ss_` slug and the CACHE
+    /// legend advertises the same targets the transition menu would).
+    pub(super) async fn slug_tables(&self, detail: &JiraIssueDetail) -> SlugTables {
+        let mut tables = build_slug_tables(&self.cache);
+        let paths = self.known_status_paths(detail).await;
+        let reachable: Vec<&str> = paths
+            .iter()
+            .filter_map(|p| p.status_names.last().map(String::as_str))
+            .collect();
+        tables.statuses = build_status_table(reachable, &detail.status);
+        tables
+    }
+
+    /// Apply a status change requested via the editable `status` field.
+    /// `target` is the resolved status *name* (or a bare `ss_` slug). Empty or
+    /// unchanged → no-op (`Ok(None)`). Otherwise look up the known transition
+    /// chain to that status (live transitions + cached workflow edges, direct
+    /// or indirect — the same set the transition menu offers) and execute it,
+    /// returning the resulting status message. An unknown target is an error:
+    /// the workflow edges for an indirect path may simply not be recorded yet,
+    /// so the user is told to open the transition menu once.
+    pub(super) async fn apply_status_transition(
+        &mut self,
+        target: &str,
+        baseline: &JiraIssueDetail,
+    ) -> Result<Option<String>> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Ok(None);
         }
-
-        paths_to_options(&paths)
+        let want = normalize(target.strip_prefix(STATUS_PREFIX).unwrap_or(target));
+        if want.is_empty() || want == normalize(&baseline.status) {
+            return Ok(None);
+        }
+        let paths = self.known_status_paths(baseline).await;
+        match find_status_chain(&paths, target) {
+            Some(chain) => match self.execute_transition_chain(&chain).await? {
+                ActionOutcome::Done { message } => Ok(message),
+                _ => Ok(None),
+            },
+            None => Err(other_err(format!(
+                "no known transition from `{}` to `{}` — open the status transition \
+                 menu once so the workflow edges get recorded, then retry",
+                baseline.status, target,
+            ))),
+        }
     }
 
     /// Execute a comma-separated chain of transition IDs sequentially.
@@ -293,10 +373,7 @@ impl JiraIssueNode {
     /// are preserved server-side — they aren't rolled back, mirroring
     /// the agreed semantics: "bei required fields mit fehler abbrechen,
     /// aber denk an den refresh".
-    pub(super) async fn execute_transition_chain(
-        &mut self,
-        chain: &str,
-    ) -> Result<ActionOutcome> {
+    pub(super) async fn execute_transition_chain(&mut self, chain: &str) -> Result<ActionOutcome> {
         let ids: Vec<String> = chain
             .split(',')
             .map(str::trim)
@@ -343,6 +420,28 @@ impl JiraIssueNode {
     }
 }
 
+/// Find the transition-id chain (comma-separated, ready for
+/// [`JiraIssueNode::execute_transition_chain`]) that reaches `target` from the
+/// enumerated `paths`. `target` is a status *name* or a bare `ss_` slug;
+/// matching is case-insensitive on the normalized terminal status name.
+/// Because [`enumerate_paths`] sorts shortest-first, the first match is the
+/// shortest route. Returns `None` when no known path reaches the target.
+pub(crate) fn find_status_chain(paths: &[WorkflowPath], target: &str) -> Option<String> {
+    let want = normalize(target.strip_prefix(STATUS_PREFIX).unwrap_or(target));
+    if want.is_empty() {
+        return None;
+    }
+    paths
+        .iter()
+        .find(|p| {
+            p.status_names
+                .last()
+                .map(|n| normalize(n) == want)
+                .unwrap_or(false)
+        })
+        .map(|p| p.value())
+}
+
 /// Picker labels from enumerated paths: terminal status name only, with
 /// a `*` suffix for multi-hop chains. Deduped by terminal status — since
 /// paths are pre-sorted by hop count ascending, the shortest route to a
@@ -352,7 +451,9 @@ fn paths_to_options(paths: &[WorkflowPath]) -> Vec<ActionOption> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut options = Vec::with_capacity(paths.len());
     for p in paths {
-        let Some(terminal) = p.status_names.last() else { continue };
+        let Some(terminal) = p.status_names.last() else {
+            continue;
+        };
         if !seen.insert(terminal.clone()) {
             continue;
         }
@@ -361,7 +462,10 @@ fn paths_to_options(paths: &[WorkflowPath]) -> Vec<ActionOption> {
         } else {
             terminal.clone()
         };
-        options.push(ActionOption { label, value: p.value() });
+        options.push(ActionOption {
+            label,
+            value: p.value(),
+        });
     }
     options
 }
@@ -374,11 +478,18 @@ fn fallback_options(transitions: &[JiraTransition]) -> Vec<ActionOption> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut options = Vec::with_capacity(transitions.len());
     for t in transitions {
-        let terminal = if t.to_status.is_empty() { &t.name } else { &t.to_status };
+        let terminal = if t.to_status.is_empty() {
+            &t.name
+        } else {
+            &t.to_status
+        };
         if !seen.insert(terminal.clone()) {
             continue;
         }
-        options.push(ActionOption { label: terminal.clone(), value: t.id.clone() });
+        options.push(ActionOption {
+            label: terminal.clone(),
+            value: t.id.clone(),
+        });
     }
     options
 }
@@ -540,11 +651,41 @@ mod tests {
         ];
         let paths = enumerate_paths(&edges, "1", 4);
         let options = paths_to_options(&paths);
-        let done = options.iter().filter(|o| o.label.starts_with("Done")).count();
+        let done = options
+            .iter()
+            .filter(|o| o.label.starts_with("Done"))
+            .count();
         assert_eq!(done, 1, "only one entry for terminal status Done");
-        let done_opt = options.iter().find(|o| o.label.starts_with("Done")).unwrap();
+        let done_opt = options
+            .iter()
+            .find(|o| o.label.starts_with("Done"))
+            .unwrap();
         assert_eq!(done_opt.label, "Done", "direct edge wins, no star");
         assert_eq!(done_opt.value, "21");
+    }
+
+    #[test]
+    fn find_status_chain_matches_shortest_and_prefix_insensitive() {
+        let edges = vec![
+            edge(("1", "Open"), ("2", "In Progress"), "21", "Start"),
+            edge(("2", "In Progress"), ("3", "Done"), "31", "Finish"),
+            edge(("1", "Open"), ("3", "Done"), "41", "Resolve"),
+        ];
+        let paths = enumerate_paths(&edges, "1", 4);
+        // Direct edge to Done (41) is shorter than the 2-hop chain (21,31).
+        assert_eq!(find_status_chain(&paths, "Done").as_deref(), Some("41"));
+        // `ss_` prefix optional, case-insensitive, spaces normalize.
+        assert_eq!(
+            find_status_chain(&paths, "ss_in_progress").as_deref(),
+            Some("21")
+        );
+        assert_eq!(
+            find_status_chain(&paths, "in progress").as_deref(),
+            Some("21")
+        );
+        // Unknown / empty target → no chain.
+        assert_eq!(find_status_chain(&paths, "Nirvana"), None);
+        assert_eq!(find_status_chain(&paths, ""), None);
     }
 
     #[test]

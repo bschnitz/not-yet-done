@@ -49,14 +49,22 @@ tab:
   name: Stoat
   order: 7
   icon: "󰭹"
+  # While any row in this view is unread, the tab bar puts a marker in front
+  # of the icon and emphasises the label — the only unread cue a *background*
+  # chat tab can give. Both keys are optional: the marker falls back to the
+  # view's own `unread_marker` below (so tree and tab agree) and then to 🔔,
+  # the style defaults to bold. Uncomment to override:
+  #   unread_marker: "🔔"
+  #   unread_style: [bold]     # or: unread, or { fg: unread, modifiers: [bold] }
 
 adapter:
   type: stoat
   id: chat
   config: stoat-adapter.yaml
-  # Connect on tab open (default). Set true to require a manual `r`
-  # before the adapter logs in / opens the socket.
-  manual_connect: false
+  # `manual_connect` defaults to true: the adapter logs in and opens its
+  # socket only after you press `r`. Set it to false to connect at startup —
+  # note that a login needing an answer then raises its dialog right away,
+  # over whatever tab you happen to be on.
 
 views:
   - name: chats
@@ -76,8 +84,10 @@ views:
     # (from this or another client). `unread_style` is a theme color name
     # (default: theme `unread`); `unread_marker` is the leading glyph (default
     # 💬; "" suppresses it, color only). Both are optional — omit for defaults.
+    # Overridden to a bell here because 💬 marks the channel *type* below
+    # (`icon:`) — the two glyphs answer different questions and must differ.
     unread_style: unread
-    unread_marker: "💬"
+    unread_marker: "🔔"
     columns:
       - { key: name, label: Name, source: label, sizing: "flex(1)" }
     actions:
@@ -116,13 +126,30 @@ views:
       - name: channels
         node_type: "stoat:channel"
         tree_label: name
+        # `icon:` = the row's TYPE glyph, drawn right before the label on
+        # every row of this level (unlike `leaf_glyph`, which only marks
+        # rows with nothing below them). It earns its keep here because
+        # uncategorized channels and categories share this tree level: with
+        # no glyph, a channel directly under the server reads exactly like a
+        # category, and expanding it surprises you with messages.
+        icon: "💬"
         columns:
           - { key: name, label: Channel, source: label, sizing: "flex(1)" }
         # Rename the channel under the cursor. `PATCH /channels/{id}` is a
         # single-field delta; the gateway's ChannelUpdate echo refreshes
         # the tree without a reload. `R` is a single char (no chord).
+        #
+        # `A` posts local files into the channel: `InputSpec::FilePicker
+        # { multi: true }` opens the TUI's picker, the adapter uploads each
+        # pick and sends them as messages with an empty body. Revolt allows
+        # 5 files per message, so a larger selection is split across several
+        # messages instead of being rejected. There is no caption — the API
+        # cannot add a file to an existing message; `e` on the posted
+        # message adds text in place afterwards. `type: custom` because a
+        # file picker is not the editor pipeline.
         actions:
           - { name: rename, key: R, type: custom, id: rename }
+          - { name: attach, key: A, type: custom, id: attach }
         # `C` cuts THIS channel (mark for move, no delete); `P` pastes a
         # previously-cut channel beside this one (into the same container).
         shortcuts:
@@ -151,9 +178,10 @@ views:
             # `smooth_scroll: true` makes this (long, multi-line) list scroll
             # one physical line at a time over the whole content instead of
             # jumping message-to-message — the body "glides" continuously.
-            # The highlight (what `e`/`d`/`+`/`p` act on) is sticky: it stays
-            # on its message and glides along with the content, only handing
-            # off to a neighbour once that message scrolls fully off an edge.
+            # The highlight (what `e`/`d`/`+`/`p` act on) glides with the
+            # content, but hands off one message at a time as soon as the
+            # next one is on screen — so `j`/`k` still walk the chat
+            # message by message while the body scrolls line by line.
             # Default is `false` (classic row-by-row scrolling).
             smooth_scroll: true
             # `mark_read_on_reach_end:` is a generic engine hook: when the
@@ -169,6 +197,17 @@ views:
             # never re-fires after the ack-driven reload). Drop the line to
             # disable. Ignored in tree mode (flat lists only).
             mark_read_on_reach_end: mark-read
+            # `cursor_on_open:` is the same idea at the other end of the list:
+            # opening this level puts the cursor on the first message the user
+            # has NOT read yet (the `unread` metadata field the tree highlight
+            # already uses), anchored at the TOP edge so the rest of the unread
+            # run reads downward from it — scroll on and you eventually hit
+            # `mark_read_on_reach_end` above. With nothing unread it falls back
+            # to the newest message. Only *opening* applies it: a reload, a live
+            # invalidation or an incoming message never yanks the cursor away
+            # from where you scrolled. Other values: `first` (the old default),
+            # `last`.
+            cursor_on_open: first_unread
             # `columns:` defines the data + sizing + per-column fg color
             # (`style:` is a theme reference). `row_layout:` arranges those
             # columns onto multiple physical lines per message — a chat look:
@@ -247,10 +286,55 @@ views:
               source: content
               markdown: true # render the body as soft-wrapped markdown
               keybinding: p
+            # Files posted with a message. The message node reports
+            # `has_children` only when it actually carries files, so Enter
+            # drills into this list on those messages and does nothing on
+            # the rest. Revolt has no per-attachment endpoint — files only
+            # ever ship embedded in their message — so the node ids are
+            # composite (`<channel>/msg/<message>/file/<file>`) and the
+            # adapter re-reads the parent message to resolve one.
+            #
+            # This level is only needed to reach a file *as a file*. Image
+            # attachments already render inline in the body above (the
+            # adapter emits them as markdown images), and `i` on the
+            # message opens all of them in the OS viewer at once.
+            children:
+              - name: attachments
+                node_type: "stoat:attachment"
+                columns:
+                  - {
+                      key: filename,
+                      label: File,
+                      source: label,
+                      style: text_high,
+                      sizing: "flex(1)",
+                    }
+                  - { key: size, label: Size, sizing: max }
+                  - { key: content_type, label: Type, sizing: max }
+                actions:
+                  # `open` downloads once into a per-message temp dir and
+                  # hands the path to the frontend (xdg-open). All files of
+                  # one message land in the same dir, so the viewer can page
+                  # through them; re-opening reuses the downloaded bytes.
+                  - { name: open, key: o, type: custom, id: open }
+                  # Saves EVERY file of the parent message into a directory
+                  # the form asks for (`~` is expanded, missing parents are
+                  # created). There is no delete: Revolt cannot remove a
+                  # single file from a message, only the whole message.
+                  - {
+                      name: download all,
+                      key: D,
+                      type: custom,
+                      id: download_all,
+                    }
+                  - { name: refresh, key: r, type: reload }
 
       - name: categories
         node_type: "stoat:category"
         tree_label: name
+        # The counterpart to the channels branch above — it is the PAIR of
+        # glyphs that makes the shared level readable.
+        icon: "📁"
         columns:
           - { key: name, label: Category, source: label, sizing: "flex(1)" }
         # A channel can also be created INSIDE a category (cursor on a
@@ -275,12 +359,16 @@ views:
           - name: channels
             node_type: "stoat:channel"
             tree_label: name
+            # Same glyph as the uncategorized branch — a channel looks like
+            # a channel wherever it sits.
+            icon: "💬"
             columns:
               - { key: name, label: Channel, source: label, sizing: "flex(1)" }
-            # Rename a channel inside a category — same action as the
-            # uncategorized branch.
+            # Rename a channel inside a category, and post files into it —
+            # same pair as the uncategorized branch.
             actions:
               - { name: rename, key: R, type: custom, id: rename }
+              - { name: attach, key: A, type: custom, id: attach }
             # Cut/paste a channel inside a category — same move pair as the
             # uncategorized branch.
             shortcuts:
@@ -300,8 +388,10 @@ views:
                 # Smooth line-wise scrolling + same chat layout as the
                 # uncategorized-channels branch above.
                 smooth_scroll: true
-                # Same cursor-on-newest ack hook as the uncategorized branch.
+                # Same cursor-on-newest ack hook, and the same open-on-the-first-
+                # unread-message placement, as the uncategorized branch.
                 mark_read_on_reach_end: mark-read
+                cursor_on_open: first_unread
                 columns:
                   - { key: author, source: author, style: accent, sizing: max }
                   - { key: time, source: time, style: text_dim, sizing: max }
@@ -345,6 +435,30 @@ views:
                   source: content
                   markdown: true # render the body as soft-wrapped markdown
                   keybinding: p
+                # Same attachment level as the uncategorized branch — Enter
+                # on a message that carries files drills into them.
+                children:
+                  - name: attachments
+                    node_type: "stoat:attachment"
+                    columns:
+                      - {
+                          key: filename,
+                          label: File,
+                          source: label,
+                          style: text_high,
+                          sizing: "flex(1)",
+                        }
+                      - { key: size, label: Size, sizing: max }
+                      - { key: content_type, label: Type, sizing: max }
+                    actions:
+                      - { name: open, key: o, type: custom, id: open }
+                      - {
+                          name: download all,
+                          key: D,
+                          type: custom,
+                          id: download_all,
+                        }
+                      - { name: refresh, key: r, type: reload }
 
   # To browse direct-message / group channels instead of servers, point a
   # second view's top level at stoat:channel (the root lists DMs there).

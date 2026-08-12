@@ -57,6 +57,35 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
+/// Map a backend-described [`ColumnSchema`](not_yet_done_content::ColumnSchema)
+/// `value_type` onto the view's [`ColumnKind`]. `Some` for the types that
+/// change rendering (number/duration/datetime); `None` for `text` and any
+/// unknown type, leaving the YAML-configured `kind` in place. This is the
+/// front-end side of the backend→front-end type channel (`describe_columns`).
+pub fn column_kind_from_value_type(value_type: &str) -> Option<ColumnKind> {
+    match value_type {
+        "number" => Some(ColumnKind::Number),
+        "duration" => Some(ColumnKind::Duration),
+        "datetime" => Some(ColumnKind::Datetime),
+        _ => None,
+    }
+}
+
+/// The inverse of [`column_kind_from_value_type`]: map a view [`ColumnKind`]
+/// onto the canonical `value_type` string the custom-column store understands.
+/// Drives the front-end→backend type channel for `edit-cells`, where the TUI
+/// sends each cell's type so the store can bootstrap the column on first write.
+/// `Path`/`Elapsed` have no dedicated store type, so they degrade to the
+/// nearest fit (`text`/`duration`).
+pub fn value_type_from_column_kind(kind: ColumnKind) -> &'static str {
+    match kind {
+        ColumnKind::Number => "number",
+        ColumnKind::Duration | ColumnKind::Elapsed => "duration",
+        ColumnKind::Datetime => "datetime",
+        ColumnKind::Text | ColumnKind::Path => "text",
+    }
+}
+
 /// Default display pattern for `datetime` columns without an explicit
 /// `format`.
 const DEFAULT_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M";
@@ -158,6 +187,25 @@ mod tests {
             format_typed_value("hello", ColumnKind::Text, None, "/"),
             ("hello".to_string(), CellAlignment::Left)
         );
+    }
+
+    #[test]
+    fn value_type_maps_to_typed_kinds_only() {
+        assert!(matches!(
+            column_kind_from_value_type("number"),
+            Some(ColumnKind::Number)
+        ));
+        assert!(matches!(
+            column_kind_from_value_type("duration"),
+            Some(ColumnKind::Duration)
+        ));
+        assert!(matches!(
+            column_kind_from_value_type("datetime"),
+            Some(ColumnKind::Datetime)
+        ));
+        // `text` and unknown types leave the YAML-configured kind in place.
+        assert!(column_kind_from_value_type("text").is_none());
+        assert!(column_kind_from_value_type("bogus").is_none());
     }
 
     #[test]

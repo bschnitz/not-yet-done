@@ -1,12 +1,11 @@
 //! JQL helpers shared by the issue list path: column→field mapping for
 //! sort, ORDER-BY rewriting on top of the user-supplied JQL, and the
-//! `SortableColumn` advertisement returned by [`crate::adapter::JiraRoot`].
+//! column declaration returned by [`crate::adapter::JiraRoot`].
 
-use not_yet_done_content::{SortDirection, SortKey, SortKind, SortableColumn};
+use not_yet_done_content::{ColumnSchema, SortDirection, SortKey};
 
-/// Map a public column key (as exposed by [`sortable_columns`]) onto the
-/// JQL field name. Returns `None` for columns we cannot sort on
-/// server-side.
+/// Map a public column key onto the JQL field name. Returns `None` for
+/// columns we cannot sort on server-side.
 pub(super) fn jql_field_for_column(column: &str) -> Option<&'static str> {
     match column {
         "key" => Some("key"),
@@ -14,45 +13,60 @@ pub(super) fn jql_field_for_column(column: &str) -> Option<&'static str> {
         "status" => Some("status"),
         "priority" => Some("priority"),
         "assignee" => Some("assignee"),
+        "creator" => Some("creator"),
+        // JQL names the field in the singular even though an issue can carry
+        // several versions. Ordering follows the project's version *sequence*,
+        // not the version name — so `1.9` sorts before `1.10` when the project
+        // has them in that order.
+        "fix_versions" => Some("fixVersion"),
         "summary" => Some("summary"),
         "updated" => Some("updated"),
         _ => None,
     }
 }
 
-/// Columns the issue list can be server-side sorted on.
-pub(super) fn issue_sortable_columns() -> Vec<SortableColumn> {
-    [
-        ("key", "Key"),
-        ("type", "Type"),
-        ("status", "Status"),
-        ("priority", "Priority"),
-        ("assignee", "Assignee"),
-        ("summary", "Summary"),
-        ("updated", "Updated"),
+/// Every column an issue row carries, with its type. The order matches the
+/// metadata fields `issue_summary` builds, so this list and that projection
+/// are read side by side.
+fn issue_row_columns() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema::new("bookmarked", "Bookmark"),
+        ColumnSchema::new("key", "Key"),
+        ColumnSchema::new("summary", "Summary"),
+        ColumnSchema::new("type", "Type"),
+        ColumnSchema::new("status", "Status"),
+        ColumnSchema::new("priority", "Priority"),
+        ColumnSchema::new("assignee", "Assignee"),
+        ColumnSchema::new("creator", "Creator"),
+        ColumnSchema::new("fix_versions", "Fix Versions"),
+        ColumnSchema::new("updated", "Updated").typed("datetime"),
+        ColumnSchema::new("attachments", "Attachm.").typed("number"),
     ]
-    .into_iter()
-    .map(|(key, label)| SortableColumn {
-        key: key.into(),
-        label: label.into(),
-        // Jira sorts server-side via JQL ORDER BY, so the kind is unused here.
-        kind: SortKind::Text,
-    })
-    .collect()
 }
 
-/// Columns the bookmarks list can be sorted on. Same set as the normal
-/// issue list, plus the synthetic `bookmarked_at` column. Unlike the normal
-/// list (server-side JQL `ORDER BY`), the bookmarks list sorts **locally**
-/// via [`not_yet_done_content::apply_sort`], so the [`SortKind`] matters
-/// here: `bookmarked_at` is RFC3339 and sorts as a `DateTime`.
-pub(super) fn bookmark_sortable_columns() -> Vec<SortableColumn> {
-    let mut cols = issue_sortable_columns();
-    cols.push(SortableColumn {
-        key: "bookmarked_at".into(),
-        label: "Bookmarked".into(),
-        kind: SortKind::DateTime,
-    });
+/// The issue list's columns. Every one is carried in the rows; a column is
+/// **sortable** exactly when [`jql_field_for_column`] can name it in an
+/// `ORDER BY`, because this list is ordered by the server — the rows we get
+/// back are one page of a much larger result, so sorting them locally would
+/// order the page, not the query.
+pub(super) fn issue_columns() -> Vec<ColumnSchema> {
+    issue_row_columns()
+        .into_iter()
+        .map(|c| {
+            let server_sortable = jql_field_for_column(&c.key).is_some();
+            if server_sortable { c } else { c.unsortable() }
+        })
+        .collect()
+}
+
+/// The bookmarks list's columns: the issue columns plus the synthetic
+/// `bookmarked_at`. This list is held in full and sorted **locally** via
+/// [`not_yet_done_content::apply_sort`], so every column in the rows is
+/// sortable — including the two JQL cannot order by — and the declared
+/// `value_type` is what the comparison actually uses.
+pub(super) fn bookmark_columns() -> Vec<ColumnSchema> {
+    let mut cols = issue_row_columns();
+    cols.push(ColumnSchema::new("bookmarked_at", "Bookmarked").typed("datetime"));
     cols
 }
 
@@ -108,10 +122,11 @@ pub(super) fn strip_order_by(jql: &str) -> String {
     jql.to_string()
 }
 
-/// Splice `sort` onto a JQL string. If `sort` is empty, the JQL is
-/// returned unchanged (preserving any embedded `ORDER BY`). Otherwise
-/// any existing `ORDER BY` is stripped and our clause is appended.
-pub(super) fn apply_sort(jql: &str, sort: &[SortKey]) -> (String, Vec<SortKey>) {
+/// Splice `sort` onto a JQL string as an `ORDER BY` clause — this does not
+/// sort anything itself, it hands the ordering to the server. If `sort` is
+/// empty, the JQL is returned unchanged (preserving any embedded `ORDER BY`).
+/// Otherwise any existing `ORDER BY` is stripped and our clause is appended.
+pub(super) fn apply_order_by(jql: &str, sort: &[SortKey]) -> (String, Vec<SortKey>) {
     if sort.is_empty() {
         return (jql.to_string(), Vec::new());
     }
@@ -133,20 +148,45 @@ mod tests {
     use super::*;
 
     fn key(c: &str, d: SortDirection) -> SortKey {
-        SortKey { column: c.into(), direction: d }
+        SortKey {
+            column: c.into(),
+            direction: d,
+        }
     }
 
     #[test]
     fn bookmark_columns_extend_issue_columns_with_datetime() {
-        let issue = issue_sortable_columns();
-        let bookmark = bookmark_sortable_columns();
+        let issue = issue_columns();
+        let bookmark = bookmark_columns();
         // Same issue columns, plus exactly one extra (bookmarked_at).
         assert_eq!(bookmark.len(), issue.len() + 1);
         let stamp = bookmark
             .iter()
             .find(|c| c.key == "bookmarked_at")
             .expect("bookmarked_at column present");
-        assert_eq!(stamp.kind, SortKind::DateTime);
+        assert_eq!(stamp.sort_kind(), not_yet_done_content::SortKind::DateTime);
+    }
+
+    #[test]
+    fn the_issue_list_only_advertises_what_jql_can_order_by() {
+        for col in issue_columns() {
+            assert_eq!(
+                col.sortable,
+                jql_field_for_column(&col.key).is_some(),
+                "column '{}' promises a sort JQL cannot deliver",
+                col.key
+            );
+            assert!(col.in_rows, "column '{}' must be in the rows", col.key);
+        }
+    }
+
+    #[test]
+    fn the_bookmarks_list_sorts_locally_so_every_column_is_sortable() {
+        // Held in full and sorted by `apply_sort`, so even the columns JQL
+        // has no field for (bookmark marker, attachment count) are honest.
+        for col in bookmark_columns() {
+            assert!(col.sortable && col.in_rows, "column '{}'", col.key);
+        }
     }
 
     #[test]
@@ -205,18 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_sort_appends_when_jql_has_no_order_by() {
-        let (jql, applied) = apply_sort(
-            "project = FOO",
-            &[key("status", SortDirection::Asc)],
-        );
+    fn apply_order_by_appends_when_jql_has_no_order_by() {
+        let (jql, applied) = apply_order_by("project = FOO", &[key("status", SortDirection::Asc)]);
         assert_eq!(jql, "project = FOO ORDER BY status ASC");
         assert_eq!(applied.len(), 1);
     }
 
     #[test]
-    fn apply_sort_overrides_existing_order_by() {
-        let (jql, _) = apply_sort(
+    fn apply_order_by_overrides_existing_order_by() {
+        let (jql, _) = apply_order_by(
             "project = FOO ORDER BY updated DESC",
             &[key("status", SortDirection::Asc)],
         );
@@ -224,18 +261,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_sort_preserves_existing_when_input_empty() {
-        let (jql, applied) = apply_sort(
-            "project = FOO ORDER BY updated DESC",
-            &[],
-        );
+    fn apply_order_by_preserves_existing_when_input_empty() {
+        let (jql, applied) = apply_order_by("project = FOO ORDER BY updated DESC", &[]);
         assert_eq!(jql, "project = FOO ORDER BY updated DESC");
         assert!(applied.is_empty());
     }
 
     #[test]
-    fn apply_sort_with_only_unknown_columns_keeps_original() {
-        let (jql, applied) = apply_sort(
+    fn apply_order_by_with_only_unknown_columns_keeps_original() {
+        let (jql, applied) = apply_order_by(
             "project = FOO ORDER BY updated DESC",
             &[key("nonsense", SortDirection::Asc)],
         );
@@ -244,15 +278,27 @@ mod tests {
     }
 
     #[test]
-    fn apply_sort_handles_empty_jql_with_sort() {
-        let (jql, applied) = apply_sort("", &[key("status", SortDirection::Asc)]);
+    fn apply_order_by_handles_empty_jql_with_sort() {
+        let (jql, applied) = apply_order_by("", &[key("status", SortDirection::Asc)]);
         assert_eq!(jql, "ORDER BY status ASC");
         assert_eq!(applied.len(), 1);
     }
 
+    /// `fix_versions` is the column key (plural, mirroring Jira's `fixVersions`
+    /// field), but JQL only knows the singular `fixVersion`. Sorting on the
+    /// column must emit the JQL spelling, or the server rejects the query.
     #[test]
-    fn issue_sortable_columns_includes_key_and_updated() {
-        let cols = issue_sortable_columns();
+    fn fix_versions_column_maps_to_the_singular_jql_field() {
+        assert_eq!(jql_field_for_column("fix_versions"), Some("fixVersion"));
+        let order = build_order_by(&[key("fix_versions", SortDirection::Desc)]);
+        assert_eq!(order.clause, "ORDER BY fixVersion DESC");
+        // Advertised as sortable, so the sort menu offers it at all.
+        assert!(issue_columns().iter().any(|c| c.key == "fix_versions"));
+    }
+
+    #[test]
+    fn issue_columns_include_key_and_updated() {
+        let cols = issue_columns();
         assert!(cols.iter().any(|c| c.key == "key"));
         assert!(cols.iter().any(|c| c.key == "updated"));
     }

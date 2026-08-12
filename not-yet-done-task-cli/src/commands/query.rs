@@ -19,12 +19,14 @@ pub mod cli {
     ///   nyd-t query run --entity tracking --file filter.yaml --debug
     #[command(about = "Execute a YAML filter query and print matching rows as JSON")]
     pub fn run(
-        #[arg(long, short, help = "Entity to query: 'task' or 'tracking'")]
-        entity: String,
-        #[arg(long, short, help = "Path to YAML filter file (reads stdin if omitted)")]
+        #[arg(long, short, help = "Entity to query: 'task' or 'tracking'")] entity: String,
+        #[arg(
+            long,
+            short,
+            help = "Path to YAML filter file (reads stdin if omitted)"
+        )]
         file: Option<String>,
-        #[arg(long, help = "Show resolved filter expression before executing")]
-        debug: bool,
+        #[arg(long, help = "Show resolved filter expression before executing")] debug: bool,
     ) -> u8 {
         let content = match file {
             Some(path) => match std::fs::read_to_string(&path) {

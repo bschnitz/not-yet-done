@@ -19,8 +19,8 @@ pub trait RenderTarget {
 /// Coordinates are always absolute (origin at `(0, 0)`), matching the
 /// convention used in `grid-render-sim` where the area always starts at `(0,0)`.
 pub struct CharBuf {
-    buf:    Vec<Vec<char>>,
-    width:  usize,
+    buf: Vec<Vec<char>>,
+    width: usize,
     height: usize,
 }
 
@@ -28,7 +28,7 @@ impl CharBuf {
     /// Create a blank buffer of the given dimensions.
     pub fn new(width: usize, height: usize) -> Self {
         Self {
-            buf:    vec![vec![' '; width]; height],
+            buf: vec![vec![' '; width]; height],
             width,
             height,
         }
@@ -36,7 +36,10 @@ impl CharBuf {
 
     /// Consume the buffer and return its rows as owned `String`s.
     pub fn into_lines(self) -> Vec<String> {
-        self.buf.into_iter().map(|row| row.into_iter().collect()).collect()
+        self.buf
+            .into_iter()
+            .map(|row| row.into_iter().collect())
+            .collect()
     }
 }
 

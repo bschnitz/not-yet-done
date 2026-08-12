@@ -10,40 +10,44 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use not_yet_done_content::http_log;
-use reqwest::{Client as HttpClient, header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue}};
+use reqwest::{
+    Client as HttpClient,
+    header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue},
+};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-pub mod query;
-mod history;
 mod actions;
+mod convert;
+mod create;
+mod edit;
+mod history;
 mod notifications;
 mod project_meta;
-mod edit;
-mod create;
-mod convert;
+pub mod query;
 
-pub use query::{
-    ItemSummary, ItemType, ParsedTaigaQuery, QuerySpec, apply_sort as apply_query_sort,
-    default_sort, parse_query_yaml, parse_taiga_query, run_queries, sortable_column_keys,
-};
-pub use history::{TaigaComment, fetch_comments};
 pub use actions::{
     TaigaAttachment, delete_attachment, download_attachment, edit_comment, list_attachments,
     toggle_watch, upload_attachment, upload_attachment_bytes,
 };
 pub use convert::{delete_item, fetch_id_name_map, fetch_raw_detail};
-pub use project_meta::{TaigaMember, TaigaStatus};
-pub use edit::{
-    EditFields, ItemPatch, PatchOutcome, add_comment, delete_comment, patch_item,
-};
 pub use create::{CreateFields, CreatedItem, create_item};
+pub use edit::{EditFields, ItemPatch, PatchOutcome, add_comment, delete_comment, patch_item};
+pub use history::{TaigaComment, fetch_comments};
 pub use notifications::{
     NotificationEvent, NotificationPage, NotificationTarget, TaigaNotification,
     fetch_all_web_notifications, fetch_notifications_page, mark_notification_as_read,
 };
+pub use project_meta::{TaigaMember, TaigaStatus};
+pub use query::{
+    ItemSummary, ItemType, ParsedTaigaQuery, QuerySpec, apply_sort as apply_query_sort,
+    default_sort, parse_query_yaml, parse_taiga_query, run_queries, sortable_column_keys,
+};
+/// Crate-internal: the detail path reuses the list path's person-name
+/// resolution so a row and its ticket buffer never disagree on a name.
+pub(crate) use query::{member_display_name, owner_display_name};
 
 pub(crate) use project_meta::ProjectMetaCache;
 

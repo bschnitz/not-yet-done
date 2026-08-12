@@ -1,5 +1,5 @@
-use crate::widgets::common::{render_empty_line, render_prefixed_line, PREFIX_LEN};
 use crate::widgets::common::types::SelectionMarker;
+use crate::widgets::common::{PREFIX_LEN, render_empty_line, render_prefixed_line};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::{Frame, layout::Rect};
@@ -31,7 +31,11 @@ pub(super) struct MultiChoiceViewData<'a> {
     pub shortcuts: &'a [Option<char>],
 }
 
-pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'_>) -> Option<Position> {
+pub(super) fn render(
+    frame: &mut Frame,
+    area: Rect,
+    data: &MultiChoiceViewData<'_>,
+) -> Option<Position> {
     let total_width = data.width.unwrap_or(area.width);
     let text_width = total_width.saturating_sub(PREFIX_LEN) as usize;
     let x = area.x;
@@ -42,8 +46,11 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
     let title_style = data.style.resolved_style(ST::Title);
     render_prefixed_line(
         frame.buffer_mut(),
-        x, y, total_width,
-        data.title, text_width,
+        x,
+        y,
+        total_width,
+        data.title,
+        text_width,
         &data.style.prefix_color,
         &title_style,
         false,
@@ -55,9 +62,15 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
         if data.show_filter {
             if y < area.bottom() {
                 cursor_pos = render_filter_row(
-                    frame.buffer_mut(), x, y, total_width, text_width,
-                    data.filter_query, data.filter_cursor,
-                    &data.style.prefix_color, data.style,
+                    frame.buffer_mut(),
+                    x,
+                    y,
+                    total_width,
+                    text_width,
+                    data.filter_query,
+                    data.filter_cursor,
+                    &data.style.prefix_color,
+                    data.style,
                     data.cursor_on_empty,
                 );
                 y += 1;
@@ -71,21 +84,29 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
             data.filtered_indices.len()
         };
 
-        let visible_items = data.filtered_indices.iter()
+        let visible_items = data
+            .filtered_indices
+            .iter()
             .skip(data.scroll_offset)
             .take(visible_count);
 
         // Calculate order number padding width based on total items.
         let order_width = if data.show_order {
             let total_items = data.order.len();
-            let digits = if total_items == 0 { 1 } else { (total_items as f64).log10() as usize + 1 };
+            let digits = if total_items == 0 {
+                1
+            } else {
+                (total_items as f64).log10() as usize + 1
+            };
             digits + 2 // "N. " with right-aligned number
         } else {
             0
         };
 
         for (vi, &real_idx) in visible_items.enumerate() {
-            if y >= area.bottom() { break; }
+            if y >= area.bottom() {
+                break;
+            }
             let choice = &data.choices[real_idx];
             let is_selected = data.selected.get(real_idx).copied().unwrap_or(false);
             let is_cursor = (data.scroll_offset + vi) == data.cursor;
@@ -102,7 +123,10 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
 
             let display = if data.show_order {
                 // Look up position of this item in the full order vec.
-                let order_pos = data.order.iter().position(|&x| x == real_idx)
+                let order_pos = data
+                    .order
+                    .iter()
+                    .position(|&x| x == real_idx)
                     .map(|p| p + 1)
                     .unwrap_or(0);
                 let num_str = format!("{:>width$}. ", order_pos, width = order_width - 2);
@@ -119,8 +143,11 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
 
             render_prefixed_line(
                 frame.buffer_mut(),
-                x, y, total_width,
-                &display, text_width,
+                x,
+                y,
+                total_width,
+                &display,
+                text_width,
                 &data.style.prefix_color,
                 &row_style,
                 is_cursor,
@@ -129,15 +156,23 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
             // Highlight shortcut character if present.
             if let Some(Some(sc)) = data.shortcuts.get(real_idx) {
                 // Find the position of the shortcut char in the choice label.
-                if let Some(char_offset) = choice.chars().position(|c| c.to_lowercase().next() == Some(*sc)) {
+                if let Some(char_offset) = choice
+                    .chars()
+                    .position(|c| c.to_lowercase().next() == Some(*sc))
+                {
                     // Compute the screen position: PREFIX_LEN + marker + order + char_offset
                     let prefix_chars = marker_text.chars().count();
-                    let screen_offset = if data.show_order { order_width + prefix_chars + char_offset } else { prefix_chars + char_offset };
+                    let screen_offset = if data.show_order {
+                        order_width + prefix_chars + char_offset
+                    } else {
+                        prefix_chars + char_offset
+                    };
                     let cx = x + PREFIX_LEN + screen_offset as u16;
                     if cx < x + total_width {
                         if let Some(cell) = frame.buffer_mut().cell_mut((cx, y)) {
                             use ratatui::style::Modifier;
-                            let hl_style = row_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+                            let hl_style =
+                                row_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                             cell.set_style(hl_style);
                         }
                     }
@@ -154,8 +189,11 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
             let footer_style = data.style.resolved_style(ST::Footer);
             render_prefixed_line(
                 frame.buffer_mut(),
-                x, y, total_width,
-                &footer_text, text_width,
+                x,
+                y,
+                total_width,
+                &footer_text,
+                text_width,
                 &data.style.prefix_color,
                 &footer_style,
                 false,
@@ -177,15 +215,15 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
                 data.style.resolved_style(ST::Normal),
             )
         } else {
-            (
-                summary,
-                data.style.resolved_style(ST::SelectedActive),
-            )
+            (summary, data.style.resolved_style(ST::SelectedActive))
         };
         render_prefixed_line(
             frame.buffer_mut(),
-            x, y, total_width,
-            &summary_text, text_width,
+            x,
+            y,
+            total_width,
+            &summary_text,
+            text_width,
             &data.style.prefix_color,
             &summary_style,
             false,
@@ -196,8 +234,13 @@ pub(super) fn render(frame: &mut Frame, area: Rect, data: &MultiChoiceViewData<'
 }
 
 fn render_filter_row(
-    buf: &mut Buffer, x: u16, y: u16, total_width: u16, text_width: usize,
-    query: &str, cursor_pos: usize,
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    total_width: u16,
+    text_width: usize,
+    query: &str,
+    cursor_pos: usize,
     prefix_color: &Option<ratatui::style::Color>,
     style: &MultiChoiceStyle,
     cursor_on_empty: bool,
@@ -211,8 +254,12 @@ fn render_filter_row(
         query.to_string()
     };
     render_prefixed_line(
-        buf, x, y, total_width,
-        &display, text_width,
+        buf,
+        x,
+        y,
+        total_width,
+        &display,
+        text_width,
         prefix_color,
         &input_style,
         false,
@@ -225,7 +272,11 @@ fn render_filter_row(
     // Compute terminal cursor position.
     let text_start = x + PREFIX_LEN;
     let max_w = total_width.saturating_sub(PREFIX_LEN) as usize;
-    let view_start = if cursor_pos >= max_w { cursor_pos + 1 - max_w } else { 0 };
+    let view_start = if cursor_pos >= max_w {
+        cursor_pos + 1 - max_w
+    } else {
+        0
+    };
     let screen_pos = cursor_pos.saturating_sub(view_start);
 
     if screen_pos < max_w {

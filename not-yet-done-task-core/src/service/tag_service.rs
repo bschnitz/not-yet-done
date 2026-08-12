@@ -11,7 +11,10 @@ use crate::repository::{ProjectRepository, TagRepository, TagStyle, TagStylePatc
 #[derive(Debug)]
 pub enum TagItem {
     Global(global_tag::Model),
-    Project { tag: project_tag::Model, project_name: String },
+    Project {
+        tag: project_tag::Model,
+        project_name: String,
+    },
 }
 
 enum TagId {
@@ -34,7 +37,10 @@ pub trait TagService: shaku::Interface {
     ) -> Result<project_tag::Model, AppError>;
     async fn list_all(&self) -> Result<Vec<TagItem>, AppError>;
     async fn list_global(&self) -> Result<Vec<global_tag::Model>, AppError>;
-    async fn list_by_project(&self, project_ref: String) -> Result<Vec<project_tag::Model>, AppError>;
+    async fn list_by_project(
+        &self,
+        project_ref: String,
+    ) -> Result<Vec<project_tag::Model>, AppError>;
     async fn edit(
         &self,
         id: String,
@@ -72,7 +78,9 @@ impl TagService for TagServiceImpl {
     ) -> Result<project_tag::Model, AppError> {
         validate_style(&style)?;
         let project = resolve_project(&*self.project_repository, &project_ref).await?;
-        self.tag_repository.insert_project(name, style, project.id).await
+        self.tag_repository
+            .insert_project(name, style, project.id)
+            .await
     }
 
     async fn list_all(&self) -> Result<Vec<TagItem>, AppError> {
@@ -83,7 +91,10 @@ impl TagService for TagServiceImpl {
 
         for tag in project_tags {
             let project = self.project_repository.find_by_id(tag.project_id).await?;
-            items.push(TagItem::Project { tag, project_name: project.name });
+            items.push(TagItem::Project {
+                tag,
+                project_name: project.name,
+            });
         }
 
         Ok(items)
@@ -114,9 +125,15 @@ impl TagService for TagServiceImpl {
                 Ok(TagItem::Global(tag))
             }
             TagId::Project(uuid) => {
-                let tag = self.tag_repository.update_project_tag(uuid, name, style).await?;
+                let tag = self
+                    .tag_repository
+                    .update_project_tag(uuid, name, style)
+                    .await?;
                 let project = self.project_repository.find_by_id(tag.project_id).await?;
-                Ok(TagItem::Project { tag, project_name: project.name })
+                Ok(TagItem::Project {
+                    tag,
+                    project_name: project.name,
+                })
             }
         }
     }
@@ -147,8 +164,12 @@ fn validate_style(style: &TagStyle) -> Result<(), AppError> {
 }
 
 fn validate_style_patch(patch: &TagStylePatch) -> Result<(), AppError> {
-    if let Some(c) = &patch.fg_color { validate_color_opt(c)?; }
-    if let Some(c) = &patch.bg_color { validate_color_opt(c)?; }
+    if let Some(c) = &patch.fg_color {
+        validate_color_opt(c)?;
+    }
+    if let Some(c) = &patch.bg_color {
+        validate_color_opt(c)?;
+    }
     Ok(())
 }
 

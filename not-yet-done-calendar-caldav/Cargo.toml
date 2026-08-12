@@ -1,0 +1,25 @@
+[package]
+name = "not-yet-done-calendar-caldav"
+version = "0.1.0"
+edition = "2024"
+
+# CalDAV calendar backend for the calendar adapter. Reads events from any
+# CalDAV server (mail.de, Nextcloud, Baïkal, Fastmail, iCloud, Radicale, …) over
+# HTTP Basic auth: it discovers the account's calendar collections from the
+# configured entry URL and runs a `calendar-query` REPORT per window, letting
+# the server expand recurrences to concrete UTC instances. One instance per
+# configured connection; the adapter aggregates several. Depends only on
+# `calendar-core` (the backend seam) and `content` (the credential resolver) —
+# never on the adapter crate or the TUI.
+
+[dependencies]
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+quick-xml   = { workspace = true }
+reqwest     = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
+tokio       = { workspace = true }
+
+not-yet-done-calendar-core = { path = "../not-yet-done-calendar-core" }
+not-yet-done-content       = { path = "../not-yet-done-content" }

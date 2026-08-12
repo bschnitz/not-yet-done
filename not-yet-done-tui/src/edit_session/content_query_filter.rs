@@ -5,6 +5,7 @@
 //! on close via `FollowUp` dispatch.
 
 use async_trait::async_trait;
+use not_yet_done_content::QueryKind;
 
 use super::{CommitOutcome, EditSession, FollowUp, SessionScope};
 
@@ -13,6 +14,17 @@ pub struct ContentQueryFilterSession {
     save_name: Option<String>,
     is_new: bool,
     template: String,
+    /// Editor file suffix for syntax highlighting — the adapter's query
+    /// language (`.yaml` for the FilterExpr DSL, `.jql`/`.cql` for Jira /
+    /// Confluence), or `.md` for an extended document, whose container is
+    /// the framework's format rather than the adapter's. See
+    /// `ContentAdapter::query_body_suffix`.
+    suffix: String,
+    /// Which store this body belongs to. Carried through the session
+    /// because the App cannot recover it from the text on commit: an
+    /// extended document is a Markdown file, and a `yaml`-language
+    /// adapter's own query would look just like the spec fence inside one.
+    kind: QueryKind,
 }
 
 impl ContentQueryFilterSession {
@@ -21,8 +33,17 @@ impl ContentQueryFilterSession {
         save_name: Option<String>,
         is_new: bool,
         template: String,
+        suffix: String,
+        kind: QueryKind,
     ) -> Self {
-        Self { view_index, save_name, is_new, template }
+        Self {
+            view_index,
+            save_name,
+            is_new,
+            template,
+            suffix,
+            kind,
+        }
     }
 }
 
@@ -33,7 +54,7 @@ impl EditSession for ContentQueryFilterSession {
     }
 
     fn suffix(&self) -> &str {
-        ".jql"
+        &self.suffix
     }
 
     fn scope(&self) -> SessionScope {
@@ -50,6 +71,7 @@ impl EditSession for ContentQueryFilterSession {
             content: text.to_string(),
             save_name: self.save_name.clone(),
             is_new: self.is_new,
+            kind: self.kind,
         })
     }
 
@@ -58,6 +80,7 @@ impl EditSession for ContentQueryFilterSession {
             view_index: self.view_index,
             content: text.to_string(),
             save_name: self.save_name.clone(),
+            kind: self.kind,
         })
     }
 }

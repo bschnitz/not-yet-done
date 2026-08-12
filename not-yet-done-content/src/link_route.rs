@@ -24,8 +24,11 @@ pub enum LinkRouteError {
     #[error("stale link: {0}")]
     Stale(String),
 
-    /// Layer recognised the head but cannot open it (e.g. Postgres
-    /// rows in v1 — their IDs are not stable across refreshes).
+    /// Layer recognised the address but cannot open it — the adapter
+    /// declared `unstable_node_ids`, or the target isn't among the
+    /// loaded rows and the adapter can't locate it. Distinct from
+    /// [`Self::Stale`] on purpose: this is "can't get there", not
+    /// "isn't there", so it must not trigger a prune.
     #[error("not supported: {0}")]
     NotSupported(String),
 

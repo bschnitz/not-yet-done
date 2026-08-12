@@ -95,7 +95,10 @@ impl App {
             create_action: config.create.clone(),
             rename_action: config.rename.clone(),
             delete_action: config.delete.clone(),
-            title: config.title.clone().unwrap_or_else(|| "Options".to_string()),
+            title: config
+                .title
+                .clone()
+                .unwrap_or_else(|| "Options".to_string()),
         });
 
         self.spawn_option_menu_load(view_index, pane_id, node_id, config.source, config.marker);

@@ -86,7 +86,7 @@ impl JiraClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("POST", &url, e))?;
-        let resp = http_log::check_status("POST", &url, resp).await?;
+        let resp = self.check_status("POST", &url, resp).await?;
         let body_text = resp
             .text()
             .await

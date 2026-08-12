@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tokio       = { workspace = true }
 async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
 thiserror   = { workspace = true }

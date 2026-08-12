@@ -7,7 +7,6 @@ members = [
   "not-yet-done-tui",
   "not-yet-done-macros",
   "not-yet-done-forest",
-  "ratatui_form_widgets",
   "grid-render-sim",
   "not-yet-done-grid-core",
   "not-yet-done-ratatui",
@@ -15,16 +14,33 @@ members = [
   "not-yet-done-waybar",
   "not-yet-done-content",
   "not-yet-done-filter",
+  "not-yet-done-extended-query",
   "not-yet-done-task-core",
   "not-yet-done-jira-adapter",
+  "not-yet-done-custom-columns",
   "not-yet-done-kimai-adapter",
   "not-yet-done-taiga-adapter",
   "not-yet-done-transport",
+  "not-yet-done-scripts",
+  "not-yet-done-sql-core",
   "not-yet-done-postgres-adapter",
+  "not-yet-done-sqlite-adapter",
   "not-yet-done-confluence-adapter",
   "not-yet-done-stoat-adapter",
   "not-yet-done-local-adapter",
+  "not-yet-done-workflow",
+  "not-yet-done-calendar-core",
+  "not-yet-done-calendar-msgraph",
+  "not-yet-done-office365-web",
+  "not-yet-done-calendar-office365-web",
+  "not-yet-done-calendar-caldav",
+  "not-yet-done-calendar-adapter",
   "not-yet-done-host",
+  "date-periods",
+  "natural-date",
+  "fieldsmith",
+  "vimrealm",
+  "fieldsmith-derive",
 ]
 
 [workspace.dependencies]
@@ -41,7 +57,9 @@ tokio = { version = "1.50.0", features = ["full"] }
 uuid = { version = "1.22.0", features = ["v4", "v5"] }
 shaku = { version = "0.6.2", features = ["derive"] }
 async-trait = "0.1.89"
+futures = "0.3.31"
 chrono = { version = "0.4.44", features = ["clock"] }
+croner = "3.0.1"
 regex = "1.12.3"
 chrono-english = "0.1.8"
 dateparser     = "0.2.1"
@@ -52,6 +70,7 @@ dirs = "6.0.0"
 keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
+fieldsmith = { path = "fieldsmith", version = "0.1" }
 # reqwest 0.13 flipped the default TLS backend from native-tls to rustls
 # and made `query`/`form` opt-in features. We keep native-tls (openssl)
 # to preserve the existing behaviour and stay on a single TLS stack with
@@ -69,6 +88,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "query",
 ] }
 base64 = "0.22"
+quick-xml = "0.39"
 slug = "0.1"
 serde_yaml = "0.9.34"
 crossterm = { version = "0.29.0", features = ["event-stream"] }

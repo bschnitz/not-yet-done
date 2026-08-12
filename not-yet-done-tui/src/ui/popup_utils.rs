@@ -1,10 +1,10 @@
 //! Shared popup rendering utilities used by grouping and column config popups.
 
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, BorderType, Clear};
-use ratatui::Frame;
+use ratatui::widgets::{Block, BorderType, Borders, Clear};
 
 use crate::ui::theme::Theme;
 
@@ -89,7 +89,9 @@ pub fn render_hints_bar(
 
         let key_style = Style::default().fg(t.accent()).bg(hints_bg);
         for ch in key.chars() {
-            if hx >= inner.right() || hy >= inner.bottom() { break; }
+            if hx >= inner.right() || hy >= inner.bottom() {
+                break;
+            }
             if let Some(cell) = buf.cell_mut(Position::new(hx, hy)) {
                 cell.set_char(ch);
                 cell.set_style(key_style);
@@ -99,7 +101,9 @@ pub fn render_hints_bar(
         let desc_style = Style::default().fg(t.text_med()).bg(hints_bg);
         let desc_text = format!(" {}  ", desc);
         for ch in desc_text.chars() {
-            if hx >= inner.right() || hy >= inner.bottom() { break; }
+            if hx >= inner.right() || hy >= inner.bottom() {
+                break;
+            }
             if let Some(cell) = buf.cell_mut(Position::new(hx, hy)) {
                 cell.set_char(ch);
                 cell.set_style(desc_style);

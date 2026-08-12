@@ -162,7 +162,13 @@ impl TaigaAttachmentNode {
 
         let (saved, total, failures) = write_attachments(&self.client, &attachments, &dir).await;
         Ok(ActionOutcome::Done {
-            message: Some(download_summary(&self.parent_id, &dir, saved, total, &failures)),
+            message: Some(download_summary(
+                &self.parent_id,
+                &dir,
+                saved,
+                total,
+                &failures,
+            )),
         })
     }
 }
@@ -209,7 +215,11 @@ fn download_summary(
         dir.display()
     );
     if !failures.is_empty() {
-        message.push_str(&format!(" — {} failed ({})", failures.len(), failures.join("; ")));
+        message.push_str(&format!(
+            " — {} failed ({})",
+            failures.len(),
+            failures.join("; ")
+        ));
     }
     message
 }
@@ -235,11 +245,6 @@ impl Node for TaigaAttachmentNode {
     fn content(&self) -> Option<&dyn Content> {
         None
     }
-
-    fn actions(&self) -> Vec<NodeAction> {
-        attachment_actions()
-    }
-
     /// `delete` opts into the frontend's generic delete plumbing: returning
     /// [`ActionDispatch::DeleteSelf`] makes the TUI show a `(y/n)` prompt and,
     /// on confirm, call `execute("delete", None)` here. The adapter authors
@@ -256,11 +261,7 @@ impl Node for TaigaAttachmentNode {
         }
     }
 
-    async fn execute(
-        &mut self,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_via_xdg().await,
             ("download_all", ActionInput::Form(values)) => {

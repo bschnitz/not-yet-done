@@ -55,7 +55,9 @@ impl Component for Grid {
 
 impl AppComponent<GridEvent, NoUserEvent> for Grid {
     fn on(&mut self, ev: &Event<NoUserEvent>) -> Option<GridEvent> {
-        let Event::Keyboard(key) = ev else { return None };
+        let Event::Keyboard(key) = ev else {
+            return None;
+        };
         let key = *key;
         let old_focus = self.focus_cell;
         self.handle_key(key);

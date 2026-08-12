@@ -48,6 +48,20 @@ pub(super) fn channel_type() -> &'static NodeType {
     &T
 }
 
+/// One uploaded file below a message. Leaf; the mime type is per-file, so
+/// the static descriptor stays generic (the node's metadata carries the
+/// real `content_type`).
+pub(super) fn attachment_type() -> &'static NodeType {
+    static T: LazyLock<NodeType> = LazyLock::new(|| NodeType {
+        type_id: "stoat:attachment".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Attachment".into(),
+    });
+    &T
+}
+
 pub(super) fn message_type() -> &'static NodeType {
     static T: LazyLock<NodeType> = LazyLock::new(|| NodeType {
         type_id: "stoat:message".into(),

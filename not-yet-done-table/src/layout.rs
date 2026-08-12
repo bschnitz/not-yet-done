@@ -43,7 +43,8 @@ where
     let sizing_cells: Vec<HashMap<ColumnId, String>> = rows
         .iter()
         .map(|row| {
-            row.cells.iter()
+            row.cells
+                .iter()
                 .map(|(k, v)| (k.clone(), v.text.clone()))
                 .collect()
         })
@@ -280,10 +281,10 @@ mod tests {
     #[test]
     fn basic_two_columns() {
         let cols = vec![ColumnId::new("name"), ColumnId::new("val")];
-        let config = make_config(20, vec![
-            ("name", ColStrategy::Flex(1)),
-            ("val", ColStrategy::Max),
-        ]);
+        let config = make_config(
+            20,
+            vec![("name", ColStrategy::Flex(1)), ("val", ColStrategy::Max)],
+        );
 
         let rows = vec![
             Row::new(1u32).cell("name", "Alice").cell("val", "42"),
@@ -303,16 +304,18 @@ mod tests {
     #[test]
     fn right_aligned_column() {
         let cols = vec![ColumnId::new("name"), ColumnId::new("num")];
-        let config = make_config(20, vec![
-            ("name", ColStrategy::Fixed(10)),
-            ("num", ColStrategy::Fixed(6)),
-        ]);
+        let config = make_config(
+            20,
+            vec![
+                ("name", ColStrategy::Fixed(10)),
+                ("num", ColStrategy::Fixed(6)),
+            ],
+        );
 
-        let rows = vec![
-            Row::new(1u32)
-                .cell("name", "Alice")
-                .cell("num", crate::cell::CellContent::aligned("42", crate::cell::CellAlignment::Right)),
-        ];
+        let rows = vec![Row::new(1u32).cell("name", "Alice").cell(
+            "num",
+            crate::cell::CellContent::aligned("42", crate::cell::CellAlignment::Right),
+        )];
 
         let table = compute_table(&rows, &config, &cols, None);
         assert_eq!(table.rows[0].cells[1], "    42");
@@ -338,9 +341,7 @@ mod tests {
         let cols = vec![ColumnId::new("x")];
         let config = make_config(40, vec![("x", ColStrategy::Max)]);
 
-        let rows = vec![
-            Row::new(1u32).cell("x", "ab"),
-        ];
+        let rows = vec![Row::new(1u32).cell("x", "ab")];
         let header = Row::new(0u32).cell("x", "LongHeader");
 
         let table = compute_table(&rows, &config, &cols, Some(&header));
@@ -370,10 +371,10 @@ mod tests {
     fn multiline_single_line_template_matches_compute_table() {
         // A single-line template must reproduce compute_table's layout.
         let cols = vec![ColumnId::new("name"), ColumnId::new("val")];
-        let config = make_config(20, vec![
-            ("name", ColStrategy::Flex(1)),
-            ("val", ColStrategy::Max),
-        ]);
+        let config = make_config(
+            20,
+            vec![("name", ColStrategy::Flex(1)), ("val", ColStrategy::Max)],
+        );
         let rows = vec![Row::new(1u32).cell("name", "Alice").cell("val", "42")];
 
         let template = RowTemplate::single_line(cols.clone());
@@ -388,11 +389,14 @@ mod tests {
     #[test]
     fn multiline_chat_layout_three_lines() {
         // Chat layout: line0 = [author, time], line1 = [content], line2 = spacer.
-        let config = make_config(40, vec![
-            ("author", ColStrategy::Max),
-            ("time", ColStrategy::Max),
-            ("content", ColStrategy::Flex(1)),
-        ]);
+        let config = make_config(
+            40,
+            vec![
+                ("author", ColStrategy::Max),
+                ("time", ColStrategy::Max),
+                ("content", ColStrategy::Flex(1)),
+            ],
+        );
         let rows = vec![
             Row::new(1u32)
                 .cell("author", "alice")
@@ -427,13 +431,15 @@ mod tests {
     #[test]
     fn truncation_with_separator() {
         let cols = vec![ColumnId::new("a"), ColumnId::new("b")];
-        let config = make_config(12, vec![
-            ("a", ColStrategy::Fixed(5)),
-            ("b", ColStrategy::Flex(1)),
-        ]);
+        let config = make_config(
+            12,
+            vec![("a", ColStrategy::Fixed(5)), ("b", ColStrategy::Flex(1))],
+        );
 
         let rows = vec![
-            Row::new(1u32).cell("a", "hello").cell("b", "world of rust programming"),
+            Row::new(1u32)
+                .cell("a", "hello")
+                .cell("b", "world of rust programming"),
         ];
 
         let table = compute_table(&rows, &config, &cols, None);

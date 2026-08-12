@@ -18,4 +18,4 @@ pub mod script_completions;
 pub mod script_store;
 
 pub use adapter::{PostgresAdapter, PostgresAdapterFactory};
-pub use script_store::PostgresScriptStore;
+pub use script_store::postgres_script_store;

@@ -6,12 +6,15 @@
 
 use std::sync::Arc;
 
-use not_yet_done_content::{AdapterFactory, ContentAdapter, ContentError, Result};
+use not_yet_done_content::{
+    ContentAdapter, ContentError, MechanismSpec, Result, TypedAdapterFactory,
+};
 
 use crate::client::PostgresClient;
 use crate::config::PostgresConfig;
 
 use super::PostgresAdapter;
+use super::auth::{MECHANISMS, PostgresCredentials};
 
 #[derive(Default)]
 pub struct PostgresAdapterFactory;
@@ -22,48 +25,68 @@ impl PostgresAdapterFactory {
     }
 }
 
-impl AdapterFactory for PostgresAdapterFactory {
+impl TypedAdapterFactory for PostgresAdapterFactory {
+    type Config = PostgresConfig;
+
     fn adapter_type(&self) -> &str {
         "postgres"
     }
 
-    fn create(
+    fn auth_mechanisms(&self) -> &'static [MechanismSpec] {
+        MECHANISMS
+    }
+
+    fn build(
         &self,
         instance_id: &str,
-        config: &str,
+        cfg: PostgresConfig,
         _ctx: &not_yet_done_content::HostContext,
     ) -> Result<Box<dyn ContentAdapter>> {
-        let cfg: PostgresConfig = serde_yaml::from_str(config).map_err(|e| {
-            ContentError::Other(format!("Invalid Postgres config: {e}").into())
-        })?;
-        cfg.validate().map_err(|e| {
-            ContentError::Other(format!("Invalid Postgres config: {e}").into())
-        })?;
+        cfg.validate()
+            .map_err(|e| ContentError::Other(format!("Invalid Postgres config: {e}").into()))?;
 
         let target_host = cfg.transport.target.host.clone();
-        let name = cfg.name.unwrap_or_else(|| format!("postgres@{target_host}"));
+        let name = cfg
+            .name
+            .unwrap_or_else(|| format!("postgres@{target_host}"));
 
-        let query_timeout = cfg
-            .query_timeout_secs
-            .map(std::time::Duration::from_secs);
+        let query_timeout = cfg.query_timeout_secs.map(std::time::Duration::from_secs);
+        // The auth block, when some provider slot delegates to it. Built
+        // here rather than lazily so a mechanism this adapter cannot
+        // speak fails at config time, next to every other config error.
+        let credentials = match cfg.auth {
+            Some(spec) => {
+                spec.validate_against(MECHANISMS).map_err(|e| {
+                    ContentError::Other(format!("Invalid Postgres auth spec: {e}").into())
+                })?;
+                Some(PostgresCredentials::new(spec).map_err(|e| ContentError::Other(e.into()))?)
+            }
+            None => None,
+        };
+
         let client = Arc::new(PostgresClient::new(
             cfg.transport,
             cfg.postgres,
             query_timeout,
+            credentials.clone(),
         ));
 
-        let warm = Arc::clone(&client);
-        tokio::spawn(async move {
-            // Warm tunnel + session in the background so the first user
-            // interaction with the tab is fast. Errors are surfaced on
-            // the next real call.
-            let _ = warm.list_databases().await;
-        });
+        // No eager warmup. Building an adapter happens for every
+        // configured view at TUI startup, so a background
+        // `list_databases()` here ran unconditionally — and its first
+        // step is resolving the password, which for a `command` provider
+        // means running `pass` and putting a pinentry dialog on screen
+        // before the user has even left the tasks view. That defeats the
+        // view-level `adapter.manual_connect: true` opt-out (same
+        // trade-off the Jira and Confluence factories already made).
+        // The tunnel and session are established lazily by the first
+        // real call instead.
 
         Ok(Box::new(PostgresAdapter::from_client(
             client,
             name,
             instance_id.to_string(),
+            credentials,
         )))
     }
 }

@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use not_yet_done_content::http_log;
-use reqwest::header::{ACCEPT, COOKIE, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 mod attachment;
@@ -58,6 +58,9 @@ pub struct ConfluenceUser {
 pub struct ConfluenceClient {
     base_url: String,
     http: reqwest::Client,
+    /// Set when the server rejects this client's cookie; read by the auth
+    /// bridge, which then throws the client away and logs in again.
+    rejection: http_log::AuthRejection,
 }
 
 impl ConfluenceClient {
@@ -90,6 +93,7 @@ impl ConfluenceClient {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .danger_accept_invalid_certs(accept_invalid_certs)
+            .redirect(http_log::api_redirect_policy())
             .timeout(HTTP_TIMEOUT)
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -97,6 +101,7 @@ impl ConfluenceClient {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             http,
+            rejection: http_log::AuthRejection::new(),
         })
     }
 
@@ -130,6 +135,26 @@ impl ConfluenceClient {
         &self.http
     }
 
+    /// [`http_log::check_status`] for this client. Every REST call in the
+    /// submodules goes through here rather than the free function, so a
+    /// rejected session is noticed where it happens instead of being
+    /// re-reported on every later call (see [`ConfluenceClient::auth_rejected`]).
+    pub(crate) async fn check_status(
+        &self,
+        method: &str,
+        url: &str,
+        resp: reqwest::Response,
+    ) -> Result<reqwest::Response, String> {
+        self.rejection.check_status(method, url, resp).await
+    }
+
+    /// Whether the server has rejected this client's session — an expired
+    /// cookie, or an SSO deployment bouncing the API call into its login
+    /// flow. The auth bridge drops a client that reports `true`.
+    pub fn auth_rejected(&self) -> bool {
+        self.rejection.is_rejected()
+    }
+
     /// Health-probe / current-user lookup. Calls
     /// `GET /rest/api/user/current` and parses the relevant fields. Used
     /// by the auth bridge (CF-2b) as the session-validation endpoint;
@@ -143,13 +168,12 @@ impl ConfluenceClient {
             .send()
             .await
             .map_err(|e| http_log::network_error("GET", &url, e))?;
-        let resp = http_log::check_status("GET", &url, resp).await?;
+        let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()
             .await
             .map_err(|e| format!("Failed to read response: {e}"))?;
-        serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse /user/current: {e}"))
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse /user/current: {e}"))
     }
 }
 

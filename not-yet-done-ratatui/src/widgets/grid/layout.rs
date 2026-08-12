@@ -34,7 +34,12 @@ impl GridLayout {
     pub fn cell_rect(&self, row: usize, col: usize) -> Rect {
         let cb = self.col_rects[col];
         let rb = self.row_rects[row];
-        Rect { x: cb.x, y: rb.y, width: cb.width, height: rb.height }
+        Rect {
+            x: cb.x,
+            y: rb.y,
+            width: cb.width,
+            height: rb.height,
+        }
     }
 
     /// Returns the merged `Rect` for a group (spans the full bounding box
@@ -49,7 +54,12 @@ impl GridLayout {
         let y = first_rb.y;
         let right = last_cb.x + last_cb.width;
         let bottom = last_rb.y + last_rb.height;
-        Rect { x, y, width: right - x, height: bottom - y }
+        Rect {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        }
     }
 
     /// Returns the `Rect` for a cell, expanding to its group if it has one.
@@ -76,7 +86,11 @@ pub(super) fn compute_layout(grid: &Grid, area: Rect) -> GridLayout {
     };
 
     // --- columns ---
-    let v_gap_total: u16 = grid.v_gaps.iter().map(|g| if g.has_gap { 1 } else { 0 }).sum();
+    let v_gap_total: u16 = grid
+        .v_gaps
+        .iter()
+        .map(|g| if g.has_gap { 1 } else { 0 })
+        .sum();
     let col_available = inner.width.saturating_sub(v_gap_total);
 
     let col_rects = split_constraints(&grid.col_constraints, col_available);
@@ -100,7 +114,11 @@ pub(super) fn compute_layout(grid: &Grid, area: Rect) -> GridLayout {
     }
 
     // --- rows ---
-    let h_gap_total: u16 = grid.h_gaps.iter().map(|g| if g.has_gap { 1 } else { 0 }).sum();
+    let h_gap_total: u16 = grid
+        .h_gaps
+        .iter()
+        .map(|g| if g.has_gap { 1 } else { 0 })
+        .sum();
     let row_available = inner.height.saturating_sub(h_gap_total);
 
     let row_heights = split_constraints(&grid.row_constraints, row_available);
@@ -137,7 +155,12 @@ fn split_constraints(constraints: &[Constraint], available: u16) -> Vec<u16> {
     if constraints.is_empty() {
         return Vec::new();
     }
-    let dummy = Rect { x: 0, y: 0, width: available, height: 1 };
+    let dummy = Rect {
+        x: 0,
+        y: 0,
+        width: available,
+        height: 1,
+    };
     let rects = Layout::horizontal(constraints).split(dummy);
     rects.iter().map(|r| r.width).collect()
 }

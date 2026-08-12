@@ -12,7 +12,10 @@ use crate::entity::task;
 /// decided once for the whole path via the `case_insensitive` flag.
 #[derive(Debug)]
 pub enum SegmentMatcher {
-    Substring { needle: String, case_insensitive: bool },
+    Substring {
+        needle: String,
+        case_insensitive: bool,
+    },
     Regex(Regex),
 }
 
@@ -33,18 +36,23 @@ impl SegmentMatcher {
             } else {
                 seg.to_string()
             };
-            Ok(SegmentMatcher::Substring { needle, case_insensitive })
+            Ok(SegmentMatcher::Substring {
+                needle,
+                case_insensitive,
+            })
         }
     }
 
     pub fn matches(&self, text: &str) -> bool {
         match self {
-            SegmentMatcher::Substring { needle, case_insensitive: true } => {
-                text.to_ascii_lowercase().contains(needle.as_str())
-            }
-            SegmentMatcher::Substring { needle, case_insensitive: false } => {
-                text.contains(needle.as_str())
-            }
+            SegmentMatcher::Substring {
+                needle,
+                case_insensitive: true,
+            } => text.to_ascii_lowercase().contains(needle.as_str()),
+            SegmentMatcher::Substring {
+                needle,
+                case_insensitive: false,
+            } => text.contains(needle.as_str()),
             SegmentMatcher::Regex(re) => re.is_match(text),
         }
     }
@@ -82,11 +90,7 @@ pub enum WalkOutcome {
 /// against task `description`. The first segment matches tasks with
 /// `parent_id = None`; subsequent segments are filtered to children of
 /// the previous match.
-pub fn walk_task_path(
-    rows: &[task::Model],
-    path: &str,
-    case_insensitive: bool,
-) -> WalkOutcome {
+pub fn walk_task_path(rows: &[task::Model], path: &str, case_insensitive: bool) -> WalkOutcome {
     let Some(stripped) = path.strip_prefix('/') else {
         return WalkOutcome::MissingLeadingSlash;
     };
@@ -172,14 +176,23 @@ mod tests {
     #[test]
     fn missing_leading_slash() {
         let rows: Vec<task::Model> = vec![];
-        assert!(matches!(walk_task_path(&rows, "foo/bar", false), WalkOutcome::MissingLeadingSlash));
+        assert!(matches!(
+            walk_task_path(&rows, "foo/bar", false),
+            WalkOutcome::MissingLeadingSlash
+        ));
     }
 
     #[test]
     fn empty_path() {
         let rows: Vec<task::Model> = vec![];
-        assert!(matches!(walk_task_path(&rows, "/", false), WalkOutcome::EmptyPath));
-        assert!(matches!(walk_task_path(&rows, "///", false), WalkOutcome::EmptyPath));
+        assert!(matches!(
+            walk_task_path(&rows, "/", false),
+            WalkOutcome::EmptyPath
+        ));
+        assert!(matches!(
+            walk_task_path(&rows, "///", false),
+            WalkOutcome::EmptyPath
+        ));
     }
 
     #[test]
@@ -198,8 +211,14 @@ mod tests {
     fn case_sensitive_default() {
         let root = t("Work", None);
         let rows = vec![root.clone()];
-        assert!(matches!(walk_task_path(&rows, "/work", false), WalkOutcome::NotFound { .. }));
-        assert!(matches!(walk_task_path(&rows, "/work", true), WalkOutcome::Found(_)));
+        assert!(matches!(
+            walk_task_path(&rows, "/work", false),
+            WalkOutcome::NotFound { .. }
+        ));
+        assert!(matches!(
+            walk_task_path(&rows, "/work", true),
+            WalkOutcome::Found(_)
+        ));
     }
 
     #[test]
@@ -220,7 +239,11 @@ mod tests {
         let child = t("Clients", Some(root.id));
         let rows = vec![root.clone(), child.clone()];
         match walk_task_path(&rows, "/Work/Clients/Tickets", false) {
-            WalkOutcome::NotFound { last_matched, depth, seg } => {
+            WalkOutcome::NotFound {
+                last_matched,
+                depth,
+                seg,
+            } => {
                 assert_eq!(last_matched, Some(child.id));
                 assert_eq!(depth, 2);
                 assert_eq!(seg, "Tickets");
@@ -233,7 +256,11 @@ mod tests {
     fn not_found_at_root_has_none_last_matched() {
         let rows: Vec<task::Model> = vec![];
         match walk_task_path(&rows, "/Nope", false) {
-            WalkOutcome::NotFound { last_matched, depth, .. } => {
+            WalkOutcome::NotFound {
+                last_matched,
+                depth,
+                ..
+            } => {
                 assert_eq!(last_matched, None);
                 assert_eq!(depth, 0);
             }
@@ -247,7 +274,11 @@ mod tests {
         let b = t("Foo Beta", None);
         let rows = vec![a.clone(), b.clone()];
         match walk_task_path(&rows, "/Foo", false) {
-            WalkOutcome::Ambiguous { candidates, depth, seg } => {
+            WalkOutcome::Ambiguous {
+                candidates,
+                depth,
+                seg,
+            } => {
                 assert_eq!(depth, 0);
                 assert_eq!(seg, "Foo");
                 assert_eq!(candidates.len(), 2);
@@ -274,7 +305,10 @@ mod tests {
         let root = t("FOO", None);
         let rows = vec![root.clone()];
         // Without -i, regex /foo/ wouldn't match FOO.
-        assert!(matches!(walk_task_path(&rows, "/re:foo", false), WalkOutcome::NotFound { .. }));
+        assert!(matches!(
+            walk_task_path(&rows, "/re:foo", false),
+            WalkOutcome::NotFound { .. }
+        ));
         // With -i, it should match.
         match walk_task_path(&rows, "/re:foo", true) {
             WalkOutcome::Found(_) => {}

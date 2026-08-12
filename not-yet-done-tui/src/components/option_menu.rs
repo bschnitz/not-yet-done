@@ -31,9 +31,9 @@
 
 use std::sync::Arc;
 
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::Frame;
 use tuirealm::component::Component;
 
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
@@ -76,7 +76,10 @@ pub enum OptionMenuMessage {
     /// Enter on a selected option — the embedder dispatches the configured
     /// toggle action with `value`. The popup has already flipped the option's
     /// `★` marker and stays open for further toggles.
-    Toggle { value: String, label: String },
+    Toggle {
+        value: String,
+        label: String,
+    },
     /// A text prompt was submitted — the embedder dispatches the create or
     /// rename action with `text` (and, for rename, the focused option's id in
     /// `value`). The popup stays open; the embedder refreshes its options.
@@ -87,7 +90,10 @@ pub enum OptionMenuMessage {
     },
     /// A delete was confirmed — the embedder dispatches the delete action with
     /// the focused option's `value`. The popup stays open.
-    Delete { value: String, label: String },
+    Delete {
+        value: String,
+        label: String,
+    },
 }
 
 /// Inline text prompt state for a create / rename flow.
@@ -162,9 +168,7 @@ impl OptionMenuComponent {
         if let (Some(pkb), Some(icons)) = (self.popup_kb.clone(), self.key_icons.clone()) {
             popup = popup.with_popup_kb(pkb, icons);
         }
-        let mut hints = vec![
-            (kb.label(&TagMenuAction::Toggle), "toggle".into()),
-        ];
+        let mut hints = vec![(kb.label(&TagMenuAction::Toggle), "toggle".into())];
         if caps.create {
             hints.push((kb.label(&TagMenuAction::Create), "new".into()));
         }
@@ -190,8 +194,11 @@ impl OptionMenuComponent {
 
         // Sub-flow: delete confirmation owns the keyboard until answered.
         if let Some((value, label)) = self.confirm_delete.clone() {
-            let cancel =
-                key == "n" || key == "N" || kb.get(&TagMenuAction::Close).is_some_and(|b| b.matches(key));
+            let cancel = key == "n"
+                || key == "N"
+                || kb
+                    .get(&TagMenuAction::Close)
+                    .is_some_and(|b| b.matches(key));
             if key == "y" || key == "Y" {
                 self.confirm_delete = None;
                 return OptionMenuMessage::Delete { value, label };
@@ -208,11 +215,17 @@ impl OptionMenuComponent {
         }
 
         // ── Menu mode ──────────────────────────────────────────────────────
-        if kb.get(&TagMenuAction::Close).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&TagMenuAction::Close)
+            .is_some_and(|b| b.matches(key))
+        {
             self.popup = None;
             return OptionMenuMessage::Closed;
         }
-        if kb.get(&TagMenuAction::Toggle).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&TagMenuAction::Toggle)
+            .is_some_and(|b| b.matches(key))
+        {
             let popup = self.popup.as_mut().unwrap();
             let Some(item) = popup.selected_item() else {
                 return OptionMenuMessage::Handled;
@@ -227,7 +240,11 @@ impl OptionMenuComponent {
             popup.toggle_selected_marked();
             return msg;
         }
-        if self.caps.create && kb.get(&TagMenuAction::Create).is_some_and(|b| b.matches(key)) {
+        if self.caps.create
+            && kb
+                .get(&TagMenuAction::Create)
+                .is_some_and(|b| b.matches(key))
+        {
             self.prompt = Some(PromptState {
                 verb: OptionMenuVerb::Create,
                 value: None,
@@ -247,7 +264,11 @@ impl OptionMenuComponent {
             }
             return OptionMenuMessage::Handled;
         }
-        if self.caps.delete && kb.get(&TagMenuAction::Delete).is_some_and(|b| b.matches(key)) {
+        if self.caps.delete
+            && kb
+                .get(&TagMenuAction::Delete)
+                .is_some_and(|b| b.matches(key))
+        {
             if let Some(item) = self.popup.as_ref().unwrap().selected_item() {
                 self.confirm_delete = Some((item.value.clone(), item.label.clone()));
             }
@@ -274,7 +295,10 @@ impl OptionMenuComponent {
         kb: &KeyBindingSection<TagMenuAction>,
     ) -> OptionMenuMessage {
         // Esc cancels back to the menu (the popup stays open).
-        if kb.get(&TagMenuAction::Close).is_some_and(|b| b.matches(key)) {
+        if kb
+            .get(&TagMenuAction::Close)
+            .is_some_and(|b| b.matches(key))
+        {
             self.prompt = None;
             return OptionMenuMessage::Handled;
         }
@@ -344,7 +368,12 @@ impl OptionMenuComponent {
             }
             if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
                 cell.set_char(ch);
-                cell.set_style(Style::default().fg(body_fg).bg(t.bg()).add_modifier(Modifier::BOLD));
+                cell.set_style(
+                    Style::default()
+                        .fg(body_fg)
+                        .bg(t.bg())
+                        .add_modifier(Modifier::BOLD),
+                );
             }
             x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
         }
@@ -389,13 +418,20 @@ mod tests {
     }
 
     fn all_caps() -> OptionMenuCaps {
-        OptionMenuCaps { create: true, rename: true, delete: true }
+        OptionMenuCaps {
+            create: true,
+            rename: true,
+            delete: true,
+        }
     }
 
     #[test]
     fn unhandled_when_closed() {
         let mut menu = OptionMenuComponent::new(theme());
-        assert_eq!(menu.handle_key("enter", &make_kb()), OptionMenuMessage::Unhandled);
+        assert_eq!(
+            menu.handle_key("enter", &make_kb()),
+            OptionMenuMessage::Unhandled
+        );
     }
 
     #[test]
@@ -404,7 +440,9 @@ mod tests {
         let kb = make_kb();
         menu.open("Tags", &entries(), OptionMenuCaps::default(), &kb);
         let msg = menu.handle_key("enter", &kb);
-        assert!(matches!(msg, OptionMenuMessage::Toggle { ref value, .. } if value == "global-tag:1"));
+        assert!(
+            matches!(msg, OptionMenuMessage::Toggle { ref value, .. } if value == "global-tag:1")
+        );
         // Stays open for multi-toggle.
         assert!(menu.is_open());
     }

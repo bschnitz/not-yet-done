@@ -51,7 +51,9 @@ pub async fn toggle_watch(
     );
     http_log::log_request("POST", &url);
     let resp = client
-        .send_retrying("POST", &url, || client.http.post(&url).headers(headers.clone()))
+        .send_retrying("POST", &url, || {
+            client.http.post(&url).headers(headers.clone())
+        })
         .await?;
     http_log::check_status("POST", &url, resp).await?;
     Ok(!was_watching)
@@ -81,7 +83,11 @@ pub async fn edit_comment(
     http_log::log_request("POST", &url);
     let resp = client
         .send_retrying("POST", &url, || {
-            client.http.post(&url).headers(headers.clone()).json(&payload)
+            client
+                .http
+                .post(&url)
+                .headers(headers.clone())
+                .json(&payload)
         })
         .await?;
     http_log::check_status("POST", &url, resp).await?;
@@ -146,7 +152,9 @@ pub async fn list_attachments(
     let headers = client.auth_headers()?;
     http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || client.http.get(&url).headers(headers.clone()))
+        .send_retrying("GET", &url, || {
+            client.http.get(&url).headers(headers.clone())
+        })
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     let dtos: Vec<AttachmentDto> = resp
@@ -164,7 +172,11 @@ pub async fn list_attachments(
             modified_date: d.modified_date,
             owner: d.owner,
             // Prefer `url` (cache-busted) but fall back to raw storage URL.
-            url: if d.url.is_empty() { d.attached_file } else { d.url },
+            url: if d.url.is_empty() {
+                d.attached_file
+            } else {
+                d.url
+            },
             thumbnail_url: d.thumbnail_card_url,
         })
         .collect())
@@ -235,16 +247,17 @@ pub async fn upload_attachment_bytes(
         created_date: dto.created_date,
         modified_date: dto.modified_date,
         owner: dto.owner,
-        url: if dto.url.is_empty() { dto.attached_file } else { dto.url },
+        url: if dto.url.is_empty() {
+            dto.attached_file
+        } else {
+            dto.url
+        },
         thumbnail_url: dto.thumbnail_card_url,
     })
 }
 
 /// GET the binary content of an attachment.
-pub async fn download_attachment(
-    client: &TaigaClient,
-    url: &str,
-) -> Result<Vec<u8>, String> {
+pub async fn download_attachment(client: &TaigaClient, url: &str) -> Result<Vec<u8>, String> {
     let headers = client.auth_headers()?;
     http_log::log_request("GET", url);
     let resp = client

@@ -1,6 +1,6 @@
 use not_yet_done_macros::ColumnRegistry;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ColumnRegistry)]
 #[sea_orm(table_name = "tracking")]

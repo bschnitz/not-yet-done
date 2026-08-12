@@ -12,7 +12,14 @@ fn query_tasks_from_file() {
     write!(filter_file.as_file(), "query:\n  [deleted, =, false]\n").unwrap();
 
     common::nyd(&db_url)
-        .args(["query", "run", "--entity", "task", "--file", filter_file.path().to_str().unwrap()])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "task",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Test task for query"));
@@ -27,7 +34,14 @@ fn query_tasks_json_output() {
     write!(filter_file.as_file(), "query:\n  [deleted, =, false]\n").unwrap();
 
     let output = common::nyd(&db_url)
-        .args(["query", "run", "--entity", "task", "--file", filter_file.path().to_str().unwrap()])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "task",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
         .get_output()
@@ -49,7 +63,14 @@ fn query_trackings_from_file() {
     write!(filter_file.as_file(), "query:\n  [deleted, =, false]\n").unwrap();
 
     let output = common::nyd(&db_url)
-        .args(["query", "run", "--entity", "tracking", "--file", filter_file.path().to_str().unwrap()])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "tracking",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
         .get_output()
@@ -76,7 +97,14 @@ fn query_with_date_filter() {
     .unwrap();
 
     let output = common::nyd(&db_url)
-        .args(["query", "run", "--entity", "tracking", "--file", filter_file.path().to_str().unwrap()])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "tracking",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
         .get_output()
@@ -100,8 +128,13 @@ fn query_debug_shows_resolved_filter() {
 
     common::nyd(&db_url)
         .args([
-            "query", "run", "--entity", "tracking", "--file",
-            filter_file.path().to_str().unwrap(), "--debug",
+            "query",
+            "run",
+            "--entity",
+            "tracking",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+            "--debug",
         ])
         .assert()
         .success()
@@ -117,7 +150,14 @@ fn query_invalid_entity() {
     write!(filter_file.as_file(), "query:\n  [deleted, =, false]\n").unwrap();
 
     common::nyd(&db_url)
-        .args(["query", "run", "--entity", "bogus", "--file", filter_file.path().to_str().unwrap()])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "bogus",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Unknown entity"));
@@ -131,7 +171,14 @@ fn query_invalid_yaml() {
     write!(filter_file.as_file(), "{{{{not yaml").unwrap();
 
     common::nyd(&db_url)
-        .args(["query", "run", "--entity", "task", "--file", filter_file.path().to_str().unwrap()])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "task",
+            "--file",
+            filter_file.path().to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Filter parse error"));
@@ -142,7 +189,14 @@ fn query_missing_file() {
     let (_dir, db_url) = common::setup();
 
     common::nyd(&db_url)
-        .args(["query", "run", "--entity", "task", "--file", "/nonexistent/filter.yaml"])
+        .args([
+            "query",
+            "run",
+            "--entity",
+            "task",
+            "--file",
+            "/nonexistent/filter.yaml",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Error reading"));

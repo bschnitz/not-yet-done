@@ -28,24 +28,20 @@
 use std::time::Duration;
 
 use crossterm::{cursor::SetCursorStyle, execute};
-use not_yet_done_ratatui::{
-    widgets::{
-        grid::{
-            BorderPos, CellGroup, Grid, GridChild, GridKeymap, TextAnchor,
-            BORDER_ROUNDED, BORDER_SIMPLE,
-        },
-        multi_choice::{
-            MultiChoice, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType,
-        },
-        text_input::{TextInput, TextInputStyle, TextInputStyleType},
+use not_yet_done_ratatui::widgets::{
+    grid::{
+        BORDER_ROUNDED, BORDER_SIMPLE, BorderPos, CellGroup, Grid, GridChild, GridKeymap,
+        TextAnchor,
     },
+    multi_choice::{MultiChoice, MultiChoiceKeymap, MultiChoiceStyle, MultiChoiceStyleType},
+    text_input::{TextInput, TextInputStyle, TextInputStyleType},
 };
 use ratatui::{
+    DefaultTerminal, Frame,
     layout::{Constraint, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
-    DefaultTerminal, Frame,
 };
 use tuirealm::{
     application::{Application, PollStrategy},
@@ -61,28 +57,38 @@ use tuirealm::{
 // Colour palette
 // ---------------------------------------------------------------------------
 
-const BG:           Color = Color::Rgb(15, 17, 26);
-const PANEL_BG:     Color = Color::Rgb(22, 25, 37);
-const BORDER_FG:    Color = Color::Rgb(60, 70, 110);
-const ACCENT:       Color = Color::Rgb(120, 160, 255);
-const ACCENT_DIM:   Color = Color::Rgb(60, 90, 160);
-const INPUT_FG:     Color = Color::Rgb(210, 218, 240);
-const INPUT_BG:     Color = Color::Rgb(30, 34, 52);
-const PLACEHOLDER:  Color = Color::Rgb(70, 78, 110);
-const ACTIVE_FG:    Color = Color::Rgb(255, 220, 100);
-const SELECTED_BG:  Color = Color::Rgb(40, 50, 80);
+const BG: Color = Color::Rgb(15, 17, 26);
+const PANEL_BG: Color = Color::Rgb(22, 25, 37);
+const BORDER_FG: Color = Color::Rgb(60, 70, 110);
+const ACCENT: Color = Color::Rgb(120, 160, 255);
+const ACCENT_DIM: Color = Color::Rgb(60, 90, 160);
+const INPUT_FG: Color = Color::Rgb(210, 218, 240);
+const INPUT_BG: Color = Color::Rgb(30, 34, 52);
+const PLACEHOLDER: Color = Color::Rgb(70, 78, 110);
+const ACTIVE_FG: Color = Color::Rgb(255, 220, 100);
+const SELECTED_BG: Color = Color::Rgb(40, 50, 80);
 
-const HINT_FG:      Color = Color::Rgb(55, 65, 100);
-const SUBMIT_BG:    Color = Color::Rgb(100, 200, 140);
-const OVERLAY_BG:   Color = Color::Rgb(28, 32, 50);
-const ERROR_FG:     Color = Color::Rgb(240, 90, 90);
+const HINT_FG: Color = Color::Rgb(55, 65, 100);
+const SUBMIT_BG: Color = Color::Rgb(100, 200, 140);
+const OVERLAY_BG: Color = Color::Rgb(28, 32, 50);
+const ERROR_FG: Color = Color::Rgb(240, 90, 90);
 
 // ---------------------------------------------------------------------------
 // Static data
 // ---------------------------------------------------------------------------
 
-const TEAMS: [&str; 6]     = ["Frontend", "Backend", "Design", "Data", "DevOps", "Research"];
-const EXPERTISE: [&str; 7] = ["Rust", "TypeScript", "Python", "Go", "SQL", "Figma", "Kubernetes"];
+const TEAMS: [&str; 6] = [
+    "Frontend", "Backend", "Design", "Data", "DevOps", "Research",
+];
+const EXPERTISE: [&str; 7] = [
+    "Rust",
+    "TypeScript",
+    "Python",
+    "Go",
+    "SQL",
+    "Figma",
+    "Kubernetes",
+];
 
 // ---------------------------------------------------------------------------
 // Styles
@@ -100,31 +106,58 @@ fn text_inactive() -> TextInputStyle {
 fn text_active() -> TextInputStyle {
     TextInputStyle::new()
         .prefix_color(ACCENT)
-        .set_style(TextInputStyleType::Title,  Style::default().fg(ACCENT).bg(INPUT_BG))
-        .set_style(TextInputStyleType::Input,  Style::default().fg(INPUT_FG).bg(INPUT_BG))
+        .set_style(
+            TextInputStyleType::Title,
+            Style::default().fg(ACCENT).bg(INPUT_BG),
+        )
+        .set_style(
+            TextInputStyleType::Input,
+            Style::default().fg(INPUT_FG).bg(INPUT_BG),
+        )
         .placeholder_color(PLACEHOLDER)
-        .set_style(TextInputStyleType::Error,  Style::default().fg(ERROR_FG))
+        .set_style(TextInputStyleType::Error, Style::default().fg(ERROR_FG))
 }
 
 fn mc_inactive() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(ACCENT_DIM)
-        .set_style(MultiChoiceStyleType::Title,          Style::default().fg(ACCENT_DIM))
-        .set_style(MultiChoiceStyleType::Normal,         Style::default().fg(INPUT_FG))
-        .set_style(MultiChoiceStyleType::Selected,       Style::default().fg(INPUT_FG).bg(SELECTED_BG))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(ACTIVE_FG).bg(SELECTED_BG))
-        .set_style(MultiChoiceStyleType::LastLine,       Style::default())
+        .set_style(MultiChoiceStyleType::Title, Style::default().fg(ACCENT_DIM))
+        .set_style(MultiChoiceStyleType::Normal, Style::default().fg(INPUT_FG))
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(INPUT_FG).bg(SELECTED_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(ACTIVE_FG).bg(SELECTED_BG),
+        )
+        .set_style(MultiChoiceStyleType::LastLine, Style::default())
 }
 
 fn mc_active() -> MultiChoiceStyle {
     MultiChoiceStyle::new()
         .prefix_color(ACCENT)
-        .set_style(MultiChoiceStyleType::Title,          Style::default().fg(ACCENT).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Normal,         Style::default().fg(INPUT_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Active,         Style::default().fg(ACTIVE_FG).bg(INPUT_BG))
-        .set_style(MultiChoiceStyleType::Selected,       Style::default().fg(INPUT_FG).bg(SELECTED_BG))
-        .set_style(MultiChoiceStyleType::SelectedActive, Style::default().fg(ACTIVE_FG).bg(SELECTED_BG))
-        .set_style(MultiChoiceStyleType::LastLine,       Style::default())
+        .set_style(
+            MultiChoiceStyleType::Title,
+            Style::default().fg(ACCENT).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Normal,
+            Style::default().fg(INPUT_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Active,
+            Style::default().fg(ACTIVE_FG).bg(INPUT_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::Selected,
+            Style::default().fg(INPUT_FG).bg(SELECTED_BG),
+        )
+        .set_style(
+            MultiChoiceStyleType::SelectedActive,
+            Style::default().fg(ACTIVE_FG).bg(SELECTED_BG),
+        )
+        .set_style(MultiChoiceStyleType::LastLine, Style::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -136,9 +169,9 @@ fn build_grid() -> Grid {
     let mut grid = Grid::new(3, 2)
         .with_column_constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
         .with_row_constraints([
-            Constraint::Length(3),  // row 0: names
-            Constraint::Length(3),  // row 1: bio (grouped)
-            Constraint::Length(3),  // row 2: dropdowns (expand over outer border when open)
+            Constraint::Length(3), // row 0: names
+            Constraint::Length(3), // row 1: bio (grouped)
+            Constraint::Length(3), // row 2: dropdowns (expand over outer border when open)
         ])
         .with_keymap(GridKeymap {
             next_cell: Some(tuirealm::event::KeyEvent {
@@ -150,11 +183,14 @@ fn build_grid() -> Grid {
                 modifiers: KeyModifiers::SHIFT,
             }),
             ..GridKeymap::default()
-        })
-;
+        });
 
     // --- group the middle row ---
-    grid.group_cells(CellGroup::ColSpan { row: 1, first_col: 0, last_col: 1 });
+    grid.group_cells(CellGroup::ColSpan {
+        row: 1,
+        first_col: 0,
+        last_col: 1,
+    });
 
     // --- borders ---
     //
@@ -177,7 +213,8 @@ fn build_grid() -> Grid {
 
     // --- children ---
     grid.set_child(
-        0, 0,
+        0,
+        0,
         Box::new(
             TextInput::default()
                 .with_title("Full Name")
@@ -187,7 +224,8 @@ fn build_grid() -> Grid {
         ),
     );
     grid.set_child(
-        0, 1,
+        0,
+        1,
         Box::new(
             TextInput::default()
                 .with_title("Role Title")
@@ -197,7 +235,8 @@ fn build_grid() -> Grid {
         ),
     );
     grid.set_child(
-        1, 0,
+        1,
+        0,
         Box::new(
             TextInput::default()
                 .with_title("Bio / About")
@@ -207,7 +246,8 @@ fn build_grid() -> Grid {
         ),
     );
     grid.set_child(
-        2, 0,
+        2,
+        0,
         Box::new(
             MultiChoice::default()
                 .with_title("Team")
@@ -219,7 +259,8 @@ fn build_grid() -> Grid {
         ),
     );
     grid.set_child(
-        2, 1,
+        2,
+        1,
         Box::new(
             MultiChoice::default()
                 .with_title("Expertise")
@@ -279,13 +320,15 @@ impl Component for FormComp {
 
 impl AppComponent<Msg, NoUserEvent> for FormComp {
     fn on(&mut self, ev: &Event<NoUserEvent>) -> Option<Msg> {
-        let Event::Keyboard(key) = ev else { return None };
+        let Event::Keyboard(key) = ev else {
+            return None;
+        };
 
         // Global shortcuts — intercepted before the grid sees them.
         match key.code {
             Key::Esc => return Some(Msg::Quit),
             Key::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Some(Msg::Submit)
+                return Some(Msg::Submit);
             }
             _ => {}
         }
@@ -339,10 +382,18 @@ impl Model {
                 let names: Vec<&str> = values
                     .iter()
                     .filter_map(|v| {
-                        if let StateValue::Usize(i) = v { labels.get(*i).copied() } else { None }
+                        if let StateValue::Usize(i) = v {
+                            labels.get(*i).copied()
+                        } else {
+                            None
+                        }
                     })
                     .collect();
-                if names.is_empty() { "—".to_string() } else { names.join(", ") }
+                if names.is_empty() {
+                    "—".to_string()
+                } else {
+                    names.join(", ")
+                }
             } else {
                 "—".to_string()
             }
@@ -372,10 +423,7 @@ impl Model {
         let panel = Rect::new(px, py, panel_w.min(area.width), panel_h.min(area.height));
 
         // Dark panel background (the grid's outer border paints over it).
-        frame.render_widget(
-            Block::default().style(Style::default().bg(PANEL_BG)),
-            panel,
-        );
+        frame.render_widget(Block::default().style(Style::default().bg(PANEL_BG)), panel);
 
         self.app.view(&Id::Form, frame, panel);
 
@@ -484,7 +532,10 @@ fn run(mut terminal: DefaultTerminal) -> std::io::Result<()> {
             terminal.draw(|f| model.view(f))?;
             model.redraw = false;
         }
-        if let Ok(msgs) = model.app.tick(PollStrategy::Once(Duration::from_millis(20))) {
+        if let Ok(msgs) = model
+            .app
+            .tick(PollStrategy::Once(Duration::from_millis(20)))
+        {
             if !msgs.is_empty() {
                 model.redraw = true;
                 for msg in msgs {

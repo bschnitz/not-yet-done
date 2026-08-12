@@ -53,14 +53,12 @@ impl Default for FilePickerKeymap {
             submit: Keys::ctrl(Key::Char('o')),
             cancel: Keys::plain(Key::Esc),
             paste: Keys::ctrl(Key::Char('v')),
-            toggle: Keys::plain(Key::Enter)
-                .or(Key::Enter, KeyModifiers::CONTROL),
+            toggle: Keys::plain(Key::Enter).or(Key::Enter, KeyModifiers::CONTROL),
             remove_selected: Keys::ctrl(Key::Char('d')),
             filter_clear: Keys::plain(Key::Char(',')),
             browse_down: Keys::ctrl(Key::Char('j')),
             browse_up: Keys::ctrl(Key::Char('k')),
-            browse_navigate: Keys::plain(Key::Enter)
-                .or(Key::Enter, KeyModifiers::CONTROL),
+            browse_navigate: Keys::plain(Key::Enter).or(Key::Enter, KeyModifiers::CONTROL),
             tab_complete: Keys::plain(Key::Tab),
         }
     }

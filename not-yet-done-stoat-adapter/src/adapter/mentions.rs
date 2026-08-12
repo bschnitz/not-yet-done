@@ -1,14 +1,14 @@
 //! Revolt `<@USERID>` mention rendering — the Stoat analogue of the
-//! Jira/Taiga `uu-…` slug mechanism (built on the same
+//! Jira/Taiga `uu_…` slug mechanism (built on the same
 //! [`not_yet_done_content::slug::SlugTable`]).
 //!
 //! Two directions, because display and editing want different forms:
 //!
 //! - **Display** (read-only chat rendering): `<@01ABC…>` → `@username`.
 //!   The user sees a readable handle instead of the internal code.
-//! - **Edit** (round-trip): `<@01ABC…>` ↔ `@uu-username`. The editor
+//! - **Edit** (round-trip): `<@01ABC…>` ↔ `@uu_username`. The editor
 //!   buffer carries autocomplete-friendly slugs plus a trailing CACHE
-//!   section listing every available `@uu-…`; on save the slugs are
+//!   section listing every available `@uu_…`; on save the slugs are
 //!   translated back to the wire `<@ID>` form.
 //!
 //! Unknown ids / slugs are kept verbatim on render and surfaced as an
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use not_yet_done_content::slug::SlugTable;
 
 /// Slug prefix for user mentions (shared convention with Jira/Taiga).
-pub(super) const USER_PREFIX: &str = "uu-";
+pub(super) const USER_PREFIX: &str = "uu_";
 
 /// Marker introducing the trailing CACHE section in an editor buffer.
 /// Everything from this line on is stripped before parsing.
@@ -70,22 +70,22 @@ pub(super) fn render_display(text: &str, users: &HashMap<String, String>) -> Str
     replace_mentions(text, |id| users.get(id).map(|name| format!("@{name}")))
 }
 
-/// `<@ID>` → `@uu-slug` for the editor buffer. Unknown ids kept raw
+/// `<@ID>` → `@uu_slug` for the editor buffer. Unknown ids kept raw
 /// (they round-trip back unchanged through [`parse_slugs`]).
 pub(super) fn render_slugs(text: &str, users: &SlugTable) -> String {
     replace_mentions(text, |id| users.slug_for(id).map(|slug| format!("@{slug}")))
 }
 
-/// Reverse of [`render_slugs`]: rewrite `@uu-slug` back to `<@ID>`.
-/// Only matches at word boundaries so `mail@uu-x.com` is preserved.
-/// Returns the offending slug if any `@uu-…` doesn't resolve.
+/// Reverse of [`render_slugs`]: rewrite `@uu_slug` back to `<@ID>`.
+/// Only matches at word boundaries so `mail@uu_x.com` is preserved.
+/// Returns the offending slug if any `@uu_…` doesn't resolve.
 pub(super) fn parse_slugs(text: &str, users: &SlugTable) -> Result<String, String> {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut last = 0usize;
     let mut i = 0usize;
     while i + 4 <= bytes.len() {
-        if bytes[i] == b'@' && &bytes[i + 1..i + 4] == b"uu-" {
+        if bytes[i] == b'@' && &bytes[i + 1..i + 4] == b"uu_" {
             let prev_ok = i == 0 || !is_word_byte(bytes[i - 1]);
             if prev_ok {
                 let mut end = i + 4;
@@ -120,10 +120,10 @@ fn is_word_byte(b: u8) -> bool {
 }
 
 fn is_slug_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-'
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Render the trailing CACHE section listing every available `@uu-…`
+/// Render the trailing CACHE section listing every available `@uu_…`
 /// slug. Empty string when there are no users to advertise.
 pub(super) fn cache_section(users: &SlugTable) -> String {
     if users.is_empty() {
@@ -183,7 +183,7 @@ mod tests {
         let table = user_table(&users);
         let body = "ping <@01AAA> and <@01BBB>!";
         let rendered = render_slugs(body, &table);
-        assert_eq!(rendered, "ping @uu-alice and @uu-bob!");
+        assert_eq!(rendered, "ping @uu_alice and @uu_bob!");
         // …and back to the wire form.
         assert_eq!(parse_slugs(&rendered, &table).unwrap(), body);
     }
@@ -203,15 +203,18 @@ mod tests {
     fn parse_rejects_unknown_slug() {
         let users = sample_users();
         let table = user_table(&users);
-        assert_eq!(parse_slugs("hi @uu-nobody", &table), Err("uu-nobody".into()));
+        assert_eq!(
+            parse_slugs("hi @uu_nobody", &table),
+            Err("uu_nobody".into())
+        );
     }
 
     #[test]
     fn parse_preserves_email_like_at_word() {
         let users = sample_users();
         let table = user_table(&users);
-        // `x@uu-...` is mid-word (preceded by a word byte) → untouched.
-        let s = "mail x@uu-alice stays";
+        // `x@uu_...` is mid-word (preceded by a word byte) → untouched.
+        let s = "mail x@uu_alice stays";
         assert_eq!(parse_slugs(s, &table).unwrap(), s);
     }
 
@@ -221,11 +224,11 @@ mod tests {
         let table = user_table(&users);
         let section = cache_section(&table);
         assert!(section.contains(CACHE_MARKER));
-        assert!(section.contains("@uu-alice"));
-        assert!(section.contains("@uu-bob"));
+        assert!(section.contains("@uu_alice"));
+        assert!(section.contains("@uu_bob"));
 
-        let buffer = format!("hello @uu-alice\n{section}");
-        assert_eq!(strip_cache_section(&buffer), "hello @uu-alice");
+        let buffer = format!("hello @uu_alice\n{section}");
+        assert_eq!(strip_cache_section(&buffer), "hello @uu_alice");
     }
 
     #[test]

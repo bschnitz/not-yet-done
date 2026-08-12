@@ -34,7 +34,7 @@ impl CmdlineComponent {
 
     /// Open the cmdline with `prefill` already typed and the cursor at
     /// the end. Used by adapter-action flows that want the user to
-    /// finish a partially-typed command (e.g. `:db-script-new <db> `
+    /// finish a partially-typed command (e.g. `:db-script new `
     /// → user types just the script name and presses Enter).
     pub fn open_with(&mut self, prefill: &str) {
         self.active = true;
@@ -73,7 +73,9 @@ impl CmdlineComponent {
             }
             "backspace" => {
                 if self.cursor > 0 {
-                    let byte_pos = self.query.char_indices()
+                    let byte_pos = self
+                        .query
+                        .char_indices()
                         .nth(self.cursor - 1)
                         .map(|(i, _)| i)
                         .unwrap_or(0);
@@ -96,7 +98,9 @@ impl CmdlineComponent {
                 CmdlineKeyResult::Handled
             }
             ch if ch.chars().count() == 1 && !ch.chars().next().unwrap().is_control() => {
-                let byte_pos = self.query.char_indices()
+                let byte_pos = self
+                    .query
+                    .char_indices()
                     .nth(self.cursor)
                     .map(|(i, _)| i)
                     .unwrap_or(self.query.len());

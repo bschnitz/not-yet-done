@@ -24,13 +24,13 @@
 
 use std::sync::Arc;
 
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::Frame;
 
 use tuirealm::command::{Cmd, CmdResult};
-use tuirealm::props::{Attribute, AttrValue, QueryResult};
 use tuirealm::component::Component;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
 use crate::ui::theme::Theme;
@@ -131,8 +131,13 @@ pub struct ActionBarComponent {
     hints: Vec<ActionHint>,
     /// Active filter / saved-query name shown after the hints.
     active_filter_name: Option<String>,
-    /// Favorites (name, shortcut).
+    /// Favorites (name, shortcut) — saved queries with a bound chord. The
+    /// active one is highlighted.
     favorites: Vec<Favorite>,
+    /// Script-shortcut entries (name, shortcut) — the `:script`-menu and
+    /// per-table script chords. Rendered as their own group after the query
+    /// favorites, separated only when non-empty. Never highlighted active.
+    script_favorites: Vec<Favorite>,
 
     fuzzy: FuzzyState,
     search: SearchState,
@@ -155,6 +160,7 @@ impl ActionBarComponent {
             hints: Vec::new(),
             active_filter_name: None,
             favorites: Vec::new(),
+            script_favorites: Vec::new(),
             fuzzy: FuzzyState::default(),
             search: SearchState::default(),
             cmdline: CmdlineState::default(),
@@ -190,6 +196,10 @@ impl ActionBarComponent {
 
     pub fn set_favorites(&mut self, favorites: Vec<Favorite>) {
         self.favorites = favorites;
+    }
+
+    pub fn set_script_favorites(&mut self, script_favorites: Vec<Favorite>) {
+        self.script_favorites = script_favorites;
     }
 
     pub fn set_fuzzy(&mut self, active: bool, query: &str, cursor: usize) {
@@ -356,7 +366,10 @@ impl ActionBarComponent {
         let t = &self.theme;
         let bg = t.toolbar_bg();
         let run = |text: &str, fg: Color, mods: Modifier| {
-            (text.to_string(), Style::default().fg(fg).bg(bg).add_modifier(mods))
+            (
+                text.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(mods),
+            )
         };
 
         let prefix = if let Some(label) = self.mode_label.as_deref() {
@@ -380,7 +393,11 @@ impl ActionBarComponent {
         let mut units: Vec<BarUnit> = Vec::new();
 
         for hint in &self.hints {
-            let fg = if hint.active { t.accent() } else { t.secondary() };
+            let fg = if hint.active {
+                t.accent()
+            } else {
+                t.secondary()
+            };
             let mods = if hint.active {
                 Modifier::UNDERLINED | Modifier::BOLD
             } else {
@@ -397,34 +414,67 @@ impl ActionBarComponent {
         }
 
         if let Some(name) = self.active_filter_name.as_deref() {
-            units.push(BarUnit {
-                runs: vec![
-                    run(" │  ", t.text_dim(), Modifier::empty()),
-                    run(name, t.accent(), Modifier::ITALIC),
-                ],
-            });
+            // Only surface the active query as a standalone label when it is
+            // *not* also a favorite: a favorite with the same name is already
+            // rendered in the favorites group below and highlighted (accent +
+            // bold) precisely because it is active, so a separate label would
+            // show the active query twice. When the active query has no
+            // shortcut (not a favorite) this standalone label is the only place
+            // it appears.
+            let shown_as_favorite = self.favorites.iter().any(|(fav, _)| fav == name);
+            if !shown_as_favorite {
+                units.push(BarUnit {
+                    runs: vec![
+                        // Leading "│  " (no leading spaces): the preceding hint
+                        // already ends with "  ", so the gap reads as one
+                        // "  │  " rather than a doubled one. Trailing "  " so a
+                        // following favorites group separates the same way.
+                        run("│  ", t.text_dim(), Modifier::empty()),
+                        run(name, t.accent(), Modifier::ITALIC),
+                        run("  ", t.text_dim(), Modifier::empty()),
+                    ],
+                });
+            }
         }
 
-        for (i, (name, shortcut)) in self.favorites.iter().enumerate() {
-            let is_active = self.active_filter_name.as_deref() == Some(name.as_str());
-            let fg = if is_active { t.accent() } else { t.secondary() };
-            let mods = if is_active {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            };
-            let mut runs: Vec<(String, Style)> = Vec::new();
-            // The favorites group separator rides with the first favorite so it
-            // wraps as a group marker rather than dangling at a line's end.
-            if i == 0 {
-                runs.push(run("  │  ", t.text_dim(), Modifier::empty()));
+        // A group of "name [chord]" entries with a single leading "│  "
+        // separator on the first entry. The separator carries no leading
+        // spaces — it relies on the preceding unit's trailing "  " so the gap
+        // is one "  │  ", not a doubled "    │  ". Skipped entirely when the
+        // group is empty, so no dangling separator is drawn.
+        let push_group = |units: &mut Vec<BarUnit>, entries: &[Favorite], active: Option<&str>| {
+            for (i, (name, shortcut)) in entries.iter().enumerate() {
+                let is_active = active == Some(name.as_str());
+                let fg = if is_active { t.accent() } else { t.secondary() };
+                let mods = if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
+                let mut runs: Vec<(String, Style)> = Vec::new();
+                if i == 0 {
+                    runs.push(run("│  ", t.text_dim(), Modifier::empty()));
+                }
+                runs.push(run(name, fg, mods));
+                runs.push(run(" ", t.text_dim(), Modifier::empty()));
+                runs.push(run(
+                    &format!("[{shortcut}]"),
+                    t.text_dim(),
+                    Modifier::empty(),
+                ));
+                runs.push(run("  ", t.text_dim(), Modifier::empty()));
+                units.push(BarUnit { runs });
             }
-            runs.push(run(name, fg, mods));
-            runs.push(run(" ", t.text_dim(), Modifier::empty()));
-            runs.push(run(&format!("[{shortcut}]"), t.text_dim(), Modifier::empty()));
-            runs.push(run("  ", t.text_dim(), Modifier::empty()));
-            units.push(BarUnit { runs });
-        }
+        };
+
+        // Query favorites (active one highlighted), then script shortcuts as a
+        // separate group. The `│` between them only appears when scripts exist.
+        push_group(
+            &mut units,
+            &self.favorites,
+            self.active_filter_name.as_deref(),
+        );
+        push_group(&mut units, &self.script_favorites, None);
 
         (prefix, units)
     }
@@ -438,7 +488,17 @@ impl ActionBarComponent {
         let right = area.right();
         let bottom = area.bottom();
 
-        write_run(buf, &mut x, &mut y, right, bottom, ":", t.accent(), bg, Modifier::BOLD);
+        write_run(
+            buf,
+            &mut x,
+            &mut y,
+            right,
+            bottom,
+            ":",
+            t.accent(),
+            bg,
+            Modifier::BOLD,
+        );
 
         let max_w = right.saturating_sub(x) as usize;
         let chars: Vec<char> = self.cmdline.query.chars().collect();
@@ -450,7 +510,17 @@ impl ActionBarComponent {
         let text_start_x = x;
 
         if chars.is_empty() {
-            write_run(buf, &mut x, &mut y, right, bottom, "type command…", t.text_dim(), bg, Modifier::empty());
+            write_run(
+                buf,
+                &mut x,
+                &mut y,
+                right,
+                bottom,
+                "type command…",
+                t.text_dim(),
+                bg,
+                Modifier::empty(),
+            );
         } else {
             for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
                 if screen_idx >= max_w {
@@ -466,7 +536,8 @@ impl ActionBarComponent {
             }
         }
 
-        let cursor_screen_x = text_start_x + (self.cmdline.cursor.saturating_sub(view_start)) as u16;
+        let cursor_screen_x =
+            text_start_x + (self.cmdline.cursor.saturating_sub(view_start)) as u16;
         if cursor_screen_x < right {
             Some(Position::new(cursor_screen_x, y))
         } else {
@@ -484,7 +555,17 @@ impl ActionBarComponent {
         let bottom = area.bottom();
 
         let prefix = self.search.prefix.as_deref().unwrap_or("/ ");
-        write_run(buf, &mut x, &mut y, right, bottom, prefix, t.accent(), bg, Modifier::BOLD);
+        write_run(
+            buf,
+            &mut x,
+            &mut y,
+            right,
+            bottom,
+            prefix,
+            t.accent(),
+            bg,
+            Modifier::BOLD,
+        );
 
         let match_info = if !self.search.show_match_info || self.search.query.is_empty() {
             String::new()
@@ -505,8 +586,22 @@ impl ActionBarComponent {
         let text_start_x = x;
 
         if chars.is_empty() {
-            let placeholder = self.search.placeholder.as_deref().unwrap_or("type to search…");
-            write_run(buf, &mut x, &mut y, right, bottom, placeholder, t.text_dim(), bg, Modifier::empty());
+            let placeholder = self
+                .search
+                .placeholder
+                .as_deref()
+                .unwrap_or("type to search…");
+            write_run(
+                buf,
+                &mut x,
+                &mut y,
+                right,
+                bottom,
+                placeholder,
+                t.text_dim(),
+                bg,
+                Modifier::empty(),
+            );
         } else {
             for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
                 if screen_idx >= max_w {
@@ -527,7 +622,17 @@ impl ActionBarComponent {
         } else {
             t.text_dim()
         };
-        write_run(buf, &mut x, &mut y, right, bottom, &match_info, info_fg, bg, Modifier::empty());
+        write_run(
+            buf,
+            &mut x,
+            &mut y,
+            right,
+            bottom,
+            &match_info,
+            info_fg,
+            bg,
+            Modifier::empty(),
+        );
 
         let cx = text_start_x + (self.search.cursor.saturating_sub(view_start)) as u16;
         if cx < right {
@@ -546,7 +651,17 @@ impl ActionBarComponent {
         let right = area.right();
         let bottom = area.bottom();
 
-        write_run(buf, &mut x, &mut y, right, bottom, "󰈲 ", t.accent(), bg, Modifier::BOLD);
+        write_run(
+            buf,
+            &mut x,
+            &mut y,
+            right,
+            bottom,
+            "󰈲 ",
+            t.accent(),
+            bg,
+            Modifier::BOLD,
+        );
 
         let exit_w = self.fuzzy_exit_label.chars().count() as u16 + 2;
         let max_w = right.saturating_sub(x).saturating_sub(exit_w) as usize;
@@ -559,7 +674,17 @@ impl ActionBarComponent {
         let text_start_x = x;
 
         if chars.is_empty() {
-            write_run(buf, &mut x, &mut y, right, bottom, "type to filter…", t.text_dim(), bg, Modifier::empty());
+            write_run(
+                buf,
+                &mut x,
+                &mut y,
+                right,
+                bottom,
+                "type to filter…",
+                t.text_dim(),
+                bg,
+                Modifier::empty(),
+            );
         } else {
             for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
                 if screen_idx >= max_w {
@@ -586,7 +711,17 @@ impl ActionBarComponent {
         let hint_x = right.saturating_sub(exit_label_w + 1);
         let mut hx = hint_x;
         let mut hy = y;
-        write_run(buf, &mut hx, &mut hy, right, bottom, &self.fuzzy_exit_label, t.text_dim(), bg, Modifier::empty());
+        write_run(
+            buf,
+            &mut hx,
+            &mut hy,
+            right,
+            bottom,
+            &self.fuzzy_exit_label,
+            t.text_dim(),
+            bg,
+            Modifier::empty(),
+        );
 
         cursor_pos
     }
@@ -678,7 +813,10 @@ mod tests {
     #[test]
     fn fits_on_one_line_when_wide_enough() {
         let mut b = bar();
-        b.set_hints(vec![ActionHint::new("f", "fuzzy filter"), ActionHint::new("/", "search")]);
+        b.set_hints(vec![
+            ActionHint::new("f", "fuzzy filter"),
+            ActionHint::new("/", "search"),
+        ]);
         assert_eq!(b.required_height(200), 1);
     }
 
@@ -701,6 +839,49 @@ mod tests {
         // Narrow enough that the favorites no longer fit → must wrap, so the
         // bar reports more than one row (previously stuck at 1).
         assert!(b.required_height(40) > 1, "favorites must force a wrap");
+    }
+
+    /// Flatten every run's text across the normal-mode units into one string,
+    /// so a test can count how often a name is displayed.
+    fn normal_text(b: &ActionBarComponent) -> String {
+        let (prefix, units) = b.normal_units();
+        prefix
+            .into_iter()
+            .chain(units)
+            .flat_map(|u| u.runs.into_iter().map(|(s, _)| s))
+            .collect()
+    }
+
+    #[test]
+    fn active_query_that_is_a_favorite_is_shown_once() {
+        // The active query is highlighted in the favorites group, so it must
+        // not also appear as a standalone active-filter label.
+        let mut b = bar();
+        b.set_active_filter_name(Some("My Tickets".into()));
+        b.set_favorites(vec![
+            ("Mentioned In".into(), "ctrl+m".into()),
+            ("My Tickets".into(), "ctrl+i".into()),
+        ]);
+        let text = normal_text(&b);
+        assert_eq!(
+            text.matches("My Tickets").count(),
+            1,
+            "active favorite must be displayed exactly once: {text:?}"
+        );
+    }
+
+    #[test]
+    fn active_query_without_a_shortcut_still_shows_its_name() {
+        // No matching favorite → the standalone label is the only place the
+        // active query surfaces, so it must stay.
+        let mut b = bar();
+        b.set_active_filter_name(Some("Ad Hoc".into()));
+        b.set_favorites(vec![("My Tickets".into(), "ctrl+i".into())]);
+        let text = normal_text(&b);
+        assert!(
+            text.contains("Ad Hoc"),
+            "active non-favorite must be shown: {text:?}"
+        );
     }
 
     #[test]

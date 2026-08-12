@@ -201,8 +201,10 @@ impl TreeState {
         // 2. Prune the deleted subtree's expansion + cache (its own path and
         //    everything beneath it). A recursive delete removes descendants
         //    in the backend too, so their cache is now stale.
-        self.expanded.retain(|p| !p.starts_with(own_path.as_slice()));
-        self.cache.retain(|p, _| !p.starts_with(own_path.as_slice()));
+        self.expanded
+            .retain(|p| !p.starts_with(own_path.as_slice()));
+        self.cache
+            .retain(|p, _| !p.starts_with(own_path.as_slice()));
         // 3. Last child gone → the parent is now a leaf; clear its glyph in
         //    the grandparent's cache so the `▶` disappears.
         let parent_now_empty = self
@@ -340,10 +342,17 @@ impl TreeState {
         let kids = state.children.clone();
         let has_more = state.next_page.is_some();
         for kid in kids {
-            self.flatten_into(kid, own_path.clone(), own_type_chain.clone(), depth + 1, view_def);
+            self.flatten_into(
+                kid,
+                own_path.clone(),
+                own_type_chain.clone(),
+                depth + 1,
+                view_def,
+            );
         }
         if has_more {
-            self.entries.push(more_placeholder_entry(own_path, depth + 1));
+            self.entries
+                .push(more_placeholder_entry(own_path, depth + 1));
         }
     }
 }
@@ -728,6 +737,26 @@ pub fn leaf_glyph_opt_for_chain<'a>(
     view_def.leaf_glyph.as_deref()
 }
 
+/// Resolve the configured *type* icon for an entry whose `node_type_chain`
+/// is given: the producing ChildDef's `icon`, else the ViewDef's, else
+/// `None`. Unlike [`leaf_glyph_opt_for_chain`] this is independent of the
+/// entry's expand state — it says what the row *is*, which is what lets two
+/// sibling branches sharing one tree depth (Stoat: uncategorized channels
+/// next to categories) tell themselves apart.
+pub fn icon_opt_for_chain<'a>(
+    view_def: &'a ViewDef,
+    node_type_chain: &[String],
+) -> Option<&'a str> {
+    // Pass the ORIGINAL chain — see `leaf_glyph_opt_for_chain` on why
+    // pre-stripping would double-strip in a uniform recursive tree.
+    if let Some(child) = child_def_for_type_chain(view_def, node_type_chain) {
+        if let Some(g) = child.icon.as_deref() {
+            return Some(g);
+        }
+    }
+    view_def.icon.as_deref()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -774,8 +803,14 @@ mod tests {
         }
     }
 
-    fn child(name: &str, tree_label: Option<&str>, columns: Vec<ColumnDef>, children: Vec<ChildDef>) -> ChildDef {
+    fn child(
+        name: &str,
+        tree_label: Option<&str>,
+        columns: Vec<ColumnDef>,
+        children: Vec<ChildDef>,
+    ) -> ChildDef {
         ChildDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: name.into(),
@@ -790,20 +825,24 @@ mod tests {
             action_chains: ActionChains::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: tree_label.map(String::from),
             shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             mark_read_on_reach_end: None,
+            cursor_on_open: None,
         }
     }
 
     fn view(tree_label: Option<&str>, columns: Vec<ColumnDef>, children: Vec<ChildDef>) -> ViewDef {
         ViewDef {
+            card: None,
             row_layout: None,
             smooth_scroll: false,
             name: "root".into(),
@@ -820,11 +859,14 @@ mod tests {
             action_chains: ActionChains::default(),
             column_cursor: false,
             record_detail: false,
+            node_scripts: false,
             tree_label: tree_label.map(String::from),
             retries: 0,
             script_template: None,
+            script_source: None,
             shortcuts: HashMap::new(),
             leaf_glyph: None,
+            icon: None,
             group_by: None,
             aggregates: Vec::new(),
             tree_connector_style: None,
@@ -834,6 +876,7 @@ mod tests {
             tree_markers: None,
             expand_depth: None,
             group_headers: None,
+            event_actions: Vec::new(),
         }
     }
 
@@ -903,7 +946,10 @@ mod tests {
         t.rebuild_entries(&v);
         assert_eq!(t.entries.len(), 2);
         assert_eq!(t.entries[0].depth, 0);
-        assert_eq!(t.entries[0].node_type_chain, vec!["mock:schema".to_string()]);
+        assert_eq!(
+            t.entries[0].node_type_chain,
+            vec!["mock:schema".to_string()]
+        );
         assert!(t.entries[0].has_children);
         assert_eq!(t.entries[0].node.id, "db1");
     }
@@ -1037,10 +1083,14 @@ mod tests {
 
         assert!(t.remove_node("public"));
 
-        assert!(!t.cache.contains_key(&vec!["db1".to_string(), "public".to_string()]));
-        assert!(!t
-            .expanded
-            .contains(&vec!["db1".to_string(), "public".to_string()]));
+        assert!(
+            !t.cache
+                .contains_key(&vec!["db1".to_string(), "public".to_string()])
+        );
+        assert!(
+            !t.expanded
+                .contains(&vec!["db1".to_string(), "public".to_string()])
+        );
     }
 
     #[test]
@@ -1090,7 +1140,11 @@ mod tests {
         let v = view(Some("name"), vec![col("name")], vec![schema]);
         let kids_at_1 = tree_level_children(&v, 1).unwrap();
         assert_eq!(kids_at_1.len(), 2);
-        assert!(kids_at_1.iter().any(|c| c.name == "rows" && c.tree_label.is_none()));
+        assert!(
+            kids_at_1
+                .iter()
+                .any(|c| c.name == "rows" && c.tree_label.is_none())
+        );
     }
 
     #[test]
@@ -1114,15 +1168,17 @@ mod tests {
         leaf_summary.has_children = Some(false);
         let mut expandable_summary = typed_node("p2", "Has subpages", "mock:page");
         expandable_summary.has_children = Some(true);
-        t.set_cached_children(
-            Vec::new(),
-            vec![leaf_summary, expandable_summary],
-            None,
-        );
+        t.set_cached_children(Vec::new(), vec![leaf_summary, expandable_summary], None);
         t.rebuild_entries(&v);
         assert_eq!(t.entries.len(), 2);
-        assert!(!t.entries[0].has_children, "explicit Some(false) wins over recursive");
-        assert!(t.entries[1].has_children, "explicit Some(true) keeps it expandable");
+        assert!(
+            !t.entries[0].has_children,
+            "explicit Some(false) wins over recursive"
+        );
+        assert!(
+            t.entries[1].has_children,
+            "explicit Some(true) keeps it expandable"
+        );
     }
 
     /// A node whose only child opens via drill/split (no `tree_label`)
@@ -1195,6 +1251,36 @@ mod tests {
         assert_eq!(tree_row_glyph(&page_leaf, &t, &v), "·");
     }
 
+    /// The type `icon:` resolves per level like `leaf_glyph` — but
+    /// independently of the expand state, which is the whole point: two
+    /// branches sharing one depth (Stoat channels vs. categories) must stay
+    /// distinguishable while both are expandable.
+    #[test]
+    fn icon_resolves_per_level_regardless_of_expand_state() {
+        let mut chans = child("channels", Some("name"), vec![col("name")], Vec::new());
+        chans.node_type = "mock:channel".into();
+        chans.icon = Some("💬".into());
+        let mut cats = child("categories", Some("name"), vec![col("name")], Vec::new());
+        cats.node_type = "mock:category".into();
+        cats.icon = Some("📁".into());
+        let mut v = view(Some("name"), vec![col("name")], vec![chans, cats]);
+
+        let chan_chain = vec!["mock:root".into(), "mock:channel".into()];
+        let cat_chain = vec!["mock:root".into(), "mock:category".into()];
+        assert_eq!(icon_opt_for_chain(&v, &chan_chain), Some("💬"));
+        assert_eq!(icon_opt_for_chain(&v, &cat_chain), Some("📁"));
+
+        // Root level falls back to the ViewDef's own icon …
+        assert_eq!(icon_opt_for_chain(&v, &["mock:root".to_string()]), None);
+        v.icon = Some("🖧".into());
+        assert_eq!(
+            icon_opt_for_chain(&v, &["mock:root".to_string()]),
+            Some("🖧")
+        );
+        // … which never overrides a level that declares its own.
+        assert_eq!(icon_opt_for_chain(&v, &chan_chain), Some("💬"));
+    }
+
     #[test]
     fn glyph_reflects_state() {
         let mut t = TreeState::new();
@@ -1209,13 +1295,19 @@ mod tests {
         };
         assert_eq!(tree_row_glyph(&leaf_entry, &t, &v), "·");
 
-        let collapsed = TreeEntry { has_children: true, ..leaf_entry.clone() };
+        let collapsed = TreeEntry {
+            has_children: true,
+            ..leaf_entry.clone()
+        };
         assert_eq!(tree_row_glyph(&collapsed, &t, &v), "▶");
 
         t.expanded.insert(vec!["x".into()]);
         assert_eq!(tree_row_glyph(&collapsed, &t, &v), "▼");
 
-        let placeholder = TreeEntry { is_more_placeholder: true, ..leaf_entry };
+        let placeholder = TreeEntry {
+            is_more_placeholder: true,
+            ..leaf_entry
+        };
         assert_eq!(tree_row_glyph(&placeholder, &t, &v), "…");
     }
 
@@ -1231,7 +1323,10 @@ mod tests {
             None,
         );
         // db1's children are paginated: arm next_page.
-        let next = PageRequest { offset: 2, limit: 2 };
+        let next = PageRequest {
+            offset: 2,
+            limit: 2,
+        };
         t.set_cached_children(
             vec!["db1".into()],
             vec![
@@ -1264,7 +1359,10 @@ mod tests {
         t.set_cached_children(
             vec!["db1".into()],
             vec![typed_node("a", "a", "mock:table")],
-            Some(PageRequest { offset: 1, limit: 1 }),
+            Some(PageRequest {
+                offset: 1,
+                limit: 1,
+            }),
         );
         t.expanded.insert(vec!["db1".into()]);
         t.rebuild_entries(&v);
@@ -1312,15 +1410,15 @@ mod tests {
         assert_eq!(schemas_def.name, "schemas");
 
         // And the db_scripts branch.
-        let scripts_def = child_def_for_type_chain(
-            &v,
-            &["mock:database".into(), "mock:db_scripts".into()],
-        )
-        .unwrap();
+        let scripts_def =
+            child_def_for_type_chain(&v, &["mock:database".into(), "mock:db_scripts".into()])
+                .unwrap();
         assert_eq!(scripts_def.name, "db_scripts");
 
         // Unknown type at depth 1 returns None.
-        assert!(child_def_for_type_chain(&v, &["mock:database".into(), "mock:nope".into()]).is_none());
+        assert!(
+            child_def_for_type_chain(&v, &["mock:database".into(), "mock:nope".into()]).is_none()
+        );
     }
 
     #[test]
@@ -1366,7 +1464,10 @@ mod tests {
         assert_eq!(t.entries[1].node_type_chain.last().unwrap(), "mock:schemas");
         // Schemas group has tree-continuing child (Schema) → has_children = true.
         assert!(t.entries[1].has_children);
-        assert_eq!(t.entries[2].node_type_chain.last().unwrap(), "mock:db_scripts");
+        assert_eq!(
+            t.entries[2].node_type_chain.last().unwrap(),
+            "mock:db_scripts"
+        );
         // DB-Scripts group has tree-continuing child (db_script with no tree_label) → false here,
         // because db_script has no tree_label, so has_tree_continuation returns false.
         assert!(!t.entries[2].has_children);
@@ -1375,12 +1476,7 @@ mod tests {
     #[test]
     fn multi_load_merges_buckets_in_expected_order() {
         let schemas = child("schemas", Some("name"), vec![col("name")], Vec::new());
-        let db_scripts = child(
-            "db_scripts",
-            Some("name"),
-            vec![col("name")],
-            Vec::new(),
-        );
+        let db_scripts = child("db_scripts", Some("name"), vec![col("name")], Vec::new());
         let database = child(
             "database",
             Some("name"),
@@ -1442,17 +1538,11 @@ mod tests {
             vec![schemas, db_scripts],
         );
         let v = view(Some("name"), vec![col("name")], vec![database]);
-        let schemas_level = tree_level_for_chain(
-            &v,
-            &["mock:database".into(), "mock:schemas".into()],
-        )
-        .unwrap();
+        let schemas_level =
+            tree_level_for_chain(&v, &["mock:database".into(), "mock:schemas".into()]).unwrap();
         assert_eq!(schemas_level.columns.len(), 1);
-        let scripts_level = tree_level_for_chain(
-            &v,
-            &["mock:database".into(), "mock:db_scripts".into()],
-        )
-        .unwrap();
+        let scripts_level =
+            tree_level_for_chain(&v, &["mock:database".into(), "mock:db_scripts".into()]).unwrap();
         assert_eq!(scripts_level.columns.len(), 2);
     }
 
@@ -1528,11 +1618,9 @@ mod tests {
         assert!(child_def_for_type_chain(&v, &["postgres:database".into()]).is_none());
         // depth-1 chain (schema) → resolves Schema ChildDef even though
         // the chain starts with the view-root type.
-        let resolved = child_def_for_type_chain(
-            &v,
-            &["postgres:database".into(), "postgres:schema".into()],
-        )
-        .unwrap();
+        let resolved =
+            child_def_for_type_chain(&v, &["postgres:database".into(), "postgres:schema".into()])
+                .unwrap();
         assert_eq!(resolved.name, "schema");
         // depth-2 chain (table) → resolves Table ChildDef.
         let resolved = child_def_for_type_chain(
@@ -1553,13 +1641,7 @@ mod tests {
         // wrapper ChildDef. Glyph must be ▶/▼ on depth-0 and depth-1
         // expandable rows, `·` only on the true leaf (table, since its
         // child Rows has no tree_label).
-        let rows = child_with_type(
-            "rows",
-            "postgres:row",
-            None,
-            vec![col("name")],
-            Vec::new(),
-        );
+        let rows = child_with_type("rows", "postgres:row", None, vec![col("name")], Vec::new());
         let table = child_with_type(
             "table",
             "postgres:table",
@@ -1607,7 +1689,10 @@ mod tests {
         // db1 (depth 0, has tree-continuing child Schema) → ▶/▼.
         assert!(t.entries[0].has_children, "db1 should be expandable");
         // public (depth 1, has tree-continuing child Table) → ▶/▼.
-        assert!(t.entries[1].has_children, "public schema should be expandable");
+        assert!(
+            t.entries[1].has_children,
+            "public schema should be expandable"
+        );
         // users (depth 2, child Rows has no tree_label) → leaf glyph.
         assert!(
             !t.entries[2].has_children,
@@ -1649,12 +1734,7 @@ mod tests {
     #[test]
     fn effective_child_children_prepends_self_for_recursive() {
         let leaf = child("leaf", None, vec![col("name")], Vec::new());
-        let mut dir = child(
-            "dir",
-            Some("name"),
-            vec![col("name")],
-            vec![leaf.clone()],
-        );
+        let mut dir = child("dir", Some("name"), vec![col("name")], vec![leaf.clone()]);
         dir.recursive = true;
         let effective = effective_child_children(&dir);
         assert_eq!(effective.len(), 2);

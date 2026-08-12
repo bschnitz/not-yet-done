@@ -9,14 +9,18 @@ mock = []
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+fieldsmith = { workspace = true }
 dirs = { workspace = true }
 keyring = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process", "sync", "time"] }
 
 [dev-dependencies]
+# Only to build synthetic `reqwest::Response`s in the http_log tests.
+http = "1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "process", "rt", "sync", "time"] }
