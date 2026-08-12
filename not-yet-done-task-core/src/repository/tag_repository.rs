@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::entity::{global_tag, project_tag};
 use crate::error::AppError;
 
-/// Aufgelöster Tag — entweder global oder projektspezifisch
+/// A resolved tag — either global or project-specific
 #[derive(Debug, Clone)]
 pub enum ResolvedTag {
     Global(global_tag::Model),
@@ -107,7 +107,7 @@ impl TagRepository for TagRepositoryImpl {
         name: String,
         style: TagStyle,
     ) -> Result<global_tag::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
         if let Some(existing) = self.find_global_by_name(&name).await? {
             return Err(AppError::DuplicateGlobalTag {
@@ -132,9 +132,9 @@ impl TagRepository for TagRepositoryImpl {
         style: TagStyle,
         project_id: Uuid,
     ) -> Result<project_tag::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
 
-        // Prüfen ob (name, project_id) schon existiert
+        // Check whether (name, project_id) already exists
         let existing = project_tag::Entity::find()
             .filter(project_tag::Column::Name.eq(&name))
             .filter(project_tag::Column::ProjectId.eq(project_id))
@@ -160,7 +160,7 @@ impl TagRepository for TagRepositoryImpl {
     }
 
     async fn find_all_global(&self) -> Result<Vec<global_tag::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(global_tag::Entity::find().all(db).await?)
     }
 
@@ -168,7 +168,7 @@ impl TagRepository for TagRepositoryImpl {
         &self,
         project_id: Uuid,
     ) -> Result<Vec<project_tag::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(project_tag::Entity::find()
             .filter(project_tag::Column::ProjectId.eq(project_id))
             .all(db)
@@ -176,12 +176,12 @@ impl TagRepository for TagRepositoryImpl {
     }
 
     async fn find_all_project_tags(&self) -> Result<Vec<project_tag::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(project_tag::Entity::find().all(db).await?)
     }
 
     async fn find_global_by_id(&self, id: Uuid) -> Result<global_tag::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         global_tag::Entity::find_by_id(id)
             .one(db)
             .await?
@@ -189,7 +189,7 @@ impl TagRepository for TagRepositoryImpl {
     }
 
     async fn find_project_tag_by_id(&self, id: Uuid) -> Result<project_tag::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         project_tag::Entity::find_by_id(id)
             .one(db)
             .await?
@@ -197,7 +197,7 @@ impl TagRepository for TagRepositoryImpl {
     }
 
     async fn find_global_by_name(&self, name: &str) -> Result<Option<global_tag::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(global_tag::Entity::find()
             .filter(global_tag::Column::Name.eq(name))
             .one(db)
@@ -209,7 +209,7 @@ impl TagRepository for TagRepositoryImpl {
         name: &str,
         project_ids: &[Uuid],
     ) -> Result<Vec<project_tag::Model>, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         Ok(project_tag::Entity::find()
             .filter(project_tag::Column::Name.eq(name))
             .filter(project_tag::Column::ProjectId.is_in(project_ids.to_vec()))
@@ -223,7 +223,7 @@ impl TagRepository for TagRepositoryImpl {
         name: Option<String>,
         style: TagStylePatch,
     ) -> Result<global_tag::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let tag = self.find_global_by_id(id).await?;
         let mut model: global_tag::ActiveModel = tag.into();
         if let Some(n) = name {
@@ -247,7 +247,7 @@ impl TagRepository for TagRepositoryImpl {
         name: Option<String>,
         style: TagStylePatch,
     ) -> Result<project_tag::Model, AppError> {
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let tag = self.find_project_tag_by_id(id).await?;
         let mut model: project_tag::ActiveModel = tag.into();
         if let Some(n) = name {
@@ -267,7 +267,7 @@ impl TagRepository for TagRepositoryImpl {
 
     async fn delete_global(&self, id: Uuid) -> Result<(), AppError> {
         use sea_orm::ModelTrait;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let tag = self.find_global_by_id(id).await?;
         tag.delete(db).await?;
         Ok(())
@@ -275,7 +275,7 @@ impl TagRepository for TagRepositoryImpl {
 
     async fn delete_project_tag(&self, id: Uuid) -> Result<(), AppError> {
         use sea_orm::ModelTrait;
-        let db = self.db.as_ref().expect("DB nicht initialisiert");
+        let db = self.db.as_ref().expect("DB not initialized");
         let tag = self.find_project_tag_by_id(id).await?;
         tag.delete(db).await?;
         Ok(())

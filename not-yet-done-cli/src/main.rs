@@ -30,10 +30,10 @@ where
 {
     let module = MODULE
         .get()
-        .expect("TaskDomainModule nicht initialisiert")
+        .expect("TaskDomainModule not initialized")
         .clone();
     tokio::runtime::Runtime::new()
-        .expect("tokio Runtime konnte nicht erstellt werden")
+        .expect("failed to create the tokio runtime")
         .block_on(f(module))
 }
 
@@ -74,7 +74,7 @@ fn main() -> std::process::ExitCode {
     let config_service = ConfigServiceImpl::new();
 
     let db_url = tokio::runtime::Runtime::new()
-        .expect("tokio Runtime konnte nicht erstellt werden")
+        .expect("failed to create the tokio runtime")
         .block_on(async { config_service.get_database_url().await });
 
     let db_url = match db_url {
@@ -89,13 +89,13 @@ fn main() -> std::process::ExitCode {
     // core DB; schema sync was only ever triggered by the now-removed
     // `db sync`, so connect without it.
     let db = tokio::runtime::Runtime::new()
-        .expect("tokio Runtime konnte nicht erstellt werden")
+        .expect("failed to create the tokio runtime")
         .block_on(async { db::connect(&db_url, false).await });
 
     let db = match db {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("Datenbankverbindung fehlgeschlagen: {e}");
+            eprintln!("Database connection failed: {e}");
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -119,7 +119,7 @@ fn main() -> std::process::ExitCode {
 
     MODULE
         .set(module)
-        .unwrap_or_else(|_| panic!("MODULE bereits gesetzt"));
+        .unwrap_or_else(|_| panic!("MODULE already set"));
 
     std::process::ExitCode::from(cli::exec_cli().unwrap_or(0))
 }

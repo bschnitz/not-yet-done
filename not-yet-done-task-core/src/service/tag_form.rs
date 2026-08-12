@@ -92,8 +92,8 @@ fn edit_template(
     format!(
         "\
 # Edit tag. Save & quit to commit.
-# `name:` darf nicht leer werden. Lines starting with `#` are ignored.
-# `project:` ist read-only — Re-scope wird hier nicht unterstützt.
+# `name:` must not become empty. Lines starting with `#` are ignored.
+# `project:` is read-only — re-scoping is not supported here.
 
 name: \"{name}\"
 

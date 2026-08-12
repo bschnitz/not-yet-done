@@ -154,8 +154,8 @@ impl LineTemplate {
     }
 }
 
-/// Bauplan, wie die Spalten einer logischen Row auf physische Zeilen verteilt
-/// werden. Ein einzeiliges Template entspricht der klassischen Tabelle.
+/// Blueprint for how a logical row's columns are spread over physical lines.
+/// A single-line template is the classic table.
 #[derive(Debug, Clone)]
 pub struct RowTemplate {
     pub lines: Vec<LineTemplate>,

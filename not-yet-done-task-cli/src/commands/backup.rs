@@ -20,7 +20,7 @@ pub mod cli {
         let dir = backup::default_backup_dir();
         match backup::create_backup_at(crate::tasks_dsn(), &dir, super::MAX_BACKUPS) {
             Ok(path) => {
-                println!("✓ Backup erstellt: {}", path);
+                println!("✓ Backup created: {}", path);
                 0
             }
             Err(e) => {
@@ -61,7 +61,7 @@ pub mod cli {
         let dir = backup::default_backup_dir();
         match backup::restore_backup_at(crate::tasks_dsn(), &dir, &filename) {
             Ok(path) => {
-                println!("✓ Datenbank wiederhergestellt: {}", path);
+                println!("✓ Database restored: {}", path);
                 0
             }
             Err(e) => {

@@ -2176,7 +2176,7 @@ impl Node for TrackingRootNode {
 
 /// Which fallback question the pending `paste-move` confirm chain is on.
 /// The generic confirm mechanism only round-trips a single `confirmed` bool,
-/// so the two-step "ans Ende?" → "vor das erste?" cascade needs this to
+/// so the two-step "to the end?" → "before the first?" cascade needs this to
 /// remember which question a re-invocation is answering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PasteStage {
