@@ -39,7 +39,7 @@ Punkt notieren.
 
 ## Jira ContentView — Drill-down (Phase 1)
 
-- [x] `c` (navigate) drillt in Comments → Liste lädt
+- [x] `C` (navigate) drillt in Comments → Liste lädt
 - [ ] `e` editiert Comment (`edit_full`) → "Comment updated"
       → Funktioniert. Erweitert in Phase 2: Edit-Action wird bei
       Comments fremder Autoren ausgeblendet (siehe unten).
@@ -188,7 +188,7 @@ keine Sonderfälle mehr.
       markers"
 - [x] Issue editieren, `:q!` ohne Änderung → Notification "Edit
       cancelled"
-- [x] Comment via `c` (ContentChildCreate) anlegen →
+- [x] Comment anlegen (`C` drillt in Comments, `a` = ContentChildCreate) →
       Drill-down-Liste refresht
 
 ## EditSession — Tasks

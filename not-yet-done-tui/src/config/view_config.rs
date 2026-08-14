@@ -2913,6 +2913,95 @@ views:
         }
     }
 
+    /// The comment drill-down is reached through a `navigate` action, never
+    /// through a key on the `children:` entry — [`ChildDef`] has no `key`
+    /// field, so one written there is silently dropped. That action must be
+    /// `C`: `c` is the tab-wide chord leader (column config, sort), and the
+    /// validator rejects an action that takes it without `force: true`.
+    #[test]
+    fn committed_examples_bind_the_comment_drill_to_shift_c() {
+        for (file, yaml) in [
+            (
+                "jira.yaml",
+                include_str!("../../../docs/examples/views/jira.yaml"),
+            ),
+            (
+                "taiga.yaml",
+                include_str!("../../../docs/examples/views/taiga.yaml"),
+            ),
+        ] {
+            let cfg: ViewFileConfig =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{file} must parse: {e}"));
+
+            let navigates: Vec<&ActionDef> = cfg
+                .views
+                .iter()
+                .flat_map(|v| &v.actions)
+                .filter(|a| {
+                    a.navigate_to
+                        .as_deref()
+                        .is_some_and(|t| t.ends_with(":comment"))
+                })
+                .collect();
+            assert!(!navigates.is_empty(), "{file} navigates to comments");
+            for action in navigates {
+                assert!(
+                    action
+                        .key
+                        .as_ref()
+                        .is_some_and(|k| k.matches_sequence(&["C".to_string()])),
+                    "{file}: the comment drill is bound to Shift+C, not {:?}",
+                    action.key
+                );
+            }
+
+            // Walk the raw document: `ChildDef` drops an unknown `key:`
+            // during deserialization, so the typed config can no longer
+            // show it. Only the untyped tree can catch the dead line.
+            let raw: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            let mut dead = Vec::new();
+            collect_child_keys(&raw, &mut dead);
+            assert!(
+                dead.is_empty(),
+                "{file}: `key:` on a `children:` entry does nothing — \
+                 bind a `navigate` action instead (found on {dead:?})"
+            );
+        }
+    }
+
+    /// Collect the names of every `children:` entry that carries a `key:`.
+    /// Such a key is silently ignored (see [`ChildDef`]), so it is a config
+    /// bug that no amount of typed parsing can surface.
+    fn collect_child_keys(node: &serde_yaml::Value, out: &mut Vec<String>) {
+        match node {
+            serde_yaml::Value::Mapping(map) => {
+                for (k, v) in map {
+                    if k.as_str() == Some("children") {
+                        for child in v.as_sequence().into_iter().flatten() {
+                            if let Some(m) = child.as_mapping()
+                                && m.contains_key(serde_yaml::Value::from("key"))
+                            {
+                                out.push(
+                                    m.get(serde_yaml::Value::from("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("<unnamed>")
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    collect_child_keys(v, out);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for item in items {
+                    collect_child_keys(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Flatten a child tree into one list (depth-first), so a test can look
     /// for a node type without walking the nesting by hand.
     fn collect_children(children: &[ChildDef]) -> Vec<&ChildDef> {
