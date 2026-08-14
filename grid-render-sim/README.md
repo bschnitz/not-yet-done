@@ -1,223 +1,219 @@
 # grid-render-sim
 
-Simulation und Testbed für die Render-Funktion der `Grid`-Komponente des
-`not-yet-done-ratatui`-Projekts. Die Simulation erzeugt die Gerüst-Ausgabe
-(Gaps, Borders, Zellhintergründe) als `Vec<String>`, ohne einen echten
-ratatui-Buffer oder ein Terminal zu benötigen.
+A simulation and testbed for the render function of the `Grid` component of the
+`not-yet-done-ratatui` project. The simulation produces the scaffolding output
+(gaps, borders, cell backgrounds) as a `Vec<String>`, without needing a real
+ratatui buffer or a terminal.
 
 ---
 
-## Ziel
+## Goal
 
-Die Grid-Render-Logik ist komplex: Gaps unterbrechen Borders, Gruppen
-unterdrücken Gap-Zeichen, Kreuzungspunkte erfordern passende Corner-Zeichen,
-und Spanned-Borders erzeugen Half-Endings. All das lässt sich in einem
-String-Buffer weit einfacher entwickeln und debuggen als direkt in einem
-ratatui-`Buffer`.
+The grid render logic is complex: gaps interrupt borders, groups suppress gap
+characters, intersections require matching corner characters, and spanned borders
+produce half endings. All of that is far easier to develop and debug in a string
+buffer than directly in a ratatui `Buffer`.
 
-Das Ziel dieser Simulation ist es, den gesamten Render-Algorithmus für
-Gaps und Borders — inklusive aller Sonderfälle — vollständig korrekt zu
-implementieren und pixel-genau gegen die Spezifikation zu testen, bevor
-der Code in die eigentliche `MockComponent`-Implementierung übertragen wird.
+The goal of this simulation is to implement the entire render algorithm for gaps
+and borders — including all the special cases — completely correctly, and to test
+it pixel-exact against the specification, before the code is transferred into the
+actual `MockComponent` implementation.
 
 ---
 
-## Architektur
+## Architecture
 
 ```
 src/
-  lib.rs       Öffentliche API, Test-Modul
-  types.rs     Alle Datentypen: BorderChars, BorderPos, GapPos,
+  lib.rs       Public API, test module
+  types.rs     All data types: BorderChars, BorderPos, GapPos,
                CellGroup, TextAnchor, GridConfig, GapSlot,
                BorderText, SpannedBorder
-  layout.rs    Layout-Berechnung (GridLayout, compute_layout)
-  render.rs    Render-Pipeline: render_gaps_and_borders,
+  layout.rs    Layout computation (GridLayout, compute_layout)
+  render.rs    Render pipeline: render_gaps_and_borders,
                render_with_cells
 ```
 
-### Render-Pipeline (6 Schritte)
+### Render pipeline (6 steps)
 
 ```
-1. Layout berechnen          → Koordinaten für alle Zellen und Gaps
-2. Puffer mit Leerzeichen    → saubere Ausgangslage
-2a. Zellhintergründe füllen  → ▓ ░ █ Zyklus pro Zelle (nur render_with_cells)
-3. Horizontale Linien        → ─, Half-Endings ╶/╴, Extended ─ durchgehend
-4. Vertikale Linien          → │, Half-Endings ╷/╵, Extended │ durchgehend
-5. Kreuzungen und Ecken      → ┼ ┬ ┴ ├ ┤ ┌ ┐ └ ┘, aus Kontext berechnet
-6. Border-Texte              → überschreibt alles darunter
+1. Compute the layout       → coordinates for all cells and gaps
+2. Buffer full of spaces    → a clean starting point
+2a. Fill cell backgrounds   → ▓ ░ █ cycle per cell (render_with_cells only)
+3. Horizontal lines         → ─, half endings ╶/╴, extended ─ continuous
+4. Vertical lines           → │, half endings ╷/╵, extended │ continuous
+5. Intersections and corners→ ┼ ┬ ┴ ├ ┤ ┌ ┐ └ ┘, computed from the context
+6. Border texts             → overwrite everything beneath them
 ```
 
-Wichtig: Der äußere Rahmen (`draw_outer_frame`) wird als **erstes** in
-Schritt 3/4 gezeichnet, damit innere Borders ihre Half-Endings darüber
-schreiben können.
+Important: the outer frame (`draw_outer_frame`) is drawn **first** in steps 3 and
+4, so that inner borders can write their half endings over it.
 
 ---
 
-## Was wurde bereits erreicht
+## What has been achieved so far
 
-### Implementiert und getestet
+### Implemented and tested
 
-- **Äußerer Rahmen** (`BorderPos::Grid`) mit allen vordefinierten Styles:
+- **Outer frame** (`BorderPos::Grid`) with all the predefined styles:
   `BORDER_SIMPLE`, `BORDER_ROUNDED`, `BORDER_DOUBLE_EXTENDED`,
   `BORDER_THICK_EXTENDED`
-- **Vollständige innere Borders** (`AfterCol`, `AfterRow`, `BeforeCol`,
-  `BeforeRow`) mit Half-Endings und Extended-Varianten
-- **Kreuzungen** bei gleichen Styles (`┼`), kein Join bei verschiedenen Styles
-- **T-Pieces** (`┬`, `┴`, `├`, `┤`) wo innere Borders auf gleich-style
-  äußeren Rahmen treffen
-- **Spanned Borders** (`AfterColSpanned`, `AfterRowSpanned` etc.) mit
-  Half-Endings an den Span-Grenzen
-- **Spanned Crossings**: Schnittpunkte zwischen Spanned H- und V-Borders,
-  zwischen Full- und Spanned-Borders
-- **Nur-Gap-Positionen** (Leerzeichen, kein Border-Char)
-- **Border-Texte**: horizontal und vertikal, `TextAnchor::Start`/`End`,
-  Offset, Truncation mit `…`
-- **Zellhintergründe**: `▓ ░ █` Zyklus nach Formel `(2*row + col) % 3`,
-  sodass keine zwei benachbarten Zellen (horizontal oder vertikal) denselben
-  Hintergrund haben
-- **Half-Ending-Logik**: Half-Endings werden gesetzt wenn kein äußerer Rahmen
-  vorhanden ist, oder wenn der äußere Rahmen einen anderen Style hat als die
-  innere Border (kein Join möglich → keine T-Pieces → Half-Endings bleiben)
+- **Complete inner borders** (`AfterCol`, `AfterRow`, `BeforeCol`, `BeforeRow`)
+  with half endings and extended variants
+- **Intersections** for identical styles (`┼`), no join for differing styles
+- **T-pieces** (`┬`, `┴`, `├`, `┤`) where inner borders meet an outer frame of
+  the same style
+- **Spanned borders** (`AfterColSpanned`, `AfterRowSpanned` etc.) with half
+  endings at the span boundaries
+- **Spanned crossings**: intersections between spanned horizontal and vertical
+  borders, and between full and spanned borders
+- **Gap-only positions** (spaces, no border char)
+- **Border texts**: horizontal and vertical, `TextAnchor::Start`/`End`, offset,
+  truncation with `…`
+- **Cell backgrounds**: the `▓ ░ █` cycle by the formula `(2*row + col) % 3`, so
+  that no two adjacent cells (horizontally or vertically) share the same
+  background
+- **Half-ending logic**: half endings are set when there is no outer frame, or
+  when the outer frame has a different style than the inner border (no join
+  possible → no T-pieces → the half endings remain)
 
-### Vordefinierte BorderChars-Konstanten
+### Predefined BorderChars constants
 
-| Name                   | Horizontal | Vertikal | Ecken         | Half-Enden     |
-|------------------------|-----------|----------|---------------|----------------|
-| `BORDER_SIMPLE`        | `─`       | `│`      | `┌┐└┘`        | `╷╵╶╴`         |
-| `BORDER_SIMPLE_EXTENDED` | `─`     | `│`      | `┌┐└┘`        | `│││─`         |
-| `BORDER_DOUBLE_EXTENDED` | `═`     | `║`      | `╔╗╚╝`        | (voll)         |
-| `BORDER_THICK_EXTENDED`  | `━`     | `┃`      | `┏┓┗┛`        | (voll)         |
-| `BORDER_ROUNDED`         | `─`     | `│`      | `╭╮╰╯`        | `╷╵╶╴`         |
-| `BORDER_ROUNDED_EXTENDED`| `─`     | `│`      | `╭╮╰╯`        | (voll)         |
-| `BORDER_DASHED`          | `┄`     | `┆`      | `┌┐└┘`        | `╷╵╶╴`         |
-| `BORDER_DASHED_EXTENDED` | `┄`     | `┆`      | `┌┐└┘`        | (voll)         |
-| `BORDER_DOTTED`          | `┈`     | `┊`      | `┌┐└┘`        | `╷╵╶╴`         |
-| `BORDER_DOTTED_EXTENDED` | `┈`     | `┊`      | `┌┐└┘`        | (voll)         |
-
----
-
-## Was noch fehlt / getestet werden muss
-
-### Gruppierte Zellen (CellGroup) — noch nicht implementiert
-
-Dies ist der nächste große Schritt. Laut Spezifikation:
-
-- Gaps und Borders **innerhalb** einer Gruppe werden nicht gerendert
-- Das Gruppen-Rect umfasst alle Mitgliedszellen **inklusive** der
-  internen Gap-Spalten/-Zeilen
-- Zellhintergründe werden für die gesamte Gruppenflache gezeichnet
-  (Hintergrundfarbe der ersten Zelle oben-links)
-- Bei der Navigation wird die Gruppe als eine einzige Position behandelt
-
-Zu testende Szenarien:
-
-- `CellGroup::Row(r)` — ganze Zeile als eine Zelle
-- `CellGroup::Col(c)` — ganze Spalte als eine Zelle
-- `CellGroup::ColSpan { row, first_col, last_col }` — mehrere Spalten in
-  einer Zeile
-- `CellGroup::RowSpan { col, first_row, last_row }` — mehrere Zeilen in
-  einer Spalte
-- `CellGroup::Span { ... }` — rechteckiger Bereich
-- Gruppenränder mit und ohne Border/Gap
-- Eine durchgehende Border die durch eine Gruppe unterbrochen wird
-  (soll in zwei Segmente mit eigenen Half-Endings aufgeteilt werden)
-- Schachtelungsverbot: partielle Überschneidung zweier Gruppen → Panic
-- Vollständige Umschließung: größere Gruppe gewinnt
-
-### Weitere offene Punkte
-
-- `BORDER_DASHED`/`BORDER_DOTTED` visuell testen (noch kein Test dafür)
-- `GapPos::Grid` kombiniert mit Borders an einzelnen Positionen
-- Benutzerdefinierte `BorderChars` (eigene `pub static`)
-- `set_border_text` auf Spanned-Positionen (existiert im Code, kein Test)
-- `remove_border` / `remove_gap` / `ungroup_cells` (noch nicht implementiert)
-- Sehr große Grids (Performance, kein funktionaler Bug erwartet)
-- Grids mit `Constraint::Percentage`, `Min`, `Max`, `Ratio` statt nur
-  `Length` (Layout-Engine wird korrekt verwendet, aber nie getestet)
+| Name                      | Horizontal | Vertical | Corners | Half endings |
+| ------------------------- | ---------- | -------- | ------- | ------------ |
+| `BORDER_SIMPLE`           | `─`        | `│`      | `┌┐└┘`  | `╷╵╶╴`       |
+| `BORDER_SIMPLE_EXTENDED`  | `─`        | `│`      | `┌┐└┘`  | `│││─`       |
+| `BORDER_DOUBLE_EXTENDED`  | `═`        | `║`      | `╔╗╚╝`  | (full)       |
+| `BORDER_THICK_EXTENDED`   | `━`        | `┃`      | `┏┓┗┛`  | (full)       |
+| `BORDER_ROUNDED`          | `─`        | `│`      | `╭╮╰╯`  | `╷╵╶╴`       |
+| `BORDER_ROUNDED_EXTENDED` | `─`        | `│`      | `╭╮╰╯`  | (full)       |
+| `BORDER_DASHED`           | `┄`        | `┆`      | `┌┐└┘`  | `╷╵╶╴`       |
+| `BORDER_DASHED_EXTENDED`  | `┄`        | `┆`      | `┌┐└┘`  | (full)       |
+| `BORDER_DOTTED`           | `┈`        | `┊`      | `┌┐└┘`  | `╷╵╶╴`       |
+| `BORDER_DOTTED_EXTENDED`  | `┈`        | `┊`      | `┌┐└┘`  | (full)       |
 
 ---
 
-## Tests schreiben und durchführen
+## What is still missing / needs testing
 
-### Ausführen
+### Grouped cells (CellGroup) — not implemented yet
+
+This is the next big step. According to the specification:
+
+- Gaps and borders **inside** a group are not rendered
+- The group rect covers all member cells **including** the internal gap columns
+  and rows
+- Cell backgrounds are drawn across the whole group area (the background colour
+  of the first cell, top left)
+- During navigation the group is treated as a single position
+
+Scenarios to test:
+
+- `CellGroup::Row(r)` — a whole row as one cell
+- `CellGroup::Col(c)` — a whole column as one cell
+- `CellGroup::ColSpan { row, first_col, last_col }` — several columns in one row
+- `CellGroup::RowSpan { col, first_row, last_row }` — several rows in one column
+- `CellGroup::Span { ... }` — a rectangular area
+- Group edges with and without a border/gap
+- A continuous border interrupted by a group (it should be split into two
+  segments with their own half endings)
+- The no-nesting rule: a partial overlap of two groups → panic
+- Complete enclosure: the larger group wins
+
+### Further open points
+
+- Test `BORDER_DASHED`/`BORDER_DOTTED` visually (no test for it yet)
+- `GapPos::Grid` combined with borders at individual positions
+- User-defined `BorderChars` (your own `pub static`)
+- `set_border_text` on spanned positions (exists in the code, no test)
+- `remove_border` / `remove_gap` / `ungroup_cells` (not implemented yet)
+- Very large grids (performance; no functional bug expected)
+- Grids with `Constraint::Percentage`, `Min`, `Max`, `Ratio` instead of only
+  `Length` (the layout engine is used correctly, but never tested)
+
+---
+
+## Writing and running tests
+
+### Running
 
 ```sh
-# Alle Tests, nur Failures mit Output:
+# All tests, only failures with output:
 cargo test 2>&1
 
-# Einzelnen Test mit vollständiger Ausgabe:
+# A single test with full output:
 cargo test test_name -- --nocapture 2>&1
 
-# Alle Tests mit vollständiger Ausgabe (inkl. erfolgreiche):
+# All tests with full output (including the successful ones):
 cargo test -- --nocapture 2>&1
 ```
 
-### Struktur eines Tests
+### The structure of a test
 
 ```rust
 #[test]
 fn test_my_scenario() {
-    let mut cfg = make_3x3(7, 3);  // 3 Zeilen × 3 Spalten, je 7×3 Zeichen
+    let mut cfg = make_3x3(7, 3);  // 3 rows × 3 columns, 7×3 characters each
     cfg.apply_border_pos(&BorderPos::Grid, &BORDER_SIMPLE);
     cfg.apply_border_pos(&BorderPos::AfterCol(0), &BORDER_SIMPLE);
-    // ...weitere Konfiguration...
+    // ...further configuration...
 
     assert_grid("my_scenario", &render(&cfg), &[
         "┌───────┬──────────────┐",
         "│▓▓▓▓▓▓▓│░░░░░░░███████│",
-        // ...eine Zeile pro Terminal-Zeile...
+        // ...one line per terminal row...
         "└───────┴──────────────┘",
     ]);
 }
 ```
 
-### Hilfsfunktionen
+### Helper functions
 
 ```rust
-make_3x3(col_len, row_len)   // 3×3 GridConfig mit Length-Constraints
-make_3x5(col_len, row_len)   // 3×5 GridConfig (3 Zeilen, 5 Spalten)
-render(&cfg)                  // → Vec<String> mit Zellhintergründen
-assert_grid(label, lines, expected)  // pixel-genaue Zeilenvergleiche
-print_grid(label, lines)     // gibt das Grid auf stdout aus
+make_3x3(col_len, row_len)   // 3×3 GridConfig with Length constraints
+make_3x5(col_len, row_len)   // 3×5 GridConfig (3 rows, 5 columns)
+render(&cfg)                  // → Vec<String> with cell backgrounds
+assert_grid(label, lines, expected)  // pixel-exact line comparisons
+print_grid(label, lines)     // prints the grid to stdout
 ```
 
-### Neue expected Strings ermitteln
+### Determining new expected strings
 
-Wenn eine Änderung die Ausgabe verändert (z.B. neue Zellhintergrund-Formel),
-alle Tests einmal mit `--nocapture` laufen lassen und die tatsächliche Ausgabe
-als neue expected Strings übernehmen:
+When a change alters the output (e.g. a new cell-background formula), run all the
+tests once with `--nocapture` and adopt the actual output as the new expected
+strings:
 
 ```sh
-cargo test -- --nocapture 2>&1 | grep -A 30 "── mein_test ──"
+cargo test -- --nocapture 2>&1 | grep -A 30 "── my_test ──"
 ```
 
 ---
 
-## Besonderheiten und Fallstricke
+## Peculiarities and pitfalls
 
-### Zellhintergrund-Formel
+### The cell-background formula
 
 ```rust
 CELL_BG[(2 * row + col) % 3]  // ▓=0  ░=1  █=2
 ```
 
-Der Faktor `2` stellt sicher dass benachbarte Zellen (horizontal **und**
-vertikal) immer verschiedene Hintergründe haben, unabhängig von der
-Spaltenanzahl. Bei `(row * cols + col) % 3` würde bei `cols % 3 == 0`
-jede Spalte eine einheitliche Farbe bekommen.
+The factor `2` makes sure that adjacent cells (horizontally **and** vertically)
+always have different backgrounds, regardless of the number of columns. With
+`(row * cols + col) % 3`, every column would end up with a uniform colour
+whenever `cols % 3 == 0`.
 
-### Half-Ending-Logik
+### Half-ending logic
 
-Eine innere Border bekommt Half-Endings (`╷╵╶╴`) wenn:
+An inner border gets half endings (`╷╵╶╴`) when:
 
-- kein äußerer Rahmen vorhanden ist, **oder**
-- der äußere Rahmen einen anderen Style hat (kein Join → kein T-Piece)
+- there is no outer frame, **or**
+- the outer frame has a different style (no join → no T-piece)
 
-Bei gleichem Style überschreibt `draw_crossings` die Half-Endings mit
-T-Pieces (`┬`, `┴`, `├`, `┤`). Daher ist die Reihenfolge entscheidend:
-äußerer Rahmen zuerst zeichnen, dann innere Borders, dann Crossings.
+With the same style, `draw_crossings` overwrites the half endings with T-pieces
+(`┬`, `┴`, `├`, `┤`). That is why the order matters: draw the outer frame first,
+then the inner borders, then the crossings.
 
-### Same-Style-Vergleich
+### The same-style comparison
 
 ```rust
 fn same_style(a: &BorderChars, b: &BorderChars) -> bool {
@@ -225,123 +221,121 @@ fn same_style(a: &BorderChars, b: &BorderChars) -> bool {
 }
 ```
 
-`BORDER_SIMPLE` und `BORDER_ROUNDED` haben identische `─`/`│`-Chars aber
-verschiedene Ecken. Sie gelten als "same style" für Join-Zwecke — das ist
-korrekt, da T-Pieces und Crossings nur `─`/`│` und `cross` verwenden,
-nicht die Ecken.
+`BORDER_SIMPLE` and `BORDER_ROUNDED` have identical `─`/`│` chars but different
+corners. They count as "the same style" for join purposes — which is correct,
+since T-pieces and crossings only use `─`/`│` and `cross`, not the corners.
 
-### Gap-Zeilen haben keine Zellhintergründe
+### Gap rows have no cell backgrounds
 
-Eine Gap-Zeile (horizontal) oder Gap-Spalte (vertikal) gehört zu keiner
-Zelle. Der Buffer bleibt dort nach `fill_cell_backgrounds` leer (Spaces).
-Nur die Border-Zeichen füllen diese Bereiche. Das bedeutet: bei einem
-Spanned Border der nur einen Teil einer Gap-Zeile abdeckt, bleiben die
-restlichen Positionen in dieser Zeile Spaces — auch wenn eine Zelle
-"daneben" liegt.
+A gap row (horizontal) or gap column (vertical) belongs to no cell. The buffer
+stays empty there after `fill_cell_backgrounds` (spaces). Only the border
+characters fill those areas. That means: with a spanned border covering only part
+of a gap row, the remaining positions in that row stay spaces — even if a cell
+lies "next to" them.
 
-### `Before*` ist Alias für `After*(i-1)`
+### `Before*` is an alias for `After*(i-1)`
 
-`BorderPos::BeforeCol(i)` ist identisch mit `AfterCol(i-1)`.
-`apply_border_pos` normalisiert intern auf `After*`-Indizes.
+`BorderPos::BeforeCol(i)` is identical to `AfterCol(i-1)`. `apply_border_pos`
+normalizes internally to `After*` indices.
 
 ### `GapPos::Grid` vs. `BorderPos::Grid`
 
-- `GapPos::Grid` → setzt Gaps zwischen **allen inneren** Spalten und Zeilen
-  (kein äußerer Rahmen)
-- `BorderPos::Grid` → setzt einen geschlossenen **äußeren Rahmen**
+- `GapPos::Grid` → sets gaps between **all inner** columns and rows (no outer
+  frame)
+- `BorderPos::Grid` → sets a closed **outer frame**
 
-Diese haben völlig verschiedene Semantik trotz identischen Namens.
+These have completely different semantics despite the identical name.
 
-### `set_border` impliziert `set_gap`
+### `set_border` implies `set_gap`
 
-Ein Border braucht immer einen Gap-Slot (1 Zeichen Platz). `set_border`
-erzeugt diesen implizit. `remove_border` entfernt nur die Zeichen, der
-Gap-Slot (Leerzeichen) bleibt. `remove_gap` entfernt beides.
+A border always needs a gap slot (1 character of space). `set_border` creates it
+implicitly. `remove_border` removes only the characters, the gap slot (a space)
+remains. `remove_gap` removes both.
 
-### Reihenfolge in `draw_all`
+### The order in `draw_all`
 
 ```rust
-draw_outer_frame(...)      // äußerer Rahmen zuerst
-draw_horizontal_lines(...) // innere H-Linien + Spanned H
-draw_vertical_lines(...)   // innere V-Linien + Spanned V
-draw_crossings(...)        // Kreuzungen überschreiben Enden
-draw_border_texts(...)     // Texte zuletzt, überschreiben alles
+draw_outer_frame(...)      // the outer frame first
+draw_horizontal_lines(...) // inner horizontal lines + spanned H
+draw_vertical_lines(...)   // inner vertical lines + spanned V
+draw_crossings(...)        // crossings overwrite the endings
+draw_border_texts(...)     // texts last, they overwrite everything
 ```
 
-Diese Reihenfolge ist nicht beliebig. Insbesondere:
-- Outer frame vor inneren Linien → Half-Endings können outer frame
-  überschreiben (bei different-style)
-- Crossings nach den Linien → T-Pieces überschreiben Half-Endings
-  (bei same-style)
-- Texte ganz am Ende → immer sichtbar, unabhängig von Border-Chars
+This order is not arbitrary. In particular:
+
+- Outer frame before the inner lines → half endings can overwrite the outer frame
+  (with a different style)
+- Crossings after the lines → T-pieces overwrite half endings (with the same
+  style)
+- Texts right at the end → always visible, regardless of the border chars
 
 ---
 
-## Instruktionen für KI-Assistenten
+## Instructions for AI assistants
 
-### Allgemein
+### General
 
-- **Immer vollständige Funktionen liefern**, keine Diffs mit `// ...rest
-  bleibt gleich`. Der Nutzer trägt den Code manuell ein.
-- **`cargo check` oder `cargo test` nach jeder Änderung** — der Nutzer
-  führt diese aus und liefert den Output zurück.
-- **Nie raten was die Ausgabe sein wird** — wenn expected Strings unklar
-  sind, den Test erst ohne expected laufen lassen und die tatsächliche
-  Ausgabe übernehmen.
-- **Keine Änderungen an funktionierenden Tests** ohne explizite Anfrage.
+- **Always deliver complete functions**, no diffs with `// ...rest stays the
+same`. The user enters the code manually.
+- **`cargo check` or `cargo test` after every change** — the user runs these and
+  returns the output.
+- **Never guess what the output will be** — when the expected strings are
+  unclear, first run the test without them and adopt the actual output.
+- **No changes to working tests** without an explicit request.
 
-### Neue Tests hinzufügen
+### Adding new tests
 
-1. Test schreiben mit vorläufigen expected Strings (aus Kopfrechnen oder
-   aus der Spec)
-2. `cargo test test_name -- --nocapture` ausführen lassen
-3. Tatsächliche Ausgabe als expected Strings übernehmen
-4. Erst dann weitere Tests hinzufügen
+1. Write the test with provisional expected strings (from mental arithmetic or
+   from the spec)
+2. Have `cargo test test_name -- --nocapture` run
+3. Adopt the actual output as the expected strings
+4. Only then add further tests
 
-### Debugging-Workflow
+### Debugging workflow
 
-Wenn ein Test unerwartet fehlschlägt:
+When a test fails unexpectedly:
 
-1. `cargo test test_name -- --nocapture` für isolierten Output
-2. `got`/`want` in der Fehlermeldung vergleichen
-3. Bei Layoutproblemen: `render_debug` Hilfsfunktion einbauen die
-   `col_x`, `col_w`, `row_y`, `row_h`, `v_gap_x`, `h_gap_y` ausgibt
-4. Nie blind raten — lieber eine gezielte Debug-Ausgabe anfordern
+1. `cargo test test_name -- --nocapture` for isolated output
+2. Compare `got`/`want` in the error message
+3. For layout problems: add a `render_debug` helper that prints `col_x`, `col_w`,
+   `row_y`, `row_h`, `v_gap_x`, `h_gap_y`
+4. Never guess blindly — better to request a targeted debug output
 
-### CellGroup (noch zu implementieren)
+### CellGroup (still to be implemented)
 
-Bei der Implementierung von Gruppen gelten folgende Regeln laut Spec:
+When implementing groups, the following rules apply according to the spec:
 
-- `is_inside_h_group(grid, row, v_gap_index)` → prüft ob der vertikale
-  Gap zwischen zwei Spalten liegt, die in `row` zur selben Gruppe gehören
-- `is_inside_v_group(grid, h_gap_index, col)` → analog für horizontale Gaps
-- Gruppen-Unterdrückung gilt für Schritt 4 (Stil) **und** Schritt 5 (Zeichen)
-- Das Gruppen-Rect (`group_rect`) umfasst alle Zellen **plus** die Gap-Spalten
-  dazwischen — diese werden in Schritt 7a mit `fill_rect` überschrieben,
-  wodurch Gap-Zeichen innerhalb der Gruppe verschwinden
+- `is_inside_h_group(grid, row, v_gap_index)` → checks whether the vertical gap
+  lies between two columns that belong to the same group in `row`
+- `is_inside_v_group(grid, h_gap_index, col)` → the same for horizontal gaps
+- The group suppression applies to step 4 (style) **and** step 5 (characters)
+- The group rect (`group_rect`) covers all cells **plus** the gap columns between
+  them — these are overwritten with `fill_rect` in step 7a, which makes the gap
+  characters inside the group disappear
 
-### Dateipfade immer angeben
+### Always give the file paths
 
-Jeder Code-Block muss mit dem vollständigen Dateipfad beginnen, z.B.:
+Every code block must start with the full file path, e.g.:
 
 ```rust
 // grid-render-sim/src/render.rs
 ```
 
-### Shell-Befehle in Nushell-Syntax
+### Shell commands in Nushell syntax
 
-Der Nutzer verwendet Nushell. Keine `&&`-Verkettung in direkten
-Shell-Befehlen. Shell-Skript-**Dateien** dürfen sh/bash-kompatibel sein.
+The user uses Nushell. No `&&` chaining in direct shell commands. Shell script
+**files** may be sh/bash compatible.
 
 ---
 
-## Abhängigkeiten
+## Dependencies
 
 ```toml
 [dependencies]
 ratatui-core = "0.1.0"
 ```
 
-Nur `ratatui-core` — kein volles ratatui, kein crossterm, kein tui-realm.
-Die Simulation ist vollständig terminal-unabhängig und läuft als reine
-Unit-Tests ohne UI-Initialisierung.
+Only `ratatui-core` — no full ratatui, no crossterm, no tui-realm. The simulation
+is completely terminal-independent and runs as pure unit tests without any UI
+initialization.
