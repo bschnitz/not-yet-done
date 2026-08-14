@@ -373,6 +373,12 @@ pub struct ContentPane {
     nav_stack: Vec<NavFrame>,
     /// When drilled into a child, this holds the ChildDef config.
     active_child: Option<ChildDef>,
+    /// Set by [`Self::apply_cursor_on_open`] when the placement it applied
+    /// left the cursor on an unread last row — the state the
+    /// `mark_read_on_reach_end` hook acks on, arrived at by opening rather
+    /// than by a keypress. Drained by
+    /// [`ContentView::set_items_for_pane`](ContentView::set_items_for_pane).
+    mark_read_on_open: bool,
     /// The drilled-into level's `cursor_on_open` placement, armed by
     /// [`Self::drill_down_prepare`] and consumed by the first
     /// [`Self::set_items`] that brings rows in. Pending rather than applied
@@ -1356,6 +1362,7 @@ impl ContentPane {
             filtered_indices: Vec::new(),
             nav_stack: Vec::new(),
             active_child: None,
+            mark_read_on_open: false,
             pending_cursor_on_open: None,
             active_query: None,
             active_query_name: None,
@@ -5196,6 +5203,41 @@ impl ContentPane {
             // edge, which is where `set_selected` scrolls it.
             None => self.table.set_selected(rows - 1),
         }
+        // The reach-end hook is arrival-driven (see
+        // [`ContentView::detect_mark_read_reached`]), and a placement is not
+        // an arrival: a level whose only unread row IS its last one puts the
+        // cursor straight there on open, where no keypress will ever move it
+        // to again. Arm the hook here so opening still acks — otherwise such
+        // a row stays flagged unread until the user steps off it and back.
+        self.mark_read_on_open = self.on_unread_last_row();
+    }
+
+    /// Whether the cursor sits on this flat level's last row while that row
+    /// is still unread — the state `mark_read_on_reach_end` acks on. Tree
+    /// panes never qualify (the hook is a flat-list notion).
+    fn on_unread_last_row(&self) -> bool {
+        if self.tree.is_some() {
+            return false;
+        }
+        let Some(last) = self.filtered_indices.len().checked_sub(1) else {
+            return false;
+        };
+        self.table.selected_row() == last
+            && self
+                .selected_item()
+                .is_some_and(|it| metadata_field_value(it, "unread") == "true")
+    }
+
+    /// Drain an [`Self::mark_read_on_open`] arming as the `(node id, action
+    /// id)` pair the hook dispatches, or `None` when nothing is armed (or
+    /// the level configures no hook).
+    fn take_mark_read_on_open(&mut self) -> Option<(String, String)> {
+        if !std::mem::take(&mut self.mark_read_on_open) {
+            return None;
+        }
+        let action = self.mark_read_action()?.to_string();
+        let node_id = self.selected_item_id()?.to_string();
+        Some((node_id, action))
     }
 
     /// Display-order row index of the first row carrying an `unread`
@@ -9416,11 +9458,25 @@ impl ContentView {
         if error.is_none() {
             self.connected_once = true;
         }
+        let view_index = self.view_index;
         let view_defs = &self.view_defs;
         let tree = &mut self.pane_trees[tree_idx];
+        let mut armed = None;
         if let Some(leaf) = tree.root.find_leaf_mut(pane_id) {
             leaf.pane
                 .set_items(items, applied_sort, page, columns, error, view_defs);
+            // The fresh items may have opened a level straight onto an unread
+            // last row — a `mark_read_on_reach_end` arrival no keypress can
+            // produce (see `ContentPane::apply_cursor_on_open`).
+            armed = leaf.pane.take_mark_read_on_open();
+        }
+        if let Some((node_id, action_name)) = armed {
+            self.pending_mark_read = Some(ViewRequest::InvokeNodeAction {
+                view_index,
+                pane_id,
+                node_id,
+                action_name,
+            });
         }
         self.sync_action_bar_hints();
     }
@@ -10131,26 +10187,10 @@ impl ContentView {
         let resolved: Option<(String, String)> = {
             let pane = &self.pane_trees[self.active_subtab].focused_leaf().pane;
             // Flat lists only — a tree pane never carries chat messages.
-            match (pane.tree.is_some(), pane.mark_read_action()) {
-                (false, Some(action)) => {
-                    let last = pane.filtered_indices.len().checked_sub(1);
-                    let row = pane.table.selected_row();
-                    match last {
-                        Some(last) if row == last && before_row != last => {
-                            let unread = pane
-                                .selected_item()
-                                .map(|it| metadata_field_value(it, "unread") == "true")
-                                .unwrap_or(false);
-                            if unread {
-                                pane.selected_item_id()
-                                    .map(|id| (id.to_string(), action.to_string()))
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                }
+            match (pane.mark_read_action(), pane.on_unread_last_row()) {
+                (Some(action), true) if before_row != pane.table.selected_row() => pane
+                    .selected_item_id()
+                    .map(|id| (id.to_string(), action.to_string())),
                 _ => None,
             }
         };
@@ -15568,10 +15608,11 @@ mod tests {
         use not_yet_done_content::{Metadata, MetadataField};
         // The generic `mark_read_on_reach_end` hook fires once when the cursor
         // first lands on the still-unread LAST row of a flat drill level. Two
-        // gates keep it honest: arrival (`before_row != last`, so merely
-        // opening the list or pressing a key while already at the bottom does
-        // not ack) and unread (so it never re-fires after the ack-driven
-        // reload, which flips the row to read).
+        // gates keep it honest: arrival (`before_row != last`, so a key
+        // pressed while already at the bottom does not ack) and unread (so it
+        // never re-fires after the ack-driven reload, which flips the row to
+        // read). Landing there by `cursor_on_open` instead of by key is armed
+        // on the placement — see the test below.
         let msg = |id: &str, unread: bool| -> NodeSummary {
             let mut n = tnode(id, id, "mock:msg");
             if unread {
@@ -15636,6 +15677,75 @@ mod tests {
         let mut view = setup(false);
         view.active_pane_mut().table.set_selected(1);
         view.detect_mark_read_reached(0);
+        assert!(view.take_pending_mark_read().is_none(), "read row → no ack");
+    }
+
+    #[test]
+    fn cursor_on_open_landing_on_an_unread_last_row_acks_without_a_keypress() {
+        use not_yet_done_content::{Metadata, MetadataField};
+        // `cursor_on_open: first_unread` can place the cursor directly on the
+        // last row: a chat channel whose only unread message is its newest —
+        // which is exactly the shape of a channel ending on a
+        // `[deleted message]` tombstone. No keypress ever arrives there, so
+        // without arming on the placement the row would stay unread forever.
+        let msg = |id: &str, unread: bool| -> NodeSummary {
+            let mut n = tnode(id, id, "mock:msg");
+            if unread {
+                n.metadata = Metadata {
+                    fields: vec![MetadataField {
+                        key: "unread".into(),
+                        value: "true".into(),
+                        display_label: "Unread".into(),
+                        editable: false,
+                        allowed_values: None,
+                    }],
+                };
+            }
+            n
+        };
+        let open_with = |last_unread: bool| -> ContentView {
+            let config = heterogeneous_uneven_tree_config();
+            let mut view =
+                ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+            let mut child = hchild("messages", "mock:msg", None, vec![hcol("name")], vec![]);
+            child.mark_read_on_reach_end = Some("mark-read".into());
+            child.cursor_on_open = Some(CursorOnOpen::FirstUnread);
+            let pane_id = view.active_pane_id();
+            let pane = view.active_pane_mut();
+            pane.tree = None; // flat list, not tree mode
+            pane.active_child = Some(child);
+            // What `drill_down_prepare` arms when the level is opened.
+            pane.pending_cursor_on_open = Some(CursorOnOpen::FirstUnread);
+            view.set_items_for_pane(
+                pane_id,
+                vec![msg("m1", false), msg("m2", last_unread)],
+                Vec::new(),
+                None,
+                Vec::new(),
+                None,
+            );
+            view
+        };
+
+        // Newest row unread → the open placed the cursor on it and acked it.
+        let mut view = open_with(true);
+        assert_eq!(view.active_pane().table.selected_row(), 1);
+        match view.take_pending_mark_read() {
+            Some(ViewRequest::InvokeNodeAction {
+                node_id,
+                action_name,
+                ..
+            }) => {
+                assert_eq!(node_id, "m2");
+                assert_eq!(action_name, "mark-read");
+            }
+            other => panic!("expected an InvokeNodeAction, got {other:?}"),
+        }
+
+        // Everything read → the placement still parks on the newest row, but
+        // there is nothing to acknowledge.
+        let mut view = open_with(false);
+        assert_eq!(view.active_pane().table.selected_row(), 1);
         assert!(view.take_pending_mark_read().is_none(), "read row → no ack");
     }
 

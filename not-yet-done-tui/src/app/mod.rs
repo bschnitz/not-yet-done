@@ -4078,8 +4078,17 @@ impl App {
                     // moved — used to fetch the backend-described column schema
                     // (3b) off-thread so its types can be merged into rendering.
                     let node_types = distinct_node_types(&items);
+                    let mut mark_read = None;
                     if let Some(cv) = self.content_view_mut(view_index) {
                         cv.set_items_for_pane(pane_id, items, applied_sort, page, columns, error);
+                        // Opening a level can land the cursor on an unread
+                        // last row without a keypress (a `cursor_on_open`
+                        // placement) — the ack the key path drains after
+                        // `handle_key` has to be dispatched here instead.
+                        mark_read = cv.take_pending_mark_read();
+                    }
+                    if let Some(req) = mark_read {
+                        self.process_view_request(req);
                     }
                     self.refresh_column_schema(view_index, node_types);
                     // Eager tree (capability `supports_eager_subtree`): the

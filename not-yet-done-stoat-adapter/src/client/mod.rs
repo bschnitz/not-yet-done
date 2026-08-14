@@ -24,7 +24,7 @@ use not_yet_done_content::http_log;
 
 pub use auth::{StoatSession, perform_login};
 pub use discovery::{RootInfo, fetch_root_info};
-pub use messages::{Attachment, MessageView, ulid_timestamp_ms};
+pub use messages::{Attachment, DELETED_BODY, MessageView, ulid_timestamp_ms};
 
 const SESSION_TOKEN_HEADER: &str = "x-session-token";
 

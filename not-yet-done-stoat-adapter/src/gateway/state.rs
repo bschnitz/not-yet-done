@@ -147,30 +147,29 @@ impl StoatState {
         }
     }
 
-    /// Reconcile a channel's `last_message_id` against what a **newest-page**
-    /// message fetch actually returned (`None` = the channel is empty).
+    /// The channel's `last_message_id` when it names a message the server no
+    /// longer has — compared against what a **newest-page** message fetch
+    /// actually returned (`None` = the fetch came back empty).
     ///
-    /// Why this is needed: Stoat never clears `last_message_id` when the last
-    /// message is deleted — the field keeps pointing at a message that 404s.
-    /// The stale pointer makes the tree offer an expand arrow for a channel
-    /// that lists nothing, and flags it unread forever (the read marker can
-    /// never reach a message that no longer exists). Opening the channel is
-    /// exactly the moment we learn the truth, so we heal the snapshot there.
+    /// Why this exists: Stoat never clears `last_message_id` when the last
+    /// message is deleted, so the field keeps pointing at a message that
+    /// 404s. Since the unread rule in [`Self::is_channel_unread`] is exactly
+    /// "`last_message_id` newer than the read marker", such a pointer flags
+    /// the channel unread forever — the marker can never reach a message
+    /// that no longer exists, and every reconnect restores the pointer from
+    /// the server's `Ready`.
     ///
-    /// Emits [`Invalidation::All`] on an actual change so the tree drops the
-    /// arrow and the unread marker without a manual reload. A `MessageCreate`
-    /// racing the fetch can be undone here for one repaint — the event's own
-    /// refresh refetches and puts it back.
-    pub fn reconcile_last_message(&mut self, channel_id: &str, newest: Option<&str>) {
-        let Some(channel) = self.channels.get_mut(channel_id) else {
-            return;
-        };
-        if channel.last_message_id.as_deref() == newest {
-            return;
-        }
-        channel.last_message_id = newest.map(str::to_string);
-        if let Some(tx) = &self.inv_tx {
-            let _ = tx.send(Invalidation::All);
+    /// The snapshot is deliberately **not** healed here. The message list
+    /// renders the returned id as a `[deleted message]` tombstone row
+    /// instead, which keeps the channel's expand arrow honest (there *is* a
+    /// row to show) and, once the cursor reaches it, acks the channel up to
+    /// that very id — which the API accepts for a deleted message, so the
+    /// unread state clears server-side, permanently and for every client.
+    pub fn deleted_tail(&self, channel_id: &str, newest: Option<&str>) -> Option<String> {
+        let last = self.channels.get(channel_id)?.last_message_id.as_deref()?;
+        match newest {
+            Some(newest) if last <= newest => None,
+            _ => Some(last.to_string()),
         }
     }
 
@@ -421,10 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_clears_last_message_of_an_empty_channel() {
+    fn deleted_tail_reports_a_last_message_the_fetch_did_not_return() {
         // The stale-pointer case: Stoat keeps `last_message_id` after the
         // last message was deleted, so the channel claims messages (unread
-        // marker + expand arrow) while its newest page comes back empty.
+        // marker + expand arrow) while its newest page comes back without
+        // that message.
         let mut st = StoatState::default();
         st.apply_ready(
             vec![],
@@ -437,20 +437,26 @@ mod tests {
         );
         assert!(st.is_channel_unread("C1"));
 
-        st.reconcile_last_message("C1", None);
-        assert_eq!(st.channels["C1"].last_message_id, None);
-        assert!(!st.is_channel_unread("C1"));
-
-        // A fetch that DOES return messages adopts its newest entry — the
-        // same heal for "only the latest message was deleted".
-        st.reconcile_last_message("C1", Some(OLDER_MSG));
+        // Empty page, and a page whose newest entry is older than the
+        // pointer: both mean the named message is gone.
+        assert_eq!(st.deleted_tail("C1", None).as_deref(), Some(NEWER_MSG));
         assert_eq!(
-            st.channels["C1"].last_message_id.as_deref(),
-            Some(OLDER_MSG)
+            st.deleted_tail("C1", Some(OLDER_MSG)).as_deref(),
+            Some(NEWER_MSG)
         );
 
-        // Unknown channel (reconnect race) is a no-op, not a panic.
-        st.reconcile_last_message("nope", None);
+        // The pointer is intact once the fetch returns it (nothing deleted).
+        assert_eq!(st.deleted_tail("C1", Some(NEWER_MSG)), None);
+
+        // A channel without messages, and an unknown one (reconnect race),
+        // have no tail — neither is a panic.
+        st.apply_ready(
+            vec![],
+            vec![server("S2", &["C2"])],
+            vec![text_channel("C2", "S2")],
+        );
+        assert_eq!(st.deleted_tail("C2", None), None);
+        assert_eq!(st.deleted_tail("nope", None), None);
     }
 
     #[test]
