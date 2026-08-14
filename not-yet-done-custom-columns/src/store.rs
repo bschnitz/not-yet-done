@@ -34,6 +34,42 @@ pub struct Cell {
 /// the rest are validated on write.
 pub const VALUE_TYPES: [&str; 5] = ["text", "number", "duration", "datetime", "json"];
 
+/// Decode a column's stored option list. Absent, blank or unparseable JSON all
+/// mean "free value" — a column whose options can't be read must not start
+/// rejecting writes.
+fn parse_options(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else { return Vec::new() };
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+/// Encode an option list for storage. An empty list is stored as `NULL`, i.e.
+/// "no restriction" — that is what clearing the enumeration means.
+fn encode_options(options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        None
+    } else {
+        serde_json::to_string(options).ok()
+    }
+}
+
+/// Validate a value against both halves of its column's schema: the type
+/// ([`validate_value`]) and, when the column is an enumeration, its closed set
+/// of allowed values. An empty value is "unset" and always passes.
+fn validate_cell(value_type: &str, options: &[String], value: &str) -> Result<()> {
+    validate_value(value_type, value)?;
+    let v = value.trim();
+    if v.is_empty() || options.is_empty() || options.iter().any(|o| o == v) {
+        return Ok(());
+    }
+    Err(ContentError::Other(
+        format!(
+            "`{value}` is not an allowed value (one of: {})",
+            options.join(", ")
+        )
+        .into(),
+    ))
+}
+
 /// Validate a value string against its declared type. An empty value is always
 /// accepted (it represents "unset"); `text` and any unknown type never fail.
 /// `number` parses as a decimal, `duration` as integer seconds, `datetime` as
@@ -171,6 +207,11 @@ impl LocalColumnStore {
         .await
         .map_err(|e| ContentError::Other(Box::new(e)))?;
 
+        // A column's enumeration lives in the schema, like its type: a write
+        // can only pick from it, never widen it (that is `set-column-options`).
+        // A column this write introduces starts out free.
+        let options = parse_options(existing.as_ref().and_then(|s| s.options.as_deref()));
+
         let effective_type = match &existing {
             Some(schema) => {
                 if schema.value_type != value_type {
@@ -188,7 +229,7 @@ impl LocalColumnStore {
             None => value_type.to_string(),
         };
 
-        validate_value(&effective_type, value)?;
+        validate_cell(&effective_type, &options, value)?;
 
         // Register the column schema on first write.
         if existing.is_none() {
@@ -198,6 +239,7 @@ impl LocalColumnStore {
                 column_key: Set(column_key.to_string()),
                 value_type: Set(effective_type.clone()),
                 label: Set(None),
+                options: Set(None),
             })
             .exec(conn.as_ref())
             .await
@@ -335,6 +377,116 @@ impl LocalColumnStore {
         Ok(cells.len())
     }
 
+    /// Turn a defined column into an enumeration — or back into a free one.
+    ///
+    /// `options` is the closed set of values the column accepts from now on;
+    /// an empty slice removes the restriction. Values are trimmed, blanks
+    /// dropped and duplicates collapsed (first occurrence wins), so the stored
+    /// list is exactly what a front-end should offer in a select.
+    ///
+    /// Like [`Self::retype_column`] this is a scope-wide decision that has to
+    /// survive the data already stored: the new set is accepted only when
+    /// *every* stored value for the column is in it, and rejected otherwise
+    /// with an error naming each offending row id and value. Each option must
+    /// also be a valid value for the column's type, so a `number` column can't
+    /// be given a set of words. Nothing is written on the failure path.
+    ///
+    /// Returns the number of stored cells the set now covers.
+    pub async fn set_column_options(
+        &self,
+        scope: &str,
+        node_type: &str,
+        column_key: &str,
+        options: &[String],
+    ) -> Result<usize> {
+        let Some(conn) = &self.conn else {
+            return Ok(0);
+        };
+
+        let mut allowed: Vec<String> = Vec::new();
+        for o in options {
+            let o = o.trim();
+            if o.is_empty() || allowed.iter().any(|a| a == o) {
+                continue;
+            }
+            allowed.push(o.to_string());
+        }
+
+        let schema = custom_column::Entity::find_by_id((
+            scope.to_string(),
+            node_type.to_string(),
+            column_key.to_string(),
+        ))
+        .one(conn.as_ref())
+        .await
+        .map_err(|e| ContentError::Other(Box::new(e)))?
+        .ok_or_else(|| {
+            ContentError::Other(
+                format!("no custom column `{column_key}` is defined on `{node_type}`").into(),
+            )
+        })?;
+
+        let value_type = schema.value_type.clone();
+        // An option that the column's own type would reject could never be
+        // stored — catch that here rather than at the first hopeless write.
+        let bad: Vec<&str> = allowed
+            .iter()
+            .filter(|o| validate_value(&value_type, o).is_err())
+            .map(|o| o.as_str())
+            .collect();
+        if !bad.is_empty() {
+            return Err(ContentError::Other(
+                format!(
+                    "cannot make custom column `{column_key}` an enumeration: {} option(s) are \
+                     not valid `{value_type}` values — {}",
+                    bad.len(),
+                    bad.join(", ")
+                )
+                .into(),
+            ));
+        }
+
+        let cells = custom_cell::Entity::find()
+            .filter(custom_cell::Column::Scope.eq(scope))
+            .filter(custom_cell::Column::ColumnKey.eq(column_key))
+            .filter(custom_cell::Column::ValueType.eq(value_type.as_str()))
+            .all(conn.as_ref())
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+
+        // Name every value that falls outside the set, not just the first —
+        // the point is to hand back a complete correction list.
+        if !allowed.is_empty() {
+            let mut offenders: Vec<String> = cells
+                .iter()
+                .filter(|c| validate_cell(&value_type, &allowed, &c.value).is_err())
+                .map(|c| format!("{}: `{}`", c.row_id, c.value))
+                .collect();
+            if !offenders.is_empty() {
+                offenders.sort();
+                return Err(ContentError::Other(
+                    format!(
+                        "cannot restrict custom column `{column_key}` to {}: {} stored value(s) \
+                         are outside the set — {}",
+                        allowed.join(", "),
+                        offenders.len(),
+                        offenders.join(", ")
+                    )
+                    .into(),
+                ));
+            }
+        }
+
+        let mut am: custom_column::ActiveModel = schema.into();
+        am.options = Set(encode_options(&allowed));
+        custom_column::Entity::update(am)
+            .exec(conn.as_ref())
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+
+        Ok(cells.len())
+    }
+
     /// Remove one cell. Missing cells are not an error (idempotent). The
     /// column's schema entry is intentionally left in place — a column stays
     /// defined (and typed) even when no row currently carries a value.
@@ -368,13 +520,20 @@ impl LocalColumnStore {
         models.sort_by(|a, b| a.column_key.cmp(&b.column_key));
         Ok(models
             .into_iter()
-            .map(|m| ColumnSchema {
-                label: m.label,
-                // Sortable and present in every row: the decorator projects
-                // each defined column into every row it injects into, blank
-                // where no cell is stored — so a sort or a filter over a
-                // custom column sees a real, if empty, cell everywhere.
-                ..ColumnSchema::new(m.column_key, "").typed(m.value_type)
+            .map(|m| {
+                let options = parse_options(m.options.as_deref());
+                ColumnSchema {
+                    label: m.label,
+                    // Sortable and present in every row: the decorator projects
+                    // each defined column into every row it injects into, blank
+                    // where no cell is stored — so a sort or a filter over a
+                    // custom column sees a real, if empty, cell everywhere.
+                    // An enumeration's options travel along, which is what
+                    // turns the column into a select on the edit side.
+                    ..ColumnSchema::new(m.column_key, "")
+                        .typed(m.value_type)
+                        .with_options(options)
+                }
             })
             .collect())
     }
@@ -847,5 +1006,148 @@ mod tests {
             store.get_for_row(scope, "B-1").await.unwrap()[0].value_type,
             "duration"
         );
+    }
+
+    #[tokio::test]
+    async fn options_close_the_value_set() {
+        let store = mem_store("cc_options").await;
+        let scope = "jira/acme";
+        let nt = "jira:issue";
+
+        // A free column first — the enumeration is declared on an existing
+        // column, exactly as a retype is.
+        store
+            .set_cell(scope, nt, "ISS-1", "state", "implemented", "text")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .set_column_options(scope, nt, "state", &["implemented".into(), "merged".into()])
+                .await
+                .unwrap(),
+            1
+        );
+
+        // In the set: stored. Outside it: rejected, and the old value stands.
+        store
+            .set_cell(scope, nt, "ISS-1", "state", "merged", "text")
+            .await
+            .unwrap();
+        let err = store
+            .set_cell(scope, nt, "ISS-1", "state", "in_review", "text")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("in_review"), "{err}");
+        assert!(err.contains("implemented, merged"), "{err}");
+        assert_eq!(
+            store.get_for_row(scope, "ISS-1").await.unwrap()[0].value,
+            "merged"
+        );
+
+        // Clearing a cell is not a value and stays allowed.
+        store.clear_cell(scope, "ISS-1", "state").await.unwrap();
+
+        // The options travel to the front-end as the column's select values.
+        let col = &store.columns(scope, nt).await.unwrap()[0];
+        assert_eq!(col.options, vec!["implemented", "merged"]);
+
+        // An empty set makes the column free again.
+        store
+            .set_column_options(scope, nt, "state", &[])
+            .await
+            .unwrap();
+        store
+            .set_cell(scope, nt, "ISS-1", "state", "anything", "text")
+            .await
+            .unwrap();
+        assert!(
+            store.columns(scope, nt).await.unwrap()[0]
+                .options
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn options_are_refused_when_stored_values_fall_outside() {
+        let store = mem_store("cc_options_offenders").await;
+        let scope = "jira/acme";
+        let nt = "jira:issue";
+        store
+            .set_cell(scope, nt, "ISS-1", "state", "implemented", "text")
+            .await
+            .unwrap();
+        store
+            .set_cell(scope, nt, "ISS-2", "state", "in_review", "text")
+            .await
+            .unwrap();
+
+        let err = store
+            .set_column_options(scope, nt, "state", &["implemented".into()])
+            .await
+            .unwrap_err()
+            .to_string();
+        // The offender is named with its row, and nothing was written.
+        assert!(err.contains("ISS-2: `in_review`"), "{err}");
+        assert!(!err.contains("ISS-1"), "{err}");
+        assert!(
+            store.columns(scope, nt).await.unwrap()[0]
+                .options
+                .is_empty()
+        );
+
+        // Correct the value, then the same restriction goes through.
+        store
+            .set_cell(scope, nt, "ISS-2", "state", "implemented", "text")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .set_column_options(scope, nt, "state", &["implemented".into()])
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn options_must_fit_the_column_type_and_are_normalised() {
+        let store = mem_store("cc_options_typed").await;
+        let scope = "jira/acme";
+        let nt = "jira:issue";
+        store
+            .set_cell(scope, nt, "ISS-1", "size", "1", "number")
+            .await
+            .unwrap();
+
+        let err = store
+            .set_column_options(scope, nt, "size", &["1".into(), "big".into()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("big"), "{err}");
+
+        // Blanks dropped, duplicates collapsed, surrounding space trimmed.
+        store
+            .set_column_options(
+                scope,
+                nt,
+                "size",
+                &[" 1 ".into(), "".into(), "2".into(), "1".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.columns(scope, nt).await.unwrap()[0].options,
+            vec!["1", "2"]
+        );
+
+        // An undefined column cannot be restricted.
+        let err = store
+            .set_column_options(scope, nt, "nope", &["a".into()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no custom column `nope`"), "{err}");
     }
 }

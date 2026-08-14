@@ -29,6 +29,17 @@ pub struct Model {
     /// Optional human label. Reserved for a future front-end that introduces a
     /// column without a view YAML; `None` today.
     pub label: Option<String>,
+    /// The column's closed value set, as a JSON array of strings — an
+    /// enumeration. `None` (or an empty array) leaves the column free: any
+    /// value the [`value_type`](Self::value_type) accepts is stored. Once set,
+    /// a write outside the set is rejected, and front-ends render the column as
+    /// a select (via [`ColumnSchema::options`](not_yet_done_content::ColumnSchema::options)).
+    ///
+    /// Kept orthogonal to `value_type` rather than modelled as a separate
+    /// `enum` type: the two answer different questions ("how does this value
+    /// parse, sort and render?" vs "which values are allowed?"), and a closed
+    /// set is just as meaningful over `number` as over `text`.
+    pub options: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
