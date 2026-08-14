@@ -955,7 +955,7 @@ keys of the default window bindings) → effective alphabet `adfghjkl`.
       bar shows, in bold and in the accent colour, the label `WINDOW`
       followed by the hints `v split right`, `s split down` and
       `q close pane` (with several panes open also `<a/d/…> switch
-  pane`).
+pane`).
 - [ ] Resolve any chord (for example `wv`) → the action bar falls back to
       the normal hint list (without the `WINDOW` label).
 - [ ] Press `w` while an input is active (`f` fuzzy / `/` search / `:`
@@ -1026,7 +1026,7 @@ Precondition: a chain is defined at ChildDef level in a content-tab YAML
 - [ ] Abort on error: the chain consists of `window.focus_parent`
       followed by `content.open`, and no parent pane can be linked from
       the focus → a notification reading `chain ctrl+x: step N aborted:
-  …`, the following steps are not executed.
+…`, the following steps are not executed.
 - [ ] Validation at config load: `[global.quit]` as a chain entry → the
       app start aborts with a `not chainable in V1` error.
 - [ ] Validation at config load: `[content.warp]` as a chain entry → the
@@ -1877,78 +1877,77 @@ below the space home page.
       it → follow it → the path ends on the page, the comment itself is
       only focused if the subtab shows comments as children.
 
-## In-App Config-Editor (`:config`)
+## In-app config editor (`:config`)
 
-Cross-cutting Feature: YAML-Configs unter
-`~/.config/not_yet_done/` im externen `$EDITOR` öffnen und nach Save
-in-process neu laden — ohne TUI-Restart.
+A cross-cutting feature: open the YAML configs under
+`~/.config/not_yet_done/` in the external `$EDITOR` and reload them
+in-process after saving — without restarting the TUI.
 
-### 1. Fuzzy-Picker
+### 1. Fuzzy picker
 
-- [ ] `:config` öffnet ein SearchablePopup mit allen `*.yaml` Dateien
-      (rekursiv) unter `~/.config/not_yet_done/`. Labels sind
-      relativ zur Config-Root (z. B. `tui.yaml`,
+- [ ] `:config` opens a SearchablePopup with all `*.yaml` files
+      (recursively) under `~/.config/not_yet_done/`. The labels are
+      relative to the config root (for example `tui.yaml`,
       `views/jira.yaml`, `views/jira-adapter.yaml`).
-- [ ] Tippen filtert die Liste (Fuzzy, gleicher Matcher wie
-      `gl`/`gs`-Popups).
-- [ ] `Enter` öffnet die selektierte Datei im `$EDITOR`. `Esc`
-      schließt den Picker.
-- [ ] `:config jira` (mit Argument) öffnet die Picker-Liste bereits
-      gefiltert; wenn das Argument exakt eine Datei matcht, wird der
-      Editor direkt geöffnet ohne Zwischenschritt.
+- [ ] Typing filters the list (fuzzy, the same matcher as the `gl`/`gs`
+      popups).
+- [ ] `Enter` opens the selected file in `$EDITOR`. `Esc` closes the
+      picker.
+- [ ] `:config jira` (with an argument) opens the picker list already
+      filtered; if the argument matches exactly one file, the editor
+      opens directly without the intermediate step.
 
-### 2. Edit + Save + Reload — Granular (View-YAML)
+### 2. Edit + save + reload — granular (view YAML)
 
-- [ ] Eine View-YAML editieren (z. B. `views/jira.yaml`: `tab.name`
-      ändern), speichern und `$EDITOR` schließen.
-- [ ] Notification "Reloaded view jira.yaml" erscheint.
-- [ ] Der Tab-Name in der Tab-Bar zeigt den neuen Wert.
-- [ ] Andere Tabs (Tasks, Trackings, Taiga, Postgres) sind unverändert
-      — keine Daten verloren, keine Cursor-Sprünge.
+- [ ] Edit a view YAML (for example change `tab.name` in
+      `views/jira.yaml`), save and close `$EDITOR`.
+- [ ] The notification "Reloaded view jira.yaml" appears.
+- [ ] The tab name in the tab bar shows the new value.
+- [ ] Other tabs (tasks, trackings, Taiga, Postgres) are unchanged — no
+      data lost, no cursor jumps.
 
-### 3. Edit + Save + Reload — Voll (tui.yaml / adapter-yaml)
+### 3. Edit + save + reload — full (tui.yaml / adapter YAML)
 
-- [ ] `tui.yaml` editieren (z. B. ein Theme-Color ändern), speichern.
-- [ ] Notification "tui.yaml reloaded"; neues Theme greift sofort.
-- [ ] Tasks- und Trackings-Tab: Daten werden neu geladen
-      (spawn_load lief), Selection auf Default zurück — akzeptiert.
-- [ ] Eine Adapter-YAML editieren (z. B. `views/jira-adapter.yaml`:
-      Subdomain ändern), speichern.
-- [ ] Notification "All views reloaded after views/jira-adapter.yaml
-      change"; Jira-Tab nutzt sofort den neuen Adapter (z. B. neue
-      Auth-Domain).
+- [ ] Edit `tui.yaml` (change a theme colour, say) and save.
+- [ ] The notification "tui.yaml reloaded"; the new theme takes effect
+      immediately.
+- [ ] Tasks and trackings tab: the data is reloaded (spawn_load ran), the
+      selection is back at the default — accepted.
+- [ ] Edit an adapter YAML (for example change the subdomain in
+      `views/jira-adapter.yaml`) and save.
+- [ ] The notification "All views reloaded after views/jira-adapter.yaml
+      change"; the Jira tab uses the new adapter immediately (a new auth
+      domain, say).
 
-### 4. Fehlerfall — Parse Error
+### 4. Failure case — parse error
 
-- [ ] In einer YAML eine offene Klammer einfügen
-      (`queries: [unclosed`), speichern.
-- [ ] Editor **schließt nicht** — wird mit dem gleichen Buffer
-      sofort wiedereröffnet, oben drüber ein Error-Banner
-      (`# ─── ERRORS ───` … `# • YAML parse: …` … `# ─────────────────`).
-- [ ] Die Datei auf Disk wurde **nicht** überschrieben (alter Inhalt
-      bleibt). Alte Config läuft normal weiter.
-- [ ] Den Banner-Block belassen und ein zweites Mal speichern → nur
-      ein Banner-Block bleibt am Ende sichtbar (kein Stapeln).
-- [ ] Fehler beheben + speichern → Editor schließt, Reload-Message
-      erscheint normal.
+- [ ] Insert an unclosed bracket into a YAML (`queries: [unclosed`) and
+      save.
+- [ ] The editor does **not** close — it is reopened immediately with the
+      same buffer, an error banner above it (`# ─── ERRORS ───` …
+      `# • YAML parse: …` … `# ─────────────────`).
+- [ ] The file on disk was **not** overwritten (the old content stays).
+      The old config keeps running normally.
+- [ ] Leave the banner block in place and save a second time → only one
+      banner block remains visible at the end (no stacking).
+- [ ] Fix the error and save → the editor closes, the reload message
+      appears as normal.
 
-### 5. Fehlerfall — Validation Error (semantisch)
+### 5. Failure case — validation error (semantic)
 
-- [ ] In `views/jira.yaml` einen `adapter.type: nonexistent` setzen,
-      speichern.
-- [ ] Datei wird auf Disk geschrieben (anders als beim Parse-Error —
-      Syntax war ja OK).
-- [ ] Editor öffnet sich wieder mit Error-Banner
-      (`Reload … failed: no adapter factory registered for type
-'nonexistent'`).
-- [ ] Im Hintergrund: Jira-Tab läuft **mit der alten Config weiter**
-      (alter Adapter aktiv). User kann tabben und sehen, dass nichts
-      verloren ging.
+- [ ] Set `adapter.type: nonexistent` in `views/jira.yaml` and save.
+- [ ] The file is written to disk (unlike with the parse error — the
+      syntax was fine after all).
+- [ ] The editor opens again with an error banner reading "Reload …
+      failed: no adapter factory registered for type 'nonexistent'".
+- [ ] In the background: the Jira tab **keeps running with the old
+      config** (the old adapter is active). The user can tab over and see
+      that nothing was lost.
 
-## Cmdline-Shortcuts (`cmdline_shortcuts:`)
+## Cmdline shortcuts (`cmdline_shortcuts:`)
 
-In `tui.yaml` lassen sich beliebige `:command`-Strings auf einzelne
-Tasten/Chords binden — ohne über den `:`-Prompt zu gehen.
+In `tui.yaml`, arbitrary `:command` strings can be bound to individual
+keys or chords — without going through the `:` prompt.
 
 ```yaml
 cmdline_shortcuts:
@@ -1956,266 +1955,274 @@ cmdline_shortcuts:
   "<c-comma>": "config"
 ```
 
-- [ ] Mit obigem Eintrag: `F2` öffnet sofort `tui.yaml` im Editor,
-      `Ctrl+,` öffnet den `:config` Picker.
-- [ ] Shortcut feuert nur, wenn die Taste **kein** typed Action
-      bindet — Standard-Keys (`q`, `j`, `k`, …) bleiben unverändert.
-- [ ] Shortcut feuert **vor** dem Chord-Prefix-Fallback: ein
-      single-char Shortcut auf `m` würde `gl`-Chord-Erkennung nicht
-      kaputt machen (weil `m` kein Prefix von `gl` ist), aber wäre
-      auch nicht verfügbar wenn `m` bereits eine Action wäre.
-- [ ] Nach `:config tui` → Edit eines Shortcuts → Save: neue
-      Shortcuts greifen sofort (tui.yaml Reload schließt sie ein).
-- [ ] **Built-in default** `T` → `tag`: Bei tui.yaml ohne
-      `cmdline_shortcuts:` Section (oder mit Section, die `T` nicht
-      definiert und vorher kein eigener `cmdline_shortcuts:`-Eintrag
-      existierte) öffnet `T` das Tag-Menü. Sobald der User
-      `cmdline_shortcuts:` explizit setzt, ersetzt sein Block die
-      Defaults — er muss `T: tag` selbst eintragen, falls er es
-      behalten will.
+- [ ] With the entry above: `F2` opens `tui.yaml` in the editor
+      immediately, `Ctrl+,` opens the `:config` picker.
+- [ ] A shortcut only fires if the key binds **no** typed action —
+      standard keys (`q`, `j`, `k`, …) stay unchanged.
+- [ ] A shortcut fires **before** the chord prefix fallback: a
+      single-character shortcut on `m` would not break the `gl` chord
+      detection (because `m` is not a prefix of `gl`), but it would also
+      not be available if `m` were already an action.
+- [ ] After `:config tui` → edit a shortcut → save: the new shortcuts
+      take effect immediately (the tui.yaml reload includes them).
+- [ ] **Built-in default** `T` → `tag`: with a tui.yaml without a
+      `cmdline_shortcuts:` section (or with a section that does not
+      define `T`, and where no `cmdline_shortcuts:` entry of the user's
+      own existed before), `T` opens the tag menu. As soon as the user
+      sets `cmdline_shortcuts:` explicitly, their block replaces the
+      defaults — they have to add `T: tag` themselves if they want to
+      keep it.
 
-## Tasks-Tree Expand/Collapse
+## Tasks tree expand/collapse
 
-Aufklappbarer Tree im Tasks-Tab. Bindings: `vt`/`vl` (Tree/List
-sub-view), `enter` (toggle Cursor-Node), `zr` (alles ausklappen),
-`zm` (auf `default_expand_depth` zurück; **nicht** voll bis Roots,
-dafür `default_expand_depth: 0` setzen). Config:
+An expandable tree in the tasks tab. Bindings: `vt`/`vl` (tree/list
+sub-view), `enter` (toggle the cursor node), `zr` (expand everything),
+`zm` (back to `default_expand_depth`; **not** all the way to the roots,
+set `default_expand_depth: 0` for that). Config:
 
 ```yaml
 tasks:
   tree:
-    default_expand_depth: 2 # 0 = nur Roots, 1 = + direkte Kinder, ...
+    default_expand_depth: 2 # 0 = roots only, 1 = + direct children, ...
 ```
 
-- [x] In Tasks-Tab: `vt` → Tree-Sub-View aktiv; `vl` → List-Sub-View
-      aktiv (Rename von `t`/`l`).
-- [x] Tree zeigt initial nur die ersten `default_expand_depth+1`
-      Ebenen — tiefere Nodes sind versteckt; ihre direkten Eltern
-      tragen `▶` + `(N)` Suffix (N = Anzahl direkter Kinder).
-- [ ] `enter` auf einem collapsed Parent → klappt auf, Glyph
-      wechselt zu `▼`, Kinder werden sichtbar.
-- [ ] `enter` auf einem expanded Parent → klappt zu, Glyph wechselt
-      zu `▶`, Kinder verschwinden, `(N)` Suffix erscheint.
-- [ ] `enter` auf einem Leaf-Node → No-Op (Cursor bleibt, Tree
-      unverändert).
-- [ ] `zr` → alle Branches ausgeklappt; alle Parents zeigen `▼`,
-      keine `(N)` Suffixes.
-- [ ] `zm` → Tree zurück auf `default_expand_depth` (z.B. 2 Ebenen
-      offen, tiefer wieder zu); per-Node `enter`-Toggles werden dabei
-      verworfen.
-- [ ] Mit `:config tui` `default_expand_depth: 0` setzen, dann `zm` →
-      jetzt sind nur die Roots sichtbar (vim-style full collapse).
-- [ ] Fuzzy-Filter aktiv (`f` + Text) → Expand-State wird ignoriert;
-      jedes Match (plus Ancestors) erscheint, keine `(N)` Suffixes.
-- [ ] Filter clear → vorheriger Expand-State ist zurück.
-- [ ] `:config tui` → `default_expand_depth: 3` → Save → Tree
-      rendert sofort mit der neuen Tiefe (über Reload-Pipeline).
-- [ ] Restart der TUI: Expand-State ist **nicht** persistiert; Tree
-      ist wieder auf `default_expand_depth` zurück.
-- [ ] List-Sub-View (`vl`) zeigt weder Glyphen noch `(N)` —
-      Listenmodus unangetastet.
-- [ ] Trackings-Tab → Tree (`t`) zeigt **keine** Glyphen und
-      **keine** `(N)`-Suffixes (Trackings-Tree ist nicht aufklappbar
-      konfiguriert).
-- [ ] Action-Bar (im Tree-Sub-View) zeigt Hint `↵ expand/collapse`.
-- [ ] Default `dismiss_notifications` ist jetzt `Z` (vorher `z`,
-      kollidierte mit `zr`/`zm`). Trigger eine Notification (z.B.
-      Fehler-Befehl), drücke `Z` im Normal-Mode → Notification
-      verschwindet. `:dismiss-notifications` ohne Argument tut
-      dasselbe. `:dismiss-notifications foo` → Modal _":dismiss-notifications
-      takes no arguments"_.
+- [x] In the tasks tab: `vt` → the tree sub-view is active; `vl` → the
+      list sub-view is active (renamed from `t`/`l`).
+- [x] Initially the tree shows only the first `default_expand_depth+1`
+      levels — deeper nodes are hidden; their direct parents carry a `▶`
+      plus an `(N)` suffix (N = the number of direct children).
+- [ ] `enter` on a collapsed parent → it expands, the glyph switches to
+      `▼`, the children become visible.
+- [ ] `enter` on an expanded parent → it collapses, the glyph switches to
+      `▶`, the children disappear, the `(N)` suffix appears.
+- [ ] `enter` on a leaf node → no-op (the cursor stays, the tree is
+      unchanged).
+- [ ] `zr` → all branches expanded; all parents show `▼`, no `(N)`
+      suffixes.
+- [ ] `zm` → the tree goes back to `default_expand_depth` (2 levels open,
+      say, deeper ones closed again); the per-node `enter` toggles are
+      discarded in the process.
+- [ ] Set `default_expand_depth: 0` via `:config tui`, then `zm` → now
+      only the roots are visible (vim-style full collapse).
+- [ ] Fuzzy filter active (`f` plus text) → the expand state is ignored;
+      every match (plus its ancestors) appears, no `(N)` suffixes.
+- [ ] Clear the filter → the previous expand state is back.
+- [ ] `:config tui` → `default_expand_depth: 3` → save → the tree renders
+      with the new depth immediately (via the reload pipeline).
+- [ ] Restart the TUI: the expand state is **not** persisted; the tree is
+      back at `default_expand_depth`.
+- [ ] The list sub-view (`vl`) shows neither glyphs nor `(N)` — list mode
+      is untouched.
+- [ ] Trackings tab → the tree (`t`) shows **no** glyphs and **no** `(N)`
+      suffixes (the trackings tree is not configured as expandable).
+- [ ] The action bar (in the tree sub-view) shows the hint
+      `↵ expand/collapse`.
+- [ ] The default for `dismiss_notifications` is now `Z` (formerly `z`,
+      which collided with `zr`/`zm`). Trigger a notification (an
+      erroneous command, say), press `Z` in normal mode → the
+      notification disappears. `:dismiss-notifications` without an
+      argument does the same. `:dismiss-notifications foo` → the modal
+      ":dismiss-notifications takes no arguments".
 
-### `/`-Suche durch eingeklappte Branches
+### `/` search through collapsed branches
 
-`/` durchsucht im Tree-Sub-View jetzt **alle** Tasks (auch versteckte).
-Springt der Cursor mit `n`/`N` auf einen Match in einem eingeklappten
-Branch, klappt sich nur die Ancestor-Kette des aktuellen Treffers auf.
-Beim nächsten `n`/`N` kollabiert der vorherige Pfad wieder; eine
-beliebige andere Taste (`j`, `k`, `<space>`, Enter zum Schließen, …)
-"committet" den aktuellen Pfad — er bleibt offen, der nächste `n` ist
-dann wieder eine frische Auto-Expansion.
+In the tree sub-view, `/` now searches **all** tasks (hidden ones
+included). If the cursor jumps to a match in a collapsed branch with
+`n`/`N`, only the ancestor chain of the current hit expands. On the next
+`n`/`N` the previous path collapses again; any other key (`j`, `k`,
+`<space>`, Enter to close, …) "commits" the current path — it stays open,
+and the next `n` is a fresh auto-expansion again.
 
-- [ ] Tree mit `default_expand_depth: 2` und Sub-Tasks tiefer als 2.
-      `/` + Tippen eines Strings, der nur in einem tiefen Sub-Task
-      vorkommt → der Pfad zum Treffer öffnet sich automatisch, Cursor
-      landet auf dem Match.
-- [ ] Weiter tippen (Buchstaben anhängen) → bei jedem Query-Change
-      kollabiert der alte Pfad und der neue Pfad zum ersten Match
-      öffnet sich.
-- [ ] Mehrere Treffer in verschiedenen Sub-Branches: `n` springt zum
-      nächsten Match → vorheriger Branch kollabiert wieder, neuer
-      Branch öffnet sich. `N` rückwärts analog.
-- [ ] Während `n`/`N`-Sequenz: `j` (oder beliebige andere Taste) →
-      aktuell offener Pfad **bleibt** offen. Anschließend nochmal `n`
-      → neuer Branch öffnet sich, der eben "fixierte" Pfad bleibt
-      auch offen (zwei sichtbare Pfade).
-- [ ] `Enter` (Suche annehmen) commit'tet den aktuell offenen Pfad
-      ebenso.
-- [ ] `Esc` (Suche abbrechen, leere Query) → Auto-Expansion wird
-      verworfen, Tree fällt auf den vorigen Expand-State zurück.
-- [ ] `Esc` bei nicht-leerer Query → Query wird gelöscht, Auto-
-      Expansion verworfen, Suche bleibt aktiv.
-- [ ] Fuzzy-Filter aktiv (`f` + Text) + `/`-Suche → Suche durchsucht
-      nur die vom Fuzzy-Filter sichtbaren Tasks (keine Auto-Expansion
-      nötig, alles ist bereits sichtbar).
-- [ ] Vor `/`: einen Top-Level-Branch manuell mit `enter` zugeklappt.
-      `/` matched einen Task in diesem Branch → Branch öffnet sich
-      transient. Commit → Branch bleibt offen, `enter` darauf
-      schließt ihn wieder normal (transient wurde sauber in `flipped`
-      promotet, nicht doppelt geflippt).
+- [ ] A tree with `default_expand_depth: 2` and sub-tasks deeper than 2.
+      `/` plus typing a string that only occurs in a deep sub-task → the
+      path to the hit opens automatically, the cursor lands on the match.
+- [ ] Keep typing (append letters) → on every query change the old path
+      collapses and the new path to the first match opens.
+- [ ] Several hits in different sub-branches: `n` jumps to the next
+      match → the previous branch collapses again, the new branch opens.
+      `N` likewise, backwards.
+- [ ] During an `n`/`N` sequence: `j` (or any other key) → the currently
+      open path **stays** open. Then press `n` again → the new branch
+      opens and the path just "pinned" stays open too (two visible
+      paths).
+- [ ] `Enter` (accept the search) commits the currently open path as
+      well.
+- [ ] `Esc` (cancel the search, empty query) → the auto-expansion is
+      discarded, the tree falls back to the previous expand state.
+- [ ] `Esc` with a non-empty query → the query is cleared, the
+      auto-expansion is discarded, the search stays active.
+- [ ] Fuzzy filter active (`f` plus text) plus a `/` search → the search
+      only covers the tasks made visible by the fuzzy filter (no
+      auto-expansion needed, everything is visible already).
+- [ ] Before `/`: collapse a top-level branch manually with `enter`. `/`
+      matches a task in that branch → the branch opens transiently.
+      Commit → the branch stays open, `enter` on it closes it normally
+      again (the transient state was promoted into `flipped` cleanly, not
+      flipped twice).
 
-## Tasks-Tree Cut / Paste (`:cut-node` / `:paste-node`)
+## Tasks tree cut / paste (`:cut-node` / `:paste-node`)
 
-Tasks im Tree umhängen ohne Edit-Form: erst `mc` (oder
-`:cut-node`) auf der Quelle, dann Cursor auf den neuen Parent
-bewegen, dann `mp` (oder `:paste-node`). Das DB-Update läuft
-**ausschließlich** bei Paste — vorher wird nichts angefasst.
+Re-parent tasks in the tree without the edit form: first `mc` (or
+`:cut-node`) on the source, then move the cursor onto the new parent,
+then `mp` (or `:paste-node`). The database update happens **only** on
+paste — nothing is touched before that.
 
-- [ ] Tasks-Tab, irgendeinen Task wählen, `mc` → Notification "Cut:
-      … — paste with :paste-node (mp)". Tree unverändert.
-- [ ] Anderen Task wählen, `mp` → Notification "Moved: …". Tree
-      rebuildet, Quelle hängt jetzt unter dem Ziel.
-- [ ] `mc` ohne Auswahl in Tasks → Modal _":cut-node — no task selected"_.
-- [ ] `mp` ohne vorheriges `mc` → Modal _":paste-node — nothing cut (use :cut-node / mc first)"_.
-- [ ] `mc` auf einem Task A, dann nochmal `mc` auf Task B → letzter
-      Cut gewinnt (Notification mit Beschreibung von B).
-- [ ] `mc` auf A, `Esc` → Notification "Cut cancelled".
-      Nachfolgendes `mp` → Modal _"nothing cut"_.
-- [ ] `mc` auf A, Cursor auf A selbst, `mp` → Modal _"cannot paste a
-      task onto itself"_. A bleibt cut (zweiter Versuch möglich).
-- [ ] `mc` auf A, Cursor auf einen Nachfahren von A, `mp` → Modal
-      _"cannot move a task into its own subtree"_. Tree unverändert.
-- [ ] `mc` auf A, Cursor auf den aktuellen Parent von A, `mp` →
-      Notification _"already a child of the target"_, kein DB-Write,
-      Cut gelöscht.
-- [ ] `mc` auf A, `mp` auf Root-Task B → A wird Kind von B,
-      Notifikation "Moved: …".
-- [ ] `mc` aus Tasks-Tab raus in Trackings/Content-Tab gewechselt,
-      dann `mp` → Modal _":paste-node only works on the Tasks tab"_.
-- [ ] `:cut-node foo` → Modal _":cut-node takes no arguments"_.
-      Analog für `:paste-node foo`.
-- [ ] Default-Bindings: `m` allein landet nicht direkt (wird als
-      Chord-Prefix gestasht); erst `mc` / `mp` feuert.
+- [ ] Tasks tab, pick any task, `mc` → a notification "Cut: … — paste
+      with :paste-node (mp)". The tree is unchanged.
+- [ ] Pick another task, `mp` → a notification "Moved: …". The tree is
+      rebuilt, the source now hangs below the target.
+- [ ] `mc` without a selection in tasks → the modal ":cut-node — no task
+      selected".
+- [ ] `mp` without a preceding `mc` → the modal ":paste-node — nothing
+      cut (use :cut-node / mc first)".
+- [ ] `mc` on a task A, then `mc` again on task B → the last cut wins
+      (the notification describes B).
+- [ ] `mc` on A, `Esc` → a notification "Cut cancelled". A subsequent
+      `mp` → the modal "nothing cut".
+- [ ] `mc` on A, cursor on A itself, `mp` → the modal "cannot paste a
+      task onto itself". A stays cut (a second attempt is possible).
+- [ ] `mc` on A, cursor on a descendant of A, `mp` → the modal "cannot
+      move a task into its own subtree". The tree is unchanged.
+- [ ] `mc` on A, cursor on the current parent of A, `mp` → a
+      notification "already a child of the target", no database write,
+      the cut is cleared.
+- [ ] `mc` on A, `mp` on the root task B → A becomes a child of B, a
+      notification "Moved: …".
+- [ ] `mc` in the tasks tab, then switch to the trackings or a content
+      tab and press `mp` → the modal ":paste-node only works on the Tasks
+      tab".
+- [ ] `:cut-node foo` → the modal ":cut-node takes no arguments".
+      Likewise for `:paste-node foo`.
+- [ ] Default bindings: `m` on its own does not land directly (it is
+      stashed as a chord prefix); only `mc` / `mp` fire.
 
-## `:jump` und `:focus-task`
+## `:jump` and `:focus-task`
 
-Programmatic Navigation für Skripte und Power-Cmdline-User.
-`:jump <Tab>[:<sub>]` schaltet Tab/Subtab, `:focus-task /a/b/c`
-sucht im Tasks-Tree den passenden Knoten und expandiert den Pfad.
+Programmatic navigation for scripts and power cmdline users.
+`:jump <Tab>[:<sub>]` switches the tab/subtab, `:focus-task /a/b/c`
+looks up the matching node in the tasks tree and expands the path.
 
-- [ ] `:jump Tasks` → schaltet auf Tasks-Tab, Subtab unverändert.
-- [ ] `:jump Tasks:tree` → Tasks-Tab, Subtab Tree. Aus dem List-
-      Subtab heraus: Selektion bleibt erhalten (set_pending_focus).
-- [ ] `:jump Tasks:list` analog.
-- [ ] `:jump Tasks:foobar` → Modal _":jump — unknown Tasks sub-view 'foobar' (list|tree)"_.
-- [ ] `:jump Trackings:condensed` → Trackings-Tab, Condensed-Subtab.
-      (Trackings rebuildet via `rebuild_trackings_table`.)
-- [ ] `:jump <name-eines-content-tabs>` (case-insensitive) →
-      schaltet auf den passenden Content-Tab.
-- [ ] `:jump nichtvorhanden` → Modal _":jump — unknown tab 'nichtvorhanden'"_.
-- [ ] `:jump` ohne Argument → Modal _":jump expects one argument, e.g. :jump Tasks:tree"_.
+- [ ] `:jump Tasks` → switches to the tasks tab, the subtab is
+      unchanged.
+- [ ] `:jump Tasks:tree` → tasks tab, subtab tree. Coming from the list
+      subtab: the selection is preserved (set_pending_focus).
+- [ ] `:jump Tasks:list` likewise.
+- [ ] `:jump Tasks:foobar` → the modal ":jump — unknown Tasks sub-view
+      'foobar' (list|tree)".
+- [ ] `:jump Trackings:condensed` → trackings tab, condensed subtab.
+      (Trackings rebuilds via `rebuild_trackings_table`.)
+- [ ] `:jump <name-of-a-content-tab>` (case-insensitive) → switches to
+      the matching content tab.
+- [ ] `:jump doesnotexist` → the modal ":jump — unknown tab
+      'doesnotexist'".
+- [ ] `:jump` without an argument → the modal ":jump expects one
+      argument, e.g. :jump Tasks:tree".
 
-- [ ] Im Tasks:tree, `:focus-task /seg1/seg2/...` mit eindeutiger
-      Pfadkette → Pfad expandiert sich, Cursor parkt auf dem
-      tiefsten Knoten. Default-Match ist **case-sensitive
-      substring**.
-- [ ] `:focus-task /Work` (Groß-W) trifft `work`-Task NICHT mehr
-      (Default sensitive); `:focus-task -i /Work` findet ihn.
-- [ ] `:focus-task -i /…` mit gemischter Groß/Kleinschreibung in den
-      Segmenten matched trotzdem, sowohl für Substring- als auch
-      `re:`-Segmente.
-- [ ] `:focus-task /work/clients/acme/tickets/re:\b42\b` →
-      matched ein Task mit "42" in der description, NICHT 420 oder 421. (Word-Boundary-Trennung über Ziffern.)
-- [ ] `:focus-task /…/re:[broken(` (kaputtes Regex) → Modal
-      _"invalid regex 're:…' — …"_, Tree unverändert.
-- [ ] `:focus-task -x /…` (unbekannter Flag) → Modal _"unknown flag
-      '-x' (only -i is supported)"_, Tree unverändert.
-- [ ] `:focus-task /unbekannt` → Modal _"no task matching 'unbekannt' at root level"_, Tree unverändert.
-- [ ] `:focus-task /work/unbekannt` → Modal _"… under 'work'"_, Tree unverändert.
-- [ ] `:focus-task work/x` (ohne führenden `/`) → Modal _"expects a /-rooted path …"_.
-- [ ] `:focus-task /` → Modal _"path is empty"_.
-- [ ] `:focus-task -i /` → Modal _"path is empty"_ (Flag konsumiert, leerer Pfad).
-- [ ] `:focus-task /<ambig>` wenn mehrere Root-Tasks matchen → Modal
-      _"'<ambig>' is ambiguous: 'task A', 'task B', …"_.
-- [ ] `:focus-task /…` im Tasks:list-Subtab → Modal _"only works in the Tasks:tree sub-view"_.
-- [ ] `:focus-task /…` aus Trackings/Content-Tab → Modal _"only works on the Tasks tab"_.
+- [ ] In Tasks:tree, `:focus-task /seg1/seg2/...` with an unambiguous
+      path chain → the path expands, the cursor parks on the deepest
+      node. The default match is a **case-sensitive substring**.
+- [ ] `:focus-task /Work` (capital W) no longer hits the `work` task
+      (the default is case-sensitive); `:focus-task -i /Work` finds it.
+- [ ] `:focus-task -i /…` with mixed case in the segments matches
+      anyway, for substring segments as well as `re:` segments.
+- [ ] `:focus-task /work/clients/acme/tickets/re:\b42\b` → matches a
+      task with "42" in the description, NOT 420 or 421. (Word boundary
+      separation across digits.)
+- [ ] `:focus-task /…/re:[broken(` (a broken regex) → the modal "invalid
+      regex 're:…' — …", the tree is unchanged.
+- [ ] `:focus-task -x /…` (an unknown flag) → the modal "unknown flag
+      '-x' (only -i is supported)", the tree is unchanged.
+- [ ] `:focus-task /unknown` → the modal "no task matching 'unknown' at
+      root level", the tree is unchanged.
+- [ ] `:focus-task /work/unknown` → the modal "… under 'work'", the tree
+      is unchanged.
+- [ ] `:focus-task work/x` (without the leading `/`) → the modal
+      "expects a /-rooted path …".
+- [ ] `:focus-task /` → the modal "path is empty".
+- [ ] `:focus-task -i /` → the modal "path is empty" (the flag is
+      consumed, the path is empty).
+- [ ] `:focus-task /<ambig>` when several root tasks match → the modal
+      "'<ambig>' is ambiguous: 'task A', 'task B', …".
+- [ ] `:focus-task /…` in the Tasks:list subtab → the modal "only works
+      in the Tasks:tree sub-view".
+- [ ] `:focus-task /…` from the trackings or a content tab → the modal
+      "only works on the Tasks tab".
 
 ## `:reload-tasks`
 
-Synchroner Refetch der `task_rows` aus der DB. Hauptzweck: in einer
-Command-Chain aus einem Skript (siehe nächster Abschnitt) zwischen
-einem externen `nyd add` (Alias für `nyd tasks do add`) und einem
-nachgelagerten `:focus-task` einklemmen, damit der neu angelegte Task
-gesehen wird.
+A synchronous refetch of the `task_rows` from the database. Its main
+purpose: in a command chain from a script (see the next section), wedge
+it between an external `nyd add` (an alias for `nyd tasks do add`) and a
+subsequent `:focus-task`, so that the newly created task is seen.
 
-- [ ] In TUI Tasks-Tab; in zweitem Terminal `nyd add -m 'Smoke
-reload'` → neue Row
-      ist im laufenden TUI noch NICHT sichtbar (selbst nach
-      Tab-Wechsel hin und zurück, weil `set_active_tab` nur bei
-      `Idle` reloaded). `:reload-tasks` → Row erscheint sofort im
-      Tree (Parent ggf. auto-expandiert, falls vorher offen).
-- [ ] `:reload-tasks` aus Trackings-Tab → Tasks werden im
-      Hintergrund neu geladen, aktiver Tab bleibt Trackings (kein
-      Auto-Switch).
-- [ ] `:reload-tasks` aus einem Content-Tab → dito, kein Tab-Wechsel.
-- [ ] `:reload-tasks foo` → Modal _"takes no arguments"_.
-- [ ] Tasks-Filter aktiv (z.B. fuzzy oder gespeicherter Filter) →
-      Reload respektiert den aktiven Filter (gleiche Args wie
-      `spawn_load`); neue Rows, die den Filter nicht erfüllen,
-      tauchen nicht auf.
-- [ ] DB nicht erreichbar während Reload → Modal _"reload-tasks
-      — …"_; aktive `task_rows` bleiben unverändert (kein Wipe).
+- [ ] In the TUI tasks tab; in a second terminal run `nyd add` with a
+      message of your own → the new row is NOT visible yet in the running
+      TUI (not even after switching tabs back and forth, because
+      `set_active_tab` only reloads while `Idle`). `:reload-tasks` → the
+      row appears in the tree immediately (the parent auto-expands if it
+      was open before).
+- [ ] `:reload-tasks` from the trackings tab → the tasks are reloaded in
+      the background, the active tab stays trackings (no auto switch).
+- [ ] `:reload-tasks` from a content tab → likewise, no tab switch.
+- [ ] `:reload-tasks foo` → the modal "takes no arguments".
+- [ ] A tasks filter is active (fuzzy or a saved filter, say) → the
+      reload respects the active filter (the same arguments as
+      `spawn_load`); new rows that do not satisfy the filter do not show
+      up.
+- [ ] The database is unreachable during the reload → the modal
+      "reload-tasks — …"; the active `task_rows` stay unchanged (no
+      wipe).
 
 ## `:focus-node`
 
-Content-View-Pendant zu `:focus-task`. Schaltet auf den genannten
-Content-Tab (+ optional Sub-View) und parkt den Cursor auf der ersten
-Zeile, deren Spalte das Pattern matched. Default: case-sensitive
-substring; `-i` foldet Case; `re:` opt-in zu Regex. Single-segment
-only (Drill-Down später).
+The content-view counterpart to `:focus-task`. It switches to the named
+content tab (plus an optional sub-view) and parks the cursor on the first
+row whose column matches the pattern. Default: case-sensitive substring;
+`-i` folds case; `re:` opts into a regex. Single segment only (drill-down
+comes later).
 
-- [ ] In einem beliebigen Tab; `:focus-node Taiga:items /ref|acme#42`
-      → Tab wechselt zu Taiga, Subview items, Cursor parkt auf der
-      Zeile mit `ref = acme#42`. Nachfolgende n/N-Navigation
-      respektiert die neue Position.
-- [ ] `:focus-node Taiga:items /acme#42` (kein column-hint) →
-      matched, weil das Pattern in der konkatenierten label+fields
-      vorkommt; falls Collisions (z.B. mit subject), darüber direkt
-      `ref|...` schreiben.
-- [ ] `:focus-node Taiga:items /id|userstory:4242` → matched via
-      composite_id. (Skripten unbequem, weil die `composite_id` nicht
-      aus dem ref/slug ableitbar ist; aber als Form unterstützt.)
-- [ ] `:focus-node Taiga:items /label|<exakter subject-Anfang>` →
-      matched substring im NodeSummary.label.
-- [ ] `:focus-node Taiga:items /ref|re:\bacme#42\b` → Regex mit
-      Word-Boundary, matched nicht auch `acme#420`.
-- [ ] `:focus-node -i Taiga:items /ref|ACME#42` → case-insensitive
-      matched eine Zeile mit `ref = acme#42`.
-- [ ] `:focus-node Taiga:items /foo|x` (foo existiert in keiner
-      Metadaten-Spalte) → Modal _"unknown column 'foo' (available:
-      …)"_, Cursor unverändert.
-- [ ] `:focus-node Taiga:items /ref|nope` → Modal _"no row matching
-      'ref|nope'"_.
-- [ ] `:focus-node Taiga:items /ref|acme` (matched mehrere
-      Tickets) → Modal _"'ref|acme' is ambiguous: 'userstory:1',
-      'userstory:2', …"_.
-- [ ] `:focus-node Taiga:items /a/b` (zwei Segmente) → Modal
-      _"multi-segment drill-down paths are not yet supported"_.
-- [ ] `:focus-node Taiga:items ref|x` (ohne führenden `/` im Pfad)
-      → Modal _"expects a /-rooted path …"_.
-- [ ] `:focus-node Taiga:items /` → Modal _"path is empty"_.
-- [ ] `:focus-node Tasks:tree /work` → Modal _"…not a content tab"_
-      (Tasks ist kein Content-Tab; für Tasks gilt `:focus-task`).
-- [ ] `:focus-node nichtvorhanden:items /ref|x` → Modal _"'…' is not
-      a content tab …"_.
-- [ ] `:focus-node Taiga:foobar /ref|x` → Modal _"unknown view
-      'foobar' for tab 'Taiga' (available: items, notifications)"_.
-- [ ] `:focus-node -x Taiga:items /ref|x` (unbekannter Flag) → Modal
-      _"unknown flag '-x' (only -i is supported)"_.
-- [ ] Wenn die Items-View noch nie geladen wurde (manual*connect):
-      `:focus-node Taiga:items /ref|acme#42` findet 0 Zeilen →
-      Modal *"no row matching …"\_; User muss erst `r` (reload)
-      triggern.
+- [ ] From any tab; `:focus-node Taiga:items /ref|acme#42` → the tab
+      switches to Taiga, sub-view items, the cursor parks on the row with
+      `ref = acme#42`. Subsequent n/N navigation respects the new
+      position.
+- [ ] `:focus-node Taiga:items /acme#42` (no column hint) → it matches,
+      because the pattern occurs in the concatenated label plus fields;
+      in case of collisions (with the subject, say) write `ref|...`
+      explicitly instead.
+- [ ] `:focus-node Taiga:items /id|userstory:4242` → matches via the
+      composite_id. (Inconvenient for scripts, because the
+      `composite_id` cannot be derived from the ref/slug; but the form is
+      supported.)
+- [ ] `:focus-node Taiga:items /label|<exact start of the subject>` →
+      matches a substring in NodeSummary.label.
+- [ ] `:focus-node Taiga:items /ref|re:\bacme#42\b` → a regex with a
+      word boundary, does not also match `acme#420`.
+- [ ] `:focus-node -i Taiga:items /ref|ACME#42` → case-insensitive,
+      matches a row with `ref = acme#42`.
+- [ ] `:focus-node Taiga:items /foo|x` (foo exists in no metadata
+      column) → the modal "unknown column 'foo' (available: …)", the
+      cursor is unchanged.
+- [ ] `:focus-node Taiga:items /ref|nope` → the modal "no row matching
+      'ref|nope'".
+- [ ] `:focus-node Taiga:items /ref|acme` (matches several tickets) →
+      the modal "'ref|acme' is ambiguous: 'userstory:1', 'userstory:2',
+      …".
+- [ ] `:focus-node Taiga:items /a/b` (two segments) → the modal
+      "multi-segment drill-down paths are not yet supported".
+- [ ] `:focus-node Taiga:items ref|x` (without the leading `/` in the
+      path) → the modal "expects a /-rooted path …".
+- [ ] `:focus-node Taiga:items /` → the modal "path is empty".
+- [ ] `:focus-node Tasks:tree /work` → the modal "…not a content tab"
+      (tasks is not a content tab; `:focus-task` applies to tasks).
+- [ ] `:focus-node doesnotexist:items /ref|x` → the modal "'…' is not a
+      content tab …".
+- [ ] `:focus-node Taiga:foobar /ref|x` → the modal "unknown view
+      'foobar' for tab 'Taiga' (available: items, notifications)".
+- [ ] `:focus-node -x Taiga:items /ref|x` (an unknown flag) → the modal
+      "unknown flag '-x' (only -i is supported)".
+- [ ] If the items view has never been loaded (`manual_connect`):
+      `:focus-node Taiga:items /ref|acme#42` finds 0 rows → the modal "no
+      row matching …"; the user has to trigger `r` (reload) first.
 
 ## CLI `tasks show --path`
 
