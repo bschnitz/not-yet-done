@@ -55,6 +55,9 @@ pub const CLEAR_CELL_ACTION_ID: &str = "clear-cell";
 pub const EDIT_CELLS_ACTION_ID: &str = "edit-cells";
 /// Stable id of the synthetic "change a custom column's type" action.
 pub const RETYPE_COLUMN_ACTION_ID: &str = "retype-column";
+/// Stable id of the synthetic "restrict a custom column to a set of values"
+/// action — the enumeration counterpart to [`RETYPE_COLUMN_ACTION_ID`].
+pub const SET_COLUMN_OPTIONS_ACTION_ID: &str = "set-column-options";
 
 /// The synthetic actions injected onto every node's [`Node::actions`]. Menu- /
 /// form-driven (no default key), so they surface in the CLI `do`/`actions`
@@ -114,7 +117,31 @@ fn custom_column_actions() -> Vec<NodeAction> {
                 ],
             },
         ),
+        // Making a column an enumeration is likewise a column-level decision,
+        // not something a cell write may do in passing: `set-cell` can only
+        // pick from the set, never widen it. An empty `options` clears the
+        // restriction and makes the column free again.
+        NodeAction::new(
+            SET_COLUMN_OPTIONS_ACTION_ID,
+            "set custom column options",
+            InputSpec::Form {
+                fields: vec![
+                    FormFieldSpec::text("column_key", "Column key"),
+                    FormFieldSpec::text("options", "Allowed values (comma-separated)").optional(),
+                ],
+            },
+        ),
     ]
+}
+
+/// Split the comma-separated `options` field into the store's option list.
+/// Trimming and de-duplication happen in the store, so this only has to cut
+/// the string; an empty field yields an empty list, i.e. "no restriction".
+fn split_options(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|o| o.trim().to_string())
+        .filter(|o| !o.is_empty())
+        .collect()
 }
 
 /// Append each stored cell as a metadata field, unless a field with that key
@@ -663,6 +690,39 @@ impl Node for CustomColumnsNode {
                     message: Some(format!(
                         "Custom column `{column_key}` is now `{value_type}` ({migrated} cell(s) migrated)"
                     )),
+                })
+            }
+            // Also scope-wide: the allowed set belongs to the column, so the
+            // store checks it against every stored cell and refuses — naming
+            // the ones in the way — rather than leaving values behind that it
+            // would no longer accept.
+            SET_COLUMN_OPTIONS_ACTION_ID => {
+                let fields = form_fields(input)?;
+                let column_key = required(&fields, "column_key")?;
+                let options = split_options(
+                    fields
+                        .get("options")
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                );
+                let covered = self
+                    .store
+                    .set_column_options(
+                        &self.scope,
+                        &self.inner.node_type().type_id,
+                        &column_key,
+                        &options,
+                    )
+                    .await?;
+                Ok(ActionOutcome::Done {
+                    message: Some(if options.is_empty() {
+                        format!("Custom column `{column_key}` accepts any value again")
+                    } else {
+                        format!(
+                            "Custom column `{column_key}` is now one of: {} ({covered} stored cell(s))",
+                            options.join(", ")
+                        )
+                    }),
                 })
             }
             EDIT_CELLS_ACTION_ID => {
