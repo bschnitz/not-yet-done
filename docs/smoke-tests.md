@@ -4456,10 +4456,10 @@ of both bars.
 - [ ] A `:config` reload (saving tui.yaml) loses neither the open messages nor
       the log.
 
-## Builtin-Editor (`builtin: true`, Crate `vimrealm`)
+## The builtin editor (`builtin: true`, the `vimrealm` crate)
 
-Ein Editor-Profil mit `builtin: true` editiert in einem Pane der TUI statt
-einen `$EDITOR`-Prozess zu starten. Profil in `tui.yaml`, z.B.:
+An editor profile with `builtin: true` edits in a pane of the TUI instead of
+launching an `$EDITOR` process. The profile lives in `tui.yaml`, for example:
 
 ```yaml
 editors:
@@ -4469,366 +4469,370 @@ editors:
     line_numbers: false
 ```
 
-Verdrahtet über das `editor:`-Feld einer Action (Stoat: `views/stoat.yaml`,
-Actions `new`/`edit`). Zurück auf den echten nvim = `editor: compose-below`.
+Wired up through an action's `editor:` field (Stoat: `views/stoat.yaml`,
+actions `new`/`edit`). Back to the real nvim = `editor: compose-below`.
 
-- [ ] Stoat-Kanal → `n`: Pane erscheint **unten** über den Meldungsleisten,
-      Titel nennt die Action; Tab-/Action-/Statusleiste bleiben stehen.
-- [ ] Normal-Mode funktioniert: `i a o`, `hjkl`, `w b e`, `0 ^ $`, `dd`, `cw`,
-      `x`, `p`, `u` / `Ctrl+R`, Counts (`3w`, `2dd`).
-- [ ] `q` allein beendet die **App nicht** mehr, solange das Pane offen ist;
-      `:q!` schließt das Pane, danach quittet `q` wieder normal.
-- [ ] `:w` sendet die Nachricht (`commit_on_save: true`), Pane bleibt offen,
-      Statuszeile zeigt `written`; ein zweites `:w` ohne Änderung tut nichts.
-- [ ] `:wq` sendet und schließt; die neue Nachricht erscheint in der Liste.
-- [ ] `:q` bei ungespeicherter Änderung verweigert mit `E37`, `:q!` verwirft.
-- [ ] Kein zweiter Editor: bei offenem Pane erneut `n` → "Editor is already
-      open".
-- [ ] Umschalten auf `editor: compose-below` in `stoat.yaml` + `:config`-Reload
-      → wieder echter nvim im Kitty-Split, unverändert wie vorher.
-- [ ] Lange Nachricht: Softwrap im Pane, `j`/`k` bewegen sich logisch
-      (nicht pro Bildschirmzeile), Scrollen folgt dem Cursor.
-- [ ] Kleines Terminal: Pane nimmt höchstens zwei Drittel der Höhe, die
-      Zeilenliste bleibt sichtbar.
+- [ ] Stoat channel → `n`: the pane appears at the **bottom**, above the
+      message bars, and its title names the action; the tab, action and status
+      bars stay put.
+- [ ] Normal mode works: `i a o`, `hjkl`, `w b e`, `0 ^ $`, `dd`, `cw`, `x`,
+      `p`, `u` / `Ctrl+R`, counts (`3w`, `2dd`).
+- [ ] `q` on its own no longer quits the **app** while the pane is open; `:q!`
+      closes the pane, after which `q` quits normally again.
+- [ ] `:w` sends the message (`commit_on_save: true`), the pane stays open and
+      the status line shows `written`; a second `:w` without a change does
+      nothing.
+- [ ] `:wq` sends and closes; the new message appears in the list.
+- [ ] `:q` with an unsaved change refuses with `E37`, `:q!` discards it.
+- [ ] No second editor: pressing `n` again while the pane is open → "Editor is
+      already open".
+- [ ] Switch to `editor: compose-below` in `stoat.yaml` plus a `:config`
+      reload → the real nvim in the Kitty split again, unchanged from before.
+- [ ] A long message: soft wrapping in the pane, `j`/`k` move logically (not
+      per screen line), and the scrolling follows the cursor.
+- [ ] A small terminal: the pane takes at most two thirds of the height and
+      the row list stays visible.
 
-### Phase 3: Register, Text-Objekte, Visual, Suche, Dot-Repeat, Theming
+### Phase 3: registers, text objects, visual mode, search, dot-repeat, theming
 
-- [ ] Register: `"ayy` in Zeile 1, Cursor in Zeile 2, `"ap` fügt Zeile 1 ein;
-      `"Ayy` hängt an, `"add` löscht ohne den unnamed Register zu überschreiben
-      (danach `p` fügt weiterhin das vorher Gejankte ein).
-- [ ] Text-Objekte: `ciw` mitten im Wort ersetzt das ganze Wort, `daw` nimmt
-      auch das Leerzeichen mit, `di"` leert einen String, `da(` löscht Klammern
-      samt Inhalt — auch mehrzeilig und bei geschachtelten Klammern.
-- [ ] Visual charwise: `v` + `w`/`l`/`j` markiert sichtbar (Cursor bleibt im
-      markierten Bereich erkennbar), `d` löscht die Markierung, `y` + `p` fügt
-      sie ein, `c` löscht und landet in Insert.
-- [ ] Visual linewise: `V` markiert ganze Zeilen (inkl. der Zelle am
-      Zeilenende), `j` nimmt Zeilen dazu, `d` löscht sie ganz.
-- [ ] Visual: `o` springt an das andere Ende und erweitert von dort; `v` beendet,
-      `V` schaltet auf linewise um, `Esc` verwirft; `viw` markiert das Wort.
-- [ ] Suche: `/wort` + Enter springt zum nächsten Treffer, `n`/`N` weiter und
-      zurück, Wrap meldet „search hit BOTTOM, continuing at TOP"; `/nichtsda`
-      meldet `E486`, ohne den Cursor zu bewegen; `n` ohne vorherige Suche → `E35`.
-- [ ] Dot-Repeat: `ciwfoo<Esc>` dann `w` `.` ersetzt das nächste Wort ebenso;
-      `dw` `.` `.` löscht drei Wörter; `2.` wiederholt zweimal; `u` und `.`
-      selbst werden nicht als „letzte Änderung" aufgenommen.
-- [ ] Cursor: im Normal-Mode Blockcursor über dem Zeichen; nach `i` ist es der
-      **echte** Terminal-Cursor (Form/Blinken wie im Query-Menü), kein Block
-      mehr; `Esc` zurück zum Block. Bei `A` steht er hinter dem letzten Zeichen.
-- [ ] Insert-Grenze: `i` in „ab", zweimal Pfeil rechts → Cursor steht hinter
-      `b`; ein getipptes Zeichen hängt an (`abc`), überschreibt nichts. Ebenso
-      mit `End`. Im Normal-Mode bleiben `l`/`Pfeil rechts`/`$`/`End` auf `b`.
-- [ ] Cursor im Command-Mode: nach `:` sitzt der Terminal-Cursor **in** der
-      Kommandozeile hinter dem Getippten (wandert beim Tippen mit), nicht im
-      Text; `Esc` bringt ihn zurück in den Puffer.
-- [ ] Theming: leerer/fehlender `vim:`-Block in `tui-theme.yaml` sieht aus wie
-      bisher. Dann z.B. `vim: {selection_bg: "#504945", gutter: "#928374"}`
-      setzen + `:config`-Reload und neu öffnen → nur diese beiden Rollen ändern
-      sich. `cursor_bg` setzen → Cursor hat feste Farbe statt Reverse (und ist
-      innerhalb einer Markierung immer noch zu sehen).
+- [ ] Registers: `"ayy` on line 1, cursor on line 2, `"ap` pastes line 1;
+      `"Ayy` appends, `"add` deletes without overwriting the unnamed register
+      (afterwards `p` still pastes what was yanked before).
+- [ ] Text objects: `ciw` in the middle of a word replaces the whole word,
+      `daw` takes the space along, `di"` empties a string, `da(` deletes the
+      parentheses together with their content — across lines and with nested
+      parentheses too.
+- [ ] Visual charwise: `v` plus `w`/`l`/`j` selects visibly (the cursor stays
+      recognizable inside the selection), `d` deletes the selection, `y` plus
+      `p` pastes it, `c` deletes and lands in insert mode.
+- [ ] Visual linewise: `V` selects whole lines (including the cell at the end
+      of the line), `j` adds lines, `d` deletes them entirely.
+- [ ] Visual: `o` jumps to the other end and extends from there; `v` ends it,
+      `V` switches to linewise, `Esc` discards; `viw` selects the word.
+- [ ] Search: `/word` plus Enter jumps to the next match, `n`/`N` go forwards
+      and backwards, a wrap reports "search hit BOTTOM, continuing at TOP";
+      `/nothinghere` reports `E486` without moving the cursor; `n` without a
+      previous search → `E35`.
+- [ ] Dot-repeat: `ciwfoo<Esc>` then `w` `.` replaces the next word the same
+      way; `dw` `.` `.` deletes three words; `2.` repeats twice; `u` and `.`
+      themselves are not recorded as the "last change".
+- [ ] Cursor: in normal mode a block cursor over the character; after `i` it is
+      the **real** terminal cursor (shape and blinking as in the query menu),
+      no longer a block; `Esc` goes back to the block. With `A` it sits behind
+      the last character.
+- [ ] The insert boundary: `i` in "ab", then arrow-right twice → the cursor
+      sits behind `b`; a typed character is appended (`abc`), it overwrites
+      nothing. Same with `End`. In normal mode `l`/arrow-right/`$`/`End` stay
+      on `b`.
+- [ ] The cursor in command mode: after `:` the terminal cursor sits **in** the
+      command line behind what was typed (moving along as you type), not in the
+      text; `Esc` brings it back into the buffer.
+- [ ] Theming: an empty or missing `vim:` block in `tui-theme.yaml` looks as it
+      did before. Then set for instance
+      `vim: {selection_bg: "#504945", gutter: "#928374"}`, do a `:config`
+      reload and reopen → only those two roles change. Set `cursor_bg` → the
+      cursor gets a fixed colour instead of reverse video (and is still visible
+      inside a selection).
 
-## Card-Modus (`card:` pro Ebene, Umschalttaste + Persistenz)
+## Card mode (`card:` per level, toggle key plus persistence)
 
-Setup: den `card:`-Block aus
-[`examples/views/cards.yaml`](examples/views/cards.yaml) in eine echte
-Content-Ebene mit sechs Spalten übernehmen (`columns: 3`, `weights: [1, 1, 2]`,
-`key: C`, `gap: 1`) — Doku: [`generic-view-spec.md`](generic-view-spec.md),
-Abschnitt `card:`.
+Setup: take the `card:` block from
+[`examples/views/cards.yaml`](examples/views/cards.yaml) into a real content
+level with six columns (`columns: 3`, `weights: [1, 1, 2]`, `key: C`,
+`gap: 1`) — documentation: [`generic-view-spec.md`](generic-view-spec.md),
+section `card:`.
 
-- [ ] Ohne `card:`-Block bleibt `C` auf der Ebene eine gewöhnliche Taste (nichts
-      passiert / bestehende Bindung greift weiter), und die Status-Leiste zeigt
-      keinen Card-Hinweis.
-- [ ] Mit `card:`-Block: Ebene startet als **Tabelle** (Deklaration allein
-      schaltet nicht um), Status-Leiste zeigt `C cards`.
-- [ ] `C` → jede Zeile wird eine gerahmte Card mit **zwei** Zeilen à drei
-      Feldern (Zeilenzahl abgeleitet, kein `rows:` in der Config); Hinweis
-      wechselt auf `C table`.
-- [ ] Rechte Kante: **alle** Card-Zeilen enden exakt auf derselben Spalte, auch
-      der dritte (breitere) Slot; Terminal schmaler/breiter ziehen → bleibt
-      bündig.
-- [ ] Labels: `labels: inline` zeigt `Label: Wert`; auf `none` umstellen →
-      nur Werte; auf `above` → Labels auf eigener Zeile, Card doppelt so hoch.
-- [ ] `gap: 1` → Leerzeile zwischen zwei Cards, und diese Leerzeile bekommt beim
-      Auswählen **keinen** Highlight (die Cards lesen sich als Blöcke).
-- [ ] Rahmen/Labels in Theme-Farben: `card_border` / `card_label` in `tui.yaml`
-      ändern + `:config`-Reload → Rahmen bzw. Labels ändern sich, Werte nicht.
-      Danach `border_style:` / `label_style:` in der View setzen → gewinnt über
-      die Theme-Slots. `border: plain` → eckige Ecken, `border: none` → kein
-      Rahmen.
-- [ ] Cursor/Selektion: `j`/`k` springen von Card zu Card (nicht Zeile für
-      Zeile), die ganze Card bekommt den Auswahl-Hintergrund. `/`-Suche
-      markiert die Treffer weiterhin **im Wert** der Card.
-- [ ] Spalten-Popup (`c`): ein Card-Feld ausblenden → das Feld verschwindet aus
-      der Card, das Raster rückt nach (keine Lücke, keine Verschiebung der
-      rechten Kante). Wieder einblenden → Feld ist zurück.
-- [ ] `card_mode` überlebt den Neustart: `C` an, TUI beenden, neu starten →
-      Ebene öffnet direkt als Cards. `C` aus (= zurück auf den Config-Default),
-      neu starten → Tabelle. (Gespeichert wird pro Ebene unter
-      `card_mode:<tab>`; der Eintrag wird beim Zurückschalten auf den Default
-      wieder gelöscht.)
-- [ ] `default: true` in der Config → Ebene startet als Cards; `C` schaltet auf
-      Tabelle und **das** überlebt ebenfalls den Neustart.
-- [ ] Split-Pane: mit `wv` eine zweite Pane derselben Ebene öffnen → beide
-      zeigen denselben Modus, `C` in einer schaltet beide um.
-- [ ] Gruppierung: auf einer Ebene mit `group_by:` → im Card-Modus keine
-      Gruppen-Kopfzeilen/Summen; zurück auf Tabelle → Gruppierung ist wieder da.
-- [ ] Grenzen (erwartetes Nein): Tree-Ebene und `record_detail:`-Follower bieten
-      `C` nicht an. Ein `markdown: true`-Feld in `card.fields` → harter
-      Config-Fehler beim Start mit klarer Meldung (kein stiller Fallback).
-- [ ] Chord-Taste (`key: 'v c'`, so live im Jira-Tab konfiguriert): `v` allein
-      tut nichts und wartet, `v c` schaltet um. `v` + Esc bricht ab, ohne dass
-      `c` danach das Spalten-Popup öffnet. Ein `c` **ohne** vorheriges `v`
-      öffnet weiterhin normal das Spalten-Popup.
-- [ ] Kollisionsprüfung: `card.key` versehentlich auf eine belegte Taste der
-      Ebene setzen (im Jira-Tab z. B. `t`) → Fehler beim Start, der
-      `views.tickets.card.key` und die kollidierende Action nennt. Danach
-      zurücksetzen.
-- [ ] Keybinding-Editor (Ctrl+Y) listet die Card-Taste als „Toggle card mode"
-      und schreibt eine Änderung nach `views[*].card.key` in die View-YAML.
-- [ ] `fields:` weglassen → die Card zeigt **alle** Spalten der Ebene in der
-      Reihenfolge der Tabelle (auch die, die man in einer expliziten Liste
-      leicht vergisst); Zeilenzahl entsprechend `Spalten ÷ columns`. Eine
-      Spalte im Popup (`c`) ausblenden → sie fällt auch hier raus. Eine
-      `markdown: true`-Spalte wird still übersprungen (kein Config-Fehler —
-      der gilt nur für eine **explizit** aufgeführte Markdown-Spalte).
+- [ ] Without a `card:` block, `C` stays an ordinary key on that level
+      (nothing happens, or an existing binding still applies) and the status
+      bar shows no card hint.
+- [ ] With a `card:` block: the level starts as a **table** (the declaration
+      alone does not switch it), the status bar shows `C cards`.
+- [ ] `C` → every row becomes a framed card with **two** lines of three fields
+      each (the number of lines is derived, there is no `rows:` in the config);
+      the hint changes to `C table`.
+- [ ] The right edge: **all** card lines end on exactly the same column, the
+      third (wider) slot included; make the terminal narrower and wider → it
+      stays flush.
+- [ ] Labels: `labels: inline` shows `Label: value`; switch to `none` → values
+      only; to `above` → labels on their own line, the card twice as tall.
+- [ ] `gap: 1` → a blank line between two cards, and that blank line gets
+      **no** highlight when selecting (the cards read as blocks).
+- [ ] Borders and labels in theme colours: change `card_border` /
+      `card_label` in `tui.yaml` plus a `:config` reload → the borders
+      respectively the labels change, the values do not. Then set
+      `border_style:` / `label_style:` in the view → they win over the theme
+      slots. `border: plain` → square corners, `border: none` → no border.
+- [ ] Cursor and selection: `j`/`k` jump from card to card (not line by line),
+      and the whole card gets the selection background. The `/` search still
+      marks the matches **inside the value** of the card.
+- [ ] Column popup (`c`): hide a card field → the field disappears from the
+      card and the grid closes up (no gap, and the right edge does not move).
+      Show it again → the field is back.
+- [ ] `card_mode` survives a restart: `C` on, quit the TUI, start it again →
+      the level opens as cards straight away. `C` off (back to the config
+      default), restart → a table. (It is stored per level under
+      `card_mode:<tab>`; the entry is deleted again when switching back to the
+      default.)
+- [ ] `default: true` in the config → the level starts as cards; `C` switches
+      to the table and **that** survives a restart as well.
+- [ ] Split pane: open a second pane on the same level with `wv` → both show
+      the same mode, and `C` in one switches both.
+- [ ] Grouping: on a level with `group_by:` → no group headers or sums in card
+      mode; back to the table → the grouping is there again.
+- [ ] Limitations (an expected no): tree levels and `record_detail:` followers
+      do not offer `C`. A `markdown: true` field in `card.fields` → a hard
+      config error at startup with a clear message (no silent fallback).
+- [ ] Chord key (`key: 'v c'`, configured that way live in the Jira tab): `v`
+      alone does nothing and waits, `v c` toggles. `v` plus Esc aborts without
+      `c` opening the column popup afterwards. A `c` **without** a preceding
+      `v` still opens the column popup normally.
+- [ ] Collision check: set `card.key` to a key that is already taken on that
+      level by accident (`t` in the Jira tab, say) → an error at startup naming
+      `views.tickets.card.key` and the colliding action. Undo it afterwards.
+- [ ] The keybinding editor (Ctrl+Y) lists the card key as "Toggle card mode"
+      and writes a change to `views[*].card.key` in the view YAML.
+- [ ] Leave `fields:` out → the card shows **all** columns of the level in the
+      table's order (including the ones easily forgotten in an explicit list);
+      the number of lines follows as `columns ÷ columns per line`. Hide a
+      column in the popup (`c`) → it drops out here as well. A `markdown: true`
+      column is skipped silently (no config error — that only applies to an
+      **explicitly** listed markdown column).
 
-## Creator-Spalte (Jira + Taiga)
+## The creator column (Jira + Taiga)
 
-Voraussetzung: `creator` steht als Spalte in der jeweiligen View-YAML
-(`docs/examples/views/jira.yaml` / `taiga.yaml` zeigen die Blöcke; in einer
-bestehenden privaten Config muss sie nachgetragen werden — sonst liefert der
-Adapter das Feld, die Tabelle zeigt es nur nicht).
+Prerequisite: `creator` is listed as a column in the respective view YAML
+(`docs/examples/views/jira.yaml` and `taiga.yaml` show the blocks; in an
+existing private config it has to be added — otherwise the adapter delivers
+the field and the table simply does not show it).
 
-- [ ] Jira-Tickets: Spalte „Creator" ist gefüllt und weicht bei Tickets, die
-      jemand anders gestellt hat, sichtbar von „Assignee" ab.
-- [ ] Bookmarks-Subtab (`m`) zeigt die Spalte ebenfalls.
-- [ ] Taiga-Liste: dasselbe für alle vier Item-Typen. Ein Item, dessen Creator
-      **nicht** (mehr) Projektmitglied ist, zeigt den Namen aus dem Payload
-      bzw. `user-<id>` — nicht leer.
-- [ ] Sortieren mit `S` → `creator` steht in der Spaltenliste (Jira sortiert
-      per JQL server-seitig, Taiga client-seitig). Aufsteigend landen Zeilen
-      ohne Creator am **Ende**, nicht oben.
-- [ ] Ticket mit `e` öffnen: unterhalb des `---`-Markers steht eine
-      `creator:`-Zeile im Read-only-Block. Datei ohne Änderung speichern und
-      schließen → kein Konflikt-Banner (der Round-Trip-Guard ignoriert
-      unbekannte Read-only-Keys).
-- [ ] Nach dem Speichern eines Tickets bleibt die Creator-Spalte der Zeile
-      gefüllt (Post-Edit-Row-Patch mit demselben Key).
-- [ ] Anon-Modus: Creator erscheint pseudonymisiert, nicht im Klartext.
+- [ ] Jira tickets: the column "Creator" is filled in and visibly differs from
+      "Assignee" on tickets somebody else raised.
+- [ ] The bookmarks subtab (`m`) shows the column as well.
+- [ ] Taiga list: the same for all four item types. An item whose creator is
+      **not** (or no longer) a project member shows the name from the payload,
+      or `user-<id>` — not an empty cell.
+- [ ] Sorting with `S` → `creator` is in the column list (Jira sorts
+      server-side via JQL, Taiga client-side). Ascending, rows without a
+      creator end up at the **bottom**, not at the top.
+- [ ] Open a ticket with `e`: below the `---` marker there is a `creator:` line
+      in the read-only block. Save and close the file without a change → no
+      conflict banner (the round-trip guard ignores unknown read-only keys).
+- [ ] After saving a ticket the row's creator column stays filled in (the
+      post-edit row patch uses the same key).
+- [ ] Anon mode: the creator appears pseudonymized, not in the clear.
 
-## Fix-Versions-Spalte (Jira)
+## The fix-versions column (Jira)
 
-Spaltenschlüssel ist `fix_versions` (Plural wie Jiras Feld); JQL kennt nur den
-Singular `fixVersion`, den der Adapter beim Sortieren einsetzt. Auch hier muss
-die Spalte in der privaten View-YAML stehen — in `jira.yaml` in **beiden**
-Spaltenlisten (tickets + bookmarks) und, falls genutzt, in `card.fields`.
+The column key is `fix_versions` (plural, like Jira's field); JQL only knows
+the singular `fixVersion`, which the adapter substitutes when sorting. Here too
+the column has to be present in the private view YAML — in `jira.yaml` in
+**both** column lists (tickets and bookmarks) and, if used, in `card.fields`.
 
-- [ ] Ticketliste: Spalte „Fix Versions" ist bei eingeplanten Tickets gefüllt
-      und bei den übrigen leer (kein `-`, kein `0`). Ein Ticket mit mehreren
-      Versionen zeigt sie komma-getrennt in einer Zelle.
-- [ ] Bookmarks-Subtab (`m`) zeigt die Spalte ebenfalls.
-- [ ] Sortieren mit `S` → `fix_versions` steht in der Liste; aufsteigend
-      kommen die eingeplanten Tickets zuerst (Jiras Versions-Reihenfolge, nicht
-      alphabetisch), absteigend zuletzt. Kein JQL-Fehler-Banner — das wäre das
-      Symptom, wenn der Plural statt `fixVersion` gesendet würde.
-- [ ] Ticket mit `e` öffnen: `fix_versions:`-Zeile im Read-only-Block unter dem
-      `---`-Marker. Unverändert speichern → kein Konflikt-/Änderungs-Banner.
-- [ ] Nach dem Speichern bleibt die Spalte der Zeile gefüllt
-      (Post-Edit-Row-Patch).
-- [ ] Card-Modus (`v c`): das Feld erscheint als „Fix Versions" mit Label.
-- [ ] Anon-Modus: Versionsnamen erscheinen ersetzt (sie können Produkt-/
-      Kundenbegriffe enthalten), nicht verbatim.
+- [ ] Ticket list: the column "Fix Versions" is filled in on scheduled tickets
+      and empty on the rest (no `-`, no `0`). A ticket with several versions
+      shows them comma-separated in one cell.
+- [ ] The bookmarks subtab (`m`) shows the column as well.
+- [ ] Sorting with `S` → `fix_versions` is in the list; ascending, the
+      scheduled tickets come first (in Jira's version order, not
+      alphabetically), descending they come last. No JQL error banner — that
+      would be the symptom if the plural were sent instead of `fixVersion`.
+- [ ] Open a ticket with `e`: a `fix_versions:` line in the read-only block
+      below the `---` marker. Save it unchanged → no conflict or change banner.
+- [ ] After saving, the row's column stays filled in (the post-edit row patch).
+- [ ] Card mode (`v c`): the field appears as "Fix Versions" with a label.
+- [ ] Anon mode: version names appear replaced (they can contain product or
+      customer terms), not verbatim.
 
-## Kommentar-Vorschau: Kürzung auf Zeichen, nicht Bytes
+## Comment preview: truncating on characters, not bytes
 
-Regression: die Vorschau in der Kommentar-Liste kürzte auf 80 **Bytes**; lag
-die Grenze in einem Mehrbyte-Zeichen, riss der Panic den tokio-Worker mit.
+A regression: the preview in the comment list truncated at 80 **bytes**; if
+that boundary fell inside a multi-byte character, the panic took the tokio
+worker down with it.
 
-- [ ] Ticket mit einem längeren Kommentar in einer Sprache mit Umlauten
-      auswählen und `C` drücken → Liste öffnet, kein Crash, lange Vorschauen
-      enden auf `…`.
-- [ ] Kommentar, der genau um die Grenze herum ein Mehrbyte-Zeichen hat
-      (Umlaut, Emoji, CJK) → Vorschau bricht direkt hinter dem Zeichen ab,
-      keine kaputten Bytes in der Zelle.
-- [ ] Ein Server-Fehler mit nicht-ASCII-Fehlerseite (z. B. abgelaufene
-      Session) → Fehlermeldung/HTTP-Log erscheinen normal; das gekürzte
-      Body-Snippet crasht nicht beim _Melden_ des Fehlers.
+- [ ] Select a ticket with a longer comment in a language with umlauts and
+      press `C` → the list opens, no crash, and long previews end in `…`.
+- [ ] A comment with a multi-byte character right around the boundary (an
+      umlaut, an emoji, CJK) → the preview breaks off right after that
+      character, no broken bytes in the cell.
+- [ ] A server error with a non-ASCII error page (an expired session, say) →
+      the error message and the HTTP log appear normally; the truncated body
+      snippet does not crash while the error is being _reported_.
 
-## Freie Suche (Taiga `text_search`) — Treffer + Aktiv-Markierung
+## Free-text search (Taiga `text_search`) — matches and the active marker
 
-Zwei Regressionen: (1) das Query-Template deckte `userstory` nicht ab und
-enthielt einen `ref:`-Block, den Taiga ignoriert (Antwort = komplette
-ungefilterte Liste); (2) der Hint der Suche erlosch, sobald sie wirkte.
+Two regressions: (1) the query template did not cover `userstory` and
+contained a `ref:` block that Taiga ignores (so the response was the complete
+unfiltered list); (2) the search's hint went out as soon as it took effect.
 
-- [ ] Freie Suche öffnen (Taste der `text_search`-Action, im Beispiel-Config
-      `s`) und eine reine Ref-Nummer eingeben (z. B.
-      `112`) → genau die Items mit dieser Ref erscheinen, quer über alle
-      Typen inkl. User Story; **keine** Flut nicht passender Zeilen.
-- [ ] Dieselbe Nummer mit führendem `#` (`#112`) → identisches Ergebnis.
-- [ ] Ein Wort aus einem Betreff eingeben → Volltextsuche über Task,
-      Issue, Epic und User Story.
-- [ ] Während des Tippens: der Hint der freien Suche ist markiert, der
-      Hint der lokalen `/`-Suche **nicht**.
-- [ ] Nach Enter (Ergebnisliste steht): der Hint bleibt markiert, solange
-      die Ergebnisliste angezeigt wird.
-- [ ] Andere Query anwenden (Query-Menü, Default-Query, Query-Editor) →
-      Markierung erlischt.
-- [ ] Pane splitten, während die Suche aktiv ist → das neue Pane erbt
-      Query **und** Markierung.
+- [ ] Open the free-text search (the key of the `text_search` action, `s` in
+      the example config) and enter a plain ref number (`112`, say) → exactly
+      the items with that ref appear, across all types including user stories;
+      **no** flood of non-matching rows.
+- [ ] The same number with a leading `#` (`#112`) → an identical result.
+- [ ] Enter a word from a subject → a full-text search across tasks, issues,
+      epics and user stories.
+- [ ] While typing: the free-text search's hint is marked, the local `/`
+      search's hint is **not**.
+- [ ] After Enter (with the result list up): the hint stays marked for as long
+      as the result list is displayed.
+- [ ] Apply another query (the query menu, the default query, the query
+      editor) → the marking goes out.
+- [ ] Split the pane while the search is active → the new pane inherits the
+      query **and** the marking.
 
-## SQLite-Tab — Dateien, Tabellen, Skripte
+## The SQLite tab — files, tables, scripts
 
-Voraussetzung: `docs/examples/views/sqlite.yaml` +
-`docs/examples/views/sqlite-adapter.yaml` nach
-`~/.config/not_yet_done/views/` kopieren und in der Adapter-Config die
-`sources:`-Globs auf eigene `.db`-Dateien zeigen lassen. Der Tab kommt ohne
-Login und ohne Server — was fehlschlagen kann, ist das Globbing und die
-Adressierung.
+Prerequisite: copy `docs/examples/views/sqlite.yaml` and
+`docs/examples/views/sqlite-adapter.yaml` to
+`~/.config/not_yet_done/views/` and point the `sources:` globs in the adapter
+config at your own `.db` files. The tab needs no login and no server — what can
+fail is the globbing and the addressing.
 
-### Dateien und Zeilen (`sources:`-Globs)
+### Files and rows (the `sources:` globs)
 
-- [ ] Tab öffnen → eine Zeile je getroffener Datei, mit Größe und Pfad.
-- [ ] Ein `**`-Pattern nimmt Dateien aus Unterverzeichnissen mit; ein
-      Pattern ohne Treffer ist kein Fehler, sondern liefert nichts.
-- [ ] Zwei gleichnamige Dateien in verschiedenen Ordnern erscheinen als
-      **zwei** Zeilen (Key trägt den Pfad-Hash) und teilen sich weder
-      Tabellen noch Skript-Verzeichnis.
-- [ ] Neue `.db`-Datei anlegen → `r` → sie ist da, ohne Neustart.
-- [ ] Durchdrillen bis `Rows`, blättern (`>`/`<`), `o` öffnet das
-      Record-Detail-Pane; eine Tabelle mit BLOB-Spalte rendert lesbar
-      statt zu brechen.
+- [ ] Open the tab → one row per matched file, with its size and path.
+- [ ] A `**` pattern picks up files from subdirectories; a pattern without
+      matches is not an error, it simply yields nothing.
+- [ ] Two files with the same name in different folders appear as **two** rows
+      (the key carries the path hash) and share neither their tables nor their
+      script directory.
+- [ ] Create a new `.db` file → `r` → it is there, without a restart.
+- [ ] Drill down to `Rows`, page through (`>`/`<`), `o` opens the
+      record-detail pane; a table with a BLOB column renders readably instead
+      of breaking.
 
-### Per-Tabelle-Skripte (`q` / `Q`)
+### Per-table scripts (`q` / `Q`)
 
-- [ ] `Q` auf einer Tabelle → Editor mit Template `SELECT * FROM "t";`.
-      Speichern, ausführen, blättern.
-- [ ] `q` nach dem ersten Speichern → das Skript steht im Menü.
-- [ ] `Q` eine Ebene tiefer (in `Rows`) adressiert weiterhin die Tabelle
-      darüber, nicht die Zeile.
-- [ ] Mehr-Statement-Skript → läuft, aber ohne Seiteninfo (nicht
-      paginierbare Form).
-- [ ] Ein `UPDATE` → scheitert mit dem Hinweis auf `read_only: false`.
+- [ ] `Q` on a table → the editor with the template `SELECT * FROM "t";`.
+      Save it, run it, page through it.
+- [ ] `q` after the first save → the script is in the menu.
+- [ ] `Q` one level deeper (in `Rows`) still addresses the table above, not
+      the row.
+- [ ] A multi-statement script → it runs, but without page information (a
+      non-paginatable form).
+- [ ] An `UPDATE` → fails with the hint about `read_only: false`.
 
-### Skript-Ast unter der Datenbank (`Scripts`)
+### The script branch below the database (`Scripts`)
 
-Derselbe Ast wie im Postgres-Tab (geteilter Code in `sql-core`), nur mit
-`sqlite:`-Typen — deshalb hier vor allem prüfen, dass er **überhaupt** hängt
-und auf die richtige Datei zeigt.
+The same branch as in the Postgres tab (shared code in `sql-core`), just with
+`sqlite:` types — so the point here is mainly to check that it hangs there **at
+all** and points at the right file.
 
-- [ ] `Scripts` steht neben `Tables` unter jeder Datenbank, auch wenn noch
-      kein Skript existiert.
-- [ ] `a` legt ein Skript an, `A` einen Ordner; Ordner nesten beliebig tief.
-- [ ] Filesystem-Check:
+- [ ] `Scripts` sits next to `Tables` under every database, even when no
+      script exists yet.
+- [ ] `a` creates a script, `A` a folder; folders nest to any depth.
+- [ ] Filesystem check:
       `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…` —
-      `<key>` ist der gehashte Datei-Key, nicht der Pfad.
-- [ ] `e` editiert in-place (Tempfile mit `.nyd_tmp_`-Prefix **im**
-      Skript-Verzeichnis), `r` umbenennt (Endung bleibt), `M` verschiebt.
-- [ ] `d` auf einem nicht-leeren Ordner verweigert mit "not empty".
-- [ ] **`x` führt aus und paginiert per LIMIT/OFFSET** — das ist die
-      Abweichung von Postgres: das Ergebnis-Pane steht auf
-      `pagination: mode: server`. Kein Fehler wie "sqlite has no cursor
-      pagination"; `>`/`<` blättern.
-- [ ] Ein Skript unter Datei A greift auf eine Tabelle zu, die nur in
-      Datei B existiert → Fehler von SQLite (belegt, dass gegen die
-      richtige Datei gelaufen wird, nicht gegen die zuletzt geöffnete).
+      `<key>` is the hashed file key, not the path.
+- [ ] `e` edits in place (a temp file with the `.nyd_tmp_` prefix **inside**
+      the script directory), `r` renames (keeping the extension), `M` moves.
+- [ ] `d` on a non-empty folder refuses with "not empty".
+- [ ] **`x` runs and paginates via LIMIT/OFFSET** — that is the deviation from
+      Postgres: the result pane is set to `pagination: mode: server`. No error
+      such as "sqlite has no cursor pagination"; `>`/`<` page through.
+- [ ] A script under file A accesses a table that only exists in file B → an
+      error from SQLite (proof that it runs against the right file, not against
+      the most recently opened one).
 
-### Table-Completions im SQLite-Skript-Editor
+### Table completions in the SQLite script editor
 
-Mechanismus wie im Postgres-Tab (siehe TC-1 … TC-5), aber **einstufige**
-Tokens — eine Datei hat keinen Schema-Namensraum.
+The mechanism is the same as in the Postgres tab (see TC-1 … TC-5), but with
+**single-stage** tokens — a file has no schema namespace.
 
-- [ ] `e` auf einem `.sql`-Skript → letzte Zeile ist
-      `-- table completions: tt_<tabelle>, …` mit **allen** Tabellen _und
-      Views_ der Datei, ohne `sqlite_`-Interna.
-- [ ] Token benutzen: `SELECT * FROM tt_<tabelle>;` → `x` liefert Zeilen
-      (expandiert zu `"<tabelle>"`).
-- [ ] Speichern, dann `cat` des Skripts unter
+- [ ] `e` on a `.sql` script → the last line is
+      `-- table completions: tt_<table>, …` with **all** tables _and views_ of
+      the file, without the `sqlite_` internals.
+- [ ] Use a token: `SELECT * FROM tt_<table>;` → `x` returns rows (it expands
+      to `"<table>"`).
+- [ ] Save, then `cat` the script under
       `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…`:
-      **keine** Completion-Zeile auf Platte. Erneutes `e` zeigt sie wieder,
-      genau einmal (nicht gestapelt).
-- [ ] `e` auf einem `.py`-Skript im selben Ast → keine Completion-Zeile.
-- [ ] Zwei Dateien mit gleichnamiger Tabelle: die Zeile unter Datei A listet
-      A's Tabellen (Beleg, dass der Key aus der Node-ID kommt).
-- [ ] Unbekannter Token (`tt_gibtsnicht`) → SQLite-Fehler nennt den
-      literalen Token, kein stiller Ersatz.
+      **no** completion line on disk. Another `e` shows it again, exactly once
+      (not stacked).
+- [ ] `e` on a `.py` script in the same branch → no completion line.
+- [ ] Two files with a table of the same name: the line under file A lists A's
+      tables (proof that the key comes from the node ID).
+- [ ] An unknown token (`tt_doesnotexist`) → the SQLite error names the
+      literal token, no silent substitution.
 
-## DB-Views editieren (`E` → `edit_view`, SQLite + Postgres)
+## Editing database views (`E` → `edit_view`, SQLite + Postgres)
 
-Views sind ein **eigener Node-Type** (`sqlite:view` / `postgres:view`) in einem
-eigenen `Views`-Ast neben `Tables`. Zeilen lesen sie wie eine Tabelle; dazu
-kommt `E`: das öffnet die `CREATE VIEW`-Anweisung im Editor, Speichern ersetzt
-die View. Voraussetzung: die `Views`-Äste aus
-`docs/examples/views/{sqlite,postgres}.yaml` in der eigenen Config, und für
-SQLite `read_only: false` in `sqlite-adapter.yaml`.
+Views are a **node type of their own** (`sqlite:view` / `postgres:view`) in a
+dedicated `Views` branch next to `Tables`. Reading their rows works like a
+table's; on top of that comes `E`: it opens the `CREATE VIEW` statement in the
+editor, and saving replaces the view. Prerequisite: the `Views` branches from
+`docs/examples/views/{sqlite,postgres}.yaml` in your own config, and for SQLite
+`read_only: false` in `sqlite-adapter.yaml`.
 
-Die Bindung ist bewusst eine `actions:`-Zeile mit `type: edit, id: edit_view`
-und **keine** `shortcuts:`-Zeile — deshalb ist der erste Punkt kein Detail,
-sondern der Beleg, dass die Verdrahtung stimmt.
+The binding is deliberately an `actions:` line with `type: edit, id: edit_view`
+and **not** a `shortcuts:` line — which is why the first item is not a detail
+but the proof that the wiring is right.
 
-### Gemeinsam (beide Adapter)
+### Common to both adapters
 
-- [ ] `Views` steht neben `Tables` (SQLite unter der Datenbank, Postgres unter
-      dem Schema), auch wenn die DB keine View hat.
-- [ ] Durchdrillen bis `Rows` → Zeilen der View, `>`/`<` blättert, `o` öffnet
-      das Record-Detail-Pane. `Q`/`q` adressieren die View wie eine Tabelle.
-- [ ] `E` auf einer View → Editor mit der kompletten `CREATE VIEW`-Anweisung,
-      Kopfkommentar erklärt, was Speichern tut. Puffer-Endung `.sql`
-      (Syntax-Highlighting im Editor-Profil).
-- [ ] Ohne Änderung speichern → Meldung "no changes", die View wird **nicht**
-      angefasst. Nur Semikolon/Whitespace am Ende ändern zählt ebenfalls als
-      keine Änderung; Umformatieren zählt als Änderung.
-- [ ] Rumpf ändern (z. B. `WHERE` ergänzen) → Meldung "view … replaced", danach
-      zeigt `Rows` die neuen Zeilen und ein erneutes `E` die neue Definition
-      (der Puffer ist re-baselined, kein Konflikt-Warnhinweis).
-- [ ] View **umbenennen** → Ablehnung im Editor, Text bleibt erhalten, Hinweis
-      "rename it back, or create the other view from a DB script".
-- [ ] Zweites Statement anhängen (`; DROP TABLE …`) → Ablehnung, nichts läuft.
-- [ ] Kaputtes SQL (`SELECT * FROM gibtsnicht`) → Fehler des Servers/der Datei
-      **oben im Puffer** als Banner, der eigene Text darunter unverändert.
-      Erneutes Speichern nach der Korrektur entfernt das Banner (es wird nicht
-      mit gespeichert).
-- [ ] Die View parallel von außen ändern (zweites `sqlite3` / `psql`), dann
-      speichern → Konflikt-Hinweis mit der fremden Definition im Puffer statt
-      stillem Überschreiben.
-- [ ] View von außen löschen, dann speichern → nachvollziehbare Meldung, kein
-      Panic.
-- [ ] Flache `views`-Ansicht (`v`) → alle Views; `E` dort editiert ohne
-      Durchdrillen und ohne die Baumansicht zu benutzen.
+- [ ] `Views` sits next to `Tables` (under the database in SQLite, under the
+      schema in Postgres), even when the database has no view.
+- [ ] Drill down to `Rows` → the view's rows, `>`/`<` page through, `o` opens
+      the record-detail pane. `Q`/`q` address the view like a table.
+- [ ] `E` on a view → the editor with the complete `CREATE VIEW` statement,
+      with a header comment explaining what saving does. The buffer extension
+      is `.sql` (syntax highlighting in the editor profile).
+- [ ] Save without a change → the message "no changes", the view is **not**
+      touched. Changing only the trailing semicolon or whitespace also counts
+      as no change; reformatting counts as a change.
+- [ ] Change the body (add a `WHERE`, say) → the message "view … replaced",
+      after which `Rows` shows the new rows and another `E` the new definition
+      (the buffer is re-baselined, no conflict warning).
+- [ ] **Rename** the view → rejected in the editor, the text is preserved,
+      with the hint "rename it back, or create the other view from a DB
+      script".
+- [ ] Append a second statement (`; DROP TABLE …`) → rejected, nothing runs.
+- [ ] Broken SQL (`SELECT * FROM doesnotexist`) → the error from the server or
+      the file appears **at the top of the buffer** as a banner, with your own
+      text unchanged below it. Saving again after the correction removes the
+      banner (it is not saved along).
+- [ ] Change the view from outside in parallel (a second `sqlite3` or `psql`),
+      then save → a conflict hint with the foreign definition in the buffer
+      instead of a silent overwrite.
+- [ ] Delete the view from outside, then save → a comprehensible message, no
+      panic.
+- [ ] The flat `views` view (`v`) → all views; `E` edits there without drilling
+      down and without using the tree view.
 
-### Nur SQLite
+### SQLite only
 
-- [ ] `read_only: true` (Default) → `E` öffnet, Speichern scheitert mit dem
-      Hinweis auf `read_only: false`. Die View bleibt unverändert **da** —
-      der Drop passiert in derselben Transaktion wie das Create.
-- [ ] Erfolgreiches Speichern behält die verbatime Form:
-      `sqlite3 <datei> "SELECT sql FROM sqlite_master WHERE name='<view>'"`
-      zeigt genau den gespeicherten Text (SQLite formatiert nicht nach).
-- [ ] Eine View, die eine andere View benutzt: die abhängige View bleibt nach
-      dem Ersetzen benutzbar (SQLite löst Rümpfe erst beim Zugriff auf — der
-      `SELECT … LIMIT 0`-Test in der Transaktion ist die eigentliche Prüfung).
-- [ ] Der `Tables`-Ast listet **keine** Views mehr (und die `kind`-Spalte ist
-      dort weg, weil sie konstant wäre).
+- [ ] `read_only: true` (the default) → `E` opens, saving fails with the hint
+      about `read_only: false`. The view is still **there** unchanged — the
+      drop happens in the same transaction as the create.
+- [ ] A successful save keeps the verbatim form:
+      `sqlite3 <file> "SELECT sql FROM sqlite_master WHERE name='<view>'"`
+      shows exactly the saved text (SQLite does not reformat it).
+- [ ] A view that uses another view: the dependent view stays usable after the
+      replacement (SQLite only resolves bodies on access — the
+      `SELECT … LIMIT 0` test inside the transaction is the actual check).
+- [ ] The `Tables` branch lists **no** views any more (and the `kind` column is
+      gone from it, since it would be constant).
 
-### Nur Postgres
+### Postgres only
 
-- [ ] Speichern läuft als `CREATE OR REPLACE VIEW`: eine abhängige View und
-      ein gesetztes `GRANT` überleben (`\dp` vor/nach vergleichen). Nichts
-      wird gedroppt.
-- [ ] **Spaltenliste ändern** (Spalte umbenennen oder entfernen) → Postgres
-      lehnt ab, Fehler landet im Banner; anhängen einer neuen Spalte am Ende
-      funktioniert. Kein automatisches `DROP … CASCADE`.
-- [ ] Schema-Qualifier aus dem Kopf entfernen (`CREATE OR REPLACE VIEW v AS …`)
-      → Ablehnung mit dem Hinweis auf den `search_path`; nichts läuft.
-- [ ] Kopf auf ein **anderes** Schema zeigen lassen → Ablehnung ("different
+- [ ] Saving runs as `CREATE OR REPLACE VIEW`: a dependent view and a granted
+      `GRANT` survive (compare `\dp` before and after). Nothing is dropped.
+- [ ] **Change the column list** (rename or remove a column) → Postgres
+      refuses and the error lands in the banner; appending a new column at the
+      end works. No automatic `DROP … CASCADE`.
+- [ ] Remove the schema qualifier from the header
+      (`CREATE OR REPLACE VIEW v AS …`) → rejected with a hint about the
+      `search_path`; nothing runs.
+- [ ] Point the header at a **different** schema → rejected ("different
       schema").
-- [ ] Nach einer Ablehnung **weiterarbeiten**: eine normale Query auf demselben
-      Tab läuft noch. (Belegt, dass keine gecachte Session in aborted state
-      hängt — es gibt bewusst keinen `BEGIN`-Block.)
-- [ ] Blättern in `Rows` einer View ohne eigenes `ORDER BY` kann Zeilen
-      wiederholen/auslassen; mit `ORDER BY` im Rumpf ist es stabil. Erwartetes
-      Verhalten: eine View hat kein `ctid`, nach dem sortiert werden könnte.
-- [ ] Materialized View (`relkind = 'm'`) erscheint **nicht** im `Views`-Ast.
-- [ ] Table-Completions im DB-Skript-Editor listen auch Views.
+- [ ] **Keep working** after a rejection: a normal query on the same tab still
+      runs. (Proof that no cached session is stuck in an aborted state — there
+      is deliberately no `BEGIN` block.)
+- [ ] Paging through the `Rows` of a view without an `ORDER BY` of its own can
+      repeat or skip rows; with an `ORDER BY` in the body it is stable. This is
+      the expected behaviour: a view has no `ctid` to sort by.
+- [ ] A materialized view (`relkind = 'm'`) does **not** appear in the `Views`
+      branch.
+- [ ] The table completions in the database script editor list views as well.
 
 ## Datenzeilen editieren (`e` → `edit_row`, SQLite + Postgres)
 
