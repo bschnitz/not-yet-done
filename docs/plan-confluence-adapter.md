@@ -44,7 +44,7 @@ backs on the existing `AuthOrchestrator` (cookie mechanism, like Jira).
 
 ### D1 — Base on Jira adapter (not Taiga)
 
-Reasons (siehe `adapter-survey-2026-06-02.md` für Detail):
+Reasons (see `adapter-survey-2026-06-02.md` for detail):
 
 - Jira's auth is **cookie-based**; Confluence DC behind the same
   Atlassian Crowd SSO uses the **same cookie idiom**. Jira's
@@ -107,22 +107,22 @@ shaped after `JiraClient`:
   `comments.rs`, `search.rs`, `user.rs`)
 - `reqwest::Client` with 30 s default timeout
 - XSRF: `X-Atlassian-Token: no-check` header on every `POST`/`PUT`/`DELETE`
-  (Confluence enforces this on write endpoints; siehe Reference-Script
-  unten — Atlassian akzeptiert `no-check` und `nocheck`, wir bleiben beim
-  bewährten Hyphen-Format)
+  (Confluence enforces this on write endpoints; see the reference script
+  below — Atlassian accepts both `no-check` and `nocheck`, we stay with the
+  proven hyphenated form)
 - pagination via `start` / `limit` params (server-side, native), default
   `limit=50`
 - `http_log::log_request()` for debugging
 
-**Working reference (manuell, ausserhalb des Repos):** das User-Skript
-`~/data/conf-edit` bestätigt den Edit-Flow gegen den realen
-Server (Read `?expand=body.storage,version,title` → format → edit in
-nvim → PUT mit `version.number+1`, `Content-Type: application/json`,
-`X-Atlassian-Token: no-check`). Endpoint-Shapes + Header in unserem
-Plan stimmen damit überein. Live-Probe 2026-06-02 gegen die echte
-Instanz: `/user/current`, `/space?limit=1`, `/content/{id}?expand=...`,
-`/content/{id}/child/{page|attachment|comment}` alle HTTP 200.
-Confluence-Version: **9.2.19 Server/DC**.
+**Working reference (manual, outside the repo):** the user script
+`~/data/conf-edit` confirms the edit flow against the real
+server (read `?expand=body.storage,version,title` → format → edit in
+nvim → PUT with `version.number+1`, `Content-Type: application/json`,
+`X-Atlassian-Token: no-check`). The endpoint shapes and headers in our
+plan agree with it. Live probe 2026-06-02 against the real
+instance: `/user/current`, `/space?limit=1`, `/content/{id}?expand=...`,
+`/content/{id}/child/{page|attachment|comment}` all HTTP 200.
+Confluence version: **9.2.19 Server/DC**.
 
 Endpoint summary (Server REST `/rest/api/`):
 
@@ -152,25 +152,25 @@ Confluence uses three serializations: `storage` (XHTML-like, canonical
 authoring format), `view` (rendered HTML), `wiki` (legacy textile-ish).
 
 - **For our edit buffer:** fetch + write `body.storage`. Stable,
-  diff-freundlich, round-trip-sicher. Storage-Wert kommt vom Server
-  als one-liner ohne Whitespace — unbenutzbar zum editieren.
-- **Pretty-Print-Trick** (aus `~/data/conf-edit` übernommen):
-  Wert in `<root>...</root>` wrappen, durch XML-Formatter laufen
-  lassen (`xmllint --format`), Root-Tag-Wrapper anschließend wieder
-  strippen. Funktioniert, weil `body.storage` valides XML-Fragment
-  ist (Atlassian-eigene Namespaces wie `<ac:*>` / `<ri:*>` sind erlaubt,
-  brauchen aber wegen nicht-deklarierter Prefixes evtl. `xmllint
---recover` oder einen Custom-Pretty-Printer).
-- **Change-Detection vor PUT**: Original AUCH formatiert speichern,
-  Vergleich erst nach dem Formatter-Roundtrip. Sonst würde jeder
-  Edit als „geändert" gelten, weil das Formatieren selbst nicht
-  byte-exakt round-trippt.
+  diff-friendly, round-trip-safe. The storage value arrives from the server
+  as a one-liner without whitespace — unusable for editing.
+- **Pretty-print trick** (taken from `~/data/conf-edit`):
+  wrap the value in `<root>...</root>`, run it through an XML formatter
+  (`xmllint --format`), then strip the root-tag wrapper again.
+  This works because `body.storage` is a valid XML fragment
+  (Atlassian's own namespaces such as `<ac:*>` / `<ri:*>` are allowed,
+  but because of the undeclared prefixes they may need `xmllint
+--recover` or a custom pretty-printer).
+- **Change detection before the PUT**: store the original in formatted form
+  as well, and compare only after the formatter round trip. Otherwise every
+  edit would count as "changed", because formatting itself does not round
+  trip byte-exactly.
 - **No conversion to/from Markdown.** Rabbit hole. Users edit storage
-  XHTML direkt. README dokumentiert das. (Confluence-Wiki-Markup-
-  Grammar in `~/data/projects/confluence_wiki` ist separat —
-  optional viel später für ein Markdown-Bridge-Folge-Feature.)
-- **Editor-Suffix `.xml`** im tempfile, damit nvim XML-Syntax-Highlight
-  - ggf. Tree-Sitter-XML zieht.
+  XHTML directly. The README documents that. (The Confluence wiki-markup
+  grammar in `~/data/projects/confluence_wiki` is separate —
+  optionally much later for a Markdown-bridge follow-up feature.)
+- **Editor suffix `.xml`** on the tempfile, so that nvim picks up XML syntax
+  highlighting and possibly tree-sitter XML.
 
 ### D6 — Conflict handling on `PUT /content/{id}`
 
@@ -178,11 +178,11 @@ Confluence requires `version.number = current + 1`. If two clients save
 concurrently, the second `PUT` fails (409 / 409-equivalent error in
 `statusCode`/`message`).
 
-Das User-Reference-Skript (`conf-edit`) macht das **nicht** — es PUTet
-blind mit `version+1` und akzeptiert Last-Write-Wins. Für unseren
-Adapter wollen wir eine Stufe besser sein:
+The user's reference script (`conf-edit`) does **not** do this — it PUTs
+blindly with `version+1` and accepts last-write-wins. For our
+adapter we want to be one step better:
 
-PUT-Body shape (vom Reference-Skript verifiziert):
+PUT-body shape (verified with the reference script):
 
 ```json
 {
@@ -198,10 +198,11 @@ PUT-Body shape (vom Reference-Skript verifiziert):
 Strategy:
 
 1. On `open-for-edit`: fetch `body.storage` + `version.number` + `title`,
-   stash alle drei in `EditSession`.
-2. On `commit`: PUT mit `version.number = stashed + 1`.
-3. On `409`: re-fetch latest, `diffy`-3-way-merge (analog Jira), Konflikt-
-   Marker in den Buffer, Status-Bar-Warning. User merged → erneut commit.
+   stash all three in the `EditSession`.
+2. On `commit`: PUT with `version.number = stashed + 1`.
+3. On `409`: re-fetch the latest, do a `diffy` 3-way merge (as in Jira), put
+   conflict markers into the buffer and a warning into the status bar. The user
+   merges → commit again.
 
 ### D7 — CQL → saved queries
 
@@ -245,7 +246,7 @@ extract from qutebrowser sqlite or browser-extension export).
 
 ### D10 — TUI integration
 
-- New tab key `6` for Confluence (1–5 sind belegt — Tasks, Trackings,
+- New tab key `6` for Confluence (1–5 are taken — Tasks, Trackings,
   Jira, Taiga, Postgres).
 - View YAML at `~/.config/not_yet_done/views/confluence.yaml`:
   - root subview: spaces list
@@ -254,242 +255,246 @@ extract from qutebrowser sqlite or browser-extension export).
     pages + attachments + comments siblings)
 - Saved queries (CQL) per view via existing `q` menu.
 
-## Phasen-Liste
+## Phase list
 
-Reihenfolge ist absichtlich Read-zuerst, Write-zuletzt. Jede Phase
-kommt in einen eigenen Commit, ist lokal smoke-bar.
+The order is deliberately read-first, write-last. Every phase goes into
+its own commit and is smoke-testable locally.
 
-### Vorab (vor CF-0) — entschieden
+### Up front (before CF-0) — decided
 
-- **R-1: `sort_serde` aus Jira- und Taiga-Adapter in `not-yet-done-content`
-  ziehen.** **Entschieden (User 2026-06-02): vorab, vor CF-0.**
-  Trivial (~30 LoC, identische Implementierung in beiden). Reduziert
-  Duplikat sofort und Confluence baut von Anfang an auf der shared
-  Variante auf.
-- **R-2: `not-yet-done-adapter-common` als neues Crate.** Aufnahme von
-  `HttpClientBuilder` (auth-header injection, timeout-default, http*log
-  integration), `SlugTable<T>`, `TemplateRenderer` (3b-Format).
-  Größerer Umbau. **Nicht jetzt — Confluence-Adapter erstmal mit
-  bewusster Duplizierung des Jira-Patterns, dann R-2 als Folge-Refactor
-  über alle drei Adapter.** Begründung: zwei Datenpunkte (Jira/Taiga)
-  sind dünn für ein gutes Trait-Design; drei Adapter geben uns das
-  Material für eine \_echte* Abstraktion statt eines "zwei waren ähnlich
-  also ist es ein Pattern"-Fehlschlusses.
+- **R-1: pull `sort_serde` out of the Jira and Taiga adapters into
+  `not-yet-done-content`.** **Decided (user, 2026-06-02): up front, before
+  CF-0.** Trivial (~30 LoC, identical implementation in both). It removes the
+  duplicate immediately, and Confluence builds on the shared variant from the
+  start.
+- **R-2: `not-yet-done-adapter-common` as a new crate.** It would absorb
+  `HttpClientBuilder` (auth-header injection, timeout default, http*log
+  integration), `SlugTable<T>`, `TemplateRenderer` (3b format).
+  A bigger rebuild. **Not now — build the Confluence adapter with deliberate
+  duplication of the Jira pattern first, then do R-2 as a follow-up refactor
+  across all three adapters.** Rationale: two data points (Jira/Taiga)
+  are thin for a good trait design; three adapters give us the
+  material for a \_real* abstraction instead of a "two were similar
+  so it must be a pattern" fallacy.
 
-### CF-0 — Anchor
+### CF-0 — anchor
 
-- `docs/plan-confluence-adapter.md` (dieses Dokument).
-- `memory/project_confluence_adapter.md` als Tracking-Memory.
-- `memory/adapter_survey_2026_06_02.md` mit den Refactor-Kandidaten aus
-  dem Survey (siehe Anhang unten).
-- Commit-Anker für compact.
+- `docs/plan-confluence-adapter.md` (this document).
+- `memory/project_confluence_adapter.md` as the tracking memory.
+- `memory/adapter_survey_2026_06_02.md` with the refactor candidates from
+  the survey (see the appendix below).
+- A commit anchor for the compaction.
 
-### CF-1 — Crate-Scaffold
+### CF-1 — crate scaffold
 
-- Neues Workspace-Member `not-yet-done-confluence-adapter`.
-- Skelett-Files: `Cargo.toml`, `src/lib.rs`, `src/adapter/mod.rs`,
+- New workspace member `not-yet-done-confluence-adapter`.
+- Skeleton files: `Cargo.toml`, `src/lib.rs`, `src/adapter/mod.rs`,
   `src/client/mod.rs`, `src/config.rs`, `src/factory.rs`,
   `src/auth_bridge.rs`, `src/db.rs`.
-- Adapter implementiert `ContentAdapter`-Trait mit minimal-stubs
-  (`root()` gibt leere Liste, alles andere `Other("not implemented")`).
-- Factory registriert in `not-yet-done-tui/src/main.rs::build_adapter_factories()`.
-- Tab-Key `6` in der TUI; Tab zeigt leere Liste, nichts crashed.
+- The adapter implements the `ContentAdapter` trait with minimal stubs
+  (`root()` returns an empty list, everything else `Other("not implemented")`).
+- The factory is registered in
+  `not-yet-done-tui/src/main.rs::build_adapter_factories()`.
+- Tab key `6` in the TUI; the tab shows an empty list, nothing crashes.
 - `cargo build --release` + `cargo test --release` + install + commit.
 
-### CF-2a — DB + Entities + ConfluenceClient-Stub
+### CF-2a — DB + entities + ConfluenceClient stub
 
-Reines „dumb plumbing", noch keine Auth-Logik. Soll für sich kompilieren
-und installierbar bleiben.
+Pure "dumb plumbing", no auth logic yet. It should compile on its own
+and stay installable.
 
-- Sea-ORM Entities `auth_session` + `view_sort_state` (1:1 wie Jira).
-- `db.rs` mit `default_sqlite_url()` (Pfad
-  `~/.local/share/not_yet_done/confluence-cache.sqlite`) und
-  `connect()` mit `get_schema_registry(...).sync()`.
-- `auth_session_store.rs` mit `SqlAuthSessionStore` (analog Jira,
-  Blob = JSON `{cookie: "..."}`).
-- `cache_store.rs` mit `scope_id_for_url()`.
+- SeaORM entities `auth_session` + `view_sort_state` (1:1 as in Jira).
+- `db.rs` with `default_sqlite_url()` (path
+  `~/.local/share/not_yet_done/confluence-cache.sqlite`) and
+  `connect()` with `get_schema_registry(...).sync()`.
+- `auth_session_store.rs` with `SqlAuthSessionStore` (as in Jira,
+  blob = JSON `{cookie: "..."}`).
+- `cache_store.rs` with `scope_id_for_url()`.
 - `ConfluenceClient::new(base_url, cookie_header, accept_invalid_certs)`:
-  reqwest-Setup, 30 s Timeout, `Cookie`-Header + `X-Atlassian-Token: no-check`
-  als Default-Header. Eine einzige Methode: `current_user() -> Result<JsonValue>`
-  als Health-Probe. Per-Concern-Submodule sind noch nicht da.
-- `config.rs` erweitert: `auth: AuthSpec`, `accept_invalid_certs: bool`,
-  `db: Option<DbConfig>`, `manual_connect: bool`. Tests aktualisieren.
-- Factory pumpt nichts davon noch in den Adapter (Adapter-Konstruktor
-  bekommt zusätzlich Arc<DatabaseConnection> + scope_id, aber Auth
-  bleibt extern). Adapter bleibt minimal — Root weiter leer.
+  reqwest setup, 30 s timeout, a `Cookie` header + `X-Atlassian-Token: no-check`
+  as default headers. A single method: `current_user() -> Result<JsonValue>`
+  as a health probe. The per-concern submodules are not there yet.
+- `config.rs` extended: `auth: AuthSpec`, `accept_invalid_certs: bool`,
+  `db: Option<DbConfig>`, `manual_connect: bool`. Update the tests.
+- The factory does not pump any of this into the adapter yet (the adapter
+  constructor additionally receives `Arc<DatabaseConnection>` + scope_id, but
+  auth stays external). The adapter stays minimal — the root remains empty.
 - Smoke: `cargo build --release` + `cargo test --release -p
-not-yet-done-confluence-adapter` grün, TUI installierbar.
+not-yet-done-confluence-adapter` green, the TUI installable.
 
-### CF-2b — AuthBridge + Session-Validation
+### CF-2b — AuthBridge + session validation
 
-- `AuthBridge` analog Jira:
-  - `Cookie` mechanism akzeptiert `command`/`literal`/`env` source.
-  - Cached `ConfluenceClient`-Instance hinter `RwLock<Option<Arc<...>>>`.
-  - `validate_session()` ruft `current_user()` auf, gibt `bool`.
-  - `invalidate_session()` löscht Blob in `auth_session`-Tabelle.
-- Factory wired AuthBridge ein, übergibt an Adapter.
-- `submit_credentials()` ungebraucht (Cookie kommt extern via command).
-- Smoke: View-YAML mit `adapter: confluence` + echtem Cookie-Command,
-  Tab öffnet, Banner zeigt `Ready` (oder `Session invalid` falls
-  Cookie abgelaufen ist). Erstes echtes Bytes-on-the-Wire gegen
-  reale Instanz.
+- `AuthBridge` as in Jira:
+  - the `Cookie` mechanism accepts a `command`/`literal`/`env` source.
+  - a cached `ConfluenceClient` instance behind `RwLock<Option<Arc<...>>>`.
+  - `validate_session()` calls `current_user()` and returns a `bool`.
+  - `invalidate_session()` clears the blob in the `auth_session` table.
+- The factory wires the AuthBridge in and hands it to the adapter.
+- `submit_credentials()` is unused (the cookie comes from outside via the
+  command).
+- Smoke: a view YAML with `adapter: confluence` plus a real cookie command,
+  the tab opens, the banner shows `Ready` (or `Session invalid` if the
+  cookie has expired). The first real bytes on the wire against a
+  real instance.
 
-### CF-3 — Spaces
+### CF-3 — spaces
 
 - `ConfluenceClient::list_spaces(start, limit)` → `Vec<SpaceMeta>`.
-- `ConfluenceSpaceNode` (`confluence:space`) mit `id()`, `label()`,
-  `metadata()`, `actions()` (initial: `open-in-browser`).
-- `ConfluenceRootNode::list()` paginiert über `list_spaces`.
-- View-YAML zeigt Spaces-Liste in Root-Tab.
-- Smoke: Tab `6` zeigt Spaces, ESC/q schliesst.
+- `ConfluenceSpaceNode` (`confluence:space`) with `id()`, `label()`,
+  `metadata()`, `actions()` (initially: `open-in-browser`).
+- `ConfluenceRootNode::list()` paginates over `list_spaces`.
+- The view YAML shows the spaces list in the root tab.
+- Smoke: tab `6` shows the spaces, ESC/q closes.
 
-### CF-4 — Page-Tree (Read-only, rekursiv)
+### CF-4 — page tree (read-only, recursive)
 
 - `ConfluenceClient::list_top_pages(space_key, start, limit)`.
 - `ConfluenceClient::list_child_pages(parent_id, start, limit)`.
-- `ConfluencePageNode` mit `list()` → child-pages-Aufruf je nach
-  Position im Tree (top-level via `space.content.page`, sonst via
+- `ConfluencePageNode` with `list()` → the child-pages call depending on
+  the position in the tree (top level via `space.content.page`, otherwise via
   `content/{id}/child/page`).
-- Recursive ChildDef im View-YAML (DSF-Mechanismus weiterverwenden).
-- Smoke: Spaces → enter → Top-Pages → enter → Child-Pages → mehrere
-  Ebenen tief.
+- A recursive ChildDef in the view YAML (reusing the DSF mechanism).
+- Smoke: spaces → enter → top pages → enter → child pages → several
+  levels deep.
 
-### CF-5 — Page-Detail (Read-only)
+### CF-5 — page detail (read-only)
 
-- `ConfluenceClient::get_page(id)` mit `expand=body.storage,version,ancestors,metadata.labels`.
-- `ConfluencePageNode::content()` rendert `body.storage` in `ItemDetail`
-  (Detail-Pane). Storage-Format ist XHTML-ähnlich; first cut zeigt es
-  roh mit Syntax-Highlighting `xml`/`html`.
-- Cache: `OnceCell<PageDetail>` pro Node (lazy hydration, Jira-Pattern).
-- Smoke: `p` (preview-toggle) auf einer Page zeigt `body.storage`.
+- `ConfluenceClient::get_page(id)` with `expand=body.storage,version,ancestors,metadata.labels`.
+- `ConfluencePageNode::content()` renders `body.storage` into an `ItemDetail`
+  (detail pane). The storage format is XHTML-like; the first cut shows it
+  raw with `xml`/`html` syntax highlighting.
+- Cache: `OnceCell<PageDetail>` per node (lazy hydration, the Jira pattern).
+- Smoke: `p` (preview toggle) on a page shows `body.storage`.
 
-### CF-6 — Attachments (Read-only)
+### CF-6 — attachments (read-only)
 
-- `ConfluencePageNode::children_types()` enthält `confluence:attachment`.
+- `ConfluencePageNode::children_types()` contains `confluence:attachment`.
 - `ConfluenceClient::list_attachments(page_id)`.
-- `ConfluenceAttachmentNode` mit `download`-Action (öffnet via xdg-open
-  nach Download in tempfile).
-- Smoke: Page → drill → Attachment-Liste; `d` lädt + öffnet.
+- `ConfluenceAttachmentNode` with a `download` action (opens via xdg-open
+  after downloading into a tempfile).
+- Smoke: page → drill → attachment list; `d` downloads + opens.
 
-### CF-7 — Comments (Read-only)
+### CF-7 — comments (read-only)
 
-- `ConfluencePageNode::children_types()` ergänzt um `confluence:comment`.
+- `ConfluencePageNode::children_types()` extended by `confluence:comment`.
 - `ConfluenceClient::list_comments(page_id)`.
-- `ConfluenceCommentNode` zeigt Body + Author + Timestamp.
-- Smoke: Page mit Kommentaren → drill → Comments-Liste.
+- `ConfluenceCommentNode` shows body + author + timestamp.
+- Smoke: a page with comments → drill → comments list.
 
-### CF-8 — Saved Queries (CQL)
+### CF-8 — saved queries (CQL)
 
 - `ConfluenceAdapter::saved_query_store()` → `FsSavedQueryStore`
-  unter `<instance_data_dir>/queries/`.
-- View-Konfiguration unterstützt `q`-Menü; Apply ruft
+  under `<instance_data_dir>/queries/`.
+- The view configuration supports the `q` menu; apply calls
   `ConfluenceClient::cql_search(cql, start, limit)`.
-- Eine erste Beispiel-Query mitliefern (`saved/recent-pages.yaml` mit
+- Ship a first example query (`saved/recent-pages.yaml` with
   `lastModified > now('-7d') ORDER BY lastModified DESC`).
-- Smoke: `q` öffnet Menü, Apply zeigt CQL-Resultate.
+- Smoke: `q` opens the menu, apply shows the CQL results.
 
-### CF-9 — Page-Edit (Write 1)
+### CF-9 — page edit (write 1)
 
-- `EditSession` für `confluence:page` analog Jira's Issue-Edit:
-  - öffnet `body.storage` in tempfile mit `.html` Suffix
-  - stash `version.number`
-  - on commit: `PUT /content/{id}` mit `version.number + 1`
-  - on `409`: re-fetch, `diffy` merge, Konflikt-Marker im Buffer
-- Action `e` ruft `EditSession`.
-- Smoke: `e` auf Page → tempfile öffnet → editieren → save → Page
-  ist im Browser aktualisiert.
+- An `EditSession` for `confluence:page`, as in Jira's issue edit:
+  - opens `body.storage` in a tempfile with an `.html` suffix
+  - stashes `version.number`
+  - on commit: `PUT /content/{id}` with `version.number + 1`
+  - on `409`: re-fetch, `diffy` merge, conflict markers in the buffer
+- The action `e` invokes the `EditSession`.
+- Smoke: `e` on a page → the tempfile opens → edit → save → the page
+  is updated in the browser.
 
-### CF-10 — Page-Create (Write 2)
+### CF-10 — page create (write 2)
 
-- `confluence:space`-Action `create-page` (Shift+A oder `a`),
-  `confluence:page`-Action `create-child`.
-- Template-Datei mit leerem `<p></p>` + Header-Block für Titel.
-- `POST /content` mit `type=page`, `space.key`, ggf. `ancestors=[{id:...}]`.
-- Smoke: Space → `a` → Titel + Body → save → neue Page erscheint.
+- A `confluence:space` action `create-page` (Shift+A or `a`),
+  a `confluence:page` action `create-child`.
+- A template file with an empty `<p></p>` plus a header block for the title.
+- `POST /content` with `type=page`, `space.key`, and `ancestors=[{id:...}]`
+  where applicable.
+- Smoke: space → `a` → title + body → save → the new page appears.
 
-### CF-11 — Page-Delete (Write 3)
+### CF-11 — page delete (write 3)
 
-- Action `D` (capital) auf Page → Confirm-Popup → `DELETE
-/content/{id}` (status=current → in Trash).
-- Optional: zweites `D` → `DELETE /content/{id}?status=trashed`
-  (endgültig). Vorerst nur Trash, Purge dokumentiert aber nicht
-  exponiert (Sicherheit).
-- Smoke: `D` → confirm → Page weg aus Liste.
+- The action `D` (capital) on a page → confirm popup → `DELETE
+/content/{id}` (status=current → into the trash).
+- Optionally: a second `D` → `DELETE /content/{id}?status=trashed`
+  (permanent). For now only the trash step; purge is documented but not
+  exposed (safety).
+- Smoke: `D` → confirm → the page is gone from the list.
 
-### CF-12 — Comments-CRUD (Write 4)
+### CF-12 — comments CRUD (write 4)
 
-- `confluence:page`-Action `add-comment` (`c`) öffnet leeren Editor.
-- `confluence:comment`-Actions `edit` (`e`), `delete` (`D`).
-- `POST /content` mit `type=comment, container={page_id}`.
-- `PUT /content/{commentId}` analog Edit-Page.
-- Smoke: alle drei Aktionen je einmal.
+- A `confluence:page` action `add-comment` (`c`) opens an empty editor.
+- `confluence:comment` actions `edit` (`e`), `delete` (`D`).
+- `POST /content` with `type=comment, container={page_id}`.
+- `PUT /content/{commentId}` as in the page edit.
+- Smoke: all three actions once each.
 
-### CF-13 — Attachment-Upload (Write 5)
+### CF-13 — attachment upload (write 5)
 
-- `confluence:page`-Action `upload-attachment` (`A`) öffnet FilePicker
-  (Taiga-Pattern, bereits in `not-yet-done-tui/src/widgets/file_picker.rs`).
+- A `confluence:page` action `upload-attachment` (`A`) opens the FilePicker
+  (the Taiga pattern, already in `not-yet-done-tui/src/widgets/file_picker.rs`).
 - `POST /content/{id}/child/attachment` multipart + `X-Atlassian-Token: nocheck`.
-- Smoke: `A` → FilePicker → Datei wählen → erscheint in Attachment-Liste.
+- Smoke: `A` → FilePicker → pick a file → it appears in the attachment list.
 
-### CF-14 — Clone-Page
+### CF-14 — clone page
 
-- Analog Jira/Taiga clone-action (Pattern: `y` zum Markieren,
-  `p` zum Paste — oder Direkt-Clone-Action mit Titel-Prompt).
-- `GET /content/{id}` → `POST /content` mit gleichem Body + neuem Titel.
-- Smoke: clone in gleichem Space, clone in anderen Space.
+- As in the Jira/Taiga clone action (pattern: `y` to mark,
+  `p` to paste — or a direct clone action with a title prompt).
+- `GET /content/{id}` → `POST /content` with the same body and a new title.
+- Smoke: clone within the same space, clone into another space.
 
-### CF-15 — Docs + Final-Smoke + Install + Commit
+### CF-15 — docs + final smoke + install + commit
 
-- README-Sektion „Confluence Adapter".
-- `docs/smoke-tests.md` ergänzen (Confluence-Block).
-- View-YAML mit allen Sub-Tabs als Default mitliefern.
+- A README section "Confluence Adapter".
+- Extend `docs/smoke-tests.md` (Confluence block).
+- Ship a view YAML with all the sub-tabs as the default.
 - `cargo build --release` + `cargo test --release` + install.
-- Bundle-Commit oder per-Phase-Commits — je nach User-Präferenz.
+- A bundled commit or per-phase commits — depending on the user's preference.
 
-## Open Questions (vor CF-1 zu klären)
+## Open questions (to be clarified before CF-1)
 
-1. **Cookie-Quelle:** **Geklärt (User 2026-06-02): gleicher Crowd-SSO,
-   gleicher Cookie-Pool wie Jira.** Bestehendes Skript wiederverwenden,
-   evtl. `--path` / `--service`-Parameter, der die Cookies für den
-   richtigen Subpfad filtert.
-2. **DB-Cache-Schema:** **Geklärt (User 2026-06-02):** CF-1 startet
-   mit nur `auth_session` + `view_sort_state`. User-Cache analog
-   `JiraCache` (`Arc<Mutex<...>>` für `confluence_user`-Tabelle) wird
-   später nachgereicht, **wenn es sich anbietet** — frühestens bei
-   CF-7 (Comments brauchen Author-Auflösung) oder CF-12 (Comments-CRUD
-   mit Mention-Autocomplete). Labels bleiben page-lokal, kein
-   eigener Cache geplant.
-3. **Storage-Format-Editor:** **Vorgehen (User 2026-06-02): bei CF-9 ad
-   hoc evaluieren** — Roundtrip-Verhalten gegen reale Page testen
-   (gemischtes XHTML mit Atlassian-Namespaces wie `<ac:structured-macro>`,
-   `<ri:user>` etc.). Wenn `xmllint --format` nichts kaputt macht,
-   bleibt's roh; sonst Custom-Pretty-Printer schreiben.
-4. **CQL-Beispiele:** **Geklärt: post-compact** — wenn wir bei CF-8
-   landen, klären wir die Defaults am echten Workflow.
+1. **Cookie source:** **Clarified (user, 2026-06-02): the same Crowd SSO,
+   the same cookie pool as Jira.** Reuse the existing script,
+   possibly with a `--path` / `--service` parameter that filters the cookies for
+   the right subpath.
+2. **DB cache schema:** **Clarified (user, 2026-06-02):** CF-1 starts
+   with only `auth_session` + `view_sort_state`. A user cache along the lines of
+   `JiraCache` (`Arc<Mutex<...>>` for a `confluence_user` table) will be
+   added later, **when it makes sense** — at the earliest at
+   CF-7 (comments need author resolution) or CF-12 (comments CRUD
+   with mention autocomplete). Labels stay page-local, no
+   cache of their own is planned.
+3. **Storage-format editor:** **Approach (user, 2026-06-02): evaluate ad hoc
+   at CF-9** — test the round-trip behaviour against a real page
+   (mixed XHTML with Atlassian namespaces such as `<ac:structured-macro>`,
+   `<ri:user>` etc.). If `xmllint --format` breaks nothing,
+   it stays raw; otherwise write a custom pretty-printer.
+4. **CQL examples:** **Clarified: post-compact** — once we reach CF-8,
+   we settle the defaults against the real workflow.
 
-## Anhang: Refactor-Kandidaten aus dem Adapter-Survey
+## Appendix: refactor candidates from the adapter survey
 
-(Vollständige Analyse: `memory/adapter_survey_2026_06_02.md`.)
+(Full analysis: `memory/adapter_survey_2026_06_02.md`.)
 
-Quick wins (vor oder direkt nach Confluence):
+Quick wins (before or directly after Confluence):
 
-1. `sort_serde` aus den beiden Adaptern in `not-yet-done-content` ziehen.
-2. `view_sort_state` SeaORM-Entity als shared definieren statt 2× zu
-   duplizieren.
+1. Pull `sort_serde` out of the two adapters into `not-yet-done-content`.
+2. Define the `view_sort_state` SeaORM entity as shared instead of duplicating
+   it twice.
 
-Größere Refactors (besser nach Confluence, weil dann 3 Datenpunkte):
+Bigger refactors (better after Confluence, because then there are 3 data
+points):
 
-3. `not-yet-done-adapter-common` mit `HttpClientBuilder` (auth-header
+3. `not-yet-done-adapter-common` with `HttpClientBuilder` (auth-header
    injection, timeout, http_log, retry-on-401).
-4. `SlugTable<T>` + `SlugResolver` Trait (Jira: `ll-`/`uu-`; Taiga:
-   `ss-`/`uu-`/`tt-`; Confluence wird Labels + User auch brauchen).
-5. `TemplateRenderer` für das 3b-Format (Header/Body/Comments).
-6. `diffy`-basiertes 3-way-merge als shared utility.
-7. Composite-ID-Codec (`<parent>/<type>/<child>` Parser & Builder).
+4. `SlugTable<T>` + a `SlugResolver` trait (Jira: `ll-`/`uu-`; Taiga:
+   `ss-`/`uu-`/`tt-`; Confluence will need labels + users too).
+5. `TemplateRenderer` for the 3b format (header/body/comments).
+6. A `diffy`-based 3-way merge as a shared utility.
+7. A composite-ID codec (`<parent>/<type>/<child>` parser & builder).
 
-Adapter-Registrierung:
+Adapter registration:
 
-8. Statt hardcoded HashMap in `main.rs::build_adapter_factories()`
-   ein `inventory::collect!`-basiertes Registry-Pattern — Adapter-
-   Crates registrieren sich selbst, `main.rs` muss nicht angefasst
-   werden wenn ein neuer dazu kommt. Klein, lohnt sich aber.
+8. Instead of a hardcoded HashMap in `main.rs::build_adapter_factories()`,
+   an `inventory::collect!`-based registry pattern — adapter
+   crates register themselves, and `main.rs` does not have to be touched
+   when a new one is added. Small, but worth it.
