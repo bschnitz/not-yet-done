@@ -1331,6 +1331,11 @@ pub struct CustomColumnField {
     pub key: String,
     pub label: String,
     pub value_type: String,
+    /// The column's closed value set when the store declared one, else empty.
+    /// Unlike `value_type` this cannot come from the YAML — an enumeration is
+    /// a property of the stored column, so it is only known once the backend
+    /// has described the column. Empty means "free text field".
+    pub options: Vec<String>,
 }
 
 impl ContentPane {
@@ -2304,9 +2309,25 @@ impl ContentPane {
             .map(|c| CustomColumnField {
                 label: c.label.clone().unwrap_or_else(|| c.key.clone()),
                 value_type: value_type_from_column_kind(c.kind).to_string(),
+                // A column the store restricted to a set of values edits as a
+                // select rather than free text. The set only exists once the
+                // column does, so an as-yet-unstored column stays free — the
+                // store rejects a bad value on write either way.
+                options: self
+                    .described_column(&c.key)
+                    .map(|s| s.options.clone())
+                    .unwrap_or_default(),
                 key: c.key,
             })
             .collect()
+    }
+
+    /// The backend-described schema for a column key, across every cached node
+    /// type. Custom-column keys are unique per column, so a flat lookup is
+    /// enough — and it also covers tree levels whose node type isn't the one
+    /// currently in `self.items`.
+    fn described_column(&self, key: &str) -> Option<&not_yet_done_content::ColumnSchema> {
+        self.column_schema.values().flatten().find(|s| s.key == key)
     }
 
     /// Stable identity of the level whose columns the pane currently
@@ -2363,21 +2384,16 @@ impl ContentPane {
     }
 
     /// Override each column's `kind` with the backend-described `value_type`
-    /// for a matching key. Custom-column keys are unique per column, so a flat
-    /// lookup across every cached node type is enough (and covers tree levels
-    /// whose node type isn't the one in `self.items`). YAML stays the source of
-    /// truth for width/order/visibility; only the type is taken from the
-    /// backend. Unknown/`text` types leave the YAML `kind` untouched.
+    /// for a matching key (see [`Self::described_column`]). YAML stays the
+    /// source of truth for width/order/visibility; only the type is taken from
+    /// the backend. Unknown/`text` types leave the YAML `kind` untouched.
     fn merge_described_kinds(&self, cols: &mut [ColumnDef]) {
         if self.column_schema.is_empty() {
             return;
         }
         for col in cols.iter_mut() {
             if let Some(kind) = self
-                .column_schema
-                .values()
-                .flatten()
-                .find(|s| s.key == col.key)
+                .described_column(&col.key)
                 .and_then(|s| column_kind_from_value_type(&s.value_type))
             {
                 col.kind = kind;
@@ -13714,6 +13730,43 @@ mod tests {
         assert_eq!(
             cols.iter().find(|c| c.key == "key").unwrap().kind,
             ColumnKind::Text
+        );
+    }
+
+    #[test]
+    fn a_restricted_custom_column_edits_as_a_select() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        // Two `source: custom` columns; only one is an enumeration in the
+        // store. The other has never been written at all, so no schema
+        // describes it — it must still get a (free) field, which is what lets
+        // the first write bootstrap the column.
+        let mut free = hcol("note");
+        free.source = Some("custom".into());
+        let mut state = hcol("state");
+        state.source = Some("custom".into());
+        view.view_defs[0].columns.extend([free, state]);
+        view.record_column_schema(
+            "any".into(),
+            vec![
+                not_yet_done_content::ColumnSchema::new("state", "")
+                    .typed("text")
+                    .with_options(vec!["implemented".into(), "merged".into()]),
+            ],
+        );
+
+        let fields = view
+            .active_pane()
+            .custom_column_fields(&view.view_defs)
+            .into_iter()
+            .map(|f| (f.key, f.options))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            vec![
+                ("note".to_string(), Vec::<String>::new()),
+                ("state".to_string(), vec!["implemented".into(), "merged".into()]),
+            ]
         );
     }
 

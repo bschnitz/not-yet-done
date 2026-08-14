@@ -9783,9 +9783,20 @@ impl App {
                     .iter()
                     .map(|c| (c.key.clone(), c.value_type.clone()))
                     .collect();
+                // Every field is optional: an empty value means "clear this
+                // cell". For a column the store restricted to a set of values
+                // that is a select, whose optional variant keeps an empty
+                // `(none)` state — so clearing stays reachable there too.
                 let fields = custom
                     .into_iter()
-                    .map(|c| not_yet_done_content::FormFieldSpec::text(c.key, c.label).optional())
+                    .map(|c| {
+                        if c.options.is_empty() {
+                            not_yet_done_content::FormFieldSpec::text(c.key, c.label)
+                        } else {
+                            not_yet_done_content::FormFieldSpec::select(c.key, c.label, c.options)
+                        }
+                        .optional()
+                    })
                     .collect();
                 self.open_content_form_popup(
                     adapter,

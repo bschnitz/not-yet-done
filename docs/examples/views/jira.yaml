@@ -88,16 +88,21 @@ views:
       # native column. The adapter is entirely uninvolved; the same mechanism
       # works on *any* tab (Jira, Taiga, Trackings, …) and at any tree level.
       #
-      # Set/clear a cell with the framework-synthetic actions every level gains
-      # automatically. From the CLI, on the selected row:
-      #   nyd jira do set-cell <KEY> --field column_key=estimate \
-      #                              --field value=5 --field value_type=number
-      #   nyd jira do clear-cell <KEY> --field column_key=estimate
-      # (`value_type` ∈ text | number | duration | datetime; it is stored for a
-      # later type-aware edit path — v1 renders the raw string via `kind:`.)
+      # Fill it in the TUI by binding the `edit-cells` action (see `actions:`
+      # below) — one form over every custom column of the level. From the CLI,
+      # the same framework-synthetic actions every level gains automatically:
+      #   nyd adapter jira:issue <KEY> set-cell --field column_key=estimate \
+      #                                --field value=5 --field value_type=number
+      #   nyd adapter jira:issue <KEY> clear-cell --field column_key=estimate
+      # (`value_type` ∈ text | number | duration | datetime | json. The first
+      # write defines the column and takes its type from `kind:`; from then on
+      # the stored type wins over `kind:` for rendering. `retype-column` and
+      # `set-column-options` change the column itself.)
       #
       # A real field emitted by the adapter under the same key always wins, so
       # a custom column can never shadow live data.
+      #
+      # Full write-up: docs/custom-columns.md
       - key: estimate
         label: Est.
         source: custom
@@ -118,6 +123,13 @@ views:
       keybinding: p
 
     actions:
+      # One form over every `source: custom` column of this level, prefilled
+      # with the row's current values; an emptied field clears the cell. The
+      # action is synthetic — no adapter implements it.
+      - name: edit custom cells
+        key: M
+        type: custom
+        id: edit-cells
       - name: fuzzy filter
         key: f
         type: fuzzy_filter
