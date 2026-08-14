@@ -5134,8 +5134,11 @@ column_key=<key> --field options=a,b,c`).
 - [ ] Danach eine Zelle auf einen Wert **außerhalb** des Satzes setzen → wird
       abgelehnt, der alte Wert steht noch da. Ein Wert aus dem Satz geht.
 - [ ] Zelle leeren bleibt erlaubt (leer = „unbelegt", keine Verletzung).
-- [ ] In der Edit-Form (`m` bzw. die im View gebundene `edit-cells`-Action)
-      erscheint die Spalte jetzt als **Select** mit genau diesen Werten.
+- [ ] In der Edit-Form (die im View gebundene `edit-cells`-Action) erscheint
+      die Spalte als **Select** mit genau diesen Werten; eine unrestringierte
+      Custom-Spalte daneben bleibt ein Textfeld.
+- [ ] Im Select lässt sich „nichts" wählen (leerer `(none)`-Zustand) → Zelle
+      wird geleert.
 - [ ] `options` leer setzen → Spalte ist wieder frei, beliebige Werte gehen.
 - [ ] Auf einer `number`-Spalte einen Satz mit einem Wort setzen → abgelehnt
       (Optionen müssen zum `value_type` passen).
