@@ -232,7 +232,6 @@ views:
 
     children:
       - name: Comments
-        key: c
         node_type: "jira:comment"
         columns:
           - key: author
@@ -268,7 +267,6 @@ views:
             id: create_comment
 
       - name: Attachments
-        key: a
         node_type: "jira:attachment"
         columns:
           - key: filename
@@ -419,7 +417,6 @@ views:
 
     children:
       - name: Comments
-        key: c
         node_type: "jira:comment"
         columns:
           - key: author
@@ -453,7 +450,6 @@ views:
             id: create_comment
 
       - name: Attachments
-        key: a
         node_type: "jira:attachment"
         columns:
           - key: filename

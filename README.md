@@ -1227,7 +1227,7 @@ Omit the field to keep the historic "list everything" behaviour.
 | `p`       | preview           | Toggles the body.storage preview pane. First toggle lazy-hydrates `GET /content/{id}?expand=body.storage,...`.                     |
 | `e`       | edit              | Opens the page's `body.storage` in `$EDITOR` (pretty-printed via `xmllint --format`). Save writes `PUT /content/{id}` `version+1`. |
 | `a`       | create-child page | Opens a small `title:` + empty `<p></p>` buffer. Save POSTs as a child of the current page.                                        |
-| `c`       | add comment       | Opens an empty XHTML buffer; save POSTs `type=comment, container={page_id}`.                                                       |
+| `C`       | add comment       | Opens an empty XHTML buffer; save POSTs `type=comment, container={page_id}`. Shift+C, because `c` is the chord leader.             |
 | `Shift+A` | upload attachment | Opens the FilePicker (multi-select); each chosen file is POSTed to `/rest/api/content/{id}/child/attachment` (one POST each).      |
 | `y`       | clone             | Opens an editor pre-filled with the source page's title + " (Clone)" + body. Save POSTs a new page under the same parent.          |
 | `Shift+D` | delete (Trash)    | Confirm popup, then `DELETE /rest/api/content/{id}`. The page survives in Confluence's Trash and can be restored from the web UI.  |

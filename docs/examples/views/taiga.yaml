@@ -193,7 +193,6 @@ views:
 
     children:
       - name: Comments
-        key: c
         node_type: "taiga:comment"
         columns:
           - key: author
@@ -230,7 +229,6 @@ views:
           d: delete
 
       - name: Attachments
-        key: a
         node_type: "taiga:attachment"
         columns:
           - key: filename
