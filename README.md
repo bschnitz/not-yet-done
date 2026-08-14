@@ -412,7 +412,7 @@ There are **two** command-line binaries, by design:
 Both build on the **same core**: the in-process TUI adapters and `nyd-t` each
 talk to `not-yet-done-task-core` in their own idiom. Adapters are _interop
 boundaries_ (a uniform protocol for many systems); `nyd-t` is the domain's own
-front-end. See [decision 0004](docs/decisions/0004-zwei-cli-binaries-adapter-vs-domain.md)
+front-end. See [decision 0004](docs/decisions/0004-two-cli-binaries-adapter-vs-domain.md)
 for the why.
 
 ### `nyd` — generic adapter front-end
@@ -1733,7 +1733,7 @@ backup fires once a day whichever front-end you launch first). Change the
 `throttle`, point `run` at a different action, or drop the block to disable
 auto-backup. Hooks are best-effort: a bad action or unwritable state file is
 logged and never blocks startup. See
-[decision 0005](docs/decisions/0005-host-crate-und-lifecycle-hooks.md) for the
+[decision 0005](docs/decisions/0005-host-crate-and-lifecycle-hooks.md) for the
 design.
 
 ### Editor
@@ -1947,7 +1947,7 @@ What it does and, just as importantly, what it deliberately does **not**:
   also has the real database.
 
 Design rationale and the full list of scrubbed vs. raw surfaces are in
-[ADR 0006](docs/decisions/0006-anonymisierung-content-layer.md).
+[ADR 0006](docs/decisions/0006-anonymization-content-layer.md).
 
 ## Debugging
 
