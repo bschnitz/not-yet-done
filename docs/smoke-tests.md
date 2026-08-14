@@ -2226,322 +2226,321 @@ comes later).
 
 ## CLI `tasks show --path`
 
-Pfad-basiertes Lookup über den **generischen** `--path`-Resolver (D3b-1) auf
-der Adapter-Instanz `tasks` (das frühere hartkodierte `task show` ist
-entfernt). Ein Segment pro Ebene, gegen Child-Labels per Substring (mit `-i`
-case-gefoldet) oder `re:`-Regex; jedes Segment muss genau ein Kind treffen.
-Erfolg → Node-Felder auf stdout (`-o json` für JSON), exit 0.
+Path-based lookup through the **generic** `--path` resolver (D3b-1) on the
+adapter instance `tasks` (the former hard-coded `task show` is gone). One
+segment per level, matched against child labels by substring (case-folded with
+`-i`) or by a `re:` regex; every segment must match exactly one child. On
+success the node fields go to stdout (`-o json` for JSON), exit 0.
 
-> ⚠ Der generische Resolver hat andere Fehlermeldungen/Exit-Codes als das alte
-> `task show`. Diese Items beim nächsten Smoke gegen das Ist-Verhalten von
-> `adapter_cli` (substring/`re:`, „ambiguous … list the candidates") neu
-> verifizieren und die erwarteten Strings hier nachziehen.
+> ⚠ The generic resolver has different error messages and exit codes than the
+> old `task show`. Re-verify these items against the actual behaviour of
+> `adapter_cli` (substring vs. `re:`, "ambiguous … list the candidates") at the
+> next smoke run and update the expected strings here.
 
-- [ ] `nyd tasks show --path /Work/Clients/Acme/Tickets` →
-      stdout mit den Node-Feldern, exit 0.
-- [ ] `nyd tasks show -i --path /work/clients/acme/tickets` →
-      gleicher Hit wie oben, exit 0.
-- [ ] `nyd tasks show --path '/Inbox/re:^Week \d+$'` → Regex-Segment matched.
-- [ ] `nyd tasks show --path /nope` → Fehler (unmatched segment), exit ≠ 0.
-- [ ] `nyd tasks show --path /<ambig>` wenn mehrere Kinder matchen →
-      Fehler mit Kandidatenliste, exit ≠ 0.
-- [ ] Pipe-bar: `nyd tasks show --path … -o json | jq -r '.id'` liefert
-      eine valide UUID (smoke fürs JSON-Schema).
+- [ ] `nyd tasks show --path /Work/Clients/Acme/Tickets` → the node fields on
+      stdout, exit 0.
+- [ ] `nyd tasks show -i --path /work/clients/acme/tickets` → same hit as
+      above, exit 0.
+- [ ] `nyd tasks show --path '/Inbox/re:^Week \d+$'` → the regex segment
+      matches.
+- [ ] `nyd tasks show --path /nope` → error (unmatched segment), exit ≠ 0.
+- [ ] `nyd tasks show --path /<ambig>` where several children match → error
+      listing the candidates, exit ≠ 0.
+- [ ] Pipe-friendly: `nyd tasks show --path … -o json | jq -r '.id'` yields a
+      valid UUID (smoke test for the JSON schema).
 
 ## Script `mode: commands` (script → TUI command relay)
 
-`# mode: commands` Skripte schreiben in `$NYD_OUTPUT_FILE` JSON
-`{"commands": [...]}` und steuern darüber die TUI (z.B. `jump`,
-`focus-task`, `tag`, ...). `interactive+commands` macht dasselbe,
-nur dass das Skript zusätzlich das Terminal bekommt.
+Scripts marked `# mode: commands` write JSON of the form
+`{"commands": [...]}` into `$NYD_OUTPUT_FILE` and drive the TUI through it
+(e.g. `jump`, `focus-task`, `tag`, …). `interactive+commands` does the same,
+except that the script additionally gets the terminal.
 
-- [ ] Background-Variante: Skript schreibt
-      `{"commands": ["jump Tasks:tree"]}` in `$NYD_OUTPUT_FILE`,
-      Tab wechselt nach Tasks:tree.
-- [ ] Mehrere Commands hintereinander: `["jump Tasks:tree",
-"focus-task /work/foo"]` → Jump + Path-Expand + Focus
-      laufen der Reihe nach durch.
-- [ ] Skript schreibt nichts → Notification "Script finished", keine
-      Commands ausgeführt (no-op statt Fehler).
-- [ ] JSON ist nicht parsebar → Modal _"Script output is not valid JSON: …"_.
-- [ ] JSON ohne `commands`-Array → Modal _"missing `commands` array"_.
-- [ ] Eintrag in `commands` ist kein String → Modal _"command entry is not a string"_, weitere Einträge laufen trotzdem.
-- [ ] Eintrag mit führendem `:` (`":jump Tasks:tree"`) wird genauso
-      akzeptiert wie ohne.
-- [ ] Skript exitet mit non-zero status → Modal _"Script exited with …"_,
-      Commands werden NICHT ausgeführt.
-- [ ] Vorwärtskompatibilität: JSON `{"commands": [...], "version": 1,
-"metadata": {…}}` wird akzeptiert, unbekannte Keys ignoriert.
-- [ ] Stderr aus dem Skript landet weiterhin als Notification.
-- [ ] `interactive+commands`: Skript läuft interaktiv (TUI yielded
-      Terminal), nach Beendung werden Commands aus dem detached-
-      output_file ausgeführt.
-- [ ] Das output-file in `/tmp` ist nach dem Lauf weg (cleanup).
+- [ ] Background variant: the script writes `{"commands": ["jump Tasks:tree"]}`
+      into `$NYD_OUTPUT_FILE`, the tab switches to Tasks:tree.
+- [ ] Several commands in a row: a list of `jump Tasks:tree` followed by
+      `focus-task /work/foo` → jump, path expand and focus run in order.
+- [ ] The script writes nothing → notification "Script finished", no commands
+      executed (a no-op rather than an error).
+- [ ] The JSON does not parse → modal _"Script output is not valid JSON: …"_.
+- [ ] JSON without a `commands` array → modal _"missing `commands` array"_.
+- [ ] An entry in `commands` is not a string → modal _"command entry is not a
+      string"_, the remaining entries still run.
+- [ ] An entry with a leading `:` (`":jump Tasks:tree"`) is accepted just like
+      one without.
+- [ ] The script exits with a non-zero status → modal _"Script exited with …"_,
+      the commands are NOT executed.
+- [ ] Forward compatibility: JSON carrying `commands` plus extra keys such as
+      `version` and `metadata` is accepted, unknown keys are ignored.
+- [ ] Stderr from the script still shows up as a notification.
+- [ ] `interactive+commands`: the script runs interactively (the TUI yields the
+      terminal); once it finishes, the commands from the detached output file
+      are executed.
+- [ ] The output file in `/tmp` is gone after the run (cleanup).
 
 ## SQ-8 — Postgres-Script-Shortcuts via `query_shortcut` (DB)
 
-Postgres-pro-Tabelle-Skripte hängen ihren Hotkey nicht mehr in einer
-`.shortcuts.yaml` neben dem Skript-`.sql`, sondern in der
-`query_shortcut`-Tabelle (Scope = NodeRef-Pfad
-`postgres/<inst>/<db>/schemas/<schema>/tables/<table>`, Name =
-Skript-Datei-Stem, Shortcut = Chord). Apply-on-Chord ist symmetrisch zu
-Jira/Taiga: globaler Auslöser solange das fokussierte Pane auf genau
-dieser Tabelle steht.
+Per-table Postgres scripts no longer keep their hotkey in a `.shortcuts.yaml`
+next to the script's `.sql`, but in the `query_shortcut` table (scope = the
+NodeRef path `postgres/<inst>/<db>/schemas/<schema>/tables/<table>`, name = the
+script file stem, shortcut = the chord). Apply-on-chord is symmetric to
+Jira/Taiga: a global trigger for as long as the focused pane sits on exactly
+that table.
 
-- [ ] **Bestand:** Migration der 6 jira/taiga-Zeilen mit `:`-Separator auf
-      NodeRef-`/`-Form:
-      `sh
-sqlite3 ~/.local/share/not_yet_done/nyd.db \
-    "UPDATE query_shortcut SET scope = REPLACE(scope, ':', '/') WHERE scope LIKE '%:%';"
-`
-      Danach erscheinen Jira/Taiga-Saved-Query-Hotkeys (`ctrl+i`, `ctrl+m`,
-      `ctrl+w` etc.) im Tab wieder als highlighted Apply-Hint und feuern
-      die zugehörige Query.
-- [ ] Postgres-Tab → eine konkrete Table fokussieren (Drilldown auf Schema
-      `public` → Cursor auf `users`) → `q queries` → ein existierendes
-      Skript hat `[chord]` in der Liste, wenn vorher gebunden.
-- [ ] `Ctrl+e` in der Skript-Liste → Modal „Press a shortcut key" → eine
-      freie Taste drücken → Notification „Bound shortcut" oder still.
-      Anschließend `sqlite3 ~/.local/share/not_yet_done/nyd.db
-"SELECT scope, name, shortcut FROM query_shortcut WHERE scope LIKE
-'postgres/%';"` zeigt den Eintrag mit NodeRef-Pfad.
-- [ ] Popup schliessen, Cursor bleibt auf derselben Tabelle → den
-      gebundenen Chord drücken → der Skript-Result öffnet sich im
-      Rows-Split (gleiches Verhalten wie Enter-on-Apply aus dem Menü).
-- [ ] Selber Chord, Cursor auf ANDERER Tabelle → der Chord ist NICHT
-      claimed (`PostgresTableScriptShortcut` ist auf den Table-NodeRef
-      konditioniert), Default-Verhalten der Taste bleibt aktiv.
-- [ ] Im Q-Menü `d` (delete) auf ein Skript mit Shortcut → Datei UND
-      `query_shortcut`-Zeile sind weg (sqlite3-Check).
-- [ ] Restart TUI → die Bindings überleben (DB-persistent).
-- [ ] Filesystem-Check: Es gibt nach Bind/Delete KEINE
-      `.shortcuts.yaml`-Datei mehr in
-      `~/.local/share/not_yet_done/postgres/*/queries/**`.
+- [ ] **Existing data:** migrate the 6 jira/taiga rows with the `:` separator
+      to the NodeRef form using `/`:
 
-## Jira Multi-Hop Workflow-Transitions (TR-1 … TR-7)
+  ```sh
+  sqlite3 ~/.local/share/not_yet_done/nyd.db \
+      "UPDATE query_shortcut SET scope = REPLACE(scope, ':', '/') WHERE scope LIKE '%:%';"
+  ```
 
-Hintergrund: Der Transition-Picker schreibt jede beobachtete Workflow-Kante
-in den Cache (`jira_workflow_edge`) und enumeriert daraus Mehrschritt-Ketten,
-sodass User von `Ready → In Progress → Done` in einem Schritt durchgehen
-können, ohne die Zwischenstati einzeln klicken zu müssen.
+  Afterwards the Jira/Taiga saved-query hotkeys (`ctrl+i`, `ctrl+m`, `ctrl+w`
+  and so on) show up in the tab again as a highlighted apply hint and fire
+  their query.
+
+- [ ] Postgres tab → focus one concrete table (drill down into schema `public`
+      → cursor on `users`) → `q queries` → an existing script shows `[chord]`
+      in the list if it was bound earlier.
+- [ ] `Ctrl+e` in the script list → modal "Press a shortcut key" → press a free
+      key → notification "Bound shortcut", or nothing. Afterwards a `sqlite3`
+      query on `~/.local/share/not_yet_done/nyd.db` selecting scope, name and
+      shortcut from `query_shortcut` where the scope starts with `postgres/`
+      shows the entry with its NodeRef path.
+- [ ] Close the popup, leave the cursor on the same table → press the bound
+      chord → the script result opens in the rows split (same behaviour as
+      Enter-on-apply from the menu).
+- [ ] Same chord, cursor on a DIFFERENT table → the chord is NOT claimed
+      (`PostgresTableScriptShortcut` is conditioned on the table NodeRef), the
+      key keeps its default behaviour.
+- [ ] `d` (delete) in the Q menu on a script with a shortcut → both the file
+      AND the `query_shortcut` row are gone (check with sqlite3).
+- [ ] Restart the TUI → the bindings survive (persisted in the DB).
+- [ ] Filesystem check: after binding and deleting there is NO `.shortcuts.yaml`
+      file left in `~/.local/share/not_yet_done/postgres/*/queries/**`.
+
+## Jira multi-hop workflow transitions (TR-1 … TR-7)
+
+Background: the transition picker records every observed workflow edge in the
+cache (`jira_workflow_edge`) and enumerates multi-step chains from it, so that
+users can go `Ready → In Progress → Done` in a single step without clicking
+through the intermediate states one by one.
 
 ### Setup
 
-- Backing-DB ist `~/.local/share/not_yet_done/jira-cache.sqlite`. Tabelle
-  `jira_workflow_edge` wird beim ersten Adapter-Start automatisch angelegt
-  (SeaORM auto-sync).
-- Cache nie manuell zurückgesetzt — Hop-Limit ist 4, Self-Loops werden
-  aufgezeichnet aber nicht traversiert.
+- The backing DB is `~/.local/share/not_yet_done/jira-cache.sqlite`. The
+  `jira_workflow_edge` table is created automatically on the first adapter
+  start (SeaORM auto-sync).
+- Never reset the cache by hand — the hop limit is 4, and self-loops are
+  recorded but not traversed.
 
-### Smoke (Cold-Start, leerer Cache)
+### Smoke (cold start, empty cache)
 
-- [ ] DB-Tabelle leeren: `sqlite3 ~/.local/share/not_yet_done/jira-cache.sqlite "DELETE FROM jira_workflow_edge;"`
-      vor TUI-Start.
-- [ ] Auf einem Jira-Ticket Transition-Picker öffnen → Optionen entsprechen
-      genau den direkten Transitions. Label = nur Ziel-Status, kein `*`
-      (alle direkt). Kein doppelter Eintrag wenn zwei Transitions zum
-      selben Status führen — erste gewinnt.
-- [ ] Picker schließen → in der DB existieren Edges für aktuellen Status:
-      `sqlite3 ... "SELECT from_status_name, transition_name, to_status_name FROM jira_workflow_edge;"`
+- [ ] Empty the table before starting the TUI: a `sqlite3` call on
+      `~/.local/share/not_yet_done/jira-cache.sqlite` running
+      `DELETE FROM jira_workflow_edge;`.
+- [ ] Open the transition picker on a Jira issue → the options match exactly
+      the direct transitions. The label is just the target status, no `*` (all
+      of them are direct). No duplicate entry when two transitions lead to the
+      same status — the first one wins.
+- [ ] Close the picker → the DB holds edges for the current status: select
+      `from_status_name`, `transition_name` and `to_status_name` from
+      `jira_workflow_edge`.
 
-### Smoke (Snowball wächst, Multi-Hop erscheint)
+### Smoke (the snowball grows, multi-hop appears)
 
-- [ ] Ticket in Status `Ready` öffnen → Picker → direkte Transitionen
-      (keine `*`).
-- [ ] Andere Tickets in `In Progress` und in `Review` öffnen, Picker je
-      einmal aufrufen, dann Esc (kein Transition!).
-- [ ] Zurück zum ersten Ticket → Picker → erscheint jetzt zusätzlich
-      Eintrag `Done*` (oder ähnlich), erreichbar via Multi-Hop. Das `*`
-      markiert "nicht direkt"; die Zwischenstati erscheinen NICHT mehr
-      im Label.
-- [ ] Gibt es sowohl eine direkte Transition nach `Done` als auch eine
-      Multi-Hop-Kette zu `Done`, erscheint nur ein Eintrag `Done` (ohne
-      `*`) — der direkte Pfad gewinnt.
+- [ ] Open an issue in status `Ready` → picker → direct transitions (no `*`).
+- [ ] Open other issues in `In Progress` and in `Review`, open the picker once
+      on each, then press Esc (do not transition!).
+- [ ] Back on the first issue → picker → an entry `Done*` (or similar) now
+      shows up as well, reachable via multi-hop. The `*` marks "not direct";
+      the intermediate states are NOT part of the label any more.
+- [ ] If there is both a direct transition to `Done` and a multi-hop chain to
+      `Done`, only a single entry `Done` appears (without `*`) — the direct
+      path wins.
 
-### Smoke (Chain-Erfolg)
+### Smoke (chain success)
 
-- [ ] Picker → Multi-Hop-Eintrag wählen (z.B. 2-Hop) → Enter.
-- [ ] Status-Bar: `<KEY> → <Endstatus>`.
-- [ ] Ticket-Detail zeigt Endstatus; Jira-Web bestätigt dass beide
-      Transitionen durchliefen.
+- [ ] Picker → pick a multi-hop entry (e.g. a 2-hop one) → Enter.
+- [ ] Status bar: `<KEY> → <final status>`.
+- [ ] The issue detail shows the final status; the Jira web UI confirms that
+      both transitions ran.
 
-### Smoke (Chain-Fehler mit Refresh)
+### Smoke (chain failure with refresh)
 
-- [ ] Workflow mit `required field` an zweitem Hop konstruieren (z.B.
-      Transition fordert `resolution` als pflicht). Test-Ticket auf
-      Startstatus zurücksetzen.
-- [ ] Picker → Multi-Hop wählen, dass den Pflicht-Feld-Hop enthält → Enter.
-- [ ] Status-Bar: `Chain stopped at step 2/3 (now in <Zwischenstatus>):
-<Jira-Errorbody>`.
-- [ ] Ticket-Detail in TUI zeigt aktuellen Zwischenstatus (Hop 1 erfolgreich
-      persistiert, Hop 2 abgebrochen) — nicht den ursprünglichen Startstatus.
+- [ ] Construct a workflow with a `required field` on the second hop (e.g. the
+      transition demands `resolution`). Reset the test issue to the starting
+      status.
+- [ ] Picker → pick a multi-hop entry that contains the required-field hop →
+      Enter.
+- [ ] Status bar: "Chain stopped at step 2/3 (now in \<intermediate status\>)"
+      followed by the Jira error body.
+- [ ] The issue detail in the TUI shows the current intermediate status (hop 1
+      persisted successfully, hop 2 aborted) — not the original starting
+      status.
 
-### Smoke (Picker-Hint-Bar)
+### Smoke (picker hint bar)
 
-- [ ] Beliebige Picker-Action öffnen (`transition`, oder auch andere wie
-      Postgres-Cell-Picker falls existent) → Hint-Bar zeigt `Enter apply
-| Esc close` am Popup-Footer.
-- [ ] Im Detail-Pane: Style passt zu anderen Menü-Hints (Query-Menü,
-      Tag-Menü). Kein doppelter Style, kein Layout-Bruch.
+- [ ] Open any picker action (`transition`, or another one such as the Postgres
+      cell picker if it exists) → the hint bar in the popup footer shows an
+      apply hint for Enter and a close hint for Esc.
+- [ ] In the detail pane: the style matches the other menu hints (query menu,
+      tag menu). No doubled styling, no broken layout.
 
-### Edge Cases
+### Edge cases
 
-- [ ] Ticket-Key ohne `-` (sollte nicht passieren, aber falls
-      Test-Konfig kaputt ist): Recording bricht still ab, direkter
-      Picker funktioniert weiter.
-- [ ] `db.url` in der Jira-Adapter-YAML auf `none`/leer: Recording
-      No-op, Picker zeigt nur direkte Transitionen, kein Crash.
-- [ ] Self-Loop-Transition in Workflow (z.B. `To Do → To Do` zum Anhängen
-      eines Attachments): Wird als Edge geschrieben, aber NICHT als
-      Pfad-Option vorgeschlagen.
+- [ ] An issue key without a `-` (should not happen, but in case the test
+      config is broken): recording aborts silently, the direct picker keeps
+      working.
+- [ ] `db.url` in the Jira adapter YAML set to `none` or empty: recording is a
+      no-op, the picker only shows direct transitions, no crash.
+- [ ] A self-loop transition in the workflow (e.g. `To Do → To Do` for
+      attaching a file): it is written as an edge, but NOT offered as a path
+      option.
 
-## SearchablePopup — intrinsische Navigation (SP-1 … SP-7)
+## SearchablePopup — intrinsic navigation (SP-1 … SP-7)
 
-Hintergrund: `SearchablePopup` trägt jetzt sein eigenes Set an Bindings
-für `next` / `prev` / `backspace` / `cursor_left` / `cursor_right`
-(`PopupAction`-Enum, konfigurierbar unter `popup:` in `tui.yaml`,
-Defaults `ctrl+j`/`ctrl+k`/`backspace`/`left`/`right` plus Pfeiltasten
-als Sekundär-Binding für `Next`/`Prev`). Die intrinsischen Hints
-erscheinen automatisch in der Hint-Bar — der Transition-Picker stimmt
-damit visuell und funktional zu QueryMenu/TagMenu/ScriptMenu.
+Background: `SearchablePopup` now carries its own set of bindings for `next`,
+`prev`, `backspace`, `cursor_left` and `cursor_right` (the `PopupAction` enum,
+configurable under `popup:` in `tui.yaml`, defaulting to `ctrl+j`, `ctrl+k`,
+`backspace`, `left` and `right` plus the arrow keys as a secondary binding for
+`Next`/`Prev`). The intrinsic hints appear in the hint bar automatically — the
+transition picker thus matches QueryMenu, TagMenu and ScriptMenu both visually
+and functionally.
 
-### Smoke (Transition-Picker bekommt jetzt sichtbare Navigation)
+### Smoke (the transition picker gains visible navigation)
 
-- [ ] Jira-Ticket mit ≥3 verfügbaren Transitions auswählen, Picker
-      öffnen (`Action`-Trigger des Adapters, z.B. `t`).
-- [ ] Hint-Bar am unteren Popup-Rand zeigt: `↓ next  ↑ prev  ⏎ apply
-␛ close` (Icons via `key_icons`-Map; `↓/↑` für Pfeil + ggf. `ctrl+j`
-      mit Slash davor).
-- [ ] Pfeil-Hoch/Runter UND `Ctrl+J`/`Ctrl+K` navigieren beide.
-- [ ] Tippen filtert die Liste; `Backspace` zeigt zusätzlichen Hint
-      `⌫ erase` (nur wenn die Query nicht leer ist).
+- [ ] Select a Jira issue with ≥3 available transitions, open the picker (the
+      adapter's `Action` trigger, e.g. `t`).
+- [ ] The hint bar at the bottom edge of the popup shows next, prev, apply and
+      close hints (icons come from the `key_icons` map; `↓`/`↑` for the arrows,
+      possibly with `ctrl+j` after a slash).
+- [ ] Arrow up/down AND `Ctrl+J`/`Ctrl+K` both navigate.
+- [ ] Typing filters the list; `Backspace` adds an erase hint (only while the
+      query is non-empty).
 
-### Smoke (andere Picker unverändert)
+### Smoke (other pickers unchanged)
 
-- [ ] QueryMenu (`q` auf Trackings/Tasks/Content) — Hint-Bar zeigt
-      jetzt zusätzlich `next`/`prev` vor den bisherigen Hints
-      (`apply`/`edit`/`shortcut`/`delete`/`close`).
-- [ ] TagMenu (`:tag`), ScriptMenu (`:script`) und `gl`-Link-Popup
-      analog: Pfeile + `Ctrl+J/K` funktionieren, Hint-Bar zeigt sie.
-- [ ] `:config` Picker funktioniert weiterhin: tippen filtert,
-      Pfeil-Navigation, Enter öffnet die Datei.
+- [ ] QueryMenu (`q` on Trackings/Tasks/Content) — the hint bar now shows
+      `next`/`prev` in front of the existing hints (apply, edit, shortcut,
+      delete, close).
+- [ ] TagMenu (`:tag`), ScriptMenu (`:script`) and the `gl` link popup behave
+      the same: arrows and `Ctrl+J`/`Ctrl+K` work, the hint bar shows them.
+- [ ] The `:config` picker still works: typing filters, arrow navigation, Enter
+      opens the file.
 
-### Smoke (Custom-Bindings via tui.yaml)
+### Smoke (custom bindings via tui.yaml)
 
-- [ ] In `~/.config/not-yet-done/tui.yaml` unter `keybindings.popup:`
-      `next: ctrl+n` und `prev: ctrl+p` setzen.
-- [ ] TUI neu starten (oder `:config` → tui.yaml → save → granularer
-      Reload).
-- [ ] Transition-Picker zeigt jetzt `^N next  ^P prev …` und genau
-      diese Tasten navigieren.
+- [ ] In `~/.config/not-yet-done/tui.yaml` set `next: ctrl+n` and
+      `prev: ctrl+p` under `keybindings.popup:`.
+- [ ] Restart the TUI (or `:config` → tui.yaml → save → granular reload).
+- [ ] The transition picker now shows `^N next  ^P prev …` and exactly those
+      keys navigate.
 
 ## Shortcut Hints (SH-1 … SH-7)
 
-Hintergrund: YAML-`shortcuts:` (z.B. `a: add`, `x: execute`,
-`Q: parent:edit_sql`) werden jetzt als Action-Bar- oder Status-Bar-Hints
-auf der gerade selektierten Zeile gerendert. Die Hints sind row-spezifisch
-und kommen aus dem `Node::actions()`-Lookup pro `node_id`, asynchron
-gefetcht und gecached. Race-frei via Cache-Key = `node_id`.
+Background: YAML `shortcuts:` (e.g. `a: add`, `x: execute`,
+`Q: parent:edit_sql`) are now rendered as action-bar or status-bar hints for
+the currently selected row. The hints are row-specific and come from the
+`Node::actions()` lookup per `node_id`, fetched asynchronously and cached. Free
+of races because the cache key is the `node_id`.
 
-### Smoke (Postgres — Datenbank-Subtab Tree-Mode)
+### Smoke (Postgres — database subtab in tree mode)
 
-- [ ] Postgres-Tab → Subtab `5` (Datenbank) → in Tree-Mode hoch- und
-      runter-cursorn. Cursor auf einer DB-Scripts-Gruppen-Row →
-      Action-Bar zeigt `a: add`.
-- [ ] Tree-expand der Scripts-Gruppe (`l`/`Enter`) → Cursor auf einer
-      einzelnen DB-Script-Leaf → Action-Bar zeigt `X: execute`,
-      `e: edit`, `d: delete` — `a: add` ist NICHT mehr sichtbar
-      (Leaf hat kein `add` in `actions()`).
-- [ ] Erster Cursor-Move auf neuer Zeile: Hints können kurz fehlen,
-      erscheinen sobald die Adapter-Antwort eintrifft (max. einige
-      ms). Beim zweiten Besuch derselben Zeile sofort da (Cache-Hit).
+- [ ] Postgres tab → subtab `5` (database) → move the cursor up and down in
+      tree mode. Cursor on a DB-scripts group row → the action bar shows
+      `a: add`.
+- [ ] Tree-expand the scripts group (`l`/`Enter`) → cursor on an individual
+      DB-script leaf → the action bar shows `X: execute`, `e: edit`,
+      `d: delete` — `a: add` is NOT visible any more (the leaf has no `add` in
+      `actions()`).
+- [ ] First cursor move onto a new row: the hints may be missing briefly and
+      appear as soon as the adapter response arrives (a few ms at most). On the
+      second visit to the same row they are there immediately (cache hit).
 
-### Smoke (Rows-View mit `parent:`-Shortcut)
+### Smoke (rows view with a `parent:` shortcut)
 
-- [ ] Postgres-Tab → Tabelle wählen → Rows-View öffnen. Action-Bar
-      zeigt `Q: edit sql` (aus dem ViewDef-Shortcut
-      `Q: parent:edit_sql`), aufgelöst über den Eltern-Table-Node.
-      Cursor in der Zeilen-Liste bewegen → der Hint bleibt stabil
-      (Target ist das Parent, nicht die aktuelle Row).
+- [ ] Postgres tab → pick a table → open the rows view. The action bar shows
+      `Q: edit sql` (from the ViewDef shortcut `Q: parent:edit_sql`), resolved
+      through the parent table node. Move the cursor within the row list → the
+      hint stays stable (the target is the parent, not the current row).
 
-### Smoke (Cache-Invalidation auf Reload)
+### Smoke (cache invalidation on reload)
 
-- [ ] Auf einer Row mit existierenden Hints (z.B. DB-Script-Leaf,
-      `x e d` sichtbar) → `r` (reload) → Liste wird neu geladen, Hints
-      werden für die nun selektierte Zeile neu gefetched und
-      erscheinen wieder.
+- [ ] On a row with existing hints (e.g. a DB-script leaf with `x e d` visible)
+      → `r` (reload) → the list is reloaded, the hints are fetched again for
+      the now-selected row and reappear.
 
-### Regression-Bait
+### Regression bait
 
-- [ ] Mehrfaches schnelles Hoch-/Runter-Cursorn auf verschiedenen
-      Rows: keine Duplikat-Fetches, keine stale Hints aus einer alten
-      Row (Cache key=node_id, Pending-Dedup).
-- [ ] Jira-Ticket-Liste: bewegt sich der Cursor zwischen Tickets, sind
-      die Shortcut-Hints der jeweiligen Row stets ihrer eigenen
-      `actions()` zugeordnet (kein Ticket zeigt die Hints des
-      Nachbar-Tickets).
+- [ ] Repeated fast cursor movement up and down across different rows: no
+      duplicate fetches, no stale hints from an older row (cache key =
+      `node_id`, pending requests deduplicated).
+- [ ] Jira issue list: as the cursor moves between issues, the shortcut hints
+      of each row always belong to that row's own `actions()` (no issue shows
+      its neighbour's hints).
 
-## EIP — Edit-in-Place für DB Scripts
+## EIP — edit-in-place for DB scripts
 
-ChildDef-Flag `editor_in_place: true` legt das Editor-Tempfile im
-Zielverzeichnis statt in `$TMPDIR` ab, damit LSPs (z. B.
-`postgres-language-server`) den Projektkontext finden.
+The ChildDef flag `editor_in_place: true` puts the editor's temp file into the
+target directory instead of `$TMPDIR`, so that language servers (e.g.
+`postgres-language-server`) find the project context.
 
-**Setup**: ein leeres oder beliebiges `postgres-language-server.jsonc`
-unter `<instance_data_dir>/db_scripts/<db>/` ablegen.
+**Setup**: place an empty or arbitrary `postgres-language-server.jsonc` under
+`<instance_data_dir>/db_scripts/<db>/`.
 
-- [ ] DB Scripts-Tree öffnen, mit `e` ein Skript editieren →
-      vim/$EDITOR-Statuszeile zeigt einen Pfad **innerhalb** des
-      `db_scripts/<db>/`-Verzeichnisses, prefix `.nyd_tmp_…`, suffix
-      `.sql` (kein `/tmp/…`).
-- [ ] Nach `:w` + `:q` ist das `.nyd_tmp_…`-Tempfile im Verzeichnis
-      gelöscht, das echte Skript trägt den geschriebenen Inhalt.
-- [ ] `postgres-language-server.jsonc` neben den Skripten wirkt auf
-      die Edit-Session (LSP-Diagnose / Hover, je nach Server-Setup).
-- [ ] Mit `editor_in_place: false` (oder Default) liegt das Tempfile
-      wieder in `/tmp/…`.
-- [ ] Ein `.py`/`.md`-Skript editieren: Tempfile-Suffix übernimmt die
-      reale Endung (`.nyd_tmp_xyz.py`), kein SQL-Template eingefügt.
-- [ ] TUI hart killen mitten in einer Edit-Session →
-      `.nyd_tmp_…`-Datei verbleibt im Verzeichnis (Prefix ist klar
-      als Junk erkennbar; manuell löschbar).
+- [ ] Open the DB scripts tree, edit a script with `e` → the vim/`$EDITOR`
+      status line shows a path **inside** the `db_scripts/<db>/` directory,
+      prefixed `.nyd_tmp_…` and suffixed `.sql` (not `/tmp/…`).
+- [ ] After `:w` and `:q` the `.nyd_tmp_…` temp file in the directory is gone
+      and the real script carries the written content.
+- [ ] The `postgres-language-server.jsonc` next to the scripts takes effect for
+      the edit session (LSP diagnostics / hover, depending on the server
+      setup).
+- [ ] With `editor_in_place: false` (or the default) the temp file lands in
+      `/tmp/…` again.
+- [ ] Edit a `.py` or `.md` script: the temp-file suffix picks up the real
+      extension (`.nyd_tmp_xyz.py`), no SQL template is inserted.
+- [ ] Kill the TUI hard in the middle of an edit session → the `.nyd_tmp_…`
+      file stays behind in the directory (the prefix marks it clearly as junk;
+      it can be removed by hand).
 
-## AE — Adapter Child-Process Environment
+## AE — adapter child-process environment
 
-Trait `ContentAdapter::child_process_env(node) -> HashMap<String,String>`
-wird beim Spawn von Editor- und Skript-Kindprozessen abgefragt; die TUI
-gibt den Inhalt opak per `Command::envs(...)` weiter. Postgres-Adapter
-liefert `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`/`PGSSLMODE`.
+The trait method `ContentAdapter::child_process_env(node) -> HashMap<String,String>`
+is queried when editor and script child processes are spawned; the TUI passes
+the content on opaquely via `Command::envs(...)`. The Postgres adapter supplies
+`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` and `PGSSLMODE`.
 
-**Setup**: aktiver Postgres-Adapter mit `manual_connect: false` (auto-
-warmup), `transport.mode: ssh_tunnel` ist der interessante Fall. Im
-nvim `postgres_lsp` aktiv via `:LspInfo`. Die jsonc neben den Skripten
-darf nur die Schema-Zeile enthalten — alle `db`-Keys raus.
+**Setup**: an active Postgres adapter with `manual_connect: false` (auto
+warm-up); `transport.mode: ssh_tunnel` is the interesting case. In nvim,
+`postgres_lsp` active according to `:LspInfo`. The jsonc next to the scripts
+may only contain the schema line — remove all `db` keys.
 
-- [ ] Auf einem `postgres:db_script` Node `e` (Edit) — nvim öffnet den
-      Buffer in `db_scripts/<db>/`, `postgres-language-server` startet
-      sauber (Logs: kein „pool timed out").
-- [ ] Im Buffer `SELECT * FROM ` tippen → Completion-Popup mit den
-      realen Tabellen/Spalten der DB der NodeRef. Vorher/nachher
-      vergleichen: ohne Adapter-Env (z. B. `disableConnection: true`
-      in der jsonc) liefert v0.25 0 Items.
-- [ ] In einem Shell-Term im editor: `env | grep ^PG` zeigt die fünf+
-      Variablen (Wert von `PGPASSWORD` nicht in den Repo paste!).
-- [ ] Adapter offline (Status-Bar `Disconnected`): `e` öffnet trotzdem,
-      LSP startet ohne DB-Connection und zeigt 0 Completions (graceful,
-      keine Fehlermeldung).
-- [ ] `:script` im Postgres-Tab auf einem Tabellen-Knoten ausführen:
-      `python3 - <<'PY' …` kann `os.environ["PGPASSWORD"]` lesen
-      (z. B. Skript schreibt nach `$NYD_OUTPUT_FILE` eine Liste der
-      `PG*`-Variablen). `NYD_OUTPUT_FILE` darf von Adapter-Env nicht
-      überschrieben werden — Adapter-`PGFOO` kommt vor `NYD_*`.
-- [ ] `:script` im Tasks-Tab: empty env, kein `PG*` (no regression —
-      Tasks-Skripte sehen weiterhin nur die alten Variablen).
-- [ ] `:script` im Trackings-Tab: gleich, empty env.
-- [ ] Tunnel manuell killen (auf der SSH-Bastion), in der TUI eine
-      Query absetzen → tear_down + reconnect; nächster Editor-Start
-      auf einem DB-Script hat `PGPORT` mit dem neuen lokalen Port,
-      nicht dem alten.
+- [ ] Press `e` (edit) on a `postgres:db_script` node — nvim opens the buffer
+      in `db_scripts/<db>/` and `postgres-language-server` starts cleanly (in
+      the logs: no "pool timed out").
+- [ ] Type `SELECT * FROM ` in the buffer → a completion popup with the real
+      tables and columns of the NodeRef's database. Compare before and after:
+      without the adapter env (e.g. `disableConnection: true` in the jsonc)
+      v0.25 returns 0 items.
+- [ ] In a shell terminal inside the editor: `env | grep ^PG` shows the five
+      or more variables (do not paste the value of `PGPASSWORD` into the
+      repo!).
+- [ ] Adapter offline (status bar `Disconnected`): `e` still opens, the LSP
+      starts without a DB connection and offers 0 completions (gracefully, no
+      error message).
+- [ ] Run `:script` on a table node in the Postgres tab: a `python3` heredoc
+      can read `os.environ["PGPASSWORD"]` (e.g. the script writes a list of the
+      `PG*` variables to `$NYD_OUTPUT_FILE`). The adapter env must not
+      overwrite `NYD_OUTPUT_FILE` — the adapter's `PG*` variables are applied
+      before the `NYD_*` ones.
+- [ ] `:script` in the Tasks tab: empty env, no `PG*` (no regression — task
+      scripts still see only the old variables).
+- [ ] `:script` in the Trackings tab: the same, empty env.
+- [ ] Kill the tunnel by hand (on the SSH bastion) and issue a query in the TUI
+      → tear-down plus reconnect; the next editor start on a DB script has
+      `PGPORT` set to the new local port, not the old one.
 
 ## Confluence-Adapter (CF-3 … CF-16)
 
