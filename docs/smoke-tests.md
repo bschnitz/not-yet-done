@@ -2542,387 +2542,371 @@ may only contain the schema line — remove all `db` keys.
       → tear-down plus reconnect; the next editor start on a DB script has
       `PGPORT` set to the new local port, not the old one.
 
-## Confluence-Adapter (CF-3 … CF-16)
+## Confluence adapter (CF-3 … CF-16)
 
-Hintergrund: Confluence-Server/DC-Adapter spiegelt die Jira-/Taiga-
-Architektur — `confluence:space` als Root, `confluence:page` rekursiv
-darunter, plus `confluence:attachment` und `confluence:comment` als
-Leaf-Branches an jeder Seite. Alle Aktionen werden über das
-adapterseitige `actions_for_type` gebunden, die View-YAML-Einträge
-sind Dokumentation.
+Background: the Confluence Server/DC adapter mirrors the Jira and Taiga
+architecture — `confluence:space` as the root, `confluence:page` recursively
+below it, plus `confluence:attachment` and `confluence:comment` as leaf
+branches on every page. All actions are bound through the adapter-side
+`actions_for_type`; the view YAML entries are documentation.
 
 ### Setup
 
-- `~/.config/not_yet_done/views/confluence-adapter.yaml` mit Cookie-
-  Skript-Pfad (`auth.bindings[].provider.script`). Skript schreibt
-  eine Zeile `JSESSIONID=...; crowd.token_key=...; atlassian.xsrf.token=...`
-  auf stdout.
-- `~/.config/not_yet_done/views/confluence.yaml` (Beispiel:
+- `~/.config/not_yet_done/views/confluence-adapter.yaml` with the path to the
+  cookie script (`auth.bindings[].provider.script`). The script writes a single
+  line `JSESSIONID=...; crowd.token_key=...; atlassian.xsrf.token=...` to
+  stdout.
+- `~/.config/not_yet_done/views/confluence.yaml` (example:
   [`docs/examples/views/confluence.yaml`](examples/views/confluence.yaml)).
-- Saved-Queries-Verzeichnis:
-  `<XDG_DATA_HOME>/not_yet_done/confluence/<instance_id>/queries/`.
-  Optionaler Seed:
+- Saved-queries directory:
+  `<XDG_DATA_HOME>/not_yet_done/confluence/<instance_id>/queries/`. Optional
+  seed:
   [`docs/examples/views/saved/confluence/recent-pages.yaml`](examples/views/saved/confluence/recent-pages.yaml).
-- TUI starten → Tab `Confluence` (Default-Sub-Tab `spaces`); per
-  `manual_connect: true` lädt nichts automatisch, `r` triggert den
-  ersten Fetch.
+- Start the TUI → tab `Confluence` (default subtab `spaces`); with
+  `manual_connect: true` nothing loads automatically, `r` triggers the first
+  fetch.
 
-### CF-3 — Spaces
+### CF-3 — spaces
 
-- [ ] `r` auf `spaces` → Liste aller Spaces; `Key`/`Name`/`Type`
-      Spalten gefüllt; Cursor-Navigation `j`/`k` funktioniert.
-- [ ] `f`-Fuzzy- und `/`-Search-Aktionen filtern auf `Key`+`Name`.
-- [ ] `o` auf einem Space-Row öffnet den Space im Browser (webui).
+- [ ] `r` on `spaces` → a list of all spaces; the `Key`, `Name` and `Type`
+      columns are filled; cursor navigation with `j`/`k` works.
+- [ ] The `f` fuzzy and `/` search actions filter on `Key` and `Name`.
+- [ ] `o` on a space row opens the space in the browser (webui).
 
-### CF-4 — Pages (rekursiv)
+### CF-4 — pages (recursive)
 
-- [ ] Auf einer Space-Row Enter → Top-Level-Pages werden inline
-      expandiert; Tree-Marker (`▼`/`▶`) sichtbar.
-- [ ] Auf einer Page-Row Enter → Kindseiten + Attachments + Comments
-      als drei Branches erscheinen.
-- [ ] Tief drillen (3+ Ebenen) bleibt konsistent — gleicher
-      rekursiver `ChildDef` an jedem Level.
+- [ ] Enter on a space row → the top-level pages expand inline; the tree
+      markers (`▼`/`▶`) are visible.
+- [ ] Enter on a page row → child pages, attachments and comments appear as
+      three branches.
+- [ ] Drilling deep (3+ levels) stays consistent — the same recursive
+      `ChildDef` at every level.
 
-### CF-5 — Preview Pane (body.storage)
+### CF-5 — preview pane (body.storage)
 
-- [ ] Auf einer Page-Row `p` → Preview-Pane erscheint horizontal
-      gesplittet (50/50), zeigt `body.storage` (XHTML).
-- [ ] Erste `p`-Toggle: spürbare Latenz (lazy-fetch
-      `GET /content/{id}?expand=body.storage,...`); zweite Toggle:
-      sofort (Cache).
-- [ ] `p` erneut → Preview schließt.
+- [ ] `p` on a page row → the preview pane appears in a horizontal split
+      (50/50) and shows `body.storage` (XHTML).
+- [ ] First `p` toggle: noticeable latency (lazy fetch of
+      `GET /content/{id}?expand=body.storage,...`); second toggle: instant
+      (cache).
+- [ ] `p` again → the preview closes.
 
-### CF-6 — Attachments
+### CF-6 — attachments
 
-- [ ] Page drillen → `attachments`-Branch zeigt Dateiname, Author,
-      Size, Mime-Type, Created.
-- [ ] `d` auf einem Attachment → Download in Tempdir + `xdg-open`
-      öffnet die Datei.
-- [ ] Zweiter `d` auf demselben Attachment: kein erneuter Fetch
-      (cached-by-id), öffnet sofort.
+- [ ] Drill into a page → the `attachments` branch shows file name, author,
+      size, MIME type and creation date.
+- [ ] `d` on an attachment → download into a temp dir plus `xdg-open` opens the
+      file.
+- [ ] A second `d` on the same attachment: no re-fetch (cached by id), opens
+      immediately.
 
-### CF-7 — Comments (read-only)
+### CF-7 — comments (read-only)
 
-- [ ] `comments`-Branch zeigt Author, Created, Body-Auszug.
-- [ ] `p` toggelt Body-Preview; **kein** zweiter HTTP-Call (Body
-      ridet auf `list_comments` mit `expand=body.storage,version`).
+- [ ] The `comments` branch shows author, creation date and a body excerpt.
+- [ ] `p` toggles the body preview; **no** second HTTP call (the body rides
+      along on `list_comments` with `expand=body.storage,version`).
 
-### CF-8 — CQL Search
+### CF-8 — CQL search
 
-- [ ] Sub-Tab `search` öffnen → Default-CQL aus YAML
-      (`type = page AND lastModified > now("-7d") ...`) zeigt
-      Treffer.
-- [ ] `q` öffnet Saved-Queries-Menu; Seed `recent-pages` taucht auf.
-      Enter applied; `Ctrl+f` bindet Chord-Shortcut (persistiert in
+- [ ] Open the `search` subtab → the default CQL from the YAML
+      (`type = page AND lastModified > now("-7d") ...`) shows hits.
+- [ ] `q` opens the saved-queries menu; the `recent-pages` seed shows up. Enter
+      applies it; `Ctrl+f` binds a chord shortcut (persisted in
       `query_shortcut`).
-- [ ] `:query new <name>` → Editor öffnet; CQL eintippen, speichern
-      → erscheint im `q`-Menu.
-- [ ] `:query delete <name>` entfernt Datei + DB-Shortcut.
-- [ ] Drilldown auf einem Search-Treffer öffnet die gleichen drei
-      Branches (pages / attachments / comments) wie via `spaces`.
+- [ ] `:query new <name>` → the editor opens; type CQL, save → it appears in
+      the `q` menu.
+- [ ] `:query delete <name>` removes both the file and the DB shortcut.
+- [ ] Drilling into a search hit opens the same three branches (pages,
+      attachments, comments) as via `spaces`.
 
-### CF-9 — Edit Page + 3-Way Merge
+### CF-9 — edit page plus 3-way merge
 
-- [ ] `e` auf einer Page → `$EDITOR` öffnet mit `title: <echter
-Titel>` auf Zeile 1 (nicht die Page-Id!), Leerzeile, dann
+- [ ] `e` on a page → `$EDITOR` opens with a `title:` header carrying the
+      **real title** on line 1 (not the page id!), a blank line, then the
       pretty-printed `body.storage` (xmllint).
-- [ ] Body trivial ändern (z.B. neuen Absatz einfügen), speichern,
-      Editor schließen → `Updated page <Title> (v <n+1>)` Banner.
-- [ ] **Tree-Zeile nach Save** zeigt weiterhin den **echten Titel**,
-      nicht die Page-Id (Regression-Guard: der Post-Edit-Row-Patch
-      re-resolved die Zeile via `get_by_id`, dessen Stub den Titel auf
-      die Id setzte → Zeile zeigte die Id bis zum nächsten vollen
-      Tree-Reload; `get_by_id` hydriert den Titel jetzt vom Server).
-- [ ] Confluence-Web: neue Version erscheint, Body korrekt, **Titel
-      unverändert** (Regression-Guard: früher schrieb ein body-only
-      Edit die Page-Id als neuen Titel zurück).
-- [ ] **Rename**: nur die `title:`-Zeile ändern, Body gleich lassen,
-      speichern → Page heißt im Confluence-Web neu; keine NoChanges-
-      Kurzschluss.
-- [ ] **Disjoint-Merge**: vor Editor-Save in Confluence-Web die
-      Page upstream ändern (eine andere Stelle als die Edits im
-      Buffer). Speichern → 409 → auto-merge → `Merged on top of
-v<m>` Banner; beide Änderungen sind in der Final-Version.
-- [ ] **Conflict-Merge**: vor Save dieselbe Stelle upstream
-      ändern. Speichern → 409 → Buffer reopent mit
-      `<<<<<<< ours` / `>>>>>>> theirs` Markern + Banner
-      `Merge conflict — resolve and save again`. Marker manuell
-      auflösen, Save → Update geht durch.
-- [ ] Parse-Error im Buffer (z.B. Title-Zeile löschen) → Reopen
-      mit Error-Banner, kein PUT.
+- [ ] Change the body trivially (e.g. insert a new paragraph), save, close the
+      editor → banner `Updated page <Title> (v <n+1>)`.
+- [ ] **The tree row after saving** still shows the **real title**, not the
+      page id (regression guard: the post-edit row patch re-resolved the row
+      via `get_by_id`, whose stub set the title to the id → the row showed the
+      id until the next full tree reload; `get_by_id` now hydrates the title
+      from the server).
+- [ ] Confluence web: the new version appears, the body is correct, the
+      **title is unchanged** (regression guard: a body-only edit used to write
+      the page id back as the new title).
+- [ ] **Rename**: change only the `title:` line, leave the body as it is, save
+      → the page has the new name in the Confluence web UI; no no-changes
+      short-circuit.
+- [ ] **Disjoint merge**: before saving in the editor, change the page upstream
+      in the Confluence web UI (a different spot than the edits in the buffer).
+      Save → 409 → auto-merge → a banner reporting that the change was merged
+      on top of version `<m>`; both changes are in the final version.
+- [ ] **Conflicting merge**: change the same spot upstream before saving. Save
+      → 409 → the buffer reopens with `<<<<<<< ours` / `>>>>>>> theirs` markers
+      plus the banner `Merge conflict — resolve and save again`. Resolve the
+      markers by hand, save → the update goes through.
+- [ ] Parse error in the buffer (e.g. delete the title line) → reopen with an
+      error banner, no PUT.
 
-### CF-10 — Create Page
+### CF-10 — create page
 
-- [ ] `a` auf einer Space-Row → Editor mit `title:`-Header + leerem
-      `<p></p>`-Body. Title setzen, Save → neue Top-Level-Page in
-      diesem Space (Banner mit neuer ID); Reload zeigt sie unter
-      dem Space.
-- [ ] `a` auf einer Page-Row → analog, neue Kindseite unter dieser
-      Page (Reload zeigt sie als Child).
-- [ ] Title leer lassen → Reopen mit Parse-Error.
+- [ ] `a` on a space row → an editor with a `title:` header and an empty
+      `<p></p>` body. Set the title, save → a new top-level page in this space
+      (banner with the new id); a reload shows it under the space.
+- [ ] `a` on a page row → the same, a new child page below this page (a reload
+      shows it as a child).
+- [ ] Leave the title empty → reopen with a parse error.
 
-### CF-11 — Delete Page (Trash)
+### CF-11 — delete page (trash)
 
-- [ ] `Shift+D` auf einer Page → Confirm-Popup
-      `Delete '<title>'? y/n` (oder Enter/Esc).
-- [ ] `y`/Enter → Page verschwindet aus Liste; Confluence-Web Trash
-      enthält sie; Restore aus Web-UI funktioniert.
-- [ ] `n`/Esc → Page bleibt; kein Request gefeuert.
+- [ ] `Shift+D` on a page → confirmation popup `Delete '<title>'? y/n` (or
+      Enter/Esc).
+- [ ] `y`/Enter → the page disappears from the list; the Confluence web trash
+      contains it; restoring from the web UI works.
+- [ ] `n`/Esc → the page stays; no request is fired.
 
-### CF-12 — Comments CRUD
+### CF-12 — comments CRUD
 
-- [ ] `c` auf einer Page → leerer XHTML-Editor; Body eingeben, Save
-      → neuer Comment erscheint im `comments`-Branch (Reload
-      erzwingen via `r` auf der Page).
-- [ ] `e` auf einem Comment → Buffer mit Body, modifizieren,
-      speichern → Banner `Updated comment`; Body neu im Listing.
-- [ ] **Comment-409**: parallel auf dem Web denselben Comment
-      editieren → Reopen mit Error-Banner (kein 3-way merge — manuell
-      neu schreiben + speichern).
-- [ ] `Shift+D` auf einem Comment → generisches `ConfirmDeleteContentNode`
-      Popup → Enter löscht; Comment verschwindet.
+- [ ] `c` on a page → an empty XHTML editor; enter a body, save → the new
+      comment appears in the `comments` branch (force a reload with `r` on the
+      page).
+- [ ] `e` on a comment → a buffer with the body, modify it, save → banner
+      `Updated comment`; the body is updated in the listing.
+- [ ] **Comment 409**: edit the same comment in the web UI in parallel → reopen
+      with an error banner (no 3-way merge — rewrite by hand and save again).
+- [ ] `Shift+D` on a comment → the generic `ConfirmDeleteContentNode` popup →
+      Enter deletes; the comment disappears.
 
-### CF-13 — Attachment-Upload
+### CF-13 — attachment upload
 
-- [ ] `Shift+A` auf einer Page → FilePicker öffnet sich.
-- [ ] Multi-Select: 2–3 kleine Test-Dateien wählen (invented data,
-      keine echten Kunden-Files!) → Save → Banner
-      `Uploaded N attachment(s) to page <Title>`.
-- [ ] `attachments`-Branch der Page (nach `r`) listet alle
-      hochgeladenen Files; `d` öffnet sie korrekt.
-- [ ] Eine unlesbare Datei + eine lesbare auswählen → Error-Banner
-      benennt explizit den fehlgeschlagenen Pfad; lesbare Datei
-      trotzdem hochgeladen (`uploaded 1/2; failures: ...`).
+- [ ] `Shift+A` on a page → the file picker opens.
+- [ ] Multi-select: pick 2–3 small test files (invented data, no real customer
+      files!) → save → banner `Uploaded N attachment(s) to page <Title>`.
+- [ ] The page's `attachments` branch (after `r`) lists all uploaded files; `d`
+      opens them correctly.
+- [ ] Select one unreadable and one readable file → the error banner names the
+      failing path explicitly; the readable file is uploaded anyway
+      (`uploaded 1/2; failures: ...`).
 
-### CF-14 — Clone Page
+### CF-14 — clone page
 
-- [ ] `y` auf einer Page → Editor öffnet mit `title: <Original> (Clone)` + pretty-printed Body.
-- [ ] Save ohne Änderung → neue Page unter demselben Parent
-      (oder als Top-Level, wenn Quelle Top-Level war) im selben
-      Space; Banner `Cloned page <orig> → <new> (id ...)`.
-- [ ] Title-Suffix-Stacking: `y` auf der gerade geklonten Page →
-      Title bleibt `<Original> (Clone)` (kein doppeltes Suffix).
-- [ ] Body editieren vor Save → neue Page hat den editierten Body,
-      nicht den Original-Body.
-- [ ] Parse-Error (Title-Zeile löschen) → Reopen mit Banner; kein
-      POST gefeuert.
+- [ ] `y` on a page → the editor opens with the title set to the original
+      followed by `(Clone)`, plus the pretty-printed body.
+- [ ] Save without changing anything → a new page under the same parent (or as
+      a top-level page, if the source was top-level) in the same space; banner
+      `Cloned page <orig> → <new> (id ...)`.
+- [ ] Title suffix stacking: `y` on the page just cloned → the title keeps the
+      single `(Clone)` suffix (no doubled suffix).
+- [ ] Edit the body before saving → the new page carries the edited body, not
+      the original one.
+- [ ] Parse error (delete the title line) → reopen with a banner; no POST is
+      fired.
 
-### CF-Bugfix 2026-06-02 — Pages-in-Space rendern leer (tree_label-Alignment)
+### CF bugfix 2026-06-02 — pages in a space render empty (tree_label alignment)
 
-Symptom: eine `tree_label: name`-Space aufgeklappt → ~50 leere Zeilen unter der Space-
-Zeile, obwohl der `/content/page`-Response volle `title`-Felder
-liefert. Root-Cause: der Tree-Renderer (`content_view.rs::build_tree_data_rows`)
-malt für jede Zeile nur dann die Label-Zelle, wenn die `tree_label`
-des Zeilen-Levels mit einem `col.key` der **aktiven** Spaltenmenge
-übereinstimmt — und zeigt für non-active-depth Zeilen sonst alle
-Zellen leer an. Space-Level hatte `tree_label: name`, Page-Level
-`tree_label: title` → keine Übereinstimmung → Page-Zeilen leer.
+Symptom: expanding a space with `tree_label: name` → ~50 empty rows below the
+space row, even though the `/content/page` response carries full `title`
+fields. Root cause: the tree renderer
+(`content_view.rs::build_tree_data_rows`) only paints the label cell for a row
+when that row level's `tree_label` matches a `col.key` of the **active** column
+set — and otherwise leaves every cell of a non-active-depth row empty. The
+space level had `tree_label: name`, the page level `tree_label: title` → no
+match → empty page rows.
 
-Fix: Page-Level in `confluence.yaml` (User-Config + Repo-Example) auf
-`tree_label: name` umgestellt; Page-Column `key: title` → `key: name`
-(Display-Header bleibt "Title" via `label:`). 115 Tests grün.
+Fix: the page level in `confluence.yaml` (user config and repo example) was
+switched to `tree_label: name`, and the page column `key: title` became
+`key: name` (the display header stays "Title" via `label:`). 115 tests green.
 
-- [ ] Space-Whitelist aktiv mit zwei realen Keys (s. user-config),
-      Cursor auf der ersten Space-Zeile lassen, `o` zum Expand →
-      Pages erscheinen mit korrekten Titeln (nicht leer).
-- [ ] Cursor auf eine Page-Zeile bewegen → active_depth=1, Header
-      wechselt auf "Title | ID", andere Spaces zeigen leer (by design,
-      siehe Konvention).
-- [ ] Recursive: in eine Page mit Sub-Pages drillen → Sub-Pages
-      ebenfalls korrekt benannt (kein Regress gegen die rekursive
-      ChildDef).
+- [ ] Space whitelist active with two real keys (see the user config), leave
+      the cursor on the first space row, `o` to expand → the pages appear with
+      correct titles (not empty).
+- [ ] Move the cursor onto a page row → `active_depth=1`, the header switches
+      to "Title | ID", other spaces show empty (by design, see the
+      convention).
+- [ ] Recursive: drill into a page that has sub-pages → the sub-pages are named
+      correctly as well (no regression against the recursive ChildDef).
 
-### CF-Bugfix 2026-06-02 — Spaces zeigen alle Pages statt Top-Level
+### CF bugfix 2026-06-02 — spaces show all pages instead of the top level
 
-Symptom: eine Space aufgeklappt → ~50 Pages der gesamten Space, statt
-nur der direkten Children des Space-Homepages wie im Confluence
-"Tree browser" der Web-UI sichtbar. Root-Cause:
-`/rest/api/space/{KEY}/content/page` liefert per Default `depth=all`,
-also _jede_ Page der Space — nicht die Tree-Browser-Liste.
+Symptom: expanding a space → ~50 pages from the whole space instead of only the
+direct children of the space homepage as shown in the Confluence "tree browser"
+of the web UI. Root cause: `/rest/api/space/{KEY}/content/page` defaults to
+`depth=all`, i.e. _every_ page in the space — not the tree-browser list.
 
-Fix: `/rest/api/space?expand=homepage` zieht jetzt die Homepage-Id
-pro Space mit, `SpaceMeta::homepage_id` speichert sie. Beim Expand
-einer Space ruft der Adapter `list_child_pages(homepage_id, ...)`
-statt `list_top_pages(space_key, ...)`. Lookup-Pfad
-(`get_by_id`-Synthesizer) fetcht `/space/{KEY}?expand=homepage`
-lazy beim ersten `list()` via `OnceCell`. Wenn Confluence keine
-Homepage exponiert (legacy/restricted), liefert die Listing-API
-eine leere Page-Liste statt zurück auf alle-Pages-Fallback.
+Fix: `/rest/api/space?expand=homepage` now pulls the homepage id along per
+space and `SpaceMeta::homepage_id` stores it. When a space is expanded the
+adapter calls `list_child_pages(homepage_id, ...)` instead of
+`list_top_pages(space_key, ...)`. The lookup path (the `get_by_id` synthesizer)
+fetches `/space/{KEY}?expand=homepage` lazily on the first `list()` via a
+`OnceCell`. If Confluence exposes no homepage (legacy or restricted), the
+listing API returns an empty page list rather than falling back to all pages.
 
-- [ ] Space-Whitelist aktiv, eine bekannte Space mit Tree-Browser-
-      Seitenleiste im Web-Confluence öffnen → Anzahl + Titel der
-      sichtbaren Pages dort gegen die Expand-Liste in der TUI
-      vergleichen (sollten 1:1 matchen, Reihenfolge `position`).
-- [ ] Reload (`r`) auf eine Space-Zeile → Pages erscheinen weiter
-      korrekt (Cache-Pfad).
-- [ ] Direkter Lookup-Pfad: nach `:focus-node` oder Cross-Tab-Link
-      auf eine Space → erste Expand hängt nicht (OnceCell fetcht
-      Homepage transparent), Pages-Liste matcht Web-UI.
+- [ ] Space whitelist active; open a known space with the tree-browser sidebar
+      in the Confluence web UI → compare the number and titles of the pages
+      visible there against the expanded list in the TUI (they should match
+      1:1, ordered by `position`).
+- [ ] Reload (`r`) on a space row → the pages still appear correctly (cache
+      path).
+- [ ] Direct lookup path: after `:focus-node` or a cross-tab link onto a space
+      → the first expand does not hang (the `OnceCell` fetches the homepage
+      transparently), the page list matches the web UI.
 
-### CF-Bugfix 2026-06-02 — Column-Reihenfolge: Tree-Spalte zuerst
+### CF bugfix 2026-06-02 — column order: the tree column comes first
 
-YAML-Reorder in `spaces`-View: `name` (tree-label) jetzt vorne,
-`key` und `type` trailing. Konvention für tree-mode Views: die
-Tree-tragende Spalte gehört an Position 1, sonst kommt der
-Tree-Indent erst nach den schmalen Trailing-Spalten.
+YAML reorder in the `spaces` view: `name` (the tree label) now comes first,
+`key` and `type` trail it. Convention for tree-mode views: the column carrying
+the tree belongs at position 1, otherwise the tree indent only starts after the
+narrow trailing columns.
 
-- [ ] Spaces-Subtab zeigt links zuerst den Tree-Indent + Space-Name,
-      rechts daneben `Key` und `Type`.
+- [ ] The spaces subtab shows the tree indent and the space name first on the
+      left, with `Key` and `Type` to their right.
 
-### CF-16 — Spaces-Whitelist (`space_keys`)
+### CF-16 — spaces whitelist (`space_keys`)
 
-- [ ] `confluence-adapter.yaml` ohne `space_keys:` → spaces sub-tab
-      listet wie früher alle lesbaren Spaces (Regression-Check).
-- [ ] `space_keys: [BBB, AAA]` mit zwei realen Keys, die _nicht_
-      alphabetisch sortiert die gewünschte UI-Reihenfolge sind →
-      spaces sub-tab zeigt nur BBB und AAA, in genau dieser
-      Reihenfolge (BBB zuerst).
-- [ ] `space_keys: [GOOD, NOPE_TYPO]` → spaces sub-tab zeigt nur
-      GOOD; kein Error-Banner, kein Crash. (silent-drop verifiziert)
-- [ ] Mit `space_keys:` gesetzt: `r` (reload) im spaces sub-tab →
-      keine Pagination-Affordanzen sichtbar (kein `has_next`),
-      Listing zeigt nur die whitelist-Spaces.
-- [ ] Drill-down in eine whitelisted Space → Pages/Attachments/
-      Comments funktionieren wie ohne whitelist (Recursive ChildDef
-      ist unbetroffen).
+- [ ] `confluence-adapter.yaml` without `space_keys:` → the spaces subtab lists
+      every readable space as before (regression check).
+- [ ] `space_keys: [BBB, AAA]` with two real keys whose desired UI order is
+      **not** alphabetical → the spaces subtab shows only BBB and AAA, in
+      exactly that order (BBB first).
+- [ ] `space_keys: [GOOD, NOPE_TYPO]` → the spaces subtab shows only GOOD; no
+      error banner, no crash (silent drop verified).
+- [ ] With `space_keys:` set: `r` (reload) in the spaces subtab → no pagination
+      affordances are visible (no `has_next`), the listing shows only the
+      whitelisted spaces.
+- [ ] Drill down into a whitelisted space → pages, attachments and comments
+      work just as they do without the whitelist (the recursive ChildDef is
+      unaffected).
 
-### CT-1..CT-11 — Tree-Find (spaces-tab `/`)
+### CT-1..CT-11 — tree find (`/` in the spaces tab)
 
-Voraussetzung: Spaces sub-tab geladen mit ≥2 Spaces, in denen
-mehrere Pages liegen (mindestens eine mit ≥2 Verschachtelungstiefe).
-Wenn `space_keys:` gesetzt: nur whitelisted Spaces dürfen auftauchen.
+Prerequisite: the spaces subtab loaded with ≥2 spaces holding several pages
+(at least one of them nested ≥2 levels deep). With `space_keys:` set, only
+whitelisted spaces may show up.
 
-- [ ] `/` öffnet die Eingabezeile mit Prompt "Search pages" und
-      `?`-Prefix. Tippen ändert die Anzeige nicht (kein
-      Local-Filter).
-- [ ] Enter mit nicht-trivialem Begriff → Toast
-      `Tree find "q": N hits — n/N to navigate`. Status-Bar zeigt
+- [ ] `/` opens the input line with the prompt "Search pages" and a `?` prefix.
+      Typing does not change the display (no local filter).
+- [ ] Enter with a non-trivial term → toast
+      `Tree find "q": N hits — n/N to navigate`. The status bar shows
       `n/N  Tree find "q": 1/N`.
-- [ ] Tree expandiert automatisch bis zum ersten Hit, Cursor sitzt
-      darauf.
-- [ ] `n` springt zum nächsten Hit in Baum-Reihenfolge (gleicher
-      Space zuerst, dann nächster YAML-Space-Eintrag); Vorfahren
-      werden lazy nachgeladen wenn nötig (kurzes Flackern okay).
-- [ ] `N` springt zurück (wrap-around am Anfang/Ende).
-- [ ] Status-Bar-Counter aktualisiert sich bei jedem Sprung
-      (`1/47`, `2/47`, …).
-- [ ] Wenn der Server mehr Treffer hat als der Cap (100), zeigt der
-      Counter `, truncated` an und das Toast meldet `truncated`.
-- [ ] Esc auf der leeren Eingabezeile schließt sie ohne Cache.
-- [ ] Esc auf gefüllter Eingabezeile vor Enter: löscht den Cache
-      (n/N fällt zurück auf Local-/).
-- [ ] `r` (reload) löscht den Tree-Find-Cache. Status-Bar-Hint
-      verschwindet, n/N wieder Local-/.
-- [ ] Erneutes `/` mit anderer Query: alter Cache weg, neuer Such-
-      vorgang startet sauber (kein Mix von alten + neuen Hits).
-- [ ] Mit `space_keys:` gesetzt: tree_find findet keine Pages aus
-      whitelisted-out Spaces (Server filtert via `space in (...)`
-      injection).
-- [ ] Während ein Tree-Find aktiv ist, weiterhin manuelles
-      Expandieren/Kollabieren in Spaces möglich; Cache überlebt
-      diese UI-Interaktionen.
-- [ ] `f` (lokaler fuzzy_filter) ist unverändert und filtert nur
-      die bereits sichtbaren Space-Zeilen (nicht Pages).
+- [ ] The tree expands automatically down to the first hit, with the cursor on
+      it.
+- [ ] `n` jumps to the next hit in tree order (the same space first, then the
+      next space entry from the YAML); ancestors are loaded lazily when needed
+      (a brief flicker is fine).
+- [ ] `N` jumps back (wrapping around at the start and the end).
+- [ ] The status-bar counter updates on every jump (`1/47`, `2/47`, …).
+- [ ] When the server has more hits than the cap (100), the counter shows
+      `, truncated` and the toast reports `truncated`.
+- [ ] Esc on the empty input line closes it without a cache.
+- [ ] Esc on a filled input line before Enter: clears the cache (n/N falls back
+      to the local `/`).
+- [ ] `r` (reload) clears the tree-find cache. The status-bar hint disappears,
+      n/N is the local `/` again.
+- [ ] Another `/` with a different query: the old cache is gone and the new
+      search starts cleanly (no mix of old and new hits).
+- [ ] With `space_keys:` set: tree find finds no pages from whitelisted-out
+      spaces (the server filters via an injected `space in (...)`).
+- [ ] While a tree find is active, manual expanding and collapsing in spaces is
+      still possible; the cache survives those UI interactions.
+- [ ] `f` (the local `fuzzy_filter`) is unchanged and filters only the already
+      visible space rows (not pages).
 
-### CT-12 — SpaceNode → top-level pages (statt Homepage-Kinder)
+### CT-12 — SpaceNode → top-level pages (instead of homepage children)
 
-Voraussetzung: Spaces sub-tab mit ≥1 Space, dessen Homepage und/oder
-Top-Level-Pages mehrere Verschachtelungsebenen haben.
+Prerequisite: the spaces subtab with ≥1 space whose homepage and/or top-level
+pages are nested several levels deep.
 
-- [ ] Drill in einen Space → Level 1 zeigt nicht mehr nur die
-      Homepage-Kinder, sondern alle Top-Level-Pages des Space
-      (inklusive der Homepage selbst).
-- [ ] Tree-Find (`/`) auf eine Page, die ≥2 Ebenen unter der
-      Homepage liegt → expandiert sauber bis zur Page (kein
-      `Tree find: Hit's ancestor '…' at depth 1 not in loaded
-children` mehr).
-- [ ] Page mit `o` (open-in-browser) auf Homepage-Zeile öffnet die
-      Homepage-URL.
-- [ ] `a` auf Space-Zeile erstellt weiterhin eine top-level Page;
-      `a` auf Homepage-Zeile erstellt ein Child unter der Homepage
-      (= bisheriges Verhalten, unverändert).
-- [ ] Spaces ohne erkennbare Top-Level-Pages (Edge-Case) liefern
-      eine leere Liste statt eines Errors.
+- [ ] Drill into a space → level 1 no longer shows just the homepage children
+      but all top-level pages of the space (including the homepage itself).
+- [ ] Tree find (`/`) for a page ≥2 levels below the homepage → expands cleanly
+      down to the page (no more complaint that the hit's ancestor at depth 1 is
+      not among the loaded children).
+- [ ] `o` (open in browser) on the homepage row opens the homepage URL.
+- [ ] `a` on a space row still creates a top-level page; `a` on the homepage
+      row creates a child below the homepage (the previous behaviour,
+      unchanged).
+- [ ] Spaces without recognisable top-level pages (an edge case) return an
+      empty list rather than an error.
 
-### CT-13 — Tree-Find Walker bleibt nach Hit "settled"
+### CT-13 — the tree-find walker stays "settled" after a hit
 
-Voraussetzung: tree_find auf spaces aktiv (`type: tree_find` in
-view-YAML). Vorher mindestens einmal `/` gesucht und auf einen Hit
-gesprungen.
+Prerequisite: tree find active on spaces (`type: tree_find` in the view YAML).
+Searched with `/` at least once beforehand and jumped to a hit.
 
-- [ ] Nach Treffer-Sprung den Cursor mit `j`/`k` woandershin bewegen,
-      dann auf einem anderen, eingeklappten Knoten Enter drücken
-      (lädt dessen Kinder) → Cursor bleibt auf dem geöffneten Knoten,
-      springt NICHT zurück zum letzten Suchergebnis.
-- [ ] `n`/`N` springt weiterhin zwischen den Hits hin und her (also
-      settled wird durch next/prev korrekt zurückgesetzt).
-- [ ] Neue Suche mit `/` (Search-Input erneut öffnen) verhält sich
-      wie immer: erster Hit wird angesprungen.
+- [ ] After jumping to a hit, move the cursor elsewhere with `j`/`k`, then
+      press Enter on another, collapsed node (loading its children) → the
+      cursor stays on the opened node and does NOT jump back to the last search
+      result.
+- [ ] `n`/`N` still moves back and forth between the hits (so settled is reset
+      correctly by next/prev).
+- [ ] A new search with `/` (opening the search input again) behaves as always:
+      the first hit is jumped to.
 
-### RD-1 — Render-Loop Dirty-Gating (CPU im Leerlauf)
+### RD-1 — render-loop dirty gating (CPU while idle)
 
-Siehe `docs/decisions/0001-render-loop-dirty-gating.md`.
+See `docs/decisions/0001-render-loop-dirty-gating.md`.
 
-- [ ] App offen lassen, nichts tun (kein Key, kein Tracking aktiv):
-      `top`/`htop` zeigt die CPU des Prozesses nahe 0 % (vorher: dauerhaft
-      spürbare Last durch 60-fps-Repaint).
-- [ ] Tippen/Navigieren fühlt sich unverändert direkt an — keine
-      Eingabe-Latenz (Keys lösen sofort Redraw aus).
-- [ ] Async-Last (z. B. großes Content-Listing laden, Taiga/Jira-Reload):
-      Ergebnis erscheint praktisch sofort (≤ ~200 ms), Spinner/Banner
-      aktualisieren sich flüssig.
-- [ ] **Busy-Banner-Zähler läuft:** eine Query mit `query_timeout_secs`
-      starten (Postgres) bzw. langsame Verbindung — der „…(Ns/…)"-Zähler
-      im Banner zählt **ohne** weitere Eingabe sekündlich hoch (friert
-      nicht ein).
-- [ ] **Aktives Tracking:** ein Tracking starten → die Dauer-Spalte
-      aktualisiert sich weiterhin (adaptives Intervall), App bleibt im
-      Leerlauf trotzdem ruhig.
-- [ ] Editor öffnen (`e`), `:w` (live-apply, falls aktiv), schließen →
-      Rückkehr rendert sofort sauber; detached-Script (`x`) liefert nach
-      Ende sein Ergebnis ohne Hänger.
+- [ ] Leave the app open and do nothing (no key, no active tracking):
+      `top`/`htop` shows the process CPU near 0 % (before: a constantly
+      noticeable load from the 60 fps repaint).
+- [ ] Typing and navigating feel as immediate as before — no input latency
+      (keys trigger a redraw at once).
+- [ ] Async load (e.g. loading a large content listing, a Taiga/Jira reload):
+      the result appears practically instantly (≤ ~200 ms), spinners and
+      banners update smoothly.
+- [ ] **The busy-banner counter runs:** start a query with
+      `query_timeout_secs` (Postgres), or use a slow connection — the
+      "…(Ns/…)" counter in the banner ticks up every second **without** any
+      further input (it does not freeze).
+- [ ] **Active tracking:** start a tracking → the duration column keeps
+      updating (adaptive interval), yet the app stays quiet while idle.
+- [ ] Open the editor (`e`), `:w` (live apply, if active), close → returning
+      renders cleanly right away; a detached script (`x`) delivers its result
+      when it finishes, without stalling.
 
-### RD-2 — Render-Loop 1b (event-getriebener `select!`-Loop)
+### RD-2 — render loop 1b (event-driven `select!` loop)
 
-Siehe `docs/decisions/0001-render-loop-dirty-gating.md` (§1b). Ersetzt den
-200-ms-Poll-Loop; Idle ist jetzt geparkt statt periodisch wach. **Fokus:
-keine Regression an stdin-Übergabe und Zeitgetriebenem.**
+See `docs/decisions/0001-render-loop-dirty-gating.md` (§1b). Replaces the
+200 ms polling loop; idle is now parked instead of periodically awake.
+**Focus: no regression in the stdin hand-over and in the time-driven parts.**
 
-- [ ] **Echtes Idle:** App offen, nichts tun → CPU 0 %. Mit `strace -fp
-<pid> -e trace=poll,read` (oder `perf`) sieht man **keine**
-      periodischen 200-ms-Wakeups mehr, solange kein Tracking/Banner/Editor
-      lebt.
-- [ ] **Key-Latenz:** Tippen/Navigieren reagiert sofort — kein Regress
-      gegenüber 1a.
-- [ ] **Async-Push weckt sofort:** großes Content-Listing laden → Ergebnis
-      erscheint ohne wahrnehmbare Verzögerung (nicht mehr an 200-ms-Raster
-      gebunden).
-- [ ] **Inline-Editor stdin-Übergabe:** `e` → der Editor bekommt **jeden**
-      Tastendruck (kein verschlucktes erstes Zeichen), Tippen flüssig;
-      Schließen → TUI kehrt sauber zurück, erste Taste danach wirkt sofort.
-- [ ] **Detached-/Launch-Editor + `:w` live-apply:** Editor (Launch-Modus)
-      offen lassen, im Editor speichern → live-reload greift weiterhin;
-      `.done`/Schließen → Commit läuft, Rückkehr rendert.
-- [ ] **Validierungsfehler-Reopen:** einen Commit mit Fehler provozieren →
-      Editor öffnet erneut mit Fehlerpuffer, stdin gehört wieder dem Editor
-      (keine verschluckten Keys).
-- [ ] **Interaktives Script (`x`):** Script übernimmt das Terminal voll,
-      bekommt Eingaben; „Press any key" + Rückkehr funktionieren.
-- [ ] **Busy-Banner-Sekunde** und **aktives Tracking** zählen wie unter
-      RD-1 sekündlich/adaptiv hoch — und sobald sie enden, kehrt die App in
-      echtes Idle zurück (Ticker disarmt).
-- [ ] **Resize:** Terminal-Fenster vergrößern/verkleinern → sofortiger,
-      korrekter Repaint (kein „erst bei nächster Taste").
-- [ ] **Quit:** `q`/`:q` beendet prompt.
+- [ ] **Real idle:** app open, nothing happening → CPU 0 %. Tracing the process
+      with `strace` for `poll` and `read` (or with `perf`) shows **no**
+      periodic 200 ms wake-ups any more, as long as no tracking, banner or
+      editor is alive.
+- [ ] **Key latency:** typing and navigating react instantly — no regression
+      against 1a.
+- [ ] **An async push wakes the loop instantly:** load a large content listing
+      → the result appears without perceptible delay (no longer tied to the
+      200 ms grid).
+- [ ] **Inline editor stdin hand-over:** `e` → the editor receives **every**
+      keystroke (no swallowed first character), typing is smooth; on closing,
+      the TUI returns cleanly and the first key afterwards takes effect
+      immediately.
+- [ ] **Detached/launch editor with `:w` live apply:** leave the editor (launch
+      mode) open and save inside it → the live reload still fires;
+      `.done`/closing → the commit runs and the return renders.
+- [ ] **Reopen on a validation error:** provoke a commit that fails → the
+      editor opens again with the error buffer, stdin belongs to the editor
+      again (no swallowed keys).
+- [ ] **Interactive script (`x`):** the script takes over the terminal fully
+      and receives input; "Press any key" and the return work.
+- [ ] **The busy-banner second** and **active tracking** tick up per second /
+      adaptively as under RD-1 — and as soon as they end, the app returns to
+      real idle (the ticker is disarmed).
+- [ ] **Resize:** enlarge and shrink the terminal window → an immediate,
+      correct repaint (not "only on the next key").
+- [ ] **Quit:** `q`/`:q` exits promptly.
 
-### Real-Data-Sweep
+### Real-data sweep
 
-- [ ] Vor jedem Commit: `git diff --staged | grep -iE '<euer-firmenname>|<firmen-kurzform>|atlassian\.net|<echte JSESSIONID-Snippets>'`
-      — muss leer sein. (Die Platzhalter `<…>` durch euren echten
-      Firmennamen + Kurzform + interne Host-Muster ersetzen; diese
-      Muster selbst gehören **nicht** ins Repo.) Beispiel-Hosts sind
-      `wiki.example.invalid`, Beispiel-Cookies `JSESSIONID=synthetic`,
-      Space-Keys `DEMO`.
+- [ ] Before every commit, grep the staged diff case-insensitively for your
+      company name, its short form, `atlassian.net` and real JSESSIONID
+      snippets — the result must be empty. (Substitute your actual company
+      name, its short form and your internal host patterns; those patterns
+      themselves do **not** belong in the repo.) Example hosts are
+      `wiki.example.invalid`, example cookies `JSESSIONID=synthetic`, space
+      keys `DEMO`.
 
 ## Stoat-Adapter (Phase 0 — Fundament)
 
