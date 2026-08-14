@@ -4279,181 +4279,182 @@ CLI or waybar); (3) the live duration ticks adaptively instead of every second
 - [ ] Trackings tree/condensed after a toggle or reload: durations are
       consistently fresh (under group headers too).
 
-## Eager-Subtree (`supports_eager_subtree`, `list_subtree`)
+## Eager subtree (`supports_eager_subtree`, `list_subtree`)
 
-In-Memory-Adapter (Tasks, Trackings) liefern bei `expand_depth: all`
-bzw. `expand_depth: N` den ganzen erwarteten Teilbaum in **einem**
-`list_subtree`-Call statt der per-Knoten-Kaskade. Resultat muss optisch
-**identisch** zur Kaskade sein — gleiche Zeilen, gleiche Reihenfolge, gleiche
-Aufklapp-Tiefe — nur ohne das ebenenweise Nachladen.
+With `expand_depth: all` or `expand_depth: N`, in-memory adapters (tasks,
+trackings) return the whole expected subtree in **one** `list_subtree` call
+instead of the per-node cascade. The result has to look **identical** to the
+cascade — the same rows, the same order, the same expansion depth — just
+without the level-by-level loading.
 
-- [ ] Tasks Tree-View (`expand_depth: all`): nach dem Laden ist der
-      komplette Forest sofort offen — kein sichtbares Ebene-für-Ebene-
-      Nachklappen. Tiefe ≥ 3 Ebenen testen (Task → Subtask → Sub-Subtask).
-- [ ] Selektion/Collapse: Cursor auf einen tiefen Knoten, `zc`/Collapse
-      und wieder aufklappen → Zustand stimmt (Pfad-Schema == Kaskade).
-- [ ] Trackings Tree-View: dito, voll aufgeklappt in einem Rutsch.
-- [ ] `:tree-find "Tasks" id:<uuid>` (z. B. via `goto_task`) landet
-      weiterhin auf dem richtigen Knoten — der eager geladene Baum ist
-      vollständig durchsuchbar.
-- [ ] `r`-Reload auf dem eager Tree erneuert alle Ebenen (z. B. neu
-      gestartetes Tracking zeigt `⏱` auf verschachteltem Task).
-- [ ] Gegenprobe Remote (Postgres/Confluence-Tree, `supports_eager_subtree:
-false`): klappt weiterhin **progressiv** auf (Ebene für Ebene), UI
-      friert nicht ein — der eager Pfad greift dort bewusst nicht.
+- [ ] Tasks tree view (`expand_depth: all`): after loading, the entire forest
+      is open right away — no visible level-by-level unfolding. Test a depth of
+      ≥ 3 levels (task → subtask → sub-subtask).
+- [ ] Selection/collapse: put the cursor on a deep node, `zc`/collapse and
+      expand again → the state is correct (the path scheme matches the
+      cascade's).
+- [ ] Trackings tree view: same again, fully expanded in one go.
+- [ ] `:tree-find "Tasks" id:<uuid>` (via `goto_task`, say) still lands on the
+      right node — the eagerly loaded tree is fully searchable.
+- [ ] An `r` reload on the eager tree renews every level (a freshly started
+      tracking shows `⏱` on a nested task, for instance).
+- [ ] Counter-check with a remote tree (Postgres or Confluence, where
+      `supports_eager_subtree` is false): it still expands **progressively**
+      (level by level) and the UI does not freeze — the eager path deliberately
+      does not apply there.
 
-## Fuzzy-Filter — Teilstring-Highlight (Tasks/Trackings)
+## Fuzzy filter — substring highlighting (tasks/trackings)
 
-Parität zum nativen Tasks-Tab: der gematchte Teilstring wird hervorgehoben
-(Theme-`accent`, fett). Im Tree-Mode im **Label** der `tree_label`-Spalte (der
-Box-Connector behält seine `tree_connector`-Farbe), im Flat-Mode in den
-durchsuchten Spalten.
+Parity with the native tasks tab: the matched substring is highlighted (the
+theme's `accent`, bold). In tree mode inside the **label** of the `tree_label`
+column (the box connector keeps its `tree_connector` colour), in flat mode
+inside the searched columns.
 
-- [ ] Tasks Tree-View: `f` + Teil-Text eines Task-Titels tippen → in den
-      verbleibenden Zeilen ist genau der getroffene Teilstring farbig/fett
-      hervorgehoben; die Box-Connectors (`├──`/`└──`/`▶`) behalten ihre
-      eigene Farbe.
-- [ ] Mehrere Tokens (`foo bar`) → beide Treffer-Runs im selben Label sind
-      hervorgehoben.
-- [ ] Eine Zeile, die nur über ein anderes Feld (z. B. Tag) matcht, zeigt im
-      Label **keine** Markierung (kein falsches Highlight).
-- [ ] Filter leeren (`esc`) → Highlight verschwindet, Labels normal.
-- [ ] Flat-View (`v`): `f` + Text → Treffer in den durchsuchten Spalten
-      hervorgehoben; nicht durchsuchte Spalten bleiben unmarkiert.
-- [ ] Sehr schmale Spalte / langes Label: Highlight bleibt korrekt geclamped
-      (kein Panic, kein Übermalen des Connectors).
+- [ ] Tasks tree view: `f` plus part of a task title → in the remaining rows
+      exactly the matched substring is coloured and bold; the box connectors
+      (`├──`/`└──`/`▶`) keep their own colour.
+- [ ] Several tokens (`foo bar`) → both matching runs in the same label are
+      highlighted.
+- [ ] A row that only matches via another field (a tag, say) shows **no**
+      marking in its label (no bogus highlight).
+- [ ] Clear the filter (`esc`) → the highlighting disappears, labels are
+      normal again.
+- [ ] Flat view (`v`): `f` plus text → matches in the searched columns are
+      highlighted; columns that are not searched stay unmarked.
+- [ ] A very narrow column or a long label: the highlight stays correctly
+      clamped (no panic, and it does not paint over the connector).
 
-## Jump-Mode (`J`) auf Content-Tabs (`content.jump_mode`)
+## Jump mode (`J`) on content tabs (`content.jump_mode`)
 
-Parität zum nativen Tasks-Tab-Sprung (dort `p`), hier auf `Shift+J`.
-Default-Binding ist `J`; konfigurierbar über `keybindings.content.jump_mode`.
-Das Label-Alphabet kommt aus `navigation.jump_chars`.
+Parity with the native tasks tab's jump (`p` there), here on `Shift+J`. The
+default binding is `J`; configurable via `keybindings.content.jump_mode`. The
+label alphabet comes from `navigation.jump_chars`.
 
-- [ ] Tasks: `Shift+J` drücken → Sprung-Overlay aktiv (Action-Bar zeigt
-      `J jump`). Ein Zeichen tippen, das in mehreren sichtbaren Zeilen
-      vorkommt → jede Treffer-Zeile bekommt ein Label, Nicht-Treffer sind
-      gedimmt.
-- [ ] Label tippen → Cursor springt in die zugehörige Zeile.
-- [ ] Zeichen, das nur in **einer** sichtbaren Zeile vorkommt → sofortiger
-      Sprung ohne Label-Phase.
-- [ ] Zeichen ohne Treffer → Overlay schließt sich, keine Auswahländerung.
-- [ ] `esc` während des Overlays → Abbruch, Cursor unverändert.
-- [ ] In einem Split: `Shift+J` wirkt nur auf das **fokussierte** Pane; nach
-      Pane-Wechsel funktioniert der Sprung auch dort (neu erzeugtes Pane).
-- [ ] Trackings (Liste/Condensed/Tree): `Shift+J` verhält sich gleich.
-- [ ] Nativer Tasks-Tab unverändert: `p` öffnet dort weiterhin den Sprung.
+- [ ] Tasks: press `Shift+J` → the jump overlay is active (the action bar
+      shows `J jump`). Type a character that occurs in several visible rows →
+      every matching row gets a label, non-matches are dimmed.
+- [ ] Type a label → the cursor jumps to the corresponding row.
+- [ ] A character that occurs in only **one** visible row → an immediate jump
+      without the label phase.
+- [ ] A character with no match → the overlay closes, the selection does not
+      change.
+- [ ] `esc` while the overlay is up → abort, the cursor is unchanged.
+- [ ] In a split: `Shift+J` acts only on the **focused** pane; after switching
+      panes the jump works there too (a freshly created pane).
+- [ ] Trackings (list/condensed/tree): `Shift+J` behaves the same way.
+- [ ] The native tasks tab is unchanged: `p` still opens the jump there.
 
-## Stoat: Ungelesen-Hervorhebung (`unread_style` / `unread_marker`)
+## Stoat: unread highlighting (`unread_style` / `unread_marker`)
 
-Channels/Kategorien mit ungelesenen Nachrichten + ungelesene
-Nachrichten-Header werden hervorgehoben (Marker-Glyph + Theme-Farbe
-`unread`, beide per View überschreibbar). Quelle ist der Revolt-Read-State
-(`sync/unreads` + Acks); Live-Reload bei jeder eintreffenden Nachricht.
+Channels and categories with unread messages, plus the headers of unread
+messages themselves, are highlighted (a marker glyph plus the theme colour
+`unread`, both overridable per view). The source is the Revolt read state
+(`sync/unreads` plus acks); a live reload happens on every incoming message.
 
-Voraussetzung: Stoat-Tab geöffnet, Gateway `Ready`, in einem Server mit
-mindestens einem Channel, der ungelesene Nachrichten enthält.
+Prerequisite: the Stoat tab open, the gateway `Ready`, in a server with at
+least one channel that holds unread messages.
 
-- [ ] Channel mit ungelesenen Nachrichten zeigt im Tree den Marker (Default
-      💬) **vor** dem Channel-Namen, Name in der `unread`-Farbe (Default
-      `#89b4fa`, fett).
-- [ ] Die Kategorie, die einen solchen Channel enthält, ist ebenfalls
-      markiert (OR über ihre Channels).
-- [ ] In die Nachrichtenliste drillen: ungelesene Nachrichten haben einen
-      hervorgehobenen Header (Autor/Zeit-Zeile) in derselben Farbe; gelesene
-      Nachrichten normal.
-- [ ] Marker-Breite stimmt: das Emoji (2 Zellen) verschiebt Einrückung/
-      Folgespalten nicht, kein abgeschnittener Connector.
-- [ ] Fuzzy-Filter (`/`) auf einem ungelesenen Channel: die Treffer-Runs
-      bleiben in der Fuzzy-Match-Farbe (gewinnt über die Unread-Farbe), der
-      Rest des Labels in der Unread-Farbe.
-- [ ] In einem ungelesenen Channel eine Nachricht **senden** → Channel- und
-      Kategorie-Marker verschwinden (Ack-on-send), ohne manuelles `r`.
-- [ ] Eine neue Nachricht trifft in einem anderen Channel ein → dieser
-      Channel + seine Kategorie werden live markiert (kein manuelles `r`).
-- [ ] `unread_marker: ""` in der View gesetzt → kein Glyph, aber Name/Header
-      weiterhin in der Unread-Farbe.
-- [ ] `unread_style:` auf einen anderen Theme-Farbnamen gesetzt → Marker +
-      Name/Header in dieser Farbe.
+- [ ] A channel with unread messages shows the marker (💬 by default)
+      **before** the channel name in the tree, the name in the `unread` colour
+      (`#89b4fa` by default, bold).
+- [ ] The category containing such a channel is marked as well (an OR over its
+      channels).
+- [ ] Drill into the message list: unread messages have a highlighted header
+      (the author/time line) in the same colour; read messages look normal.
+- [ ] The marker width is right: the emoji (2 cells) does not shift the
+      indentation or the following columns, and no connector is cut off.
+- [ ] Fuzzy filter (`/`) on an unread channel: the matching runs stay in the
+      fuzzy-match colour (which wins over the unread colour), the rest of the
+      label is in the unread colour.
+- [ ] **Send** a message in an unread channel → the channel and category
+      markers disappear (ack on send), without a manual `r`.
+- [ ] A new message arrives in another channel → that channel and its category
+      are marked live (no manual `r`).
+- [ ] With `unread_marker: ""` set in the view → no glyph, but the name and
+      headers are still in the unread colour.
+- [ ] With `unread_style:` set to another theme colour name → the marker and
+      the name/headers use that colour.
 
-### Ack bei Cursor auf der neuesten Nachricht (`mark_read_on_reach_end`)
+### Ack when the cursor is on the newest message (`mark_read_on_reach_end`)
 
-Der Channel-Marker verschwindet auch, wenn man den Cursor auf die unterste
-(neueste) Nachricht der Liste bewegt — ohne zu senden und ohne manuelles `r`.
-Konfiguriert über `mark_read_on_reach_end: mark-read` auf der Nachrichten-Ebene
-(beide Branches in `stoat.yaml`: Channels im und außerhalb einer Kategorie).
-Fehlt der Hook in der View-Config, passiert **nichts** (kein Ack, Marker bleibt
-ewig stehen) — häufigste Ursache, wenn eine ältere `stoat.yaml` installiert ist.
+The channel marker also disappears when you move the cursor to the bottom-most
+(newest) message of the list — without sending anything and without a manual
+`r`. It is configured via `mark_read_on_reach_end: mark-read` on the message
+level (both branches in `stoat.yaml`: channels inside and outside a category).
+If the hook is missing from the view config, **nothing** happens (no ack, the
+marker stays forever) — the most common cause when an older `stoat.yaml` is
+installed.
 
-Der Tree-Marker (Channel + Kategorie) wird **lokal** gecleart: `mark_read` ist
-der einzige Choke-Point für „gelesen" und schickt selbst `Invalidation::All`,
-sobald die Lese-Marke vorrückt. Damit repaintet der Tree sofort, unabhängig
-davon, ob der Server das eigene Ack als `ChannelAck` zurückspielt.
+The tree marker (channel plus category) is cleared **locally**: `mark_read` is
+the single choke point for "read" and sends `Invalidation::All` itself as soon
+as the read mark advances. That way the tree repaints immediately, regardless
+of whether the server plays our own ack back as a `ChannelAck`.
 
-- [ ] In einen ungelesenen Channel drillen, der **mehrere** ungelesene
-      Nachrichten hat → die ungelesenen Header sind hervorgehoben, der Cursor
-      steht oben/auf einer der oberen Zeilen; Channel-/Kategorie-Marker bleiben
-      noch sichtbar (kein Auto-Ack beim Öffnen).
-- [ ] Cursor mit `j`/Pfeil-runter bis auf die **unterste** (neueste) Zeile
-      bewegen → Channel- und Kategorie-Marker im Tree verschwinden (Ack), die
-      Header-Hervorhebung der Liste klingt nach dem Reload ab.
-- [ ] Erneut am Listenende eine Taste drücken / wieder hoch- und runterfahren →
-      kein erneutes Ack-Flackern (idempotent: Zeile ist nun gelesen).
-- [ ] In einem bereits gelesenen Channel drillen und ans Ende fahren → keine
-      Änderung (nichts zu acken).
+- [ ] Drill into an unread channel that has **several** unread messages → the
+      unread headers are highlighted and the cursor sits at the top or on one
+      of the upper rows; the channel and category markers are still visible (no
+      auto-ack on opening).
+- [ ] Move the cursor with `j`/arrow-down down to the **bottom-most** (newest)
+      row → the channel and category markers disappear in the tree (the ack),
+      and the list's header highlighting fades after the reload.
+- [ ] Press a key at the end of the list again, or move up and back down →
+      no repeated ack flicker (idempotent: the row is read now).
+- [ ] Drill into an already read channel and move to the end → nothing changes
+      (there is nothing to ack).
 
-## Shortcut-Menü — Keybinding-Editor (Ctrl+Y)
+## The shortcut menu — the keybinding editor (Ctrl+Y)
 
-Nutzer-Doku: [`keybinding-editor.md`](keybinding-editor.md). Nach jeder
-Edit-Aktion greift Sofort-Reload; Kommentar-/Format-Erhalt in der
-betroffenen YAML **immer** mitprüfen (`git diff`).
+User documentation: [`keybinding-editor.md`](keybinding-editor.md). Every edit
+action triggers an immediate reload; **always** check that comments and
+formatting survive in the affected YAML (`git diff`).
 
-- [ ] `Ctrl+Y` öffnet das Menü; `Tab` wechselt Context ↔ alle Tabs;
-      Tippen filtert; keyless Actions werden mitgelistet.
-- [ ] `Ctrl+N` auf einer View-Action → aufnehmen, Einzeltaste, `Return` →
-      "Bound …"; Taste feuert sofort; `views/*.yaml` bekommt `key:` dazu,
-      Kommentare bleiben.
-- [ ] `Ctrl+N` Chord (`Ctrl+K` dann `L`) → gespeichert als
-      `key: "ctrl+k l"`; `Backspace` verwirft letzten Schritt; `Esc`
-      bricht ab (keine Änderung).
-- [ ] `Ctrl+N` auf einer read-only-Zeile (Saved-Query/Script) → Hinweis,
-      keine Aufnahme.
-- [ ] Zweites Binding auf dieselbe Action → Liste `key: [alt1, alt2]`
-      (Alternative angehängt, alte Taste bleibt).
-- [ ] `Ctrl+D` bei einer einzigen Bindung → weg (`[]` bei Built-in in
-      `tui.yaml`, Default feuert nicht mehr).
-- [ ] `Ctrl+D` bei mehreren Bindungen → Picker, Auswahl, `Return` →
-      Restliste geschrieben; `Esc` bricht ab.
-- [ ] `Ctrl+R` auf Built-in → `tui.yaml`-Override verschwindet, Default
-      gilt wieder; auf View-Action → no-op.
-- [ ] Konflikt: Binding aufnehmen, das eine überlappende Bindung belegt
-      (inkl. globalem Built-in / Präfix `k` vs `k l`) → `y/n`-Prompt.
-      `n`/`Esc` → nichts passiert. `y` → andere Bindung verliert die
-      Taste, neue greift; beide Dateien reloaded.
-- [ ] Konflikt gegen read-only-Shortcut → als unauflösbar gemeldet,
-      Binding abgelehnt.
-- [ ] Verschiedene Tabs kollidieren nie (gleiche Taste in Tab A und B →
-      kein Prompt).
+- [ ] `Ctrl+Y` opens the menu; `Tab` switches between the context and all
+      tabs; typing filters; keyless actions are listed too.
+- [ ] `Ctrl+N` on a view action → record, a single key, `Return` → "Bound …";
+      the key fires immediately; `views/*.yaml` gains the `key:` and the
+      comments survive.
+- [ ] `Ctrl+N` with a chord (`Ctrl+K` then `L`) → stored as
+      `key: "ctrl+k l"`; `Backspace` discards the last step; `Esc` aborts (no
+      change).
+- [ ] `Ctrl+N` on a read-only row (a saved query or script) → a hint, no
+      recording.
+- [ ] A second binding for the same action → the list `key: [alt1, alt2]` (the
+      alternative is appended, the old key stays).
+- [ ] `Ctrl+D` with a single binding → gone (`[]` for a built-in in
+      `tui.yaml`, and the default no longer fires).
+- [ ] `Ctrl+D` with several bindings → a picker; choose one, `Return` → the
+      remaining list is written; `Esc` aborts.
+- [ ] `Ctrl+R` on a built-in → the `tui.yaml` override disappears and the
+      default applies again; on a view action → a no-op.
+- [ ] Conflict: record a binding that takes an overlapping binding (including
+      a global built-in, or the prefix `k` versus `k l`) → a `y/n` prompt.
+      `n`/`Esc` → nothing happens. `y` → the other binding loses the key, the
+      new one applies; both files are reloaded.
+- [ ] A conflict against a read-only shortcut → reported as unresolvable, the
+      binding is rejected.
+- [ ] Different tabs never collide (the same key in tab A and tab B → no
+      prompt).
 
-## Benachrichtigungsleiste — Anzeigelimit + Log im Editor (`f10`)
+## The notification bar — display limit + the log in the editor (`f10`)
 
-`notifications.max_messages` begrenzt, wie viele Meldungen die **untere**
-Leiste gleichzeitig zeigt (`0` = unbegrenzt); `notifications.history_limit`
-begrenzt das mitlaufende Log beider Leisten.
+`notifications.max_messages` limits how many messages the **bottom** bar shows
+at once (`0` = unlimited); `notifications.history_limit` limits the running log
+of both bars.
 
-- [ ] `max_messages: 1` in `tui.yaml`: zwei Meldungen nacheinander auslösen
-      → unten steht nur die **neuere**; die ältere ist verdrängt.
-- [ ] Obere Alert-Leiste bleibt unberührt: mehrere `prominent`-Meldungen
-      stehen weiterhin alle gleichzeitig oben.
-- [ ] `f10` öffnet das Log read-only im Editor: alle Meldungen beider
-      Leisten chronologisch, mit Zeitstempel, Alert-Zeilen mit `!` markiert;
-      Speichern/Schließen ändert nichts.
-- [ ] `Z` (dismiss) leert die Leisten, das Log bleibt: `f10` zeigt die
-      verworfenen Meldungen weiterhin.
-- [ ] Ohne jede Meldung: `f10` → "No notifications yet", kein Editor.
-- [ ] Hint rechts unten nennt die echten Tasten (`[Z] dismiss  [f10] open`)
-      und folgt einem Rebind der beiden Actions.
-- [ ] `:config`-Reload (tui.yaml speichern) verliert weder offene Meldungen
-      noch das Log.
+- [ ] `max_messages: 1` in `tui.yaml`: trigger two messages in a row → only
+      the **newer** one is at the bottom; the older one has been displaced.
+- [ ] The upper alert bar is untouched: several `prominent` messages still sit
+      up there all at once.
+- [ ] `f10` opens the log read-only in the editor: all messages of both bars
+      in chronological order, with timestamps, alert lines marked with `!`;
+      saving or closing changes nothing.
+- [ ] `Z` (dismiss) clears the bars, the log stays: `f10` still shows the
+      dismissed messages.
+- [ ] With no message at all: `f10` → "No notifications yet", no editor.
+- [ ] The hint in the bottom right names the actual keys
+      (`[Z] dismiss  [f10] open`) and follows a rebind of the two actions.
+- [ ] A `:config` reload (saving tui.yaml) loses neither the open messages nor
+      the log.
 
 ## Builtin-Editor (`builtin: true`, Crate `vimrealm`)
 
