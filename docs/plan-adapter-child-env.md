@@ -18,9 +18,9 @@ For the Postgres LSP (`postgres-language-server`, sqlx-based) to work
 against the live DB the editor's child process needs Postgres credentials
 in its environment: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`,
 `PGDATABASE`. Today the LSP can only see whatever the user manually puts
-into `postgres-language-server.jsonc` — which means Klartext-Passwort auf
-Disk, manual port-tracking (Tunnel ist dynamic), and the .jsonc would
-contain Customer-Daten (HARD RULE-Violation).
+into `postgres-language-server.jsonc` — which means a plaintext password
+on disk, manual port tracking (the tunnel is dynamic), and the .jsonc
+would contain customer data (a HARD RULE violation).
 
 The cleanest answer (architecturally and pragmatically): the **adapter**
 owns the connection state and the credentials, so the **adapter** decides

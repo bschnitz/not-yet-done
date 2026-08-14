@@ -1,704 +1,697 @@
 # Smoke Tests
 
-Zentrale Sammlung manueller Smoke-Tests für not-yet-done. Bei jedem
-neuen Feature oder größeren Refactor: passende Tests hier ergänzen,
-nicht in separaten Dokumenten. Erledigt-Marker (`[x]` / `[ ]`)
-bleiben stehen, damit man sieht, was schon einmal grün war.
+Central collection of manual smoke tests for not-yet-done. On every new
+feature or larger refactor: add the matching tests here, not in separate
+documents. The done markers (`[x]` / `[ ]`) stay in place so that one can
+see what has been green at least once.
 
-Bei Fund eines Bugs: stoppen, Diagnose, Fix oder festhalten BEVOR
-weiter. Findings, die zu separaten Tasks werden, kurz unter dem
-Punkt notieren.
+When a bug is found: stop, diagnose, fix or record it BEFORE moving on.
+Findings that turn into separate tasks get a short note under the item.
 
-## Jira ContentView — Issue-Level (Phase 1)
+## Jira ContentView — issue level (phase 1)
 
-- [x] Liste lädt (`assignee = currentUser() ORDER BY updated DESC`)
-- [x] `e` editiert Issue (Action `edit_full`, `InputSpec::Editor`) →
-      3b-Template, beliebige Änderung, `:wq` → "X updated"
-- [ ] Summary leeren → `:wq` → Reopen mit Error-Banner; das vorherige
-      Summary wird automatisch wiederhergestellt (kein blanker Buffer
-      mehr — User muss nicht blind tippen)
-      → Reopen-Suffix-Bug (`.md` statt `.jira`) gefixt in `main.rs`,
-      neu testen
-- [x] Konkurrenter Browser-Edit auf disjunktem Feld → auto-merge
-      Notification
-- [x] Konkurrenter Browser-Edit auf gleicher Zeile → Reopen mit
-      Conflict-Markern
-- [x] `:q!` ohne Änderung → "Edit cancelled"
-- [ ] `t` öffnet Transition-Picker (Action `transition`,
-      `InputSpec::Picker`) → Optionen werden geladen, Auswahl mit
+- [x] The list loads (`assignee = currentUser() ORDER BY updated DESC`)
+- [x] `e` edits the issue (action `edit_full`, `InputSpec::Editor`) →
+      3b template, any change, `:wq` → "X updated"
+- [ ] Clear the summary → `:wq` → reopen with an error banner; the
+      previous summary is restored automatically (no blank buffer any
+      more — the user does not have to type blindly)
+      → reopen suffix bug (`.md` instead of `.jira`) fixed in `main.rs`,
+      re-test
+- [x] Concurrent browser edit on a disjoint field → auto-merge
+      notification
+- [x] Concurrent browser edit on the same line → reopen with conflict
+      markers
+- [x] `:q!` without a change → "Edit cancelled"
+- [ ] `t` opens the transition picker (action `transition`,
+      `InputSpec::Picker`) → the options are loaded, pick with
       Enter → "X transitioned"
-      → User-YAML war veraltet (`custom_action: transition` statt
-      `id: transition`). Migriert, neu testen.
-- [x] `r` reload → Liste neu
-- [x] `f` fuzzy-filter → tippen filtert, `enter` schließt
-- [ ] `/` text-search → tippen springt, `n`/`N` next/prev
-      → User-YAML hatte keine `search`-Action. Hinzugefügt, neu testen.
-      → In Tasks/Trackings ist `/` ein älterer, separater Bug —
-      eigener Task.
-- [x] `q` öffnet Query-Menü, `Q` öffnet Query-Editor
+      → the user YAML was outdated (`custom_action: transition` instead
+      of `id: transition`). Migrated, re-test.
+- [x] `r` reload → fresh list
+- [x] `f` fuzzy filter → typing filters, `enter` closes
+- [ ] `/` text search → typing jumps, `n`/`N` next/prev
+      → the user YAML had no `search` action. Added, re-test.
+      → in tasks/trackings, `/` is an older, separate bug — its own task.
+- [x] `q` opens the query menu, `Q` opens the query editor
 
-## Jira ContentView — Drill-down (Phase 1)
+## Jira ContentView — drill-down (phase 1)
 
-- [x] `C` (navigate) drillt in Comments → Liste lädt
-- [ ] `e` editiert Comment (`edit_full`) → "Comment updated"
-      → Funktioniert. Erweitert in Phase 2: Edit-Action wird bei
-      Comments fremder Autoren ausgeblendet (siehe unten).
-- [ ] `a` (create) öffnet Editor (`create_comment`) → Body eingeben,
-      `:wq` → Drill-down-Liste refresht, neuer Kommentar sichtbar
-      → User-YAML war veraltet (`type: create` ohne `id`). Migriert,
-      neu testen.
-- [x] `backspace` zurück zu Issues
-- [ ] `a` (navigate) drillt in Attachments → read-only Liste, keine
-      Edit-Action
-- [ ] Attachment markieren, `o` → Datei wird heruntergeladen nach
-      `$TMPDIR/not_yet_done/jira_attachments/<id>-<filename>` und in
-      `xdg-open` gestartet (background, keine TUI-Pause). Notification
-      "opened &lt;filename&gt;". Zweites `o` auf demselben Attachment
-      öffnet ohne Re-Download.
+- [x] `C` (navigate) drills into the comments → the list loads
+- [ ] `e` edits a comment (`edit_full`) → "Comment updated"
+      → works. Extended in phase 2: the edit action is hidden for
+      comments by other authors (see below).
+- [ ] `a` (create) opens the editor (`create_comment`) → enter a body,
+      `:wq` → the drill-down list refreshes, the new comment is visible
+      → the user YAML was outdated (`type: create` without `id`).
+      Migrated, re-test.
+- [x] `backspace` back to the issues
+- [ ] `a` (navigate) drills into the attachments → read-only list, no
+      edit action
+- [ ] Mark an attachment, `o` → the file is downloaded to
+      `$TMPDIR/not_yet_done/jira_attachments/<id>-<filename>` and
+      launched via `xdg-open` (in the background, no TUI pause).
+      Notification "opened &lt;filename&gt;". A second `o` on the same
+      attachment opens it without re-downloading.
 
-## Jira ContentView — `edit_with_comments` (Phase 2)
+## Jira ContentView — `edit_with_comments` (phase 2)
 
-`Shift+e` auf einem Issue: öffnet 3b-Header + alle Kommentare in einem
-Buffer (newest→oldest). Eigene Comments inline editierbar / per `del`
-löschbar; neue Comments per `--- add ---`-Block. Fremde Comments
-werden read-only gerendert; Konflikte landen im Banner-Reopen.
+`Shift+e` on an issue: opens the 3b header plus all comments in one
+buffer (newest→oldest). Own comments are editable inline / deletable via
+`del`; new comments through an `--- add ---` block. Comments by others
+are rendered read-only; conflicts end up in the banner reopen.
 
-- [ ] `Shift+e` öffnet Buffer mit Header + allen Kommentaren in
-      newest→oldest-Reihenfolge
-- [ ] Eigenen Comment-Body editieren → `:wq` → Notification
-      "X updated, comments: ~1" (oder mit `+`/`-`/`~`-Counts wenn
-      mehrere Operationen)
-- [ ] Eigenen Comment per `del` (oder `delete`, case-insensitive,
-      einziger non-blank line) löschen → `:wq` → DELETE-Request,
+- [ ] `Shift+e` opens a buffer with the header and all comments in
+      newest→oldest order
+- [ ] Edit the body of an own comment → `:wq` → notification
+      "X updated, comments: ~1" (or with `+`/`-`/`~` counts when there
+      are several operations)
+- [ ] Delete an own comment via `del` (or `delete`, case-insensitive,
+      as the only non-blank line) → `:wq` → DELETE request,
       "comments: -1"
-- [ ] `--- add ---` + Body am Ende → POST neuer Comment, Drill-down
-      zeigt ihn anschließend
-- [ ] Fremden Comment editieren → Banner-Reopen
-      `# ─── COMMENTS CHANGED UPSTREAM ───` mit Bullet pro Foreign-
-      Edit-Versuch + Restore aus fresh
-- [ ] Konkurrenter Browser-Edit auf Comment während Editor offen →
-      Banner-Reopen mit re-rendered fresh comments + User-Edit als
-      Banner-Bullet
-- [ ] Header-Edit + eigener Comment-Edit gleichzeitig → beides geht
-      durch, eine kombinierte Notification
-- [ ] Im JiraCommentNode-Drilldown bei fremdem Comment: Edit-Action
-      ist nicht in der Action-Bar (nur eigene Comments editierbar)
-- [ ] Reopen → User akzeptiert Foreign (löscht eigene Edit, lässt
-      fresh stehen) → nächster `:wq` geht ohne Banner durch
+- [ ] `--- add ---` plus a body at the end → POST a new comment, the
+      drill-down shows it afterwards
+- [ ] Edit someone else's comment → banner reopen
+      `# ─── COMMENTS CHANGED UPSTREAM ───` with one bullet per foreign
+      edit attempt plus a restore from fresh
+- [ ] Concurrent browser edit on a comment while the editor is open →
+      banner reopen with re-rendered fresh comments plus the user edit
+      as a banner bullet
+- [ ] Header edit and own comment edit at the same time → both go
+      through, one combined notification
+- [ ] In the JiraCommentNode drill-down on a foreign comment: the edit
+      action is not in the action bar (only own comments are editable)
+- [ ] Reopen → the user accepts the foreign version (deletes their own
+      edit, leaves fresh in place) → the next `:wq` goes through without
+      a banner
 
-## Schema-Validation (Phase 1, strikt)
+## Schema validation (phase 1, strict)
 
-`ActionDef` hat `#[serde(deny_unknown_fields)]`; `validate()` läuft
-beim App-Start auf jeder als View-Config erkannten YAML-Datei (hat
-`tab` + `adapter`). Bei Fehler `exit(1)` mit Diagnose.
+`ActionDef` has `#[serde(deny_unknown_fields)]`; `validate()` runs at app
+start on every YAML file recognised as a view config (has `tab` +
+`adapter`). On error, `exit(1)` with a diagnostic.
 
-- [ ] `create`-Action ohne `id:` im YAML → App startet nicht, Meldung
-      "type='create' requires `id` (e.g. id: create_comment)"
-- [ ] `custom`-Action ohne `id:` im YAML → App startet nicht, Meldung
-      "type='custom' requires `id`"
-- [ ] `navigate` ohne `navigate_to:` → App startet nicht, Meldung
-      "type='navigate' requires `navigate_to`"
-- [ ] Legacy-Felder (`edit:`, `custom_action:`, `query_template:`)
-      im YAML → App startet nicht, serde-Fehler "unknown field"
-- [ ] Adapter-Credential-File (kein `tab:`/`adapter:`) im
-      Views-Verzeichnis → wird silent geskippt (kein App-Crash)
+- [ ] A `create` action without `id:` in the YAML → the app does not
+      start, message "type='create' requires `id` (e.g. id:
+      create_comment)"
+- [ ] A `custom` action without `id:` in the YAML → the app does not
+      start, message "type='custom' requires `id`"
+- [ ] `navigate` without `navigate_to:` → the app does not start,
+      message "type='navigate' requires `navigate_to`"
+- [ ] Legacy fields (`edit:`, `custom_action:`, `query_template:`) in
+      the YAML → the app does not start, serde error "unknown field"
+- [ ] An adapter credential file (no `tab:`/`adapter:`) in the views
+      directory → silently skipped (no app crash)
 
-## Action-Bar / Status-Bar
+## Action bar / status bar
 
 - [ ] `e` (edit), `f` (fuzzy_filter), `/` (search), `q` (queries),
-      `Q` (edit query), `Shift+e` (edit + comments) erscheinen in der
-      Action-Bar
-      → `/` jetzt im User-YAML konfiguriert, neu testen.
-- [x] `r` (reload), `c`/`a` (navigate), `t` (custom-transition)
-      erscheinen nur in der Status-Bar
-- [ ] Beim drill-down ändern sich die Hints zur Child-Level-Konfig
-      (Comments: `e`/`a`/`f`; Attachments: keine Edit-Aktionen)
-      → `a` bei Comments-Child jetzt mit `id: create_comment`,
-      neu testen.
+      `Q` (edit query), `Shift+e` (edit + comments) appear in the action
+      bar
+      → `/` is now configured in the user YAML, re-test.
+- [x] `r` (reload), `c`/`a` (navigate), `t` (custom transition) appear
+      in the status bar only
+- [ ] On drill-down the hints change to the child-level config
+      (comments: `e`/`a`/`f`; attachments: no edit actions)
+      → `a` on the comments child now has `id: create_comment`,
+      re-test.
 
-### Status-Bar leitet Nav/Fold-Hints aus den Claims ab
+### The status bar derives nav/fold hints from the claims
 
-Die Status-Bar zählt `back`/`open`/Paging/Fold-Chords nicht mehr von Hand
-auf, sondern leitet sie aus demselben Claim-Satz ab, den auch der
-Dispatcher nutzt (`ContentPane::build_claims`). Dadurch erscheint jede
-momentan auslösbare Nav/Fold-Action automatisch in der Leiste.
+The status bar no longer enumerates `back`/`open`/paging/fold chords by
+hand; it derives them from the same set of claims the dispatcher uses
+(`ContentPane::build_claims`). Every nav/fold action that can currently
+be triggered therefore appears in the bar automatically.
 
-- [ ] **Tasks / Trackings Tree**: die Status-Bar zeigt
-      `[zm] collapse all`, `[zr] expand all` und `[⌫] collapse` — auf
-      jeder Cursor-Tiefe, solange die Ansicht im Tree-Modus ist (war
-      vorher nicht sichtbar).
-- [ ] Auf einem gruppierten Flat-View erscheint zusätzlich
-      `cycle group`; auf einem Tree-View mit `tree_aggregate`-Spalte
-      `aggregate`.
-- [ ] **Paging**: `prev page`/`next page` erscheinen nur, wenn es in die
-      jeweilige Richtung tatsächlich eine Seite gibt (Gate jetzt direkt
-      im Claim, nicht mehr in der Bar).
-- [ ] `open` erscheint nur, wenn die Cursor-Zeile aufklappbar/drillbar
-      ist; `back` nur nach einem Drilldown.
+- [ ] **Tasks / trackings tree**: the status bar shows
+      `[zm] collapse all`, `[zr] expand all` and `[⌫] collapse` — at
+      every cursor depth, as long as the view is in tree mode (was not
+      visible before).
+- [ ] On a grouped flat view, `cycle group` appears in addition; on a
+      tree view with a `tree_aggregate` column, `aggregate`.
+- [ ] **Paging**: `prev page`/`next page` appear only when there
+      actually is a page in that direction (the gate now sits in the
+      claim, no longer in the bar).
+- [ ] `open` appears only when the cursor row can be expanded or drilled
+      into; `back` only after a drill-down.
 
-### Aktiv-Markierung der Action-Bar-Hints
+### Active marking of the action-bar hints
 
-Die obere Action-Bar markiert jeden Shortcut, der gerade _aktiv_
-(„scharf") ist, mit Akzentfarbe + fett + unterstrichen. Jeder
-`ActionHint` trägt sein `active`-Flag selbst — die Komponente kennt
-keine Sonderfälle mehr.
+The upper action bar marks every shortcut that is currently **active**
+("armed") with the accent colour plus bold plus underline. Every
+`ActionHint` carries its own `active` flag — the component no longer
+knows any special cases.
 
-- [ ] **Jump**: `J` (bzw. konfigurierter `jump_mode`-Key) drücken →
-      `jump`-Hint wird markiert, solange der Hop-Overlay offen ist;
-      nach Auswahl/`Esc` erlischt die Markierung. Über alle
-      Content-Tabs (Tasks, Trackings, Jira, …) und in allen
-      Ansichten (Liste/Tree/Condensed).
-- [ ] **Track**: in Tasks / Trackings ein Tracking starten
-      (`t`/`s`) → `track`-Hint bleibt markiert, solange ein Tracking
-      läuft; Stop → Markierung weg.
-- [ ] **Cut**: einen Knoten mit `C` (mark-move) auf das Move-Clipboard
-      legen → `cut`-Hint markiert, bis Paste/Abbruch/Tab-Wechsel.
-- [ ] **Editor**: einen Editor öffnen (`e`/`a`) → der zugehörige Hint
-      (`edit`/`add`/…) ist markiert, solange die Edit-Session offen ist.
-- [ ] Rebinding-Test: `jump_mode` in `tui.yaml` auf eine andere Taste
-      legen → Hint zeigt die neue Taste UND markiert weiterhin korrekt
-      (Identität über die konfigurierte Taste, nicht hartcodiert).
-- [ ] **Link-Hop**: In einem Stoat-Chat mit sichtbaren Links (nackte URL
-      und/oder Markdown-`[text](url)`) `f` drücken → jeder Link bekommt ein
-      grünes Label; Label tippen → URL öffnet im Browser (Opener aus
-      `navigation.link_opener`, Default `xdg-open`), TUI blockiert nicht.
-      `Esc` schließt den Overlay; Pane ohne Link → Hinweis „No links on
-      screen". Generisch auf jedem Content-Tab (nicht nur Stoat).
+- [ ] **Jump**: press `J` (or the configured `jump_mode` key) → the
+      `jump` hint is marked as long as the hop overlay is open; after a
+      pick or `Esc` the marking goes away. Across all content tabs
+      (tasks, trackings, Jira, …) and in all views (list/tree/condensed).
+- [ ] **Track**: start a tracking in tasks / trackings (`t`/`s`) → the
+      `track` hint stays marked as long as a tracking is running; stop →
+      marking gone.
+- [ ] **Cut**: put a node on the move clipboard with `C` (mark-move) →
+      the `cut` hint is marked until paste/abort/tab switch.
+- [ ] **Editor**: open an editor (`e`/`a`) → the corresponding hint
+      (`edit`/`add`/…) is marked as long as the edit session is open.
+- [ ] Rebinding test: move `jump_mode` to a different key in `tui.yaml`
+      → the hint shows the new key AND still marks correctly (identity
+      via the configured key, not hardcoded).
+- [ ] **Link hop**: in a Stoat chat with visible links (a bare URL
+      and/or a markdown `[text](url)`) press `f` → every link gets a
+      green label; type the label → the URL opens in the browser (opener
+      from `navigation.link_opener`, default `xdg-open`), the TUI does
+      not block. `Esc` closes the overlay; a pane without links → notice
+      "No links on screen". Generic on every content tab (not just
+      Stoat).
 
-## EditSession — Jira (Refactor Phase 7)
+## EditSession — Jira (refactor phase 7)
 
-- [x] Issue editieren via `e` → 3b-Layout sehen, beliebiges Feld
-      ändern, `:wq` → App bleibt responsive während Save (Jira ist
-      langsam, gut beobachtbar), Notification "X updated"
-- [x] Während Save (5–30 s Fenster) nochmal `e` drücken →
-      Notification "Saving previous edit, please wait…"
-- [x] Issue editieren, Summary löschen → `:wq` → Error-Banner
-      ("Summary is required") im Reopen
-- [x] Issue editieren, im Browser ein _anderes_ Feld ändern, lokal
-      `:wq` → auto-merge: kein Reopen, Notification "X updated
-      (auto-merged with upstream changes)". Auch disjunkte Body-
-      Zeilen (Zeile 1 lokal, Zeile 5 upstream) gehen automatisch.
-- [x] Issue editieren, im Browser _dieselbe Zeile_ anders ändern,
-      lokal `:wq` → Reopen mit Banner + git-style Markern
-      (`<<<<<<< ours`, `=======`, `>>>>>>> theirs`) genau auf der
-      konfligierenden Zeile. Resolve durch Löschen einer Seite +
-      Marker, save → "X updated"
-- [x] Beim Reopen Marker stehen lassen und `:wq` → Error-Banner
+- [x] Edit an issue via `e` → see the 3b layout, change any field,
+      `:wq` → the app stays responsive during the save (Jira is slow,
+      easy to observe), notification "X updated"
+- [x] During the save (a 5–30 s window) press `e` again → notification
+      "Saving previous edit, please wait…"
+- [x] Edit an issue, delete the summary → `:wq` → error banner
+      ("Summary is required") in the reopen
+- [x] Edit an issue, change a **different** field in the browser, `:wq`
+      locally → auto-merge: no reopen, notification "X updated
+      (auto-merged with upstream changes)". Disjoint body lines (line 1
+      local, line 5 upstream) also go through automatically.
+- [x] Edit an issue, change **the same line** differently in the
+      browser, `:wq` locally → reopen with a banner plus git-style
+      markers (`<<<<<<< ours`, `=======`, `>>>>>>> theirs`) exactly on
+      the conflicting line. Resolve by deleting one side plus the
+      markers, save → "X updated"
+- [x] Leave the markers in place in the reopen and `:wq` → error banner
       "unresolved conflict marker — keep one side and remove the
       markers"
-- [x] Issue editieren, `:q!` ohne Änderung → Notification "Edit
+- [x] Edit an issue, `:q!` without a change → notification "Edit
       cancelled"
-- [x] Comment anlegen (`C` drillt in Comments, `a` = ContentChildCreate) →
-      Drill-down-Liste refresht
+- [x] Create a comment (`C` drills into the comments, `a` =
+      ContentChildCreate) → the drill-down list refreshes
 
-## EditSession — Tasks
+## EditSession — tasks
 
-- [x] `n` Add-Task in Tree-Subview → parent wird vererbt
-- [x] `n` Add-Task in List-Subview → kein parent
-- [x] `e` Edit-Task → Tracking-Toggle in Form ändern, save →
-      active_trackings aktualisiert, action_bar reflektiert das
-- [x] `r` Restructure → Subtree editieren, mehrere `:w` während
-      Editor offen → live_apply läuft, IDs werden korrekt erkannt
-      (kein Doppel-Insert)
-- [x] Restructure mit Parse-Fehler → query_error-Bar zeigt Fehler,
-      bei nächstem erfolgreichen Save verschwindet er
-- [x] Notes editieren (`o`) → speichert; mit leerem Buffer save →
-      Datei wird gelöscht (Re-Test nach Fix: TaskNotesSession::new
-      legte vorher eine 0-Byte-Datei an, dadurch matchte der leere
-      Save mit dem leeren Template und triggerte cancel-detection
-      statt commit→delete)
+- [x] `n` add-task in the tree subview → the parent is inherited
+- [x] `n` add-task in the list subview → no parent
+- [x] `e` edit-task → change the tracking toggle in the form, save →
+      active_trackings is updated, the action bar reflects it
+- [x] `r` restructure → edit the subtree, several `:w` while the editor
+      is open → live_apply runs, the IDs are recognised correctly (no
+      double insert)
+- [x] Restructure with a parse error → the query_error bar shows the
+      error, it disappears on the next successful save
+- [x] Edit the notes (`o`) → saves; save with an empty buffer → the file
+      is deleted (re-test after the fix: TaskNotesSession::new used to
+      create a 0-byte file, so the empty save matched the empty template
+      and triggered cancel detection instead of commit→delete)
 
-## EditSession — Trackings
+## EditSession — trackings
 
-- [x] Tracking-Script anlegen → wird unter
-      `<data>/not_yet_done/tracking/scripts/` mit `chmod 755`
-      abgelegt
-- [x] Script ausführen (background / capture / interactive) →
-      jeweiliger Modus funktioniert, bei capture öffnet sich
-      Output-Editor (read-only)
-- [x] Tracking-Query-Filter editieren via Query-Menu → live-apply
-      während `:w`, save mit Name → favorite-Shortcut-Prompt erscheint
+- [x] Create a tracking script → it is placed under
+      `<data>/not_yet_done/tracking/scripts/` with `chmod 755`
+- [x] Run a script (background / capture / interactive) → each mode
+      works; with capture, an output editor opens (read-only)
+- [x] Edit the tracking query filter via the query menu → live apply on
+      `:w`, save with a name → the favorite-shortcut prompt appears
 
-## `:script` fuzzy menu (Trackings + Tasks + Content)
+## `:script` fuzzy menu (trackings + tasks + content)
 
-- [ ] Trackings-Tab `x` öffnet das Menü mit den Scripts unter
-      `<data>/not_yet_done/tracking/scripts/`; `X` ist nicht mehr
-      gebunden (entfernt)
-- [ ] Enter auf bestehendes Script → führt es aus (JSON-Argument
-      enthält `tracking_ids` + `filter_min_date` + `filter_max_date`
-      wie bisher)
-- [ ] Typischen Namen ohne Treffer + Enter → öffnet leeren Editor
-      auf neuem Script unter dem passenden Scripts-Dir
-- [ ] `+name` als Eingabe + Enter → erzwingt CreateNew auch wenn
-      `name` einen Treffer matcht
-- [ ] Ctrl+E → öffnet das selektierte Script im Editor
-- [ ] Ctrl+D → löscht das selektierte Script (mit Notification)
-- [ ] Tasks-Tab (list **und** tree, beide Sub-Views): `x` öffnet das
-      Menü mit den Scripts unter `<data>/not_yet_done/scripts/tasks/`
-      (flach, geteilter Pool). Per-View-Title ist „Scripts · Tasks".
-- [ ] Tasks-Tab `x` ohne Selektion → Notification „No task selected",
-      Menü öffnet sich nicht.
-- [ ] Tasks-Tab Run eines Scripts → JSON-Argument hat Form
-      `{"task": {"id": "<uuid>", "description": "<desc>", "parent_id":
-"<uuid>"|null, "ancestors": [{"id":..,"description":..}, …]}}`.
-      `ancestors` ist root→parent (Self exklusiv). Root-Task hat
-      `parent_id: null` und `ancestors: []`.
-- [ ] Tasks-Tab `:script` (cmdline) → identisches Menü wie `x`.
-- [ ] Tasks-Tree, Cursor auf Task in tiefem Pfad (z.B.
-      `Work/Clients/acme/Tickets/#42 - …`): `ancestors` enthält
-      genau die 4 Eltern in Root→Parent-Reihenfolge.
-- [ ] Tasks-Tab, Script in `# mode: commands` emittiert
-      `focus-node Taiga:items /ref|<slug>#<n>` → Tab wechselt nach
-      Taiga, Cursor parkt auf dem Ticket (Rückrichtung des
-      `goto_task.py`-Flows).
-- [ ] `:script` in einem Content-Tab mit selektiertem Node → Menü
-      mit Scripts unter `<data>/not_yet_done/scripts/<tab>/<view-path>/`,
-      Run liefert JSON `{node: {ref, id, label, node_type, tab, instance,
-fields}}` (`label` = Anzeige-Label der Zeile, z. B. die Task-Beschreibung)
-- [ ] Taiga `items`-View mit gemischten Knotentypen (issue +
-      userstory + task + epic): das Skript-Menü zeigt **immer
-      dieselbe** Liste unabhängig vom selektierten Knoten — Pfad
-      `scripts/taiga/taiga_item/`. Im JSON-`node.node_type` steht
-      dennoch der Item-Typ (`taiga_issue` / `taiga_userstory` / …)
-- [ ] Drill-Down in eine ChildDef (z.B. `taiga:item` → `taiga:comment`):
-      Skript-Menü zeigt nun Skripte aus
-      `scripts/taiga/taiga_item/taiga_comment/`, JSON enthält
-      die Felder des selektierten Comments
-- [ ] Per-View `actions: - {name: script, key: x, type: script}` in
-      einer View-YAML → drücken von `x` triggert das Menü; ohne
-      diesen Eintrag passiert auf `x` nichts (kein globaler Default
-      auf Content-Tabs)
-- [ ] **Batch-Scope (`scope: filtered_set`)** — Trackings, flache
-      `trackings`-View (`x` mit `scope: filtered_set`): Run eines Scripts
-      liefert JSON `{"tracking_ids": […], "filter_min_date": …,
-"filter_max_date": …}` (NICHT `{"node": …}`) — exakt die Legacy-Form, die
-      `daily_report.py` / `hours_report.py` / `equalize_trackings.py`
-      erwarten; die migrierten Scripts unter
-      `<data>/not_yet_done/scripts/trackings/tracking_entry/` laufen
-      unverändert.
-- [ ] Batch-Scope, `tracking_ids` folgt dem Sichtbaren: ohne Fuzzy-Filter
-      = alle Zeilen der aktiven Query; mit aktivem Fuzzy-Filter (`f`) =
-      exakt die Treffermenge.
-- [ ] Batch-Scope, Datumsgrenzen: aktive Query `started_at gt last month`
-      → `filter_min_date` ist der aufgelöste Monatsanfang (RFC3339),
-      `filter_max_date` ist `null` (keine Obergrenze).
-- [ ] Interactive-Skript mit `{json_file}` Placeholder im
-      `interactive_command` → wird von beiden Pfaden (Trackings +
-      Content) bedient (alter `{tracking_json_file}` ist
-      umbenannt → tui.yaml einmal anpassen)
-- [ ] Taiga `items`-View, Cursor auf einem Ticket mit `ref` wie
-      `acme#42`, `:script` → `goto_task.py` ausführen → TUI springt
-      auf den **Adapter**-Tab „Tasks" (NICHT den Legacy-Tasks-Tab)
-      und expandiert/parkt auf dem Task im Pfad
-      `/work/.../<slug>/tickets/<…42…>`. Das Skript emittiert genau
-      ein `tree-find "Tasks" id:<uuid>`.
-- [ ] Taiga `items`-View, Auto-Create-Pfad: Cursor auf einem
-      Ticket, dessen lokaler Task NOCH NICHT existiert (z.B. neue
-      Ticket-Nummer). `:script` → `goto_task.py`:
-  - Skript ruft via CLI `task add` auf, legt `#<n> - <subject>`
-    unter dem `tickets`-Parent an und löst danach dessen `id` neu auf.
-  - `tree-find` erzwingt einen frischen Reload des Adapter-Tabs, **bevor**
-    gesucht wird → der eben angelegte Task ist sofort sichtbar
-    (Parität zum alten `reload-tasks`), Cursor parkt darauf.
-  - Wiederholtes Ausführen ist idempotent (Task existiert dann
-    schon → nur jump+focus). Tree zeigt KEINE Duplikate.
-  - Wenn der Parent-Path (`/work/.../<slug>/tickets`) gar
-    nicht existiert: Modal-Fehler aus dem Skript (stderr).
-- [ ] `:tree-find` direkt (ohne Skript): `:tree-find "Tasks" <text>`
-      (Beschreibungs-Substring) springt auf Tasks und parkt auf
-      dem ersten Treffer; `n`/`N` zykeln weitere. `:tree-find "Tasks"
-id:<uuid>` parkt exakt auf diesem Knoten. Modal-Fehler bei
-      unbekanntem Tab/View oder wenn die aktive View kein Baum ist
-      (Hinweis auf `:focus-node`).
+- [ ] Trackings tab: `x` opens the menu with the scripts under
+      `<data>/not_yet_done/tracking/scripts/`; `X` is no longer bound
+      (removed)
+- [ ] Enter on an existing script → runs it (the JSON argument contains
+      `tracking_ids` + `filter_min_date` + `filter_max_date` as before)
+- [ ] Type a name with no match + Enter → opens an empty editor on a new
+      script under the matching scripts directory
+- [ ] `+name` as input + Enter → forces CreateNew even when `name`
+      matches an existing script
+- [ ] Ctrl+E → opens the selected script in the editor
+- [ ] Ctrl+D → deletes the selected script (with a notification)
+- [ ] Tasks tab (list **and** tree, both subviews): `x` opens the menu
+      with the scripts under `<data>/not_yet_done/scripts/tasks/` (flat,
+      shared pool). The per-view title is "Scripts · Tasks".
+- [ ] Tasks tab, `x` without a selection → notification "No task
+      selected", the menu does not open.
+- [ ] Tasks tab, running a script → the JSON argument has the shape
+      `{"task": {…}}` with the keys `id`, `description`, `parent_id` (a
+      UUID or null) and `ancestors` (a list of objects with `id` and
+      `description`). `ancestors` runs root→parent (excluding self). A
+      root task has a null `parent_id` and an empty `ancestors` list.
+- [ ] Tasks tab, `:script` (cmdline) → the same menu as `x`.
+- [ ] Tasks tree, cursor on a task in a deep path (e.g.
+      `Work/Clients/acme/Tickets/#42 - …`): `ancestors` contains exactly
+      the 4 parents in root→parent order.
+- [ ] Tasks tab, a script in `# mode: commands` emits
+      `focus-node Taiga:items /ref|<slug>#<n>` → the tab switches to
+      Taiga, the cursor parks on the ticket (the reverse direction of
+      the `goto_task.py` flow).
+- [ ] `:script` in a content tab with a selected node → menu with the
+      scripts under `<data>/not_yet_done/scripts/<tab>/<view-path>/`;
+      running one delivers a JSON object with a `node` key holding
+      `ref`, `id`, `label`, `node_type`, `tab`, `instance` and `fields`
+      (`label` = the display label of the row, e.g. the task
+      description)
+- [ ] Taiga `items` view with mixed node types (issue + userstory + task + epic): the script menu shows **the same** list regardless of the
+      selected node — path `scripts/taiga/taiga_item/`. The JSON
+      `node.node_type` still carries the item type (`taiga_issue` /
+      `taiga_userstory` / …)
+- [ ] Drill down into a ChildDef (e.g. `taiga:item` → `taiga:comment`):
+      the script menu now shows the scripts from
+      `scripts/taiga/taiga_item/taiga_comment/`, and the JSON contains
+      the fields of the selected comment
+- [ ] A per-view `actions: - {name: script, key: x, type: script}` in a
+      view YAML → pressing `x` triggers the menu; without that entry,
+      `x` does nothing (no global default on content tabs)
+- [ ] **Batch scope (`scope: filtered_set`)** — trackings, flat
+      `trackings` view (`x` with `scope: filtered_set`): running a
+      script delivers JSON with the keys `tracking_ids`,
+      `filter_min_date` and `filter_max_date` (NOT a `node` key) —
+      exactly the legacy shape expected by `daily_report.py` /
+      `hours_report.py` / `equalize_trackings.py`; the migrated scripts
+      under `<data>/not_yet_done/scripts/trackings/tracking_entry/` run
+      unchanged.
+- [ ] Batch scope, `tracking_ids` follows what is visible: without a
+      fuzzy filter = all rows of the active query; with an active fuzzy
+      filter (`f`) = exactly the matching set.
+- [ ] Batch scope, date bounds: with the active query
+      `started_at gt last month` → `filter_min_date` is the resolved
+      start of the month (RFC3339), `filter_max_date` is `null` (no
+      upper bound).
+- [ ] An interactive script with a `{json_file}` placeholder in
+      `interactive_command` → served by both paths (trackings +
+      content); the old `{tracking_json_file}` has been renamed, so
+      tui.yaml needs a one-time adjustment
+- [ ] Taiga `items` view, cursor on a ticket with a `ref` like
+      `acme#42`, `:script` → run `goto_task.py` → the TUI jumps to the
+      **adapter** tab "Tasks" (NOT the legacy tasks tab) and
+      expands/parks on the task at the path
+      `/work/.../<slug>/tickets/<…42…>`. The script emits exactly one
+      `tree-find "Tasks" id:<uuid>`.
+- [ ] Taiga `items` view, auto-create path: cursor on a ticket whose
+      local task does NOT exist yet (e.g. a new ticket number).
+      `:script` → `goto_task.py`:
+  - The script calls `task add` via the CLI, creates
+    `#<n> - <subject>` under the `tickets` parent and then re-resolves
+    its `id`.
+  - `tree-find` forces a fresh reload of the adapter tab **before**
+    searching → the task just created is immediately visible (parity
+    with the old `reload-tasks`), and the cursor parks on it.
+  - Running it again is idempotent (the task then already exists → just
+    jump+focus). The tree shows NO duplicates.
+  - If the parent path (`/work/.../<slug>/tickets`) does not exist at
+    all: a modal error from the script (stderr).
+- [ ] `:tree-find` directly (without a script): `:tree-find "Tasks"
+  <text>` (a description substring) jumps to tasks and parks on the
+      first match; `n`/`N` cycle through the others. The same command
+      with `id:<uuid>` instead of the text parks exactly on that node.
+      A modal error for an unknown tab/view, or when the active view is
+      not a tree (with a pointer to `:focus-node`).
 
 ## `:query apply` — saved-query activation via cmdline
 
-- [ ] Auf einem Content-Tab mit mind. einer in YAML definierten
-      Saved Query, `:query apply <name>` (ohne `-t`) → die genannte
-      Query wird im aktiven View aktiv (Action-Bar zeigt
-      `Filter: <name>`), Rows reloaded, vorheriger Cursor verloren
-      ist OK.
-- [ ] `:query apply foo bar baz` mit Whitespace im Namen → Name
-      wird komplett als ein Token interpretiert (Whitespace bleibt
-      Teil des Match-Strings, Case-insensitive Vergleich).
-- [ ] `:query apply -t Taiga:items <name>` von einem anderen Tab
-      aus → wechselt zuerst auf Taiga:items, dann Query
-      aktivieren + Reload. Wenn `<name>` nur YAML-Default ist,
-      funktioniert das auch bei einem nie besuchten Tab.
-- [ ] `:query apply -t Taiga:nonexistent foo` → Modal-Fehler
-      „unknown view 'nonexistent' for tab 'Taiga' (available: …)",
-      kein Tab-Wechsel.
-- [ ] `:query apply unknown-name` → Modal-Fehler mit Liste der
-      verfügbaren Saved Queries.
-- [ ] Auf einem Tasks- oder Trackings-Tab ohne `-t`:
-      Modal-Fehler „not on a content tab".
-- [ ] Command-Chain aus einem `# mode: commands` Skript:
-      `query apply -t Taiga:items <q>` gefolgt von
-      `focus-node -i Taiga:items /ref|<slug>#<num>` → die Saved
-      Query ist beim `focus-node`-Schritt bereits aktiv, der
-      Cursor parkt auf dem Ticket (synchroner Reload zwischen
-      den beiden Schritten).
-- [ ] `:query` ohne Subkommando → Modal-Fehler mit Hinweis auf
-      `:query apply`. `:query foo` → Modal-Fehler „unknown
-      subcommand 'foo'".
+- [ ] On a content tab with at least one saved query defined in YAML,
+      `:query apply <name>` (without `-t`) → the named query becomes
+      active in the current view (the action bar shows
+      `Filter: <name>`), rows are reloaded; losing the previous cursor
+      is fine.
+- [ ] `:query apply foo bar baz` with whitespace in the name → the name
+      is interpreted as one whole token (whitespace stays part of the
+      match string, compared case-insensitively).
+- [ ] `:query apply -t Taiga:items <name>` from another tab → switches
+      to Taiga:items first, then activates the query and reloads. If
+      `<name>` is only a YAML default, this also works for a tab that
+      has never been visited.
+- [ ] `:query apply -t Taiga:nonexistent foo` → modal error "unknown
+      view 'nonexistent' for tab 'Taiga' (available: …)", no tab switch.
+- [ ] `:query apply unknown-name` → modal error listing the available
+      saved queries.
+- [ ] On a tasks or trackings tab without `-t`: modal error "not on a
+      content tab".
+- [ ] Command chain from a `# mode: commands` script:
+      `query apply -t Taiga:items <q>` followed by
+      `focus-node -i Taiga:items /ref|<slug>#<num>` → the saved query is
+      already active at the `focus-node` step and the cursor parks on
+      the ticket (synchronous reload between the two steps).
+- [ ] `:query` without a subcommand → modal error pointing at
+      `:query apply`. `:query foo` → modal error "unknown subcommand
+      'foo'".
 
 ## `:query edit/new/delete` — saved-query body management
 
-- [ ] Auf einem Content-Tab mit Jira- oder Taiga-Adapter,
-      `:query new Test foo` → `$EDITOR` öffnet sich auf leerem
-      Buffer mit Suffix `.yaml`. Inhalt eingeben + Speichern +
-      Editor schließen → Notification „Saved query 'Test foo'",
-      Datei taucht unter
-      `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/Test foo.yaml`
-      auf, Q-Menü (Taste `q`) zeigt sie.
-- [ ] Direkt danach `:query new Test foo` nochmal → Modal-Fehler
-      „'Test foo' already exists (use :query edit to modify)",
-      kein Editor.
-- [ ] `:query edit Test foo` → Editor öffnet sich mit dem zuvor
-      gespeicherten Inhalt. Inhalt ändern, speichern, schließen →
-      Notification, Datei aktualisiert.
-- [ ] `:query edit unknown` → Modal-Fehler „no saved query named
+- [ ] On a content tab with a Jira or Taiga adapter, `:query new Test
+  foo` → `$EDITOR` opens on an empty buffer with the suffix `.yaml`.
+      Enter content, save, close the editor → notification "Saved query
+      'Test foo'", the file appears under
+      `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/Test foo.yaml`,
+      and the Q menu (key `q`) shows it.
+- [ ] Immediately afterwards, `:query new Test foo` again → modal error
+      "'Test foo' already exists (use :query edit to modify)", no
+      editor.
+- [ ] `:query edit Test foo` → the editor opens with the previously
+      saved content. Change the content, save, close → notification,
+      the file is updated.
+- [ ] `:query edit unknown` → modal error "no saved query named
       'unknown' (use :query new to create)".
-- [ ] `:query delete Test foo` → Datei und ggf. Shortcut-Eintrag
-      sind weg, Notification „Deleted saved query 'Test foo'",
-      Q-Menü listet sie nicht mehr.
-- [ ] `:query delete unknown` → keine Aktion, leise (idempotent,
-      kein Modal), Notification trotzdem.
-- [ ] Auf Tasks- oder Trackings-Tab: `:query edit/new/delete foo` →
-      Modal-Fehler „not on a content tab".
-- [ ] Auf Postgres-Tab (Adapter ohne `saved_query_store()` → noch
-      nicht migriert) → Modal-Fehler „adapter 'postgres' has no
-      saved-query store".
-- [ ] Q-Menü sortiert die Liste so, dass neue Queries direkt
-      auftauchen ohne Restart (Adapter-Store wird vor jedem
-      Q-Menü-Aufruf neu gelesen).
+- [ ] `:query delete Test foo` → the file and any shortcut entry are
+      gone, notification "Deleted saved query 'Test foo'", the Q menu no
+      longer lists it.
+- [ ] `:query delete unknown` → no action, quietly (idempotent, no
+      modal), but a notification all the same.
+- [ ] On a tasks or trackings tab: `:query edit/new/delete foo` → modal
+      error "not on a content tab".
+- [ ] On a Postgres tab (an adapter without `saved_query_store()` → not
+      migrated yet) → modal error "adapter 'postgres' has no saved-query
+      store".
+- [ ] The Q menu orders the list such that new queries show up right
+      away without a restart (the adapter store is re-read before every
+      Q-menu invocation).
 
-## `:query apply` — Variablen + Popup
+## `:query apply` — variables + popup
 
-- [ ] Taiga-Saved-Query mit `project=${proj:alpha}` als YAML-Default:
-      Shortcut-Taste (z.B. `1`) → Popup öffnet sich mit Feld
-      `proj` und vorbelegtem `alpha`. Enter → Reload mit
-      `project=alpha`. Esc → kein Reload, Popup zu, alte Rows
-      bleiben.
-- [ ] Gleiche Query: Popup öffnen, Wert auf `beta` ändern, Enter
-      → Reload mit `project=beta`. Action-Bar zeigt
-      `Filter: <name>` wie zuvor.
-- [ ] Query mit `${proj}` (kein Default, also required): Shortcut
-      → Popup zeigt Label `proj (required)`, leeres Feld. Enter
-      mit leerem Feld → Inline-Fehler „'proj' is required",
-      Popup bleibt offen. Wert eingeben + Enter → Reload.
-- [ ] Query-Menü `Apply`-Action auf einer Query mit Variablen →
-      gleicher Popup, gleiches Verhalten wie Shortcut (immer
-      Popup).
-- [ ] `:query apply --var proj=alpha -t Taiga:items <name>` mit
-      derselben Query → kein Popup, direkter Reload mit
-      `project=alpha`. Geeignet für Scripts.
-- [ ] `:query apply --var proj=alpha --var x=42 -t Taiga:items
-<name>` mehrere `--var` werden alle vorbelegt. Reihenfolge
-      zwischen `--var` und `-t` egal.
-- [ ] `:query apply -t Taiga:items <name>` ohne `--var` auf einer
-      Query mit nur optionalen Variablen (alle haben Defaults) →
-      kein Popup (CLI-Pfad), Reload mit Defaults.
-- [ ] `:query apply -t Taiga:items <name>` auf einer Query mit
-      einer required Variable und ohne `--var` für sie → Popup
-      öffnet, weil mind. eine required nicht abgedeckt ist.
-- [ ] `:query apply --var=oops -t ...` (kein `=` im Wert) →
-      Modal-Fehler „--var expects k=v".
-- [ ] Saved-Query ohne Variablen (kein `${...}`) → Verhalten
-      unverändert, kein Popup, direkter Reload.
-- [ ] Tab-Wechsel/Tabwechsel und andere Popups: Query-Var-Popup
-      verhält sich wie andere Modals — solange offen, schluckt
-      es alle Keys außer Esc.
+- [ ] Taiga saved query with `project=${proj:alpha}` as the YAML
+      default: shortcut key (e.g. `1`) → the popup opens with a `proj`
+      field pre-filled with `alpha`. Enter → reload with
+      `project=alpha`. Esc → no reload, the popup closes, the old rows
+      remain.
+- [ ] Same query: open the popup, change the value to `beta`, Enter →
+      reload with `project=beta`. The action bar shows `Filter: <name>`
+      as before.
+- [ ] Query with `${proj}` (no default, therefore required): shortcut →
+      the popup shows the label `proj (required)` and an empty field.
+      Enter on the empty field → inline error "'proj' is required", the
+      popup stays open. Enter a value + Enter → reload.
+- [ ] The `Apply` action of the query menu on a query with variables →
+      the same popup, the same behaviour as the shortcut (always a
+      popup).
+- [ ] `:query apply --var proj=alpha -t Taiga:items <name>` on the same
+      query → no popup, a direct reload with `project=alpha`. Suitable
+      for scripts.
+- [ ] The same command with two `--var` arguments (e.g.
+      `--var proj=alpha --var x=42`) → all of them are pre-filled. The
+      order of `--var` and `-t` does not matter.
+- [ ] `:query apply -t Taiga:items <name>` without `--var` on a query
+      with only optional variables (all have defaults) → no popup (CLI
+      path), reload with the defaults.
+- [ ] `:query apply -t Taiga:items <name>` on a query with one required
+      variable and without a `--var` for it → the popup opens, because
+      at least one required variable is not covered.
+- [ ] `:query apply --var=oops -t ...` (no `=` in the value) → modal
+      error "--var expects k=v".
+- [ ] Saved query without variables (no `${...}`) → behaviour unchanged,
+      no popup, direct reload.
+- [ ] Tab switching and other popups: the query-var popup behaves like
+      other modals — while open it swallows all keys except Esc.
 
-## EditSession — Query-Menu (alle drei Tabs)
+## EditSession — query menu (all three tabs)
 
-- [x] Tasks-Tab: Filter neu anlegen, save → DB persist +
-      favorite-Prompt
-- [x] Trackings-Tab: bestehenden Filter editieren → kein Prompt
-- [x] ContentView: Query editieren mit/ohne save_name
+- [x] Tasks tab: create a new filter, save → DB persist + favorite
+      prompt
+- [x] Trackings tab: edit an existing filter → no prompt
+- [x] ContentView: edit a query with and without save_name
 
-## EditSession — Editor-Pfade
+## EditSession — editor paths
 
-- [x] Launch-Modus (User-Default): kitty-Split öffnet, `:wq` schließt
-      Split, App ist responsive
-- [x] Inline-Modus (`editor.inline: true` in tui.yaml): TUI pausiert,
-      Editor bekommt Terminal, Resume nach `:wq` — funktioniert
-      weiter wie vorher (sync-await, kann blockieren bei langsamem
-      Backend)
+- [x] Launch mode (the user default): a kitty split opens, `:wq` closes
+      the split, the app is responsive
+- [x] Inline mode (`editor.inline: true` in tui.yaml): the TUI pauses,
+      the editor gets the terminal, resume after `:wq` — still works as
+      before (sync await, may block with a slow backend)
 
-## Tasks/Trackings — `/` text-search
+## Tasks/trackings — `/` text search
 
-- [ ] Tasks-Tab: `/` öffnet die Such-Leiste in der Action-Bar (`/ ` +
-      Cursor + "type to search…"-Placeholder)
-- [ ] Tippen filtert die Auswahl auf den ersten Match. Zeile springt
-      automatisch zum ersten Treffer
-- [ ] `n`/`N` springen zum nächsten/vorigen Match
-- [ ] `enter` schließt die Such-Leiste, Auswahl bleibt auf dem Treffer
-- [ ] `esc` mit leerer Query schließt die Leiste; mit nicht-leerer
-      Query → erst clearen, dann schließen (zwei `esc`)
-- [ ] Trackings-Tab: dasselbe Verhalten
+- [ ] Tasks tab: `/` opens the search bar in the action bar (`/ ` +
+      cursor + a "type to search…" placeholder)
+- [ ] Typing narrows the selection to the first match. The row jumps to
+      the first hit automatically
+- [ ] `n`/`N` jump to the next/previous match
+- [ ] `enter` closes the search bar, the selection stays on the hit
+- [ ] `esc` with an empty query closes the bar; with a non-empty query →
+      clear first, then close (two `esc`)
+- [ ] Trackings tab: the same behaviour
 
-## Jira — Free-text search (`s`)
+## Jira — free-text search (`s`)
 
-- [ ] Jira-Tab Root-Level: `s` öffnet die Action-Bar mit Prompt `? `
-      und dem in `jira.yaml` konfigurierten Placeholder (`Jira-Suche`,
-      kein `[n/m]`-Counter)
-- [ ] Tippen lässt nichts lokal passieren (kein Filter, keine
-      Selektions-Sprünge — Eingabe geht erst beim Submit raus)
-- [ ] Plain-Text-Eingabe + `enter` → aktive Query wird zu
-      `text ~ "<input>"` (kein `ORDER BY`, `{key_or}` bleibt leer);
-      Reload läuft, Query-Name wird geleert (anonyme Query). Treffer
-      sind nach Lucene-Score sortiert (best match zuerst), nicht nach
-      Datum
-- [ ] Eingabe einer Issue-Key-Form (`ABC-123`) + `enter` → Query wird
-      zu `issuekey = "ABC-123" OR text ~ "ABC-123"`; das genannte
-      Ticket erscheint im Ergebnis
-- [ ] `esc` mit leerer Query schließt die Leiste; mit nicht-leerer
-      Query → erst clearen, dann schließen
-- [ ] Eingabe mit `"`/`\`-Zeichen → JQL bleibt valide (Escape via
-      `\"` / `\\`); Suche läuft ohne 400er
-- [ ] Prompt-Override: wenn `prompt:` im YAML entfernt wird, fällt der
-      Placeholder zurück auf `free-text search…`
-- [ ] `q` (Query-Menü) und `Q` (Query-Editor) funktionieren weiterhin
-      — `s` darf den anderen Such-Pfaden nichts wegnehmen
-- [ ] **Bug-Regression**: in einem Content-Tab `s` drücken triggert
-      KEIN Tracking-Toggle mehr (vorher: Last-Tracking aus Trackings
-      wurde gestartet)
+- [ ] Jira tab, root level: `s` opens the action bar with the prompt
+      `? ` and the placeholder configured in `jira.yaml` (`Jira-Suche`,
+      no `[n/m]` counter)
+- [ ] Typing does nothing locally (no filter, no selection jumps — the
+      input only goes out on submit)
+- [ ] Plain-text input + `enter` → the active query becomes
+      `text ~ "<input>"` (no `ORDER BY`, `{key_or}` stays empty); the
+      reload runs and the query name is cleared (an anonymous query).
+      The hits are sorted by Lucene score (best match first), not by
+      date
+- [ ] Input in issue-key form (`ABC-123`) + `enter` → the query becomes
+      `issuekey = "ABC-123" OR text ~ "ABC-123"`; that ticket shows up
+      in the result
+- [ ] `esc` with an empty query closes the bar; with a non-empty query →
+      clear first, then close
+- [ ] Input containing `"`/`\` characters → the JQL stays valid (escaped
+      via `\"` / `\\`); the search runs without a 400
+- [ ] Prompt override: when `prompt:` is removed from the YAML, the
+      placeholder falls back to `free-text search…`
+- [ ] `q` (query menu) and `Q` (query editor) still work — `s` must not
+      take anything away from the other search paths
+- [ ] **Bug regression**: pressing `s` in a content tab no longer
+      triggers a tracking toggle (before: the last tracking from
+      trackings was started)
 
-## Jira — Toggle Watch (`w`)
+## Jira — toggle watch (`w`)
 
-- [ ] Auf einem nicht-gewatchten Issue `w` drücken → Status-Bar zeigt
-      `<KEY>: watching`; nach kurzem Reload taucht das Ticket im
-      Saved-Query "Watched Tickets" (`ctrl+w`) auf
-- [ ] Auf einem gewatchten Issue `w` drücken → Status-Bar zeigt
-      `<KEY>: no longer watching`; nach Reload ist das Ticket aus dem
-      `ctrl+w`-View verschwunden
-- [ ] Fehlerfall (z.B. Auth-Status nicht ok / Issue nicht erreichbar)
-      → Status-Bar zeigt `Action failed: …`, kein Crash, View bleibt
-      stehen
+- [ ] Press `w` on an unwatched issue → the status bar shows
+      `<KEY>: watching`; after a short reload the ticket shows up in the
+      saved query "Watched Tickets" (`ctrl+w`)
+- [ ] Press `w` on a watched issue → the status bar shows
+      `<KEY>: no longer watching`; after the reload the ticket has
+      disappeared from the `ctrl+w` view
+- [ ] Error case (e.g. auth status not ok / issue unreachable) → the
+      status bar shows `Action failed: …`, no crash, the view stays put
 
-## Jira — Saved Queries (Ctrl-Shortcuts)
+## Jira — saved queries (ctrl shortcuts)
 
-Bodies liegen unter
-`<XDG_DATA_HOME>/not_yet_done/jira/<instance>/queries/<name>.yaml`,
-Shortcuts in der DB-Tabelle `query_shortcut`
-(Scope `jira:<instance>:tickets`).
+The bodies live under
+`<XDG_DATA_HOME>/not_yet_done/jira/<instance>/queries/<name>.yaml`, the
+shortcuts in the DB table `query_shortcut` (scope
+`jira:<instance>:tickets`).
 
-- [ ] `ctrl+i` lädt "My Tickets" (`assignee = currentUser()`)
-- [ ] `ctrl+w` lädt "Watched Tickets" (`watcher = currentUser()`) —
-      darf NICHT mit dem `w`-Toggle-Watch kollidieren
-- [ ] `ctrl+m` lädt "Mentioned In" — darf NICHT als `enter` interpretiert
-      werden (Kitty-Protokoll erforderlich, sonst kollidiert es mit der
-      Selektions-Aktion)
-- [ ] `q`-Menü listet exakt die Bodies aus dem queries-Verzeichnis
-      des Adapters (keine YAML-`saved:`-Reste mehr). Action-Bar zeigt
-      die Shortcuts an der Saved Query — `My Tickets [ctrl+i]` etc.
-- [ ] `:query delete <name>` löscht Body **und** Shortcut-Row; nach
-      App-Restart sind beide weg.
+- [ ] `ctrl+i` loads "My Tickets" (`assignee = currentUser()`)
+- [ ] `ctrl+w` loads "Watched Tickets" (`watcher = currentUser()`) —
+      must NOT collide with the `w` toggle-watch
+- [ ] `ctrl+m` loads "Mentioned In" — must NOT be interpreted as `enter`
+      (the kitty protocol is required, otherwise it collides with the
+      selection action)
+- [ ] The `q` menu lists exactly the bodies from the adapter's queries
+      directory (no YAML `saved:` leftovers any more). The action bar
+      shows the shortcuts on the saved query — `My Tickets [ctrl+i]`
+      etc.
+- [ ] `:query delete <name>` deletes the body **and** the shortcut row;
+      after an app restart both are gone.
 
-## Jira — Labels / Assignee / Mentions im Edit-Template
+## Jira — labels / assignee / mentions in the edit template
 
-- [ ] `e` auf einem Issue: editierbare Sektion zeigt jetzt
-      `summary:`, `labels:` (CSV mit `ll-…`-Slugs), `assignee:`
-      (`uu-…`-Slug oder leer)
-- [ ] Am Ende des Templates erscheint `#### CACHE / available labels
-& users (do not edit) ####`-Block mit den Slugs aus dem Cache
-- [ ] Label hinzufügen/entfernen via `ll-…`-Slug → speichert korrekt
-      (Liste wird ersetzt, nicht ergänzt)
-- [ ] Assignee ändern via `uu-…`-Slug → speichert; leerer Wert
-      un-assigned das Issue
-- [ ] Unbekanntes `ll-foo` oder `uu-foo` → Reopen mit Banner-Fehler
+- [ ] `e` on an issue: the editable section now shows `summary:`,
+      `labels:` (CSV with `ll-…` slugs), `assignee:` (a `uu-…` slug or
+      empty)
+- [ ] At the end of the template there is a block headed
+      `#### CACHE / available labels & users (do not edit) ####` with
+      the slugs from the cache
+- [ ] Add/remove a label via its `ll-…` slug → saves correctly (the list
+      is replaced, not appended to)
+- [ ] Change the assignee via a `uu-…` slug → saves; an empty value
+      un-assigns the issue
+- [ ] An unknown `ll-foo` or `uu-foo` → reopen with a banner error
       ("unknown label slug …" / "unknown user slug …")
-- [ ] `Shift+E` (`edit_with_comments`): in jedem Comment-Body wird
-      `[~JDOE1]` als `@uu-jane-doe` angezeigt
-- [ ] Comment unverändert speichern → kein Change-Event (Roundtrip
-      sauber, kein Update an Jira)
-- [ ] In `--- add ---` Block ein `@uu-…` schreiben → kommt bei Jira
-      als `[~KEY]`-Mention an
-- [ ] Unbekanntes `@uu-…` in Comment → Reopen mit Banner-Fehler
-- [ ] Kollidierende Slugs (zwei Labels normalisieren auf gleichen
-      Wert) bekommen `-2`, `-3` Suffix; deterministisch über Restarts
+- [ ] `Shift+E` (`edit_with_comments`): in every comment body,
+      `[~JDOE1]` is displayed as `@uu-jane-doe`
+- [ ] Save a comment unchanged → no change event (a clean round trip, no
+      update sent to Jira)
+- [ ] Write a `@uu-…` in an `--- add ---` block → it arrives at Jira as
+      a `[~KEY]` mention
+- [ ] An unknown `@uu-…` in a comment → reopen with a banner error
+- [ ] Colliding slugs (two labels normalising to the same value) get a
+      `-2`, `-3` suffix; deterministic across restarts
 
-## Jira — Merge-Only User/Label Cache (Issue-basiert)
+## Jira — merge-only user/label cache (issue-based)
 
-Hintergrund: alter Bulk-Pull (`/rest/api/2/user/search?username=.`) ist
-kaputt — Server cappt unentdeckt bei 100 Treffern. Stattdessen wird der
-Cache jetzt rein über tatsächlich geladene Issues gefüttert
-(assignee + reporter + creator + Comment-Authoren + Labels) und ist
-strikt additiv: was einmal drin ist, bleibt drin; existierende Einträge
-bekommen bei Re-Merge nur ihren `display_name` aktualisiert.
+Background: the old bulk pull (`/rest/api/2/user/search?username=.`) is
+broken — the server caps at 100 hits without saying so. Instead the
+cache is now fed purely from issues that were actually loaded (assignee,
+reporter, creator, comment authors and labels) and is strictly additive:
+whatever is in it stays in it; existing entries only get their
+`display_name` updated on a re-merge.
 
-- [ ] Erster App-Start nach Update: stderr zeigt einmalig
-      `nyd: cleaned up N orphan jira_user and M orphan jira_label
-row(s) from previous schema` (legacy-Rows aus dem alten
-      `run_sync`-Pfad mit anderer connection_id)
-- [ ] Zweiter Start: Meldung kommt **nicht** mehr (nichts mehr zu
-      räumen)
-- [ ] Issue mit bekanntem Reporter/Creator öffnen, der bisher nicht in
-      der CACHE-Liste stand → CACHE-Sektion am Buffer-Ende führt ihn
-      jetzt mit `uu-…`-Slug
-- [ ] DB-Inspektion: nach Issue-Open ist der Reporter/Creator als
-      Zeile in `jira_user` (gleiche `connection_id` wie vorhandene
-      Einträge — UUID v5 vom Jira-URL)
-- [ ] Issue mit Comment-Author, der bisher nicht im Cache war →
-      Author taucht als `uu-…`-Slug in CACHE-Sektion auf, im Comment-
-      Body wird sein `[~KEY]` → `@uu-…` aufgelöst
-- [ ] User wird im Jira umbenannt → nach erneutem Issue-Open für
-      ein Ticket, in dem er auftaucht: `display_name` ist im Cache
-      aktualisiert (in DB und in der CACHE-Sektion); `username`
-      bleibt stabil
-- [ ] User wird im Jira deaktiviert → bleibt im Cache (Merge-only,
-      es wird nie gelöscht); Slugs zu alten Comments funktionieren
-      weiter
-- [ ] App-Restart → Cache wird aus DB hydratisiert, sofort beim ersten
-      Issue-Open ist die CACHE-Sektion gefüllt (kein Bulk-API-Call mehr
-      nötig — kein "ladend" Zustand)
-- [ ] `[~KEY]` in einem Comment, der KEY noch nicht im Cache:
-      `Shift+e` löst die KEY per `/rest/api/2/user?username=KEY`
-      auf, mergt in Cache + DB, rendert `@uu-…`-Slug in dem Comment
-- [ ] `[~UNKNOWN]` (KEY existiert auch in Jira nicht) → Lookup gibt
-      Fehler, KEY bleibt im Render verbatim als `[~UNKNOWN]` stehen
-      (kein Crash)
-- [ ] CLI-Export `nyd content list jira:user` → API-Call, Result wird
-      zusätzlich in den Cache + DB gemergt (nächste Session findet
-      die User dort)
-- [ ] Alte YAML mit `cache: { preload: true, label_ttl: 86400,
-user_ttl: 86400 }` → App startet ohne Validation-Fehler, das
-      Block wird stillschweigend ignoriert (Felder sind tot)
+- [ ] First app start after the update: stderr shows, once, a line of
+      the form "cleaned up N orphan jira_user and M orphan jira_label
+      row(s) from previous schema" (legacy rows from the old `run_sync`
+      path with a different connection_id)
+- [ ] Second start: the message does **not** come again (nothing left to
+      clean up)
+- [ ] Open an issue with a known reporter/creator who was not in the
+      CACHE list so far → the CACHE section at the end of the buffer now
+      lists them with a `uu-…` slug
+- [ ] DB inspection: after opening the issue, the reporter/creator is a
+      row in `jira_user` (the same `connection_id` as the existing
+      entries — a UUID v5 derived from the Jira URL)
+- [ ] An issue with a comment author who was not in the cache so far →
+      the author shows up as a `uu-…` slug in the CACHE section, and
+      their `[~KEY]` is resolved to `@uu-…` in the comment body
+- [ ] A user is renamed in Jira → after re-opening an issue in which
+      they appear: the `display_name` is updated in the cache (in the DB
+      and in the CACHE section); the `username` stays stable
+- [ ] A user is deactivated in Jira → they stay in the cache
+      (merge-only, nothing is ever deleted); slugs in old comments keep
+      working
+- [ ] App restart → the cache is hydrated from the DB; the CACHE section
+      is filled right at the first issue open (no bulk API call needed
+      any more — no "loading" state)
+- [ ] A `[~KEY]` in a comment whose KEY is not in the cache yet:
+      `Shift+e` resolves the KEY via `/rest/api/2/user?username=KEY`,
+      merges it into the cache + DB and renders a `@uu-…` slug in that
+      comment
+- [ ] `[~UNKNOWN]` (a KEY that does not exist in Jira either) → the
+      lookup errors, the KEY stays verbatim as `[~UNKNOWN]` in the
+      render (no crash)
+- [ ] CLI export `nyd content list jira:user` → an API call, and the
+      result is additionally merged into the cache + DB (the next
+      session finds the users there)
+- [ ] An old YAML with a `cache:` block (`preload`, `label_ttl`,
+      `user_ttl`) → the app starts without a validation error and the
+      block is silently ignored (the fields are dead)
 
-## Sort-Hint Mode (Phase 6)
+## Sort-hint mode (phase 6)
 
-Default-Keybinding `S`. Zwei Phasen, beide rendern das Overlay direkt
-in den Tabellen-Headern (kein ActionBar-Overlay). Spaltenbreiten
-bleiben über alle Phasen hinweg stabil.
+The default keybinding is `S`. Two phases, both rendering the overlay
+directly in the table headers (no action-bar overlay). Column widths
+stay stable across all phases.
 
-- [ ] Tasks: `S` aktiviert Sort-Mode. In den sortierbaren Headern
-      erscheint an Position 0 ein Label-Buchstabe (`a`, `b`, `c`, …),
-      die ersten Zeichen des Originalheaders werden überschrieben
-      (z. B. `Status` → `atatus`, `Pri` → `bri`, `Task` → `cask`).
-      Nicht-sortierbare Spalten (z. B. `Tr`, `N`) sind gedimmt.
-- [ ] Tasks: Bereits sortierte Spalten behalten beim `S` ihren
-      Sortpfeil neben dem Label (`Status ▲` → `atatus ▲`); die
-      Spaltenbreite ändert sich beim Eintritt in Sort-Mode nicht.
-- [ ] Tasks: Drücken eines Label-Buchstabens schaltet auf Phase 2 um.
-      Über dem gewählten Header erscheint als Overlay
-      `(d)esc/(a)sc/(c)lear` (in der Akzent-Farbe). Der darunter
-      liegende Header behält die Originalbreite — andere Spalten
-      verschieben sich **nicht**, das Overlay kann benachbarte
-      gedimmte Header optisch überdecken.
-- [ ] Tasks: `a` (asc) / `d` (desc) / `c` (clear) führen die Aktion aus.
-      Sortierte Spalte zeigt anschließend `▲` bzw. `▼` neben dem
-      Original-Header.
-- [ ] Tasks: Multi-column Sort ist additiv. Wenn nach Spalte `Status`
-      sortiert wurde und anschließend `S` → `Pri` → `a` gedrückt wird,
-      werden **beide** Sorts angewendet. Beide Spalten zeigen einen
-      Pfeil mit Index-Subscript (`Status ▲₁`, `Pri ▲₂`).
-- [ ] Tasks: `c` auf einer der sortierten Spalten entfernt nur diese
-      eine Sort-Ebene aus dem Stack; die übrigen Sorts bleiben aktiv.
-- [ ] Tasks: Sort persistiert über Restart (`settings`-Tabelle Key
-      `tasks.sort`); Pfeil bleibt nach Restart sichtbar.
-- [ ] Tasks: in Tree-Mode bleibt Reihenfolge der Geschwister konsistent
-      mit der gewählten Sort-Spalte.
-- [ ] Jira ContentView: `S` zeigt Labels in den Adapter-Headern
-      (sortierbare Felder per YAML); Auswahl + Direction triggern
-      Reload mit neuer Sort.
-- [ ] Jira/Taiga ContentView: Sort persistiert pro `query_scope` über
-      Restart (eigene `jira_view_sort_state` / `taiga_view_sort_state`
-      Tabellen in der Adapter-DB).
-- [ ] `Esc` in beiden Phasen schließt den Mode ohne Änderung; Header
-      kehren in Originaldarstellung zurück.
-- [ ] Tab-Wechsel während Sort-Mode aktiv → Mode schließt automatisch.
-- [ ] Trackings (nativer Tab): `S` zeigt **keinen** Sort-Hint in der
-      Status-Bar (der native Trackings-Tab ist bewusst ausgenommen).
+- [ ] Tasks: `S` activates sort mode. In the sortable headers a label
+      letter (`a`, `b`, `c`, …) appears at position 0, overwriting the
+      first characters of the original header (e.g. `Status` →
+      `atatus`, `Pri` → `bri`, `Task` → `cask`). Non-sortable columns
+      (e.g. `Tr`, `N`) are dimmed.
+- [ ] Tasks: columns that are already sorted keep their sort arrow next
+      to the label when `S` is pressed (`Status ▲` → `atatus ▲`); the
+      column width does not change when entering sort mode.
+- [ ] Tasks: pressing a label letter switches to phase 2. Above the
+      chosen header, the overlay `(d)esc/(a)sc/(c)lear` appears (in the
+      accent colour). The header underneath keeps its original width —
+      other columns do **not** shift, and the overlay may visually cover
+      adjacent dimmed headers.
+- [ ] Tasks: `a` (asc) / `d` (desc) / `c` (clear) perform the action.
+      The sorted column then shows `▲` or `▼` next to the original
+      header.
+- [ ] Tasks: multi-column sorting is additive. After sorting by the
+      `Status` column, pressing `S` → `Pri` → `a` applies **both** sorts.
+      Both columns show an arrow with an index subscript (`Status ▲₁`,
+      `Pri ▲₂`).
+- [ ] Tasks: `c` on one of the sorted columns removes only that one sort
+      level from the stack; the remaining sorts stay active.
+- [ ] Tasks: the sort persists across a restart (`settings` table, key
+      `tasks.sort`); the arrow is still visible after the restart.
+- [ ] Tasks: in tree mode the sibling order stays consistent with the
+      chosen sort column.
+- [ ] Jira ContentView: `S` shows labels in the adapter headers (the
+      sortable fields come from the YAML); a pick plus a direction
+      triggers a reload with the new sort.
+- [ ] Jira/Taiga ContentView: the sort persists per `query_scope` across
+      a restart (in the dedicated `jira_view_sort_state` /
+      `taiga_view_sort_state` tables in the adapter DB).
+- [ ] `Esc` in either phase closes the mode without a change; the
+      headers return to their original rendering.
+- [ ] Switching tabs while sort mode is active → the mode closes
+      automatically.
+- [ ] Trackings (the native tab): `S` shows **no** sort hint in the
+      status bar (the native trackings tab is deliberately excluded).
 
-## Trackings — Gruppen-Order (`o`) + Item-Sort (`S`)
+## Trackings — group order (`o`) + item sort (`S`)
 
-Adapter-Tab „Trackings" auf der gruppierten Flat-View (`key: a`,
-Default `group_by: started/day/desc`).
+Adapter tab "Trackings" on the grouped flat view (`key: a`, default
+`group_by: started/day/desc`).
 
-- [ ] Status-Bar zeigt `o order ↓` (absteigend = neueste Tage zuerst).
-      `o` drücken → die Tagesgruppen kippen auf älteste-zuerst, Indikator
-      wird `o order ↑`. Erneut `o` → zurück. Die **Reihenfolge der
-      Einträge innerhalb** eines Tages ändert sich dabei **nicht**.
-- [ ] `o` lässt die Bucket-Granularität unberührt: vorher `zg` auf Week
-      schalten, dann `o` → es kippt die Wochen-Reihenfolge, bleibt aber
-      `week` (nicht zurück auf Day).
-- [ ] Grouping per `zg`/`u`-Menü auf „No grouping" → `o` ist ein No-op
-      (kein `order`-Hint in der Bar, nichts passiert).
-- [ ] `S` öffnet den Sort-Picker; **alle** Datenspalten sind wählbar
-      (Active/Task/Task path/Started/Ended/Duration), nicht nur eine
-      Teilmenge. Spalte `Duration` + `asc` → Einträge **innerhalb jeder
-      Tagesgruppe** stehen kürzeste-zuerst, numerisch korrekt (90 s vor
-      600 s, nicht lexikografisch „600" vor „90"). Fußzeile zeigt den
-      aktiven Sort.
-- [ ] `S` → `Started` + `desc` → Einträge je Gruppe chronologisch
-      (Datums-Sortierung, nicht String). Laufende Einträge (`ended` =
-      „running") sortieren bei Sort nach `Ended` ans Ende.
-- [ ] `o` und `S` sind orthogonal: erst `S` Duration asc, dann `o` →
-      Tagesgruppen kippen, die Duration-Sortierung **innerhalb** bleibt.
+- [ ] The status bar shows `o order ↓` (descending = newest days
+      first). Press `o` → the day groups flip to oldest-first, the
+      indicator becomes `o order ↑`. Press `o` again → back. The
+      **order of the entries within** a day does **not** change.
+- [ ] `o` leaves the bucket granularity untouched: switch to week with
+      `zg` first, then `o` → it flips the week order but stays on
+      `week` (it does not fall back to day).
+- [ ] Grouping set to "No grouping" via the `zg`/`u` menu → `o` is a
+      no-op (no `order` hint in the bar, nothing happens).
+- [ ] `S` opens the sort picker; **all** data columns are selectable
+      (Active/Task/Task path/Started/Ended/Duration), not just a subset.
+      Column `Duration` + `asc` → the entries **within each day group**
+      are shortest-first, numerically correct (90 s before 600 s, not
+      lexicographically "600" before "90"). The footer shows the active
+      sort.
+- [ ] `S` → `Started` + `desc` → the entries per group are in
+      chronological order (date sorting, not string sorting). Running
+      entries (`ended` = "running") sort to the end when sorting by
+      `Ended`.
+- [ ] `o` and `S` are orthogonal: first `S` duration asc, then `o` →
+      the day groups flip, the duration sorting **within** them stays.
 
-## Auth — Explicit invalidation (Phase 5)
+## Auth — explicit invalidation (phase 5)
 
-- [ ] Cmdline `:invalidate-session` auf einem Content-Tab:
-      Status-Bar meldet _"Session invalidated, re-authenticating…"_,
-      `auth_session`-Row für die Connection ist weg, nächster List-Call
-      triggert Re-Auth (Cookie-Script läuft / JWT wird neu gezogen),
-      Liste lädt durch.
-- [ ] Cmdline `:invalidate-credentials` auf einem Content-Tab mit
-      `prompt`-Provider (Taiga): Status-Bar meldet
-      _"Credentials invalidated, re-authenticating…"_, Resolver-Caches
-      und Prompt-Cache sind leer, Credentials-Popup erscheint erneut.
-- [ ] Cmdline `:invalidate-session` auf einem Nicht-Content-Tab
-      (Tasks/Trackings) → Modal _"… only works on a content tab"_,
-      keine Aktion.
-- [ ] YAML-Action `type: invalidate_session` mit Keybinding feuert
-      identisch zur Cmdline-Variante. Tipp:
-      `- { name: forget session, key: I, type: invalidate_session }`
-      in `views[].actions`.
+- [ ] Cmdline `:invalidate-session` on a content tab: the status bar
+      reports "Session invalidated, re-authenticating…", the
+      `auth_session` row for the connection is gone, the next list call
+      triggers a re-auth (the cookie script runs / the JWT is fetched
+      again), and the list loads through.
+- [ ] Cmdline `:invalidate-credentials` on a content tab with a
+      `prompt` provider (Taiga): the status bar reports "Credentials
+      invalidated, re-authenticating…", the resolver caches and the
+      prompt cache are empty, and the credentials popup appears again.
+- [ ] Cmdline `:invalidate-session` on a non-content tab
+      (tasks/trackings) → modal "… only works on a content tab", no
+      action.
+- [ ] The YAML action `type: invalidate_session` with a keybinding
+      fires identically to the cmdline variant. Tip:
+      `- { name: forget session, key: I, type: invalidate_session }` in
+      `views[].actions`.
 
-## Taiga — Notifications subtab (#149–#152)
+## Taiga — notifications subtab (#149–#152)
 
-Voraussetzung: `~/.config/not_yet_done/views/taiga.yaml` enthält den
-`notifications`-View (`node_type: taiga:notification`, `key: n`,
-Actions inklusive `mark as read` und `open ticket`).
+Precondition: `~/.config/not_yet_done/views/taiga.yaml` contains the
+`notifications` view (`node_type: taiga:notification`, `key: n`, with
+actions including `mark as read` and `open ticket`).
 
-- [ ] Auf Taiga-Tab: `n` schaltet auf den Notifications-Subtab um,
-      die Liste lädt; Spalten _Read/Event/Ref/Project/Actor/Created/
-      Subject_ sind sichtbar; Default-Sort ist zweispaltig _read asc,
-      created desc_ — alle ungelesenen erscheinen als Block oben
-      (innerhalb des Blocks neueste zuerst), darunter der Read-Block in
-      gleicher Datums-Reihenfolge. `i` schaltet zurück auf _items_.
-- [ ] Wenn die Liste fehlschlägt (z. B. abgelaufenes JWT), erscheint
-      ein roter Banner _"Fetch failed: …"_ am oberen Rand der
-      Content-Fläche statt eine wortlos leere Tabelle (Regression-
-      Schutz: vorher wurde `fetch_error` nirgends gerendert).
-- [ ] Pagination-Footer zeigt _N total_, blättern via Next/Prev
-      funktioniert (sofern mehr als die Default-Page-Size existiert).
-- [ ] Sort-Hint Mode (`S`) zeigt die Notification-Sortspalten
-      (created, event, project, actor, read, subject); Asc/Desc-
-      Wechsel sortiert in-place ohne Reload.
-- [ ] `m` auf einer ungelesenen Zeile → Status-Bar zeigt _"Notification
-      #X marked as read"_, View lädt nach, der _Read_-Wert dieser
-      Zeile wechselt auf _read_, weiteres `m` auf einer bereits
-      gelesenen Zeile → _"Action `mark_as_read` not exposed by node"_
-      (oder ähnlich; kein API-Call).
-- [ ] `e` (open ticket) auf einer Notification → Edit-Editor öffnet
-      sich für das _verlinkte_ Ticket (nicht für die Notification);
-      Speichern wirkt auf das Ticket; Schließen kehrt zur
-      Notifications-Liste zurück.
-- [ ] `e` auf einer Notification mit unbekanntem `content_type`
-      (z. B. wiki*page) → Notify *"… target*id … empty"* (Action
-      ist no-op statt Crash).
-- [ ] `:invalidate-session` auf dem Notifications-Subtab feuert
-      identisch zum items-Subtab; nächste Liste lädt nach Re-Auth
-      durch.
+- [ ] On the Taiga tab: `n` switches to the notifications subtab and the
+      list loads; the columns Read/Event/Ref/Project/Actor/Created/
+      Subject are visible; the default sort has two levels, read asc and
+      created desc — all unread ones appear as a block at the top
+      (newest first within the block), with the read block below it in
+      the same date order. `i` switches back to the items view.
+- [ ] When the list fails (e.g. an expired JWT), a red banner
+      "Fetch failed: …" appears at the top of the content area instead
+      of a wordlessly empty table (regression guard: `fetch_error` used
+      not to be rendered anywhere).
+- [ ] The pagination footer shows the total count, and paging via
+      Next/Prev works (provided there is more than one default page).
+- [ ] Sort-hint mode (`S`) shows the notification sort columns (created,
+      event, project, actor, read, subject); switching asc/desc sorts
+      in place without a reload.
+- [ ] `m` on an unread row → the status bar shows "Notification #X
+      marked as read", the view reloads, the Read value of that row
+      switches to read; another `m` on an already-read row →
+      "Action `mark_as_read` not exposed by node" (or similar; no API
+      call).
+- [ ] `e` (open ticket) on a notification → the edit editor opens for
+      the **linked** ticket (not for the notification); saving acts on
+      the ticket; closing returns to the notifications list.
+- [ ] `e` on a notification with an unknown `content_type` (e.g.
+      `wiki_page`) → a notification saying the `target_id` is empty (the
+      action is a no-op rather than a crash).
+- [ ] `:invalidate-session` on the notifications subtab fires
+      identically to the items subtab; the next list loads through after
+      the re-auth.
 
-## Postgres adapter — Phase A (databases-only)
+## Postgres adapter — phase A (databases only)
 
-Voraussetzung: `~/.config/not_yet_done/views/postgres.yaml` aus dem
-Repo (gibt den Tab Postgres mit dem Subtab _databases_ vor) und ein
-selbst gepflegtes `~/.config/not_yet_done/views/postgres-adapter.yaml`
-mit Transport- + Postgres-Block. Beispiel-Skelett:
+Precondition: `~/.config/not_yet_done/views/postgres.yaml` from the repo
+(which defines the Postgres tab with the databases subtab) plus a
+hand-maintained `~/.config/not_yet_done/views/postgres-adapter.yaml`
+with a transport block and a postgres block. Example skeleton:
 
 ```yaml
 # Optional: hard deadline for each postgres call. On timeout, the
@@ -749,102 +742,97 @@ postgres:
   sslmode: prefer # optional; one of disable | prefer | require
 ```
 
-- [ ] **Direct mode**: `mode: direct`, `target` zeigt direkt auf einen
-      lokal erreichbaren Postgres → Tab _Postgres_ erscheint, Subtab
-      _databases_ lädt; Spalten _Name / Owner / Encoding_ sind
-      gefüllt; Templates (`template0`, `template1`) sind nicht
-      enthalten; sortiert alphabetisch.
-- [ ] **SSH-tunnel mode mit `kind: agent`**: `ssh-add -l` zeigt
-      mindestens eine Identität → Tab lädt ohne Passwortprompt,
-      `ss -lntp | grep 127.0.0.1:` zeigt einen ephemeren Listener,
-      Subtab _databases_ lädt durch. Beim Schließen des Tabs
-      verschwindet der Listener.
-- [ ] **SSH-tunnel mit `kind: public_key`** und encrypted key:
-      `passphrase`-Provider feuert genau einmal (z. B. `pass`-Aufruf
-      einmal), Folge-Listings nutzen die gecachte Sitzung
-      (kein erneuter Aufruf).
-- [ ] **SSH-tunnel mit `kind: password`** (Bastion) und
-      `password.type: keyring`: Login zieht das SSH-Passwort aus dem
-      keyring; falsches Passwort → Tab zeigt Fehler-Banner _"ssh auth
-      failed: server rejected credentials"_ statt leerer Liste.
-- [ ] **Zwei-Hop-Kette (Jump-Server, DBeaver-äquivalent)**: `ssh:`
-      enthält zwei Einträge — z. B. Public-Key auf Hop #1 und Passwort
-      auf Hop #2. Beim Tab-Öffnen authentifizieren beide Hops; auf der
-      Bastion zeigt `ss -tnp | grep <hop2-port>` einen Connect-Out vom
-      sshd-Forked-Prozess. Falsches Passwort auf Hop #2 → Banner _"ssh
-      auth failed (hop #1): …"_ (Index 1 = zweiter Eintrag). Hop-#1
-      OK + falscher Hop-#2-Host → Banner _"ssh channel error: open hop
-      #1 (…): …"_.
-- [ ] Postgres-Auth fehlerhaft (z. B. falsches `postgres.password`):
-      Tab zeigt Fehler-Banner _"postgres connect: password
-      authentication failed for user …"_; nach Korrektur und Reload
-      lädt die Liste.
-- [ ] Tunnel-Drop unter Last: SSH-Session vom Server kappen
-      (z. B. `pkill -f "sshd: alice"`) → nächster Reload reconnectet
-      stillschweigend (lazy reconnect in `PostgresClient`).
-- [ ] **`query_timeout_secs: N` (Adapter-Top-Level, optional)**:
-      Mit z. B. `query_timeout_secs: 7` in
-      `views/postgres-adapter.yaml`. Halbgeschlossener Tunnel
-      simulieren (z. B. lokales `iptables -A OUTPUT -p tcp --dport <forward> -j DROP`
-      auf dem Forward-Port, oder Bastion-sshd Prozess pausieren mit
-      `kill -STOP`). Beim nächsten Reload zeigt der Banner einen
-      Countdown `… (0s/7s) → (1s/7s) → …`. Nach 7s: Fehler-Banner
-      _"… : timed out after 7s; connection reset"_, gefolgt von
-      `Ready`. Erneutes `r` → frischer Tunnel + Session werden
-      lazy aufgebaut.
-- [ ] **View-Retries (`retries: N` auf einer View in
-      `views/postgres.yaml` o.ä.)**: Mit `retries: 2` und
-      `query_timeout_secs: 7`. Tunnel wie oben blockieren. Erwartet:
-      Banner zeigt `Connecting/Busy` Countdown des 1. Versuchs; nach
-      7s flippt der Text auf
-      _"Retrying (2/3) — list databases (0s/7s): … timed out after
-      7s; connection reset"_; nach weiteren 7s `Retrying (3/3) — …`;
-      nach insgesamt ~21s wird der Fehler sticky als
-      _"Fetch failed: …"_-Banner und der Retry-Status verschwindet.
-      Tunnel freigeben, dann `r` → erfolgreicher Reload räumt
-      `fetch_error` weg.
-- [ ] **`retries: 0` (Default)**: Gleiches Setup ohne `retries:` —
-      Banner zeigt nur einen Versuch, sofort _"Fetch failed: …"_
-      ohne `Retrying`.
-- [ ] **Manual-Connect (`adapter.manual_connect: true`, Default)**: Auf
-      `views/postgres.yaml` im `adapter:` Block `manual_connect`
-      weglassen **oder** auf `true` setzen. TUI starten. Erwartet: Postgres-
-      Tab zeigt sofort _"Auto-connect disabled — press `r` to
-      connect"_ als Banner; **keine** Connection-Versuche, keine
-      Timeouts in Logs/Wartezeit. Subtab-Wechsel `d`/`t`/`s` triggert
-      ebenfalls **keinen** Load — jeder Subtab zeigt denselben
-      Banner. Erstes `r` startet den ersten Load (Banner wird zu
-      `Connecting/Busy` Countdown). Nach erfolgreichem Load
-      verschwindet der Banner, normales Verhalten ist
-      hergestellt. Subtab-Switch auf einen bereits geladenen Subtab
-      zeigt Cache; auf einen noch nicht geladenen zeigt erneut
-      _"Auto-connect disabled …"_.
-- [ ] **Manual-Connect ohne reload-Action**: Auf einer View mit
-      `manual_connect: true` aber **ohne** `type: reload` in
-      `actions:`. Banner liest
-      _"Auto-connect disabled — no `reload` action configured for
-      this view"_; der Tab bleibt dauerhaft leer (Soft-Fehler, kein
-      Crash).
-- [ ] **Manual-Connect off**: `manual_connect: false` → Tab lädt
-      automatisch beim Start; keine Regression.
-- [ ] **Ohne `query_timeout_secs`**: Bisheriges Verhalten — Banner
-      zeigt nur Elapsed (`… (3s)`), kein Auto-Reset. (Optional, nur
-      für Regression.)
-- [ ] Subtab _databases_ hat **keine** Aktionen (nur Default-Reload
-      via `r` falls global gebunden); `e` / `c` / `a` zeigen
-      _"Action … not exposed by node"_.
-- [ ] `transport.mode: ssh_tunnel` ohne `ssh:` Block → Tab erscheint
-      mit roter Banner _"Invalid Postgres config: transport.mode=
-      ssh_tunnel requires an `ssh:` block"_; Liste leer.
-- [ ] Unbekanntes Feld unter `postgres:` (z. B. `schema:`) → Tab
-      bleibt leer mit Banner _"Invalid Postgres config: unknown field
-      `schema` …"_ statt stillem Akzeptieren.
+- [ ] **Direct mode**: `mode: direct`, with `target` pointing straight
+      at a locally reachable Postgres → the Postgres tab appears, the
+      databases subtab loads; the Name / Owner / Encoding columns are
+      filled; the templates (`template0`, `template1`) are not included;
+      sorted alphabetically.
+- [ ] **SSH tunnel mode with `kind: agent`**: `ssh-add -l` shows at
+      least one identity → the tab loads without a password prompt,
+      `ss -lntp | grep 127.0.0.1:` shows an ephemeral listener, and the
+      databases subtab loads through. Closing the tab makes the listener
+      disappear.
+- [ ] **SSH tunnel with `kind: public_key`** and an encrypted key: the
+      `passphrase` provider fires exactly once (e.g. one `pass` call),
+      and subsequent listings use the cached session (no second call).
+- [ ] **SSH tunnel with `kind: password`** (bastion) and
+      `password.type: keyring`: the login pulls the SSH password from
+      the keyring; a wrong password → the tab shows the error banner
+      "ssh auth failed: server rejected credentials" instead of an empty
+      list.
+- [ ] **Two-hop chain (jump server, DBeaver equivalent)**: `ssh:`
+      contains two entries — e.g. a public key on hop #1 and a password
+      on hop #2. Opening the tab authenticates both hops; on the bastion,
+      `ss -tnp | grep <hop2-port>` shows an outgoing connect from the
+      forked sshd process. A wrong password on hop #2 → banner "ssh auth
+      failed (hop #1): …" (index 1 = the second entry). Hop #1 OK plus a
+      wrong hop #2 host → banner "ssh channel error: open hop #1 (…): …".
+- [ ] Faulty Postgres auth (e.g. a wrong `postgres.password`): the tab
+      shows the error banner "postgres connect: password authentication
+      failed for user …"; after correcting it and reloading, the list
+      loads.
+- [ ] Tunnel drop under load: cut the SSH session from the server (e.g.
+      `pkill -f "sshd: alice"`) → the next reload reconnects silently
+      (lazy reconnect in `PostgresClient`).
+- [ ] **`query_timeout_secs: N` (adapter top level, optional)**: with
+      e.g. `query_timeout_secs: 7` in `views/postgres-adapter.yaml`.
+      Simulate a half-closed tunnel (e.g. a local iptables DROP rule on
+      the forward port, or pause the bastion sshd process with
+      `kill -STOP`). On the next reload the banner shows a countdown
+      `… (0s/7s) → (1s/7s) → …`. After 7 s: the error banner
+      "… : timed out after 7s; connection reset", followed by `Ready`.
+      Another `r` → a fresh tunnel and session are built up lazily.
+- [ ] **View retries (`retries: N` on a view in `views/postgres.yaml`
+      or similar)**: with `retries: 2` and `query_timeout_secs: 7`.
+      Block the tunnel as above. Expected: the banner shows the
+      `Connecting/Busy` countdown of the 1st attempt; after 7 s the text
+      flips to "Retrying (2/3) — list databases (0s/7s): … timed out
+      after 7s; connection reset"; after another 7 s, "Retrying (3/3) —
+      …"; after ~21 s in total the error becomes sticky as a
+      "Fetch failed: …" banner and the retry status disappears. Release
+      the tunnel, then `r` → the successful reload clears `fetch_error`.
+- [ ] **`retries: 0` (the default)**: the same setup without
+      `retries:` — the banner shows only one attempt and goes straight
+      to "Fetch failed: …" without any `Retrying`.
+- [ ] **Manual connect (`adapter.manual_connect: true`, the default)**:
+      in `views/postgres.yaml`, either omit `manual_connect` in the
+      `adapter:` block **or** set it to `true`. Start the TUI. Expected:
+      the Postgres tab immediately shows the banner "Auto-connect
+      disabled — press `r` to connect"; **no** connection attempts, no
+      timeouts in the logs and no waiting. Switching subtabs with
+      `d`/`t`/`s` also triggers **no** load — every subtab shows the same
+      banner. The first `r` starts the first load (the banner becomes
+      the `Connecting/Busy` countdown). After a successful load the
+      banner disappears and normal behaviour is restored. Switching to
+      an already-loaded subtab shows the cache; switching to one that
+      has not been loaded shows "Auto-connect disabled …" again.
+- [ ] **Manual connect without a reload action**: on a view with
+      `manual_connect: true` but **without** a `type: reload` in
+      `actions:`. The banner reads "Auto-connect disabled — no `reload`
+      action configured for this view"; the tab stays empty permanently
+      (a soft error, no crash).
+- [ ] **Manual connect off**: `manual_connect: false` → the tab loads
+      automatically at start; no regression.
+- [ ] **Without `query_timeout_secs`**: the previous behaviour — the
+      banner shows only the elapsed time (`… (3s)`), no auto reset.
+      (Optional, for regression only.)
+- [ ] The databases subtab has **no** actions (only the default reload
+      via `r` if that is bound globally); `e` / `c` / `a` show "Action …
+      not exposed by node".
+- [ ] `transport.mode: ssh_tunnel` without an `ssh:` block → the tab
+      appears with a red banner "Invalid Postgres config:
+      transport.mode=ssh_tunnel requires an `ssh:` block"; the list is
+      empty.
+- [ ] An unknown field under `postgres:` (e.g. `schema:`) → the tab
+      stays empty with the banner "Invalid Postgres config: unknown
+      field `schema` …" instead of silently accepting it.
 
-### Postgres — Tabellen-Rows-Drilldown (`o` → split right)
+### Postgres — table rows drill-down (`o` → split right)
 
-Voraussetzung: `views/postgres.yaml` enthält den `Rows`-Child mit
+Precondition: `views/postgres.yaml` contains the `Rows` child with
 `key: o`, `split: right ratio 0.8`, `pagination: server page_size 100`.
-Der Drilldown nutzt `query_rows` mit `ORDER BY ctid` und `LIMIT/OFFSET`.
+The drill-down uses `query_rows` with `ORDER BY ctid` and
+`LIMIT/OFFSET`.
 
 - [ ] Auf einer Tabellenzeile `o` drücken → neuer Pane öffnet rechts
       (Verhältnis 1:4: links schmal, rechts breit), Akzent-Border auf
