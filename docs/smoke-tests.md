@@ -2908,316 +2908,314 @@ See `docs/decisions/0001-render-loop-dirty-gating.md` (§1b). Replaces the
       `wiki.example.invalid`, example cookies `JSESSIONID=synthetic`, space
       keys `DEMO`.
 
-## Stoat-Adapter (Phase 0 — Fundament)
+## Stoat adapter (phase 0 — foundation)
 
-Verbindungs-only: Login + Discovery + Gateway (WS) + Status-Spiegelung.
-**Noch kein Baum** — `list()` liefert leer; Phase 1 füllt ihn. Manueller
-Test gegen die private Test-Instanz (Credentials **außerhalb** des Repos,
-`username`-Feld trägt die E-Mail). Voraussetzung: `stoat-adapter.yaml` +
-`stoat.yaml` in `~/.config/not_yet_done/views/` (Vorlagen unter
-`docs/examples/views/`), echte Basis-Domain eingetragen.
+Connection only: login, discovery, gateway (WS) and status mirroring. **No
+tree yet** — `list()` returns empty; phase 1 fills it. Tested manually against
+the private test instance (credentials **outside** the repo, the `username`
+field carries the email address). Prerequisite: `stoat-adapter.yaml` and
+`stoat.yaml` in `~/.config/not_yet_done/views/` (templates under
+`docs/examples/views/`), with the real base domain filled in.
 
-- [ ] **Discovery + Login:** Stoat-Tab öffnen → Banner `Connecting…`; falls
-      Credentials nötig, erscheint das `NeedsCreds`-Formular (Feld
-      `username` = E-Mail, `password`). Nach Submit läuft der Login durch.
-- [ ] **Ready:** Nach erfolgreichem WS-`Authenticate`+`Ready` springt das
-      Banner auf `Ready`. Der Baum ist leer (Phase 0) — das ist korrekt.
-- [ ] **Falsche Credentials:** absichtlich falsches Passwort → Login
-      schlägt fehl, Banner `Failed{reason}` mit lesbarer Meldung; erneuter
-      Versuch (`r` / Credentials neu) möglich.
-- [ ] **Token-Persistenz:** TUI beenden + neu starten → kein erneuter
-      Credential-Prompt (Session-Token aus SQLite wiederverwendet), Banner
-      geht direkt über `Connecting` nach `Ready`.
-- [ ] **Heartbeat/Idle:** Tab offen lassen (kein Input) → Verbindung bleibt
-      bestehen (Ping alle 20 s); keine Idle-CPU-Regression (vgl. RD-2 — der
-      Gateway-Task schläft zwischen Pings).
-- [ ] **Reconnect:** Netz kurz trennen (z. B. WLAN aus/an) → Banner fällt
-      auf `Connecting…`, nach Wiederkehr automatisch zurück auf `Ready`
-      (Backoff ≤ 30 s).
-- [ ] **MFA-Konto:** (falls verfügbar) Login mit MFA-Konto → klare
-      „MFA not supported"-Fehlermeldung statt Hänger.
-- [ ] **Sauberes Beenden:** `:q` beendet prompt; der Gateway-Task wird beim
-      Adapter-Drop abgebrochen (kein hängender Prozess/Socket).
-- [ ] **Real-Data-Sweep:** keine echte Instanz-Domain/E-Mail/Token im Repo
-      (Vorlagen nutzen `chat.example.org`).
+- [ ] **Discovery and login:** open the Stoat tab → banner `Connecting…`; if
+      credentials are needed, the `NeedsCreds` form appears (field `username` =
+      email, plus `password`). After submitting, the login goes through.
+- [ ] **Ready:** after a successful WS `Authenticate` and `Ready`, the banner
+      switches to `Ready`. The tree is empty (phase 0) — that is correct.
+- [ ] **Wrong credentials:** use a deliberately wrong password → the login
+      fails, the banner shows `Failed{reason}` with a readable message; a
+      retry (`r`, or entering the credentials again) is possible.
+- [ ] **Token persistence:** quit and restart the TUI → no second credential
+      prompt (the session token is reused from SQLite), the banner goes
+      straight from `Connecting` to `Ready`.
+- [ ] **Heartbeat and idle:** leave the tab open (no input) → the connection
+      stays up (a ping every 20 s); no idle-CPU regression (cf. RD-2 — the
+      gateway task sleeps between pings).
+- [ ] **Reconnect:** disconnect the network briefly (e.g. toggle Wi-Fi) → the
+      banner falls back to `Connecting…` and returns to `Ready` automatically
+      once the network is back (backoff ≤ 30 s).
+- [ ] **MFA account:** (if available) log in with an MFA account → a clear
+      "MFA not supported" error message instead of a hang.
+- [ ] **Clean shutdown:** `:q` exits promptly; the gateway task is aborted when
+      the adapter is dropped (no lingering process or socket).
+- [ ] **Real-data sweep:** no real instance domain, email address or token in
+      the repo (the templates use `chat.example.org`).
 
-## Stoat-Adapter (Phase 1 — Read-only Baum)
+## Stoat adapter (phase 1 — read-only tree)
 
-Browsen + Lesen. Baut auf Phase 0 auf (Login/Gateway/Ready müssen grün
-sein). Struktur (Server/Channels) kommt aus dem WS-`Ready`-Snapshot,
-Message-Bodies per REST-Pull. **Kein Live-Push** — nach Connect ggf. `r`
-drücken, damit der Baum den frisch eingetroffenen `Ready`-Stand zeigt.
+Browsing and reading. Builds on phase 0 (login, gateway and `Ready` must be
+green). The structure (servers and channels) comes from the WS `Ready`
+snapshot, message bodies are pulled over REST. **No live push** — after
+connecting, press `r` if necessary so that the tree shows the freshly arrived
+`Ready` state.
 
-- [ ] **Server-Liste:** Nach `Ready` (ggf. `r`) listet der `chats`-View die
-      Server. Leerer Baum direkt nach Login = `Ready` kam noch nicht / `r`
-      drücken.
-- [ ] **Channels:** In einen Server drillen (`Enter`/`c`) → Text-Channels in
-      der Server-Reihenfolge. Voice-Channels erscheinen, sind aber nicht
-      aufklappbar (kein Inhalt).
-- [ ] **Messages:** In einen Text-Channel drillen → die letzten ≤ 50
-      Nachrichten, **neueste unten**. Spalten: Author, Time, Message.
-- [ ] **Autor-Auflösung:** Author-Spalte zeigt Benutzernamen (nicht die
-      rohe ID) — auch für Autoren, die nicht im `Ready`-Snapshot waren
-      (kommt über `include_users`).
-- [ ] **Zeitstempel:** Time-Spalte zeigt Datum/Uhrzeit (aus der Message-
-      ULID dekodiert), plausibel aufsteigend nach unten.
-- [ ] **Preview:** Auf einer Message `p` → Preview-Pane zeigt den vollen
-      Message-Body (mehrzeilig korrekt; Tabellen-Zeile bleibt einzeilig).
-- [ ] **DMs (optional):** Eine zweite View mit Top-Level `stoat:channel`
-      (auskommentiertes Beispiel in `stoat.yaml`) listet Direkt-/Gruppen-
-      Nachrichten statt Server.
-- [ ] **Phase-1-Grenze bewusst:** sehr lange Channels zeigen nur die
-      neuesten ~50 Messages; älteres Backfill kommt später (Cursor-
-      Pagination). Kein Bug.
-- [ ] **Real-Data-Sweep:** keine echten Channel-/Message-/User-Daten im
-      Repo (Tests/Fixtures nutzen erfundene IDs).
+- [ ] **Server list:** after `Ready` (and possibly `r`), the `chats` view lists
+      the servers. An empty tree right after logging in means `Ready` has not
+      arrived yet — press `r`.
+- [ ] **Channels:** drill into a server (`Enter`/`c`) → the text channels in
+      server order. Voice channels appear but cannot be expanded (no content).
+- [ ] **Messages:** drill into a text channel → the last ≤ 50 messages, **the
+      newest at the bottom**. Columns: author, time, message.
+- [ ] **Author resolution:** the author column shows user names (not raw IDs) —
+      including for authors who were not in the `Ready` snapshot (they arrive
+      via `include_users`).
+- [ ] **Timestamps:** the time column shows date and time (decoded from the
+      message ULID), plausibly ascending downwards.
+- [ ] **Preview:** `p` on a message → the preview pane shows the full message
+      body (multi-line correctly; the table row stays single-line).
+- [ ] **DMs (optional):** a second view with `stoat:channel` at the top level
+      (a commented-out example in `stoat.yaml`) lists direct and group messages
+      instead of servers.
+- [ ] **A deliberate phase-1 limit:** very long channels show only the newest
+      ~50 messages; backfilling older ones comes later (cursor pagination).
+      Not a bug.
+- [ ] **Real-data sweep:** no real channel, message or user data in the repo
+      (tests and fixtures use invented IDs).
 
-## Stoat-Adapter (Phase 2 — Live-Layer)
+## Stoat adapter (phase 2 — live layer)
 
-Out-of-band-Updates ohne manuelles `r`. Baut auf Phase 1 auf. Braucht
-einen zweiten Client (Web/Mobile) oder einen Helfer, um Nachrichten in
-einen Channel zu schicken, während die TUI offen ist.
+Out-of-band updates without a manual `r`. Builds on phase 1. Requires a second
+client (web or mobile) or a helper to post messages into a channel while the
+TUI is open.
 
-- [ ] **Auto-Populate:** Tab frisch öffnen. Sobald der Banner `Ready`
-      erreicht, füllt sich der Server-Baum **von selbst** — **ohne** `r`.
-      (Phase 1 brauchte hier noch ein manuelles Reload.)
-- [ ] **Live-Message:** In der TUI einen Text-Channel offen halten
-      (Message-Level). Von außen eine Nachricht in **genau diesen** Channel
-      posten → sie erscheint innerhalb ~1 s unten, ohne Tastendruck.
-- [ ] **Kein Fremd-Reload:** Channel A offen halten, Nachricht in Channel B
-      posten → A lädt **nicht** neu (kein Flackern/Cursor-Sprung). Nur das
-      offene Channel-Level reagiert.
-- [ ] **Edit/Delete/Reaction:** Eine sichtbare Nachricht von außen
-      editieren / löschen / mit einer Reaction versehen → das offene
-      Channel-Level spiegelt die Änderung nach Reload.
-- [ ] **Reconnect-Resync:** Netz kurz trennen (oder Gateway-Disconnect
-      provozieren) → Banner `Connecting`, dann `Ready`; danach zeigt der
-      Baum wieder den aktuellen Stand, ohne `r`.
-- [ ] **Cursor-Reset bekannt:** Beim Live-Reload springt der Cursor auf
-      Standard (kein „an der Leseposition bleiben") — erwartetes
-      Phase-2-Verhalten, kein Bug.
-- [ ] **Strukturgrenze bewusst:** Ein **neu angelegter/umbenannter** Channel
-      erscheint erst nach einem Reconnect (frisches `Ready`), nicht sofort —
-      strukturelle Live-Events sind noch nicht verdrahtet. Kein Bug.
-- [ ] **Idle-CPU:** Tab offen, keine Aktivität → CPU bleibt bei ~0 %
-      (Render-Loop 1b parkt; Invalidations wecken nur bei echtem Event).
+- [ ] **Auto-populate:** open the tab fresh. As soon as the banner reaches
+      `Ready`, the server tree fills **by itself** — **without** `r`. (Phase 1
+      still needed a manual reload here.)
+- [ ] **Live message:** keep a text channel open in the TUI (message level).
+      Post a message into **exactly that** channel from outside → it appears at
+      the bottom within ~1 s, without a keystroke.
+- [ ] **No foreign reload:** keep channel A open and post a message into
+      channel B → A does **not** reload (no flicker, no cursor jump). Only the
+      open channel level reacts.
+- [ ] **Edit, delete, reaction:** edit, delete or react to a visible message
+      from outside → the open channel level mirrors the change after a reload.
+- [ ] **Reconnect resync:** disconnect the network briefly (or provoke a
+      gateway disconnect) → banner `Connecting`, then `Ready`; afterwards the
+      tree shows the current state again, without `r`.
+- [ ] **Known cursor reset:** on a live reload the cursor jumps back to the
+      default (it does not "stay at the reading position") — expected phase-2
+      behaviour, not a bug.
+- [ ] **A deliberate structural limit:** a **newly created or renamed** channel
+      only appears after a reconnect (a fresh `Ready`), not immediately —
+      structural live events are not wired up yet. Not a bug.
+- [ ] **Idle CPU:** tab open, no activity → the CPU stays around 0 % (render
+      loop 1b parks; invalidations only wake it on a real event).
 
-## Stoat-Adapter (Phase 2.1 — Kategorien + Tree)
+## Stoat adapter (phase 2.1 — categories and tree)
 
-Die flache Drill-Down-View ist durch eine Tree-View ersetzt:
-`Server → (Kategorie | uncategorized Channel) → Channel → Messages`.
+The flat drill-down view has been replaced by a tree view:
+`server → (category | uncategorised channel) → channel → messages`.
 
-- [ ] **Tree statt flach:** Tab öffnen → Server stehen als Tree-Wurzeln da
-      (Indent/Glyph). Enter/→ auf einem Server expandiert **inline** zu
-      seinen Kategorien **und** uncategorized Channels (kein Tab-Wechsel).
-- [ ] **Reihenfolge:** Unter einem Server kommen die **uncategorized
-      Channels zuerst**, danach die Kategorien.
-- [ ] **Kategorie expandieren:** Enter/→ auf einer Kategorie zeigt ihre
-      Channels inline eine Ebene tiefer.
-- [ ] **Channel drillt in Messages:** Enter auf einem Channel (egal ob
-      unter Kategorie oder direkt unter Server) öffnet die **flache
-      Message-Liste**; Back/← kehrt in den Baum an dieselbe Stelle zurück.
-- [ ] **Vollständigkeit:** Summe aus „uncategorized + alle Kategorie-
-      Channels" deckt alle Channels des Servers ab — nichts fehlt, nichts
-      doppelt.
-- [ ] **Server ohne Kategorien:** Ein Server, der keine Kategorien hat,
-      zeigt alle seine Channels direkt als uncategorized (kein leerer
-      Kategorie-Zweig).
-- [ ] **Voice-Channel bleibt Leaf:** Voice-Channels erscheinen, sind aber
-      nicht drill-/expandierbar.
-- [ ] **`/` tree find:** Auf der Server-Wurzel `/` → durchsucht Channels
-      quer durch den Baum (eingeklappte Knoten inklusive).
-- [ ] **Live im Tree:** Eine Message in einem **drillgeöffneten** Channel
-      von außen posten → die Message-Liste aktualisiert sich live (Phase-2-
-      Verhalten gilt unverändert, egal wo der Channel im Baum hängt).
+- [ ] **Tree instead of flat:** open the tab → the servers stand there as tree
+      roots (indent and glyph). Enter/→ on a server expands **inline** into its
+      categories **and** its uncategorised channels (no tab switch).
+- [ ] **Order:** below a server the **uncategorised channels come first**, then
+      the categories.
+- [ ] **Expand a category:** Enter/→ on a category shows its channels inline
+      one level deeper.
+- [ ] **A channel drills into messages:** Enter on a channel (whether under a
+      category or directly under the server) opens the **flat message list**;
+      back/← returns to the same spot in the tree.
+- [ ] **Completeness:** the uncategorised channels plus all category channels
+      together cover every channel of the server — nothing missing, nothing
+      duplicated.
+- [ ] **A server without categories:** a server that has no categories shows
+      all of its channels directly as uncategorised (no empty category
+      branch).
+- [ ] **Voice channels stay leaves:** voice channels appear but cannot be
+      drilled into or expanded.
+- [ ] **`/` tree find:** `/` on the server root → searches channels across the
+      whole tree (collapsed nodes included).
+- [ ] **Live inside the tree:** post a message from outside into a channel that
+      is **drilled open** → the message list updates live (the phase-2
+      behaviour is unchanged, no matter where the channel sits in the tree).
 
-## Stoat-Adapter (Phase 3 — Write)
+## Stoat adapter (phase 3 — write)
 
-In einen Channel drillen (flache Message-Liste). Vier Aktionen:
-`a` send, `e` edit, `d` delete, `+` react. Endpoints sind vorab per `curl`
-gegen die echte Instanz verifiziert (gegen `SavedMessages`).
+Drill into a channel (the flat message list). Four actions: `a` send, `e` edit,
+`d` delete, `+` react. The endpoints were verified beforehand with `curl`
+against the real instance (against `SavedMessages`).
 
-- [ ] **Senden (`a`):** In der Message-Liste `a` → leerer `$EDITOR`
-      (Markdown). Text tippen, speichern/schließen → Status „Message sent";
-      die neue Nachricht erscheint unten in der Liste (Reload **und** Live-
-      Event). Leerer Buffer → kein Versand, keine Fehlermeldung.
-- [ ] **Senden bricht ab:** `a`, Editor **ohne** Änderung schließen →
-      nichts wird gesendet.
-- [ ] **Markdown bleibt:** Eine Nachricht senden, die mit `#` beginnt
-      (z.B. `# Überschrift`) → wird **wörtlich** gesendet (kein Header wird
-      gefressen).
-- [ ] **Editieren (`e`):** Eigene Nachricht auswählen, `e` → Editor zeigt
-      den **rohen Body** (kein `#`-Header). Body ändern, speichern → Status
-      „Message edited"; die Zeile zeigt den neuen Text + „Edited"-Flag.
-      Unverändert speichern → „No changes", kein Roundtrip.
-- [ ] **Editieren fremd:** Fremde Nachricht `e`, Body ändern, speichern →
-      sauberer Server-Fehler (403), kein Crash.
-- [ ] **Löschen (`d`):** Eigene Nachricht `d` → Bestätigung, dann weg;
-      Liste aktualisiert sich.
-- [ ] **Reagieren (`+`):** Nachricht `+` → Emoji-Picker (👍 ❤️ 😂 …),
-      eines wählen → Status „Reacted 👍"; Reaktion erscheint in einem
-      zweiten Client / nach Reload im Web-UI.
-- [ ] **Live-Echo:** Senden/Editieren/Löschen löst zusätzlich das Live-
-      Event aus → die Liste ist auch in einem zweiten geöffneten Pane
-      aktuell.
+- [ ] **Send (`a`):** `a` in the message list → an empty `$EDITOR` (markdown).
+      Type text, save and close → status "Message sent"; the new message
+      appears at the bottom of the list (via reload **and** live event). An
+      empty buffer → nothing is sent, no error message.
+- [ ] **Cancel sending:** `a`, close the editor **without** a change → nothing
+      is sent.
+- [ ] **Markdown is preserved:** send a message that starts with `#` (e.g.
+      `# Heading`) → it is sent **verbatim** (no header is swallowed).
+- [ ] **Edit (`e`):** select one of your own messages, `e` → the editor shows
+      the **raw body** (no `#` header). Change the body, save → status "Message
+      edited"; the row shows the new text plus an "Edited" flag. Saving
+      unchanged → "No changes", no round trip.
+- [ ] **Edit someone else's:** `e` on another user's message, change the body,
+      save → a clean server error (403), no crash.
+- [ ] **Delete (`d`):** `d` on one of your own messages → confirmation, then it
+      is gone; the list updates.
+- [ ] **React (`+`):** `+` on a message → an emoji picker (👍 ❤️ 😂 …), pick
+      one → status "Reacted 👍"; the reaction shows up in a second client, or
+      in the web UI after a reload.
+- [ ] **Live echo:** sending, editing and deleting also fire the live event →
+      the list is up to date in a second open pane as well.
 
-## Stoat-Adapter (Phase 4 — Strukturelle Live-Events)
+## Stoat adapter (phase 4 — structural live events)
 
-Strukturänderungen werden live, ohne Reconnect. Auslösen im **offiziellen
-Stoat/Revolt-Client** (oder seit dem Create-Feature direkt in der TUI, siehe
-nächster Abschnitt), in einem Server, den du administrierst — die TUI mit
-dem Stoat-Tab offen und auf dem Server-Baum (oder in einem Channel) daneben
-halten. Wire-Shapes vorab per WS-Capture gegen die echte 0.13.7-Instanz
-verifiziert.
+Structural changes arrive live, without a reconnect. Trigger them in the
+**official Stoat/Revolt client** (or, since the create feature, directly in the
+TUI, see the next section) in a server you administer — and keep the TUI next
+to it with the Stoat tab open, showing the server tree (or a channel). The wire
+shapes were verified beforehand with a WS capture against the real 0.13.7
+instance.
 
-- [ ] **Channel anlegen:** Im Web-Client einen Text-Channel anlegen → er
-      erscheint **ohne** `r` im TUI-Baum unter dem Server (uncategorized).
-- [ ] **Channel umbenennen:** Channel im Web-Client umbenennen → der neue
-      Name erscheint live im Baum.
-- [ ] **Channel löschen:** Channel im Web-Client löschen → verschwindet
-      live aus dem Baum (und aus seiner Kategorie, falls zugeordnet).
-- [ ] **Kategorie anlegen:** Kategorie im Web-Client anlegen → erscheint
-      live als eigener Branch unter dem Server.
-- [ ] **Kategorie umbenennen:** → neuer Titel live im Baum.
-- [ ] **Channel in Kategorie ziehen:** Channel einer Kategorie zuordnen →
-      wandert live aus „uncategorized" in den Kategorie-Branch.
-- [ ] **Kategorie löschen:** → Branch verschwindet live; die enthaltenen
-      Channels rutschen zurück nach „uncategorized" (bzw. wohin der Server
-      sie umhängt).
-- [ ] **Server umbenennen:** → Server-Label aktualisiert sich live.
-- [ ] **Cursor-Verhalten:** Eine Strukturänderung setzt den Pane-Cursor
-      zurück (bekannte Reload-Grenze, kein Bug) — Baum bleibt konsistent.
-- [ ] **Server beitreten/verlassen (Negativ-Check):** Erscheint/verschwindet
-      **erst nach Reconnect** — bewusst nicht live (Phase-4-Scope-Grenze).
+- [ ] **Create a channel:** create a text channel in the web client → it
+      appears in the TUI tree under the server (uncategorised) **without** `r`.
+- [ ] **Rename a channel:** rename the channel in the web client → the new name
+      appears live in the tree.
+- [ ] **Delete a channel:** delete the channel in the web client → it
+      disappears from the tree live (and from its category, if it had one).
+- [ ] **Create a category:** create a category in the web client → it appears
+      live as its own branch under the server.
+- [ ] **Rename a category:** → the new title appears live in the tree.
+- [ ] **Move a channel into a category:** assign a channel to a category → it
+      moves live out of "uncategorised" into the category branch.
+- [ ] **Delete a category:** → the branch disappears live; the channels it held
+      slide back into "uncategorised" (or wherever the server reassigns them).
+- [ ] **Rename the server:** → the server label updates live.
+- [ ] **Cursor behaviour:** a structural change resets the pane cursor (a known
+      reload limitation, not a bug) — the tree stays consistent.
+- [ ] **Joining and leaving a server (negative check):** it appears or
+      disappears **only after a reconnect** — deliberately not live (the
+      phase-4 scope boundary).
 
-## Stoat-Adapter — Channel/Kategorie anlegen (`al` / `ay`)
+## Stoat adapter — create a channel or category (`al` / `ay`)
 
-Anlegen direkt aus der TUI. Voraussetzung: ein Server, den du
-administrierst, und die `al`/`ay`-Actions in `stoat.yaml` (Server-View +
-`categories`-ChildDef). `al`/`ay` sind **Mehrzeichen-Chords** — sie liegen
-nicht in `keybindings.content`, sondern werden generisch über die
-View-Keymap erkannt (`ContentView::yaml_action_chord_prefix`); das `a`
-wird als Chord-Präfix gestasht, das zweite Zeichen löst aus.
+Creating directly from the TUI. Prerequisite: a server you administer, plus the
+`al`/`ay` actions in `stoat.yaml` (the server view and the `categories`
+ChildDef). `al` and `ay` are **multi-character chords** — they do not live in
+`keybindings.content` but are recognised generically through the view keymap
+(`ContentView::yaml_action_chord_prefix`); the `a` is stashed as the chord
+prefix and the second character triggers.
 
-- [ ] **Channel unter Server:** Cursor auf die **Server-Zeile**, `al` tippen
-      → Namens-Formular (ein Feld) öffnet. Name eingeben, bestätigen →
-      Channel erscheint live unter „uncategorized" (kein `r` nötig; der
-      Gateway echot `ChannelCreate`).
-- [ ] **Kategorie unter Server:** Cursor auf die **Server-Zeile**, `ay`
-      tippen → Formular → Name → Kategorie erscheint live als eigener
-      Branch (`ServerUpdate` mit voller Kategorie-Liste).
-- [ ] **Channel unter Kategorie:** Cursor auf eine **Kategorie-Zeile**, `al`
-      tippen → Formular → Name → Channel erscheint live **im
-      Kategorie-Branch**. (Zweistufig intern: Channel anlegen + Server-PATCH
-      — für den Nutzer ein Schritt.)
-- [ ] **Leerer Name:** Formular mit leerem/Whitespace-Namen bestätigen →
-      klare Fehlermeldung, kein namenloser Channel/Kategorie entsteht.
-- [ ] **`ay` auf Kategorie-Zeile:** nicht gebunden (Kategorien gibt es nur
-      unter dem Server) → `a` wird zwar als Präfix gestasht, `ay` löst
-      nichts aus und fällt sauber durch (kein Hänger, kein Fehler).
-- [ ] **Chord-Abbruch:** `a` tippen, dann `esc`/eine nicht-passende Taste →
-      kein Effekt, normale Bedienung läuft weiter.
+- [ ] **A channel under the server:** put the cursor on the **server row**,
+      type `al` → a name form (one field) opens. Enter a name, confirm → the
+      channel appears live under "uncategorised" (no `r` needed; the gateway
+      echoes `ChannelCreate`).
+- [ ] **A category under the server:** cursor on the **server row**, type `ay`
+      → form → name → the category appears live as its own branch
+      (`ServerUpdate` with the full category list).
+- [ ] **A channel under a category:** cursor on a **category row**, type `al` →
+      form → name → the channel appears live **inside the category branch**.
+      (Two steps internally: create the channel plus a server PATCH — one step
+      for the user.)
+- [ ] **Empty name:** confirm the form with an empty or whitespace-only name →
+      a clear error message, no nameless channel or category is created.
+- [ ] **`ay` on a category row:** not bound (categories only exist under the
+      server) → the `a` is stashed as a prefix, but `ay` triggers nothing and
+      falls through cleanly (no hang, no error).
+- [ ] **Cancel the chord:** type `a`, then `esc` or a non-matching key → no
+      effect, normal operation continues.
 
-## Stoat-Adapter — Channel/Kategorie umbenennen (`R`)
+## Stoat adapter — rename a channel or category (`R`)
 
-Umbenennen aus der TUI. Voraussetzung: ein Server, den du administrierst,
-und die `R`-Action in `stoat.yaml` (beide `channels`-ChildDefs +
-`categories`-ChildDef). `R` ist ein **Einzelzeichen** (kein Chord) und
-öffnet — wie `al`/`ay` — ein Namens-Formular mit einem Feld, vorgefüllt
-ist es nicht.
+Renaming from the TUI. Prerequisite: a server you administer, plus the `R`
+action in `stoat.yaml` (both `channels` ChildDefs and the `categories`
+ChildDef). `R` is a **single character** (not a chord) and opens — like `al`
+and `ay` — a name form with one field; it is not pre-filled.
 
-- [ ] **Channel unter Server:** Cursor auf eine **uncategorized Channel-Zeile**,
-      `R` tippen → Formular → neuer Name → Channel-Zeile aktualisiert sich
-      live (kein `r` nötig; der Gateway echot `ChannelUpdate`).
-- [ ] **Channel unter Kategorie:** Cursor auf eine Channel-Zeile **im
-      Kategorie-Branch**, `R` → Formular → neuer Name → Zeile aktualisiert
-      sich live (gleiche Action, `PATCH /channels/{id}`).
-- [ ] **Kategorie:** Cursor auf eine **Kategorie-Zeile**, `R` → Formular →
-      neuer Name → Kategorie-Header aktualisiert sich live (`ServerUpdate`
-      mit voller Kategorie-Liste; nur der Titel der Zielkategorie ändert
-      sich, Channel-Zuordnungen bleiben).
-- [ ] **Leerer Name:** Formular mit leerem/Whitespace-Namen bestätigen →
-      klare Fehlermeldung, kein Umbenennen findet statt.
-- [ ] **Fremder Server (kein Admin):** `R` auf einem Channel/einer Kategorie
-      ohne Rechte → der Server lehnt mit sauberer Fehlermeldung ab, der Baum
-      bleibt unverändert.
+- [ ] **A channel under the server:** cursor on an **uncategorised channel
+      row**, type `R` → form → new name → the channel row updates live (no `r`
+      needed; the gateway echoes `ChannelUpdate`).
+- [ ] **A channel under a category:** cursor on a channel row **inside the
+      category branch**, `R` → form → new name → the row updates live (the same
+      action, `PATCH /channels/{id}`).
+- [ ] **A category:** cursor on a **category row**, `R` → form → new name → the
+      category header updates live (`ServerUpdate` with the full category list;
+      only the title of the target category changes, the channel assignments
+      stay).
+- [ ] **Empty name:** confirm the form with an empty or whitespace-only name →
+      a clear error message, no rename happens.
+- [ ] **A server you do not administer:** `R` on a channel or category without
+      the permissions → the server rejects it with a clean error message, the
+      tree stays unchanged.
 
-## Stoat-Adapter — Channel cut/paste (`C` / `P`)
+## Stoat adapter — channel cut and paste (`C` / `P`)
 
-Channels zwischen Kategorien verschieben. `C` (cut) **markiert** den Channel
-unter dem Cursor — es wird **nichts gelöscht**; erst `P` (paste) hängt ihn um.
-Reuse der generischen `mark-move`/`paste-move`-Shortcuts (wie Tasks `m`/`p`),
-über `invoke_action` + `ActionContext.marked`. Voraussetzung: ein Server, den
-du administrierst. Der Move ist intern ein Voll-Listen-PATCH der Server-
-Kategorien (`update_server_categories`), live via `ServerUpdate`.
+Moving channels between categories. `C` (cut) **marks** the channel under the
+cursor — **nothing is deleted**; only `P` (paste) reattaches it. It reuses the
+generic `mark-move`/`paste-move` shortcuts (like `m`/`p` in Tasks), via
+`invoke_action` and `ActionContext.marked`. Prerequisite: a server you
+administer. Internally the move is a full-list PATCH of the server categories
+(`update_server_categories`), applied live via `ServerUpdate`.
 
-- [ ] **Channel in Kategorie:** Cursor auf eine Channel-Zeile, `C` (Status:
-      „Marked … for move") → Cursor auf eine **Kategorie-Zeile**, `P` → Channel
-      wandert live in diese Kategorie, verschwindet aus der alten Stelle.
-- [ ] **Channel → uncategorized:** Channel `C`, dann Cursor auf die
-      **Server-Zeile**, `P` → Channel landet im uncategorized-Branch.
-- [ ] **Paste neben Channel:** Channel A `C`, dann Cursor auf Channel B (in
-      einer anderen Kategorie), `P` → A landet in B's Kategorie (bzw.
-      uncategorized, wenn B uncategorized ist).
-- [ ] **Abbruch per zweimal `C`:** Channel `C`, dann auf derselben Zeile noch
-      einmal `C` → „Cut cancelled", kein Move bei späterem `P`.
-- [ ] **Abbruch per Tab-Wechsel:** Channel `C`, Tab wechseln (z. B. `1`) →
-      „Cut cancelled"; zurück auf Stoat, `P` auf einer Kategorie → nichts
-      passiert (kein hängender Cut).
-- [ ] **`C` löscht nie:** nach `C` ist der Channel unverändert sichtbar; nur
-      `P` verändert den Baum.
-- [ ] **`cut` in der oberen Leiste + Highlight:** Der `C cut`-Hint steht in der
-      **oberen Action-Bar** (nicht in der Status-Leiste). Nach `C` wird er in der
-      Akzentfarbe (fett + unterstrichen) hervorgehoben, solange ein Cut armiert
-      ist; nach `P` oder Abbruch (zweimal `C` / Tab-Wechsel) erlischt das
-      Highlight wieder.
-- [ ] **Fremder Server:** Channel von Server A `C`, dann `P` auf eine
-      Kategorie/Server B → saubere Fehlermeldung („different server"), kein
-      Move (Kategorien sind serverlokal).
+- [ ] **A channel into a category:** cursor on a channel row, `C` (status:
+      "Marked … for move") → cursor on a **category row**, `P` → the channel
+      moves live into that category and disappears from its old place.
+- [ ] **A channel into uncategorised:** `C` on the channel, then cursor on the
+      **server row**, `P` → the channel lands in the uncategorised branch.
+- [ ] **Paste next to a channel:** `C` on channel A, then cursor on channel B
+      (in another category), `P` → A lands in B's category (or in
+      uncategorised, if B is uncategorised).
+- [ ] **Cancel with a second `C`:** `C` on a channel, then `C` again on the
+      same row → "Cut cancelled", no move on a later `P`.
+- [ ] **Cancel by switching tabs:** `C` on a channel, switch tabs (e.g. `1`) →
+      "Cut cancelled"; back on Stoat, `P` on a category → nothing happens (no
+      dangling cut).
+- [ ] **`C` never deletes:** after `C` the channel is still visible and
+      unchanged; only `P` alters the tree.
+- [ ] **`cut` in the top bar plus highlight:** the `C cut` hint sits in the
+      **top action bar** (not in the status bar). After `C` it is highlighted
+      in the accent colour (bold and underlined) for as long as a cut is armed;
+      after `P` or a cancellation (a second `C`, or a tab switch) the highlight
+      goes away again.
+- [ ] **A different server:** `C` on a channel of server A, then `P` on a
+      category or server B → a clean error message ("different server"), no
+      move (categories are server-local).
 
-## Stoat-Adapter — Chat-Layout (`row_layout`)
+## Stoat adapter — chat layout (`row_layout`)
 
-Die Message-Liste rendert per `row_layout` als Chat: Meta-Zeile + Body +
-Spacer. In einen Channel drillen (split öffnet die Liste rechts).
+The message list renders as a chat via `row_layout`: a meta line, the body and
+a spacer. Drill into a channel (the split opens the list on the right).
 
-- [ ] **Drei Zeilen je Nachricht:** Jede Nachricht belegt 3 Terminalzeilen —
-      Zeile 1 `author  time`, Zeile 2 der Nachrichtentext, Zeile 3 leer.
-- [ ] **Hervorhebung:** Author in Akzentfarbe, Time gedimmt (kommt aus
-      `style: accent` / `style: text_dim`, über `tui.yaml` überschreibbar).
-- [ ] **Kein Spaltenkopf:** Im Chat-Layout wird die `Author | Time | Message`-
-      Kopfzeile **nicht** angezeigt.
-- [ ] **Selektion:** Mit `j`/`k` navigieren → Auswahl-Hintergrund deckt die
-      Meta- und die Body-Zeile ab, **nicht** die Leerzeile dazwischen.
-- [ ] **Scrollen:** Liste mit mehr Nachrichten als Bildschirmhöhe → `j` ans
-      Ende scrollt sauber Block für Block; ausgewählte Nachricht bleibt
-      vollständig sichtbar (nicht halb abgeschnitten).
-- [ ] **Aktionen unverändert:** `e`/`d`/`+`/`p`/`n` wirken weiter auf die
-      ausgewählte Nachricht (die ganze Block-Auswahl, nicht einzelne Zeilen).
-- [ ] **Andere Tabs unberührt:** Jira/Taiga/Postgres-Tabs rendern weiter als
-      normale einzeilige Tabellen (kein `row_layout` → altes Verhalten).
+- [ ] **Three lines per message:** every message occupies 3 terminal lines —
+      line 1 `author  time`, line 2 the message text, line 3 empty.
+- [ ] **Emphasis:** the author in the accent colour, the time dimmed (from
+      `style: accent` and `style: text_dim`, overridable via `tui.yaml`).
+- [ ] **No column header:** in the chat layout the `Author | Time | Message`
+      header row is **not** shown.
+- [ ] **Selection:** navigate with `j`/`k` → the selection background covers
+      the meta line and the body line, but **not** the blank line between
+      messages.
+- [ ] **Scrolling:** a list with more messages than screen height → `j` to the
+      end scrolls cleanly block by block; the selected message stays fully
+      visible (not cut in half).
+- [ ] **Actions unchanged:** `e`, `d`, `+`, `p` and `n` still act on the
+      selected message (the whole block selection, not individual lines).
+- [ ] **Other tabs untouched:** the Jira, Taiga and Postgres tabs still render
+      as ordinary single-line tables (no `row_layout` → the old behaviour).
 
-## Stoat-Adapter — Markdown-Body (`markdown: true`)
+## Stoat adapter — markdown body (`markdown: true`)
 
-Die Content-Spalte der Messages ist `source: content` + `markdown: true`, der
-Body wird mehrzeilig und soft-gewrappt gerendert (`ratatui-markdown`). In einen
-Channel drillen.
+The messages' content column is `source: content` plus `markdown: true`, so the
+body renders multi-line and soft-wrapped (`ratatui-markdown`). Drill into a
+channel.
 
-- [ ] **Alle Zeilen sichtbar:** Eine Nachricht mit mehreren harten
-      Zeilenumbrüchen zeigt **jede** Zeile, nicht zu einer Zeile kollabiert.
-- [ ] **Soft-Wrap:** Ein langer Absatz bricht am Pane-Rand um; Pane schmaler
-      ziehen → derselbe Absatz reflowt über mehr Zeilen (Row-Höhe wächst mit).
-- [ ] **Inline-Styling:** `**fett**`, `*kursiv*`, `` `code` `` erscheinen
-      hervorgehoben; eine `# Überschrift` und `- Listen` werden als solche
-      gerendert.
-- [ ] **Farben aus Theme:** Body-Text/Headings/Emphasis ziehen ihre Farben aus
-      `tui.yaml` (Theme-Bridge) — kein Hardcode; Theme wechseln verändert sie.
-- [ ] **Selektion = nur Hintergrund:** Auswahl der Nachricht legt den
-      Auswahl-Hintergrund über Meta + alle Body-Zeilen, **ohne** die
-      Vordergrundfarben (author=accent, Body-Styling) plattzumachen.
-- [ ] **Leerer Body:** Eine Nachricht ohne Text (z. B. nur Attachment) bricht
-      das Layout nicht — die Body-Zeile bleibt leer, Spacer intakt.
-- [ ] **Scrollen mit hohen Rows:** Sehr lange Nachrichten (viele Body-Zeilen)
-      scrollen sauber; ausgewählte Nachricht bleibt vollständig sichtbar.
+- [ ] **All lines visible:** a message with several hard line breaks shows
+      **every** line, not collapsed into one.
+- [ ] **Soft wrap:** a long paragraph wraps at the pane edge; make the pane
+      narrower → the same paragraph reflows across more lines (the row height
+      grows with it).
+- [ ] **Inline styling:** `**bold**`, `*italic*` and `` `code` `` appear
+      emphasised; a `# heading` and `- lists` render as such.
+- [ ] **Colours from the theme:** body text, headings and emphasis draw their
+      colours from `tui.yaml` (the theme bridge) — nothing hard-coded;
+      switching the theme changes them.
+- [ ] **Selection = background only:** selecting the message lays the selection
+      background over the meta line and all body lines **without** flattening
+      the foreground colours (author = accent, body styling).
+- [ ] **Empty body:** a message without text (e.g. an attachment only) does not
+      break the layout — the body line stays empty, the spacer is intact.
+- [ ] **Scrolling with tall rows:** very long messages (many body lines) scroll
+      cleanly; the selected message stays fully visible.
 - [ ] **Andere Tabs unberührt:** Spalten ohne `markdown:` (Jira/Taiga/Postgres)
       rendern weiter einzeilig.
 
