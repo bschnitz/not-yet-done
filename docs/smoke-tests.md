@@ -5120,6 +5120,42 @@ Das Sortier-Menü ist ein zweiter UI-Pfad auf dieselbe Sortierung wie `S`;
       Konflikt gemeldet (Prefix-Kollision mit `c c`/`c s`), `force: true`
       unterdrückt sie weiterhin.
 
+## Custom-Spalten als Aufzählung (`set-column-options`)
+
+Eine Custom-Spalte auf einen geschlossenen Wertesatz einschränken. Über das
+Aktions-Menü oder per CLI (`nyd <inst> do set-column-options <ID> --field
+column_key=<key> --field options=a,b,c`).
+
+- [ ] Auf einer Spalte mit gemischten Werten einen Satz setzen, der nicht alle
+      abdeckt → Fehler nennt die störenden Row-Ids, und die Spalte bleibt frei
+      (nichts wurde geschrieben).
+- [ ] Werte korrigieren, denselben Satz nochmal setzen → geht durch, Meldung
+      nennt die Anzahl abgedeckter Zellen.
+- [ ] Danach eine Zelle auf einen Wert **außerhalb** des Satzes setzen → wird
+      abgelehnt, der alte Wert steht noch da. Ein Wert aus dem Satz geht.
+- [ ] Zelle leeren bleibt erlaubt (leer = „unbelegt", keine Verletzung).
+- [ ] In der Edit-Form (`m` bzw. die im View gebundene `edit-cells`-Action)
+      erscheint die Spalte jetzt als **Select** mit genau diesen Werten.
+- [ ] `options` leer setzen → Spalte ist wieder frei, beliebige Werte gehen.
+- [ ] Auf einer `number`-Spalte einen Satz mit einem Wort setzen → abgelehnt
+      (Optionen müssen zum `value_type` passen).
+- [ ] Leerzeichen/Dubletten im Satz (`1 , , 2 , 1`) werden getrimmt,
+      entdoppelt und blank-frei gespeichert.
+
+## Stoat: Kanal mit gelöschter letzter Nachricht
+
+Der tote `last_message_id` hielt den Kanal früher dauerhaft ungelesen.
+
+- [ ] Kanal öffnen, dessen letzte Nachricht gelöscht wurde: die Liste endet auf
+      einer Zeile `[deleted message]` an chronologisch korrekter Stelle.
+- [ ] Der Cursor landet beim Öffnen direkt darauf (`cursor_on_open`) und die
+      Glocke in der Tab-Leiste verschwindet **ohne** einen Tastendruck.
+- [ ] Nach TUI-Neustart bleibt der Kanal gelesen (das Ack ging serverseitig
+      durch, nicht nur lokal).
+- [ ] Auf der Tombstone-Zeile schlagen `edit`/`delete`/Reaktion/Download mit
+      „this message was deleted" fehl statt mit einem 404.
+- [ ] Vorschau/Detail derselben Zeile zeigt denselben Stand-in, kein Fehler.
+
 ## Refinements / Deferred Tasks
 
 Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor
