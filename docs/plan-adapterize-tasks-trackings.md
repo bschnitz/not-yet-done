@@ -1,58 +1,56 @@
-# Tasks & Trackings als ContentAdapter — Phasen-Plan
+# Tasks & Trackings as ContentAdapter — phase plan
 
-Status: **geplant** (noch keine Implementierung).
-Grundlage: [`docs/adapterize-tasks-trackings.md`](adapterize-tasks-trackings.md)
-(Analyse der Schwierigkeiten).
-Tracking-Memory: `project_adapterize_tasks_trackings.md`.
+Status: **planned** (no implementation yet).
+Basis: [`docs/adapterize-tasks-trackings.md`](adapterize-tasks-trackings.md)
+(analysis of the difficulties).
+Tracking memory: `project_adapterize_tasks_trackings.md`.
 
-## Ziel
+## Goal
 
-Die heute bespoke nativen Tabs **Tasks** und **Trackings** vollständig
-hinter den `ContentAdapter`-Contract bringen, sodass sie wie
-Jira/Taiga/Postgres/Confluence/Stoat über `views/*.yaml` + Adapter laufen
-und die generischen Features (Splits, Links, Action-Chains, Multiline,
-Smooth-Scroll, Column-Cursor, Markdown, Retries) erben.
+Bring the currently bespoke native **Tasks** and **Trackings** tabs fully
+behind the `ContentAdapter` contract, so that they run via `views/*.yaml` +
+adapter just like Jira/Taiga/Postgres/Confluence/Stoat and inherit the
+generic features (splits, links, action chains, multiline, smooth scroll,
+column cursor, markdown, retries).
 
-## Getroffene Entscheidungen (Eingangsbasis)
+## Decisions taken (starting basis)
 
-1. **Volle Uniformität.** Beide Tabs werden `ContentView`-getrieben; die
-   bespoke `TasksView`/`TrackingsView` werden am Ende entfernt.
-2. **Aggregation/Gruppierung wird ein echtes Engine-Feature** (Variante b),
-   kein Adapter-Hack mit synthetischen Pseudo-Nodes. Alle Adapter
-   profitieren davon.
-3. **Keine Staleness.** Der Adapter muss regelmäßige Updates signalisieren
-   können, ohne die TUI zu kennen. Gelöst über einen Core-Domain-Event-Bus,
-   den Adapter in ihren Invalidation-Stream brücken; die TUI repaintet auf
-   ein neues „soft refresh / repaint"-Signal.
-4. **Sauberes Softwaredesign hat Priorität** vor Schnelligkeit.
+1. **Full uniformity.** Both tabs become `ContentView`-driven; the bespoke
+   `TasksView`/`TrackingsView` are removed at the end.
+2. **Aggregation/grouping becomes a real engine feature** (variant b), not
+   an adapter hack with synthetic pseudo nodes. All adapters benefit from it.
+3. **No staleness.** The adapter must be able to signal regular updates
+   without knowing the TUI. Solved via a core domain event bus that adapters
+   bridge into their invalidation stream; the TUI repaints on a new
+   "soft refresh / repaint" signal.
+4. **Clean software design takes priority** over speed.
 
-## Leitidee
+## Guiding idea
 
-Die Capability-Lücken aus der Analyse werden als **generische
-Engine-/Contract-Features** geschlossen (Phasen E\*), unabhängig
-unit-testbar. Erst danach konsumieren zwei dünne **lokale Adapter**
-(Phasen A\*) diese Features. Die nativen Views bleiben bis zur
-verifizierten Parität bestehen und werden dann in einem harten Schnitt
-entfernt (Phase C1).
+The capability gaps from the analysis are closed as **generic
+engine/contract features** (phases E\*), independently unit-testable. Only
+afterwards do two thin **local adapters** (phases A\*) consume those
+features. The native views stay in place until parity is verified and are
+then removed in a hard cut (phase C1).
 
 ```mermaid
 flowchart TB
-    subgraph engine[Generische Engine-/Contract-Features]
-        E7[E7 In-Process-Adapter-Wiring]
-        E4[E4 Domain-Event-Bus + Repaint-Signal]
-        E1[E1 Typisierte Spaltenwerte]
-        ELIVE[E4b Live-Elapsed-Spalte]
-        E2[E2 Gruppierung + Aggregation + Totals]
-        E3[E3 Tree-Fold-Aggregation]
-        E5[E5 Generischer Form-InputSpec]
-        E6[E6 Generisches mark/paste-move]
+    subgraph engine[Generic engine/contract features]
+        E7[E7 in-process adapter wiring]
+        E4[E4 domain event bus + repaint signal]
+        E1[E1 typed column values]
+        ELIVE[E4b live elapsed column]
+        E2[E2 grouping + aggregation + totals]
+        E3[E3 tree fold aggregation]
+        E5[E5 generic form InputSpec]
+        E6[E6 generic mark/paste move]
     end
-    subgraph adapters[Lokale Adapter]
+    subgraph adapters[Local adapters]
         A1[A1 TaskAdapter]
         A2[A2 TrackingAdapter]
     end
-    subgraph cut[Cutover - harter Schnitt]
-        C1[C1 Routing umstellen + bespoke Views entfernen + Doku/ADR]
+    subgraph cut[Cutover - hard cut]
+        C1[C1 switch routing + remove bespoke views + docs/ADR]
     end
     E1 --> ELIVE --> E2 --> E3
     E7 --> A1
@@ -67,639 +65,638 @@ flowchart TB
     A2 --> C1
 ```
 
-## Querschnittsdesign (die neuen Mechanismen)
+## Cross-cutting design (the new mechanisms)
 
-### M1 — Core-Domain-Event-Bus (löst Decision 3 + Tab-übergreifende Effekte)
+### M1 — core domain event bus (solves decision 3 + cross-tab effects)
 
-Im Core ein `tokio::sync::broadcast` für Domänen-Events:
+A `tokio::sync::broadcast` for domain events in the core:
 
 ```text
 DomainEvent::TaskChanged { id }
 DomainEvent::TrackingStarted { task_id, tracking_id }
 DomainEvent::TrackingStopped { task_id, tracking_id }
-DomainEvent::TrackingTick            // 1 Hz, solange ein Tracking läuft
+DomainEvent::TrackingTick            // 1 Hz, as long as a tracking is running
 ```
 
-- Jeder Adapter abonniert die für ihn relevanten Events und **brückt** sie
-  in seinen eigenen `subscribe_invalidations()`-Stream:
-  - „harte" Änderung (neue Zeile, gelöscht) → `Invalidation::Node`/`All`
-    (Refetch).
-  - `TrackingTick` → neues, leichtes Signal `Invalidation::Repaint`
-    (nur neu zeichnen, **kein** Refetch).
-- Die TUI kennt weder Tasks noch Trackings: sie reagiert nur auf den
-  generischen Invalidation-Stream. Der dirty-gated Render-Loop bekommt
-  `Repaint` als Wake-/Dirty-Trigger.
-- Cross-Tab: Ein Tracking-Toggle aus dem Tasks-Tab schreibt eine
-  Tracking-Zeile und emittiert `TrackingStarted`; der TrackingAdapter
-  refetcht, der Tasks-Marker aktualisiert sich, der App-/Waybar-Indikator
-  hört am selben Bus. Adapter hängen nicht voneinander ab — nur am Bus.
+- Every adapter subscribes to the events relevant to it and **bridges** them
+  into its own `subscribe_invalidations()` stream:
+  - "hard" change (new row, deleted) → `Invalidation::Node`/`All` (refetch).
+  - `TrackingTick` → new, lightweight signal `Invalidation::Repaint`
+    (redraw only, **no** refetch).
+- The TUI knows neither tasks nor trackings: it only reacts to the generic
+  invalidation stream. The dirty-gated render loop gets `Repaint` as a
+  wake/dirty trigger.
+- Cross-tab: a tracking toggle from the Tasks tab writes a tracking row and
+  emits `TrackingStarted`; the TrackingAdapter refetches, the Tasks marker
+  updates, the app/waybar indicator listens on the same bus. Adapters do not
+  depend on each other — only on the bus.
 
-### M2 — Typisierte Spaltenwerte (E1)
+### M2 — typed column values (E1)
 
-**Entscheidung: deklarativ am `ColumnDef`, nicht am `MetadataField`.**
-Der Typ einer Spalte steht ausschließlich in der View-YAML; die Adapter
-selbst bleiben unberührt. Begründung: `MetadataField` wird an ~50
-Struct-Literal-Stellen über alle fünf Adapter-Crates konstruiert — ein
-neues Pflichtfeld dort wäre Churn quer durch den ganzen Workspace, obwohl
-nur Tasks/Trackings den Typ überhaupt brauchen.
+**Decision: declared on the `ColumnDef`, not on the `MetadataField`.**
+The type of a column lives exclusively in the view YAML; the adapters
+themselves stay untouched. Rationale: `MetadataField` is constructed at
+~50 struct-literal sites across all five adapter crates — a new mandatory
+field there would mean churn across the whole workspace even though only
+Tasks/Trackings need the type at all.
 
-- `ColumnDef` bekommt `kind: ColumnKind` (`text` | `number` | `duration`
-  | `datetime` | `path`; serde-default `text`) plus optionale
-  `format`/`separator`-Felder.
-- Adapter liefern für typisierte Spalten **kanonische Strings**, die der
-  Engine eindeutig zurückparst:
-  - `duration` → Sekunden als Integer (`"3720"`),
+- `ColumnDef` gets `kind: ColumnKind` (`text` | `number` | `duration`
+  | `datetime` | `path`; serde default `text`) plus optional
+  `format`/`separator` fields.
+- For typed columns adapters deliver **canonical strings** that the engine
+  parses back unambiguously:
+  - `duration` → seconds as an integer (`"3720"`),
   - `datetime` → RFC 3339 (`"2026-06-09T08:15:00Z"`),
-  - `path` → mit `/` getrennte Segmente (`"/a/b/c"`),
-  - `number` → Dezimalzahl als String.
-- Der Engine-Formatter parst den kanonischen String pro `kind`, formatiert
-  ihn fürs Display (`duration` über den vorhandenen `format_duration`
-  → `H:MM:SS`, identisch zur bisherigen Trackings-Anzeige für Parität;
-  `datetime` → lokalisiert), setzt die Ausrichtung (`number`/`duration`
-  rechtsbündig) und stylt
-  (`path`-Segmente mit Separator-Style über die vorhandene Theme-Farbe
-  `taskpath_separator()`, Vorbild: bisheriger `build_taskpath_segments`).
-- Remote-Adapter (Jira, Taiga, Postgres, Confluence, Stoat) bleiben
-  implizit `kind: text` → **null** Änderung an `MetadataField` und an den
-  Remote-Adaptern.
-- Die kanonische Form ist zugleich die Basis, auf der M3 (Aggregation),
-  M4 (Tree-Fold) und M5 (Live-Elapsed) rechnen, ohne den Anzeige-String
-  rückparsen zu müssen.
+  - `path` → segments separated by `/` (`"/a/b/c"`),
+  - `number` → decimal number as a string.
+- The engine formatter parses the canonical string per `kind`, formats it
+  for display (`duration` via the existing `format_duration` → `H:MM:SS`,
+  identical to the previous trackings display for parity; `datetime` →
+  localized), sets the alignment (`number`/`duration` right-aligned) and
+  styles it (`path` segments with a separator style via the existing theme
+  color `taskpath_separator()`, modelled on the previous
+  `build_taskpath_segments`).
+- Remote adapters (Jira, Taiga, Postgres, Confluence, Stoat) stay implicitly
+  `kind: text` → **zero** change to `MetadataField` and to the remote
+  adapters.
+- The canonical form is at the same time the basis on which M3
+  (aggregation), M4 (tree fold) and M5 (live elapsed) compute, without
+  having to parse the display string back.
 
-### M3 — Gruppierung + Aggregation (E2)
+### M3 — grouping + aggregation (E2)
 
-`ViewDef`/View-State:
+`ViewDef`/view state:
 
-- `group_by`: Spaltenschlüssel **oder** Datums-Bucket (Day/Week/Month/Year),
-  zur **Laufzeit umschaltbar** (View-State, kein Adapter-Roundtrip).
-- `aggregates`: pro Spalte eine Aggregation (`sum` für Duration), liefert
-  Gruppen-Total-Zeilen + Grand-Total-Footer.
-- `summary_only`: Gruppen auf eine Zeile pro Gruppe kollabieren
-  (= Trackings „Condensed").
+- `group_by`: column key **or** date bucket (day/week/month/year),
+  **switchable at runtime** (view state, no adapter round trip).
+- `aggregates`: one aggregation per column (`sum` for duration), produces
+  group total rows + a grand total footer.
+- `summary_only`: collapse groups to one row per group
+  (= trackings "condensed").
 
-> **Umgesetzt (Variante 3, Hybrid).** Der **generische** Partition-/Summen-
-> Mechanismus liegt framework-agnostisch in `not-yet-done-table`
-> (`group.rs`: `GroupPlan`/`PlanRow`/`group()`), die **typisierte** Extraktion
-> (ISO-Datums-Buckets, Duration-Parsing) als reines TUI-Modul
-> `views/group_aggregate.rs` (Spiegel von `column_format.rs`). Der gruppierte
-> Render-Pfad sitzt in `content_view::build_grouped_table`; Laufzeit-Umschaltung
-> via Aktion `cycle_grouping` (Default `zg`) oder Direktsprung-Menü
-> `group_menu` (Default `u`, native-`u`-Parität; nicht persistiert — nativ
-> persistierte via `SaveTrackingGrouping`). Farbe der Header/Footer-Zeilen über
-> Theme `group_header`. Gilt nur für einzeilige Flat-Tabellen (kein
-> `row_layout`, kein Tree). Capability-only — noch an keine Live-View gebunden
-> (wie E1/E4b bis zum Cutover A1/A2).
+> **Implemented (variant 3, hybrid).** The **generic** partition/sum
+> mechanism lives framework-agnostically in `not-yet-done-table`
+> (`group.rs`: `GroupPlan`/`PlanRow`/`group()`), the **typed** extraction
+> (ISO date buckets, duration parsing) as a pure TUI module
+> `views/group_aggregate.rs` (mirroring `column_format.rs`). The grouped
+> render path sits in `content_view::build_grouped_table`; runtime switching
+> via the action `cycle_grouping` (default `zg`) or the direct-jump menu
+> `group_menu` (default `u`, parity with the native `u`; not persisted — the
+> native one persisted via `SaveTrackingGrouping`). Color of the
+> header/footer rows via the theme `group_header`. Applies only to
+> single-line flat tables (no `row_layout`, no tree). Capability only — not
+> yet bound to any live view (like E1/E4b until the A1/A2 cutover).
 
-### M4 — Tree-Fold-Aggregation (E3)
+### M4 — tree fold aggregation (E3)
 
-Im Tree-Mode eine numerische Spalte über den Teilbaum kumulieren
-(`own` vs. `cumulated`) — generisch, getrieben durch eine
-`tree_aggregate`-Deklaration auf der Spalte.
+In tree mode, accumulate a numeric column over the subtree
+(`own` vs. `cumulated`) — generic, driven by a `tree_aggregate` declaration
+on the column.
 
-> **Umgesetzt (adapter-getrieben).** Der Tree ist **lazy** (`TreeState.cache`
-> hält nur den aufgeklappten Teilbaum) → die TUI kann nicht selbst falten.
-> Deshalb: der **Adapter** liefert pro `NodeSummary` beide Werte als
-> Metadatenfelder (Eigenwert unter dem Spalten-`key`, Summenwert unter
-> `cumulated_field`) und deklariert die Fähigkeit
-> `AdapterCapabilities.supports_tree_aggregation`. Die View-YAML deklariert
-> `tree_aggregate: { cumulated_field, default: own|cumulated }` auf der Spalte;
-> im Tree-Render-Pfad (`build_tree_data_rows`) liest die Spalte je nach
-> Umschalt-Status das eigene oder das kumulierte Feld, formatiert mit der
-> gleichen `kind:`. Laufzeit-Aktion `toggle_tree_aggregate` (Default `zt`,
-> View-State, nicht persistiert) flippt **alle** `tree_aggregate`-Spalten der
-> Ebene. Eigen- **und** Summenwert nebeneinander = zwei normale Spalten auf
-> beide Felder (kein neuer Mechanismus).
+> **Implemented (adapter-driven).** The tree is **lazy** (`TreeState.cache`
+> only holds the expanded subtree) → the TUI cannot fold by itself.
+> Therefore: the **adapter** delivers both values per `NodeSummary` as
+> metadata fields (own value under the column `key`, sum value under
+> `cumulated_field`) and declares the capability
+> `AdapterCapabilities.supports_tree_aggregation`. The view YAML declares
+> `tree_aggregate: { cumulated_field, default: own|cumulated }` on the
+> column; in the tree render path (`build_tree_data_rows`) the column reads
+> either the own or the cumulated field depending on the toggle state, and
+> formats it with the same `kind:`. The runtime action
+> `toggle_tree_aggregate` (default `zt`, view state, not persisted) flips
+> **all** `tree_aggregate` columns of the level. Own **and** sum value side
+> by side = two normal columns on both fields (no new mechanism).
 >
-> **Capability-Gating (nachgezogen, A2c-Follow-up).** Das Gate auf die Aktion
-> hängt jetzt an **zwei** Bedingungen, beide nötig: **Config-Präsenz**
-> (`tree_aggregate`-Spalte vorhanden) **und** **Capability**
-> (`supports_tree_aggregation`). Dafür der generische Pfad: `ContentView::new`
-> snapshottet die Adapter-Capabilities **einmal** (`adapter.capabilities()`,
-> ohne Adapter → all-false) und reicht eine Kopie in **jede** `ContentPane`
-> (auch bei Splits, geerbt von der Quell-Pane). `level_has_tree_aggregate`
-> liest `self.capabilities.supports_tree_aggregation` zusätzlich zur
-> Spalten-Präsenz; gegated sind dadurch automatisch sowohl der Claim
-> (`build_claims`, also Key + Hint) als auch der Toggle selbst. Bewusst die
-> **ganze** `AdapterCapabilities` auf der Pane gehalten, nicht nur ein bool —
-> künftige Affordanzen lesen die jeweilige Flag dort, statt den Wert neu
-> abzuleiten. Damit ist die ursprüngliche Design-Linie (Adapter deklariert
-> Fähigkeit, TUI zeigt nur an) vollständig: ein verirrtes `tree_aggregate:`
-> in der YAML bleibt wirkungslos, solange der Adapter die Fähigkeit nicht
-> meldet. (M3 `cycle_grouping` bleibt bewusst config-only — es gibt keine
-> `supports_grouping`-Capability; der Mechanismus steht aber bereit, falls je
-> eine eingeführt wird.)
+> **Capability gating (added later, A2c follow-up).** The gate on the action
+> now hangs on **two** conditions, both required: **config presence**
+> (`tree_aggregate` column present) **and** **capability**
+> (`supports_tree_aggregation`). For that the generic path:
+> `ContentView::new` snapshots the adapter capabilities **once**
+> (`adapter.capabilities()`, without an adapter → all false) and passes a
+> copy into **every** `ContentPane` (also on splits, inherited from the
+> source pane). `level_has_tree_aggregate` reads
+> `self.capabilities.supports_tree_aggregation` in addition to the column
+> presence; that automatically gates both the claim (`build_claims`, i.e.
+> key + hint) and the toggle itself. The **whole** `AdapterCapabilities` is
+> deliberately kept on the pane, not just a bool — future affordances read
+> their respective flag there instead of re-deriving the value. With that
+> the original design line (adapter declares the capability, the TUI only
+> displays it) is complete: a stray `tree_aggregate:` in the YAML stays
+> without effect as long as the adapter does not report the capability.
+> (M3 `cycle_grouping` deliberately stays config only — there is no
+> `supports_grouping` capability; the mechanism is however ready should one
+> ever be introduced.)
 >
-> Tests auf drei Ebenen: Config-Deserialisierung (`tree_aggregate`-Felder),
-> Render-/Toggle-Integration (`build_tree_data_rows` + `toggle_tree_aggregate`,
-> own↔cumulated, No-op ohne Spalte, mit Capability-meldendem Mock-Adapter) und
-> das Gate selbst (Spalte vorhanden + Capability fehlt → unclaimable/No-op;
-> Spalte + Capability → claimable).
+> Tests on three levels: config deserialization (`tree_aggregate` fields),
+> render/toggle integration (`build_tree_data_rows` +
+> `toggle_tree_aggregate`, own↔cumulated, no-op without the column, with a
+> capability-reporting mock adapter) and the gate itself (column present +
+> capability missing → unclaimable/no-op; column + capability → claimable).
 
-### M5 — Live-Elapsed-Spalte (E4b)
+### M5 — live elapsed column (E4b)
 
-Spalten-`kind: elapsed` mit Begleitfeld `elapsed_from: <datetime-feld>`
-(Default: der eigene `key` der Spalte). Der Engine rendert `now − feld`
-beim Rebuild neu (kein Refetch). Sichtbares Ticken kommt vom `Repaint`-Signal
-aus M1: der App-Repaint-Handler ruft `repaint_live_columns()`, das genau die
-Panes mit einer `elapsed`-Spalte gegen ein frisches `now` neu baut. Damit ist
-die laufende Dauer live ohne Staleness. (Encoding bewusst als eigener `kind` +
-Begleitfeld statt parametrisiertem `elapsed_since(...)` — konsistent mit den
-übrigen Begleitfeldern `format:`/`separator:` und ohne Mini-Parser im YAML.)
+Column `kind: elapsed` with the companion field
+`elapsed_from: <datetime-field>` (default: the column's own `key`). The
+engine re-renders `now − field` on rebuild (no refetch). The visible ticking
+comes from the `Repaint` signal of M1: the app repaint handler calls
+`repaint_live_columns()`, which rebuilds exactly those panes that have an
+`elapsed` column against a fresh `now`. That makes the running duration live
+without staleness. (Encoding deliberately as its own `kind` + companion
+field instead of a parameterized `elapsed_since(...)` — consistent with the
+other companion fields `format:`/`separator:` and without a mini parser in
+the YAML.)
 
-### M6 — Generischer Form-InputSpec (E5)
+### M6 — generic form InputSpec (E5)
 
-Neuer `InputSpec::Form { fields: Vec<FormFieldSpec> }` (Text, Select mit
-`allowed_values`, NodePicker für Reparent …). Die TUI rendert ihn generisch
-über `ratatui_form_widgets`; `execute()` bekommt die Feldwerte. Damit
-bleibt das Task-Formular erhalten **und** wird ein wiederverwendbares
-Feature (auch Jira-Create etc. könnten es nutzen).
+New `InputSpec::Form { fields: Vec<FormFieldSpec> }` (text, select with
+`allowed_values`, node picker for reparent …). The TUI renders it
+generically via `ratatui_form_widgets`; `execute()` receives the field
+values. That keeps the task form **and** turns it into a reusable feature
+(Jira create etc. could use it too).
 
-> Fallback, falls Form zu schwer wird: Task-Edit als Text-Template
-> (YAML-Buffer im `$EDITOR`, parse-back) wie Jira. Weniger UX, aber
-> uniform. Primär: Form-InputSpec.
+> Fallback in case the form turns out too hard: task edit as a text template
+> (YAML buffer in `$EDITOR`, parse back) like Jira. Less UX, but uniform.
+> Primary: form InputSpec.
 
-> **Umgesetzt (Form-InputSpec, kein Fallback nötig).** content-crate:
+> **Implemented (form InputSpec, no fallback needed).** content crate:
 > `InputSpec::Form { fields: Vec<FormFieldSpec> }`, `FormFieldSpec`
-> (`Text` / `Select{allowed_values}` / `Toggle`, je `key`/`label`/
-> `required`/`default` + Builder), `ActionInput::Form(HashMap)` und der
-> `Node::form_prep(action_id) -> HashMap` Hook für Edit-Prefill. TUI:
-> generische, headless-testbare `ContentFormPopup`-Komponente (Stack aus
-> `ratatui_form_widgets`, Feld-Fokus, Pflichtfeld-Validierung) +
-> `ContentFormPopupState`, verdrahtet am `InputSpec`-Match in `app/mod.rs`
-> (`form_prep` → Popup → `ActionInput::Form` → `execute`), Overlay-Render
-> und Popup-Guards. **Scope-Entscheidung:** nur Text/Select/Toggle; der im
-> Plan genannte **NodePicker (Reparent) ist auf E6 (mark/paste, M7)
-> verschoben** — der Reparent-Pfad nutzt dort ohnehin das Clipboard-Move,
-> und ein NodePicker-Widget existiert noch nicht. Das **native
-> Task-Add/Edit (Markdown-`$EDITOR`) bleibt vorerst unangetastet** — E5
-> baut nur den generischen Mechanismus + Tests; die Umstellung des
-> TaskAdapters auf das Form passiert in **A1**. Tests: 7 Popup-Unit-Tests
-> (Eingabe/Prefill/Select/Toggle/Validierung/Submit/Cancel) + 3
-> content-Contract-Tests (Mock-Node: Form-Deklaration, `form_prep`,
-> `execute` empfängt `ActionInput::Form`).
+> (`Text` / `Select{allowed_values}` / `Toggle`, each with `key`/`label`/
+> `required`/`default` + builder), `ActionInput::Form(HashMap)` and the
+> `Node::form_prep(action_id) -> HashMap` hook for edit prefill. TUI:
+> generic, headless-testable `ContentFormPopup` component (stack of
+> `ratatui_form_widgets`, field focus, required-field validation) +
+> `ContentFormPopupState`, wired at the `InputSpec` match in `app/mod.rs`
+> (`form_prep` → popup → `ActionInput::Form` → `execute`), overlay render
+> and popup guards. **Scope decision:** text/select/toggle only; the
+> **node picker (reparent) mentioned in the plan is deferred to E6
+> (mark/paste, M7)** — the reparent path uses the clipboard move there
+> anyway, and a node-picker widget does not exist yet. The **native task
+> add/edit (markdown `$EDITOR`) stays untouched for now** — E5 only builds
+> the generic mechanism + tests; switching the TaskAdapter over to the form
+> happens in **A1**. Tests: 7 popup unit tests
+> (input/prefill/select/toggle/validation/submit/cancel) + 3 content
+> contract tests (mock node: form declaration, `form_prep`, `execute`
+> receives `ActionInput::Form`).
 
-### M7 — Generisches mark/paste-move (E6)
+### M7 — generic mark/paste move (E6)
 
-`ActionContext` trägt einen **markierten Knoten** (Clipboard). Standard-
-Action-Vokabular `mark-move` / `paste-move`; `invoke_action("paste-move",
-ctx)` führt den Move im Adapter aus. Verallgemeinert das bespoke
-mark/paste aus dem DB-Script-Folders-Plan (der darauf umgestellt wird).
+`ActionContext` carries a **marked node** (clipboard). Standard action
+vocabulary `mark-move` / `paste-move`; `invoke_action("paste-move", ctx)`
+performs the move in the adapter. Generalizes the bespoke mark/paste from
+the DB script folders plan (which is switched over to it).
 
-> **Umgesetzt (generischer Mechanismus, db-script-Konsolidierung als
-> Follow-up).** User-Scope-OK vorab: (1) `ActionContext.marked` trägt
-> `MarkedNode { node_id, node_type, label }` (leichtes Struct, kein
-> `NodeRef`); (2) generischen Mechanismus + Tests jetzt, db-script-
-> Migration als expliziter Follow-up (s.u.).
+> **Implemented (generic mechanism, db-script consolidation as a
+> follow-up).** User scope OK up front: (1) `ActionContext.marked` carries
+> `MarkedNode { node_id, node_type, label }` (lightweight struct, no
+> `NodeRef`); (2) generic mechanism + tests now, db-script migration as an
+> explicit follow-up (see below).
 >
-> - **Contract (`content/src/lib.rs`):** neues `MarkedNode`-Struct;
->   `ActionContext.marked: Option<MarkedNode>` (statt leerem Struct).
->   `paste-move` liest die Quelle aus `ctx.marked`; **der Adapter** führt
->   den Move aus und gibt `ActionDispatch::Reload` zurück. `mark-move` ist
->   Frontend-State → Adapter gibt `Noop`.
-> - **TUI:** App-Feld `content_marked_node: Option<MarkedNode>`;
->   `spawn_invoke_node_action` füllt `ctx.marked` und fängt Label+Typ des
->   Knotens (für `mark-move` ohne zweiten `get_by_id`) in
->   `LoadMsg::NodeActionDispatched` ein. Pure Entscheidung
->   `node_actions::generic_mark_move_effect(action, node_id)` liefert
+> - **Contract (`content/src/lib.rs`):** new `MarkedNode` struct;
+>   `ActionContext.marked: Option<MarkedNode>` (instead of an empty struct).
+>   `paste-move` reads the source from `ctx.marked`; **the adapter** performs
+>   the move and returns `ActionDispatch::Reload`. `mark-move` is frontend
+>   state → the adapter returns `Noop`.
+> - **TUI:** app field `content_marked_node: Option<MarkedNode>`;
+>   `spawn_invoke_node_action` fills `ctx.marked` and captures the node's
+>   label + type (for `mark-move` without a second `get_by_id`) in
+>   `LoadMsg::NodeActionDispatched`. The pure decision
+>   `node_actions::generic_mark_move_effect(action, node_id)` returns a
 >   `MarkMoveEffect` (`Mark` | `ClearOnPasteSuccess` | `Ignore`);
->   `handle_node_action_dispatched` setzt/leert das Clipboard danach.
->   `esc` leert es (Tail-End-Esc-Consumer), Status-Bar-Indikator
->   `move: <label>` (nach link-mark/db-script).
-> - **db-script bleibt vorerst auf seinem bespoke Pfad**
+>   `handle_node_action_dispatched` sets/clears the clipboard afterwards.
+>   `esc` clears it (tail-end esc consumer), status bar indicator
+>   `move: <label>` (after link-mark/db-script).
+> - **db-script stays on its bespoke path for now**
 >   (`marked_db_script_for_move` + `tui_owned_db_script_action` →
->   `Mark/PasteDbScriptMove`, TUI macht den fs-Move). `generic_mark_move_effect`
->   gibt für db-script-Knoten `Ignore` zurück → beide Clipboards disjunkt.
-> - **Tests:** 3 content-Contract (`MoveNode`: default kein Mark,
->   `paste-move` empfängt `ctx.marked`, ohne Mark → `Error`) + 4 TUI-pure
->   (`generic_mark_move_effect`: mark/paste/other/db-script). 83 content +
->   562 TUI grün, installiert, Privacy-clean.
-> - **Docs:** generic-view-spec.md Abschnitt „Markieren & Verschieben".
-> - Capability-only bis A1/A2 (kein Adapter exponiert heute `mark-move`/
->   `paste-move` außer dem bespoke db-script-Pfad). A1 (TaskAdapter) ist
->   der erste Live-Konsument (Reparent).
+>   `Mark/PasteDbScriptMove`, the TUI performs the fs move).
+>   `generic_mark_move_effect` returns `Ignore` for db-script nodes → both
+>   clipboards are disjoint.
+> - **Tests:** 3 content contract (`MoveNode`: no mark by default,
+>   `paste-move` receives `ctx.marked`, without a mark → `Error`) + 4 pure
+>   TUI (`generic_mark_move_effect`: mark/paste/other/db-script). 83 content
+>   - 562 TUI green, installed, privacy clean.
+> - **Docs:** generic-view-spec.md section "Marking & moving".
+> - Capability only until A1/A2 (no adapter exposes `mark-move`/`paste-move`
+>   today except the bespoke db-script path). A1 (TaskAdapter) is the first
+>   live consumer (reparent).
 >
-> **Follow-up — db-script auf den generischen Pfad konsolidieren (bei
-> A2/M8).** Wenn der Adapter ohnehin durchgereicht wird: Postgres-Adapter
-> `paste-move` macht den fs-Move selbst (statt `Noop` + TUI), die
-> `ViewRequest::Mark/PasteDbScriptMove`-Sonderpfade + die db-script-Gate
-> in `generic_mark_move_effect` fallen weg, `marked_db_script_for_move`
-> wird durch `content_marked_node` ersetzt. Eigener Smoke-Test, da ein
-> funktionierendes Feature umgebaut wird.
+> **Follow-up — consolidate db-script onto the generic path (with
+> A2/M8).** Once the adapter is passed through anyway: the Postgres adapter
+> `paste-move` performs the fs move itself (instead of `Noop` + TUI), the
+> `ViewRequest::Mark/PasteDbScriptMove` special paths + the db-script gate in
+> `generic_mark_move_effect` fall away, `marked_db_script_for_move` is
+> replaced by `content_marked_node`. Its own smoke test, since a working
+> feature is being rebuilt.
 
-### M8 — In-Process-Adapter-Wiring (E7)
+### M8 — in-process adapter wiring (E7)
 
-`build_adapter_factories()` bekommt ein `CoreHandle` (DB-Connection +
-`Arc<dyn TaskService>`/`Arc<dyn TrackingRepository>` + Event-Bus-Sender).
-Task-/Tracking-Factory captured diese Handles. Erster In-Process-Adapter
-über reine Lokaldaten — Pattern wird hier einmal sauber etabliert.
+`build_adapter_factories()` gets a `CoreHandle` (DB connection +
+`Arc<dyn TaskService>`/`Arc<dyn TrackingRepository>` + event bus sender).
+The task/tracking factory captures these handles. First in-process adapter
+over purely local data — the pattern is established cleanly once here.
 
-### M9 — Adapter-driven Live Rows (Variante 1, A2a)
+### M9 — adapter-driven live rows (variant 1, A2a)
 
-> **Generischer Mechanismus, vom User entworfen.** Ein Adapter kann
-> einzelne Zeilen **pushen** und das Refresh-Intervall **vorgeben +
-> dynamisch ändern**; die TUI patcht die Zeile per `id` in-place. Löst die
-> Tracking-Dauer-Spalte (eine Spalte, live für laufende, statisch für
-> abgeschlossene — was ein render-seitiges `kind: elapsed` nicht kann) und
-> generalisiert über Dauern hinaus (CI-Fortschritt, editierte Chat-Zeilen).
+> **Generic mechanism, designed by the user.** An adapter can **push**
+> individual rows and **specify + dynamically change** the refresh interval;
+> the TUI patches the row in place by `id`. Solves the tracking duration
+> column (one column, live for running and static for finished ones — which
+> a render-side `kind: elapsed` cannot do) and generalizes beyond durations
+> (CI progress, edited chat rows).
 >
-> Zwei neue `Invalidation`-Varianten in `not-yet-done-content`:
+> Two new `Invalidation` variants in `not-yet-done-content`:
 >
-> - `Invalidation::Row(NodeSummary)` — die **vollständige** neue Zeile.
->   `ContentView::patch_row` findet sie per `id` in jedem Pane, ersetzt das
->   geladene Item und ruft `rebuild_table_with` (re-derived Zellen +, bei
->   aktivem `group_by`, Gruppensummen/Footer). Kein Refetch,
->   Selektion/Scroll bleiben.
-> - `Invalidation::RefreshInterval(Option<Duration>)` — der Adapter taktet
->   den **Framework-Timer**: `Some(d)` startet/re-taktet, `None` stoppt.
+> - `Invalidation::Row(NodeSummary)` — the **complete** new row.
+>   `ContentView::patch_row` finds it by `id` in every pane, replaces the
+>   loaded item and calls `rebuild_table_with` (re-derived cells and, with an
+>   active `group_by`, group sums/footer). No refetch, selection/scroll stay.
+> - `Invalidation::RefreshInterval(Option<Duration>)` — the adapter clocks
+>   the **framework timer**: `Some(d)` starts/re-clocks, `None` stops.
 >
-> **Variante 1 (Framework-Timer + Pull).** `App.live_refresh_timers:
-HashMap<view_index, JoinHandle>`; `set_live_refresh_timer` (re)spawnt je
-> View einen `tokio::interval`, der pro Tick `adapter.live_rows()` zieht und
-> jede Zeile als `Invalidation::Row` durch den Load-Channel schickt. Neue
-> Trait-Methode `ContentAdapter::live_rows() -> Vec<NodeSummary>` (Default
-> leer) liefert nur die Zeilen, deren Rendering sich ändert. Passt zur
-> bestehenden Push-Signal/Pull-Daten-Trennung; Takten an _einer_ Stelle.
+> **Variant 1 (framework timer + pull).** A new app field
+> `live_refresh_timers` of type `HashMap<view_index, JoinHandle>`;
+> `set_live_refresh_timer` (re)spawns a
+> `tokio::interval` per view which pulls `adapter.live_rows()` per tick and
+> sends every row as an `Invalidation::Row` through the load channel. The new
+> trait method `ContentAdapter::live_rows() -> Vec<NodeSummary>` (default
+> empty) returns only those rows whose rendering changes. Fits the existing
+> push-signal/pull-data separation; clocking in _one_ place.
 >
-> `NodeSummary`/`Metadata`/`MetadataField` bekamen `PartialEq, Eq` (damit
-> `Invalidation` seine Derives behält — keine Test-Änderungen).
+> `NodeSummary`/`Metadata`/`MetadataField` got `PartialEq, Eq` (so that
+> `Invalidation` keeps its derives — no test changes).
 >
-> Bootstrap race-frei: der Invalidation-Watcher subscribt **vor** dem ersten
-> Load, also erreicht ein `RefreshInterval`, das der Adapter am Ende seines
-> Snapshot-Loads pusht, garantiert einen Empfänger.
+> Bootstrap is race free: the invalidation watcher subscribes **before** the
+> first load, so a `RefreshInterval` that the adapter pushes at the end of
+> its snapshot load is guaranteed to reach a receiver.
 >
-> **Adaptives Intervall (Nachtrag, native Parität):** der TrackingAdapter
-> taktet nicht fix 1 Hz, sondern wie `App::tick_active_trackings` nach der
-> **jüngsten** laufenden Tracking-Dauer (<60 s → 5 s, <10 min → 10 s,
-> <1 h → 30 s, sonst 60 s; `live_interval_for`). Jeder `live_rows`-Pull
-> vergleicht die Ziel-Stufe mit der zuletzt announceten und re-taktet den
-> Framework-Timer nur bei Stufenwechsel (`RefreshInterval` erneut senden).
+> **Adaptive interval (addendum, native parity):** the TrackingAdapter does
+> not clock at a fixed 1 Hz but, like `App::tick_active_trackings`, according
+> to the **most recent** running tracking duration (<60 s → 5 s, <10 min →
+> 10 s, <1 h → 30 s, otherwise 60 s; `live_interval_for`). Every `live_rows`
+> pull compares the target step with the last announced one and re-clocks the
+> framework timer only on a step change (sending `RefreshInterval` again).
 >
-> **`revalidate()` (Nachtrag, externe Änderungen):** neuer Trait-Hook
-> `ContentAdapter::revalidate()` (Default no-op), von der App bei jedem
-> Wechsel auf einen Content-Tab gespawnt. Task- und Tracking-Adapter diffen
-> die laufenden Trackings der DB (`find_all_active`) gegen ihren Snapshot
-> (`tracked`-Set bzw. aktive IDs) und droppen bei Drift den Snapshot +
-> senden `Invalidation::All` — so werden Starts/Stops aus CLI/waybar (kein
-> in-process DomainEvent) beim Tab-Wechsel sichtbar; `r` (Reload-Action)
-> bleibt der manuelle Weg. Reloads erneuern seitdem auch aufgeklappte
-> Tree-Ebenen (Engine, siehe generic-view-spec „Reload erneuert
-> aufgeklappte Ebenen").
+> **`revalidate()` (addendum, external changes):** new trait hook
+> `ContentAdapter::revalidate()` (default no-op), spawned by the app on every
+> switch to a content tab. The task and tracking adapters diff the running
+> trackings of the DB (`find_all_active`) against their snapshot (`tracked`
+> set resp. active IDs) and on drift drop the snapshot + send
+> `Invalidation::All` — that way starts/stops from CLI/waybar (no in-process
+> domain event) become visible on a tab switch; `r` (reload action) stays the
+> manual way. Since then reloads also refresh expanded tree levels (engine,
+> see generic-view-spec "Reload refreshes expanded levels").
 
-## Phasen
+## Phases
 
-Jede Phase: implementieren → `cargo build --release` → `cargo install` →
-Unit-Tests → Commit. Smoke-Tests zentral in `docs/smoke-tests.md`.
+Every phase: implement → `cargo build --release` → `cargo install` →
+unit tests → commit. Smoke tests centrally in `docs/smoke-tests.md`.
 
-### Engine-/Contract-Features
+### Engine/contract features
 
-- **E0 — Plan + Memory** (dieses Dokument + Memory-Eintrag), committet vor
-  Implementierung (übersteht `/compact`).
-- **E7 — In-Process-Adapter-Wiring (M8).** `CoreHandle`, Factory-Signatur,
-  No-Op-`LocalAdapter`-Skeleton zum Beweis der Verdrahtung, Registrierung.
-- **E4a — Domain-Event-Bus + Repaint-Signal (M1).** Core-Broadcast,
-  `Invalidation::Repaint`-Variante, Render-Loop-Wake darauf. Bridge-Helper
-  für Adapter. Tests: Event → Invalidation → Dirty-Flag.
-- **E1 — Typisierte Spaltenwerte (M2).** `value_kind` auf `MetadataField`,
-  `kind`/`format` auf `ColumnDef`, Engine-Formatter + Path-Styling. Tests.
-- **E4b — Live-Elapsed-Spalte (M5).** `kind: elapsed_since`, Per-Frame-
-  Recompute, Repaint-getriebenes Ticken. Tests (deterministisch über
-  injizierte `now`).
-- **E2 — Gruppierung + Aggregation (M3).** `group_by` (inkl. Datums-Buckets,
-  laufzeit-umschaltbar), `aggregates`, Gruppen-Header/-Total, Grand-Total,
-  `summary_only`. Tests auf drei Ebenen: Engine-Mechanismus
-  (`not-yet-done-table::group`), typisierte Extraktion (`group_aggregate`) und
-  Render-Pfad-Integration (`build_grouped_table` im View-Layer).
-- **E3 — Tree-Fold-Aggregation (M4).** Kumulation über Teilbaum,
+- **E0 — plan + memory** (this document + memory entry), committed before
+  implementation (survives `/compact`).
+- **E7 — in-process adapter wiring (M8).** `CoreHandle`, factory signature,
+  no-op `LocalAdapter` skeleton to prove the wiring, registration.
+- **E4a — domain event bus + repaint signal (M1).** Core broadcast,
+  `Invalidation::Repaint` variant, render loop wake on it. Bridge helper for
+  adapters. Tests: event → invalidation → dirty flag.
+- **E1 — typed column values (M2).** `value_kind` on `MetadataField`,
+  `kind`/`format` on `ColumnDef`, engine formatter + path styling. Tests.
+- **E4b — live elapsed column (M5).** `kind: elapsed_since`, per-frame
+  recompute, repaint-driven ticking. Tests (deterministic via an injected
+  `now`).
+- **E2 — grouping + aggregation (M3).** `group_by` (incl. date buckets,
+  switchable at runtime), `aggregates`, group header/total, grand total,
+  `summary_only`. Tests on three levels: engine mechanism
+  (`not-yet-done-table::group`), typed extraction (`group_aggregate`) and
+  render path integration (`build_grouped_table` in the view layer).
+- **E3 — tree fold aggregation (M4).** Accumulation over the subtree,
   `own`/`cumulated`. Tests.
-- **E5 — Generischer Form-InputSpec (M6).** `InputSpec::Form` +
-  `FormFieldSpec`, generische Form-EditSession in der TUI. Tests.
-- **E6 — Generisches mark/paste-move (M7).** `ActionContext.marked`,
-  Standard-Actions, DB-Script-Folders-Pattern darauf konsolidieren. Tests.
+- **E5 — generic form InputSpec (M6).** `InputSpec::Form` + `FormFieldSpec`,
+  generic form EditSession in the TUI. Tests.
+- **E6 — generic mark/paste move (M7).** `ActionContext.marked`, standard
+  actions, consolidate the DB script folders pattern onto it. Tests.
 
-### Lokale Adapter
+### Local adapters
 
-- **A1 — TaskAdapter.** Wrappt `TaskService`. Tree über `parent_id`
-  (eager-load + cache, `search_in_tree`), Spalten via E1, Filter als
-  `FilterExpr` (Query-String → bestehende Core-Übersetzung),
-  `saved_query_store` auf den bestehenden DB-Tabellen (Scope `task`,
-  keine Datenmigration). Aktionen: add/edit (Editor-Buffer statt E5-Form,
-  siehe A1b-Box), reparent (mark/paste via E6), delete (`DeleteSelf`),
-  undelete/restore, notes, scripts,
-  tracking-toggle (emittiert `TrackingStarted/Stopped` auf den Bus).
-  `views/tasks.yaml`.
+- **A1 — TaskAdapter.** Wraps `TaskService`. Tree via `parent_id`
+  (eager load + cache, `search_in_tree`), columns via E1, filter as a
+  `FilterExpr` (query string → existing core translation),
+  `saved_query_store` on the existing DB tables (scope `task`, no data
+  migration). Actions: add/edit (editor buffer instead of the E5 form, see
+  the A1b box), reparent (mark/paste via E6), delete (`DeleteSelf`),
+  undelete/restore, notes, scripts, tracking toggle (emits
+  `TrackingStarted/Stopped` on the bus). `views/tasks.yaml`.
 
-  > **A1a umgesetzt (Read-Pfad).** Der `LocalAdapter`-No-op aus E7 ist
-  > zum `TaskAdapter` (Factory-Key `local` → `tasks`) ausgebaut, im Crate
-  > `not-yet-done-local-adapter` (`task.rs`). Read-Pfad: synthetischer
-  > Forest-Root (`task:root`) listet die Top-Level-Tasks, eine rekursive
-  > `task:item`-Branch drillt beliebig tief. Die ganze nicht-gelöschte
-  > Forest lädt **einmal** in einen unveränderlichen `ForestSnapshot`
-  > (`Arc`-geteilt über alle Nodes, kein DB-Roundtrip beim Drillen);
-  > `root()` lädt frisch (Reload-Semantik), `get_by_id`/`list` aus dem
-  > Cache. Orphans (Parent gelöscht) werden auf Root re-gewurzelt.
-  > Typisierte Spalten (M2): `priority` als `number`, `created` als
-  > `datetime` — Adapter liefert kanonische Strings. `search_in_tree`
-  > matcht Multi-Token über alle Beschreibungen, liefert
-  > `path`-adressierte Hits in Tree-Render-Reihenfolge.
-  > `capabilities`: `supports_search = true`, create/delete noch
-  > `false`. **Event-Bridge schon final:** eigener `spawn_task_bridge`
-  > ignoriert `TrackingTick`, mappt `TaskChanged` → `Node`,
-  > `Tracking*` → `All`, und **leert den Snapshot** vor jedem Refetch —
-  > damit A1b-Mutationen ohne Cache-Nacharbeit korrekt refetchen.
-  > Beispiel + Regressionstest: `docs/examples/views/tasks.yaml`
-  > (parst + validiert im Test). Capability-only — die native
-  > `TasksView` läuft bis zum C1-Cutover unangetastet weiter.
+  > **A1a implemented (read path).** The `LocalAdapter` no-op from E7 has
+  > been built out into the `TaskAdapter` (factory key `local` → `tasks`), in
+  > the crate `not-yet-done-local-adapter` (`task.rs`). Read path: a
+  > synthetic forest root (`task:root`) lists the top-level tasks, a
+  > recursive `task:item` branch drills arbitrarily deep. The whole
+  > non-deleted forest loads **once** into an immutable `ForestSnapshot`
+  > (shared via `Arc` across all nodes, no DB round trip while drilling);
+  > `root()` loads fresh (reload semantics), `get_by_id`/`list` from the
+  > cache. Orphans (parent deleted) are re-rooted onto the root.
+  > Typed columns (M2): `priority` as `number`, `created` as `datetime` —
+  > the adapter delivers canonical strings. `search_in_tree` matches multiple
+  > tokens across all descriptions and returns `path`-addressed hits in tree
+  > render order. `capabilities`: `supports_search = true`, create/delete
+  > still `false`. **Event bridge already final:** its own
+  > `spawn_task_bridge` ignores `TrackingTick`, maps `TaskChanged` → `Node`,
+  > `Tracking*` → `All`, and **clears the snapshot** before every refetch —
+  > so that A1b mutations refetch correctly without cache rework.
+  > Example + regression test: `docs/examples/views/tasks.yaml`
+  > (parses + validates in the test). Capability only — the native
+  > `TasksView` keeps running untouched until the C1 cutover.
 
-  > **A1b umgesetzt (Mutationen).** Add/Edit laufen über
-  > **`InputSpec::Editor`** (nicht die E5-Form): ein Markdown-Buffer mit
-  > `---`-Frontmatter (`status`/`priority`/`tracking`/`parent`) und
-  > `## Description:` / `## Notes:`-Body. Begründung: Tasks haben
-  > mehrzeilige Markdown-Beschreibungen + einen separaten Notes-Abschnitt,
-  > eine Single-Line-Form wäre eine Regression. Buffer-Format ist
-  > **adapter-eigen** (`editor_templates`/`notes` ins Crate
-  > `not-yet-done-local-adapter` verschoben, gemeinsame Quelle mit der
-  > transitorischen nativen Session bis C1). `add` ist eine
-  > `type: create`-Action auf dem Container (Root → Top-Level-Task,
-  > Drill-in-Task → Subtask; das `parent:`-Feld im Buffer gewinnt), `edit`
-  > eine `type: edit`-Action auf dem Task. `delete` (rekursiv, mit
-  > Confirm-Flow → `DeleteSelf` → `execute("delete")`), `undelete`
-  > (`undelete_last`, ignoriert Node-Identität), `mark-move`/`paste-move`
-  > (Reparent mit Zyklus-Guard, M7 — Adapter macht den Move in
-  > `invoke_action` aus `ActionContext::marked`) hängen am generischen
-  > `shortcuts:`-Pfad (`d`/`u`/`m`/`p`). Jede Mutation emittiert ein
-  > `DomainEvent` auf den Bus (`TaskChanged`, plus `Tracking*` beim
-  > Toggle), worauf die Bridge den Snapshot leert. **Tracking-Toggle im
-  > Edit-Buffer vorgezogen** (statt rein A1c): das `tracking:`-Feld im
-  > geteilten Template wäre sonst ein totes Feld; `CoreHandle` trägt jetzt
-  > `allow_parallel_tracking` (aus `tracking.allow_parallel`).
+  > **A1b implemented (mutations).** Add/edit run via **`InputSpec::Editor`**
+  > (not the E5 form): a markdown buffer with `---` frontmatter
+  > (`status`/`priority`/`tracking`/`parent`) and a
+  > `## Description:` / `## Notes:` body. Rationale: tasks have multi-line
+  > markdown descriptions plus a separate notes section, a single-line form
+  > would be a regression. The buffer format is **adapter-owned**
+  > (`editor_templates`/`notes` moved into the crate
+  > `not-yet-done-local-adapter`, shared source with the transitional native
+  > session until C1). `add` is a `type: create` action on the container
+  > (root → top-level task, drilled-into task → subtask; the `parent:` field
+  > in the buffer wins), `edit` a `type: edit` action on the task. `delete`
+  > (recursive, with a confirm flow → `DeleteSelf` → `execute("delete")`),
+  > `undelete` (`undelete_last`, ignores node identity),
+  > `mark-move`/`paste-move` (reparent with a cycle guard, M7 — the adapter
+  > performs the move in `invoke_action` from `ActionContext::marked`) hang
+  > on the generic `shortcuts:` path (`d`/`u`/`m`/`p`). Every mutation emits
+  > a `DomainEvent` on the bus (`TaskChanged`, plus `Tracking*` on toggle),
+  > whereupon the bridge clears the snapshot. **Tracking toggle in the edit
+  > buffer pulled forward** (instead of purely A1c): the `tracking:` field in
+  > the shared template would otherwise be a dead field; `CoreHandle` now
+  > carries `allow_parallel_tracking` (from `tracking.allow_parallel`).
   > `capabilities`: `supports_create`/`supports_delete` → `true`.
   >
-  > **A1c-1 umgesetzt (Tracking-Marker + Start/Stop-Taste).** `ForestSnapshot`
-  > trägt jetzt ein `tracked: HashSet<Uuid>` (einmal `find_all_active()` in
-  > `load`); `task_metadata` emittiert ein `tracking`-Feld (`⏱` auf laufenden
-  > Rows, sonst leer), die `tracking`-Spalte in `tasks.yaml` rendert es auf
-  > beiden Ebenen. Neue Per-Node-Action `toggle-tracking` (Key `t`,
-  > `shortcuts:`-Pfad → `invoke_action`): liest den Live-Stand
-  > (`find_active_for_task`, kein Stale-Snapshot) und ruft das vorhandene
-  > `apply_tracking(!is_tracked)` → respektiert die Exklusiv-Policy, emittiert
-  > `Tracking*`, Bridge invalidiert → Reload. `actions_for_type` + der
-  > A1b-Action-Test mitgezogen.
-  > **A1c-2 umgesetzt (Saved Queries + `FilterExpr`-Filter = ein Feature).**
-  > Eine Saved Query ist ohne Auswertung tot, darum zusammen gebaut. Zwei
-  > Design-Entscheidungen: (1) **gefilterter Baum** statt Flach-Liste — die
-  > Treffer plus ihre Vorfahren bleiben als ausgedünnter Tree stehen, damit
-  > tiefe Treffer erreichbar sind; (2) **frischer FS-Store** im generischen
-  > Scope `tasks/<id>/<view>` (`FsSavedQueryStore`, nicht der native
-  > `task`-Scope). Mechanik in fünf Schichten:
+  > **A1c-1 implemented (tracking marker + start/stop key).**
+  > `ForestSnapshot` now carries a `tracked: HashSet<Uuid>` (one
+  > `find_all_active()` in `load`); `task_metadata` emits a `tracking` field
+  > (`⏱` on running rows, otherwise empty), the `tracking` column in
+  > `tasks.yaml` renders it on both levels. New per-node action
+  > `toggle-tracking` (key `t`, `shortcuts:` path → `invoke_action`): reads
+  > the live state (`find_active_for_task`, no stale snapshot) and calls the
+  > existing `apply_tracking(!is_tracked)` → respects the exclusivity policy,
+  > emits `Tracking*`, the bridge invalidates → reload. `actions_for_type` +
+  > the A1b action test carried along.
+  > **A1c-2 implemented (saved queries + `FilterExpr` filter = one
+  > feature).** A saved query is dead without evaluation, so they were built
+  > together. Two design decisions: (1) a **filtered tree** instead of a flat
+  > list — the hits plus their ancestors stay as a thinned-out tree so that
+  > deep hits remain reachable; (2) a **fresh FS store** in the generic scope
+  > `tasks/<id>/<view>` (`FsSavedQueryStore`, not the native `task` scope).
+  > Mechanics in five layers:
   >
-  > - **A (content):** neues `AdapterCapabilities.propagates_query_to_subtree`
-  >   (Default `false`). Heterogene Adapter (Jira Epic→Story) lassen es aus,
-  >   damit die Parent-JQL nicht auf andersartige Kinder leakt; der homogene
-  >   Task-Forest (`task:item`→`task:item`, ein `FilterExpr` auf jeder Tiefe)
-  >   opt-in `true`.
-  > - **B (engine):** `spawn_tree_expand`/`spawn_content_drill_down` reichten
-  >   bisher hart `query: None` an Kind-`list()`. Neu reicht
-  >   `subtree_query_for_pane` die aktive (gerenderte) Pane-Query bei
-  >   `propagates_query_to_subtree` an jede Tiefe weiter.
-  > - **C (view-state):** `TreeState::clear_for_new_query()` in beiden
-  >   Query-Settern verwirft `expanded`+`cache`+`entries` — sonst Stale-Kinder
-  >   vom alten Filter. Korrekt für alle Tree-Adapter, nicht nur Tasks.
-  > - **D (adapter):** `resolve_visible_set` parst die Query
-  >   (`query_filter::parse`) → `task_service.list_filtered(&expr)` → Treffer,
-  >   dann **In-Memory-Vorfahren-Walk** über `snapshot.by_id[..].parent`
-  >   (Vorfahren strukturell nötig, unabhängig von `options.include_ancestors`).
-  >   `child_summaries`/`summary` nehmen `filter: Option<&HashSet<Uuid>>`
-  >   (`has_children` zählt nur sichtbare Kinder). Stateless pro Call — der
-  >   `ForestSnapshot` bleibt immutable; ein `list_filtered`-DB-Call pro Expand
-  >   ist für eine persönliche Task-DB vernachlässigbar.
-  > - **E (config/doc):** `tasks.yaml` `query:`-Block (Default `open tasks`:
-  >   nicht-`done`, nicht gelöscht), `view_config`-Test parst den Default-Body,
-  >   Smoke-Sektion A1c-2.
+  > - **A (content):** new `AdapterCapabilities.propagates_query_to_subtree`
+  >   (default `false`). Heterogeneous adapters (Jira epic→story) leave it
+  >   off so that the parent JQL does not leak onto children of a different
+  >   kind; the homogeneous task forest (`task:item`→`task:item`, one
+  >   `FilterExpr` at every depth) opts in with `true`.
+  > - **B (engine):** `spawn_tree_expand`/`spawn_content_drill_down` used to
+  >   hand a hard-coded `query: None` to the child `list()`. Now
+  >   `subtree_query_for_pane` passes the active (rendered) pane query on to
+  >   every depth when `propagates_query_to_subtree` is set.
+  > - **C (view state):** `TreeState::clear_for_new_query()` in both query
+  >   setters discards `expanded`+`cache`+`entries` — otherwise stale
+  >   children from the old filter. Correct for all tree adapters, not just
+  >   tasks.
+  > - **D (adapter):** `resolve_visible_set` parses the query
+  >   (`query_filter::parse`) → `task_service.list_filtered(&expr)` → hits,
+  >   then an **in-memory ancestor walk** over `snapshot.by_id[..].parent`
+  >   (ancestors are structurally necessary, independent of
+  >   `options.include_ancestors`). `child_summaries`/`summary` take
+  >   `filter: Option<&HashSet<Uuid>>` (`has_children` only counts visible
+  >   children). Stateless per call — the `ForestSnapshot` stays immutable;
+  >   one `list_filtered` DB call per expand is negligible for a personal
+  >   task DB.
+  > - **E (config/doc):** `tasks.yaml` `query:` block (default `open tasks`:
+  >   not `done`, not deleted), the `view_config` test parses the default
+  >   body, smoke section A1c-2.
   >
-  > **Akzeptierte Lifecycle-Kante:** Eine strukturelle `DomainEvent`
-  > (add/delete/reparent) leert den Snapshot → der Filter ist verloren, bis
-  > die Pane die Query erneut sendet. Bewusst nicht weiter abgefangen.
+  > **Accepted lifecycle edge:** a structural `DomainEvent`
+  > (add/delete/reparent) clears the snapshot → the filter is lost until the
+  > pane sends the query again. Deliberately not caught any further.
   >
-  > **A1c-scripts umgesetzt (null Adapter-Code).** Der `:script`-Pfad ist
-  > schon generisch über `ContentView`/`ContentPane` verdrahtet
-  > (`open_script_menu_from_current_tab` routet `Tab::Content` →
-  > `open_script_menu_for_content` → `ScriptContext::ContentNode`). Es genügte
-  > eine `type: script`-Action (Key `x`) in `tasks.yaml` auf beiden Ebenen
-  > (`script` ist nicht root-only wie search/fuzzy*filter/tree_find). Der Task
-  > geht als **uniformes** `{"node": …}`-JSON raus (Felder aus `task_metadata`:
-  > description/status/priority/tags/tracking/created), Verzeichnis
-  > `scripts/tasks/task_item/` — \_nicht* die native `{"task": …}`-Form +
-  > `scripts/tasks/` des bespoke Tabs (der parallel weiterläuft, eigene
-  > Skripte migrieren erst bei C1). `view_config`-Test prüft die Action beide
-  > Ebenen, Smoke-Sektion A1c-scripts.
+  > **A1c-scripts implemented (zero adapter code).** The `:script` path is
+  > already wired generically via `ContentView`/`ContentPane`
+  > (`open_script_menu_from_current_tab` routes `Tab::Content` →
+  > `open_script_menu_for_content` → `ScriptContext::ContentNode`). A
+  > `type: script` action (key `x`) in `tasks.yaml` on both levels was
+  > enough (`script` is not root-only like `search`/`fuzzy_filter`/
+  > `tree_find`). The task goes out as a **uniform** `{"node": …}` JSON
+  > (fields from `task_metadata`:
+  > description/status/priority/tags/tracking/created), directory
+  > `scripts/tasks/task_item/` — **not** the native `{"task": …}`
+  > form + `scripts/tasks/` of the bespoke tab (which keeps running in
+  > parallel; its own scripts are migrated only at C1). The `view_config`
+  > test checks the action on both levels, smoke section A1c-scripts.
   >
-  > **Nachtrag Script-Parität (Port von `task_to_taiga.py`):** Zwei Lücken
-  > gegenüber dem nativen `{"task": …}`-Payload geschlossen. (1) Generisch:
-  > das `{"node": …}`-JSON trägt jetzt auch `label` (das Anzeige-Label der
-  > Zeile — bei Tasks die Beschreibung, die als `source: label`-Spalte kein
-  > Metadata-Feld ist). Gilt für alle Adapter. (2) Adapter-seitig: neues
-  > Metadata-Feld `ancestors` = JSON-Array-String `[{"id", "description"},
-…]` Root→Parent exklusive des Tasks selbst
-  > (`ForestSnapshot::ancestors_json`, O(Tiefe) pro Zeile am in-memory
-  > Forest). Damit liest ein portiertes Script Beschreibung aus
-  > `node.label` und die Pfad-Konvention aus
-  > `json.loads(node.fields.ancestors)` — funktional identisch zum nativen
-  > `task.description`/`task.ancestors`.
+  > **Addendum on script parity (port of `task_to_taiga.py`):** two gaps
+  > compared to the native `{"task": …}` payload closed. (1) Generic: the
+  > `{"node": …}` JSON now also carries `label` (the display label of the
+  > row — for tasks the description, which as a `source: label` column is not
+  > a metadata field). Applies to all adapters. (2) Adapter side: new
+  > metadata field `ancestors` = JSON array string
+  > `[{"id", "description"}, …]` root→parent excluding the task itself
+  > (`ForestSnapshot::ancestors_json`, O(depth) per row on the in-memory
+  > forest). With that a ported script reads the description from
+  > `node.label` and the path convention from
+  > `json.loads(node.fields.ancestors)` — functionally identical to the
+  > native `task.description`/`task.ancestors`.
   >
-  > **A1c-Komfort umgesetzt (Add-Child-unter-Selektion + Un-nest).**
+  > **A1c convenience implemented (add child under selection + un-nest).**
   >
-  > - **Add-Child im Tree (`A`)** — generisch, ein opt-in: neues Bool-Feld
-  >   `ActionDef.under_selection` (default false). Im `create`-Dispatch
-  >   (`content_view`) targetet die Action dann den **selektierten** Node
-  >   (`selected_item_id` + `selected_node_type_chain().last()` als
-  >   child*type) statt des Containers (`parent_node_id` +
-  >   `current_child_node_type`). So nistet `A` im Tree-Mode unter dem Cursor,
-  >   ohne vorher reinzudrillen — die `add`-Action-ID wird wiederverwendet
-  >   (`TaskItemNode::prepare("add")` = `prepare_add(Some(self.id))`), **null
-  >   Adapter-Code**. `a` (Container) bleibt unverändert. Confluence ist der
-  >   einzige andere Tree-View und hat \_keine* create-Action → kein
-  >   Verhaltens-Risiko. Generischer Nutzen: jeder Tree-Adapter kann es
-  >   per YAML opt-in nutzen.
-  > - **Un-nest (`U`)** — adapter-seitige fire-and-forget Action `unnest`
-  >   (`invoke_unnest`): `update_task(id, parent=Some(None))`, kein
-  >   Cycle-Check nötig (Root ist nie Nachfahre), `move_notes` +
-  >   `emit_task_changed` + Reload; friendly Error wenn schon top-level. Der
-  >   target-freie Inverse von mark/paste-move. In `task_item_actions` +
-  >   `invoke_action`-Arm; `actions_for_type` liefert sie für Hints mit.
+  > - **Add child in the tree (`A`)** — generic, one opt-in: new bool field
+  >   `ActionDef.under_selection` (default false). In the `create` dispatch
+  >   (`content_view`) the action then targets the **selected** node
+  >   (`selected_item_id` + `selected_node_type_chain().last()` as the
+  >   `child_type`) instead of the container (`parent_node_id` +
+  >   `current_child_node_type`). That way `A` nests under the cursor in tree
+  >   mode without drilling in first — the `add` action ID is reused
+  >   (`TaskItemNode::prepare("add")` = `prepare_add(Some(self.id))`), **zero
+  >   adapter code**. `a` (container) stays unchanged. Confluence is the only
+  >   other tree view and has _no_ create action → no behavioral risk.
+  >   Generic benefit: every tree adapter can opt into it via YAML.
+  > - **Un-nest (`U`)** — adapter-side fire-and-forget action `unnest`
+  >   (`invoke_unnest`): `update_task(id, parent=Some(None))`, no cycle check
+  >   needed (the root is never a descendant), `move_notes` +
+  >   `emit_task_changed` + reload; friendly error if already top level. The
+  >   target-free inverse of mark/paste move. In `task_item_actions` +
+  >   the `invoke_action` arm; `actions_for_type` returns it for hints too.
   >
-  > `A` + `U: unnest` in `tasks.yaml` auf **beiden** Ebenen (damit sie im
-  > Tree-Mode = Root-View greifen, nicht nur nach Drill). `view_config`-Test
-  > prüft beide; neuer `content_view`-Dispatch-Test
-  > `create_under_selection_targets_selected_node`; Smoke-Sektion A1c-Komfort.
+  > `A` + `U: unnest` in `tasks.yaml` on **both** levels (so that they apply
+  > in tree mode = root view, not only after a drill). The `view_config` test
+  > checks both; new `content_view` dispatch test
+  > `create_under_selection_targets_selected_node`; smoke section A1c
+  > convenience.
   >
-  > **A1 (TaskAdapter) ist damit vollständig.**
+  > **A1 (TaskAdapter) is thereby complete.**
 
-- **A2 — TrackingAdapter.** Wrappt `TrackingRepository` + Task-Tree für
-  Pfade. Typisierte Taskpath-Spalte (E1, `Path`-Style), Grouping/Condensed
-  (E2), Tree-Fold own/cumulated (E3), Live-Dauern (E4b), Delete/Restore/
-  Restore-All, scripts, Filter, tracking-toggle. Brückt `TrackingTick` →
-  `Repaint`. `views/trackings.yaml`.
+- **A2 — TrackingAdapter.** Wraps `TrackingRepository` + the task tree for
+  paths. Typed taskpath column (E1, `Path` style), grouping/condensed (E2),
+  tree fold own/cumulated (E3), live durations (E4b),
+  delete/restore/restore-all, scripts, filter, tracking toggle. Bridges
+  `TrackingTick` → `Repaint`. `views/trackings.yaml`.
 
-  > **In Unterphasen wie A1 (a/b/c):**
+  > **In subphases like A1 (a/b/c):**
   >
-  > - **A2a — Read-Path (FERTIG, ungepusht).** `tracking.rs` im
-  >   local-adapter (Vorlage `task.rs`): `TrackingAdapter` +
-  >   `TrackingSnapshot` (alle nicht-gelöschten Trackings, Task-Pfad-Map,
-  >   Active-Set), flache `tracking:root` → `tracking:entry`-Leaves.
-  >   Typisierte Spalten (taskpath `kind: path`, started/ended `datetime`,
-  >   duration `duration`). Live-Dauern über **M9** statt `kind: elapsed`
-  >   (eine Spalte live+statisch). Saved-Query-Filter via
-  >   `TrackingRepository::find_filtered`. `group_by`/`aggregates` rein
-  >   Engine-seitig aus `trackings.yaml`. Factory `trackings` registriert.
-  >   51 adapter + 536 TUI Tests grün, installiert. **Offen A2a:**
-  >   `patch_row`-/Timer-Unit-Test (bisher nur Build + Adapter-Logik-Tests),
-  >   Smoke.
-  > - **A2b — Mutationen (FERTIG, ungepusht).** Neuer Domain-Event
-  >   `TrackingChanged { tracking_id }` (Delete/Restore, **kein**
-  >   Start/Stop) → beide Bridges + `domain_event_to_invalidation`
-  >   mappen ihn auf `Invalidation::All`, sodass die Liste **und** der
-  >   Task-Marker neu laden. `tracking:entry`-Actions: `delete` (soft,
-  >   Zeiten erhalten, über generischen `DeleteSelf`-Confirm →
-  >   `execute("delete")`), `restore` (find_by_id → deleted-Check → BFS
-  >   `find_by_predecessor`/`hard_delete` der Nachfolger →`undelete`),
-  >   `toggle-tracking` (Reuse `crate::task::apply_tracking`, jetzt
-  >   `pub(crate)`). `tracking:root`-Action `restore-all` (best-effort
-  >   über die sichtbaren ids). YAML `shortcuts:` `d`/`R`/`t` +
-  >   `A: parent:restore-all`. `capabilities.supports_delete = true`,
-  >   `actions_for_type` für root/entry. Scripts schon in A2a via
-  >   `type: script`. **Bekannte Grenze (Parität mit Native):** die Liste
-  >   zeigt nur nicht-gelöschte Zeilen, also haben `R`/`A` heute kein
-  >   sichtbares Ziel — eine „show deleted"-Subview ist Future-Work. 53
-  >   adapter + 536 TUI Tests grün, installiert.
-  > - **A2c — Condensed (FERTIG) + Tree (FERTIG, own/cumulated, M4) +
-  >   Capability-Gating (FERTIG).**
-  >   - **Condensed (FERTIG).** Statt eines Modus-Toggles als zweite `views:`
-  >     (`key: v`, zurück mit `a`) auf der **generischen verschachtelten
-  >     Gruppierung (M3 `then_by`)**: `group_by` nach Tag + `then_by` nach
-  >     Task + `summary_only`. Dazu generisch ausgebaut: `group.rs`
-  >     `group_nested` (N Ebenen, Header tragen `level` + `representative`),
+  > - **A2a — read path (DONE, unpushed).** `tracking.rs` in the local
+  >   adapter (modelled on `task.rs`): `TrackingAdapter` +
+  >   `TrackingSnapshot` (all non-deleted trackings, task path map, active
+  >   set), flat `tracking:root` → `tracking:entry` leaves.
+  >   Typed columns (taskpath `kind: path`, started/ended `datetime`,
+  >   duration `duration`). Live durations via **M9** instead of
+  >   `kind: elapsed` (one column live + static). Saved query filter via
+  >   `TrackingRepository::find_filtered`. `group_by`/`aggregates` purely on
+  >   the engine side from `trackings.yaml`. Factory `trackings` registered.
+  >   51 adapter + 536 TUI tests green, installed. **Open in A2a:**
+  >   `patch_row`/timer unit test (so far only build + adapter logic tests),
+  >   smoke.
+  > - **A2b — mutations (DONE, unpushed).** New domain event
+  >   `TrackingChanged { tracking_id }` (delete/restore, **not** start/stop)
+  >   → both bridges + `domain_event_to_invalidation` map it onto
+  >   `Invalidation::All`, so that the list **and** the task marker reload.
+  >   `tracking:entry` actions: `delete` (soft, times preserved, via the
+  >   generic `DeleteSelf` confirm → `execute("delete")`), `restore`
+  >   (find_by_id → deleted check → BFS `find_by_predecessor`/`hard_delete`
+  >   of the successors → `undelete`), `toggle-tracking` (reuse of
+  >   `crate::task::apply_tracking`, now `pub(crate)`). `tracking:root`
+  >   action `restore-all` (best effort over the visible ids). YAML
+  >   `shortcuts:` `d`/`R`/`t` + `A: parent:restore-all`.
+  >   `capabilities.supports_delete = true`, `actions_for_type` for
+  >   root/entry. Scripts already in A2a via `type: script`. **Known limit
+  >   (parity with native):** the list only shows non-deleted rows, so `R`/`A`
+  >   have no visible target today — a "show deleted" subview is future work.
+  >   53 adapter + 536 TUI tests green, installed.
+  > - **A2c — condensed (DONE) + tree (DONE, own/cumulated, M4) +
+  >   capability gating (DONE).**
+  >   - **Condensed (DONE).** Instead of a mode toggle, as a second `views:`
+  >     entry (`key: v`, back with `a`) on the **generic nested grouping
+  >     (M3 `then_by`)**: `group_by` by day + `then_by` by task +
+  >     `summary_only`. Built out generically for that: `group.rs`
+  >     `group_nested` (N levels, headers carry `level` + `representative`),
   >     `ViewDef`/`ChildDef` `then_by: Vec<GroupBy>`, `current_levels`/
-  >     `current_then_by`, `build_grouped_table` rendert die **innerste**
-  >     `summary_only`-Ebene als selektierbare **repräsentative Daten-Zeile**
-  >     (Pfad+Task aus Member, Aggregat-Spalten = Gruppen-Total), äußere
-  >     Ebenen als eingerückte `── label ──`-Header. `zg` rotiert nur die
-  >     äußere Ebene. Adapter: nur ein verstecktes `task_id`-Feld am
-  >     `tracking:entry` (innerer Gruppen-Key, nie als Spalte). 44 table
-  >     (+3 nested) + 538 TUI (+nested-render+`then_by`-Deser) + 53 adapter
-  >     (+`task_id`) Tests grün, installiert. **Grenze:** Live-Tick im
-  >     Condensed nicht (Total statt Einzel-Dauer); zweistufig sonst
-  >     paritätstreu zum Native.
-  >   - **Tree (FERTIG).** Zweite Projektion derselben Loads: der **Task-Forest**
-  >     als `tracking:tree-item`-Knoten ([`TreeProjection`] in `tracking.rs`),
-  >     jeder Knoten trägt `duration` (eigene Sekunden) + `duration_cumulated`
-  >     (Teilbaum-Summe, bottom-up gefaltet, zyklus-gesichert). Der Baum wird
-  >     auf Tasks mit getrackter Zeit **geprunt** (`cumulated_secs > 0`, Pfad zu
-  >     getrackten Blättern bleibt), Dauern **backen beim Load** (kein Live-Tick,
-  >     wie Condensed). Verdrahtung: **EIN Root** exponiert beide Child-Typen
-  >     (`tracking:entry` + `tracking:tree-item`), `root.list()` dispatcht auf
-  >     `params.node_type`, `get_by_id`/`get_child` routen über das
-  >     **`tree:<task-uuid>`**-Präfix (Tracking- vs. Task-UUID sonst
-  >     ununterscheidbar). `supports_tree_aggregation: true`. trackings.yaml 3. View `tree` (rekursiver `tracking:tree-item`-Branch) mit
-  >     `tree_aggregate: { cumulated_field: duration_cumulated, default:
-cumulated }` auf der `duration`-Spalte (`zt` toggelt own↔cumulated über
-  >     die vorhandene M4-Engine). **Subtab-Key-Kollision gelöst:** Switch-Key
-  >     `T` (Shift+t), `t` bleibt toggle-tracking auf der Zeile —
-  >     `canonicalize_key` lowercased nicht, also distinkt; Validator grün.
-  >     `tracking:tree-item`-Actions nur `toggle-tracking` (read-only Aggregat).
-  >     6 neue Adapter-Tests (Fold/Prune/Reroot/Metadata/parse-id/actions) =
-  >     59 adapter; neuer `example_trackings_yaml_parses_and_validates` = 539
-  >     TUI; installiert.
-  >   - **Capability-Gating (FERTIG).** Der E3/M4-Follow-up: Adapter-
-  >     Capabilities werden jetzt in die Panes geplumbt. `ContentView::new`
-  >     snapshottet `adapter.capabilities()` **einmal** (ohne Adapter →
-  >     all-false) und reicht eine Kopie in jede `ContentPane` (auch bei Splits,
-  >     geerbt von der Quell-Pane). `level_has_tree_aggregate` gated jetzt
-  >     **zweifach**: Config-Präsenz (`tree_aggregate`-Spalte) **und**
-  >     `self.capabilities.supports_tree_aggregation` — damit fallen Claim
-  >     (Key + Hint via `build_claims`) und Toggle gemeinsam, sobald der
-  >     Adapter die Fähigkeit nicht meldet. Bewusst die **ganze**
-  >     `AdapterCapabilities` auf der Pane (nicht nur ein bool), damit künftige
-  >     Affordanzen die jeweilige Flag dort lesen statt sie neu abzuleiten —
-  >     das ist der generische Pfad, kein Narrow-Einzelfix. 2 neue Gate-Tests
-  >     (Spalte ohne Capability → unclaimable/No-op; Spalte + Capability →
-  >     claimable) = 541 TUI; installiert. (M3 `cycle_grouping` bleibt
-  >     in Flat-Listen config-only — keine `supports_grouping`-Capability;
-  >     im **Tree** gated es auf `group_by_via_adapter`, siehe nächster
-  >     Punkt.)
-  >   - **Tree-Gruppierung (FERTIG, generischer Mechanismus
-  >     `group_by_via_adapter`).** Native Parität Punkt (3): der Legacy-Tree
-  >     gruppierte nach Tag. Ein Tree kann nicht engine-seitig gruppieren
-  >     (der Adapter besitzt den per-Bucket-Fold), also dreht sich die
-  >     Zuständigkeit: Engine reicht das aktive `group_by` der Pane als
-  >     `ListParams.group_by` (`GroupSpec` aus dem neuen Content-Modul
-  >     `grouping`, das auch die Flat-Gruppierung der TUI speist — Keys +
-  >     Labels identisch) in den Root-`list()`; der Adapter antwortet mit
-  >     `tracking:tree-group`-Bucket-Knoten (`treegrp:<col>:<gran>:<key>`),
-  >     deren Teilbäume aus den Trackings **dieses** Buckets gefaltet sind;
-  >     Item-IDs darunter tragen den Bucket-Scope
-  >     (`tree:<col>:<gran>:<key>:<uuid>`), damit `get_by_id` ohne
-  >     Query-Kontext bucket-korrekt rechnet (Query kommt zusätzlich pro
-  >     `list()` via `propagates_query_to_subtree`). Engine-Seite:
+  >     `current_then_by`, `build_grouped_table` renders the **innermost**
+  >     `summary_only` level as a selectable **representative data row**
+  >     (path + task from a member, aggregate columns = group total), outer
+  >     levels as indented `── label ──` headers. `zg` rotates only the outer
+  >     level. Adapter: just a hidden `task_id` field on the
+  >     `tracking:entry` (inner group key, never as a column). 44 table
+  >     (+3 nested) + 538 TUI (+nested render + `then_by` deser) + 53 adapter
+  >     (+`task_id`) tests green, installed. **Limit:** no live tick in
+  >     condensed (total instead of individual duration); apart from that the
+  >     two-level form is faithful to the native parity.
+  >   - **Tree (DONE).** A second projection of the same loads: the **task
+  >     forest** as `tracking:tree-item` nodes ([`TreeProjection`] in
+  >     `tracking.rs`), every node carrying `duration` (own seconds) +
+  >     `duration_cumulated` (subtree sum, folded bottom-up, cycle-safe). The
+  >     tree is **pruned** to tasks with tracked time (`cumulated_secs > 0`,
+  >     the path to tracked leaves stays), durations are **baked at load
+  >     time** (no live tick, like condensed). Wiring: **ONE root** exposes
+  >     both child types (`tracking:entry` + `tracking:tree-item`),
+  >     `root.list()` dispatches on `params.node_type`, `get_by_id`/
+  >     `get_child` route via the **`tree:<task-uuid>`** prefix (tracking vs.
+  >     task UUID would otherwise be indistinguishable).
+  >     `supports_tree_aggregation: true`. trackings.yaml 3rd view `tree`
+  >     (recursive `tracking:tree-item` branch) with
+  >     `tree_aggregate: { cumulated_field: duration_cumulated, default: cumulated }`
+  >     on the `duration` column (`zt` toggles own↔cumulated via the existing
+  >     M4 engine). **Subtab key collision solved:** switch key `T`
+  >     (shift+t), `t` stays toggle-tracking on the row —
+  >     `canonicalize_key` does not lowercase, so they are distinct;
+  >     validator green. `tracking:tree-item` actions only `toggle-tracking`
+  >     (read-only aggregate). 6 new adapter tests
+  >     (fold/prune/reroot/metadata/parse-id/actions) = 59 adapter; new
+  >     `example_trackings_yaml_parses_and_validates` = 539 TUI; installed.
+  >   - **Capability gating (DONE).** The E3/M4 follow-up: adapter
+  >     capabilities are now plumbed into the panes. `ContentView::new`
+  >     snapshots `adapter.capabilities()` **once** (without an adapter →
+  >     all false) and passes a copy into every `ContentPane` (also on
+  >     splits, inherited from the source pane). `level_has_tree_aggregate`
+  >     now gates **twice**: config presence (`tree_aggregate` column)
+  >     **and** `self.capabilities.supports_tree_aggregation` — so that the
+  >     claim (key + hint via `build_claims`) and the toggle fall together as
+  >     soon as the adapter does not report the capability. The **whole**
+  >     `AdapterCapabilities` deliberately on the pane (not just a bool), so
+  >     that future affordances read their respective flag there instead of
+  >     re-deriving it — that is the generic path, not a narrow one-off fix.
+  >     2 new gate tests (column without capability → unclaimable/no-op;
+  >     column + capability → claimable) = 541 TUI; installed. (M3
+  >     `cycle_grouping` stays config only in flat lists — no
+  >     `supports_grouping` capability; in the **tree** it gates on
+  >     `group_by_via_adapter`, see the next point.)
+  >   - **Tree grouping (DONE, generic mechanism `group_by_via_adapter`).**
+  >     Native parity point (3): the legacy tree grouped by day. A tree
+  >     cannot group on the engine side (the adapter owns the per-bucket
+  >     fold), so the responsibility is inverted: the engine hands the pane's
+  >     active `group_by` as `ListParams.group_by` (`GroupSpec` from the new
+  >     content module `grouping`, which also feeds the flat grouping of the
+  >     TUI — keys + labels identical) into the root `list()`; the adapter
+  >     answers with `tracking:tree-group` bucket nodes
+  >     (`treegrp:<col>:<gran>:<key>`) whose subtrees are folded from the
+  >     trackings of **that** bucket; item IDs below carry the bucket scope
+  >     (`tree:<col>:<gran>:<key>:<uuid>`) so that `get_by_id` computes
+  >     bucket-correctly without query context (the query additionally comes
+  >     per `list()` via `propagates_query_to_subtree`). Engine side:
   >     `level_has_group_by`/`current_group_by`/`configured_grouping_base`
-  >     capability-gated im Tree, `zg`/`u` = **Reload** statt Rebuild,
-  >     `current_levels` im Tree immer leer (gruppierter Render-Pfad bleibt
-  >     flat-only); `spawn_content_load` + synchroner Query-Apply threaden
-  >     `adapter_group_spec`. **EIN View-Config für beide Formen:** Root
-  >     `node_type: tracking:tree-group` + rekursive
-  >     `tracking:tree-item`-ChildDef — „No grouping" liefert Items statt
-  >     Buckets, die typbasierte Chain-Auflösung matcht die ChildDef dann ab
-  >     Tiefe 0 (Root-`shortcuts:` entfernt: Buckets sind read-only;
-  >     `s: toggle-tracking` lebt auf der Item-Ebene). 592 TUI (+5 Gating/
-  >     Reload) + 68 adapter (+5 Bucket/Scope/Refold) Tests grün,
-  >     installiert.
+  >     capability-gated in the tree, `zg`/`u` = **reload** instead of
+  >     rebuild, `current_levels` always empty in the tree (the grouped
+  >     render path stays flat only); `spawn_content_load` + the synchronous
+  >     query apply thread `adapter_group_spec`. **ONE view config for both
+  >     forms:** root `node_type: tracking:tree-group` + a recursive
+  >     `tracking:tree-item` ChildDef — "no grouping" delivers items instead
+  >     of buckets, and the type-based chain resolution then matches the
+  >     ChildDef from depth 0 (root `shortcuts:` removed: buckets are read
+  >     only; `s: toggle-tracking` lives on the item level). 592 TUI
+  >     (+5 gating/reload) + 68 adapter (+5 bucket/scope/refold) tests green,
+  >     installed.
 
-### Cutover (harter Schnitt)
+### Cutover (hard cut)
 
-- **C1 — Routing + Aufräumen (ein Schritt).** Erst die Paritäts-Checkliste
-  (siehe unten) am Adapter-Pfad verifizieren. Dann in einem Zug:
-  Render-Dispatch leitet Tasks/Trackings durch `ContentView`, und die
-  bespoke `TasksView`/`TrackingsView` + toter Code werden entfernt — kein
-  Übergangs-Flag, keine Fallback-Route. Doku: README,
-  `docs/generic-view-spec.md` (neue ViewDef-Felder), `docs/smoke-tests.md`.
-  **ADR** in `docs/decisions/` zu Domain-Event-Bus, Engine-Aggregation und
-  In-Process-Adaptern.
+- **C1 — routing + cleanup (one step).** First verify the parity checklist
+  (see below) on the adapter path. Then in one go: the render dispatch routes
+  tasks/trackings through `ContentView`, and the bespoke
+  `TasksView`/`TrackingsView` + dead code are removed — no transition flag,
+  no fallback route. Docs: README, `docs/generic-view-spec.md` (new ViewDef
+  fields), `docs/smoke-tests.md`. **ADR** in `docs/decisions/` on the domain
+  event bus, engine aggregation and in-process adapters.
 
-## Parität (Cutover-Gate)
+## Parity (cutover gate)
 
-Vor C2 müssen über den Adapter-Pfad funktionieren:
+Before C2 the following must work over the adapter path:
 
-- Tasks: Tree expand/collapse, `/`-Suche durch kollabierte Knoten, add/
-  edit/reparent, delete + undelete, notes, scripts, Tracking-Toggle,
-  Saved Queries + Shortcuts + Spalten-Config.
-  > **Erledigt (2026-06-11):** initiale Aufklapptiefe (`expand_depth` auf
-  > dem Wurzel-ViewDef, generische One-Shot-Kaskade über den normalen
-  > Expand-Pfad — Parität zu `tasks.tree.default_expand_depth`) und die
-  > Listenansicht (zweite View `list` auf neuem Adapter-Typ `task:flat`,
-  > flacher DFS-Walk, Filter = nur Treffer; Subtab-Keys `v`/`t` ersetzen
-  > das native `vl`/`vt` — `l` kollidiert mit `content.open`).
-- Trackings: Normal/Condensed/Tree, Grouping Day/Week/Month/Year mit
-  Totals + Footer, Live-Dauern (tickend), Taskpath-Spalte gestylt,
-  Delete/Restore/Restore-All, scripts, Filter, Saved Queries.
+- Tasks: tree expand/collapse, `/` search through collapsed nodes,
+  add/edit/reparent, delete + undelete, notes, scripts, tracking toggle,
+  saved queries + shortcuts + column config.
+  > **Done (2026-06-11):** initial expand depth (`expand_depth` on the root
+  > ViewDef, generic one-shot cascade over the normal expand path — parity
+  > with `tasks.tree.default_expand_depth`) and the list view (second view
+  > `list` on the new adapter type `task:flat`, flat DFS walk, filter = hits
+  > only; subtab keys `v`/`t` replace the native `vl`/`vt` — `l` collides
+  > with `content.open`).
+- Trackings: normal/condensed/tree, grouping day/week/month/year with totals
+  - footer, live durations (ticking), taskpath column styled,
+    delete/restore/restore-all, scripts, filter, saved queries.
 
-## Bewusst außerhalb des Scopes (mögliche Follow-ups)
+## Deliberately out of scope (possible follow-ups)
 
-- „Trash als Teilbaum" (gelöschte Items als navigierbarer Node-Typ mit
-  per-Item-Restore) — zunächst genügen Root-Level-Restore-Actions.
-- Migration der Jira-/Postgres-Editing-Pfade auf den neuen Form-InputSpec.
-- Persistenz-Umzug der Saved Queries vom bestehenden Store auf den
-  generischen Adapter-Store (vorerst bleibt der bestehende Store hinter
-  dem Adapter).
+- "Trash as a subtree" (deleted items as a navigable node type with per-item
+  restore) — root-level restore actions are enough for now.
+- Migration of the Jira/Postgres editing paths onto the new form InputSpec.
+- Moving the persistence of the saved queries from the existing store to the
+  generic adapter store (for now the existing store stays behind the
+  adapter).
 
-## Entschiedene Mikro-Entscheidungen (2026-06-09)
+## Decided micro-decisions (2026-06-09)
 
-1. **Task-Edit:** generischer Form-InputSpec (M6/E5). Uniform und
-   wiederverwendbar.
-2. **Reparent:** mark/paste-move (M7/E6) — ein Mechanismus für Tasks und
-   DB-Script-Folders.
-3. **Undelete/Restore-All:** Root-Level-View-Actions am Root-Node (kein
-   Trash-Teilbaum).
-4. **Cutover:** **harter Schnitt** — kein Übergangs-Flag, keine
-   Fallback-Route auf die nativen Views. C1 und C2 fallen zusammen:
-   Routing-Umstellung und Entfernen der bespoke Views passieren in einem
-   Schritt, sobald die Parität (siehe unten) am Adapter-Pfad verifiziert
-   ist.
+1. **Task edit:** generic form InputSpec (M6/E5). Uniform and reusable.
+2. **Reparent:** mark/paste move (M7/E6) — one mechanism for tasks and DB
+   script folders.
+3. **Undelete/restore-all:** root-level view actions on the root node (no
+   trash subtree).
+4. **Cutover:** **hard cut** — no transition flag, no fallback route to the
+   native views. C1 and C2 coincide: switching the routing and removing the
+   bespoke views happen in one step, as soon as parity (see below) is
+   verified on the adapter path.
