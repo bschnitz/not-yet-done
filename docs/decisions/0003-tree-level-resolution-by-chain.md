@@ -1,109 +1,110 @@
-# 0003 — Tree-Ebenen-Auflösung per `node_type_chain` statt Tiefe
+# 0003 — Resolving tree levels by `node_type_chain` instead of by depth
 
-- **Status:** akzeptiert, umgesetzt (`0f998c9`)
-- **Datum:** 2026-06-05
-- **Betrifft:** `not-yet-done-tui` (`content_view.rs` —
+- **Status:** accepted, implemented (`0f998c9`)
+- **Date:** 2026-06-05
+- **Affects:** `not-yet-done-tui` (`content_view.rs` —
   `build_tree_data_rows`, `current_columns`, `tree_current_actions`,
-  `tree_active_child_def`, neue `cursor_tree_level` /
-  `cursor_node_type_chain`; `content_tree.rs` — Auflösungs-Helfer)
+  `tree_active_child_def`, the new `cursor_tree_level` /
+  `cursor_node_type_chain`; `content_tree.rs` — resolution helpers)
 
-## Kontext
+## Context
 
-Der generische `ContentView` rendert hierarchische Adapter-Daten als
-Baum: verschachtelte Knoten werden zu einer flachen Zeilenliste
-(`TreeEntry`) abgeflacht und über `not-yet-done-table` gelayoutet. Jede
-Zeile braucht zur Render-Zeit ihre **Ebene** im Baum — daraus folgen
-Spalten-Set, welche Spalte das `indent+glyph+label` trägt (die
-„Label-Spalte"), Aktionen und Preview-Config.
+The generic `ContentView` renders hierarchical adapter data as a tree:
+nested nodes are flattened into a linear list of rows (`TreeEntry`) and
+laid out through `not-yet-done-table`. At render time every row needs its
+**level** in the tree — that is what determines the column set, which
+column carries the `indent+glyph+label` (the "label column"), the actions
+and the preview config.
 
-Diese Ebene wurde **zweifach** aufgelöst, und die beiden Wege konnten
-sich widersprechen:
+That level was resolved in **two** ways, and the two could disagree:
 
-1. **Per Tiefe** (`tree_level_at_depth(depth)` und Verwandte) — ein
-   Walk, der ab der Wurzel an jedem Schritt das **erste**
-   tree-fortsetzende Kind nimmt (`first_tree_child`).
-2. **Per `node_type_chain`** (`tree_level_for_chain(&chain)`) — der
-   exakte Typ-Pfad, den jede `TreeEntry` ohnehin trägt.
+1. **By depth** (`tree_level_at_depth(depth)` and relatives) — a walk that
+   starts at the root and at every step takes the **first** tree-continuing
+   child (`first_tree_child`).
+2. **By `node_type_chain`** (`tree_level_for_chain(&chain)`) — the exact
+   type path that every `TreeEntry` carries anyway.
 
-Ein **Multi-Branch-Baum** mit unterschiedlich tiefen Zweigen bricht die
-depth-Variante: dieselbe Tiefe bildet je Zweig auf einen **anderen** Typ
-ab. Beispiel Stoat-Chat:
+A **multi-branch tree** with branches of differing depth breaks the depth
+variant: the same depth maps to a **different** type per branch. Take the
+Stoat chat:
 
-- Zweig A (uncategorized): `server(0) → channel(1) → message(2, Leaf)`
-- Zweig B (Kategorie): `server(0) → category(1) → channel(2) → message(3)`
+- Branch A (uncategorized): `server(0) → channel(1) → message(2, leaf)`
+- Branch B (category): `server(0) → category(1) → channel(2) → message(3)`
 
-`tree_label_at_depth(2)` läuft Zweig A ab → `message` (kein `tree_label`)
-→ `None`. Die Channels **unter einer Kategorie** sitzen aber auch auf
-Tiefe 2 (Zweig B) → ihre Label-Spalte wurde nicht gefunden → die Zeilen
-rendern als **Leerzeilen**.
+`tree_label_at_depth(2)` walks branch A → `message` (no `tree_label`) →
+`None`. But the channels **under a category** sit at depth 2 as well
+(branch B) → their label column was not found → those rows render as
+**blank lines**.
 
-Das Symptom trat über die Zeit auf mehreren Ebenen verschiedener Adapter
-auf (Confluence `name`/`title`, dann Stoat). Der jeweilige „Fix" war die
-Konvention **„`tree_label`-Keys über alle Ebenen gleich benennen"** — ein
-Workaround, der nur unter der Single-Chain-Annahme hält und bei jedem
-neuen, anders tiefen Zweig wieder bricht.
+Over time the symptom showed up at several levels of different adapters
+(Confluence `name`/`title`, then Stoat). The "fix" each time was the
+convention **"give the `tree_label` keys the same name across all
+levels"** — a workaround that only holds under the single-chain assumption
+and breaks again with every new branch of a different depth.
 
-## Entscheidung
+## Decision
 
-Die `node_type_chain` einer Zeile ist ihre **eindeutige Koordinate** im
-Baum; `depth` ist eine verlustbehaftete Projektion. Daher: **Jede
-Auflösung, die eine Zeile (oder die Cursor-Zeile) zur Hand hat, läuft
-über die Chain, nie über die Tiefe.** Zwei zusammengehörige Teile:
+A row's `node_type_chain` is its **unambiguous coordinate** in the tree;
+`depth` is a lossy projection of it. Therefore: **every resolution that has
+a row (or the cursor row) at hand goes through the chain, never through the
+depth.** Two parts that belong together:
 
-1. **Single Source of Truth.** Neue `cursor_tree_level()` /
-   `cursor_node_type_chain()` lösen Spalten-Set, Label-Spalte, Aktionen
-   und Preview der Cursor-Zeile chain-basiert auf. `current_columns`,
-   `tree_current_actions` (aktive Ebene) und `tree_active_child_def`
-   wurden darauf migriert; die toten depth-Helfer `tree_label_at_depth` /
-   `tree_columns_at_depth` sind entfernt.
+1. **A single source of truth.** The new `cursor_tree_level()` /
+   `cursor_node_type_chain()` resolve the column set, the label column, the
+   actions and the preview of the cursor row from the chain.
+   `current_columns`, `tree_current_actions` (active level) and
+   `tree_active_child_def` were migrated onto them; the dead depth helpers
+   `tree_label_at_depth` / `tree_columns_at_depth` are gone.
 
-2. **Label-Spalte als designierter Slot.** Die Label-Spalte wird
-   **einmal** aus der Cursor-Ebene bestimmt (deren `tree_label` — ein
-   fixer Schlüssel des aktiven Spalten-Sets). **Jede** Zeile malt ihr
-   `indent+glyph+label` in genau diese Spalte, unabhängig von der eigenen
-   Ebene. Weil Label-Spalte und Spalten-Set aus **derselben** Ebene
-   stammen, sind sie per Konstruktion konsistent — die frühere
-   Cross-Level-Key-Alignment-Konvention entfällt vollständig.
+2. **The label column as a designated slot.** The label column is
+   determined **once** from the cursor level (its `tree_label` — a fixed
+   key of the active column set). **Every** row paints its
+   `indent+glyph+label` into exactly that column, regardless of its own
+   level. Because the label column and the column set come from the **same**
+   level, they are consistent by construction — the earlier cross-level key
+   alignment convention falls away entirely.
 
-Die einzige verbleibende Invariante — `tree_label` muss ein Schlüssel der
-**eigenen** Spalten der Ebene sein — erzwingt der Config-Validator bereits
-(`view_config.rs`, `check_tree`/`walk_tree_child`). Der frühere stille
-Fehlermodus (Leerzeile) ist damit ein lauter Config-Fehler.
+The one remaining invariant — `tree_label` has to be a key of the level's
+**own** columns — is already enforced by the config validator
+(`view_config.rs`, `check_tree`/`walk_tree_child`). The former silent
+failure mode (a blank line) is now a loud config error.
 
-## Optionen (und warum verworfen)
+## Options (and why they were rejected)
 
-1. **Pro Zeile per _eigener_ Chain auflösen** (Label-Spalte =
-   Spalte mit dem Key der jeweiligen Zeilen-Ebene). Behebt den
-   Stoat-Fall (alle Ebenen nutzen `name`), lässt aber die Konvention für
-   **heterogene** Keys bestehen: hat eine Ebene `title`, der aktive
-   Spalten-Satz aber nur `name`, blankt die Zeile weiter. Verschiebt das
-   Problem, statt es zu beseitigen.
-2. **Konvention beibehalten + im Validator erzwingen** (alle `tree_label`
-   eines Chains müssen gleich heißen). Verworfen: legt eine künstliche
-   Kopplung über Ebenen fest, die fachlich nichts miteinander zu tun
-   haben (warum sollte ein Channel-Label-Key einem Kategorie-Label-Key
-   gleichen?), und schränkt heterogene Bäume unnötig ein.
-3. **Eigene Tabelle/Spalten-Geometrie pro Tiefe** rendern. Verworfen:
-   großer Umbau der Tabellen-Schicht; der eigentliche Fehler war die
-   Auflösung, nicht das Single-Table-Layout.
+1. **Resolve per row by its _own_ chain** (label column = the column
+   holding the key of that row's level). Fixes the Stoat case (all levels
+   use `name`) but leaves the convention in place for **heterogeneous**
+   keys: if a level has `title` while the active column set only has
+   `name`, the row still comes out blank. It moves the problem instead of
+   removing it.
+2. **Keep the convention and enforce it in the validator** (all
+   `tree_label`s of one chain must have the same name). Rejected: it fixes
+   an artificial coupling between levels that have nothing to do with each
+   other (why should a channel label key match a category label key?), and
+   it constrains heterogeneous trees for no reason.
+3. **Render a separate table/column geometry per depth.** Rejected: a large
+   rebuild of the table layer; the actual bug was the resolution, not the
+   single-table layout.
 
-## Konsequenzen
+## Consequences
 
-- Die frühere Konvention „`tree_label`-Keys müssen über Ebenen alignen"
-  ist **obsolet**. Multi-Branch-Bäume mit unterschiedlich tiefen Zweigen und
-  divergenten Label-Keys rendern korrekt (Stoat `Server → Kategorie →
-Channel`, Postgres `Schemas`/`Scripts`, Confluence-Seitenbäume).
-- Sichtbare Konsequenz von Teil 2: In Bäumen mit **unterschiedlichen**
-  Label-Keys pro Ebene wandert die Label-**Spaltenposition** mit dem
-  Cursor, wenn er die Ebene wechselt. Das ist konsistent mit dem schon
-  bestehenden Verhalten (der Header/Spalten-Satz wechselt ohnehin pro
-  Cursor-Ebene) und wurde bewusst akzeptiert.
-- Regressionstest `tree_renders_deep_branch_label_despite_divergent_keys`
-  baut einen Multi-Branch-Baum (ungleich tief, Keys `name` vs `title`)
-  und prüft, dass die tiefen Zweig-Zeilen nicht-leere Labels rendern —
-  verifiziert gegen die alte depth-Auflösung (schlug dort fehl).
-- **Bewusst belassen:** `tree_self_at_depth` im Tree-Find-Walker
-  (`tree_find_dispatch_step`) und der `current_children`-Fallback bleiben
-  depth-basiert — der Walker hat dort keinen `node_type_chain` zur Hand,
-  und beides ist nicht Teil des Render-Pfads. Falls Tree-Find auf
-  Multi-Branch-Bäumen einmal falsch springt, ist das die nächste Stelle.
+- The old convention "`tree_label` keys have to align across levels" is
+  **obsolete**. Multi-branch trees with branches of differing depth and
+  divergent label keys render correctly (Stoat
+  `server → category → channel`, Postgres `schemas`/`scripts`, Confluence
+  page trees).
+- A visible consequence of part 2: in trees with **different** label keys
+  per level, the label **column position** moves with the cursor when it
+  changes level. That is consistent with the existing behaviour (the header
+  and column set change per cursor level anyway) and was accepted
+  deliberately.
+- The regression test
+  `tree_renders_deep_branch_label_despite_divergent_keys` builds a
+  multi-branch tree (uneven depth, keys `name` vs `title`) and checks that
+  the deep branch rows render non-empty labels — verified against the old
+  depth resolution, where it failed.
+- **Left alone deliberately:** `tree_self_at_depth` in the tree-find walker
+  (`tree_find_dispatch_step`) and the `current_children` fallback stay
+  depth-based — the walker has no `node_type_chain` at hand there, and
+  neither is part of the render path. If tree-find ever jumps to the wrong
+  place on a multi-branch tree, that is the next place to look.

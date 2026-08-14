@@ -29,7 +29,7 @@ die Crates so geschnitten sind:
   einzige Crate, die den Vertrag _und_ alle Adapter kennt. TUI, CLI (`nyd`) und
   Waybar bauen Adapter byte-gleich über `host::resolve_adapter`, statt die
   Factory-Auswahl zu duplizieren. Begründung in
-  [ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md).
+  [ADR 0005](decisions/0005-host-crate-and-lifecycle-hooks.md).
 
 ## Crate-Landschaft
 
@@ -425,7 +425,7 @@ er am _einen_ Chokepoint `host::factories()` sitzt (siehe Host-Schicht).
   identisch.
 
 Details und Trade-offs in
-[ADR 0006](decisions/0006-anonymisierung-content-layer.md).
+[ADR 0006](decisions/0006-anonymization-content-layer.md).
 
 ## TUI (`not-yet-done-tui`)
 
@@ -544,14 +544,14 @@ Vor Block D lebte diese Logik im TUI-Binary; CLI und Waybar konnten sie nicht
 nutzen, ohne das ganze TUI zu ziehen. Die eigene Crate bricht das auf, hält den
 Graph azyklisch (Frontends → `host` → Adapter → `content`) und behebt u. a. den
 Waybar-Bug, der nach dem DB-Split die falsche DB las. Details in
-[ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md).
+[ADR 0005](decisions/0005-host-crate-and-lifecycle-hooks.md).
 
 `factories()` ist zugleich der Chokepoint der **Anonymisierung**: ist
 `NYD_ANON` truthy (ausgewertet in `host_context()` → `HostContext.anonymize`),
 wird jede registrierte Factory in eine `AnonymizingFactory` gewickelt, deren
 `create()` den gebauten Adapter dekoriert. So erben TUI, `nyd` und Waybar die
 Anonymisierung ohne eigene Zeile Code; im Normalbetrieb (Flag aus) entsteht
-kein Overhead. Siehe [ADR 0006](decisions/0006-anonymisierung-content-layer.md).
+kein Overhead. Siehe [ADR 0006](decisions/0006-anonymization-content-layer.md).
 
 ### Lifecycle-Hooks
 
@@ -591,7 +591,7 @@ scheiternde Action oder unschreibbares State-File brechen den Aufrufer nie ab.
   `task-core`, mit typisiertem, domänengeformtem JSON und abgestuften
   Exit-Codes (Stabilkontrakt für Batch-Scripts). Adapter sind Interop-Grenzen,
   `nyd-t` ist die eigene Domäne in ihrem Idiom — siehe
-  [ADR 0004](decisions/0004-zwei-cli-binaries-adapter-vs-domain.md).
+  [ADR 0004](decisions/0004-two-cli-binaries-adapter-vs-domain.md).
 - **Waybar** (`not-yet-done-waybar`) — CFFI-`.so`, zeigt das aktive Tracking in
   der Statusbar. Dünnes Protokoll-Frontend: löst über den Host denselben
   In-Process-`trackings`-Adapter auf wie TUI und `nyd` (statt selbst die DB zu

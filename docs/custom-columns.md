@@ -223,6 +223,6 @@ dates survive) — your local notes cannot leak past the mask.
 - [`docs/examples/views/jira.yaml`](examples/views/jira.yaml) — a worked example
 - [Content adapter spec](content-adapter-spec.md) — the adapter contract this
   layer decorates
-- [ADR 0007](decisions/0007-spalten-deklaration-columnschema.md) — the single
+- [ADR 0007](decisions/0007-column-declaration-columnschema.md) — the single
   `ColumnSchema` declaration that carries a column's type and options from the
   backend to the front-end

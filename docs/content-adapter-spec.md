@@ -137,7 +137,7 @@ shared state file. The first hook is `connected`, fired right after the
 factory builds the adapter (every program start for the in-process local
 adapter); the local adapter declares it so a `connected → backup` binding
 gives a once-a-day database backup with no front-end code. See
-[ADR 0005](decisions/0005-host-crate-und-lifecycle-hooks.md) and the
+[ADR 0005](decisions/0005-host-crate-and-lifecycle-hooks.md) and the
 `hooks:` block in [`examples/views/tasks.yaml`](examples/views/tasks.yaml).
 
 **Anonymization.** `anonymizer()` returns the strategy used to replace an
@@ -159,7 +159,7 @@ subtrees, `row_summary()`, detail `metadata()` + `label()`, picker labels,
 search-hit titles) but leaves `id()`/paths (addressing) and editable/exportable
 bodies (`content()`/`prepare()`/`form_prep()`/`picker_options()`/custom queries)
 **raw** — anonymization is a read/display mask, never a write-path rewrite. See
-[ADR 0006](decisions/0006-anonymisierung-content-layer.md).
+[ADR 0006](decisions/0006-anonymization-content-layer.md).
 
 ### Node
 
