@@ -3601,323 +3601,346 @@ with the gpg agent unlocked **and** a second time with it locked
       error names `transport.ssh[0].auth.password`; set the second hop to
       `script-result` as well → the error names `ssh[1]`.
 
-## Tab-Reihenfolge + Autonummerierung
+## Tab order + auto-numbering
 
-`tabs.order`-Liste in `tui.yaml` (Tab-Namen in Anzeigereihenfolge).
+The `tabs.order` list in `tui.yaml` (tab names in display order).
 
-- [ ] Tab-Bar zeigt die Tabs in Listenreihenfolge, mit Ziffern
-      `1`,`2`,`3`,… als Key-Hint.
-- [ ] Ziffern wechseln den Tab (auch `9` für einen 9. Tab wie Stoat, der
-      vorher keine Taste hatte). `0` = 10. Tab; ab dem 11. keine Ziffer.
-- [ ] Eine nicht in `order` genannte View ist verborgen (aber nicht
-      entladen) — taucht wieder auf, sobald ihr Name ergänzt wird.
-- [ ] `Tab` / `Shift+Tab` zykeln nur durch die sichtbaren Tabs.
-- [ ] Nicht belegte Ziffer (mehr Ziffern als Tabs) tut nichts.
-- [ ] `Ctrl+X` tut nichts mehr (Tab-Gruppen-Umschalter wurde entfernt).
-- [ ] `tabs.order` leeren/entfernen → alle Tabs in natürlicher
-      Slot-Reihenfolge, gleich autonummeriert.
-- [ ] Zwei Tabs mit gleichem `tab.name` → **harte Fehlermeldung** als
-      Start-Modal; App zeigt alle Tabs und bleibt bedienbar.
-- [ ] `:config` / `tui.yaml` editieren + Reload → Reihenfolge wird neu
-      aufgelöst (aktiver Tab snappt auf den ersten sichtbaren, falls er
-      rausfiel).
+- [ ] The tab bar shows the tabs in list order, with the digits
+      `1`,`2`,`3`,… as key hints.
+- [ ] Digits switch tabs (including `9` for a 9th tab such as Stoat, which
+      previously had no key). `0` = 10th tab; from the 11th on, no digit.
+- [ ] A view not named in `order` is hidden (but not unloaded) — it comes
+      back as soon as its name is added again.
+- [ ] `Tab` / `Shift+Tab` cycle through the visible tabs only.
+- [ ] An unassigned digit (more digits than tabs) does nothing.
+- [ ] `Ctrl+X` does nothing any more (the tab-group switch was removed).
+- [ ] Clearing or removing `tabs.order` → all tabs in their natural slot
+      order, auto-numbered the same way.
+- [ ] Two tabs with the same `tab.name` → **a hard error message** as a
+      startup modal; the app shows all tabs and stays usable.
+- [ ] Editing `:config` / `tui.yaml` plus a reload → the order is resolved
+      again (the active tab snaps to the first visible one if it dropped
+      out).
 
-## TaskAdapter (adapterisierter Tasks-Tab) — A1b + A1c-1 + A1c-2
+## TaskAdapter (adapterized tasks tab) — A1b + A1c-1 + A1c-2
 
-Voraussetzung: `docs/examples/views/tasks.yaml` nach
-`~/.config/not_yet_done/views/tasks.yaml` kopieren. Der Adapter-Tab läuft
-**parallel** zum nativen Tasks-Tab (Vergleich), kein C1-Cutover.
+Prerequisite: copy `docs/examples/views/tasks.yaml` to
+`~/.config/not_yet_done/views/tasks.yaml`. The adapter tab runs **alongside**
+the native tasks tab (for comparison), this is not the C1 cutover.
 
-- [ ] Tab lädt: Forest als Tree, Top-Level-Tasks sichtbar, Drill in
-      Subtasks beliebig tief; `priority` rechtsbündig, `created` lokalisiert.
-- [ ] `a` (add) am Root → Markdown-Buffer mit `## Description:` /
-      `## Notes:`; Beschreibung eintragen, `:wq` → neuer Top-Level-Task
-      erscheint, Cursor darauf.
-- [ ] `a` mit `parent:`-Feld auf eine bestehende Task-UUID → Task landet
-      als Subtask unter dem Parent.
-- [ ] In einen Task gedrillt, `a` → neuer Task hängt als Subtask darunter
-      (Buffer hat `parent:` vorbefüllt).
-- [ ] `e` (edit) auf Task → Buffer zeigt aktuelle Felder + Notes;
-      Beschreibung ändern, `:wq` → Zeile aktualisiert. Notes-Datei
-      mitgeschrieben.
-- [ ] `e` → Beschreibung leeren → `:wq` → Reopen mit Error-Banner
-      (Description darf nicht leer sein).
-- [ ] `e` → `status`/`priority` ändern → übernommen. Ungültiger `status`
-      → Reopen mit Inline-Fehler.
-- [ ] `e` → `tracking: true` → Tracking startet (im nativen Trackings-Tab
-      sichtbar); bei `allow_parallel=false` werden andere aktive Trackings
-      gestoppt. `tracking: false` → stoppt wieder.
-- [ ] `d` (delete) auf Task mit Subtasks → Confirm → ganzer Teilbaum weg;
-      Meldung „Deleted subtree (N tasks)". Notes soft-deleted.
-- [ ] `u` (undelete) → zuletzt gelöschte(r) Task(s) zurück; ohne
-      vorherige Löschung → „Nothing to undelete".
-- [ ] `m` (mark-move) auf Task A, dann `p` (paste-move) auf Task B → A
-      wird Subtask von B. „marked …"-Indikator währenddessen sichtbar.
-- [ ] `m` auf A, `p` auf A selbst oder auf einen Nachfahren von A →
-      Fehler (Zyklus abgelehnt), keine Änderung.
-- [ ] Mutation in diesem Tab → nativer Tasks-Tab (falls offen) repaint/
-      reload via DomainEvent.
+- [ ] The tab loads: the forest as a tree, top-level tasks visible, drilling
+      into subtasks to any depth; `priority` right-aligned, `created`
+      localized.
+- [ ] `a` (add) at the root → a markdown buffer with `## Description:` and
+      `## Notes:`; enter a description, `:wq` → the new top-level task shows
+      up with the cursor on it.
+- [ ] `a` with a `parent:` field pointing at an existing task UUID → the task
+      ends up as a subtask under that parent.
+- [ ] Drilled into a task, `a` → the new task hangs below it as a subtask
+      (the buffer has `parent:` prefilled).
+- [ ] `e` (edit) on a task → the buffer shows the current fields plus notes;
+      change the description, `:wq` → the row updates. The notes file is
+      written along with it.
+- [ ] `e` → clear the description → `:wq` → reopens with an error banner
+      (the description must not be empty).
+- [ ] `e` → change `status`/`priority` → applied. An invalid `status` →
+      reopens with an inline error.
+- [ ] `e` → `tracking: true` → tracking starts (visible in the native
+      trackings tab); with `allow_parallel=false` other active trackings are
+      stopped. `tracking: false` → stops it again.
+- [ ] `d` (delete) on a task with subtasks → confirm → the whole subtree is
+      gone, with the message "Deleted subtree (N tasks)". Notes are
+      soft-deleted.
+- [ ] `u` (undelete) → the most recently deleted task(s) come back; with no
+      previous deletion → "Nothing to undelete".
+- [ ] `m` (mark-move) on task A, then `p` (paste-move) on task B → A becomes
+      a subtask of B. The "marked …" indicator is visible in between.
+- [ ] `m` on A, `p` on A itself or on a descendant of A → error (the cycle is
+      rejected), nothing changes.
+- [ ] A mutation in this tab → the native tasks tab (if open) repaints or
+      reloads via a DomainEvent.
 
-### `edit node` (`ctrl+n`) — Subtree-Restructure-Outline-Editor
+### `edit node` (`ctrl+n`) — the subtree-restructuring outline editor
 
-Parität zum alten nativen Tasks-Tab (`ctrl+n` = „edit node"). Voraussetzung:
-`tasks.yaml` mit der `edit node`-Action (`key: ctrl+n`, `type: edit`,
-`id: edit-tree`) auf allen drei Ebenen (Tree-Wurzel, rekursive Subtask-Ebene,
-flache `list`-View — im Beispiel-Config gesetzt). Einen Task mit mehreren
-Subtasks/Enkeln anlegen.
+Parity with the old native tasks tab (`ctrl+n` = "edit node"). Prerequisite:
+a `tasks.yaml` carrying the `edit node` action (`key: ctrl+n`, `type: edit`,
+`id: edit-tree`) on all three levels (tree root, recursive subtask level, flat
+`list` view — set that way in the example config). Create a task with several
+subtasks and grandchildren.
 
-- [ ] `ctrl+n` auf einem Task → Editor öffnet mit dem Task **und seinem ganzen
-      Teilbaum** als eingerückte Checkbox-Outline (`- [ ] Beschreibung (p=… id=…)`),
-      Kinder unter dem Eltern-Task eingerückt.
-- [ ] Eine Zeile umhängen (Einrückung ändern) → `:wq` → Task wird re-parented;
-      Notes wandern mit. Im Baum steht der Knoten an der neuen Stelle.
-- [ ] Status-Marker einer Zeile ändern (`[ ]`→`[x]`) → `:wq` → Status
-      übernommen. Priorität via `(p=N)` ändern → übernommen.
-- [ ] Neue Zeile hinzufügen (passend eingerückt, ohne `id=`) → `:wq` → neuer
-      Subtask angelegt; verschachtelte neue Zeilen erben den richtigen Parent.
-- [ ] Eine Zeile löschen (aus dem Buffer entfernen) → `:wq` → Task soft-deleted
-      (per `u`/undelete rückholbar); ganze entfernte Teilbäume verschwinden.
-- [ ] Mehrere Änderungen in einem Buffer (umhängen + neu + löschen + Status) →
-      `:wq` → alle in einem Durchgang angewandt; Meldung nennt die Bilanz.
-- [ ] Bei `tracking.allow_parallel=false` zwei Zeilen mit `-t`-Flag markieren →
-      `:wq` → Reopen mit Fehler („Only one task can be tracked at a time …"),
-      Edits bleiben erhalten.
-- [ ] Buffer unverändert speichern → keine Änderung (Diff ist No-op).
-- [ ] `ctrl+n` auch in der flachen `list`-View (`v`) und auf jeder Drill-Tiefe
-      erreichbar (editiert dort den selektierten Task + Nachfahren als Outline).
-- [ ] Nach Anwenden: Baum re-snapshottet (DomainEvent → voller Reload),
-      nativer Tasks-Tab (falls offen) zieht nach.
+- [ ] `ctrl+n` on a task → the editor opens with that task **and its entire
+      subtree** as an indented checkbox outline (`- [ ] description (p=… id=…)`),
+      children indented below their parent task.
+- [ ] Re-hang a line (change its indentation) → `:wq` → the task is
+      re-parented and its notes move along. In the tree the node sits at its
+      new place.
+- [ ] Change a line's status marker (`[ ]`→`[x]`) → `:wq` → the status is
+      applied. Changing the priority via `(p=N)` → applied as well.
+- [ ] Add a new line (indented to fit, without an `id=`) → `:wq` → a new
+      subtask is created; nested new lines inherit the right parent.
+- [ ] Delete a line (remove it from the buffer) → `:wq` → the task is
+      soft-deleted (recoverable via `u`/undelete); whole removed subtrees
+      disappear.
+- [ ] Several changes in one buffer (re-hang, add, delete, status) → `:wq` →
+      all applied in a single pass; the message names the tally.
+- [ ] With `tracking.allow_parallel=false`, mark two lines with the `-t` flag
+      → `:wq` → reopens with the error "Only one task can be tracked at a time
+      …", the edits are preserved.
+- [ ] Save the buffer unchanged → nothing changes (the diff is a no-op).
+- [ ] `ctrl+n` is reachable in the flat `list` view (`v`) too, and at every
+      drill depth (where it edits the selected task plus its descendants as an
+      outline).
+- [ ] After applying: the tree is re-snapshotted (DomainEvent → full reload),
+      and the native tasks tab (if open) follows suit.
 
-### A1c-1 — Tracking-Marker-Spalte + Start/Stop-Taste
+### A1c-1 — the tracking-marker column + the start/stop key
 
-- [ ] `⏱`-Spalte zwischen Task und Status sichtbar. Tasks mit laufendem
-      Tracking zeigen `⏱`, alle anderen leer.
-- [ ] `t` (toggle-tracking) auf untracktem Task → `⏱` erscheint sofort
-      (Reload); im nativen Trackings-Tab taucht das Tracking auf.
-- [ ] `t` erneut auf demselben Task → `⏱` verschwindet, Tracking gestoppt.
-- [ ] Bei `tracking.allow_parallel=false`: `t` auf Task B während A läuft →
-      A's `⏱` verschwindet, B's erscheint (exklusiv, native Policy).
-- [ ] Bei `tracking.allow_parallel=true`: `t` auf B lässt A's `⏱` stehen
-      (beide laufen).
-- [ ] Tracking via `e`-Buffer (`tracking: true`) gestartet → `⏱` erscheint
-      ohne extra `t`; `t` togglet danach konsistent.
-- [ ] `t` und der `tracking:`-Buffer-Toggle bleiben synchron (kein
-      Stale-Marker): nach jedem Toggle spiegelt die Spalte den Live-Stand.
+- [ ] The `⏱` column is visible between task and status. Tasks with a running
+      tracking show `⏱`, everything else is empty.
+- [ ] `t` (toggle-tracking) on an untracked task → `⏱` appears immediately
+      (reload); the tracking shows up in the native trackings tab.
+- [ ] `t` again on the same task → `⏱` disappears, the tracking is stopped.
+- [ ] With `tracking.allow_parallel=false`: `t` on task B while A is running →
+      A's `⏱` disappears and B's appears (exclusive, the native policy).
+- [ ] With `tracking.allow_parallel=true`: `t` on B leaves A's `⏱` in place
+      (both run).
+- [ ] Tracking started via the `e` buffer (`tracking: true`) → `⏱` appears
+      without an extra `t`; `t` toggles consistently afterwards.
+- [ ] `t` and the `tracking:` buffer toggle stay in sync (no stale marker):
+      after every toggle the column mirrors the live state.
 
-### Tracking-Marker am eingeklappten Knoten (`collapsed_source`)
+### The tracking marker on a collapsed node (`collapsed_source`)
 
-Voraussetzung: `tasks.yaml` mit `collapsed_source: tracking_rollup` auf der
-`tracking`-Spalte (Root- **und** rekursive Subtask-Ebene — im Beispiel-Config
-gesetzt). Einen Task mit (mindestens) einem **Subtask** anlegen und das
-Tracking auf dem **Subtask** starten (`t`).
+Prerequisite: a `tasks.yaml` with `collapsed_source: tracking_rollup` on the
+`tracking` column (on the root **and** the recursive subtask level — set that
+way in the example config). Create a task with (at least) one **subtask** and
+start the tracking on the **subtask** (`t`).
 
-- [ ] Eltern-Task **aufgeklappt**: `⏱` steht beim laufenden Subtask, der
-      Eltern-Task selbst ist leer (zeigt seinen eigenen `tracking` = leer).
-- [ ] Eltern-Task **einklappen** (`h`/←/`zc`): Der `⏱`-Marker „bubbelt" jetzt
-      sichtbar auf den eingeklappten Eltern-Task — der Subtree-Tracking-Stand
-      bleibt erkennbar, obwohl der laufende Task verborgen ist.
-- [ ] Wieder **aufklappen**: Eltern-Task wird wieder leer, `⏱` steht wieder am
-      Subtask (Marker springt nicht „hängen").
-- [ ] Mehrstufig: Tracking auf einem Enkel; zwei Ebenen darüber einklappen →
-      `⏱` erscheint am eingeklappten Großeltern-Knoten (Roll-up über die ganze
-      Vorfahrenkette).
-- [ ] Eingeklappter Eltern-Task **ohne** Tracking irgendwo im Teilbaum bleibt
-      leer (kein falscher `⏱`).
-- [ ] Flat-Liste (`v`): Die Spalte zeigt unverändert den **eigenen** Marker —
-      `collapsed_source` ist hier inert (es gibt keinen Einklapp-Zustand).
+- [ ] Parent task **expanded**: `⏱` sits on the running subtask, the parent
+      task itself is empty (it shows its own `tracking`, which is empty).
+- [ ] **Collapse** the parent task (`h`/←/`zc`): the `⏱` marker now visibly
+      bubbles up to the collapsed parent task — the subtree's tracking state
+      stays recognizable even though the running task is hidden.
+- [ ] **Expand** it again: the parent task goes empty again and `⏱` is back on
+      the subtask (the marker does not get stuck).
+- [ ] Multi-level: tracking on a grandchild, then collapse two levels above it
+      → `⏱` appears on the collapsed grandparent node (the roll-up spans the
+      whole ancestor chain).
+- [ ] A collapsed parent task **without** any tracking anywhere in its subtree
+      stays empty (no bogus `⏱`).
+- [ ] Flat list (`v`): the column still shows the node's **own** marker —
+      `collapsed_source` is inert here (there is no collapsed state).
 
-### A1c-2 — Saved Queries + FilterExpr-Filter (gefilterter Baum)
+### A1c-2 — saved queries + FilterExpr filters (a filtered tree)
 
-Voraussetzung: `tasks.yaml` mit dem `query:`-Block (Default `open tasks`:
-nur nicht-`done`, nicht gelöscht). Mindestens ein `done`-Task tief im Baum
-und ein offener Geschwister-Task anlegen.
+Prerequisite: a `tasks.yaml` with the `query:` block (default `open tasks`:
+only non-`done`, non-deleted). Create at least one `done` task deep in the
+tree and one open sibling task.
 
-- [ ] Tab lädt mit aktivem Default-Query: `done`-Tasks fehlen im Tree,
-      offene Tasks da. Ein offener Task **unter** einem `done`-Parent bleibt
-      sichtbar — der `done`-Parent erscheint als Vorfahr mit (nur dem
-      passenden offenen Kind).
-- [ ] Drill in einen gefilterten Knoten zeigt **nur** matchende Kinder
-      (Filter greift auf jeder Tiefe, nicht nur an der Wurzel).
-- [ ] `q` öffnet das Query-Menü: Default-Query `open tasks` gelistet.
-- [ ] `:query new <name>` mit eigenem `FilterExpr`-Body (z. B.
-      `[priority, ">=", 5]`) → speichern → erscheint im `q`-Menü; Apply
-      filtert den Baum live.
-- [ ] `:query edit <name>` → Body ändern, `:wq` → Baum re-filtert sofort
-      (alter Subtree-Cache verworfen, keine Stale-Kinder).
-- [ ] `:query delete <name>` → verschwindet aus dem Menü; Body-Datei unter
-      `…/tasks/<id>/<view>/queries/<name>.yaml` weg.
-- [ ] Query mit 0 Treffern → leerer Baum, Reload-Action (`r`) bleibt
-      erreichbar (kein Dead-End).
-- [ ] Query leeren / `default` droppen → ganzer Forest wieder sichtbar.
-- [ ] Strukturelle Mutation (add/delete/reparent) → Baum re-snapshottet;
-      Filter geht bis zum nächsten erneuten Query-Send verloren (akzeptierte
-      Lifecycle-Kante, s. Plan-Box A1c-2).
-- [ ] Saved-Query-Shortcut (Ctrl+f im `q`-Menü) auf eine Query → Taste
-      filtert den Baum direkt; übersteht YAML-Reload (`query_shortcut`-Tabelle).
+- [ ] The tab loads with the default query active: `done` tasks are missing
+      from the tree, open tasks are there. An open task **below** a `done`
+      parent stays visible — the `done` parent appears as an ancestor, with
+      only the matching open child under it.
+- [ ] Drilling into a filtered node shows **only** matching children (the
+      filter applies at every depth, not just at the root).
+- [ ] `q` opens the query menu: the default query `open tasks` is listed.
+- [ ] `:query new <name>` with your own `FilterExpr` body (for example
+      `[priority, ">=", 5]`) → save → it shows up in the `q` menu; applying it
+      filters the tree live.
+- [ ] `:query edit <name>` → change the body, `:wq` → the tree re-filters
+      immediately (the old subtree cache is discarded, no stale children).
+- [ ] `:query delete <name>` → it disappears from the menu; the body file
+      under `…/tasks/<id>/<view>/queries/<name>.yaml` is gone.
+- [ ] A query with 0 matches → an empty tree, and the reload action (`r`)
+      stays reachable (no dead end).
+- [ ] Clearing the query or dropping `default` → the whole forest is visible
+      again.
+- [ ] A structural mutation (add/delete/reparent) → the tree is
+      re-snapshotted; the filter is lost until the query is sent again (an
+      accepted lifecycle edge, see plan box A1c-2).
+- [ ] A saved-query shortcut (Ctrl+f in the `q` menu) bound to a query → the
+      key filters the tree directly and survives a YAML reload (the
+      `query_shortcut` table).
 
-### A1c (scripts) — `:script` / `x` auf dem adapterisierten Tasks-Tab
+### A1c (scripts) — `:script` / `x` on the adapterized tasks tab
 
-Voraussetzung: `tasks.yaml` mit der `run script`-Action (Key `x`).
+Prerequisite: a `tasks.yaml` with the `run script` action (key `x`).
 
-- [ ] `x` auf einem selektierten Task → Script-Menü öffnet, Verzeichnis
-      `<data>/not_yet_done/scripts/tasks/task_item/` (auto-angelegt). Auch
-      `:script` über die Cmdline öffnet dasselbe Menü.
-- [ ] Auf jeder Drill-Tiefe (Subtask, Sub-Subtask) liefert `x` **dasselbe**
-      Verzeichnis (View-Pfad stabil, ein gemeinsamer Scripts-Ordner).
-- [ ] `+name<Enter>` legt ein neues Script aus dem Template an; Editor öffnet.
-- [ ] Script ausführen → bekommt den Task als JSON
-      `{"node": {"id": <uuid>, "label": <description>, "node_type":
-"task:item", "tab": "tasks", "fields": {status/priority/tags/tracking/
-created/…/ancestors}}}` (uniforme Node-Form, NICHT die native
-      `{"task": …}`-Form). `fields.ancestors` ist ein JSON-Array-String
-      `[{"id", "description"}, …]` Root→Parent (exklusive des Tasks selbst);
-      bei einem Top-Level-Task `"[]"`.
-- [ ] Selektion wechseln (anderer Task, anderer Typ-Mix) → Menü bleibt am
-      selben Ordner (kein Shuffle).
-- [ ] Kein Task selektiert / leerer Baum → Notification „No row selected",
-      kein Crash.
-- [ ] Portiertes `task_to_taiga.py` (unter `scripts/tasks/task_item/`) auf
-      einem Ticket-Task (`#<n> - …` unter `<slug>/tickets/`) ausführen →
-      Taiga-Tab aktiviert die Per-Project-Query und parkt den Cursor auf
-      dem Item `<slug>#<n>` — identisch zum Verhalten auf dem nativen
-      Tasks-Tab.
+- [ ] `x` on a selected task → the script menu opens on the directory
+      `<data>/not_yet_done/scripts/tasks/task_item/` (created automatically).
+      `:script` from the cmdline opens the same menu.
+- [ ] At every drill depth (subtask, sub-subtask) `x` yields the **same**
+      directory (the view path is stable, one shared scripts folder).
+- [ ] `+name<Enter>` creates a new script from the template and opens the
+      editor.
+- [ ] Run a script → it receives the task as JSON in the uniform node shape,
+      **not** the native `{"task": …}` shape:
 
-### Task-1 — `a` (Kind / Top-Level), `A` (Sibling), Vererbung
+  ```json
+  {
+    "node": {
+      "id": "<uuid>",
+      "label": "<description>",
+      "node_type": "task:item",
+      "tab": "tasks",
+      "fields": {
+        "status": "…",
+        "priority": "…",
+        "tags": "…",
+        "tracking": "…",
+        "created": "…",
+        "ancestors": "…"
+      }
+    }
+  }
+  ```
 
-`a` und `A` verhalten sich wie im nativen Tasks-Tab:
+  `fields.ancestors` is a JSON array string of `[{"id", "description"}, …]`
+  from root to parent (excluding the task itself); for a top-level task it is
+  `"[]"`.
 
-- [ ] **Tree-Mode, `a` auf selektiertem Task** → Editor-Buffer mit `parent:`
-      auf den selektierten Task vorbefüllt; `:wq` → neuer Task hängt **als
-      Kind** unter dem selektierten Task (nicht als Sibling/Top-Level).
-- [ ] **Tree-Mode, `A` auf selektiertem Task** → Buffer mit `parent:` auf
-      den **Eltern** des selektierten Tasks; `:wq` → neuer Task ist ein
-      **Sibling** (gleiche Ebene). Auf einem Top-Level-Task → neuer
-      Top-Level-Task.
-- [ ] **Leerer Baum (keine Tasks):** sowohl `a` als auch `A` → neuer
-      **Top-Level**-Task (Engine löst fehlende Selektion auf den Adapter-Root
-      auf).
-- [ ] **Flache Liste (`v`):** `a` → Top-Level-Task; `A` → Sibling des
-      selektierten Tasks (gleiche Eltern).
-- [ ] `a`/`A`, dann im Buffer das `parent:`-Feld editieren → `:wq` →
-      Buffer-Override gewinnt über das von der Taste gewählte Ziel.
-- [ ] `U` (Shift+U) auf einem verschachtelten Task → Task wandert auf die
-      oberste Ebene (parent_id = None), erscheint als Top-Level-Knoten.
-- [ ] `U` auf einem bereits Top-Level-Task → Notification „already at the
-      top level", keine Änderung.
+- [ ] Change the selection (another task, another type mix) → the menu stays
+      on the same folder (no shuffling).
+- [ ] No task selected / an empty tree → the notification "No row selected",
+      no crash.
+- [ ] Run the ported `task_to_taiga.py` (under `scripts/tasks/task_item/`) on
+      a ticket task (`#<n> - …` under `<slug>/tickets/`) → the Taiga tab
+      activates the per-project query and parks the cursor on the item
+      `<slug>#<n>` — identical to the behaviour on the native tasks tab.
 
-**Action-/Shortcut-Vererbung** (rekursiver `subtasks`-Branch deklariert
-keine eigenen `actions:`/`shortcuts:`):
+### Task-1 — `a` (child / top level), `A` (sibling), inheritance
 
-- [ ] In einen Task drillen (rekursive Ebene) → `e`/`a`/`A`/`x`/`ctrl+n`/`r`
-      und die Shortcuts `d`/`u`/`s`/`m`/`p`/`U` funktionieren dort genauso wie
-      auf der Wurzel-Ebene (alle via `inherit: true` vererbt).
-- [ ] `f` (fuzzy filter) und `/` (tree find) sind **nur** auf der
-      Wurzel-Ebene aktiv (nicht vererbt — Validator-Regel).
+`a` and `A` behave as they do in the native tasks tab:
 
-## TrackingAdapter (adapterisierter Trackings-Tab) — A2a + A2b + A2c
+- [ ] **Tree mode, `a` on a selected task** → an editor buffer with `parent:`
+      prefilled to the selected task; `:wq` → the new task hangs **as a
+      child** under the selected task (not as a sibling or at top level).
+- [ ] **Tree mode, `A` on a selected task** → a buffer with `parent:` set to
+      the **parent** of the selected task; `:wq` → the new task is a
+      **sibling** (same level). On a top-level task → a new top-level task.
+- [ ] **Empty tree (no tasks):** both `a` and `A` → a new **top-level** task
+      (the engine resolves the missing selection to the adapter root).
+- [ ] **Flat list (`v`):** `a` → a top-level task; `A` → a sibling of the
+      selected task (same parent).
+- [ ] `a`/`A`, then edit the `parent:` field in the buffer → `:wq` → the
+      buffer override wins over the target the key had picked.
+- [ ] `U` (Shift+U) on a nested task → the task moves to the topmost level
+      (parent_id = None) and appears as a top-level node.
+- [ ] `U` on a task that is already top level → the notification "already at
+      the top level", nothing changes.
 
-Voraussetzung: `views/trackings.yaml` (aus `docs/examples/views/`) nach
-`~/.config/not_yet_done/views/` kopiert. Der Adapter-Tab läuft neben dem
-bespoke nativen Trackings-Tab (bis C1).
+**Action and shortcut inheritance** (the recursive `subtasks` branch declares
+no `actions:`/`shortcuts:` of its own):
 
-### A2a — Read-Path + Live-Dauern + Grouping
+- [ ] Drill into a task (the recursive level) → `e`/`a`/`A`/`x`/`ctrl+n`/`r`
+      and the shortcuts `d`/`u`/`s`/`m`/`p`/`U` work there exactly as they do
+      on the root level (all inherited via `inherit: true`).
+- [ ] `f` (fuzzy filter) and `/` (tree find) are active **only** on the root
+      level (not inherited — a validator rule).
 
-- [ ] Trackings-Tab (Adapter) öffnen → flache Liste, neueste zuerst; Spalten
-      Marker (`⏱` nur bei laufenden), Path (gestylt `/a › b`), Task, Started,
-      Ended (leer bei laufend), Duration (`H:MM:SS`, rechtsbündig).
-- [ ] Auf der Tasks-Seite ein Tracking starten → die laufende Zeile zeigt
-      `⏱`, leeres Ended, und die Duration **tickt adaptiv** (frisch: alle
-      5 s; ab 1 min: 10 s; ab 10 min: 30 s; ab 1 h: 60 s — wie der native
-      Tab; nur diese Zeile wird gepatcht, kein Voll-Reload-Flackern).
-- [ ] Tracking stoppen → `⏱` weg, Ended gefüllt, Duration statisch; das
-      Ticken stoppt (kein Dauer-CPU mehr).
-- [ ] `zg` zykliert die Gruppierung (Day → Week → Month → Year → None) mit
-      Pro-Gruppe-Summe + Footer-Gesamtsumme.
-- [ ] `q` öffnet das Query-Menü; eine gespeicherte FilterExpr-Query
-      (z. B. `description ~ "<wort>"`) filtert die Liste; löschen zeigt
-      wieder alles.
+## TrackingAdapter (adapterized trackings tab) — A2a + A2b + A2c
 
-### A2b — Mutationen
+Prerequisite: `views/trackings.yaml` (from `docs/examples/views/`) copied to
+`~/.config/not_yet_done/views/`. The adapter tab runs next to the bespoke
+native trackings tab (until C1).
 
-- [ ] `d` auf einer Zeile → Confirm-Dialog; bestätigen → „Tracking deleted",
-      Zeile verschwindet (Zeiten bleiben in der DB erhalten).
-- [ ] War die gelöschte Zeile **aktiv**, verschwindet auch der Tracking-Marker
-      des zugehörigen Tasks auf dem Tasks-Tab (Cross-Tab via `TrackingChanged`).
-- [ ] **Gelöschte Zeilen ausgegraut:** Query so anpassen, dass gelöschte
-      Trackings im sichtbaren Satz liegen (z. B. `[deleted, =, true]` oder die
-      `deleted`-Klausel droppen) → die gelöschten Zeilen erscheinen **dimmed**
-      (Theme-`text_dim`). Greift auch in der **nach Tag gruppierten** flachen
-      Liste (`── Tag ──`-Header), nicht nur in der ungruppierten/Tree-Ansicht.
-- [ ] **`d` auf einer bereits gelöschten (ausgegrauten) Zeile** → **kein**
-      Confirm-Dialog, nur Notification „Already deleted" (kein Re-Delete).
-- [ ] `t` auf einer Zeile → startet/stoppt Tracking auf dem **Task** der Zeile;
-      bei deaktiviertem `allow_parallel_tracking` wird ein anderes laufendes
-      Tracking zuerst gestoppt (gleiche Politik wie Tasks-Tab).
-- [ ] `R` auf einer sichtbaren **nicht-gelöschten** Zeile → Notification
-      „Restore failed: … not deleted" (nur gelöschte Zeilen lassen sich
-      restoren — und die macht erst ein Query sichtbar, s. o.).
-- [ ] **`A` (restore all) ist im flachen Listen-View IMMER in der Action-Bar
-      sichtbar** — auch direkt nach dem Tab-Wechsel, ohne irgendwohin zu
-      drillen (statischer `on_container`-Hint, kein `parent:`-Shortcut mehr).
-- [ ] **`A` ist auf den aktiven Query gescoped** (nicht die ganze DB): Mit dem
-      Default-Query (zeigt nur nicht-gelöschte) findet `A` nichts →
-      Notification „No deleted trackings to restore" (kein Confirm-Popup, da
-      nichts zu tun ist). Wichtig: ein an anderer Stelle gelöschtes Tracking,
-      das der aktive Query **nicht** sichtbar macht, wird von `A` **nicht**
-      angefasst.
-- [ ] Query so anpassen, dass gelöschte Trackings im sichtbaren Satz liegen
-      (z. B. `deleted`-Klausel entfernen oder `[deleted, =, true]`), dann `A`
-      → **Confirm-Popup** „Restore N deleted tracking(s)? …" (nennt die Anzahl;
-      bei vorhandenen Nachfolgern zusätzlich „Purges M successor intervals —
-      irreversible"). `n`/Esc bricht ab ohne Änderung; `y` stellt **nur die
-      vom Query erfassten** wieder her und lädt die Liste neu.
-- [ ] `R` auf einer **gelöschten (ausgegrauten) Zeile** (die der Query
-      sichtbar macht) → **Confirm-Popup** mit derselben Purge-Warnung; `y`
-      führt aus, `n` bricht ab.
-- [ ] `x` öffnet das `:script`-Menü; ein Script gegen die selektierte Zeile
-      bekommt deren JSON (`{json_file}`) übergeben.
+### A2a — read path + live durations + grouping
 
-### A2c — Condensed (adapter-seitiges Condensing, `tracking:condensed-row`)
+- [ ] Open the trackings tab (the adapter one) → a flat list, newest first,
+      with the columns marker (`⏱` only while running), path (styled `/a › b`),
+      task, started, ended (empty while running) and duration (`H:MM:SS`,
+      right-aligned).
+- [ ] Start a tracking on the tasks side → the running row shows `⏱`, an empty
+      ended, and the duration **ticks adaptively** (fresh: every 5 s; from
+      1 min: 10 s; from 10 min: 30 s; from 1 h: 60 s — just like the native
+      tab; only that row is patched, no full-reload flicker).
+- [ ] Stop the tracking → `⏱` is gone, ended is filled in, the duration is
+      static; the ticking stops (no more continuous CPU).
+- [ ] `zg` cycles the grouping (day → week → month → year → none) with a
+      per-group sum plus a footer grand total.
+- [ ] `q` opens the query menu; a saved FilterExpr query (for example
+      `description ~ "<word>"`) filters the list; deleting it shows everything
+      again.
 
-- [ ] `v` schaltet auf den **Condensed**-Subtab; `a` schaltet zurück zur
-      flachen Liste.
-- [ ] Condensed zeigt pro **Tag** einen `── 2026-… ──`-Header mit Tages-Summe,
-      darunter **je Task eine Zeile** mit Pfad, Task-Name und der summierten
-      Dauer dieses Tasks **an diesem Tag**. Ein Task, der an zwei Tagen
-      getrackt wurde, erscheint zweimal (einmal pro Tag).
-- [ ] Zwei **verschiedene** Tasks mit gleichem Namen verschmelzen **nicht**
-      (innere Gruppierung keyt auf `task_id`, nicht aufs Label).
-- [ ] `zg` rotiert nur die **äußere** (Tag-)Ebene (Day→Week→Month→Year→None);
-      die Pro-Task-Aufschlüsselung bleibt. Auf `None` → eine Zeile pro Task
-      über den ganzen gefilterten Zeitraum.
-- [ ] Eine Condensed-Zeile ist **selektierbar**; `d`/`t` wirken auf das
-      repräsentative Tracking der Zeile (bekannte Grenze: Aktion trifft ein
-      einzelnes Intervall, nicht die ganze Task-Tagessumme).
-- [ ] Der Saved-Query-Filter (`q`) wirkt auch im Condensed-Subtab.
+### A2b — mutations
 
-### A2c — Tree (own/cumulated, M4 `tree_aggregate`)
+- [ ] `d` on a row → a confirm dialog; confirm → "Tracking deleted", the row
+      disappears (the times are kept in the database).
+- [ ] If the deleted row was **active**, the tracking marker of the associated
+      task disappears on the tasks tab too (cross-tab via `TrackingChanged`).
+- [ ] **Deleted rows dimmed:** adjust the query so deleted trackings fall into
+      the visible set (for example `[deleted, =, true]`, or drop the `deleted`
+      clause) → the deleted rows appear **dimmed** (the theme's `text_dim`).
+      That also applies in the flat list **grouped by day** (the `── day ──`
+      headers), not just in the ungrouped or tree view.
+- [ ] **`d` on an already deleted (dimmed) row** → **no** confirm dialog, just
+      the notification "Already deleted" (no re-delete).
+- [ ] `t` on a row → starts or stops tracking on the row's **task**; with
+      `allow_parallel_tracking` disabled another running tracking is stopped
+      first (the same policy as the tasks tab).
+- [ ] `R` on a visible **non-deleted** row → the notification "Restore failed:
+      … not deleted" (only deleted rows can be restored — and a query is what
+      makes those visible in the first place, see above).
+- [ ] **`A` (restore all) is ALWAYS visible in the action bar in the flat list
+      view** — right after switching to the tab as well, without drilling
+      anywhere (a static `on_container` hint, no `parent:` shortcut any more).
+- [ ] **`A` is scoped to the active query** (not the whole database): with the
+      default query (which shows only non-deleted ones) `A` finds nothing → the
+      notification "No deleted trackings to restore" (no confirm popup, since
+      there is nothing to do). Important: a tracking deleted elsewhere that the
+      active query does **not** make visible is **not** touched by `A`.
+- [ ] Adjust the query so deleted trackings fall into the visible set (for
+      example remove the `deleted` clause, or use `[deleted, =, true]`), then
+      `A` → a **confirm popup** "Restore N deleted tracking(s)? …" (it names
+      the count; where successors exist it adds "Purges M successor intervals —
+      irreversible"). `n`/Esc aborts without a change; `y` restores **only the
+      ones covered by the query** and reloads the list.
+- [ ] `R` on a **deleted (dimmed) row** (one the query makes visible) → a
+      **confirm popup** with the same purge warning; `y` runs it, `n` aborts.
+- [ ] `x` opens the `:script` menu; a script run against the selected row is
+      handed that row's JSON (`{json_file}`).
 
-- [ ] `T` (Shift+t) schaltet auf den **Tree**-Subtab; `a` schaltet zurück zur
-      flachen Liste. `t` (klein) bleibt toggle-tracking auf der Zeile — die
-      beiden kollidieren **nicht**.
-- [ ] Der Tree zeigt den **Task-Forest** (Tasks, nicht einzelne Intervalle);
-      nur Tasks mit getrackter Zeit **irgendwo im Teilbaum** erscheinen
-      (untracked Branches sind ausgeblendet, der Pfad zu getrackten Blättern
-      bleibt sichtbar).
-- [ ] Die `Duration`-Spalte zeigt zunächst die **kumulierte** Teilbaum-Summe
-      (Default `cumulated`). `zt` schaltet alle `tree_aggregate`-Spalten auf
-      die **eigene** Dauer des Tasks um (und zurück). (`zt` ist nur aktiv, weil
-      der Trackings-Adapter `supports_tree_aggregation` meldet — das
-      Capability-Gate. Ein `tree_aggregate:` in der YAML allein reicht nicht.)
-- [ ] Ein Eltern-Task ohne eigenes Tracking, aber mit getrackten Kindern, zeigt
-      cumulated > 0 (Eigenwert 0:00:00 nach `zt`).
-- [ ] Drill-in (Enter/→) klappt die Subtasks auf; auf jeder Tiefe gilt die
-      gleiche `tree_aggregate`-Spalte.
-- [ ] `⏱`-Marker erscheint auf Tasks mit laufendem Tracking; `t` startet/stoppt
-      Tracking auf dem selektierten Task (gemeinsame Exklusiv-Policy mit dem
-      Tasks-Tab) und der Tree lädt neu.
-- [ ] **Grenze:** kein Live-Tick im Tree (Dauern backen beim Load wie
-      Condensed); ein `r`-Reload aktualisiert sie.
+### A2c — condensed (adapter-side condensing, `tracking:condensed-row`)
+
+- [ ] `v` switches to the **condensed** subtab; `a` switches back to the flat
+      list.
+- [ ] Condensed shows a `── 2026-… ──` header per **day** with that day's sum,
+      and below it **one row per task** with the path, the task name and that
+      task's summed duration **on that day**. A task tracked on two days
+      appears twice (once per day).
+- [ ] Two **different** tasks with the same name do **not** merge (the inner
+      grouping keys on `task_id`, not on the label).
+- [ ] `zg` rotates only the **outer** (day) level (day→week→month→year→none);
+      the per-task breakdown stays. On `none` → one row per task across the
+      whole filtered period.
+- [ ] A condensed row is **selectable**; `d`/`t` act on the row's
+      representative tracking (a known limitation: the action hits a single
+      interval, not the task's whole daily sum).
+- [ ] The saved-query filter (`q`) applies in the condensed subtab too.
+
+### A2c — tree (own/cumulated, M4 `tree_aggregate`)
+
+- [ ] `T` (Shift+t) switches to the **tree** subtab; `a` switches back to the
+      flat list. Lowercase `t` remains toggle-tracking on the row — the two do
+      **not** collide.
+- [ ] The tree shows the **task forest** (tasks, not individual intervals);
+      only tasks with tracked time **somewhere in their subtree** appear
+      (untracked branches are hidden, the path down to tracked leaves stays
+      visible).
+- [ ] The `Duration` column initially shows the **cumulated** subtree sum
+      (default `cumulated`). `zt` switches all `tree_aggregate` columns to the
+      task's **own** duration (and back). (`zt` is only active because the
+      trackings adapter reports `supports_tree_aggregation` — the capability
+      gate. A `tree_aggregate:` in the YAML alone is not enough.)
+- [ ] A parent task without a tracking of its own but with tracked children
+      shows cumulated > 0 (own value 0:00:00 after `zt`).
+- [ ] Drilling in (Enter/→) expands the subtasks; the same `tree_aggregate`
+      column applies at every depth.
+- [ ] The `⏱` marker appears on tasks with a running tracking; `t` starts or
+      stops tracking on the selected task (sharing the exclusivity policy with
+      the tasks tab) and the tree reloads.
+- [ ] **Limitation:** no live tick in the tree (durations are baked at load
+      time, as in condensed); an `r` reload refreshes them.
 
 ## Saved-Query-Shortcut-Validierung (Content-Tabs)
 
