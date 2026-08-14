@@ -1,318 +1,322 @@
-# Plan — Stoat-Adapter (Chat-Anbindung)
+# Plan — Stoat adapter (chat integration)
 
-> Status: **Phase R + 0 + 1 + 2 + 2.1 + 3 + 4 erledigt** (Phase 4:
-> 2026-06-06, lokal ungepusht). Fundament, read-only Baum, Live-Layer
-> (Message-Events plus Reconnect), Tree-Ansicht mit Kategorien, **Write**
-> (send/edit/delete/react) und **strukturelle Live-Events** (Channel
-> create/rename/delete + Kategorie-CRUD) stehen. Offen: Unreact, MFA,
-> Server join/leave live. Siehe §8 für den Phasen-Status im Detail.
+> Status: **phases R + 0 + 1 + 2 + 2.1 + 3 + 4 done** (phase 4:
+> 2026-06-06, local, unpushed). The foundation, the read-only tree, the live
+> layer (message events plus reconnect), the tree view with categories, **write**
+> (send/edit/delete/react) and **structural live events** (channel
+> create/rename/delete + category CRUD) are in place. Open: unreact, MFA,
+> server join/leave live. See §8 for the phase status in detail.
 >
-> Test-Instanz: eine private Revolt-API-**0.13.7**-Instanz (Stoat-Frontend);
-> Domain + Account-Credentials liegen **außerhalb** des Repos
-> — kommen nie in Code/Tests/Fixtures
-> (Fixtures auf erfundenen Daten, siehe `feedback_no_real_data_in_repo`).
+> Test instance: a private Revolt API **0.13.7** instance (Stoat frontend);
+> the domain and the account credentials live **outside** the repo
+> — they never go into code, tests or fixtures
+> (fixtures use invented data, see `feedback_no_real_data_in_repo`).
 
-## 1. Kontext & Motivation
+## 1. Context and motivation
 
-Stoat ist ein Discord-/Slack-Alternative-Chat (Fork von Revolt, Rust-Backend).
-Wir wollen ihn als weiteren `ContentAdapter` einbinden — analog zu Jira, Taiga,
-Confluence, Postgres. Chat ist aber eine **fundamental andere Domäne** als die
-bisherigen (Issue-/Wiki-/DB-)Adapter, weil zwei Eigenschaften das bestehende
-Pull-/Request-Response-Modell brechen:
+Stoat is a Discord/Slack alternative chat (a fork of Revolt, Rust backend).
+We want to integrate it as another `ContentAdapter` — like Jira, Taiga,
+Confluence and Postgres. But chat is a **fundamentally different domain** than
+the previous (issue/wiki/DB) adapters, because two properties break the existing
+pull/request-response model:
 
-1. **Bootstrap ist push-only.** Es gibt **keinen** REST-Endpoint, der die Server
-   des Users auflistet. Die Server-/Channel-Mitgliedschaften kommen
-   ausschließlich über das WebSocket-`Ready`-Event.
-2. **Live-Updates sind push.** Neue Nachrichten, Edits, Deletes, Reactions
-   treffen als WS-Events ein und müssen out-of-band einen Redraw auslösen — das
-   tut bislang kein Adapter (alle _antworten_ nur auf User-Aktionen).
+1. **Bootstrap is push-only.** There is **no** REST endpoint that lists the
+   user's servers. The server and channel memberships arrive exclusively
+   through the WebSocket `Ready` event.
+2. **Live updates are push.** New messages, edits, deletes and reactions
+   arrive as WS events and have to trigger a redraw out-of-band — which no
+   adapter does so far (they all only _answer_ user actions).
 
-Diese beiden Punkte sind **verschiedene Concerns** und werden im Plan getrennt
-behandelt. Daraus ergibt sich ein sauberer Phasen-Schnitt: read-only zuerst,
-write später; Live-Layer additiv obendrauf.
+These two points are **separate concerns** and are treated separately in this
+plan. That yields a clean phase cut: read-only first, write later; the live
+layer additive on top.
 
-## 2. Verifizierte API-Fakten
+## 2. Verified API facts
 
-Alle folgenden Punkte sind gegen die echte Test-Instanz mit einem echten Login
-geprüft — inklusive der Write-Endpoints (in Phase 3 per `curl` gegen den eigenen
-`SavedMessages`-Channel verifiziert, statt in fremde Channels zu posten).
+All the points below were checked against the real test instance with a real
+login — including the write endpoints (verified in phase 3 via `curl` against our
+own `SavedMessages` channel, rather than posting into other people's channels).
 
 ### Discovery
 
-- `GET /api/` (unauthentifiziert) liefert die Server-Config:
+- `GET /api/` (unauthenticated) returns the server config:
   `{ revolt, features{captcha,email,invite_only,autumn,january,livekit}, ws, app, vapid }`.
-- Daraus self-discovern wir die WS-URL (`ws`) und die Datei-/Embed-Server
-  (`autumn`, `january`). Die Adapter-Config braucht damit nur die Basis-Domain.
-- Test-Instanz: `invite_only: true` (Registrierung gesperrt), `email: false`,
-  Captcha aus, `ws = wss://<instanz>/ws`.
+- From it we self-discover the WS URL (`ws`) and the file/embed servers
+  (`autumn`, `january`). The adapter config therefore only needs the base domain.
+- Test instance: `invite_only: true` (registration blocked), `email: false`,
+  captcha off, `ws = wss://<instance>/ws`.
 
 ### Auth
 
-- `POST /api/auth/session/login` mit `{email, password, friendly_name}`
+- `POST /api/auth/session/login` with `{email, password, friendly_name}`
   → `{ result:"Success", _id (session id), user_id, token, name }`.
-- Folge-Requests tragen Header **`X-Session-Token: <token>`**.
-- Test-Account hatte **keine MFA** — der Ticket-/MFA-Flow ist daher Risiko,
-  nicht abgedeckt (siehe §9).
-- Bot-Token (`X-Bot-Token`) existiert ebenfalls, ist aber **nicht** das Ziel
-  (User-Login gewünscht).
+- Follow-up requests carry the header **`X-Session-Token: <token>`**.
+- The test account had **no MFA** — the ticket/MFA flow is therefore a risk and
+  is not covered (see §9).
+- A bot token (`X-Bot-Token`) also exists, but it is **not** the target (a user
+  login is wanted).
 
-### Lesen (REST, geprüft)
+### Reading (REST, checked)
 
-- `GET /api/users/@me` → eigener User (`_id, username, discriminator, relations`).
-- `GET /api/users/dms` → Array aus `SavedMessages` / `Group` / `DirectMessage`
-  Channel-Objekten (mit `last_message_id`, `recipients`, `name` bei Groups).
-- `GET /api/channels/{id}/messages?limit=N` → Array von Messages
-  (`_id, channel, author, content, system?, …`). Pagination über
-  `before`/`after`/`sort` (Cursor = Message-ULID).
-- **Kein** Server-List-REST-Endpoint: `GET /servers/@me`, `/users/@me/servers`
-  → 404. `GET /servers/{id}` existiert (Einzelabruf).
+- `GET /api/users/@me` → our own user (`_id, username, discriminator, relations`).
+- `GET /api/users/dms` → an array of `SavedMessages` / `Group` / `DirectMessage`
+  channel objects (with `last_message_id`, `recipients`, and `name` for groups).
+- `GET /api/channels/{id}/messages?limit=N` → an array of messages
+  (`_id, channel, author, content, system?, …`). Pagination via
+  `before`/`after`/`sort` (the cursor is the message ULID).
+- **No** server-list REST endpoint: `GET /servers/@me`, `/users/@me/servers`
+  → 404. `GET /servers/{id}` exists (a single fetch).
 
-### Bootstrap (WebSocket, geprüft)
+### Bootstrap (WebSocket, checked)
 
-- Connect `wss://…/ws`, dann senden: `{"type":"Authenticate","token":"<token>"}`.
-- Server antwortet `{"type":"Authenticated"}`, danach **einmalig**
+- Connect to `wss://…/ws`, then send: `{"type":"Authenticate","token":"<token>"}`.
+- The server answers `{"type":"Authenticated"}`, then **once**
   `{"type":"Ready", users[], servers[], channels[], members[], emojis[],
 voice_states[], policy_changes[]}`.
-- `Ready` liefert **alles auf einen Schlag**: im Test 2 Server, 11 Channels
-  (Server-Channels **und** DM-/Group-Channels), 2 Users, 2 Members.
-- Server-Objekt: `_id, owner, name, channels[<id>], categories[], roles,
+- `Ready` delivers **everything in one go**: in the test 2 servers, 11 channels
+  (server channels **and** DM/group channels), 2 users, 2 members.
+- Server object: `_id, owner, name, channels[<id>], categories[], roles,
 default_permissions`.
 - TextChannel: `{channel_type:"TextChannel", _id, server, name,
 last_message_id, default_permissions}`.
-- Message-`_id` ist eine **ULID** → Erstell-Zeitstempel ist eingebettet (kein
-  separates Timestamp-Feld nötig).
+- The message `_id` is a **ULID** → the creation timestamp is embedded (no
+  separate timestamp field needed).
 
-### Schreiben (REST, ✅ in Phase 3 per `curl` verifiziert)
+### Writing (REST, ✅ verified in phase 3 via `curl`)
 
-Gegen den `SavedMessages`-Self-Channel der Test-Instanz geprüft (stört
-niemanden; Probe-Messages danach gelöscht):
+Checked against the `SavedMessages` self-channel of the test instance (it
+bothers nobody; the probe messages were deleted afterwards):
 
-- ✅ `POST /api/channels/{id}/messages` mit `{content}` → neue Message
-  (200, liefert `_id`). `nonce` ist **optional** (nur `{content}` reicht).
-- ✅ `PATCH /api/channels/{id}/messages/{msg}` `{content}` → Edit
-  (200, `edited`-Timestamp gesetzt).
-- ✅ `DELETE /api/channels/{id}/messages/{msg}` → Delete (204).
-- ✅ `PUT /api/channels/{id}/messages/{msg}/reactions/{emoji}` → Reaction
-  (204; `emoji` als percent-encodetes Pfad-Segment). Unreact
-  (`DELETE …/reactions/{emoji}`) ebenfalls 204, aber noch nicht verdrahtet.
+- ✅ `POST /api/channels/{id}/messages` with `{content}` → a new message
+  (200, returns `_id`). `nonce` is **optional** (just `{content}` is enough).
+- ✅ `PATCH /api/channels/{id}/messages/{msg}` `{content}` → edit
+  (200, the `edited` timestamp gets set).
+- ✅ `DELETE /api/channels/{id}/messages/{msg}` → delete (204).
+- ✅ `PUT /api/channels/{id}/messages/{msg}/reactions/{emoji}` → reaction
+  (204; `emoji` as a percent-encoded path segment). Unreact
+  (`DELETE …/reactions/{emoji}`) is also 204, but not wired up yet.
 
-### Laufende WS-Events (für Live-Layer, Auswahl)
+### Ongoing WS events (for the live layer, a selection)
 
 `Message`, `MessageUpdate`, `MessageDelete`, `MessageReact`/`MessageUnreact`,
 `ChannelCreate`/`ChannelUpdate`/`ChannelDelete`, `ServerUpdate`,
-`ServerMemberJoin/Leave`. Keep-Alive: Client sendet periodisch
-`{"type":"Ping","data":<n>}`, Server antwortet `Pong`.
+`ServerMemberJoin/Leave`. Keep-alive: the client periodically sends
+`{"type":"Ping","data":<n>}`, the server answers `Pong`.
 
-## 3. Architektur-Überblick
+## 3. Architecture overview
 
 ```mermaid
 flowchart LR
     subgraph adapter["not-yet-done-stoat-adapter"]
-        REST["StoatClient (REST)\nLogin · History · Send/Edit"]
-        GW["StoatGateway\n(Background-Tokio-Task)\nWS: Authenticate→Ready→Events,\nHeartbeat, Reconnect"]
+        REST["StoatClient (REST)\nlogin · history · send/edit"]
+        GW["StoatGateway\n(background tokio task)\nWS: Authenticate→Ready→events,\nheartbeat, reconnect"]
         ST["StoatState\nArc&lt;RwLock&gt;\nservers · channels ·\nmembers · users"]
-        GW -->|"Ready + Events"| ST
+        GW -->|"Ready + events"| ST
         GW -->|"Invalidation(NodeRef)"| INV(("invalidation\nchannel"))
     end
 
     subgraph tui["not-yet-done-tui"]
-        FWD["Forwarder-Task\n(je Adapter, beim Erzeugen gespawnt)"]
+        FWD["forwarder task\n(one per adapter, spawned on creation)"]
         LOADTX["load_tx\nmpsc&lt;LoadMsg&gt;"]
-        LOOP["Event-Loop (select!, 1b)"]
+        LOOP["event loop (select!, 1b)"]
         VIEW["ContentView (dirty-gated)"]
     end
 
-    ST -->|"Node::list(): Baum-Struktur\nsynchron, kein Netz-await"| VIEW
-    REST -->|"Message-History\n(pull, paginiert)"| VIEW
+    ST -->|"Node::list(): tree structure\nsynchronous, no network await"| VIEW
+    REST -->|"message history\n(pull, paginated)"| VIEW
     INV --> FWD
     FWD -->|"LoadMsg::AdapterInvalidation"| LOADTX
     LOADTX --> LOOP
-    LOOP -->|"betroffene View dirty + ggf. reload"| VIEW
+    LOOP -->|"mark the affected view dirty + reload if needed"| VIEW
 ```
 
-Bausteine:
+Building blocks:
 
-1. **`StoatClient` (REST).** Zustandsloser HTTP-Client (reqwest), trägt
-   `X-Session-Token`. Verantwortlich für Login, Message-History (paginiert),
-   Einzelabrufe, später Write. Passt 1:1 ins bestehende Pull-Modell.
-2. **`StoatGateway` (Background-Task).** Die **einzige** Stelle mit WS-Logik.
-   Hält die Verbindung (`Authenticate` → `Ready` → Event-Stream), sendet
-   Heartbeat-Pings, reconnectet bei Disconnect (Backoff), spiegelt
+1. **`StoatClient` (REST).** A stateless HTTP client (reqwest) that carries the
+   `X-Session-Token`. Responsible for login, message history (paginated),
+   single fetches, and later writes. Fits 1:1 into the existing pull model.
+2. **`StoatGateway` (background task).** The **only** place with WS logic.
+   It holds the connection (`Authenticate` → `Ready` → event stream), sends
+   heartbeat pings, reconnects on disconnect (with backoff) and mirrors the
    `AdapterStatus` (`Connecting`/`Ready`/`Failed`).
-3. **`StoatState` (`Arc<RwLock<…>>`).** In-Memory-Source-of-Truth für die
-   Baum-Struktur (Server, Channels, Members, Users), befüllt aus `Ready` und
-   laufend aus Events aktualisiert. **Kein SQLite-Cache für Chat-State**
-   (hochvolatil; persistentes Cachen bringt hier wenig — bewusst abweichend von
-   den anderen Adaptern, mit User abgestimmt). SQLite nur für das Session-Token
-   (wie üblich) und View-Sort-State.
-4. **Invalidation-Push (generisch, neu).** Neue Trait-Methode auf
-   `ContentAdapter` mit No-op-Default (Open/Closed — alle anderen Adapter
-   unverändert). Das Gateway pusht bei relevanten Events einen
-   `Invalidation`-Wert; ein Forwarder-Task in der TUI leitet ihn als neue
-   `LoadMsg`-Variante in den **bestehenden** `load_tx`-Kanal.
+3. **`StoatState` (`Arc<RwLock<…>>`).** The in-memory source of truth for the
+   tree structure (servers, channels, members, users), filled from `Ready` and
+   updated continuously from events. **No SQLite cache for chat state**
+   (highly volatile; persistent caching buys little here — a deliberate deviation
+   from the other adapters, agreed with the user). SQLite only for the session
+   token (as usual) and the view sort state.
+4. **Invalidation push (generic, new).** A new trait method on
+   `ContentAdapter` with a no-op default (open/closed — all other adapters stay
+   untouched). On relevant events the gateway pushes an
+   `Invalidation` value; a forwarder task in the TUI feeds it as a new
+   `LoadMsg` variant into the **existing** `load_tx` channel.
 
-### Schlüssel-Erkenntnis: der Push-Pfad existiert fast schon
+### Key insight: the push path almost already exists
 
-- Es gibt bereits `subscribe_status() -> watch::Receiver<AdapterStatus>` als
-  Adapter→TUI-Push-Präzedenz (`not-yet-done-content/src/lib.rs:722`).
-- Es gibt bereits `load_tx: mpsc::UnboundedSender<LoadMsg>`, über den async-Tasks
-  Ergebnisse in den Loop zurückmelden, gedraint von `App::poll_load()`
+- There is already `subscribe_status() -> watch::Receiver<AdapterStatus>` as an
+  adapter→TUI push precedent (`not-yet-done-content/src/lib.rs:722`).
+- There is already `load_tx: mpsc::UnboundedSender<LoadMsg>`, through which async
+  tasks report results back into the loop, drained by `App::poll_load()`
   (`not-yet-done-tui/src/app/mod.rs:50` ff., `main.rs:165`).
-- **Live-Updates sind dieselbe Mechanik, generalisiert:** statt „Status hat sich
-  geändert" → „Node X hat sich geändert". Das Gateway speist `load_tx`; der
-  1b-`select!`-Loop wacht beim Eintreffen sofort auf. Kein neuer Kanal nötig.
+- **Live updates are the same mechanism, generalized:** instead of "the status
+  changed" → "node X changed". The gateway feeds `load_tx`; the
+  1b `select!` loop wakes up immediately on arrival. No new channel needed.
 
-## 4. Prerequisite — Render-Loop 1b (eigene, vorgelagerte Arbeit)
+## 4. Prerequisite — render loop 1b (its own, preceding work)
 
-Begründung: Der Live-Layer (Phase 2) braucht einen Loop, der **out-of-band**
-auf ein Push-Signal aufwacht. Der aktuelle 1a-Loop ist ein 200 ms-Poll-Loop
-(`main.rs:149` ff.) — eine eintreffende Invalidation würde mit bis zu 200 ms
-Latenz und nur über das Poll-Intervall sichtbar. 1b ist laut ADR ohnehin der
-geplante Folgeschritt und „eine echte Teilmenge — kein Wegwerf-Code".
+Rationale: the live layer (phase 2) needs a loop that wakes up **out-of-band**
+on a push signal. The current 1a loop is a 200 ms poll loop
+(`main.rs:149` ff.) — an arriving invalidation would become visible with up to
+200 ms of latency, and only through the poll interval. According to the ADR, 1b
+is the planned next step anyway and "a genuine subset — not throwaway code".
 
-Schritte (Details/Heikles siehe `docs/decisions/0001-render-loop-dirty-gating.md`,
-§Konsequenzen):
+Steps (details and the tricky parts in
+`docs/decisions/0001-render-loop-dirty-gating.md`, §Consequences):
 
-- **R1.** `tokio::select!`-Loop über: crossterm-`EventStream` (statt
-  `event::poll`), `load_rx`, `commit_rx` und einen bedingten 1-Hz-`interval`
-  (nur armiert, solange `has_live_banner()` oder ein aktives Tracking lebt).
-- **R2.** Koexistenz mit Kitty-Protokoll-Enable/Disable und dem **synchronen
-  Editor-Suspend/Restore** absichern — der `EventStream` muss um die
-  Editor-Suspendierung herum sauber pausieren/fortsetzen. (ADR markiert das als
-  Hauptrisiko von 1b.)
-- **R3.** Die externen Poller ohne Kanal (`poll_live_editor`,
-  `poll_editor_close`, `poll_detached_script`) über den bedingten Low-Freq-
-  `interval` bedienen, der nur läuft, solange ein Editor/Script pending ist.
-- **R4.** ADR `0001` auf „Variante 1b umgesetzt" fortschreiben (Konsequenzen,
-  verbleibende Risiken). Idle = geparkt, ~0 % CPU; Async-Display-Latenz ohne
-  200 ms-Deckel.
-- **R5.** Regressions-Smoke: Tastendruck-Latenz, Busy-Banner-Sekundentakt,
-  Editor-Rückkehr, async-Reload — alles wie vorher, plus Idle-CPU prüfen.
+- **R1.** A `tokio::select!` loop over: the crossterm `EventStream` (instead of
+  `event::poll`), `load_rx`, `commit_rx` and a conditional 1 Hz `interval`
+  (armed only while `has_live_banner()` or an active tracking is alive).
+- **R2.** Secure the coexistence with the Kitty protocol enable/disable and the
+  **synchronous editor suspend/restore** — the `EventStream` has to pause and
+  resume cleanly around the editor suspension. (The ADR marks this as the main
+  risk of 1b.)
+- **R3.** Serve the external pollers without a channel (`poll_live_editor`,
+  `poll_editor_close`, `poll_detached_script`) through the conditional low-frequency
+  `interval`, which only runs while an editor or script is pending.
+- **R4.** Update ADR `0001` to "variant 1b implemented" (consequences,
+  remaining risks). Idle = parked, ~0 % CPU; async display latency without the
+  200 ms ceiling.
+- **R5.** Regression smoke: key-press latency, the busy banner's one-second beat,
+  returning from the editor, async reload — all as before, plus a check of the
+  idle CPU.
 
-## 5. Generischer Invalidation-Mechanismus (in `not-yet-done-content`)
+## 5. The generic invalidation mechanism (in `not-yet-done-content`)
 
-Im Anschluss an 1b, vor/mit Phase 2. Bewusst **adapterneutral** gehalten.
+Following 1b, before or together with phase 2. Deliberately kept
+**adapter-neutral**.
 
-- **I1.** Neuer Typ in `not-yet-done-content/src/lib.rs`:
+- **I1.** A new type in `not-yet-done-content/src/lib.rs`:
 
   ```rust
-  /// Out-of-band-Signal eines Adapters, dass sich Inhalte geändert haben
-  /// und betroffene Views neu geladen/neu gezeichnet werden sollten.
+  /// Out-of-band signal from an adapter that content has changed and
+  /// the affected views should be reloaded / redrawn.
   #[derive(Clone, Debug)]
   pub enum Invalidation {
-      /// Ein konkreter Knoten (und seine offene Kinderliste) ist stale.
+      /// One concrete node (and its open child list) is stale.
       Node(NodeRef),
-      /// Eine ganze Subtree-Wurzel ist stale (z. B. Channel-Liste änderte sich).
+      /// A whole subtree root is stale (e.g. the channel list changed).
       Subtree(NodeRef),
-      /// Adapter-weit alles stale (Reconnect, Resync nach Ready).
+      /// Everything in the adapter is stale (reconnect, resync after Ready).
       All,
   }
   ```
 
-- **I2.** Neue Trait-Methode auf `ContentAdapter`, **Default = leerer Stream**
-  (Open/Closed; kein bestehender Adapter muss angefasst werden):
+- **I2.** A new trait method on `ContentAdapter`, **default = an empty stream**
+  (open/closed; no existing adapter has to be touched):
 
   ```rust
-  /// Abonniere out-of-band Invalidations. Default: ein Receiver, dessen
-  /// Sender für die Prozesslaufzeit lebt und nie sendet (Pull-only-Adapter).
+  /// Subscribe to out-of-band invalidations. Default: a receiver whose
+  /// sender lives for the process lifetime and never sends (pull-only adapters).
   fn subscribe_invalidations(&self) -> tokio::sync::mpsc::UnboundedReceiver<Invalidation> {
-      // analog zum subscribe_status-Default: statischer, nie-sendender Kanal
+      // like the subscribe_status default: a static channel that never sends
   }
   ```
 
-- **I3.** TUI: neue `LoadMsg::AdapterInvalidation { instance_id: String,
-inv: Invalidation }` (`app/mod.rs`). Beim Erzeugen jedes Adapters einen
-  Forwarder-Task spawnen, der `subscribe_invalidations()` in `load_tx`
-  umpumpt (mit `instance_id` getaggt).
-- **I4.** `App::poll_load()`: neue Variante behandeln — betroffene
-  Content-View(s) dieses `instance_id` ermitteln und (a) als dirty markieren
-  und/oder (b) gezielt `spawn_content_load`/`reload` der betroffenen NodeRef
-  triggern. `Invalidation::All` → alle Views dieses Adapters.
-- **I5.** Tests: Default-Receiver blockt ewig ohne Sender-Drop-Error;
-  Forwarder-Task taggt korrekt; `poll_load` markiert die richtige View dirty.
+- **I3.** TUI: a new `LoadMsg::AdapterInvalidation { instance_id: String,
+inv: Invalidation }` (`app/mod.rs`). When each adapter is created, spawn a
+  forwarder task that pumps `subscribe_invalidations()` into `load_tx`
+  (tagged with the `instance_id`).
+- **I4.** `App::poll_load()`: handle the new variant — determine the affected
+  content view(s) of that `instance_id` and (a) mark them dirty
+  and/or (b) trigger a targeted `spawn_content_load`/`reload` of the affected
+  NodeRef. `Invalidation::All` → all views of that adapter.
+- **I5.** Tests: the default receiver blocks forever without a sender-drop error;
+  the forwarder task tags correctly; `poll_load` marks the right view dirty.
 
-## 6. Crate-Layout & Node-Tree-Mapping
+## 6. Crate layout and node-tree mapping
 
-Neues Crate `not-yet-done-stoat-adapter`, registriert in `Cargo.toml`
-(workspace members) und in `build_adapter_factories()`
-(`not-yet-done-tui/src/main.rs:112`), Key `"stoat"`. Aufbau analog Taiga/
-Confluence:
+A new crate `not-yet-done-stoat-adapter`, registered in `Cargo.toml`
+(workspace members) and in `build_adapter_factories()`
+(`not-yet-done-tui/src/main.rs:112`) under the key `"stoat"`. Structured like
+Taiga/Confluence:
 
 ```
 not-yet-done-stoat-adapter/src/
 ├── lib.rs                 # pub use adapter::{StoatAdapter, StoatAdapterFactory}
-├── config.rs              # YAML-Config (url/name + AuthSpec)
+├── config.rs              # YAML config (url/name + AuthSpec)
 ├── client/                # REST
 │   ├── mod.rs             # StoatClient, X-Session-Token
 │   ├── auth.rs            # POST /auth/session/login
-│   ├── discovery.rs       # GET /api/ → ws-url, autumn, january
+│   ├── discovery.rs       # GET /api/ → ws url, autumn, january
 │   ├── messages.rs        # GET/POST/PATCH/DELETE …/messages
 │   └── users.rs           # GET /users/@me, /users/dms, /users/{id}
 ├── gateway/               # WS
-│   ├── mod.rs             # StoatGateway (Connect, Ping, Reconnect)
-│   ├── protocol.rs        # Authenticate/Ready/Event-(De)Serialisierung
-│   └── state.rs           # StoatState (Arc<RwLock>), Event-Apply
-├── db.rs / entity/ / auth_session_store.rs   # nur Session-Token + View-Sort
+│   ├── mod.rs             # StoatGateway (connect, ping, reconnect)
+│   ├── protocol.rs        # Authenticate/Ready/event (de)serialization
+│   └── state.rs           # StoatState (Arc<RwLock>), event apply
+├── db.rs / entity/ / auth_session_store.rs   # only the session token + view sort
 └── adapter/
     ├── mod.rs             # StoatAdapter impl ContentAdapter
     ├── factory.rs         # StoatAdapterFactory impl AdapterFactory
     ├── auth_bridge.rs     # AuthOrchestrator ↔ StoatClient
-    ├── types.rs           # NodeType-Factories
-    ├── root.rs            # StoatRoot: Server + DMs
-    ├── server.rs          # StoatServerNode: Channels (nach categories)
-    ├── channel.rs         # StoatChannelNode: Messages (paginiert)
-    └── message/           # StoatMessageNode (+ Phase 3: send/edit/react)
+    ├── types.rs           # NodeType factories
+    ├── root.rs            # StoatRoot: servers + DMs
+    ├── server.rs          # StoatServerNode: channels (by categories)
+    ├── channel.rs         # StoatChannelNode: messages (paginated)
+    └── message/           # StoatMessageNode (+ phase 3: send/edit/react)
 ```
 
-Node-Tree:
+Node tree:
 
-| Ebene | Node     | `node_type`     | Kinder                               | Quelle                      |
-| ----- | -------- | --------------- | ------------------------------------ | --------------------------- |
-| 0     | Root     | —               | Server-Nodes + DMs/Groups            | `StoatState` (aus Ready)    |
-| 1     | Server   | `stoat:server`  | Channels (sortiert via `categories`) | `StoatState`                |
-| 1     | DM/Group | `stoat:channel` | Messages                             | `StoatState` + `/users/dms` |
-| 2     | Channel  | `stoat:channel` | Messages                             | REST `…/messages` (pull)    |
-| 3     | Message  | `stoat:message` | (P3: Reactions/Replies)              | REST/State                  |
+| Level | Node     | `node_type`     | Children                           | Source                      |
+| ----- | -------- | --------------- | ---------------------------------- | --------------------------- |
+| 0     | Root     | —               | server nodes + DMs/groups          | `StoatState` (from Ready)   |
+| 1     | Server   | `stoat:server`  | channels (sorted via `categories`) | `StoatState`                |
+| 1     | DM/Group | `stoat:channel` | messages                           | `StoatState` + `/users/dms` |
+| 2     | Channel  | `stoat:channel` | messages                           | REST `…/messages` (pull)    |
+| 3     | Message  | `stoat:message` | (P3: reactions/replies)            | REST/state                  |
 
 Details:
 
-- **Baum-Struktur (Ebene 0–2-Header) liest synchron aus `StoatState`** — kein
-  Netz-await in `list()` für die Struktur.
-- **Message-History (Ebene 2→3) ist REST-Pull mit Cursor-Pagination** (mappt auf
-  `ListParams`/Cursor — passt zum geplanten `project_cursor_pagination_plan`).
-  Konvention: neueste unten; Rückwärts-Scroll lädt ältere via `before=<ulid>`.
-- **Message-Content** = `content` (Markdown-nah; `syntax: "markdown"`).
-  Metadaten: Autor (über `StoatState.users` aufgelöst, Fallback
-  `GET /users/{id}`), Zeitstempel aus der ULID, `edited`.
-- **Voice-Channels** werden gelistet, aber als nicht-betretbar markiert
-  (kein Read-Inhalt) — LiveKit ist out-of-scope.
+- **The tree structure (the level 0–2 headers) is read synchronously from
+  `StoatState`** — no network await in `list()` for the structure.
+- **Message history (level 2→3) is a REST pull with cursor pagination** (it maps
+  onto `ListParams`/cursor — fitting the planned `project_cursor_pagination_plan`).
+  Convention: newest at the bottom; scrolling backwards loads older ones via
+  `before=<ulid>`.
+- **Message content** = `content` (close to Markdown; `syntax: "markdown"`).
+  Metadata: the author (resolved through `StoatState.users`, falling back to
+  `GET /users/{id}`), the timestamp from the ULID, `edited`.
+- **Voice channels** are listed, but marked as not enterable
+  (no readable content) — LiveKit is out of scope.
 
-## 7. Auth-Integration
+## 7. Auth integration
 
-Reuse des bestehenden `AuthOrchestrator` + `AuthBridge`-Musters (wie Taiga),
-**kein neuer Mechanismus nötig**:
+Reuse of the existing `AuthOrchestrator` + `AuthBridge` pattern (as in Taiga),
+**no new mechanism needed**:
 
-- `AuthMechanism::PasswordLogin`. ⚠ **Korrektur (Phase 0):** die Feldnamen sind
-  **nicht** frei wählbar — `AuthSpec::validate()` erzwingt für `PasswordLogin`
-  exakt `username` + `password`. Stoat loggt sich per E-Mail ein, deshalb trägt
-  das `username`-Feld die **E-Mail-Adresse**. Die Login-Closure liest
-  `creds["username"]` als E-Mail, baut den Body
-  `{email, password, friendly_name:"not-yet-done"}` und gibt den `token` als
-  Session-Blob zurück. (Alternativ ließe sich `PasswordLogin` in
-  `not-yet-done-content` um ein `email`-Feld erweitern — bewusst nicht getan,
-  da das den generischen Auth-Vertrag anfasst; mit User abzustimmen.)
-- `SessionCachePolicy::UntilRejected`: Token im SQL-Session-Store persistiert
-  (nur das Token, **nie** das Passwort), bei 401/403 → Re-Login.
-- `AuthBridge::get_client()` validiert Token gegen `GET /users/@me`; bei 401
-  Cache leeren + `ensure_session` erneut.
-- ⚠ **MFA**: Falls der Login statt `Success` einen MFA-Ticket-Response liefert,
-  ist das in Phase 0 noch nicht abgedeckt → als `Failed{reason}` melden und in
-  §9 als Folgearbeit. (Test-Account: keine MFA.)
+- `AuthMechanism::PasswordLogin`. ⚠ **Correction (phase 0):** the field names are
+  **not** freely choosable — `AuthSpec::validate()` enforces exactly
+  `username` + `password` for `PasswordLogin`. Stoat logs in by e-mail, so the
+  `username` field carries the **e-mail address**. The login closure reads
+  `creds["username"]` as the e-mail, builds the body
+  `{email, password, friendly_name:"not-yet-done"}` and returns the `token` as
+  the session blob. (Alternatively `PasswordLogin` in
+  `not-yet-done-content` could be extended by an `email` field — deliberately not
+  done, since that would touch the generic auth contract; to be agreed with the
+  user.)
+- `SessionCachePolicy::UntilRejected`: the token is persisted in the SQL session
+  store (only the token, **never** the password); on 401/403 → re-login.
+- `AuthBridge::get_client()` validates the token against `GET /users/@me`; on a
+  401 it clears the cache and runs `ensure_session` again.
+- ⚠ **MFA**: if the login returns an MFA ticket response instead of `Success`,
+  that is not covered in phase 0 → report it as `Failed{reason}` and treat it in
+  §9 as follow-up work. (Test account: no MFA.)
 
-Beispiel-Config (`docs/examples/views/stoat-adapter.yaml`):
+Example config (`docs/examples/views/stoat-adapter.yaml`):
 
 ```yaml
-url: https://chat.example.org # Basis; /api & /ws via GET /api/ self-discovered
+url: https://chat.example.org # base; /api and /ws self-discovered via GET /api/
 name: chat
 
 auth:
@@ -320,13 +324,13 @@ auth:
   session_cache:
     kind: until-rejected
   bindings:
-    - field: username # mechanism-fixer Feldname; trägt die LOGIN-E-MAIL
+    - field: username # field name fixed by the mechanism; carries the LOGIN E-MAIL
       provider: { type: prompt }
     - field: password
       provider: { type: prompt }
 ```
 
-View-Config (`docs/examples/views/stoat.yaml`):
+View config (`docs/examples/views/stoat.yaml`):
 
 ```yaml
 tab:
@@ -372,261 +376,260 @@ views:
     # shortcuts: { i: send_message, e: edit_message }
 ```
 
-## 8. Phasen-Schnitt
+## 8. Phase cut
 
-> Reihenfolge fix: **R vor allem anderen** (User-Entscheidung). Read vor Write.
+> The order is fixed: **R before everything else** (the user's decision). Read
+> before write.
 
-- **Phase R — Render-Loop 1b** (§4). Vorbedingung für Live. Eigenständig
-  mergebar; Nutzen auch ohne Stoat (echte 0-%-Idle, geringere Latenz).
-- **Phase 0 — Fundament. ✅ ERLEDIGT 2026-06-04.** Crate
-  `not-yet-done-stoat-adapter` (Workspace-Member + Factory-Registrierung Key
-  `"stoat"`), `StoatClient` (REST: Login, Discovery, `/users/@me`-Validierung),
-  `StoatGateway` (WS: Connect → Authenticate → Ready einsammeln, Heartbeat-Ping,
-  Reconnect mit Backoff), `StoatState` (In-Memory, aus `Ready`). `AdapterStatus`
-  vereinheitlicht über **einen** adaptereigenen `watch`-Kanal: Login-Phase aus
-  dem Auth-Orchestrator geforwardet (dessen `Ready` wird unterdrückt), Socket-
-  Phase vom Gateway (`Connecting`/`Ready`/`Failed`) — so spiegelt das Banner die
-  Realität Ende zu Ende. `root()` startet den Gateway-Bootstrap im Hintergrund
-  (nicht-blockierend) und liefert einen **leeren** Baum. 10 Unit-Tests
-  (Protokoll-(De)Serialisierung auf erfundenen Daten, `StoatState`-Apply,
-  Session-Store-Roundtrip, Config-Parsing). Referenz-Configs:
-  `docs/examples/views/stoat-adapter.yaml` + `stoat.yaml`.
-- **Phase 1 — Read-only Baum (Pull). ✅ ERLEDIGT 2026-06-04.**
-  `StoatRoot` (listet Server **und** DM-/Group-Channels — je nach
-  Top-Level-`node_type` der View), `StoatServerNode` (Channels in
-  `server.channels[]`-Reihenfolge; Voice als `has_children: false`
-  markiert), `StoatChannelNode` (Messages via REST
-  `GET …/messages?limit&sort=Latest&include_users=true`, neueste unten),
-  `StoatMessageNode` (Leaf mit `content()` für Preview). Struktur synchron
-  aus `StoatState`, kein Netz-`await`. **Autor-Auflösung** über das
-  `include_users`-Array der Listen-Antwort (Fallback: Roh-ID).
-  **Zeitstempel** aus der Message-ULID dekodiert (`%Y-%m-%d %H:%M` UTC).
-  **Komposit-IDs** `<channel>/msg/<ulid>` lassen `get_by_id` eine einzelne
-  Message für den Preview-Pfad nachladen (`GET …/messages/{id}`) — analog
-  zu Confluence-Komposit-IDs. **Stoat ist hier schon nutzbar (browsen +
-  lesen).** ⚠ **Bewusste Phase-1-Grenze:** nur die _neueste_ Seite
-  (`DEFAULT_MESSAGE_LIMIT = 50`); Backfill älterer Messages via
-  `before=<ulid>` ist in `list_messages` als Parameter vorhanden, aber
-  noch nicht in die TUI verdrahtet (wartet auf
-  `project_cursor_pagination_plan`). Kein Live-Push — nach Connect
-  manuelles `r`-Reload (Live = Phase 2). 12 weitere Unit-Tests (Messages-
-  Parsing/ULID-Dekodierung, Node-Listing-Reihenfolge, Komposit-IDs).
-- **Phase 2 — Live-Layer. ✅ ERLEDIGT 2026-06-04.** Generischer
-  Invalidation-Mechanismus (§5): neuer `Invalidation`-Enum +
-  `ContentAdapter::subscribe_invalidations()` (No-op-Default) in
-  `not-yet-done-content`; TUI-Forwarder (`spawn_content_invalidation_watcher`,
-  je View, neben dem Status-Watcher) pumpt in den **bestehenden**
-  `load_tx`-Kanal via `LoadMsg::AdapterInvalidation`. Das Gateway pusht bei
-  `Message`/`MessageUpdate`/`MessageDelete`/`MessageReact`/`MessageUnreact`
-  ein `Invalidation::Node{id: <channel>}`, bei jedem `Ready` (erster
-  Connect **und** Reconnect-Resync) ein `Invalidation::All`. `poll_load`
-  lädt die betroffenen Panes auf ihrem **aktuellen Level** neu (`All` →
-  alle Panes der View; `Node{id}` → nur Panes, deren `parent_node_id`
-  dieser Channel ist — eine Nachricht in einem nicht offenen Channel
-  kostet nichts). **Erster Ready pusht All ⇒ der initial leere Baum
-  füllt sich jetzt ohne manuelles `r`.**
-  - ⚠ **Abweichung ggü. §5-Skizze:** `subscribe_invalidations` liefert
-    einen **`broadcast::Receiver`**, nicht `mpsc` — Invalidations sind
-    diskrete _Events_ (kein Latest-Value wie `watch`, das würde
-    Zwischenstände schlucken) und **eine** Adapter-Instanz kann **mehrere**
-    Views speisen, die je unabhängig abonnieren (mpsc = Single-Consumer,
-    geht nicht). Bei `Lagged` (Frontend zu langsam) resynct der Watcher
-    konservativ mit `All` — kein Update geht verloren, nur vergröbert.
-    Payload ist eine adapter-interne Node-ID (kein app-weiter `NodeRef`):
-    der Watcher ist schon an eine View gebunden, mehr als „welches Level"
-    braucht er nicht.
-  - ⚠ **Phase-2-Grenze (in Phase 4 aufgelöst):** **strukturelle**
-    Live-Events waren in Phase 2 noch nicht verdrahtet — ein neu
-    angelegter/umbenannter Channel erschien erst nach Reconnect. Seit
-    Phase 4 (siehe unten) sind Channel-CRUD + Kategorie-CRUD live; nur
-    Server join/leave bleibt Reconnect.
-  - Reload setzt den Cursor des Panes auf das Standardverhalten zurück
-    (kein „an der Leseposition bleiben") — für Phase 2 akzeptiert.
-- **Phase 2.1 — Kategorien + Tree-Ansicht. ✅ ERLEDIGT 2026-06-05.** Die
-  flache Drill-Down-View wurde durch eine **Tree-View** ersetzt:
-  `Server → (Kategorie | uncategorized Channel) → Channel → (Drill in
-Messages)`. Wire-Shape `Server.categories: [{ id, title, channels[] }]`
-  per WS-`Ready` an Stoat **0.13.7** curl-verifiziert (`id` ist plain,
-  nicht immer ULID).
-  - `protocol.rs`: `Category`-Struct + `Server.categories` (`#[serde(default)]`
-    → fehlt das Feld, sind alle Channels uncategorized, kein Bruch).
-  - `StoatServerNode` ist jetzt multi-typ: `list(stoat:category)` →
-    Kategorien (Komposit-ID `<server>/cat/<catid>`, wie `<channel>/msg/<ulid>`),
-    `list(stoat:channel)` → **nur uncategorized** Channels (die in keiner
-    Kategorie stehen). Neuer `StoatCategoryNode` listet die Channels einer
-    Kategorie. `get_by_id` dekodiert das Kategorie-Komposit.
-  - Gemeinsamer `channel_summary`-Helper, damit ein Channel unter Server
-    und unter Kategorie identisch rendert.
-  - View-Config: heterogenes Server-Level (zwei tree-Branches: `stoat:category`
-    - `stoat:channel`), `stoat:channel` auf zwei Tiefen (Duplikat-node_type-
-      Regel ist pro Level/Geschwister, daher ok), `stoat:message` ohne
-      `tree_label` → Channel **drillt** in flache Message-Liste statt inline
-      zu expandieren. Reihenfolge: uncategorized Channels zuerst, dann
-      Kategorien. Regressionstest
-      `validate_accepts_heterogeneous_category_channel_tree`.
-  - Live-Layer unberührt: Message-Events matchen weiter auf
-    `parent_node_id == channel`, egal wo der Channel im Baum hängt.
-  - 33 stoat- + 473 TUI-Tests grün, installiert. **Smoke offen.**
-- **Phase 3 — Write — ERLEDIGT 2026-06-06 (lokal ungepusht).** Alle vier
-  Write-Endpoints zuerst per `curl` gegen die echte Instanz verifiziert
-  (gegen den `SavedMessages`-Self-Channel — stört niemanden; Probe-Messages
-  danach gelöscht): `POST …/messages {content}` (`nonce` als optional
-  bestätigt — Body aus nur `{content}` reicht), `PATCH …/messages/{id}
+- **Phase R — render loop 1b** (§4). A precondition for live. Mergeable on its
+  own; useful even without Stoat (real 0 % idle, lower latency).
+- **Phase 0 — foundation. ✅ DONE 2026-06-04.** The crate
+  `not-yet-done-stoat-adapter` (workspace member + factory registration under the
+  key `"stoat"`), `StoatClient` (REST: login, discovery, `/users/@me`
+  validation), `StoatGateway` (WS: connect → authenticate → collect Ready,
+  heartbeat ping, reconnect with backoff), `StoatState` (in memory, from
+  `Ready`). The `AdapterStatus` is unified over **one** adapter-owned `watch`
+  channel: the login phase is forwarded from the auth orchestrator (whose `Ready`
+  is suppressed), the socket phase comes from the gateway
+  (`Connecting`/`Ready`/`Failed`) — so the banner mirrors reality end to end.
+  `root()` starts the gateway bootstrap in the background (non-blocking) and
+  returns an **empty** tree. 10 unit tests (protocol (de)serialization on
+  invented data, `StoatState` apply, session-store round trip, config parsing).
+  Reference configs: `docs/examples/views/stoat-adapter.yaml` + `stoat.yaml`.
+- **Phase 1 — read-only tree (pull). ✅ DONE 2026-06-04.**
+  `StoatRoot` (lists servers **and** DM/group channels — depending on the
+  top-level `node_type` of the view), `StoatServerNode` (channels in
+  `server.channels[]` order; voice marked as `has_children: false`),
+  `StoatChannelNode` (messages via REST
+  `GET …/messages?limit&sort=Latest&include_users=true`, newest at the bottom),
+  `StoatMessageNode` (a leaf with `content()` for the preview). The structure
+  comes synchronously from `StoatState`, with no network `await`. **Author
+  resolution** through the `include_users` array of the list response (fallback:
+  the raw id). **Timestamps** decoded from the message ULID (`%Y-%m-%d %H:%M`
+  UTC). **Composite IDs** `<channel>/msg/<ulid>` let `get_by_id` reload a single
+  message for the preview path (`GET …/messages/{id}`) — like the Confluence
+  composite IDs. **Stoat is already usable at this point (browse + read).**
+  ⚠ **A deliberate phase 1 limit:** only the _newest_ page
+  (`DEFAULT_MESSAGE_LIMIT = 50`); backfilling older messages via
+  `before=<ulid>` exists as a parameter in `list_messages`, but is not
+  wired into the TUI yet (it waits for
+  `project_cursor_pagination_plan`). No live push — after connecting, a
+  manual `r` reload (live = phase 2). 12 further unit tests (message
+  parsing/ULID decoding, node listing order, composite IDs).
+- **Phase 2 — live layer. ✅ DONE 2026-06-04.** The generic
+  invalidation mechanism (§5): a new `Invalidation` enum +
+  `ContentAdapter::subscribe_invalidations()` (no-op default) in
+  `not-yet-done-content`; a TUI forwarder (`spawn_content_invalidation_watcher`,
+  one per view, next to the status watcher) pumps into the **existing**
+  `load_tx` channel via `LoadMsg::AdapterInvalidation`. On
+  `Message`/`MessageUpdate`/`MessageDelete`/`MessageReact`/`MessageUnreact` the
+  gateway pushes an `Invalidation::Node{id: <channel>}`, and on every `Ready`
+  (both the first connect **and** a reconnect resync) an `Invalidation::All`.
+  `poll_load` reloads the affected panes at their **current level** (`All` →
+  all panes of the view; `Node{id}` → only panes whose `parent_node_id` is
+  that channel — a message in a channel that is not open costs nothing).
+  **The first Ready pushes All ⇒ the initially empty tree now fills up without a
+  manual `r`.**
+  - ⚠ **Deviation from the §5 sketch:** `subscribe_invalidations` returns
+    a **`broadcast::Receiver`**, not an `mpsc` one — invalidations are
+    discrete _events_ (not a latest value like `watch`, which would
+    swallow intermediate states) and **one** adapter instance can feed
+    **several** views that each subscribe independently (mpsc = single consumer,
+    which does not work). On `Lagged` (the frontend is too slow) the watcher
+    resyncs conservatively with `All` — no update is lost, only coarsened.
+    The payload is an adapter-internal node id (not an app-wide `NodeRef`):
+    the watcher is already bound to a view, and needs no more than "which
+    level".
+  - ⚠ **A phase 2 limit (resolved in phase 4):** **structural**
+    live events were not yet wired up in phase 2 — a newly
+    created or renamed channel only appeared after a reconnect. Since
+    phase 4 (see below), channel CRUD + category CRUD are live; only
+    server join/leave still needs a reconnect.
+  - A reload resets the pane's cursor to the default behaviour
+    (no "stay at the reading position") — accepted for phase 2.
+- **Phase 2.1 — categories + tree view. ✅ DONE 2026-06-05.** The
+  flat drill-down view was replaced by a **tree view**:
+  `server → (category | uncategorized channel) → channel → (drill into
+messages)`. The wire shape `Server.categories: [{ id, title, channels[] }]`
+  via the WS `Ready` was curl-verified against Stoat **0.13.7** (`id` is plain,
+  not always a ULID).
+  - `protocol.rs`: a `Category` struct + `Server.categories` (`#[serde(default)]`
+    → if the field is missing, all channels are uncategorized, nothing breaks).
+  - `StoatServerNode` is now multi-type: `list(stoat:category)` →
+    categories (composite id `<server>/cat/<catid>`, like `<channel>/msg/<ulid>`),
+    `list(stoat:channel)` → **only uncategorized** channels (those in no
+    category). A new `StoatCategoryNode` lists the channels of a
+    category. `get_by_id` decodes the category composite.
+  - A shared `channel_summary` helper, so that a channel renders identically
+    under a server and under a category.
+  - View config: a heterogeneous server level (two tree branches,
+    `stoat:category` and `stoat:channel`), `stoat:channel` at two depths (the
+    duplicate-node_type rule is per level/sibling, so this is fine), and
+    `stoat:message` without a `tree_label` → a channel **drills** into a flat
+    message list instead of expanding inline. Order: uncategorized channels
+    first, then categories. Regression test
+    `validate_accepts_heterogeneous_category_channel_tree`.
+  - The live layer is untouched: message events still match on
+    `parent_node_id == channel`, no matter where the channel hangs in the tree.
+  - 33 stoat + 473 TUI tests green, installed. **Smoke test open.**
+- **Phase 3 — write — DONE 2026-06-06 (local, unpushed).** All four
+  write endpoints were verified via `curl` against the real instance first
+  (against the `SavedMessages` self-channel — it bothers nobody; the probe
+  messages were deleted afterwards): `POST …/messages {content}` (`nonce`
+  confirmed as optional — a body of just `{content}` is enough), `PATCH …/messages/{id}
 {content}`, `DELETE …/messages/{id}` (204), `PUT …/messages/{id}/
-reactions/{emoji}` (204, Emoji als percent-encodeter Pfad-Segment).
-  - `client/messages.rs`: `send_message` (→ Message-ID), `edit_message`,
-    `delete_message`, `add_reaction` + dependency-freier
-    `percent_encode_segment` (Unreserved-Set behalten, Rest `%XX`).
-  - `StoatMessageNode` trägt jetzt `Arc<StoatClient>` + `channel_id` +
-    `message_id` und implementiert `actions()`/`prepare()`/
-    `picker_options()`/`execute()`: `edit_message` (Editor, **roher Body
-    ohne Header** — Chat-Messages sind Markdown und dürfen mit `#` starten,
-    ein Header-Strip würde das fressen; kein Optimistic-Concurrency-Token,
-    Revolt bietet keins), `delete_message` (None), `react` (Picker über
-    kurze Unicode-Emoji-Liste). `StoatChannelNode` bekommt `send_message`
-    (Editor, leeres Template → Buffer = Nachricht). Andere-Nutzer-Edits/
-    -Deletes weist der Server mit 403 ab → sauberer Fehler statt
-    Per-Instance-Filter (deterministic-per-node_type-Vertrag).
+reactions/{emoji}` (204, the emoji as a percent-encoded path segment).
+  - `client/messages.rs`: `send_message` (→ message id), `edit_message`,
+    `delete_message`, `add_reaction` plus a dependency-free
+    `percent_encode_segment` (keep the unreserved set, `%XX` for the rest).
+  - `StoatMessageNode` now carries `Arc<StoatClient>` + `channel_id` +
+    `message_id` and implements `actions()`/`prepare()`/
+    `picker_options()`/`execute()`: `edit_message` (editor, **the raw body
+    without a header** — chat messages are Markdown and may start with `#`,
+    and a header strip would eat that; no optimistic-concurrency token,
+    Revolt offers none), `delete_message` (None), `react` (a picker over
+    a short Unicode emoji list). `StoatChannelNode` gets `send_message`
+    (editor, empty template → the buffer is the message). Edits and deletes of
+    other users' messages are rejected by the server with a 403 → a clean
+    error instead of a per-instance filter (the deterministic-per-node_type
+    contract).
   - `actions_for_type`: `stoat:channel → [send]`, `stoat:message →
-[edit, delete, react]`; im Gleichschritt mit den Node-`actions()`.
-    `capabilities` jetzt `supports_create`/`supports_delete = true`.
-  - View-YAML (Beispiel + deployed): Message-Level-Actions `a` send
+[edit, delete, react]`; in lockstep with the nodes' `actions()`.
+    `capabilities` now has `supports_create`/`supports_delete = true`.
+  - View YAML (example + deployed): message-level actions `a` send
     (`type: create, id: send_message` — parent=channel, child=message),
-    `e` edit, `d` delete, `+` react, `r` reload — in beiden `messages`-
-    Blöcken (uncategorized + unter Kategorie).
-  - Reload nach Write: `ContentActionDone` (delete/react) +
-    `NodeActionEditSession`-Reload (send/edit) aktualisieren die Pane;
-    zusätzlich kommt das Live-Event (Message/Update/Delete) und invalidiert.
-  - 38 stoat- + 474 TUI-Tests grün, installiert. **Smoke offen.**
-  - ⚠ **Noch nicht in Phase 3:** Unreact (DELETE-Reaction — `add_reaction`
-    ist nur PUT), MFA-Login-Edge-Case.
-- **Phase 4 — Strukturelle Live-Events — ERLEDIGT 2026-06-06 (lokal
-  ungepusht).** Channel- und Kategorie-Struktur ändern sich jetzt live,
-  ohne Reconnect. Wire-Shapes zuerst per WS-Capture-Probe (zweite Session
-  am Gateway, außerhalb des Repos, Werte redactet, danach gelöscht) gegen
-  Stoat **0.13.7** verifiziert:
-  - `ChannelCreate` trägt das volle Channel-Objekt inline (gleiche Shape
-    wie in `Ready`) → deserialisiert direkt in `Channel`.
-  - `ChannelUpdate { id, data: { name? … }, clear: [] }` — partieller
-    Patch (Rename).
+    `e` edit, `d` delete, `+` react, `r` reload — in both `messages`
+    blocks (uncategorized and under a category).
+  - Reload after a write: `ContentActionDone` (delete/react) plus the
+    `NodeActionEditSession` reload (send/edit) refresh the pane;
+    on top of that the live event (message/update/delete) arrives and invalidates.
+  - 38 stoat + 474 TUI tests green, installed. **Smoke test open.**
+  - ⚠ **Not yet in phase 3:** unreact (the DELETE reaction — `add_reaction`
+    is PUT only), and the MFA login edge case.
+- **Phase 4 — structural live events — DONE 2026-06-06 (local,
+  unpushed).** The channel and category structure now changes live,
+  without a reconnect. The wire shapes were verified first via a WS capture probe
+  (a second session on the gateway, outside the repo, values redacted, deleted
+  afterwards) against Stoat **0.13.7**:
+  - `ChannelCreate` carries the full channel object inline (the same shape
+    as in `Ready`) → it deserializes straight into `Channel`.
+  - `ChannelUpdate { id, data: { name? … }, clear: [] }` — a partial
+    patch (rename).
   - `ChannelDelete { id }`.
   - `ServerUpdate { id, data: { channels? | categories? | name? }, clear }`
-    — **Kategorie-CRUD existiert nicht als eigenes Event**: Anlegen/
-    Löschen/Umbenennen/Zuordnen/Umsortieren kommt komplett als volle
-    `data.categories`-Listen-Ersetzung. Channel-Create löst zusätzlich ein
-    `ServerUpdate.data.channels` (volle Liste) aus.
-  - `protocol.rs`: vier Varianten aus `Other` herausgezogen + `ChannelPatch`
-    / `ServerPatch` (nur gerenderte Felder, alles andere ignoriert). Eine
-    falsch geformte Variante scheitert beim Deserialisieren → ganzer Frame
-    wird verworfen, der Socket bleibt (kein Crash).
-  - `state.rs`: `insert_channel` (idempotent, hängt auch an `server.channels`
-    an, falls das `ServerUpdate` ausbleibt), `patch_channel`, `remove_channel`
-    (entkoppelt aus `server.channels` **und** allen Kategorien),
-    `patch_server` (volle Listen-Ersetzung für channels/categories + Rename).
-  - `gateway/mod.rs::handle_text`: vier neue Arme mutieren `StoatState` unter
-    Write-Lock und pushen `Invalidation::All` (Tree-Shape geändert →
-    Reload-Maschinerie greift; kein neues Invalidation-Variant, kein
-    Cross-Crate-Change).
-  - 50 stoat- + 474 TUI-Tests grün, installiert. **Smoke offen.**
-  - ⚠ **Noch nicht in Phase 4:** `ServerCreate`/`ServerDelete` (Server
-    beitreten/verlassen) — Wire-Shape nicht verifiziert (im Capture nicht
-    getestet), bleibt bewusst über den Reconnect-`Ready`-Pfad abgedeckt.
+    — **category CRUD does not exist as an event of its own**: creating,
+    deleting, renaming, assigning and reordering all arrive as a full
+    replacement of the `data.categories` list. Creating a channel additionally
+    triggers a `ServerUpdate.data.channels` (the full list).
+  - `protocol.rs`: four variants pulled out of `Other` plus `ChannelPatch`
+    and `ServerPatch` (only the rendered fields, everything else ignored). A
+    malformed variant fails to deserialize → the whole frame
+    is discarded and the socket survives (no crash).
+  - `state.rs`: `insert_channel` (idempotent, it also appends to
+    `server.channels` in case the `ServerUpdate` does not arrive),
+    `patch_channel`, `remove_channel` (unlinked from `server.channels` **and**
+    all categories), `patch_server` (full list replacement for
+    channels/categories + rename).
+  - `gateway/mod.rs::handle_text`: four new arms mutate `StoatState` under a
+    write lock and push `Invalidation::All` (the tree shape changed →
+    the reload machinery takes over; no new invalidation variant, no
+    cross-crate change).
+  - 50 stoat + 474 TUI tests green, installed. **Smoke test open.**
+  - ⚠ **Not yet in phase 4:** `ServerCreate`/`ServerDelete` (joining and
+    leaving servers) — the wire shape is not verified (it was not exercised in
+    the capture), and stays deliberately covered by the reconnect `Ready` path.
 
-## 9. Risiken & offene Punkte
+## 9. Risks and open points
 
-- **MFA-Login** nicht abgedeckt (Test-Account ohne MFA). Ticket-Flow ggf. in
-  Phase 0/3 nachziehen.
-- **WS-Reconnect & State-Resync.** Nach Reconnect kommt ein frisches `Ready` →
-  `StoatState` ersetzen + `Invalidation::All` pushen. Backoff + Ping-Timeout
-  sauber definieren.
-- **1b ↔ Editor-Suspend/Restore** (ADR-Hauptrisiko): `EventStream` muss um die
-  synchrone Editor-Suspendierung herum sauber pausieren.
-- **Berechtigungen/Rollen.** `default_permissions`/`roles` bestimmen sichtbare
-  Channels; für read-only zunächst nur listen, was Ready liefert (Server
-  filtert serverseitig). Keine eigene Permission-Logik in P1.
-- **Große Channels / Pagination-Grenzen.** History-Limit (Revolt: max 100/Req)
-  respektieren; Rückwärts-Scroll inkrementell. Kein stilles Truncating ohne
-  Hinweis.
-- **Author-Auflösung** für Autoren außerhalb des Ready-Caches → `GET /users/{id}`
-  mit kleinem In-Memory-LRU.
-- **Persistenz bewusst minimal** (nur Token + Sort) — falls später „letzte
-  gelesene Nachricht über Restart" gewünscht, ist das eine additive Erweiterung.
+- **MFA login** is not covered (the test account has no MFA). The ticket flow may
+  need to be added in phase 0/3.
+- **WS reconnect and state resync.** After a reconnect a fresh `Ready` arrives →
+  replace `StoatState` and push `Invalidation::All`. Define the backoff and the
+  ping timeout cleanly.
+- **1b ↔ editor suspend/restore** (the ADR's main risk): the `EventStream` has to
+  pause cleanly around the synchronous editor suspension.
+- **Permissions/roles.** `default_permissions`/`roles` determine the visible
+  channels; for read-only, just list what Ready delivers to begin with (the
+  server filters server-side). No permission logic of our own in P1.
+- **Large channels / pagination limits.** Respect the history limit (Revolt: max
+  100 per request); scroll backwards incrementally. No silent truncation without
+  a hint.
+- **Author resolution** for authors outside the Ready cache → `GET /users/{id}`
+  with a small in-memory LRU.
+- **Persistence deliberately minimal** (only the token + sort) — if "the last
+  read message across a restart" is wanted later, that is an additive extension.
 
-## 10. Test- & Smoke-Strategie
+## 10. Test and smoke strategy
 
-- **Unit/Fixtures auf erfundenen Daten** (Ready-/Message-JSON nachgebaut, keine
-  echten IDs/Namen/Inhalte). Protocol-(De)Serialisierung, `StoatState`-Event-
-  Apply, ULID→Timestamp, Author-Auflösung.
-- **Invalidation-Pfad** (§5: I5) ohne echtes Netz testbar (Fake-Sender →
-  `poll_load`).
-- **Manuelles `curl`-Probing** gegen die Test-Instanz vor jeder neuen
-  Endpoint-Nutzung (insb. Write ⚠) — Muster wie `reference_taiga_init`, Token
-  aus dem Login-Response, **nichts davon ins Repo**.
-- **Smoke-Tests** zentral in `docs/smoke-tests.md` ergänzen (eigener Abschnitt
-  „Stoat"), nicht als separate Datei (`feedback_smoke_tests_central`).
-- Nach jeder Phase `cargo build --release`; nach TUI-Änderungen `cargo install`,
-  damit der User direkt testen kann (`feedback_install_after_changes`).
+- **Unit tests/fixtures on invented data** (Ready and message JSON rebuilt, no
+  real ids, names or content). Protocol (de)serialization, `StoatState` event
+  apply, ULID→timestamp, author resolution.
+- **The invalidation path** (§5: I5) is testable without a real network (a fake
+  sender → `poll_load`).
+- **Manual `curl` probing** against the test instance before every new
+  endpoint use (especially writes ⚠) — the pattern from `reference_taiga_init`,
+  the token from the login response, **none of it into the repo**.
+- **Smoke tests** are added centrally in `docs/smoke-tests.md` (its own "Stoat"
+  section), not as a separate file (`feedback_smoke_tests_central`).
+- After every phase `cargo build --release`; after TUI changes `cargo install`,
+  so that the user can test immediately (`feedback_install_after_changes`).
 
-## 11. Doku-Mitführung
+## 11. Keeping the docs in step
 
-Pro Phase mitpflegen (sonst Change unvollständig):
+Maintain per phase (otherwise the change is incomplete):
 
-- `README.md`: Stoat in der Adapter-Liste.
-- `docs/explanation/architecture.md`: Push-/Invalidation-Mechanik + Gateway-
-  Pattern (erster Streaming-Adapter — Referenz für künftige).
-- ADR `0001` fortschreiben (1b umgesetzt); ggf. neuer ADR „0002 — Adapter-
-  Invalidation-Push / Streaming-Adapter" (Kontext, Optionen generisch vs.
-  Stoat-lokal, Entscheidung generisch, Konsequenzen).
-- `docs/examples/views/stoat*.yaml` als Referenz-Config.
-- Jede Config-Option dokumentieren (was **und warum**).
+- `README.md`: Stoat in the adapter list.
+- `docs/explanation/architecture.md`: the push/invalidation mechanics + the
+  gateway pattern (the first streaming adapter — a reference for future ones).
+- Update ADR `0001` (1b implemented); possibly a new ADR "0002 — adapter
+  invalidation push / streaming adapters" (context, the options generic vs.
+  Stoat-local, the decision for generic, consequences).
+- `docs/examples/views/stoat*.yaml` as the reference config.
+- Document every config option (what **and why**).
 
-```
+## 12. @-mentions (display + edit autocomplete)
 
-```
-
-## 12. @-Mentions (Anzeige + Edit-Autocomplete)
-
-Revolt kodiert Erwähnungen im Body als `<@USERID>`. Ziel: in der Liste lesbare
-`@username` zeigen, und beim Editieren dieselbe Autocomplete-/Roundtrip-Mechanik
-wie bei Jira/Taiga (`@uu_slug` + CACHE-Section). Aufgesetzt auf die geteilte
+Revolt encodes mentions in the body as `<@USERID>`. The goal: show a readable
+`@username` in the list, and when editing use the same autocomplete/round-trip
+mechanics as with Jira/Taiga (`@uu_slug` + a CACHE section). Built on the shared
 `not_yet_done_content::slug::SlugTable`.
 
-**Warum zwei Render-Formen?** Anzeige und Editor wollen Unterschiedliches:
+**Why two render forms?** Display and editor want different things:
 
-- **Anzeige** (read-only, Liste/Preview): `<@ID>` → `@username` — lesbar.
-- **Editor** (roundtrip): `<@ID>` ↔ `@uu_username` — slug-basiert, plus
-  CACHE-Section; beim Speichern zurück nach `<@ID>` für die Wire-API.
+- **Display** (read-only, list/preview): `<@ID>` → `@username` — readable.
+- **Editor** (round trip): `<@ID>` ↔ `@uu_username` — slug-based, plus a
+  CACHE section; on save it goes back to `<@ID>` for the wire API.
 
-**Datenquelle = server-scoped Member-Cache.** Completions dürfen nur Mitglieder
-des Servers anbieten, zu dem der Channel gehört:
+**Data source = a server-scoped member cache.** Completions may only offer
+members of the server the channel belongs to:
 
 - `StoatClient::list_server_members(server_id)` → `GET /api/servers/{id}/members`
   (`users[]` → `id → username`, `exclude_offline=false`).
 - `adapter::members::MemberCache`: `RwLock<HashMap<server_id, Arc<map>>>`, lazy,
-  einmal pro Server pro Session (kein Live-Refresh; Reconnect baut den Adapter
-  ohnehin neu). Fehler werden **nicht** gecacht (Retry beim nächsten Listing).
+  once per server per session (no live refresh; a reconnect rebuilds the adapter
+  anyway). Errors are **not** cached (retry on the next listing).
 - `adapter::members::channel_user_map(state, members, client, channel_id)`:
-  Server-Channel → Member-Cache; DM/Gruppe (kein Server) → Recipients aus dem
-  `Ready`-User-Snapshot.
+  a server channel → the member cache; a DM/group (no server) → the recipients
+  from the `Ready` user snapshot.
 
-**Transformations-Modul `adapter::mentions`** (Spiegel von Jiras `slugs.rs`):
+**The transformation module `adapter::mentions`** (a mirror of Jira's `slugs.rs`):
 
-- `user_table(map)` — `SlugTable` mit `slug_source = username`, `original = id`.
-- `render_display(text, map)` — `<@ID>` → `@username` (unbekannt: roh).
+- `user_table(map)` — a `SlugTable` with `slug_source = username`, `original = id`.
+- `render_display(text, map)` — `<@ID>` → `@username` (unknown: raw).
 - `render_slugs(text, table)` / `parse_slugs(text, table)` — `<@ID>` ↔ `@uu_…`
-  (Wortgrenzen-sicher; unbekannter Slug → `Err(slug)`).
-- `cache_section(table)` / `strip_cache_section(text)` — CACHE-Block am
-  Buffer-Ende, vor dem Parsen abgeschnitten.
+  (word-boundary safe; an unknown slug → `Err(slug)`).
+- `cache_section(table)` / `strip_cache_section(text)` — a CACHE block at the
+  end of the buffer, cut off before parsing.
 
-**Knoten-Verdrahtung:**
+**Node wiring:**
 
-- `StoatMessageNode` hält `content_body` **roh** (Source of Truth) + ein
-  `Arc<HashMap<id,username>>`. `label`/`content`-Metadata werden display-
-  gerendert; `prepare(edit)` rendert Slugs + CACHE, `execute(edit)` strippt +
-  parst zurück; `Content::read` rendert Anzeige.
-- `StoatChannelNode` hält `state` + `members`, baut die User-Map einmal pro
-  `list()` (für Anzeige) und in `prepare/execute(send_message)` (für Slugs).
+- `StoatMessageNode` holds `content_body` **raw** (the source of truth) plus an
+  `Arc<HashMap<id,username>>`. The `label`/`content` metadata are
+  display-rendered; `prepare(edit)` renders slugs + CACHE, `execute(edit)` strips
+  and parses back; `Content::read` renders the display form.
+- `StoatChannelNode` holds `state` + `members`, and builds the user map once per
+  `list()` (for display) and in `prepare/execute(send_message)` (for slugs).
 
-**Bekannte Schnitte:** Member-Liste einmal pro Server/Session gecacht (kein
-Live-Refresh bei join/leave); Slug-Source ist der Username (Server-Nickname
-noch nicht berücksichtigt) — beide als spätere Ausbaustufe vorgemerkt.
+**Known cuts:** the member list is cached once per server/session (no live
+refresh on join/leave); the slug source is the username (a server nickname is
+not taken into account yet) — both noted as later build-out steps.
