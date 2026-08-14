@@ -3219,384 +3219,387 @@ channel.
 - [ ] **Andere Tabs unberührt:** Spalten ohne `markdown:` (Jira/Taiga/Postgres)
       rendern weiter einzeilig.
 
-> Bekannte Schnitte: `/`-Suche markiert Treffer **nicht** im gerenderten Body;
-> Code-Blöcke ohne Hintergrund; Syntax-Highlighting ist optional/separat.
+> Known cut-offs: the `/` search does **not** highlight matches inside the
+> rendered body; code blocks have no background; syntax highlighting is
+> optional and separate.
 
-## Stoat-Adapter — Smooth-Scroll (`smooth_scroll: true`)
+## Stoat adapter — smooth scroll (`smooth_scroll: true`)
 
-Beide `messages`-Level haben `smooth_scroll: true`. In einen Channel mit vielen
-(idealerweise mehrzeiligen) Nachrichten drillen.
+Both `messages` levels have `smooth_scroll: true`. Drill into a channel with
+many (ideally multi-line) messages.
 
-- [ ] **Zeilenweise statt sprunghaft:** ↓ scrollt den Inhalt um **eine
-      physische Zeile** nach oben — eine hohe Nachricht oben wird dabei
-      sukzessive angeschnitten, nicht als ganzer Block weggeschoben.
-- [ ] **Kein Snapping:** Der Highlight gleitet mit dem Inhalt mit (darf am Rand
-      angeschnitten sein) und springt **nicht** bei jedem Schritt an den oberen
-      Rand.
-- [ ] **Übergabe, sobald die nächste Nachricht sichtbar ist:** Ist die nächste
-      Nachricht bereits auf dem Schirm, rückt der Highlight bei `j` sofort um
-      **genau eine** Nachricht weiter (nicht an den unteren Rand). Beim
-      Hochscrollen analog nach oben.
-- [ ] **Lange Nachricht:** Bei einer Nachricht, die höher ist als der
-      verbleibende Platz, bleibt der Highlight stehen und `j` scrollt nur —
-      bis die erste Zeile der nächsten Nachricht unten auftaucht.
-- [ ] **Kein unsichtbarer Cursor:** Beim Hochscrollen springt der Highlight
-      nicht schon dann auf die vorige Nachricht, wenn nur deren Leerzeile
-      sichtbar ist — der Cursor ist bei jedem Schritt zu sehen.
-- [ ] **Aktionen treffen die hervorgehobene Nachricht:** `e`/`d`/`+`/`p`
-      operieren auf genau der aktuell hervorgehobenen Nachricht (auch wenn sie
-      gerade angeschnitten am Rand sitzt).
-- [ ] **Halbe/ganze Seite + g/G:** `Ctrl+d`/`Ctrl+u` scrollen um eine halbe
-      Pane-Höhe (in Zeilen); `G`/`g` springen ans Ende/an den Anfang und
-      wählen dabei explizit die letzte/erste Nachricht.
-- [ ] **Bottom-Clamp:** Am Ende lässt sich nicht über die letzte Zeile hinaus
-      scrollen; die letzte Nachricht bleibt unten bündig stehen.
-- [ ] **Reload/Live-Event:** Kommt eine neue Nachricht an oder wird `r`
-      gedrückt, bleibt die Scroll-Position sinnvoll (kein Sprung an den Anfang).
-- [ ] **Andere Tabs unberührt:** Tabs ohne `smooth_scroll` (Jira/Taiga/Tasks)
-      scrollen weiterhin diskret Eintrag-für-Eintrag.
+- [ ] **Line by line instead of jumping:** ↓ scrolls the content up by **one
+      physical line** — a tall message at the top is cut off gradually rather
+      than pushed away as a whole block.
+- [ ] **No snapping:** the highlight glides along with the content (it may be
+      cut off at the edge) and does **not** jump to the top edge on every step.
+- [ ] **Hand-over as soon as the next message is visible:** if the next message
+      is already on screen, `j` moves the highlight on by **exactly one**
+      message (not to the bottom edge). Scrolling up behaves the same way
+      upwards.
+- [ ] **A long message:** for a message taller than the remaining space, the
+      highlight stays put and `j` only scrolls — until the first line of the
+      next message appears at the bottom.
+- [ ] **No invisible cursor:** when scrolling up, the highlight does not move
+      to the previous message while only that message's blank line is visible —
+      the cursor is visible at every step.
+- [ ] **Actions hit the highlighted message:** `e`, `d`, `+` and `p` operate on
+      exactly the currently highlighted message (even when it is cut off at the
+      edge).
+- [ ] **Half and full page plus g/G:** `Ctrl+d`/`Ctrl+u` scroll by half a pane
+      height (in lines); `G`/`g` jump to the end/beginning and explicitly
+      select the last/first message.
+- [ ] **Bottom clamp:** at the end it is impossible to scroll past the last
+      line; the last message stays flush with the bottom.
+- [ ] **Reload and live events:** when a new message arrives or `r` is pressed,
+      the scroll position stays sensible (no jump to the beginning).
+- [ ] **Other tabs untouched:** tabs without `smooth_scroll` (Jira, Taiga,
+      Tasks) still scroll discretely, entry by entry.
 
-## Stoat-Adapter — @-Mentions (`@username` + Slug-Roundtrip)
+## Stoat adapter — @-mentions (`@username` plus slug round trip)
 
-Revolt kodiert Erwähnungen im Body als `<@USERID>`. Anzeige und Editieren
-lösen das wie bei Jira/Taiga über `not_yet_done_content::slug::SlugTable`:
-Anzeige → `@username`, Editor → `@uu-slug` + CACHE-Section, beim Speichern
-zurück nach `<@ID>`. Die Completion-Liste ist **server-scoped** (`GET
-/api/servers/{id}/members`, einmal pro Server gecacht). Voraussetzung: einen
-Server-Channel öffnen, in dem Nachrichten mit Erwähnungen existieren.
+Revolt encodes mentions in the body as `<@USERID>`. Display and editing resolve
+that the same way as Jira and Taiga do, via
+`not_yet_done_content::slug::SlugTable`: display → `@username`, editor →
+`@uu-slug` plus a CACHE section, and back to `<@ID>` on save. The completion
+list is **server-scoped** (a GET on `/api/servers/{id}/members`, cached once
+per server). Prerequisite: open a server channel that holds messages with
+mentions.
 
-- [ ] **Anzeige `@username`:** Eine Nachricht, die jemanden erwähnt, zeigt in
-      der Liste **`@Benutzername`**, nicht den rohen `<@01ABC…>`-Code (Label-
-      Zeile **und** Markdown-Body).
-- [ ] **Unbekannte ID bleibt roh:** Erwähnung eines Users, der **nicht** im
-      Server ist (kein Cache-Eintrag) → `<@ID>` bleibt wörtlich stehen, kein
-      Crash.
-- [ ] **Edit zeigt Slugs + CACHE:** Eigene Nachricht mit Erwähnung `e` →
-      Editor zeigt `@uu-<name>` statt `<@ID>`, und unten die CACHE-Section
-      `#### CACHE / available @mentions … ####` mit allen `@uu-…` des Servers.
-- [ ] **Slug-Roundtrip (No-op):** Im Editor **nichts** ändern, speichern →
-      „No changes" (die `@uu-…` werden korrekt zurück nach `<@ID>` übersetzt,
-      Body bleibt identisch — kein versehentlicher Edit).
-- [ ] **Neue Erwähnung einfügen:** Im Editor einen `@uu-<name>` aus der CACHE-
-      Section in den Text kopieren, speichern → der Erwähnte wird im Web-Client
-      tatsächlich benachrichtigt; die TUI-Zeile zeigt danach `@<name>`.
-- [ ] **Unbekannter Slug → Fehler:** Im Editor `@uu-quatsch` (nicht im CACHE)
-      eintippen, speichern → sauberer Fehler „unknown mention slug @uu-quatsch",
-      kein Versand, kein Crash.
-- [ ] **Senden (`a`) mit Mention:** In der Channel-Liste `a` → leerer Buffer +
-      CACHE-Section; `@uu-<name>` einfügen, Text senden → Erwähnung kommt im
-      Web-Client an, TUI zeigt `@<name>`.
-- [ ] **Server-Scoping:** In zwei verschiedenen Servern hat die CACHE-Section
-      **unterschiedliche** Mitgliederlisten (nur Mitglieder des jeweiligen
-      Servers).
-- [ ] **DM/Gruppe:** In einem Direkt-/Gruppen-Channel (kein Server) speist sich
-      die Completion-Liste aus den Recipients (Ready-Snapshot), nicht aus dem
-      Members-Endpoint.
+- [ ] **Displayed as `@username`:** a message mentioning someone shows
+      **`@username`** in the list, not the raw `<@01ABC…>` code (in the label
+      row **and** in the markdown body).
+- [ ] **An unknown ID stays raw:** a mention of a user who is **not** in the
+      server (no cache entry) → `<@ID>` stays there verbatim, no crash.
+- [ ] **Editing shows slugs plus CACHE:** `e` on one of your own messages with
+      a mention → the editor shows `@uu-<name>` instead of `<@ID>`, and at the
+      bottom the CACHE section `#### CACHE / available @mentions … ####` with
+      all `@uu-…` of the server.
+- [ ] **Slug round trip (no-op):** change **nothing** in the editor and save →
+      "No changes" (the `@uu-…` are translated back to `<@ID>` correctly, the
+      body stays identical — no accidental edit).
+- [ ] **Insert a new mention:** copy an `@uu-<name>` from the CACHE section
+      into the text in the editor and save → the mentioned user really is
+      notified in the web client; afterwards the TUI row shows `@<name>`.
+- [ ] **An unknown slug is an error:** type `@uu-nonsense` (not in the CACHE)
+      in the editor and save → a clean error "unknown mention slug
+      @uu-nonsense", nothing is sent, no crash.
+- [ ] **Sending (`a`) with a mention:** `a` in the channel list → an empty
+      buffer plus the CACHE section; insert `@uu-<name>`, send the text → the
+      mention arrives in the web client, the TUI shows `@<name>`.
+- [ ] **Server scoping:** in two different servers the CACHE section holds
+      **different** member lists (only the members of the respective server).
+- [ ] **DM and group:** in a direct or group channel (no server) the completion
+      list is fed from the recipients (the `Ready` snapshot), not from the
+      members endpoint.
 
-> Bekannte Schnitte: Member-Liste wird einmal pro Server pro Session gecacht
-> (kein Live-Refresh bei Beitritt/Austritt); Slug-Source ist der Username
-> (Server-Nickname noch nicht berücksichtigt).
+> Known cut-offs: the member list is cached once per server per session (no
+> live refresh when someone joins or leaves); the slug source is the user name
+> (the server nickname is not taken into account yet).
 
-## Stoat-Adapter — Typ-Symbole im Tree (`icon:`) + leerer Channel
+## Stoat adapter — type icons in the tree (`icon:`) plus the empty channel
 
-Zwei Dinge, die zusammen aufgefallen sind: unkategorisierte Channels und
-Kategorien teilen sich die Server-Ebene und sahen identisch aus; und ein
-Channel, dessen letzte Nachricht gelöscht wurde, behielt Aufklapp-Pfeil und
-Ungelesen-Marker (Stoat räumt `last_message_id` nicht auf). `icon:` steht pro
-Ebene in `stoat.yaml` (💬 Channel, 📁 Kategorie), der Ungelesen-Marker ist
-deshalb auf `🔔` umgestellt.
+Two things that showed up together: uncategorised channels and categories share
+the server level and looked identical; and a channel whose last message had
+been deleted kept its expand arrow and unread marker (Stoat does not clean up
+`last_message_id`). `icon:` is set per level in `stoat.yaml` (💬 channel, 📁
+category), which is why the unread marker was switched to `🔔`.
 
-- [ ] **Server aufklappen:** Unkategorisierte Channels tragen `💬`, Kategorien
-      `📁` — auf einen Blick unterscheidbar, gleiche Einrückung wie vorher.
-- [ ] **Channel in Kategorie:** trägt dasselbe `💬` wie im uncategorized-Zweig.
-- [ ] **Ungelesen:** Ein Channel mit neuen Nachrichten zeigt `🔔 💬 name`
-      (Marker zuerst, dann Typ-Symbol), beides in der Ungelesen-Farbe; nach
-      dem Lesen bleibt nur `💬 name`.
-- [ ] **Fuzzy-Suche:** `/` + Teilstring → der Treffer-Highlight sitzt weiterhin
-      exakt auf dem gematchten Teil des **Labels** (nicht um die Glyph-Breite
-      verschoben).
-- [ ] **Leerer Channel heilt sich:** Einen Channel öffnen, dessen letzte
-      Nachricht gelöscht wurde → die Liste ist leer, und im Baum verschwindet
-      danach **ohne** `r` der Aufklapp-Pfeil samt Ungelesen-Marker (die
-      Nachrichten-Abfrage korrigiert `last_message_id`).
-- [ ] **Gegenprobe:** Ein Channel mit echten Nachrichten behält Pfeil und
-      Liste; eine neue Nachricht bringt Pfeil/Marker sofort zurück.
+- [ ] **Expand a server:** uncategorised channels carry `💬`, categories `📁` —
+      distinguishable at a glance, with the same indentation as before.
+- [ ] **A channel in a category:** carries the same `💬` as in the
+      uncategorised branch.
+- [ ] **Unread:** a channel with new messages shows `🔔 💬 name` (the marker
+      first, then the type icon), both in the unread colour; after reading,
+      only `💬 name` remains.
+- [ ] **Fuzzy search:** `/` plus a substring → the match highlight still sits
+      exactly on the matched part of the **label** (not shifted by the glyph
+      width).
+- [ ] **An empty channel heals itself:** open a channel whose last message was
+      deleted → the list is empty, and afterwards the expand arrow and the
+      unread marker disappear from the tree **without** `r` (the message query
+      corrects `last_message_id`).
+- [ ] **Counter-check:** a channel with real messages keeps its arrow and list;
+      a new message brings the arrow and marker straight back.
 
-## Stoat-Adapter — Ungelesen-Marker in der Tab-Leiste
+## Stoat adapter — unread marker in the tab bar
 
-Der Ungelesen-Zustand endet bisher am Rand der View: ein Stoat-Tab im
-Hintergrund sah aus wie jeder andere. Jetzt trägt das Tab-Label selbst den
-Marker (`tab.unread_marker`, Default = `unread_marker` der View) und wird
-hervorgehoben (`tab.unread_style`, Default fett). Gezählt wird nur, was eine
-Pane **gerade** hält.
+The unread state used to end at the edge of the view: a Stoat tab in the
+background looked like any other. Now the tab label itself carries the marker
+(`tab.unread_marker`, defaulting to the view's `unread_marker`) and is
+highlighted (`tab.unread_style`, bold by default). Only what a pane **currently**
+holds is counted.
 
-- [ ] **Marker erscheint:** In einem anderen Tab stehen, während im Stoat-Baum
-      eine neue Nachricht eintrifft → das Tab wird zu `🔔 💬 9 Stoat`, fett,
-      ohne Tastendruck.
-- [ ] **Marker verschwindet:** Channel öffnen und bis zur neuesten Nachricht
-      scrollen (Ack) → Marker und Fettschrift gehen im selben Moment weg, das
-      Label ist wieder `💬 9 Stoat`.
-- [ ] **Andere Tabs unberührt:** Jira/Tasks/… zeigen nie einen Marker (ihre
-      Zeilen tragen kein `unread`-Feld).
-- [ ] **Breite:** Die Leiste rutscht beim Auftauchen des Markers um die
-      Emoji-Breite weiter, ohne Zeichenmüll; bei schmalem Terminal darf sie in
-      die zweite Zeile umbrechen.
-- [ ] **Konfiguration:** In `stoat.yaml` `tab.unread_style: [italic]` setzen →
-      Label kursiv statt fett; `tab.unread_marker: ""` → nur die Hervorhebung,
-      kein Glyph.
+- [ ] **The marker appears:** stand in another tab while a new message arrives
+      in the Stoat tree → the tab turns into `🔔 💬 9 Stoat`, in bold, without a
+      keystroke.
+- [ ] **The marker disappears:** open the channel and scroll to the newest
+      message (ack) → marker and bold type go away at the same moment, the
+      label is `💬 9 Stoat` again.
+- [ ] **Other tabs untouched:** Jira, Tasks and the rest never show a marker
+      (their rows carry no `unread` field).
+- [ ] **Width:** when the marker appears, the bar shifts by the emoji width
+      without character garbage; on a narrow terminal it may wrap onto a second
+      line.
+- [ ] **Configuration:** set `tab.unread_style: [italic]` in `stoat.yaml` → the
+      label is italic instead of bold; `tab.unread_marker: ""` → only the
+      highlight, no glyph.
 
-## Stoat-Adapter — Cursor auf der ersten ungelesenen Nachricht (`cursor_on_open`)
+## Stoat adapter — cursor on the first unread message (`cursor_on_open`)
 
-Beim Öffnen eines Channels stand der Cursor auf der **ältesten** geladenen
-Nachricht — man musste sich erst zu der Stelle runterscrollen, an der man
-aufgehört hatte. `cursor_on_open: first_unread` auf der `messages`-Ebene setzt
-ihn stattdessen auf die erste ungelesene Nachricht, oben am Rand verankert, so
-dass die ungelesenen darunter stehen.
+When a channel was opened, the cursor sat on the **oldest** loaded message —
+you had to scroll down to the point where you had stopped reading.
+`cursor_on_open: first_unread` on the `messages` level puts it on the first
+unread message instead, anchored at the top edge so that the unread ones are
+below it.
 
-- [ ] **Sprung:** Channel mit mehreren ungelesenen Nachrichten öffnen → der
-      Cursor steht auf der **ältesten ungelesenen**, und zwar oben im Pane; die
-      ungelesenen Nachrichten stehen darunter, der gelesene Verlauf ist
-      weggescrollt.
-- [ ] **Alles gelesen:** Channel ohne Ungelesenes öffnen → Cursor auf der
-      **neuesten** Nachricht (unten), nicht oben.
-- [ ] **Leerer Channel:** Channel ohne Nachrichten öffnen → kein Sprung, kein
-      Panic; trifft danach die erste Nachricht ein, landet der Cursor auf ihr.
-- [ ] **Reload verschiebt nicht:** Im Channel nach oben scrollen, dann `r`
-      drücken bzw. eine Nachricht von außen schicken → der Cursor bleibt, wo er
-      war (der Sprung gehört zum Öffnen, nicht zum Laden).
-- [ ] **Zusammenspiel mit dem Ack:** Vom Sprungziel bis zur letzten Nachricht
-      durchscrollen → `mark_read_on_reach_end` greift wie gehabt, Marker in Baum
-      und Tab-Leiste gehen weg.
-- [ ] **Ack springt nicht weg:** Eine gelesene Nachricht anwählen (der Ack löst
-      einen Reload aus) → der Cursor bleibt auf **derselben** Nachricht, auch
-      wenn zwischenzeitlich eine neue eingetroffen ist und alle Zeilen um eine
-      Position hochgerutscht sind.
-- [ ] **Gelöschte Zeile:** Die angewählte Nachricht von außen löschen, dann
-      reloaden → kein Panic, der Cursor bleibt an derselben Stelle im Pane.
-- [ ] **Zweiter Zweig:** Beides auch für einen Channel **in einer Kategorie**
-      prüfen (die `messages`-Ebene ist in `stoat.yaml` zweimal konfiguriert).
+- [ ] **The jump:** open a channel with several unread messages → the cursor
+      sits on the **oldest unread** one, at the top of the pane; the unread
+      messages are below it, the history you already read is scrolled away.
+- [ ] **Everything read:** open a channel with nothing unread → the cursor sits
+      on the **newest** message (at the bottom), not at the top.
+- [ ] **Empty channel:** open a channel without messages → no jump, no panic;
+      once the first message arrives, the cursor lands on it.
+- [ ] **A reload does not move it:** scroll up in the channel, then press `r`
+      or have a message sent from outside → the cursor stays where it was (the
+      jump belongs to opening, not to loading).
+- [ ] **Interplay with the ack:** scroll from the jump target through to the
+      last message → `mark_read_on_reach_end` fires as usual, the markers in
+      the tree and the tab bar go away.
+- [ ] **The ack does not jump away:** select a message you have read (the ack
+      triggers a reload) → the cursor stays on the **same** message, even if a
+      new one has arrived meanwhile and all rows have shifted up by one
+      position.
+- [ ] **A deleted row:** delete the selected message from outside, then reload
+      → no panic, the cursor stays in the same spot in the pane.
+- [ ] **The second branch:** check both for a channel **inside a category** as
+      well (the `messages` level is configured twice in `stoat.yaml`).
 
-## Stoat-Adapter — Dateien hochladen (`A` / `attach`)
+## Stoat adapter — upload files (`A` / `attach`)
 
-`A` auf einer Channel-Zeile öffnet den File-Picker (Mehrfachauswahl), lädt jede
-Datei hoch und postet sie als Nachricht mit leerem Body. Revolt erlaubt 5
-Dateien pro Nachricht, größere Auswahlen werden auf mehrere Nachrichten
-verteilt. Für die Tests reichen ein paar kleine Wegwerf-Dateien aus `/tmp`.
+`A` on a channel row opens the file picker (multi-select), uploads every file
+and posts them as a message with an empty body. Revolt allows 5 files per
+message, so larger selections are spread across several messages. A few small
+throwaway files from `/tmp` are enough for the tests.
 
-- [ ] **Eine Datei:** `A` auf einem Channel → Picker → eine Datei wählen →
-      Notification „Attached 1 file(s) to #channel", die Nachricht taucht live
-      in der offenen Liste auf.
-- [ ] **Mehrfachauswahl:** 3 Dateien auf einmal → **eine** Nachricht mit allen
-      dreien.
-- [ ] **Über dem Limit:** 6+ Dateien → **mehrere** Nachrichten (5 + Rest), keine
-      Fehlermeldung vom Server.
-- [ ] **Picker abgebrochen:** Picker ohne Auswahl schließen → nichts passiert,
-      keine leere Nachricht.
-- [ ] **Ungelesen bleibt sauber:** Nach dem Upload ist der Channel **nicht**
-      als ungelesen markiert (der Adapter ackt den eigenen Post).
-- [ ] **Caption nachtragen:** `e` auf der geposteten Nachricht → Text ergänzen →
-      `:w` → Text steht über/bei den Dateien, die Anhänge bleiben erhalten.
-- [ ] **Beide Zweige:** Auch für einen Channel **in einer Kategorie** prüfen.
-- [ ] **Kaputter Pfad:** Eine Datei ohne Leserecht mitauswählen → die anderen
-      werden trotzdem gepostet, die Meldung nennt die fehlgeschlagene.
+- [ ] **One file:** `A` on a channel → picker → pick one file → notification
+      "Attached 1 file(s) to #channel", the message shows up live in the open
+      list.
+- [ ] **Multi-select:** 3 files at once → **one** message with all three.
+- [ ] **Above the limit:** 6+ files → **several** messages (5 plus the rest),
+      no error from the server.
+- [ ] **Picker cancelled:** close the picker without a selection → nothing
+      happens, no empty message.
+- [ ] **Unread stays clean:** after the upload the channel is **not** marked
+      unread (the adapter acks its own post).
+- [ ] **Add a caption afterwards:** `e` on the posted message → add text →
+      `:w` → the text sits above/next to the files, the attachments are
+      preserved.
+- [ ] **Both branches:** check for a channel **inside a category** as well.
+- [ ] **A broken path:** include a file you cannot read in the selection → the
+      others are posted anyway, and the message names the one that failed.
 
-## Stoat-Adapter — Anhänge als Knoten (`stoat:attachment`)
+## Stoat adapter — attachments as nodes (`stoat:attachment`)
 
-Jede hochgeladene Datei ist auch ein Knoten unter ihrer Nachricht. Enter auf
-einer Nachricht **mit** Anhängen drillt in die Dateiliste.
+Every uploaded file is also a node below its message. Enter on a message
+**with** attachments drills into the file list.
 
-- [ ] **Drilldown:** Enter auf einer Nachricht mit Anhängen → Liste mit
-      Dateiname, Größe und Typ.
-- [ ] **Ohne Anhänge:** Enter auf einer normalen Nachricht → kein Drilldown,
-      keine leere Liste (die Nachricht meldet `has_children` nur mit Dateien).
-- [ ] **`o` öffnet:** Datei anwählen, `o` → OS-Viewer geht auf. Alle Dateien der
-      Nachricht liegen im selben Temp-Verzeichnis, der Viewer kann durchblättern.
-- [ ] **Zweites `o` lädt nicht neu:** Viewer schließen, `o` erneut → geht sofort
-      auf (die Bytes liegen schon im Temp-Verzeichnis).
-- [ ] **`D` speichert alles:** `D` → Zielverzeichnis eingeben (auch mit `~`, auch
-      ein noch nicht existierendes) → **alle** Dateien der Nachricht liegen dort.
-- [ ] **Zielverzeichnis ist eine Datei:** Pfad einer existierenden Datei angeben
-      → klare Fehlermeldung, kein Teil-Download.
-- [ ] **Kein Löschen:** Es gibt bewusst keine Delete-Action auf dieser Ebene
-      (Revolt kann einzelne Dateien nicht aus einer Nachricht entfernen).
-- [ ] **Beide Zweige:** Auch unter einem Channel **in einer Kategorie** prüfen.
+- [ ] **Drill down:** Enter on a message with attachments → a list with file
+      name, size and type.
+- [ ] **Without attachments:** Enter on an ordinary message → no drill-down, no
+      empty list (a message only reports `has_children` when it has files).
+- [ ] **`o` opens:** select a file, `o` → the OS viewer opens. All files of the
+      message live in the same temp directory, so the viewer can page through
+      them.
+- [ ] **A second `o` does not re-download:** close the viewer, press `o` again →
+      it opens immediately (the bytes are already in the temp directory).
+- [ ] **`D` saves everything:** `D` → enter a target directory (`~` allowed,
+      and one that does not exist yet) → **all** files of the message end up
+      there.
+- [ ] **The target directory is a file:** give the path of an existing file → a
+      clear error message, no partial download.
+- [ ] **No deleting:** there is deliberately no delete action at this level
+      (Revolt cannot remove individual files from a message).
+- [ ] **Both branches:** check below a channel **inside a category** as well.
 
-## Inline-Bilder im Terminal (`images:` in `tui.yaml`)
+## Inline images in the terminal (`images:` in `tui.yaml`)
 
-Eine Markdown-Spalte (`markdown: true`) zeichnet `![alt](url)` als **echtes
-Bild** zwischen den Textzeilen, wenn das Terminal Grafik kann (Kitty, iTerm2,
-Sixel — beim Start automatisch erkannt). Im Stoat-Chat kommen die Bilder aus
-den Bild-Anhängen, die der Adapter als Markdown-Bilder in den Body rendert.
-Getestet wird in einem Channel mit mindestens einem Screenshot-Anhang.
+A markdown column (`markdown: true`) draws `![alt](url)` as a **real image**
+between the text lines when the terminal can do graphics (Kitty, iTerm2, Sixel
+— detected automatically at startup). In the Stoat chat the images come from
+the image attachments that the adapter renders into the body as markdown
+images. Test in a channel with at least one screenshot attachment.
 
-- [ ] **Bild erscheint:** Channel öffnen → das Bild wird an der Stelle
-      gezeichnet, an der der Anhang im Body steht, nicht als `[image: …]`-Text.
-- [ ] **Nachladen:** Direkt nach dem Öffnen steht kurz der Platzhalter, dann
-      erscheint das Bild von selbst — ohne Tastendruck, ohne `r`.
-- [ ] **Einmal laden:** Mehrfach über die Nachricht scrollen bzw. `r` drücken →
-      das Bild wird **nicht** erneut heruntergeladen (kein Flackern, keine
-      neuen Requests im `NYD_DEBUG=1`-Log).
-- [ ] **Scroll-Clipping:** Mit `j`/`k` durch die Nachricht scrollen → das Bild
-      wird an der Pane-Kante sauber abgeschnitten und wächst wieder herein; es
-      malt **nicht** über die Nachbarzeilen oder über den Rand hinaus.
-- [ ] **Split:** Im gekoppelten Chat-Pane (80 %) prüfen, dass das Bild an der
-      Pane-Grenze endet und nicht in den Channel-Baum links läuft.
-- [ ] **Höhen-Cap:** Ein hoher Screenshot (Handy-Format) belegt höchstens
-      `max_height` Zeilen (Default 20) — der Rest der Unterhaltung bleibt
-      sichtbar. Wert in `tui.yaml` ändern → nach Neustart greift er.
-- [ ] **Breite:** Terminal schmaler ziehen → das Bild skaliert mit der
-      Spaltenbreite, das Seitenverhältnis bleibt.
-- [ ] **Resize:** Während ein Bild sichtbar ist, das Terminal umgroßziehen →
-      kein Geisterbild, keine Artefakte im Text.
-- [ ] **Fallback ohne Grafik:** Dieselbe Ansicht in einem Terminal ohne
-      Grafik-Support (z. B. `xterm`) → jede Zeile bleibt Text
-      (`[image: …]`), sonst ändert sich nichts.
-- [ ] **Abgeschaltet:** `images: { enabled: false }` in `tui.yaml` → wie oben,
-      und beim Start wird das Terminal gar nicht erst abgefragt.
-- [ ] **Kaputte URL / kein Bild:** Ein Anhang, der nicht ladbar oder nicht
-      dekodierbar ist → Platzhalter-Text bleibt stehen, kein Panic, und es wird
-      **nicht** in einer Schleife erneut versucht.
-- [ ] **Nicht-Bild-Anhänge:** Eine PDF/ZIP im Body erscheint als Link
-      (`📎 name`), nicht als Bildplatzhalter.
-- [ ] **`i` bleibt:** `i` auf der Nachricht öffnet die Bilder weiterhin im
-      OS-Viewer — inline und extern schließen sich nicht aus.
-- [ ] **Andere Views unberührt:** Ein Jira-Ticket mit Markdown-Body rendert
-      unverändert (keine reservierten Leerzeilen, kein Versatz).
+- [ ] **The image appears:** open the channel → the image is drawn at the spot
+      where the attachment sits in the body, not as `[image: …]` text.
+- [ ] **Loading afterwards:** right after opening, the placeholder shows
+      briefly, then the image appears by itself — without a keystroke and
+      without `r`.
+- [ ] **Loaded once:** scroll over the message repeatedly, or press `r` → the
+      image is **not** downloaded again (no flicker, no new requests in the
+      `NYD_DEBUG=1` log).
+- [ ] **Scroll clipping:** scroll through the message with `j`/`k` → the image
+      is cut off cleanly at the pane edge and grows back in; it does **not**
+      paint over the neighbouring rows or past the edge.
+- [ ] **Split:** in the coupled chat pane (80 %), check that the image ends at
+      the pane boundary and does not bleed into the channel tree on the left.
+- [ ] **Height cap:** a tall screenshot (phone format) occupies at most
+      `max_height` lines (default 20) — the rest of the conversation stays
+      visible. Change the value in `tui.yaml` → it takes effect after a
+      restart.
+- [ ] **Width:** make the terminal narrower → the image scales with the column
+      width, the aspect ratio is preserved.
+- [ ] **Resize:** resize the terminal while an image is visible → no ghost
+      image, no artefacts in the text.
+- [ ] **Fallback without graphics:** the same view in a terminal without
+      graphics support (e.g. `xterm`) → every line stays text (`[image: …]`),
+      nothing else changes.
+- [ ] **Switched off:** `images: { enabled: false }` in `tui.yaml` → as above,
+      and the terminal is not even probed at startup.
+- [ ] **Broken URL / not an image:** an attachment that cannot be loaded or
+      decoded → the placeholder text stays, no panic, and it is **not** retried
+      in a loop.
+- [ ] **Non-image attachments:** a PDF or ZIP in the body appears as a link
+      (`📎 name`), not as an image placeholder.
+- [ ] **`i` still works:** `i` on the message still opens the images in the OS
+      viewer — inline and external do not exclude each other.
+- [ ] **Other views untouched:** a Jira issue with a markdown body renders
+      unchanged (no reserved blank lines, no offset).
 
-## Taiga-Adapter — Edit-Hang-Fix (Timeout + nicht-blockierender Editor)
+## Taiga adapter — edit-hang fix (timeout plus non-blocking editor)
 
-Zwei Ebenen gegen das „App friert beim Edit (`e`) auf einer Taiga-Zeile
-komplett ein"-Problem. Ebene 1 = HTTP-Timeout + Reconnect-Retry im Adapter;
-Ebene 2 = Editor-`prepare` läuft off-thread statt blockierend.
+Two layers against the "the app freezes completely on edit (`e`) on a Taiga
+row" problem. Layer 1 = HTTP timeout plus reconnect retry in the adapter;
+layer 2 = the editor's `prepare` runs off-thread instead of blocking.
 
-**Ebene 1 — Timeout/Reconnect:**
+**Layer 1 — timeout and reconnect:**
 
-- [ ] **Default-Timeout greift:** Ohne `request_timeout_secs` in
-      `taiga-adapter.yaml` verhält sich alles wie bisher; eine gesunde,
-      langsame Instanz antwortet weiterhin (Default 20 s).
-- [ ] **Toter Socket → Fehler statt Freeze:** Während die App läuft, die
-      Verbindung zur Taiga-Instanz hart kappen (z. B. Netzwerk/Tunnel
-      blockieren), dann `e` auf einer Zeile. Erwartet: nach ~Timeout ein
-      Reconnect-Versuch, dann saubere Fehlermeldung
-      („Failed to load …" / Netzwerkfehler) — **nie** dauerhaftes Hängen.
-- [ ] **Kurzer Timeout zum Testen:** `request_timeout_secs: 3` setzen, Tunnel
-      blockieren → Fehler kommt nach ~6 s (2 Versuche), App bleibt bedienbar.
-- [ ] **`connect_timeout_secs` separat:** Ohne Angabe = `min(request, 10)`. Mit
-      explizit z. B. `connect_timeout_secs: 30` darf der Verbindungsaufbau auf
-      einer langsamen Leitung länger als 10 s dauern, ohne fälschlich
-      abzubrechen (gesunde, langsam verbindende Instanz).
-- [ ] **Reconnect heilt transienten Abriss:** Verbindung kurz kappen und sofort
-      wieder freigeben → der zweite (Retry-)Versuch geht durch, kein
-      Nutzer-sichtbarer Fehler.
+- [ ] **The default timeout applies:** without `request_timeout_secs` in
+      `taiga-adapter.yaml` everything behaves as before; a healthy but slow
+      instance still answers (default 20 s).
+- [ ] **A dead socket gives an error instead of a freeze:** while the app is
+      running, cut the connection to the Taiga instance hard (e.g. block the
+      network or the tunnel), then press `e` on a row. Expected: after roughly
+      the timeout, one reconnect attempt, then a clean error message ("Failed
+      to load …" or a network error) — **never** a permanent hang.
+- [ ] **A short timeout for testing:** set `request_timeout_secs: 3` and block
+      the tunnel → the error arrives after ~6 s (2 attempts), the app stays
+      usable.
+- [ ] **`connect_timeout_secs` separately:** without a value it is
+      `min(request, 10)`. With an explicit `connect_timeout_secs: 30`, for
+      instance, establishing a connection on a slow line may take longer than
+      10 s without aborting wrongly (a healthy but slowly connecting instance).
+- [ ] **Reconnect heals a transient drop:** cut the connection briefly and
+      restore it right away → the second (retry) attempt goes through, no
+      user-visible error.
 
-**Ebene 2 — nicht-blockierender Editor-Dispatch (alle Adapter):**
+**Layer 2 — non-blocking editor dispatch (all adapters):**
 
-- [ ] **UI bleibt responsiv:** `e` auf einer Taiga-Zeile bei langsamer
-      Verbindung → die Notification „⏳ Opening editor: …" erscheint sofort,
-      und die TUI nimmt währenddessen weiter Input an (scrollen, Tab wechseln),
-      friert also nicht ein.
-- [ ] **Editor öffnet normal:** Bei gesunder Verbindung öffnet `$EDITOR` wie
-      gewohnt; die „Opening editor…"-Notification verschwindet beim Öffnen
-      (andere Notifications bleiben stehen).
-- [ ] **Kein Doppel-Open:** Während „Opening editor…" läuft, erneut `e` →
-      „Editor is already open", kein zweiter Ladevorgang.
-- [ ] **Fehler-Notification:** Schlägt das `prepare` fehl (toter Socket), zeigt
-      die Statuszeile den Fehler und es öffnet sich **kein** leerer Editor.
-- [ ] **Andere Adapter unverändert:** Jira/Postgres/Confluence/Stoat — `e`
-      (bzw. die jeweilige Editor-Aktion) öffnet weiterhin korrekt; inline- und
-      pause-tui-Editor-Profile funktionieren (der `pending_editor_request`-Pfad).
+- [ ] **The UI stays responsive:** `e` on a Taiga row over a slow connection →
+      the notification "⏳ Opening editor: …" appears immediately and the TUI
+      keeps accepting input meanwhile (scrolling, switching tabs), so it does
+      not freeze.
+- [ ] **The editor opens normally:** over a healthy connection `$EDITOR` opens
+      as usual; the "Opening editor…" notification disappears when it opens
+      (other notifications stay).
+- [ ] **No double open:** press `e` again while "Opening editor…" is running →
+      "Editor is already open", no second load.
+- [ ] **Error notification:** if the `prepare` fails (dead socket), the status
+      line shows the error and **no** empty editor opens.
+- [ ] **Other adapters unchanged:** Jira, Postgres, Confluence and Stoat — `e`
+      (or their respective editor action) still opens correctly; the inline and
+      pause-tui editor profiles work (the `pending_editor_request` path).
 
-> Bekannte Schnitte: kein explizites „Abbrechen" während des Ladens — der
-> Wartebalken ist durch den Adapter-Timeout (Ebene 1) ohnehin begrenzt, und der
-> Generation-Token verwirft eine veraltete Session, falls zwischenzeitlich neu
-> geöffnet wird. Retry trifft nur Transport-Fehler, nicht HTTP-Status (4xx/5xx);
-> der multipart-Upload (`upload_attachment`) hat keinen Retry (Form nicht
-> klonbar), wird aber vom Timeout geschützt.
+> Known cut-offs: there is no explicit "cancel" during loading — the wait is
+> bounded by the adapter timeout (layer 1) anyway, and the generation token
+> discards a stale session if something is reopened meanwhile. The retry only
+> covers transport errors, not HTTP statuses (4xx/5xx); the multipart upload
+> (`upload_attachment`) has no retry (the form is not cloneable) but is
+> protected by the timeout.
 
-## Postgres — Retry nach fehlgeschlagenem Erst-Load (leerer Tree)
+## Postgres — retry after a failed first load (empty tree)
 
-Voraussetzung: Postgres-Tab erreichbar machen/kappen, sodass der erste
-`list databases`-Load fehlschlägt (z. B. Tunnel-Ziel down, oder kurzes
+Prerequisite: make the Postgres tab reachable or unreachable so that the first
+`list databases` load fails (e.g. the tunnel target is down, or a short
 `query_timeout_secs`).
 
-- [ ] Postgres-Tab öffnen, Load schlägt fehl → Banner „Fetch failed:
-      list databases: …".
-- [ ] **`r` drücken → Reload wird ausgelöst** (Banner wechselt auf
-      „Retrying …"/„Connecting …", nicht stummes Nichts). Das war der
-      Bug: im leeren Tree war keine Cursor-Zeile → die View-Actions
-      (inkl. `reload`) wurden nicht aufgelöst, `r` verpuffte.
-- [ ] Verbindung wieder herstellen, `r` → Datenbanken laden, Banner weg.
-- [ ] Auch `f` (fuzzy filter) und `/` (search) sind im leeren Tree
-      ansprechbar (gleiche Wurzel-Fallback-Logik).
+- [ ] Open the Postgres tab, the load fails → banner "Fetch failed: list
+      databases: …".
+- [ ] **Press `r` → a reload is triggered** (the banner switches to "Retrying
+      …"/"Connecting …", not silently nothing). That was the bug: in an empty
+      tree there was no cursor row → the view actions (including `reload`) were
+      not resolved and `r` fizzled out.
+- [ ] Restore the connection, `r` → the databases load, the banner goes away.
+- [ ] `f` (fuzzy filter) and `/` (search) are usable in the empty tree as well
+      (the same root fallback logic).
 
-## Postgres — `manual_connect` (kein Auto-Connect, nur `r`)
+## Postgres — `manual_connect` (no auto-connect, only `r`)
 
-`adapter.manual_connect: true` in `postgres.yaml` — das ist der Default,
-der Test gilt also auch ohne die Zeile.
+`adapter.manual_connect: true` in `postgres.yaml` — that is the default, so
+the test holds without the line as well.
 
-- [ ] App-Start: Postgres-Tab lädt **nicht** automatisch; Banner
-      „Press `r` to connect".
-- [ ] Subtab-Wechsel (databases/tables/scripts) löst ebenfalls keinen
-      Auto-Load aus.
-- [ ] `r` baut Verbindung + SSH-Tunnel auf und lädt.
+- [ ] App start: the Postgres tab does **not** load automatically; banner
+      "Press `r` to connect".
+- [ ] Switching subtabs (databases/tables/scripts) does not trigger an auto
+      load either.
+- [ ] `r` establishes the connection and the SSH tunnel and loads.
 
-## `manual_connect` — Default und Startup-Login
+## `manual_connect` — default and startup login
 
-`adapter.manual_connect` steht per Default auf `true`. Getestet wird der
-Default selbst und das, was ein explizites `false` beim Start auslöst.
+`adapter.manual_connect` defaults to `true`. The test covers the default itself
+and what an explicit `false` triggers at startup.
 
-- [ ] **Default greift**: In einer View-Datei mit Adapter die Zeile
-      `manual_connect` **ganz entfernen**. TUI starten → der Tab lädt
-      nicht, Banner „Auto-connect disabled — press `r` to connect".
-- [ ] **Lokale Tabs opten zurück**: `views/tasks.yaml`,
-      `trackings.yaml`, `projects.yaml`, `sqlite.yaml` tragen
-      `manual_connect: false`; diese Tabs sind beim Start wie bisher
-      sofort gefüllt.
-- [ ] **Login eines eager Tabs kommt sofort**: In einer View mit
-      Anmeldung (z. B. `kimai.yaml`) `manual_connect: false` setzen,
-      Passwortspeicher sperren (`gpgconf --kill gpg-agent`), TUI
-      starten. Erwartet: das Credential-Popup steht **sofort** da,
-      obwohl der Tasks-Tab aktiv ist; der Titel beginnt mit dem
-      Tab-Namen (`Kimai: …`). Enter → Popup schließt, Kimai lädt im
-      Hintergrund; Tasks bleibt der aktive Tab.
-- [ ] **Escape**: Statt Enter `Esc` → Popup weg, kein zweites Popup
-      poppt nach, die TUI ist normal bedienbar. Der Kimai-Tab zeigt beim
-      Öffnen den Fehler-/Connect-Banner; `r` startet den Login neu.
-- [ ] **Zwei eager Logins**: Zwei Views mit Anmeldung auf
-      `manual_connect: false`. Erwartet: **ein** Popup zur Zeit, das
-      zweite überschreibt es nicht. Nach Beantworten/Abbrechen des
-      ersten kommt das zweite spätestens beim Öffnen seines Tabs.
-- [ ] **Manual-Connect-Tab bleibt still**: Ein Tab mit
-      `manual_connect: true` (oder ohne die Zeile) zeigt beim App-Start
-      **kein** Popup — erst `r` auf diesem Tab fragt nach.
+- [ ] **The default applies**: **remove** the `manual_connect` line entirely
+      from a view file that has an adapter. Start the TUI → the tab does not
+      load, banner "Auto-connect disabled — press `r` to connect".
+- [ ] **Local tabs opt back in**: `views/tasks.yaml`, `trackings.yaml`,
+      `projects.yaml` and `sqlite.yaml` carry `manual_connect: false`; those
+      tabs are populated immediately at startup, as before.
+- [ ] **An eager tab's login arrives immediately**: set
+      `manual_connect: false` in a view that requires a login (e.g.
+      `kimai.yaml`), lock the password store (`gpgconf --kill gpg-agent`) and
+      start the TUI. Expected: the credential popup is there **immediately**,
+      even though the Tasks tab is active; its title starts with the tab name
+      (`Kimai: …`). Enter → the popup closes, Kimai loads in the background;
+      Tasks stays the active tab.
+- [ ] **Escape**: press `Esc` instead of Enter → the popup goes away, no second
+      popup pops up behind it, the TUI is usable normally. The Kimai tab shows
+      the error/connect banner when opened; `r` restarts the login.
+- [ ] **Two eager logins**: set `manual_connect: false` on two views that
+      require a login. Expected: **one** popup at a time, the second does not
+      overwrite it. After the first is answered or cancelled, the second
+      arrives at the latest when its tab is opened.
+- [ ] **A manual-connect tab stays quiet**: a tab with `manual_connect: true`
+      (or without the line) shows **no** popup at app start — only `r` on that
+      tab asks.
 
-## Postgres — `auth:`-Block statt gpg-Pinentry
+## Postgres — an `auth:` block instead of the gpg pinentry
 
-Voraussetzung: `postgres-adapter.yaml` auf die delegierende Form umstellen
-(siehe `docs/examples/views/postgres-adapter.yaml`, Abschnitt „One
-credential script for the whole connection"): `auth.mechanism: password`
-mit `script:`, Bindings `password` + `ssh_password`, und beide Slots
-(`postgres.password`, `transport.ssh[0].auth.password`) auf
-`{ type: script-result }`. gpg-Agent vorher entsperrt **und** in einem
-zweiten Durchgang gesperrt (`gpgconf --kill gpg-agent`).
+Prerequisite: switch `postgres-adapter.yaml` to the delegating form (see
+`docs/examples/views/postgres-adapter.yaml`, section "One credential script for
+the whole connection"): `auth.mechanism: password` with `script:`, the bindings
+`password` and `ssh_password`, and both slots (`postgres.password` and
+`transport.ssh[0].auth.password`) set to `{ type: script-result }`. Run once
+with the gpg agent unlocked **and** a second time with it locked
+(`gpgconf --kill gpg-agent`).
 
-- [ ] Entsperrter Store: Tab öffnen → Verbindung kommt ohne jede
-      Rückfrage; **kein** gpg-Pinentry-Fenster.
-- [ ] Gesperrter Store: Tab öffnen → **unser** Credential-Popup mitten in
-      der TUI (Header aus dem Skript, Passphrase maskiert). Enter →
-      Tunnel und DB-Verbindung kommen aus **einem** Skript-Lauf, also
-      genau **ein** Dialog für beide Secrets.
-- [ ] Escape im Popup → Load bricht mit Meldung ab, keine
-      Wiederholungs-Dialoge; `r` fragt erneut.
-- [ ] Falsche Passphrase → Skript zeigt das Formular erneut mit seiner
-      Fehlermeldung, nicht ein neuer leerer Dialog.
-- [ ] `query_timeout_secs` klein setzen (z. B. 5) und im Popup länger
-      warten → Timeout läuft **nicht** während der Eingabe (die
-      Credentials werden vor der Uhr geholt).
-- [ ] Config-Fehler werden beim Lesen abgewiesen, nicht beim Connect:
-      Binding `ssh_password` entfernen, aber den Hop delegieren lassen →
-      Start-Fehler nennt `transport.ssh[0].auth.password`; zweiten Hop
-      ebenfalls auf `script-result` setzen → Fehler nennt `ssh[1]`.
+- [ ] Unlocked store: open the tab → the connection comes up without any
+      prompt; **no** gpg pinentry window.
+- [ ] Locked store: open the tab → **our** credential popup in the middle of
+      the TUI (the header comes from the script, the passphrase is masked).
+      Enter → the tunnel and the DB connection come out of **one** script run,
+      so exactly **one** dialog for both secrets.
+- [ ] Escape in the popup → the load aborts with a message, no repeated
+      dialogs; `r` asks again.
+- [ ] A wrong passphrase → the script shows its form again with its own error
+      message, not a fresh empty dialog.
+- [ ] Set `query_timeout_secs` low (e.g. 5) and wait longer in the popup → the
+      timeout does **not** run while you are typing (the credentials are
+      fetched before the clock starts).
+- [ ] Configuration errors are rejected while reading, not on connect: remove
+      the `ssh_password` binding but keep the hop delegating → the startup
+      error names `transport.ssh[0].auth.password`; set the second hop to
+      `script-result` as well → the error names `ssh[1]`.
 
 ## Tab-Reihenfolge + Autonummerierung
 
