@@ -282,7 +282,7 @@ impl App {
 
         // Rebuild content views too — they hold keybinding/theme refs.
         let factories = (self.adapter_factory_builder)();
-        let new_content_views = super::load_content_views(
+        let (new_content_views, view_warnings) = super::load_content_views(
             &shared_theme,
             &new_keybindings,
             &new_config.editors,
@@ -311,7 +311,13 @@ impl App {
         // empty and half-wired until the next restart.
         self.wire_content_views();
 
-        Ok("tui.yaml reloaded".to_string())
+        // Rebuilding the views re-reads every `views/*.yaml`, so this is
+        // also the moment their unknown keys resurface.
+        if view_warnings.is_empty() {
+            Ok("tui.yaml reloaded".to_string())
+        } else {
+            Ok(format!("tui.yaml reloaded — {}", view_warnings.join("; ")))
+        }
     }
 
     /// Parse-and-validate `text` as the config that would live at `path`,
@@ -370,8 +376,8 @@ impl App {
                 path.display()
             ));
         }
-        let mut config: ViewFileConfig =
-            serde_yaml::from_str(&yaml).map_err(|e| format!("view-config parse: {e}"))?;
+        let (mut config, unknown) = ViewFileConfig::parse_reporting_unknown_fields(&yaml)
+            .map_err(|e| format!("view-config parse: {e}"))?;
         // Mirror the startup loader: inherit tree-continuation columns
         // before validating, so an in-app config edit is judged the same way.
         config.inherit_tree_columns();
@@ -452,10 +458,17 @@ impl App {
         // `tab.name` may have changed → re-resolve the tab order.
         self.rebuild_tab_layout();
 
-        Ok(format!(
-            "Reloaded view {}",
-            path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
-        ))
+        let file = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+        // The edit that was just saved is the most likely source of a
+        // stray key, so this notification is where it does the most good.
+        if unknown.is_empty() {
+            Ok(format!("Reloaded view {file}"))
+        } else {
+            Ok(format!(
+                "Reloaded view {file} — ignored unknown keys: {}",
+                unknown.join(", ")
+            ))
+        }
     }
 
     /// Rebuild every content view from scratch — used when an adapter
@@ -464,7 +477,7 @@ impl App {
     /// theme + keybindings + trackings_view.
     fn reload_all_content_views(&mut self) -> Result<String, String> {
         let factories = (self.adapter_factory_builder)();
-        let new_content_views = super::load_content_views(
+        let (new_content_views, warnings) = super::load_content_views(
             &self.shared_theme,
             &self.keybindings,
             &self.config.editors,
@@ -492,7 +505,16 @@ impl App {
         // `reload_tui_config`).
         self.wire_content_views();
 
-        Ok("All content views reloaded".to_string())
+        if warnings.is_empty() {
+            Ok("All content views reloaded".to_string())
+        } else {
+            // The reload succeeded; say so, but name the keys that were
+            // dropped so an edit that "did nothing" is explained.
+            Ok(format!(
+                "All content views reloaded — {}",
+                warnings.join("; ")
+            ))
+        }
     }
 
     /// Re-open the editor on `path` after a reload failure. Reads the

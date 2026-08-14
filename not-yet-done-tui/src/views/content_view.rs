@@ -13475,6 +13475,7 @@ mod tests {
     fn test_config_with_children() -> ViewFileConfig {
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
@@ -13765,7 +13766,10 @@ mod tests {
             fields,
             vec![
                 ("note".to_string(), Vec::<String>::new()),
-                ("state".to_string(), vec!["implemented".into(), "merged".into()]),
+                (
+                    "state".to_string(),
+                    vec!["implemented".into(), "merged".into()]
+                ),
             ]
         );
     }
@@ -14224,6 +14228,7 @@ mod tests {
     fn smooth_chat_config() -> ViewFileConfig {
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Chat".into(),
                 order: 0,
@@ -14728,6 +14733,7 @@ mod tests {
     fn test_config_with_tree() -> ViewFileConfig {
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
@@ -15007,6 +15013,7 @@ mod tests {
         );
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Chat".into(),
                 order: 0,
@@ -15179,6 +15186,7 @@ mod tests {
         child.recursive = true;
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Tasks".into(),
                 order: 0,
@@ -16049,6 +16057,7 @@ mod tests {
         };
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Worklog".into(),
                 order: 0,
@@ -17980,6 +17989,7 @@ mod tests {
     fn test_config_with_query() -> ViewFileConfig {
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
@@ -19567,6 +19577,7 @@ mod tests {
             .collect();
         ViewFileConfig {
             reminder: None,
+            hooks: None,
             tab: TabConfig {
                 name: "Test".into(),
                 order: 0,
@@ -22566,6 +22577,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
     use crate::config::view_config::*;
     ViewFileConfig {
         reminder: None,
+        hooks: None,
         tab: TabConfig {
             name: "Jira".to_string(),
             order: 3,

@@ -91,6 +91,12 @@ base64 = "0.22"
 quick-xml = "0.39"
 slug = "0.1"
 serde_yaml = "0.9.34"
+# Reports every key a struct's schema does not know while deserializing.
+# The view configs are hand-written, so a typo or a field that moved in a
+# refactor would otherwise vanish without a trace — serde drops unknown
+# keys silently, and `deny_unknown_fields` would turn each one into a
+# hard error that costs the user their whole tab.
+serde_ignored = "0.1.14"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 ratatui = "0.30"
 fuzzy-matcher = "0.3.7"

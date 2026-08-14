@@ -15,6 +15,7 @@ tokio-stream         = "0.1.18"
 anyhow               = { workspace = true }
 serde                = { workspace = true }
 serde_yaml           = { workspace = true }
+serde_ignored        = { workspace = true }
 dirs                 = { workspace = true }
 chrono-english       = { workspace = true }
 shaku                = { workspace = true }
