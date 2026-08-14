@@ -302,7 +302,7 @@ knows any special cases.
   - If the parent path (`/work/.../<slug>/tickets`) does not exist at
     all: a modal error from the script (stderr).
 - [ ] `:tree-find` directly (without a script): `:tree-find "Tasks"
-  <text>` (a description substring) jumps to tasks and parks on the
+<text>` (a description substring) jumps to tasks and parks on the
       first match; `n`/`N` cycle through the others. The same command
       with `id:<uuid>` instead of the text parks exactly on that node.
       A modal error for an unknown tab/view, or when the active view is
@@ -340,7 +340,7 @@ knows any special cases.
 ## `:query edit/new/delete` — saved-query body management
 
 - [ ] On a content tab with a Jira or Taiga adapter, `:query new Test
-  foo` → `$EDITOR` opens on an empty buffer with the suffix `.yaml`.
+foo` → `$EDITOR` opens on an empty buffer with the suffix `.yaml`.
       Enter content, save, close the editor → notification "Saved query
       'Test foo'", the file appears under
       `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/Test foo.yaml`,
@@ -834,169 +834,165 @@ Precondition: `views/postgres.yaml` contains the `Rows` child with
 The drill-down uses `query_rows` with `ORDER BY ctid` and
 `LIMIT/OFFSET`.
 
-- [ ] Auf einer Tabellenzeile `o` drücken → neuer Pane öffnet rechts
-      (Verhältnis 1:4: links schmal, rechts breit), Akzent-Border auf
-      dem rechten Pane, gedimmter Border links. Im rechten Pane laden
-      bis zu 100 Rows.
-- [ ] Spalten werden automatisch aus den Daten abgeleitet (kein
-      `columns:`-Eintrag im YAML), alle gleich breit, Header zeigt die
-      Postgres-Spaltennamen.
-- [ ] NULL-Werte erscheinen als `(null)`; nicht-Text-Spalten
-      (z. B. `int`, `timestamptz`, `bool`, `jsonb`) werden korrekt als
-      Text dargestellt.
-- [ ] `>` lädt nächsten 100er-Block (Footer zeigt `100–199`),
-      `<` zurück zum vorigen. Das funktioniert auch auf einer Tabelle
-      mit mehr als 200 Rows.
-- [ ] Auf einer kleinen Tabelle (< 100 Rows): `>` ist no-op
-      (kein has_next).
-- [ ] Tabelle mit ungewöhnlichem Spaltennamen (z. B. mit `"` darin) →
-      Query darf nicht crashen, Spalte wird korrekt gequotet.
-- [ ] `backspace` schließt den rechten Pane / drillt zurück
-      (je nach Pane-Lage); Liste der Tables im linken Pane bleibt
-      erhalten.
+- [ ] Press `o` on a table row → a new pane opens on the right
+      (ratio 1:4: narrow on the left, wide on the right), accent border
+      on the right pane, dimmed border on the left. The right pane loads
+      up to 100 rows.
+- [ ] Columns are derived from the data automatically (no `columns:`
+      entry in the YAML), all of them equally wide, the header shows the
+      Postgres column names.
+- [ ] NULL values appear as `(null)`; non-text columns (for example
+      `int`, `timestamptz`, `bool`, `jsonb`) are rendered as text
+      correctly.
+- [ ] `>` loads the next block of 100 (the footer shows `100–199`), `<`
+      goes back to the previous one. This also works on a table with more
+      than 200 rows.
+- [ ] On a small table (< 100 rows): `>` is a no-op (no has_next).
+- [ ] A table with an unusual column name (for example one containing
+      `"`) → the query must not crash, the column is quoted correctly.
+- [ ] `backspace` closes the right pane / drills back (depending on the
+      pane position); the list of tables in the left pane is preserved.
 
 ## Split-Pane (Phase 2 + 3 + 4)
 
-Phase 2 hat manuelle Splits eingebaut, Defaults jetzt `wv`/`ws`/`wq`
-(Leader `w`, früher `ctrl+w`). Phase 3 öffnet Splits über `split:` in
-der ChildDef beim Drilldown. Phase 4 trägt jedem Pane einen
-Buchstabentag und einen `<leader><letter>`-Switcher nach.
-`pane_tags`-Alphabet wird automatisch gegen die Action-Keys (v/s/q
-in den Defaults) gefiltert, damit nichts kollidiert.
+Phase 2 added manual splits, the defaults are now `wv`/`ws`/`wq`
+(leader `w`, formerly `ctrl+w`). Phase 3 opens splits during a drill-down
+via `split:` in the ChildDef. Phase 4 adds a letter tag per pane and a
+`<leader><letter>` switcher. The `pane_tags` alphabet is filtered against
+the action keys (v/s/q in the defaults) automatically so that nothing
+collides.
 
-### Phase 2 — Manuelle Splits
+### Phase 2 — manual splits
 
-- [ ] Beliebigen Content-Tab öffnen (Jira/Taiga/Postgres) → `wv`
-      → zweiter Pane rechts, Akzent-Border auf rechtem Pane,
-      gedimmter Border auf linkem; Fetch feuert für neuen Pane.
-- [ ] `wq` auf rechtem Pane → schließt, linker Pane bekommt
-      Fokus zurück, Border verschwindet (Single-Leaf).
-- [ ] `ws` → Split unten; in jedem Pane unabhängig navigieren.
-- [ ] In linkem Pane in Postgres-DB drillen; mit `wv` splitten;
-      im rechten Pane anders weiterdrillen → beide behalten ihren
-      Drilldown-State.
-- [ ] Subtab-Wechsel (z. B. Taiga Tickets ↔ Notifications) bei
-      offenem Split im aktuellen Subtab → der andere Subtab-Tree
-      (Single-Leaf) erscheint, ursprünglicher Split-State beim
-      Zurückwechseln intakt.
-- [ ] Sort-Overlay (`S` in Jira/Taiga) erscheint nur auf fokussiertem
-      Pane.
-- [ ] Action-Bar / Breadcrumb passen sich nach Split an fokussierten
-      Pane an.
-- [ ] Input-Mode-Guard: bei aktivem fuzzy-Filter (`f`), Suche (`/`)
-      oder Cmdline (`:`) → `w` wird als normales Zeichen ins
-      Input-Feld geschrieben, NICHT als Leader interpretiert (sonst
-      wäre `w` im Suchtext nicht tippbar).
+- [ ] Open any content tab (Jira/Taiga/Postgres) → `wv` → a second pane
+      on the right, accent border on the right pane, dimmed border on the
+      left one; a fetch fires for the new pane.
+- [ ] `wq` on the right pane → it closes, the left pane gets the focus
+      back, the border disappears (single leaf).
+- [ ] `ws` → split at the bottom; navigate independently in each pane.
+- [ ] Drill into a Postgres database in the left pane; split with `wv`;
+      drill on differently in the right pane → both keep their own
+      drill-down state.
+- [ ] Switch subtabs (for example Taiga tickets ↔ notifications) while a
+      split is open in the current subtab → the other subtab tree
+      (single leaf) appears, the original split state is intact when
+      switching back.
+- [ ] The sort overlay (`S` in Jira/Taiga) only appears on the focused
+      pane.
+- [ ] Action bar / breadcrumb adapt to the focused pane after a split.
+- [ ] Input mode guard: while a fuzzy filter (`f`), a search (`/`) or the
+      cmdline (`:`) is active → `w` is written into the input field as an
+      ordinary character, NOT interpreted as the leader (otherwise `w`
+      could not be typed in the search text).
 
-### Phase 3 — `split:` auf ChildDef
+### Phase 3 — `split:` on a ChildDef
 
-- [ ] In einer YAML-View einen `children:`-Eintrag mit
-      `split: { direction: right, ratio: 0.5 }` konfigurieren →
-      Drill-Key (Enter / Open) öffnet die Child-Ebene als neuen Pane
-      rechts vom aktuellen, Fokus auf neuem Pane.
-- [ ] `direction: bottom` → neuer Pane unten.
-- [ ] `direction: left` / `direction: top` → neuer Pane links / oben
-      vom Source.
-- [ ] `ratio: 0.7` → neuer (gedrillter) Pane bekommt 70 % des Platzes.
-- [ ] Ohne `split:` → klassischer In-Place-Drilldown (kein neuer Pane).
-- [ ] Im neuen Split-Pane mit Back-Key (`Esc`/`h`) → kehrt zur Parent-
-      Liste zurück (NavFrame mit den Parent-Items wurde beim Split-
-      Drill auf den neuen Pane übertragen).
-- [ ] `wq` auf dem Split-Drill-Pane → schließt zurück zur
-      Single-Pane-Ansicht; Source-Pane ist unverändert.
-- [ ] Adapter-Cache: zweimal hintereinander split-drillen (erst
-      schließen, dann erneut) → zweite Anfrage liefert sofort aus
-      dem Cache, keine doppelten HTTP-Calls (der `Arc<dyn ContentAdapter>`
-      wird geteilt).
+- [ ] Configure a `children:` entry with
+      `split: { direction: right, ratio: 0.5 }` in a YAML view → the
+      drill key (Enter / Open) opens the child level as a new pane to the
+      right of the current one, focus on the new pane.
+- [ ] `direction: bottom` → new pane at the bottom.
+- [ ] `direction: left` / `direction: top` → new pane to the left of /
+      above the source.
+- [ ] `ratio: 0.7` → the new (drilled) pane gets 70 % of the space.
+- [ ] Without `split:` → classic in-place drill-down (no new pane).
+- [ ] Press the back key (`Esc`/`h`) in the new split pane → it returns
+      to the parent list (the NavFrame holding the parent items was
+      carried over to the new pane during the split drill).
+- [ ] `wq` on the split-drill pane → closes back to the single-pane view;
+      the source pane is unchanged.
+- [ ] Adapter cache: split-drill twice in a row (close first, then again)
+      → the second request is served from the cache immediately, no
+      duplicate HTTP calls (the `Arc<dyn ContentAdapter>` is shared).
 
-### Phase 4 — Letter-Tags + `w<letter>`
+### Phase 4 — letter tags + `w<letter>`
 
-Default-Alphabet `asdfghjkl`, mit Auto-Filter gegen v/s/q (= Action-
-Keys der Default-Window-Bindings) → effektives Alphabet `adfghjkl`.
+Default alphabet `asdfghjkl`, auto-filtered against v/s/q (= the action
+keys of the default window bindings) → effective alphabet `adfghjkl`.
 
-- [ ] Single-Pane: kein Border, kein sichtbarer Tag.
-- [ ] `wv` → Split rechts. Im linken Pane steht oben links im
-      Border `a`, im rechten `d` (jeweils gestylt: fokussierter
-      Pane in Akzentfarbe + bold, ungehfokussierter in dim). `s`
-      wird übersprungen, weil es als Action-Key reserviert ist.
-- [ ] `wd` → Fokus springt auf Pane `d`; Bordertitel wechselt die
-      Farben (`d` → bold/Akzent, `a` → dim). Action-Bar zeigt jetzt
-      Aktionen des `d`-Panes.
-- [ ] Im fokussierten Pane noch ein Mal `wv` → dritter Pane mit
-      Tag `f` (nächster freier Buchstabe nach `a` und `d`).
-- [ ] `wa` → Fokus zurück auf den ersten Pane. Tag-Zuweisungen
-      bleiben stabil (kein Re-Layout der Buchstaben).
-- [ ] Pane `d` schließen (`wq`) → Tag `d` ist wieder frei. Den
-      verbleibenden Pane mit `f` erneut splitten → der neue Pane
-      bekommt `d` (recyclt) statt `g`.
-- [ ] `w` gefolgt von einem nicht zugewiesenen Buchstaben (z. B.
-      `z`, oder ein Buchstabe der zwar im Alphabet ist aber kein
-      Pane trägt) → keine Aktion, Chord wird sauber abgebrochen
-      (`window_pending` zurück auf `None`).
-- [ ] In `tui.yaml` `pane_tags: "qwert"` setzen → nach Restart bekommen
-      Panes Tags aus `wert` (`q` ist Close-Action und wird gefiltert).
-- [ ] In `tui.yaml` `window:` Bindings auf `gv`/`gs`/`gq` ändern →
-      nach Restart funktioniert der Switcher mit Leader `g`
-      (`gv` = split right, `ga` = switch zu Pane `a`). Default-
-      Alphabet wird gegen v/s/q gefiltert (selber Filter-Output).
-- [ ] Subtab-Wechsel mit aktiven Splits: Tag-Belegung des einen Trees
-      beeinflusst den anderen nicht (jeder Tree hat eine eigene
-      Allokation, die mit `a` startet).
+- [ ] Single pane: no border, no visible tag.
+- [ ] `wv` → split to the right. The left pane shows `a` at the top left
+      of its border, the right one `d` (each styled: the focused pane in
+      the accent colour and bold, the unfocused one dimmed). `s` is
+      skipped because it is reserved as an action key.
+- [ ] `wd` → the focus jumps to pane `d`; the border titles swap colours
+      (`d` → bold/accent, `a` → dim). The action bar now shows the
+      actions of pane `d`.
+- [ ] Press `wv` once more in the focused pane → a third pane with tag
+      `f` (the next free letter after `a` and `d`).
+- [ ] `wa` → focus back on the first pane. Tag assignments stay stable
+      (no re-layout of the letters).
+- [ ] Close pane `d` (`wq`) → tag `d` is free again. Split the remaining
+      pane `f` once more → the new pane gets `d` (recycled) instead of
+      `g`.
+- [ ] `w` followed by an unassigned letter (for example `z`, or a letter
+      that is in the alphabet but carries no pane) → no action, the chord
+      is aborted cleanly (`window_pending` back to `None`).
+- [ ] Set `pane_tags: "qwert"` in `tui.yaml` → after a restart panes get
+      their tags from `wert` (`q` is the close action and is filtered
+      out).
+- [ ] Change the `window:` bindings in `tui.yaml` to `gv`/`gs`/`gq` →
+      after a restart the switcher works with leader `g` (`gv` = split
+      right, `ga` = switch to pane `a`). The default alphabet is filtered
+      against v/s/q (same filter output).
+- [ ] Switching subtabs with active splits: the tag allocation of one
+      tree does not affect the other (each tree has its own allocation,
+      starting at `a`).
 
-### Phase 4 follow-up — Chord-Precedence + Action-Bar-Mode
+### Phase 4 follow-up — chord precedence + action-bar mode
 
-- [ ] **Chord-Vorrang über andere Handler**: Pane `s` (mit Tag `s`)
-      lässt sich tatsächlich nicht entstehen, weil `s` als Action-Key
-      reserviert ist — daher als Stellvertreter ein Subtab-Switch
-      ausprobieren: in einer View mit Subtab-Key `i` (Taiga _items_)
-      `w` drücken, dann `i` → der Subtab wechselt **nicht**, der
-      Chord wird sauber als _ungebunden_ aufgelöst (Action-Bar wieder
-      normal). Vorher hätte der Subtab-Switch das `i` weggeschnappt.
-- [ ] Mit gesetzten Saved-Query-Shortcuts (z. B. `1` lädt "My Bugs")
-      `w1` drücken → keine Saved-Query wird geladen, Chord wird
-      verworfen.
-- [ ] **Action-Bar-Mode-Indikator**: `w` drücken → Action-Bar zeigt
-      links bold + Akzentfarbe `WINDOW  │  v split right  s split down
-q close pane` (bei mehreren Panes zusätzlich `<a/d/…>  switch
-pane`).
-- [ ] Beliebigen Chord auflösen (z. B. `wv`) → Action-Bar fällt zurück
-      auf die normale Hint-Liste (ohne `WINDOW`-Label).
-- [ ] Während eines aktiven Inputs (`f` fuzzy / `/` search / `:` cmdline)
-      `w` drücken → keine `WINDOW`-Anzeige, `w` wird ins Input-Feld
-      geschrieben.
+- [ ] **Chord precedence over other handlers**: a pane `s` (with tag `s`)
+      cannot actually come into existence, because `s` is reserved as an
+      action key — so try a subtab switch as a stand-in: in a view with
+      subtab key `i` (Taiga **items**) press `w`, then `i` → the subtab
+      does **not** change, the chord resolves cleanly as **unbound** (the
+      action bar is normal again). Previously the subtab switch would
+      have snatched the `i` away.
+- [ ] With saved-query shortcuts configured (for example `1` loads "My
+      Bugs"), press `w1` → no saved query is loaded, the chord is
+      discarded.
+- [ ] **Action-bar mode indicator**: press `w` → on the left the action
+      bar shows, in bold and in the accent colour, the label `WINDOW`
+      followed by the hints `v split right`, `s split down` and
+      `q close pane` (with several panes open also `<a/d/…> switch
+    pane`).
+- [ ] Resolve any chord (for example `wv`) → the action bar falls back to
+      the normal hint list (without the `WINDOW` label).
+- [ ] Press `w` while an input is active (`f` fuzzy / `/` search / `:`
+      cmdline) → no `WINDOW` display, `w` is written into the input
+      field.
 
 ## Coupled-Split (Phase 1)
 
-Voraussetzung: `~/.config/not_yet_done/views/postgres.yaml` setzt am
-`Rows`-Child `split.coupled: true`. Eltern-Pane = Tabellenliste,
-Child-Pane = Rows-View.
+Precondition: `~/.config/not_yet_done/views/postgres.yaml` sets
+`split.coupled: true` on the `Rows` child. Parent pane = table list,
+child pane = rows view.
 
-- [ ] Tabellenliste fokussieren, `o` auf Tabelle T1 → rechter Split
-      öffnet, lädt Rows von T1, Fokus liegt auf dem neuen Rows-Pane.
-- [ ] Zurück in den Tabellen-Pane wechseln (`wa` o. ä.), eine andere
-      Tabelle T2 selektieren, `o` → der bestehende Rows-Pane lädt um
-      auf T2 (kein neuer Split entsteht). Fokus bleibt auf dem
-      Tabellen-Pane.
-- [ ] Mehrere Wechsel hintereinander (T1 → T2 → T3) → immer derselbe
-      Rows-Pane, Spalten passen sich der jeweiligen Tabelle an
-      (auto-derived columns).
-- [ ] Im Rows-Pane `wq` (manuell schließen) → Backlink im Tabellen-Pane
-      löst sich; nächstes `o` öffnet wieder einen neuen Split.
-- [ ] Tabellen-Pane (Eltern) `wq` schließen → Rows-Pane (Kind) wird
-      mit zugemacht (Cascade), Fokus geht auf einen verbleibenden
-      Pane (z. B. Schema-Pane bei tieferer Drill-Hierarchie).
-- [ ] Cascade-Kollisions-Schutz: Wenn nur die zwei gekoppelten Panes
-      offen sind (Tabellen + Rows, sonst nichts), `wq` auf
-      Tabellen-Pane → Close wird verworfen (Tree würde sonst leer);
-      User muss erst Child manuell schließen.
-- [ ] Anderer ChildDef ohne `coupled: true` (oder ohne `split:`) →
-      Verhalten unverändert; klassischer Split-Drill bzw. In-Place-
-      Drilldown.
+- [ ] Focus the table list, press `o` on table T1 → the right split
+      opens, loads the rows of T1, the focus is on the new rows pane.
+- [ ] Switch back into the table pane (`wa` or similar), select another
+      table T2, press `o` → the existing rows pane reloads onto T2 (no
+      new split appears). The focus stays on the table pane.
+- [ ] Several switches in a row (T1 → T2 → T3) → always the same rows
+      pane, the columns adapt to the respective table (auto-derived
+      columns).
+- [ ] Press `wq` in the rows pane (close it manually) → the backlink in
+      the table pane is released; the next `o` opens a new split again.
+- [ ] Close the table pane (the parent) with `wq` → the rows pane (the
+      child) is closed along with it (cascade), the focus moves to a
+      remaining pane (for example the schema pane in a deeper drill
+      hierarchy).
+- [ ] Cascade collision guard: if only the two coupled panes are open
+      (tables + rows, nothing else), `wq` on the table pane → the close
+      is discarded (the tree would otherwise be empty); the user has to
+      close the child manually first.
+- [ ] A different ChildDef without `coupled: true` (or without `split:`)
+      → behaviour unchanged; classic split drill or in-place drill-down.
 
 ## Action-Chains (Phase 2)
 
-Voraussetzung: in einer Content-Tab-YAML (z. B. `postgres.yaml`) ist auf
-ChildDef-Ebene ein Chain definiert, etwa:
+Precondition: a chain is defined at ChildDef level in a content-tab YAML
+(for example `postgres.yaml`), such as:
 
 ```yaml
 - name: Rows
@@ -1010,168 +1006,169 @@ ChildDef-Ebene ein Chain definiert, etwa:
       [window.focus_parent, common.list_prev, content.open, window.focus_child]
 ```
 
-- [ ] `ctrl+n` im gekoppelten Rows-Pane → Fokus springt auf Eltern-
-      Pane (Tabelle/Schema), nächste Zeile selektiert, `content.open`
-      hot-replaced den Rows-Pane, anschließend springt der Fokus per
-      `window.focus_child` zurück in den Rows-Pane mit den Daten der
-      nächsten Zeile. Reihenfolge wirkt atomar (kein Flicker).
-- [ ] `ctrl+p` analog rückwärts.
-- [ ] Globale Chain in `tui.yaml` unter `key_bindings.action_chains:`
-      eintragen, z. B. `"ctrl+]": [common.list_next]`. In jedem Tab
-      drückt `ctrl+]` einen Schritt nach unten — auch in Tasks/
-      Trackings, weil die Chain im global-Scope landet.
-- [ ] ChildDef-Chain überschreibt globale Chain: gleiche Taste in
-      ChildDef + global definieren → ChildDef-Chain läuft, globale
-      bleibt stumm.
-- [ ] Chain auf einer Ebene deaktivieren: `"ctrl+n": ~` in einer
-      ViewDef → in dieser Subtab tut `ctrl+n` nichts (auch wenn global
-      eine Chain definiert ist; kein Fall-through).
-- [ ] Abbruch bei Fehler: Chain enthält `[window.focus_parent,
-content.open]` und im Fokus ist kein Eltern-Pane verlinkbar →
-      Notification mit `chain ctrl+x: step N aborted: …`, Folgesteps
-      werden nicht ausgeführt.
-- [ ] Validation am Config-Load: `[global.quit]` als Chain-Eintrag →
-      App-Start bricht mit `not chainable in V1`-Fehler ab.
-- [ ] Validation am Config-Load: `[content.warp]` als Chain-Eintrag →
-      App-Start bricht mit `unknown content action`-Fehler ab.
-- [ ] Validation am Config-Load: `[list_next]` (ohne `common.`-Präfix)
-      → App-Start bricht mit `missing <section>.`-Fehler ab.
-- [ ] Chain-Bindings greifen NICHT, solange ein Popup oder Mode-Input
-      aktiv ist (Cmdline `:`, Search `/`, Fuzzy `f`, Saved-Query-Menu,
-      Adapter-Creds-Popup). Eine Chain-Taste zwischendurch tippen →
-      Popup schluckt sie wie gewohnt.
+- [ ] `ctrl+n` in the coupled rows pane → the focus jumps to the parent
+      pane (table/schema), the next row is selected, `content.open`
+      hot-replaces the rows pane, and afterwards `window.focus_child`
+      moves the focus back into the rows pane holding the data of the
+      next row. The sequence feels atomic (no flicker).
+- [ ] `ctrl+p` likewise, backwards.
+- [ ] Add a global chain to `tui.yaml` under
+      `key_bindings.action_chains:`, for example
+      `"ctrl+]": [common.list_next]`. In every tab `ctrl+]` moves one
+      step down — in tasks/trackings too, because the chain ends up in
+      the global scope.
+- [ ] A ChildDef chain overrides a global chain: define the same key in
+      the ChildDef and globally → the ChildDef chain runs, the global one
+      stays silent.
+- [ ] Disable a chain on one level: `"ctrl+n": ~` in a ViewDef → in that
+      subtab `ctrl+n` does nothing (even if a chain is defined globally;
+      no fall-through).
+- [ ] Abort on error: the chain consists of `window.focus_parent`
+      followed by `content.open`, and no parent pane can be linked from
+      the focus → a notification reading `chain ctrl+x: step N aborted:
+    …`, the following steps are not executed.
+- [ ] Validation at config load: `[global.quit]` as a chain entry → the
+      app start aborts with a `not chainable in V1` error.
+- [ ] Validation at config load: `[content.warp]` as a chain entry → the
+      app start aborts with an `unknown content action` error.
+- [ ] Validation at config load: `[list_next]` (without the `common.`
+      prefix) → the app start aborts with a `missing <section>.` error.
+- [ ] Chain bindings do NOT take effect while a popup or a mode input is
+      active (cmdline `:`, search `/`, fuzzy `f`, saved-query menu,
+      adapter credentials popup). Type a chain key in between → the popup
+      swallows it as usual.
 
 ## Column-Cursor
 
-Per-View / per-ChildDef Opt-in (`column_cursor: true`). Liefert eine
-Spalten-Selektion zusätzlich zur Zeilen-Selektion: Zeile via
-`RowSelected`-Style, Spalte via `ColumnSelected`, Kreuzungs-Zelle via
-`CellSelected`. Navigation: `ColumnLeft`/`ColumnRight` (Default
-`left`/`h`, `right`/`l`). Aktuell aktiviert für Postgres `Rows` (und
-nur dort).
+Per-view / per-ChildDef opt-in (`column_cursor: true`). It adds a column
+selection on top of the row selection: the row via the `RowSelected`
+style, the column via `ColumnSelected`, the intersecting cell via
+`CellSelected`. Navigation: `ColumnLeft`/`ColumnRight` (default
+`left`/`h`, `right`/`l`). Currently enabled for the Postgres `Rows`
+level (and only there).
 
-Voraussetzung: `not-yet-done-tui` aus aktuellem `master` installiert
-und `~/.config/not_yet_done/views/postgres.yaml` enthält
-`column_cursor: true` auf der `Rows`-Child.
+Precondition: `not-yet-done-tui` installed from the current `master`, and
+`~/.config/not_yet_done/views/postgres.yaml` carries
+`column_cursor: true` on the `Rows` child.
 
-- [ ] Postgres-Tab → Database → Schema → Table → `o` (Rows). Im
-      Rows-Pane: Zeilen-Highlight wie gewohnt; zusätzlich erste Spalte
-      hervorgehoben; Zelle (Zeile 0, Spalte 0) im Schnitt nochmal anders.
-- [ ] `l` und `right` schieben den Spalten-Cursor nach rechts; clamped
-      am letzten Cell der Zeile (kein Wrap).
-- [ ] `h` und `left` schieben nach links; clamped bei 0.
-- [ ] Coupled-Chain-Wechsel (`ctrl+n` / `ctrl+p`): Nach `content.open
-  - window.focus_child` ist der Spalten-Cursor wieder bei 0
-    (frischer Drill in einen column_cursor-Child startet auf 0).
-- [ ] Drill heraus (z.B. `backspace` aus Rows in Tables): Spalten-
-      Highlight verschwindet (Tables hat `column_cursor: false`).
-- [ ] Drill wieder rein in Rows: Spalten-Cursor steht auf 0 (frischer
-      Drill, NavFrame-Wiederherstellung greift nur, wenn beide Ebenen
-      Cursor an haben).
-- [ ] Page-Wechsel via `>` / `<` im Rows-Pane: Spalten-Position
-      bleibt erhalten (z.B. Cursor auf Spalte 3, Page 2 zeigt immer
-      noch Cursor auf Spalte 3, sofern die Zeile mindestens so viele
-      Spalten hat — sonst geclampt).
-- [ ] Andere Views (Tasks, Trackings, Jira, Taiga): Kein Spalten-
-      Highlight. `h`/`l` machen nichts (oder verhalten sich gemäß
-      etwaiger anderer User-Mappings, aber jedenfalls keine Spalten-
-      bewegung).
-- [ ] User-Override im `tui.yaml` unter `key_bindings.common`:
-      `column_left: ["a"]` → `a` bewegt den Spalten-Cursor; `left` /
-      `h` werden überschrieben.
+- [ ] Postgres tab → database → schema → table → `o` (rows). In the rows
+      pane: row highlight as usual; on top of that the first column is
+      highlighted; the cell at (row 0, column 0) is styled differently
+      again where they intersect.
+- [ ] `l` and `right` move the column cursor to the right; clamped at the
+      last cell of the row (no wrap).
+- [ ] `h` and `left` move to the left; clamped at 0.
+- [ ] Coupled chain switch (`ctrl+n` / `ctrl+p`): after `content.open`
+      followed by `window.focus_child` the column cursor is back at 0 (a
+      fresh drill into a `column_cursor` child starts at 0).
+- [ ] Drill back out (for example `backspace` from rows into tables): the
+      column highlight disappears (tables has `column_cursor: false`).
+- [ ] Drill back into rows: the column cursor sits at 0 (fresh drill;
+      NavFrame restoration only applies if both levels have the cursor
+      enabled).
+- [ ] Page switch via `>` / `<` in the rows pane: the column position is
+      preserved (for example cursor on column 3, page 2 still shows the
+      cursor on column 3, provided the row has at least that many columns
+      — clamped otherwise).
+- [ ] Other views (tasks, trackings, Jira, Taiga): no column highlight.
+      `h`/`l` do nothing (or behave according to whatever other user
+      mappings exist, but in any case no column movement).
+- [ ] User override in `tui.yaml` under `key_bindings.common`:
+      `column_left: ["a"]` → `a` moves the column cursor; `left` / `h`
+      are overridden.
 
-## Configurable Row-Nav (Bug-Fix)
+## Configurable row nav (bug fix)
 
-ContentView routet `j`/`k`/`g`/`G` nicht mehr hardcoded; alle vier
-Tasten gehen über `CommonAction::ListNext/Prev/First/Last`.
+ContentView no longer routes `j`/`k`/`g`/`G` in a hardcoded way; all four
+keys go through `CommonAction::ListNext/Prev/First/Last`.
 
-- [ ] In `tui.yaml` `key_bindings.common.list_next: ["x"]` setzen → in
-      Postgres-Tab und in Tasks bewegt jetzt `x` nach unten; `j` und
-      `down` reagieren nicht mehr (außer per zusätzlichem Default-Eintrag).
-- [ ] Default ohne User-Override: `j`/`k`/`down`/`up` funktionieren in
-      allen Tabs (Tasks, Trackings, Postgres, Jira, Taiga).
-- [ ] `h` öffnet keine `back`-Aktion mehr und `l` keinen `open`-Drill
-      (es sei denn, der User bringt sie via `key_bindings.content.back`
-      oder `.open` zurück).
+- [ ] Set `key_bindings.common.list_next: ["x"]` in `tui.yaml` → in the
+      Postgres tab and in tasks `x` now moves down; `j` and `down` no
+      longer react (unless an additional default entry brings them back).
+- [ ] Default without a user override: `j`/`k`/`down`/`up` work in all
+      tabs (tasks, trackings, Postgres, Jira, Taiga).
+- [ ] `h` no longer triggers a `back` action and `l` no longer triggers an
+      `open` drill (unless the user brings them back via
+      `key_bindings.content.back` or `.open`).
 
-## Horizontal Scroll (Column-Cursor coupled)
+## Horizontal scroll (coupled to the column cursor)
 
-Wenn der Spalten-Cursor auf eine Spalte wandert, deren rechte Kante
-außerhalb der Pane-Breite liegt, scrollt die Tabelle horizontal mit
-(Snap an Spaltengrenze). Indikatoren `‹` / `›` in der Header-Zeile
-melden verborgene Spalten links/rechts. Aktiv nur bei
-`column_cursor: true` (Variante A, gekoppelt am bestehenden Flag).
+When the column cursor moves to a column whose right edge lies outside
+the pane width, the table scrolls horizontally along (snapping to the
+column boundary). The indicators `‹` / `›` in the header row report
+hidden columns on the left/right. Only active with `column_cursor: true`
+(variant A, coupled to the existing flag).
 
-Voraussetzung: Postgres-Tab mit einer Tabelle, deren Zeilenbreite die
-Pane-Breite übersteigt — geeignet sind Tabellen mit vielen oder
-breiten Spalten. Der Rows-Pane des Default-`postgres.yaml`-Splits ist
-80 % breit; sehr breite Tabellen reichen aus, ggf. das Terminal
-schmaler ziehen.
+Precondition: a Postgres tab with a table whose row width exceeds the
+pane width — tables with many or with wide columns are suitable. The rows
+pane of the default `postgres.yaml` split is 80 % wide; very wide tables
+are enough, otherwise make the terminal narrower.
 
-- [ ] Postgres → Database → Schema → Table → `o` (Rows): Cursor steht
-      links bei Spalte 0; kein `‹`-Indikator; `›` erscheint, wenn rechte
-      Spalten verborgen sind.
-- [ ] `l` mehrfach drücken: sobald die Cursor-Spalte rechts aus dem
-      sichtbaren Bereich rausläuft, scrollt die Ansicht (Header und
-      Zeilen synchron) um eine Spalte mit. Cursor-Highlight bleibt
-      vollständig sichtbar.
-- [ ] Linker Indikator `‹` taucht auf, sobald `scroll_col_offset > 0`,
-      verschwindet wieder beim Zurückscrollen auf 0.
-- [ ] `h` zurück: Ansicht scrollt zurück (Snap an Spaltengrenze, keine
-      Halbspalten). Bei Cursor auf 0 ist `‹` weg.
-- [ ] Coupled-Chain (`ctrl+n` / `ctrl+p`): nach Drill auf neue Row und
-      `window.focus_child` startet der Cursor auf Spalte 0 → Scroll
-      ist auf 0 zurückgesetzt.
-- [ ] Drill heraus (Tables ohne `column_cursor`): kein Indikator, keine
-      Scroll-Spuren — Tabelle wird wie zuvor abgeschnitten gerendert.
-- [ ] Drill wieder rein (Rows): Cursor und Scroll fangen frisch bei 0
-      an.
-- [ ] Page-Wechsel `>` / `<` mit Cursor weit rechts: Cursor-Position
-      bleibt; Scroll-Offset wird in `set_rows` zurückgesetzt und
-      `view()` re-snapt sofort, sodass die Cursor-Spalte wieder
-      sichtbar ist.
-- [ ] Terminal sehr schmal ziehen (1–2 Spalten passen): Cursor + Scroll
-      bleiben kohärent, kein Crash, kein leerer Render.
-- [ ] Terminal sehr breit ziehen (alle Spalten passen): kein Indikator,
-      Scroll-Offset bleibt 0 oder schnappt zurück auf 0.
-- [ ] Views ohne `column_cursor` (Tasks, Trackings, Jira, Taiga,
-      Datenbanken-Liste): keine `‹`/`›`-Indikatoren, kein
-      Horizontal-Scroll, identisches Render-Verhalten wie vor dem
-      Feature.
+- [ ] Postgres → database → schema → table → `o` (rows): the cursor sits
+      on the left at column 0; no `‹` indicator; `›` appears when columns
+      on the right are hidden.
+- [ ] Press `l` repeatedly: as soon as the cursor column runs out of the
+      visible area on the right, the view scrolls along by one column
+      (header and rows in sync). The cursor highlight stays fully
+      visible.
+- [ ] The left indicator `‹` shows up as soon as `scroll_col_offset > 0`
+      and disappears again when scrolling back to 0.
+- [ ] `h` back: the view scrolls back (snapping to the column boundary,
+      no half columns). With the cursor at 0 the `‹` is gone.
+- [ ] Coupled chain (`ctrl+n` / `ctrl+p`): after drilling onto a new row
+      and `window.focus_child` the cursor starts at column 0 → the scroll
+      is reset to 0.
+- [ ] Drill back out (tables, without `column_cursor`): no indicator, no
+      traces of scrolling — the table is rendered truncated as before.
+- [ ] Drill back in (rows): cursor and scroll start fresh at 0.
+- [ ] Page switch `>` / `<` with the cursor far to the right: the cursor
+      position stays; the scroll offset is reset in `set_rows` and
+      `view()` re-snaps immediately, so that the cursor column is visible
+      again.
+- [ ] Make the terminal very narrow (1–2 columns fit): cursor and scroll
+      stay coherent, no crash, no empty render.
+- [ ] Make the terminal very wide (all columns fit): no indicator, the
+      scroll offset stays 0 or snaps back to 0.
+- [ ] Views without `column_cursor` (tasks, trackings, Jira, Taiga, the
+      list of databases): no `‹`/`›` indicators, no horizontal scroll,
+      render behaviour identical to before the feature.
 
-## Auto Column Sizing (Postgres Rows)
+## Auto column sizing (Postgres rows)
 
-Für Tabellen mit dynamischem Schema (`current_columns`-Auto-Fallback —
-v.a. Postgres-Rows) baut der Adapter `ColumnDef { sizing: "auto" }`. Im
-Sizer wird `width = clamp(max(header_w, content_max), min, max)` mit
-Defaults `min=5`, `max=11`. Auto-Spalten respektieren das pane-Budget
-nicht — H-Scroll fängt Overflow.
+For tables with a dynamic schema (the `current_columns` auto fallback —
+above all Postgres rows) the adapter builds
+`ColumnDef { sizing: "auto" }`. In the sizer,
+`width = clamp(max(header_w, content_max), min, max)` applies with the
+defaults `min=5`, `max=11`. Auto columns do not respect the pane budget —
+horizontal scrolling catches the overflow.
 
-- [ ] Postgres → Datenbank → Schema → Tabelle drillen, in Tabelle mit
-      vielen Spalten landen. **Vorher** Symptom: `2…  …  …  …  …`.
-      **Nachher**: jede Spalte zeigt entweder Header (wenn ≤ 11 chars)
-      oder Inhalt bis 11 chars; kein `…`-Spam mehr.
-- [ ] Spalte mit Header länger als 11 (z.B. `transaction_timestamp`):
-      Header wird auf 11 chars gekappt (`transactio…` o.ä. via
-      fit_aligned), Inhalt entsprechend.
-- [ ] Spalte mit kurzem Header und sehr kurzem Inhalt (`id` mit Werten
-      `1`, `2`): Spalte ist mindestens 5 Zeichen breit (Min-Floor).
-- [ ] H-Scroll greift, wenn Spalten in Summe nicht in die Pane passen:
-      `‹`/`›`-Indikatoren erscheinen, `l`/`h` (oder konfigurierte
-      Column-Cursor-Keys) navigieren über Spaltengrenzen.
-- [ ] Per-Column-Override im YAML: in einer `ChildDef.columns`-Liste
-      eine Spalte mit `sizing: "auto(3, 30)"` setzen. Spalte respektiert
-      die neuen Bounds (min 3, max 30).
-- [ ] Tabellen mit explizit konfigurierten Spalten (Database / Schema /
-      Table-Listen mit `sizing: "max"`): unverändert, kein Auto-Verhalten.
-- [ ] Tabellen ohne `column_cursor` (Tasks, Jira) bleiben unverändert —
-      Auto-Fallback greift dort nicht (alle haben `columns:`-Listen).
+- [ ] Postgres → drill through database → schema → table and land in a
+      table with many columns. Symptom **before**: `2…  …  …  …  …`.
+      **After**: every column shows either its header (if ≤ 11 chars) or
+      its content up to 11 chars; no more `…` spam.
+- [ ] A column with a header longer than 11 (for example
+      `transaction_timestamp`): the header is cut to 11 chars
+      (`transactio…` or similar, via fit_aligned), the content likewise.
+- [ ] A column with a short header and very short content (`id` with the
+      values `1`, `2`): the column is at least 5 characters wide (min
+      floor).
+- [ ] Horizontal scrolling takes effect when the columns do not fit into
+      the pane in sum: the `‹`/`›` indicators appear, `l`/`h` (or the
+      configured column-cursor keys) navigate across column boundaries.
+- [ ] Per-column override in the YAML: set a column to
+      `sizing: "auto(3, 30)"` in a `ChildDef.columns` list. The column
+      respects the new bounds (min 3, max 30).
+- [ ] Tables with explicitly configured columns (the database / schema /
+      table lists with `sizing: "max"`): unchanged, no auto behaviour.
+- [ ] Tables without `column_cursor` (tasks, Jira) stay unchanged — the
+      auto fallback does not apply there (they all have `columns:`
+      lists).
 
-## Postgres Query Editor (`Q`)
+## Postgres query editor (`Q`)
 
-`Q` auf einer Postgres-Tabelle (Drill-Down `Database → Schema →
-Tables → <table>`, im Rows-Level) öffnet einen externen `$EDITOR`
-mit einer `.sql`-Datei. Layout:
+Pressing `Q` on a Postgres table (drill-down
+`Database → Schema → Tables → <table>`, at the rows level) opens an
+external `$EDITOR` with a `.sql` file. Layout:
 
 ```
 -- Scratch area: notes, helper SELECTs. Lines above the marker
@@ -1182,213 +1179,209 @@ mit einer `.sql`-Datei. Layout:
 SELECT * FROM "<schema>"."<table>";
 ```
 
-Auf jedem `:w` wird der Bereich **unter** dem Marker gegen den
-Adapter ausgeführt. Erfolgreiche Resultsets ersetzen die Items im
-aktiven Pane (dynamische Spalten greifen das Auto-Sizing). Fehler
-landen in der bekannten Query-Error-Bar — die Datei wird **nicht**
-verändert. Auf `:wq` mit zuletzt-gefehlertem Run wird die Datei mit
-einem Comment-Banner-Block reopen't (`-- ─── ERRORS ───`).
-Erfolgreich ausgeführte Buffer werden unter
+On every `:w` the area **below** the marker is executed against the
+adapter. Successful result sets replace the items in the active pane
+(dynamic columns pick up the auto sizing). Errors land in the familiar
+query error bar — the file is **not** modified. On `:wq` with a last run
+that errored, the file is reopened with a comment banner block
+(`-- ─── ERRORS ───`). Successfully executed buffers are persisted under
 `<XDG_DATA_HOME>/not_yet_done/postgres/<instance_id>/queries/<schema>/<table>.sql`
-persistiert (Crash-resistent, überlebt Restart).
+(crash-resistant, survives a restart).
 
-- [ ] Postgres-Tab → Database → Schema → Tables → eine Tabelle.
-      Action-Bar zeigt `Q edit query` (oder vergleichbare Hint).
-- [ ] `Q` öffnet `$EDITOR`. Default-Buffer enthält Marker-Zeile +
-      `SELECT * FROM "<schema>"."<table>";`. Vorgegebene Quotes
-      sind `"…"`, schema/table identisch zur Drill-Down-Quelle.
-- [ ] `:w` ohne Änderungen → Items werden mit dem Default-`SELECT *`
-      neu geladen. Status-Bar zeigt `N row(s)` o.ä.
-- [ ] Query in `WHERE id = …` ändern und `:w` → Pane filtert auf
-      die getroffenen Zeilen, Spalten passen sich an.
-- [ ] Syntaxfehler einbauen (`SELEC * …`) und `:w` → Query-Error-Bar
-      zeigt Postgres-Fehler. Items im Pane bleiben unverändert.
-      Datei (im Editor) zeigt **noch keinen** Banner.
-- [ ] Mit dem fehlerhaften Query `:wq` → Editor öffnet sich neu mit
-      vorangestelltem `-- ─── ERRORS ───`-Block. Banner verschwindet
-      bei nächstem `:w` mit korrigierter Query (kein Stacking).
-- [ ] Multi-Statement-Query, z.B. `BEGIN; UPDATE … ; ROLLBACK;`. Auf
-      `:w` zeigt Status-Bar das Resultat des **letzten** Statements
-      (`ROLLBACK` → `0 row(s) affected`). Bei finalem `SELECT * FROM …`
-      werden dessen Rows gerendert.
-- [ ] `UPDATE …` ohne `RETURNING` als einziges Statement → Pane
-      bleibt unverändert (keine Items), Status-Bar zeigt
-      `<n> row(s) affected`. Nach erneutem `:w` mit `SELECT` werden
-      die Items aktualisiert sichtbar.
-- [ ] Marker-Zeile aus dem Buffer entfernen + `:w` → der **gesamte**
-      Buffer (inkl. des "Scratch"-Kommentars) wird ausgeführt.
-      Postgres ignoriert SQL-Kommentare, also läuft effektiv der
-      `SELECT`. Marker zurückschreiben → Scratch-Schutz wirkt wieder.
-- [ ] Editor schließen (`:wq` mit erfolgreichem letzten Run) → Done,
-      keine Reopen-Schleife. TUI kehrt zur Ergebnisliste zurück.
-- [ ] `Q` erneut auf derselben Tabelle: persistierter Buffer (inkl.
-      letzter `WHERE`-Klausel) erscheint, **nicht** der Default.
-      Datei-Pfad
+- [ ] Postgres tab → database → schema → tables → a table. The action bar
+      shows `Q edit query` (or a comparable hint).
+- [ ] `Q` opens `$EDITOR`. The default buffer contains the marker line
+      plus `SELECT * FROM "<schema>"."<table>";`. The quotes used are
+      `"…"`, schema and table identical to the drill-down source.
+- [ ] `:w` without changes → the items are reloaded with the default
+      `SELECT *`. The status bar shows `N row(s)` or similar.
+- [ ] Change the query to `WHERE id = …` and `:w` → the pane filters down
+      to the matching rows, the columns adapt.
+- [ ] Introduce a syntax error (`SELEC * …`) and `:w` → the query error
+      bar shows the Postgres error. The items in the pane stay unchanged.
+      The file (in the editor) shows **no** banner yet.
+- [ ] `:wq` with the broken query → the editor reopens with a leading
+      `-- ─── ERRORS ───` block. The banner disappears on the next `:w`
+      with a corrected query (no stacking).
+- [ ] Multi-statement query, for example `BEGIN; UPDATE … ; ROLLBACK;`.
+      On `:w` the status bar shows the result of the **last** statement
+      (`ROLLBACK` → `0 row(s) affected`). With a final `SELECT * FROM …`
+      its rows are rendered.
+- [ ] `UPDATE …` without `RETURNING` as the only statement → the pane
+      stays unchanged (no items), the status bar shows
+      `<n> row(s) affected`. After another `:w` with a `SELECT` the
+      updated items become visible.
+- [ ] Remove the marker line from the buffer and `:w` → the **entire**
+      buffer (including the "scratch" comment) is executed. Postgres
+      ignores SQL comments, so effectively the `SELECT` runs. Write the
+      marker back → the scratch protection is in effect again.
+- [ ] Close the editor (`:wq` with a successful last run) → done, no
+      reopen loop. The TUI returns to the result list.
+- [ ] `Q` again on the same table: the persisted buffer (including the
+      last `WHERE` clause) appears, **not** the default. The file path
       `<XDG_DATA_HOME>/not_yet_done/postgres/<instance_id>/queries/<schema>/<table>.sql`
-      existiert.
-- [ ] `Q` auf einer **anderen** Tabelle: eigener Buffer, eigene
-      Datei. Tabellen-Editoren beeinflussen sich nicht.
-- [ ] Auf Root-Level (Datenbank-Liste, kein Drill-Down): `Q`
-      triggert **nicht** den SQL-Editor (existierende JQL/JSON-
-      Editor-Pfad bleibt unverändert).
-- [ ] Andere Adapter (Jira / Taiga): `Q` öffnet **keinen** SQL-Editor
-      (Notify "Adapter does not support custom queries" oder die
-      bisherige Logik je nach Level).
+      exists.
+- [ ] `Q` on a **different** table: its own buffer, its own file. Table
+      editors do not affect each other.
+- [ ] At root level (the list of databases, no drill-down): `Q` does
+      **not** trigger the SQL editor (the existing JQL/JSON editor path
+      stays unchanged).
+- [ ] Other adapters (Jira / Taiga): `Q` opens **no** SQL editor (either
+      a notification "Adapter does not support custom queries" or the
+      previous logic, depending on the level).
 
-### Multi-Instance (zwei Postgres-Tabs)
+### Multi-instance (two Postgres tabs)
 
-Voraussetzung: zwei View-Configs in `~/.config/not_yet_done/views/`
-mit demselben `adapter.type: postgres`, aber unterschiedlichen
-`adapter.id:` (z.B. `id: prod` und `id: staging`), die jeweils auf
-die gleiche Datenbank zeigen können.
+Precondition: two view configs in `~/.config/not_yet_done/views/` with
+the same `adapter.type: postgres` but different `adapter.id:` (for
+example `id: prod` and `id: staging`), which may both point at the same
+database.
 
-- [ ] App-Start: beide Tabs laden, kein Duplicate-ID-Fehler.
-- [ ] In Tab `prod` Tabelle `public.users` → `Q` → eigene Query
-      eintippen + `:w`.
-- [ ] In Tab `staging` dieselbe Tabelle `public.users` → `Q` → eine
-      andere Query eintippen + `:w`. Beide Pane-Inhalte zeigen den
-      jeweils eigenen Filter.
-- [ ] Auf Disk: zwei separate Pfade existieren —
-      `…/postgres/prod/queries/public/users.sql` und
+- [ ] App start: both tabs load, no duplicate-ID error.
+- [ ] In tab `prod`, table `public.users` → `Q` → type a query of your
+      own and `:w`.
+- [ ] In tab `staging`, the same table `public.users` → `Q` → type a
+      different query and `:w`. Both pane contents show their respective
+      filter.
+- [ ] On disk: two separate paths exist —
+      `…/postgres/prod/queries/public/users.sql` and
       `…/postgres/staging/queries/public/users.sql`.
-- [ ] App neu starten, `Q` in beiden Tabs → jeweils der zuletzt für
-      diesen Tab gespeicherte Buffer wird geladen, kein Cross-Talk.
+- [ ] Restart the app, press `Q` in both tabs → each loads the buffer
+      last saved for that tab, no cross-talk.
 
-## Tree-Mode (Phasen 0–7)
+## Tree mode (phases 0–7)
 
-Voraussetzung: `~/.config/not_yet_done/views/postgres.yaml` hat
-`tree_label: name` auf der `databases`-View **und** auf den ChildDefs
-`Schema` + `Table`. `Rows` bleibt ohne `tree_label` (Leaf → Split).
-Eine erreichbare Postgres-Instanz ist konfiguriert.
+Precondition: `~/.config/not_yet_done/views/postgres.yaml` carries
+`tree_label: name` on the `databases` view **and** on the ChildDefs
+`Schema` and `Table`. `Rows` stays without a `tree_label` (leaf →
+split). A reachable Postgres instance is configured.
 
-### Render + Expand/Collapse (Phasen 1–3)
+### Render + expand/collapse (phases 1–3)
 
-- [ ] App-Start, Postgres-Tab → `databases`-Subtab. Cursor auf Zeile 0,
-      Glyph `▶` vor dem DB-Namen, alle anderen Spalten (`Owner`,
-      `Encoding`) gefüllt — Cursor-Ebene = root.
-- [ ] `Enter` (oder `l`) auf einer DB → Glyph wechselt zu `▼`, darunter
-      eingerückte Schema-Zeilen mit eigenem `▶`. Header-Spalten
-      switchen **nicht** (Cursor steht noch auf root).
-- [ ] Cursor mit `j` auf eine Schema-Zeile → Header wechselt zu
-      Schema-Spalten (`Name`, `Owner`), die Schema-Zeile zeigt jetzt
-      Inhalt in beiden Spalten. Die DB-Zeile oberhalb hat nur noch
-      Inhalt in der `Name`-Spalte (mit `▼`), andere Spalten leer.
-- [ ] `Enter` auf einer Schema-Zeile → Tabellen erscheinen eingerückt,
-      Cursor bleibt auf Schema, kann mit `j` runter auf Table.
-- [ ] Cursor auf Table → Header wechselt zu Table-Spalten
+- [ ] App start, Postgres tab → `databases` subtab. Cursor on row 0,
+      the glyph `▶` in front of the database name, all other columns
+      (`Owner`, `Encoding`) filled — cursor level = root.
+- [ ] `Enter` (or `l`) on a database → the glyph switches to `▼`, below
+      it indented schema rows with their own `▶`. The header columns do
+      **not** switch (the cursor is still on root).
+- [ ] Move the cursor onto a schema row with `j` → the header switches to
+      the schema columns (`Name`, `Owner`), the schema row now shows
+      content in both columns. The database row above it only has content
+      in the `Name` column (with `▼`), the other columns are empty.
+- [ ] `Enter` on a schema row → the tables appear indented, the cursor
+      stays on the schema and can move down onto a table with `j`.
+- [ ] Cursor on a table → the header switches to the table columns
       (`Name`/`Owner`/`Rows (est.)`).
-- [ ] `Enter` (oder `l`) auf einer Table-Zeile → Split-Pane rechts mit
-      `Rows`-Inhalt (Tree-Pane bleibt links erhalten). Tree-Pane behält
-      seinen Cursor / sein Expanded-Set.
-- [ ] Zweiten Subtree öffnen: andere DB expanden während die erste noch
-      offen ist — beide Subtrees gleichzeitig sichtbar.
-- [ ] `Enter` auf einer expanded Zeile (mit `▼`) → kollabiert,
-      Children verschwinden, Glyph zurück zu `▶`.
+- [ ] `Enter` (or `l`) on a table row → a split pane on the right with
+      the `Rows` content (the tree pane on the left is preserved). The
+      tree pane keeps its cursor and its expanded set.
+- [ ] Open a second subtree: expand another database while the first one
+      is still open — both subtrees are visible at the same time.
+- [ ] `Enter` on an expanded row (with `▼`) → it collapses, the children
+      disappear, the glyph goes back to `▶`.
 
-### Back-Key (Phase 4)
+### Back key (phase 4)
 
-- [ ] Cursor auf eine Schema-Zeile unter expanded DB → `gh` (oder
-      konfigurierter Back-Key) → Cursor springt zurück zur DB-Zeile
-      **und** die DB collapsed (`▼` → `▶`, Children weg).
-- [ ] Cursor auf DB-Zeile (Depth 0) → `gh` → no-op (kein
-      Window-Close, keine Pane-Schließung).
+- [ ] Cursor on a schema row below an expanded database → `gh` (or the
+      configured back key) → the cursor jumps back to the database row
+      **and** the database collapses (`▼` → `▶`, children gone).
+- [ ] Cursor on a database row (depth 0) → `gh` → no-op (no window close,
+      no pane close).
 
-### Smart-Collapse `backspace` (war `c`)
+### Smart collapse on `backspace` (used to be `c`)
 
-> Seit dem Action-Bar-Refactor liegt der Smart-Collapse auf `backspace`
-> (nicht mehr `c`), damit `c` **überall** das ColumnConfig-Popup öffnet.
-> `backspace` ist ohnehin schon die „eine Ebene zurück"-Geste (`Back`):
-> im Tree-Modus klappt `Back` zum Eltern-Knoten zu, das überschneidet
-> sich bewusst mit Smart-Collapse.
+> Since the action-bar refactor the smart collapse sits on `backspace`
+> (no longer on `c`), so that `c` opens the ColumnConfig popup
+> **everywhere**. `backspace` is already the "one level back" gesture
+> (`Back`) anyway: in tree mode `Back` collapses to the parent node,
+> which deliberately overlaps with the smart collapse.
 
-- [ ] Cursor auf expanded DB-Zeile (mit `▼`) → `backspace` → DB
-      kollabiert (`▼` → `▶`, Children weg), **Cursor bleibt auf
-      derselben Zeile**.
-- [ ] Cursor auf eine Schema-Zeile (Depth 1), die selbst **nicht**
-      aufgeklappt ist → `backspace` → Eltern-DB kollabiert und Cursor
-      springt hoch auf die DB-Zeile.
-- [ ] Cursor auf expanded Schema-Zeile (Depth 1, mit `▼`) →
-      `backspace` → Schema kollabiert, Cursor bleibt auf der
-      Schema-Zeile.
-- [ ] Cursor auf eine kollabierte Top-Level-DB (Depth 0, `▶`) →
-      `backspace` → no-op (kein Window-Close, kein Beep).
+- [ ] Cursor on an expanded database row (with `▼`) → `backspace` → the
+      database collapses (`▼` → `▶`, children gone), **the cursor stays
+      on the same row**.
+- [ ] Cursor on a schema row (depth 1) that is **not** expanded itself →
+      `backspace` → the parent database collapses and the cursor jumps up
+      to the database row.
+- [ ] Cursor on an expanded schema row (depth 1, with `▼`) → `backspace`
+      → the schema collapses, the cursor stays on the schema row.
+- [ ] Cursor on a collapsed top-level database (depth 0, `▶`) →
+      `backspace` → no-op (no window close, no beep).
 
-### Action-Bar Active-State + `c` = columns (Refactor 2026-06-15)
+### Action-bar active state + `c` = columns (refactor 2026-06-15)
 
-- [ ] `c` öffnet das ColumnConfig-Popup **auf jedem Content-Tab** —
-      auch im Tree-Modus (Tasks/Trackings/Postgres-Tree). Der
-      Shortcut erscheint als `c columns` in der oberen Action-Bar.
-- [ ] Solange ein Popup/Modus offen ist, leuchtet der zugehörige
-      Top-Bar-Hint auf (Akzent + fett + unterstrichen): `d delete`
-      während des y/n-Confirm, `q queries` während des Query-Menüs,
-      `u group` während des Group-Menüs, `c columns` während des
-      ColumnConfig-Popups, `e edit`/`a add` während der Editor-Session
-      offen ist, `J jump` im Jump-Modus, `s track` bei laufendem
-      Tracking, `C cut` bei armiertem Cut, sowie der Script-Hint
-      während ein detached Script läuft.
-- [ ] In der oberen Action-Bar steht **nichts** mehr, das nicht
-      aktivierbar ist: Confluence `o open in browser` und `d download`
-      sind in die untere Status-Bar gewandert.
+- [ ] `c` opens the ColumnConfig popup **on every content tab** — in tree
+      mode too (tasks/trackings/Postgres tree). The shortcut appears as
+      `c columns` in the upper action bar.
+- [ ] While a popup or mode is open, the matching top-bar hint lights up
+      (accent, bold and underlined): `d delete` during the y/n
+      confirmation, `q queries` during the query menu, `u group` during
+      the group menu, `c columns` during the ColumnConfig popup,
+      `e edit`/`a add` while the editor session is open, `J jump` in jump
+      mode, `s track` while a tracking is running, `C cut` with an armed
+      cut, and the script hint while a detached script is running.
+- [ ] There is **nothing** left in the upper action bar that cannot be
+      activated: Confluence's `o open in browser` and `d download` have
+      moved down into the status bar.
 
-### Pagination innerhalb Tree (Phase 5)
+### Pagination inside the tree (phase 5)
 
-Voraussetzung: eine DB mit mehr Schemas als die konfigurierte
-`page_size` (oder Schema mit mehr Tables als `page_size`).
+Precondition: a database with more schemas than the configured
+`page_size` (or a schema with more tables than `page_size`).
 
-- [ ] DB mit vielen Schemas expanden → unter den geladenen Schemas
-      erscheint als letzte Zeile der Placeholder `… N weitere`
-      (Glyph `…`).
-- [ ] Cursor auf Placeholder → `Enter` lädt nächste Page und appendet
-      sie **oberhalb** des Placeholders. Sind weitere Pages verfügbar,
-      bleibt der Placeholder als letzte Zeile sichtbar; sonst
-      verschwindet er.
-- [ ] Während Pagination-Load nicht doppelt klicken — Placeholder
-      darf nicht zweimal ausgelöst werden (Cursor wandert vorher zur
-      ersten neu geladenen Zeile).
+- [ ] Expand a database with many schemas → below the loaded schemas the
+      placeholder `… N weitere` appears as the last row (glyph `…`).
+- [ ] Cursor on the placeholder → `Enter` loads the next page and appends
+      it **above** the placeholder. If further pages are available, the
+      placeholder stays visible as the last row; otherwise it disappears.
+- [ ] Do not double-click while a pagination load is running — the
+      placeholder must not be triggered twice (the cursor moves to the
+      first newly loaded row beforehand).
 
-### Filter / Search im Tree (Phase 6)
+### Filter / search in the tree (phase 6)
 
-Voraussetzung: `databases`-View hat `actions.fuzzy_filter` (key `f`)
-und `actions.search` (key `/`) — beide nur an EINEM Tree-Level
-definiert (per Validator-Constraint).
+Precondition: the `databases` view has `actions.fuzzy_filter` (key `f`)
+and `actions.search` (key `/`) — both defined on exactly ONE tree level
+(a validator constraint).
 
-- [ ] `f` auf root-Ebene → Eingabe `pub` (oder anderes Snippet, das
-      mind. eine DB matched) → nur matchende DBs sichtbar; bereits
-      expanded Subtrees ihrer matchenden DBs bleiben offen. DBs die
-      nicht matchen verschwinden samt ihren Children.
-- [ ] Filter aktiv, jetzt eine DB neu expanden (Children noch nicht im
-      Cache) → async Load läuft, neue Schemas erscheinen. Filter ist
-      auf der **root**-Ebene definiert, also greift er für Schemas
-      nicht (Schemas zeigen alle).
-- [ ] (Optional, falls `fuzzy_filter` zum Test temporär auf
-      `Schema`-ChildDef verschoben) Filter aktiv mit Snippet das nur
-      ein Schema matched → Expand einer neuen DB → neu geladene
-      Schemas werden gegen den aktiven Filter geprüft, nicht-matchende
-      bleiben versteckt. (Unit-Test:
+- [ ] `f` at root level → type `pub` (or another snippet matching at
+      least one database) → only matching databases are visible; already
+      expanded subtrees of matching databases stay open. Databases that
+      do not match disappear along with their children.
+- [ ] With the filter active, now expand another database (its children
+      are not in the cache yet) → the async load runs, new schemas
+      appear. The filter is defined on the **root** level, so it does not
+      apply to schemas (all schemas are shown).
+- [ ] (Optional, if `fuzzy_filter` has been moved to the `Schema`
+      ChildDef temporarily for the test) Filter active with a snippet
+      matching only one schema → expand a new database → the newly loaded
+      schemas are checked against the active filter, non-matching ones
+      stay hidden. (Unit test:
       `tree_apply_children_respects_active_filter_at_load_time`.)
-- [ ] Filter leeren (`Esc` / Backspace bis leer) → alle Zeilen zurück.
-- [ ] `/` Search → Eingabe → Cursor springt auf nächste Treffer-Zeile.
-      Search überspringt Pagination-Placeholder; n/N wechselt durch
-      Treffer.
+- [ ] Clear the filter (`Esc` / backspace until empty) → all rows are
+      back.
+- [ ] `/` search → type → the cursor jumps to the next matching row. The
+      search skips pagination placeholders; n/N cycle through the
+      matches.
 
-### Keymap pro Cursor-Ebene (Phase 7)
+### Keymap per cursor level (phase 7)
 
-- [ ] Action-Bar zeigt auf root-Ebene Aktionen der `databases`-View
-      (mind. `f` filter, `/` search).
-- [ ] Cursor `j` runter auf Schema → Action-Bar wechselt auf Schema-Level
-      Aktionen (sofern auf Schema-ChildDef welche definiert sind).
-      Globale Aktionen (`fuzzy_filter`, `search`, `text_search`) der
-      root-View bleiben verfügbar.
-- [ ] Cursor weiter runter auf Table → Action-Bar wechselt erneut.
+- [ ] At root level the action bar shows the actions of the `databases`
+      view (at least `f` filter, `/` search).
+- [ ] Move the cursor down onto a schema with `j` → the action bar
+      switches to the schema-level actions (provided any are defined on
+      the Schema ChildDef). The global actions (`fuzzy_filter`, `search`,
+      `text_search`) of the root view stay available.
+- [ ] Move the cursor further down onto a table → the action bar switches
+      again.
 
-### Refresh + Action-Chains
+### Refresh + action chains
 
-- [ ] `r` auf Tree-Pane (root-Cursor) → Root-Liste reloaded, Expanded-Set
-      bleibt erhalten (wo möglich).
-- [ ] Im Split-Modus (Tree links, Rows rechts): `ctrl+n` / `ctrl+p`
-      (`window.focus_parent, common.list_next, content.open,
-window.focus_child`) navigiert von Rows-Pane zur nächsten Row in
-      der Tabelle oben. Tree-Pane bleibt unverändert.
+- [ ] `r` on the tree pane (cursor at root) → the root list is reloaded,
+      the expanded set is preserved (where possible).
+- [ ] In split mode (tree on the left, rows on the right): `ctrl+n` /
+      `ctrl+p` — the chain `window.focus_parent`, `common.list_next`,
+      `content.open`, `window.focus_child` — navigates from the rows pane
+      to the next row of the table above. The tree pane stays unchanged.
 
 ## Multi-Tree-Continuation + DB-Level Scripts (MT-1 … MT-4)
 
