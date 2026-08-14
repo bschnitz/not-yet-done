@@ -1,227 +1,215 @@
-# Tasks- & Trackings-Tabs als ContentAdapter — Analyse
+# Tasks and trackings tabs as a ContentAdapter — analysis
 
-Status: **Analyse** (noch keine Entscheidung, keine Implementierung).
+Status: **analysis** (no decision yet, no implementation).
 
-Ziel der Untersuchung: Können (und sollten) die heute nativen Tabs
-**Tasks** und **Trackings** hinter denselben `ContentAdapter`-Contract
-gebracht werden wie Jira/Taiga/Confluence/Postgres/Stoat? Dieses Dokument
-hält die Schwierigkeiten und mögliche Lösungswege fest, damit ein
-späterer Phasen-Plan auf einer geklärten Grundlage aufsetzt.
+Purpose of this investigation: can (and should) the tabs **Tasks** and
+**Trackings**, which are native today, be brought behind the same
+`ContentAdapter` contract as Jira/Taiga/Confluence/Postgres/Stoat? This document
+records the difficulties and possible ways forward so that a later phase plan can
+build on a clarified basis.
 
-## Ausgangslage: zwei Welten
+## Starting point: two worlds
 
-Heute existieren zwei getrennte Render-/Lade-Welten:
+Today two separate render/load worlds exist:
 
-- **Generische Adapter-Welt** — `ContentView` + `ContentAdapter`/`Node` +
-  YAML-`ViewDef`. Async, lazy, paginiert, netzwerk-orientiert. Ein Tab
-  entsteht aus `~/.config/not_yet_done/views/*.yaml` + einer
-  `AdapterFactory`. Diese Welt bekommt „gratis": Splits, Action-Chains,
-  Links, Tree-Mode, Multiline-Rows, Smooth-Scroll, Column-Cursor,
-  Markdown-Rendering, Retries, Saved-Query-Store.
-- **Native Welt** — `TasksView`, `TrackingsView`. Bespoke Komponenten,
-  laden alles eager aus SQLite (SeaORM), bauen einen `Forest` im
-  Speicher, halten Tree-/Expand-State lokal, filtern via `FilterExpr`→SQL,
-  und haben Sub-Views sowie Aggregation, die es generisch nicht gibt.
+- **The generic adapter world** — `ContentView` + `ContentAdapter`/`Node` + a
+  YAML `ViewDef`. Async, lazy, paginated, network-oriented. A tab is created from
+  `~/.config/not_yet_done/views/*.yaml` plus an `AdapterFactory`. This world gets
+  "for free": splits, action chains, links, tree mode, multi-line rows, smooth
+  scrolling, column cursor, Markdown rendering, retries, the saved-query store.
+- **The native world** — `TasksView`, `TrackingsView`. Bespoke components, they
+  load everything eagerly from SQLite (SeaORM), build a `Forest` in memory, keep
+  tree and expand state locally, filter via `FilterExpr`→SQL, and they have
+  sub-views as well as aggregation that do not exist generically.
 
-Adapterisieren = die nativen Tabs hinter denselben Contract bringen.
-Reiz: ein einziges Konfig-Modell, Wegfall von bespoke-Code, und
-YAML-konfigurierbare Spalten/Shortcuts/Subtabs auch für Tasks/Trackings.
+Adapterizing = bringing the native tabs behind the same contract. The appeal: a
+single config model, bespoke code disappearing, and YAML-configurable
+columns/shortcuts/subtabs for tasks and trackings too.
 
-### Der Contract, den ein Adapter erfüllen muss
+### The contract an adapter has to fulfil
 
-`ContentAdapter` (in `not-yet-done-content`) liefert einen Baum über
-`root()` / `get_by_id()`. Jeder `Node` exponiert:
+`ContentAdapter` (in `not-yet-done-content`) provides a tree via `root()` /
+`get_by_id()`. Every `Node` exposes:
 
-- Identität: `id()`, `label()`, `node_type()`, `metadata()`
+- Identity: `id()`, `label()`, `node_type()`, `metadata()`
 - Navigation: `children_types()`, `list(params)`, `get_child(id)`
-- Aktionen (Menü-Pfad): `actions()`, `prepare()`, `picker_options()`,
-  `execute()`
-- Aktionen (Shortcut-Pfad): `invoke_action()` → `ActionDispatch`
-  (`OpenEditor` | `ExecuteQuery` | `CreateChild` | `DeleteSelf` |
-  `Reload` | `Noop` | `Error`)
+- Actions (menu path): `actions()`, `prepare()`, `picker_options()`, `execute()`
+- Actions (shortcut path): `invoke_action()` → `ActionDispatch` (`OpenEditor` |
+  `ExecuteQuery` | `CreateChild` | `DeleteSelf` | `Reload` | `Noop` | `Error`)
 
-Eine `ViewDef`/`ChildDef`-Hierarchie bindet einen Pfad durch diesen Baum:
-`node_type` je Ebene, `columns` (aus `metadata`/`label`), `shortcuts`
-(→ `invoke_action`), `tree_label` (Tree-Mode), `actions` (Menü-Pfad).
-Adapter werden via `AdapterFactory::create(instance_id, yaml_config)`
-instanziiert und im TUI nach Typ registriert.
+A `ViewDef`/`ChildDef` hierarchy binds a path through this tree: `node_type` per
+level, `columns` (from `metadata`/`label`), `shortcuts` (→ `invoke_action`),
+`tree_label` (tree mode), `actions` (menu path). Adapters are instantiated via
+`AdapterFactory::create(instance_id, yaml_config)` and registered by type in the
+TUI.
 
-### Wie die nativen Tabs heute funktionieren
+### How the native tabs work today
 
-- **Tasks** (`TasksView`): lädt via `TaskService::list_filtered_with_options()`
-  eager, baut aus `parent_id` einen unveränderlichen `Forest`,
-  Expand/Collapse lebt separat in `TasksTreeState` (inkl.
-  transient-open für `/`-Suche durch kollabierte Knoten). Sub-Views
-  List/Tree. Aktionen: Add/Edit/EditNode(reparent)/Delete/Undelete/
-  Notes/Script/Tree-Toggle/Tracking-Toggle. Edit ist ein **Formular**.
-- **Trackings** (`TrackingsView`): lädt via `TrackingRepository`
-  (`find_all`/`find_filtered`), joint Task-Beschreibung + Pfad lokal,
-  rechnet Dauer als `ended_at.unwrap_or(now) − started_at`, markiert
-  laufende Trackings (`active`). Sub-Views **Normal / Condensed / Tree**
-  plus **Grouping** Day/Week/Month/Year mit Gruppen-Header, Gruppen-Total
-  und Footer-Total. Soft-Delete mit Zeit-Erhalt + Undelete + Restore-All.
+- **Tasks** (`TasksView`): loads eagerly via
+  `TaskService::list_filtered_with_options()`, builds an immutable `Forest` from
+  `parent_id`; expand/collapse lives separately in `TasksTreeState` (including
+  transient-open for `/` search through collapsed nodes). Sub-views list and
+  tree. Actions: add/edit/edit-node (reparent)/delete/undelete/notes/script/tree
+  toggle/tracking toggle. Edit is a **form**.
+- **Trackings** (`TrackingsView`): loads via `TrackingRepository`
+  (`find_all`/`find_filtered`), joins the task description and path locally,
+  computes the duration as `ended_at.unwrap_or(now) − started_at`, marks running
+  trackings (`active`). Sub-views **normal / condensed / tree** plus **grouping**
+  by day/week/month/year with a group header, a group total and a footer total.
+  Soft delete with time preservation plus undelete and restore-all.
 
-Beide nutzen **nicht** die generische `ViewDef`/`ChildDef`-Maschinerie.
-Beide laden async off-thread (tokio + `LoadMsg`), wie die Adapter — aber
-direkt aus den lokalen Repos, ohne Adapter-Contract dazwischen. Es gibt
-**keinen** existierenden In-Process-Adapter über reine Lokaldaten als
-Präzedenzfall (Postgres fasst nur zusätzlich lokale Skript-Dateien an).
+Neither of them uses the generic `ViewDef`/`ChildDef` machinery. Both load async
+off-thread (tokio + `LoadMsg`), like the adapters — but straight out of the local
+repositories, with no adapter contract in between. There is **no** existing
+in-process adapter over purely local data as a precedent (Postgres only
+additionally touches local script files).
 
-## Schwierigkeiten nach Schweregrad
+## Difficulties by severity
 
-### Schwer — brauchen einen Mechanismus, den es heute nicht gibt
+### Hard — they need a mechanism that does not exist today
 
-1. **Aggregations- & Gruppen-Sub-Views (Trackings).** `Normal` mappt 1:1
-   auf das Node-Modell. Aber `Condensed` (eine Zeile pro Task, Summe
-   aller Trackings), `Tree` (Dauern entlang der Task-Hierarchie nach oben
-   gefaltet: `own` vs. `cumulated`) und `Grouping` (Day/Week/Month/Year
-   mit Gruppen-Header-Zeile, Gruppen-Total, Footer-Total) existieren im
-   generischen Table-Engine **gar nicht**. Der Node/Metadata-Contract
-   liefert flache Items mit String-Feldern — keine Gruppen-Header, keine
-   Aggregat-Zeilen, keine Footer-Totals. Größter Mismatch, betrifft fast
-   nur Trackings.
+1. **Aggregation and grouping sub-views (trackings).** `Normal` maps 1:1 onto the
+   node model. But `Condensed` (one row per task, the sum of all its trackings),
+   `Tree` (durations folded upward along the task hierarchy: `own` vs.
+   `cumulated`) and `Grouping` (day/week/month/year with a group header row, a
+   group total and a footer total) do **not exist at all** in the generic table
+   engine. The node/metadata contract yields flat items with string fields — no
+   group headers, no aggregate rows, no footer totals. The biggest mismatch, and
+   it concerns almost only trackings.
 
-2. **Live, now-relative Dauern.** Laufendes Tracking = `now − started_at`,
-   tickt pro Frame; `⏱`-Marker. Adapter liefern statische
-   Metadaten-Snapshots (Strings). Es gibt keinen „pro Frame neu
-   berechnen"-Pfad; `subscribe_invalidations` ist grob (Node/All).
-   Live-Ticking braucht client-seitiges `now`.
+2. **Live, now-relative durations.** A running tracking = `now − started_at`,
+   ticking per frame; the `⏱` marker. Adapters deliver static metadata snapshots
+   (strings). There is no "recompute per frame" path;
+   `subscribe_invalidations` is coarse (node/all). Live ticking needs a
+   client-side `now`.
 
-3. **Strukturelle Moves / Reparenting.** Tasks: Knoten ausschneiden und
-   unter einen anderen einfügen (cut/paste-node), Reparent im
-   Edit-Node-Formular. `ActionDispatch` kennt kein „verschiebe X unter Y"
-   — die Aktion spannt zwei beliebige Knoten auf. (Der
-   DB-Script-Folders-Plan stieß auf dasselbe und löste es App-seitig mit
-   mark/paste-State plus `Noop`-Dispatch — Präzedenz, aber bespoke.)
+3. **Structural moves / reparenting.** Tasks: cut a node and paste it under
+   another one (cut/paste node), reparent in the edit-node form. `ActionDispatch`
+   has no "move X under Y" — the action spans two arbitrary nodes. (The DB script
+   folders plan hit the same thing and solved it app-side with mark/paste state
+   plus a `Noop` dispatch — a precedent, but bespoke.)
 
-4. **Tab-übergreifende Aktions-Seiteneffekte.** „Tracking starten/stoppen"
-   lebt auf **Tasks UND Trackings** und mutiert App-Level-`tracked_ids`
-   plus erzeugt eine Tracking-Zeile. Eine Task-Aktion mutiert also
-   Tracking-Daten — über die Adapter-Grenze hinweg. Im Adapter-Modell ist
-   jeder Adapter eine isolierte Insel.
+4. **Cross-tab action side effects.** "Start/stop tracking" lives on **both tasks
+   and trackings** and mutates the app-level `tracked_ids` as well as creating a
+   tracking row. So a task action mutates tracking data — across the adapter
+   boundary. In the adapter model every adapter is an isolated island.
 
-### Mittel — lösbar, aber bespoke Glue oder neue Verdrahtung nötig
+### Medium — solvable, but needing bespoke glue or new wiring
 
-5. **In-Process-Adapter — kein Präzedenzfall.** Ein `TaskAdapter`/
-   `TrackingAdapter` würde die lokalen async-Repos umschließen —
-   technisch okay, aber die **Factory baut Adapter heute nur aus einem
-   YAML-String, ohne Zugriff auf den DI-Container / die Core-Services**.
-   Nötig: ein neuer Wiring-Pfad (Factory mit injiziertem
-   `Arc<dyn TaskService>` / DB-Handle).
+5. **In-process adapter — no precedent.** A `TaskAdapter`/`TrackingAdapter` would
+   wrap the local async repositories — technically fine, but **the factory builds
+   adapters today only from a YAML string, with no access to the DI container or
+   the core services**. Needed: a new wiring path (a factory with an injected
+   `Arc<dyn TaskService>` / DB handle).
 
-6. **Formular- vs. Text-Editor-Editing.** Task-Edit ist ein
-   strukturiertes Multi-Field-**Formular** (Beschreibung, Status,
-   Priorität, Tags, Reparent) über `ratatui_form_widgets`. Der
-   Adapter-Edit-Pfad ist `prepare()`→Text-Template→`execute()`
-   (Buffer-Round-Trip wie Jira) oder Picker. Entweder Task-Edit wird ein
-   Text-Template (Verlust des Formulars) oder wir routen das Formular über
-   ein bespoke `ActionDispatch::OpenEditor { session_kind: "task_form" }`
-   (machbar — es gibt bereits bespoke EditSessions wie
-   `postgres_db_script` —, aber kein generischer Gewinn).
+6. **Form editing vs. text-editor editing.** Task edit is a structured
+   multi-field **form** (description, status, priority, tags, reparent) built on
+   `ratatui_form_widgets`. The adapter edit path is
+   `prepare()`→text template→`execute()` (a buffer round trip like Jira) or a
+   picker. Either task edit becomes a text template (losing the form), or we route
+   the form through a bespoke `ActionDispatch::OpenEditor { session_kind: "task_form" }`
+   (doable — bespoke edit sessions such as `postgres_db_script` already exist —
+   but no generic gain).
 
-7. **Saved-Query-Persistenz-Fork.** Beide Tabs persistieren Saved Queries
-   samt Shortcuts und `q`-Menü App-seitig unter Scope `"task"`/`"tracking"`
-   (eigene DB-Tabellen). Adapter haben ihren eigenen `saved_query_store`.
-   Migration heißt: bestehenden Store behalten (Sonderfall) oder auf
-   Adapter-Store umziehen (Daten-/Verhaltens-Migration).
+7. **Saved-query persistence fork.** Both tabs persist saved queries including
+   their shortcuts and the `q` menu app-side under the scope `"task"`/`"tracking"`
+   (their own DB tables). Adapters have their own `saved_query_store`. Migration
+   means: keep the existing store (a special case) or move to the adapter store (a
+   data and behaviour migration).
 
-8. **Soft-Delete / Undelete / Restore-All.** `ActionDispatch::DeleteSelf`
-   gibt es. Aber Undelete und „alle gelöschten wiederherstellen"
-   operieren auf **gerade nicht sichtbaren** (gelöschten) Zeilen — es gibt
-   keinen natürlichen Knoten, an den man „restore all" hängt, und keine
-   Action-Vokabel dafür.
+8. **Soft delete / undelete / restore-all.** `ActionDispatch::DeleteSelf` exists.
+   But undelete and "restore all deleted" operate on rows that are **currently not
+   visible** (deleted ones) — there is no natural node to hang "restore all" on,
+   and no action vocabulary for it.
 
-9. **Gestylte Taskpath-Spalte.** Der Walker entlang `parent_id` ist easy
-   (Adapter hat den Baum ohnehin) — aber die **per-Segment-Stilierung**
-   (fett-oranger `/`-Separator) ist ein View-Feature; Metadata sind nur
-   Strings. Entweder ein Column-Level-Style-Feature oder der Style geht
-   verloren.
+9. **Styled taskpath column.** Walking along `parent_id` is easy (the adapter has
+   the tree anyway) — but the **per-segment styling** (a bold orange `/`
+   separator) is a view feature; metadata are only strings. Either a column-level
+   style feature, or the styling is lost.
 
-### Einfach — mappt sauber
+### Easy — maps cleanly
 
-- Flache Liste als Nodes mit Metadata-Spalten.
-- Tree via `children_types` + `list`/`get_child` (Adapter darf in `root()`
-  auch eager den ganzen Baum laden und cachen).
+- A flat list as nodes with metadata columns.
+- Tree via `children_types` + `list`/`get_child` (an adapter may also load and
+  cache the whole tree eagerly in `root()`).
 - Shortcuts → `invoke_action`.
-- Client-seitige Fuzzy-Filterung (macht `ContentView` bereits).
+- Client-side fuzzy filtering (`ContentView` already does this).
 
-## Die Lage als Bild
+## The situation as a picture
 
 ```mermaid
 flowchart LR
-    subgraph maps[mappt sauber]
-        L[Liste + Tree]
-        C[Metadata-Spalten]
-        S[Shortcuts → invoke_action]
-        F[Fuzzy-Filter]
+    subgraph maps[maps cleanly]
+        L[list + tree]
+        C[metadata columns]
+        S[shortcuts → invoke_action]
+        F[fuzzy filter]
     end
-    subgraph gap[Capability-Gap im Engine/Contract]
-        AGG[Aggregation + Gruppierung + Totals]
-        LIVE[Live now-Dauern / Tick]
-        MOVE[Reparent / cut-paste]
-        XTAB[Tab-übergreifend: Tracking-Toggle]
+    subgraph gap[capability gap in the engine/contract]
+        AGG[aggregation + grouping + totals]
+        LIVE[live now-durations / tick]
+        MOVE[reparent / cut-paste]
+        XTAB[cross-tab: tracking toggle]
     end
-    subgraph glue[bespoke Glue / neue Verdrahtung]
-        WIRE[In-Process-Factory mit Core-Services]
-        FORM[Form-Edit-Session]
-        SQ[Saved-Query-Store]
-        SD[Undelete / Restore-All]
+    subgraph glue[bespoke glue / new wiring]
+        WIRE[in-process factory with core services]
+        FORM[form edit session]
+        SQ[saved-query store]
+        SD[undelete / restore-all]
     end
-    maps -->|heute schon da| OK([ContentView])
-    gap -->|fehlt komplett| OK
-    glue -->|baubar, aber Sonderfall| OK
+    maps -->|already there today| OK([ContentView])
+    gap -->|missing entirely| OK
+    glue -->|buildable, but a special case| OK
 ```
 
-## Lösungsweg
+## Way forward
 
-Zentrale Einsicht: **Tasks ist nah am Modell, Trackings ist der Brocken.**
-Fast alle „Schwer"-Punkte (Aggregation, Gruppierung, Live-Tick) hängen an
-Trackings; Tasks bringt vor allem „Mittel"-Punkte (Wiring, Form-Edit,
-Reparent).
+The central insight: **tasks is close to the model, trackings is the hard part.**
+Almost all the "hard" points (aggregation, grouping, live tick) hang on
+trackings; tasks mainly brings "medium" points (wiring, form edit, reparent).
 
-Sinnvolle Reihenfolge:
+A sensible order:
 
-1. **Wiring-Pattern zuerst klären** (Punkt 5): Wie bekommt eine Factory
-   die Core-Services? Fundament für beide Adapter, einmal sauber
-   entscheiden.
-2. **Tasks als Pilot** (näher am Tree-Modell): klärt In-Process-Adapter,
-   Form-Edit-Session, Reparent und Saved-Query-Fork an einem
-   überschaubaren Fall.
-3. **Erst danach Trackings**, und dort die Schlüsselentscheidung treffen:
-   Aggregation im Adapter (synthetische Gruppen-/Footer-Pseudo-Nodes)
-   **oder** als neues View-Engine-Feature.
+1. **Clarify the wiring pattern first** (point 5): how does a factory get the
+   core services? It is the foundation for both adapters, so decide it cleanly
+   once.
+2. **Tasks as the pilot** (closer to the tree model): it clarifies the in-process
+   adapter, the form edit session, reparenting and the saved-query fork on a
+   manageable case.
+3. **Only then trackings**, and there make the key decision: aggregation in the
+   adapter (synthetic group/footer pseudo nodes) **or** as a new view-engine
+   feature.
 
-## Offene Architekturentscheidungen
+## Open architecture decisions
 
-Bevor daraus ein echter Phasen-Plan wird, hängen drei Entscheidungen
-daran, die nicht geraten werden sollten:
+Before this turns into a real phase plan, three decisions hang on it that should
+not be guessed:
 
-1. **Ist „alles uniform machen" das Ziel — oder „Tasks/Trackings sollen
-   die generischen Features (Splits/Links/Multiline/etc.) bekommen"?**
-   Letzteres ginge evtl. auch ohne Voll-Adapterisierung (Engine-Features
-   auf die nativen Views ziehen). Das ändert den gesamten Zuschnitt.
-2. **Wo lebt die Trackings-Aggregation/Gruppierung?** (a) Adapter
-   synthetisiert Gruppen-Header-/Total-Pseudo-Nodes und liefert sie als
-   normale Nodes — Engine bleibt dumm, Adapter wird schlau; oder (b) der
-   generische Table-Engine bekommt ein echtes Gruppierungs-/
-   Aggregations-Feature — mehr Arbeit, aber dann hätten es alle Adapter.
-3. **Wie gehen wir mit Live-Tick-Dauern um?** Staleness akzeptieren (nur
-   bei Reload/Tastendruck neu rechnen) oder einen Frame-Tick einführen,
-   der laufende Dauern client-seitig nachzieht?
+1. **Is "make everything uniform" the goal — or "tasks/trackings should get the
+   generic features (splits/links/multiline/etc.)"?** The latter might also work
+   without full adapterization (pulling engine features onto the native views).
+   That changes the entire cut of the work.
+2. **Where does the trackings aggregation/grouping live?** (a) The adapter
+   synthesizes group-header and total pseudo nodes and delivers them as normal
+   nodes — the engine stays dumb, the adapter gets smart; or (b) the generic
+   table engine gets a real grouping/aggregation feature — more work, but then
+   every adapter would have it.
+3. **How do we handle live-ticking durations?** Accept staleness (only recompute
+   on reload or a key press), or introduce a frame tick that updates running
+   durations client-side?
 
-## Relevante Dateien (Einstiegspunkte)
+## Relevant files (entry points)
 
 - Contract: `not-yet-done-content/src/lib.rs` (`ContentAdapter`, `Node`,
   `ActionDispatch`), `not-yet-done-content/src/node_ref.rs`
-- Generische View: `not-yet-done-tui/src/views/content_view.rs`,
+- Generic view: `not-yet-done-tui/src/views/content_view.rs`,
   `not-yet-done-tui/src/config/view_config.rs`
-- Factory-Registry: `not-yet-done-tui/src/main.rs`
-  (`build_adapter_factories`)
+- Factory registry: `not-yet-done-tui/src/main.rs` (`build_adapter_factories`)
 - Tasks: `not-yet-done-tui/src/views/tasks_view.rs`,
   `…/views/tasks_tree_state.rs`, `…/tabs/tasks_state.rs`,
   `not-yet-done-core/src/service/task_service.rs`
 - Trackings: `not-yet-done-tui/src/views/trackings_view.rs`,
   `…/tabs/trackings_state.rs`,
   `not-yet-done-core/src/repository/tracking_repository.rs`
-- Async-Lade-Pfad: `not-yet-done-tui/src/app/mod.rs`
-  (`spawn_load`, `spawn_load_trackings`, `spawn_content_load`)
+- Async load path: `not-yet-done-tui/src/app/mod.rs` (`spawn_load`,
+  `spawn_load_trackings`, `spawn_content_load`)
