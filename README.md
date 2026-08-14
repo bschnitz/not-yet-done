@@ -1974,6 +1974,11 @@ adapter has to fulfil — traits, capabilities, status reporting and the
 auth-mechanism table it publishes — is written up in
 [`docs/content-adapter-spec.md`](docs/content-adapter-spec.md).
 
+Columns of your own on somebody else's table — declared in a view YAML,
+stored locally, and available on every adapter without any adapter knowing
+about it — are written up in
+[`docs/custom-columns.md`](docs/custom-columns.md).
+
 The original design analysis on whether the (now-removed) native Tasks
 and Trackings tabs could move onto the `ContentAdapter` abstraction —
 since fully realized; both are adapter-backed tabs today — lives in
