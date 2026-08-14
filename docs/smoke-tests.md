@@ -5120,6 +5120,24 @@ Das Sortier-Menü ist ein zweiter UI-Pfad auf dieselbe Sortierung wie `S`;
       Konflikt gemeldet (Prefix-Kollision mit `c c`/`c s`), `force: true`
       unterdrückt sie weiterhin.
 
+## Unbekannte Keys in `views/*.yaml` (Warnung statt Stille)
+
+Serde verwirft unbekannte Keys wortlos — die Zeile steht in der Datei und
+tut nichts. Sie werden jetzt gemeldet, ohne dass der Tab kaputtgeht.
+
+- [ ] In `views/jira.yaml` unter einem `children:`-Eintrag ein `key: x`
+      ergänzen → beim Start erscheint **ein** Modal „View configuration
+      warnings" mit dem Pfad (`views.0.children.0.key`); der Jira-Tab lädt
+      normal und alle Zeilen sind da.
+- [ ] Zeile wieder entfernen → Start ohne Modal.
+- [ ] Dieselbe Zeile bei laufender TUI per `:config jira` ergänzen und
+      speichern → Notification „Reloaded view jira.yaml — ignored unknown
+      keys: …", der Tab bleibt bedienbar.
+- [ ] Ein `hooks:`-Block (siehe `docs/examples/views/tasks.yaml`) löst
+      **keine** Warnung aus — er wird vom Host gelesen, nicht vom TUI.
+- [ ] Echter YAML-Syntaxfehler verhält sich unverändert: der Tab wird
+      `Broken` mit Fehlerpanel, kein Warn-Modal.
+
 ## Custom-Spalten als Aufzählung (`set-column-options`)
 
 Eine Custom-Spalte auf einen geschlossenen Wertesatz einschränken. Über das

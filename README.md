@@ -50,6 +50,23 @@ Every tab is an adapter-backed _content tab_, configured under
 [tab order](#tab-order). Task and time tracking are no
 exception — they are adapter-backed views like everything else.
 
+A key the schema does not know does not break the file: the tab still
+loads, and startup shows one modal listing what was ignored (with the
+path, e.g. `views.0.children.0.key`). Reloading a config from inside the
+TUI reports the same thing as a notification. This matters because such
+a key is otherwise invisible — it sits right there in the file and does
+nothing. The most common case: `key:` on a `children:` entry, which has
+never been a field. A drill-down is bound by a `navigate` action instead:
+
+```yaml
+# views/jira.yaml — on the issue level
+actions:
+  - name: comments
+    key: C # `c` is the tab-wide chord leader (`c c`, `c s`)
+    type: navigate
+    navigate_to: "jira:comment"
+```
+
 **Tasks** — manage your task tree. Task management lives in the
 adapter-backed **`Tasks`** content tab (`views/tasks.yaml`); see
 [`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml) for a

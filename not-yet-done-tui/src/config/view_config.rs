@@ -31,6 +31,13 @@ pub struct ViewFileConfig {
     /// [`ContentAdapter::subscribe_reminders`]: not_yet_done_content::ContentAdapter::subscribe_reminders
     #[serde(default)]
     pub reminder: Option<ReminderConfig>,
+    /// The instance's `hooks:` block. Declared but never read here — the
+    /// host parses it out of the same file through its own narrow
+    /// `ViewFileHead` (`adapter:` + `hooks:` only). It is listed anyway
+    /// so [`Self::parse_reporting_unknown_fields`] does not flag a
+    /// documented, working block as an ignored key.
+    #[serde(default)]
+    pub hooks: Option<serde_yaml::Value>,
 }
 
 /// Frontend-side reminder handling for one tab (see [`ViewFileConfig::reminder`]).
@@ -59,6 +66,32 @@ pub struct ReminderConfig {
 }
 
 impl ViewFileConfig {
+    /// Parse a view file, reporting every key the schema does not know.
+    ///
+    /// Serde drops unknown keys without a word, which makes a whole class
+    /// of config bug invisible: a misspelled field, a field that moved in
+    /// a refactor, or a `key:` on a `children:` entry (which [`ChildDef`]
+    /// has never had — the drill is bound by a `navigate` action). The
+    /// file loads, the line is there in the editor, and it does nothing.
+    ///
+    /// The alternative, `#[serde(deny_unknown_fields)]`, would make each
+    /// one a parse error and cost the user the entire tab over a stray
+    /// line. So they are collected and returned for the caller to warn
+    /// about — the config still loads.
+    ///
+    /// Paths come out dotted, with list positions as indices, e.g.
+    /// `views.0.children.1.key`.
+    pub fn parse_reporting_unknown_fields(
+        yaml: &str,
+    ) -> Result<(Self, Vec<String>), serde_yaml::Error> {
+        let mut unknown = Vec::new();
+        let config =
+            serde_ignored::deserialize(serde_yaml::Deserializer::from_str(yaml), |path| {
+                unknown.push(path.to_string());
+            })?;
+        Ok((config, unknown))
+    }
+
     /// Propagate columns down each tree-continuation chain so a tree need
     /// only declare its columns once, at the root.
     ///
@@ -2930,8 +2963,8 @@ views:
                 include_str!("../../../docs/examples/views/taiga.yaml"),
             ),
         ] {
-            let cfg: ViewFileConfig =
-                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{file} must parse: {e}"));
+            let (cfg, _) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+                .unwrap_or_else(|e| panic!("{file} must parse: {e}"));
 
             let navigates: Vec<&ActionDef> = cfg
                 .views
@@ -2954,52 +2987,99 @@ views:
                     action.key
                 );
             }
+        }
+    }
 
-            // Walk the raw document: `ChildDef` drops an unknown `key:`
-            // during deserialization, so the typed config can no longer
-            // show it. Only the untyped tree can catch the dead line.
-            let raw: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-            let mut dead = Vec::new();
-            collect_child_keys(&raw, &mut dead);
+    /// Every shipped view example is something a user copies wholesale, so
+    /// none may carry a key the schema drops — a dead `key:` on a child, a
+    /// typo, a field that moved. This is the same check the loader runs at
+    /// startup, applied to the files we hand out.
+    #[test]
+    fn no_shipped_view_example_carries_an_unknown_field() {
+        for (file, yaml) in [
+            (
+                "calendar.yaml",
+                include_str!("../../../docs/examples/views/calendar.yaml"),
+            ),
+            (
+                "cards.yaml",
+                include_str!("../../../docs/examples/views/cards.yaml"),
+            ),
+            (
+                "confluence.yaml",
+                include_str!("../../../docs/examples/views/confluence.yaml"),
+            ),
+            (
+                "jira.yaml",
+                include_str!("../../../docs/examples/views/jira.yaml"),
+            ),
+            (
+                "kimai.yaml",
+                include_str!("../../../docs/examples/views/kimai.yaml"),
+            ),
+            (
+                "postgres.yaml",
+                include_str!("../../../docs/examples/views/postgres.yaml"),
+            ),
+            (
+                "projects.yaml",
+                include_str!("../../../docs/examples/views/projects.yaml"),
+            ),
+            (
+                "sqlite.yaml",
+                include_str!("../../../docs/examples/views/sqlite.yaml"),
+            ),
+            (
+                "stoat.yaml",
+                include_str!("../../../docs/examples/views/stoat.yaml"),
+            ),
+            (
+                "taiga.yaml",
+                include_str!("../../../docs/examples/views/taiga.yaml"),
+            ),
+            (
+                "tasks.yaml",
+                include_str!("../../../docs/examples/views/tasks.yaml"),
+            ),
+            (
+                "trackings.yaml",
+                include_str!("../../../docs/examples/views/trackings.yaml"),
+            ),
+        ] {
+            let (_, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+                .unwrap_or_else(|e| panic!("{file} must parse: {e}"));
             assert!(
-                dead.is_empty(),
-                "{file}: `key:` on a `children:` entry does nothing — \
-                 bind a `navigate` action instead (found on {dead:?})"
+                unknown.is_empty(),
+                "{file} carries keys the schema ignores: {unknown:?}"
             );
         }
     }
 
-    /// Collect the names of every `children:` entry that carries a `key:`.
-    /// Such a key is silently ignored (see [`ChildDef`]), so it is a config
-    /// bug that no amount of typed parsing can surface.
-    fn collect_child_keys(node: &serde_yaml::Value, out: &mut Vec<String>) {
-        match node {
-            serde_yaml::Value::Mapping(map) => {
-                for (k, v) in map {
-                    if k.as_str() == Some("children") {
-                        for child in v.as_sequence().into_iter().flatten() {
-                            if let Some(m) = child.as_mapping()
-                                && m.contains_key(serde_yaml::Value::from("key"))
-                            {
-                                out.push(
-                                    m.get(serde_yaml::Value::from("name"))
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("<unnamed>")
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    collect_child_keys(v, out);
-                }
-            }
-            serde_yaml::Value::Sequence(items) => {
-                for item in items {
-                    collect_child_keys(item, out);
-                }
-            }
-            _ => {}
-        }
+    /// A `key:` on a `children:` entry parses but does nothing, because
+    /// [`ChildDef`] has no such field. It must not vanish silently.
+    #[test]
+    fn a_key_on_a_child_is_reported_as_an_unknown_field() {
+        let yaml = r#"
+tab:
+  name: Test
+adapter:
+  type: mock
+views:
+  - name: issues
+    node_type: "mock:issue"
+    default: true
+    key: i
+    children:
+      - name: Comments
+        key: c
+        node_type: "mock:comment"
+"#;
+        let (cfg, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml).unwrap();
+        // The view's own `key:` is real and must not be reported.
+        assert_eq!(unknown, vec!["views.0.children.0.key".to_string()]);
+        // The rest of the file still loaded — a stray key is a warning,
+        // never a reason to drop the tab.
+        assert_eq!(cfg.views[0].children[0].name, "Comments");
     }
 
     /// Flatten a child tree into one list (depth-first), so a test can look

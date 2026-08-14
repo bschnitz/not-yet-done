@@ -1283,7 +1283,7 @@ impl App {
         let shortcut_menu_execute = config.shortcut_menu.execute_on_enter;
         let shortcut_menu_toggle = config.shortcut_menu.toggle_key.clone();
         // Load content views from YAML config files (must happen before tab_bar).
-        let content_views = load_content_views(
+        let (content_views, config_warnings) = load_content_views(
             &shared_theme,
             &config.keybindings,
             &config.editors,
@@ -1420,6 +1420,16 @@ impl App {
         // (the layout already fell back to legacy so the app still runs).
         if let Some(err) = tab_layout_error {
             app.modal_message = Some(format!("Tab configuration error:\n\n{err}"));
+        } else if !config_warnings.is_empty() {
+            // Keys the schema does not know. Not fatal — every tab loaded —
+            // but worth one modal, because the alternative is the user
+            // staring at a line that is right there in the file and does
+            // nothing. A clean config never reaches this.
+            app.modal_message = Some(format!(
+                "View configuration warnings:\n\n{}\n\nThese keys were ignored. \
+                 Check for a typo, or for a field that belongs one level up.",
+                config_warnings.join("\n")
+            ));
         }
 
         // Configure nav chars on all tables.
@@ -12170,13 +12180,17 @@ fn build_tab_layout(
     }
 }
 
+/// Returns the slots plus one warning line per view file that carries
+/// keys the schema does not know. Those keys are dropped silently by
+/// serde, so without this the user's edit simply appears to do nothing
+/// (see [`ViewFileConfig::parse_reporting_unknown_fields`]).
 fn load_content_views(
     theme: &Arc<Theme>,
     keybindings: &crate::config::keybindings::KeyBindingConfig,
     editors: &crate::config::editor::EditorsConfig,
     factories: std::collections::HashMap<String, Box<dyn not_yet_done_content::AdapterFactory>>,
     host_ctx: &not_yet_done_content::HostContext,
-) -> Vec<ContentSlot> {
+) -> (Vec<ContentSlot>, Vec<String>) {
     use crate::config::view_config::ViewFileConfig;
 
     let views_dir = dirs::config_dir()
@@ -12205,6 +12219,7 @@ fn load_content_views(
     }
 
     let mut loaded: Vec<(std::path::PathBuf, Loaded)> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for path in &yaml_files {
         let yaml = match std::fs::read_to_string(path) {
             Ok(y) => y,
@@ -12227,8 +12242,23 @@ fn load_content_views(
 
         // YAML-parse failure: take the file's stem as a fallback tab name
         // (the actual `tab.name` is unreadable).
-        let mut config: ViewFileConfig = match serde_yaml::from_str(&yaml) {
-            Ok(c) => c,
+        let mut config: ViewFileConfig = match ViewFileConfig::parse_reporting_unknown_fields(&yaml)
+        {
+            Ok((c, unknown)) => {
+                // Unknown keys never break the load — they are reported so
+                // the user can see why an edit had no effect.
+                if !unknown.is_empty() {
+                    let file = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let w = format!("{file}: ignored unknown config keys: {}", unknown.join(", "));
+                    not_yet_done_content::http_log::log_error("view_config", &w);
+                    warnings.push(w);
+                }
+                c
+            }
             Err(e) => {
                 let name = path
                     .file_stem()
@@ -12383,7 +12413,7 @@ fn load_content_views(
         }
     }
 
-    slots
+    (slots, warnings)
 }
 
 #[cfg(test)]
