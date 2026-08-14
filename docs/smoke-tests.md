@@ -3944,355 +3944,340 @@ native trackings tab (until C1).
 
 ## Saved-Query-Shortcut-Validierung (Content-Tabs)
 
-Saved-Query-Shortcuts claimen tab-weit auf der View-Claim-Ebene und würden
-jede danach dispatchte Taste überschatten (Navigations-Keys, Chords, …).
-Beide Prüfpfade testen:
+Saved-query shortcuts claim tab-wide on the view claim level and would shadow
+every key dispatched after them (navigation keys, chords, …). Test both check
+paths:
 
-- [ ] **Set-Time:** q-Menü öffnen, auf einer Query `ctrl+s` (Shortcut
-      binden), dann `j` drücken → Modal „Shortcut 'j' is already taken by
-      common.list_next!" und Re-Prompt; `v` → Konflikt mit dem Subtab-Key;
-      `w` → Konflikt mit einem Window-Chord (Leader-Präfix); `z` →
-      Konflikt mit `content.cycle_grouping` (Chord-Präfix); `d` →
-      Konflikt mit dem YAML-`shortcuts:`-Eintrag. `esc` bricht ab.
-- [ ] Ein freier Key (z. B. `M`) wird akzeptiert: „Favorite … added".
-- [ ] **Load-Time:** eine kollidierende Row direkt in `query_shortcut`
-      schreiben (oder eine Config-Änderung, die einen bestehenden
-      Shortcut kollidieren lässt) → beim Start erscheint eine
-      Notification „<Tab>: saved-query shortcut [x] ('name') shadows … —
-      rebind it via the query menu"; der Shortcut bleibt aktiv.
+- [ ] **Set time:** open the q menu, press `ctrl+s` on a query (bind a
+      shortcut), then press `j` → the modal "Shortcut 'j' is already taken by
+      common.list_next!" and a re-prompt; `v` → a conflict with the subtab key;
+      `w` → a conflict with a window chord (the leader prefix); `z` → a
+      conflict with `content.cycle_grouping` (a chord prefix); `d` → a conflict
+      with the YAML `shortcuts:` entry. `esc` aborts.
+- [ ] A free key (for example `M`) is accepted: "Favorite … added".
+- [ ] **Load time:** write a colliding row directly into `query_shortcut` (or
+      make a config change that lets an existing shortcut collide) → at startup
+      the notification "<Tab>: saved-query shortcut [x] ('name') shadows … —
+      rebind it via the query menu" appears; the shortcut stays active.
 
-## Column-Config (`c`) auf Content-Tabs
+## Column config (`c`) on content tabs
 
-`c` öffnete früher auf jedem Nicht-Trackings-Tab das **native
-Tasks**-Spalten-Popup (und hätte beim Anwenden dessen Settings
-überschrieben). Jetzt generisch pro Level:
+On every non-trackings tab, `c` used to open the **native tasks** column popup
+(and applying it would have overwritten that tab's settings). It is now
+generic, per level:
 
-- [x] Adapter-Tab (z. B. „Trackings"): `c` zeigt die Spalten der
-      aktiven View (nicht die Tasks-Spalten); `Space` blendet eine
-      Spalte aus (z. B. Taskpath) → Tabelle baut sofort ohne sie neu.
-- [x] Persistenz: App neu starten → die Spalte bleibt ausgeblendet
-      (Settings-Row `content_columns:<Tab>` als JSON-Map).
-- [x] Reset: Spalte wieder aktivieren und per `Ctrl+D` an die
-      YAML-Position schieben → Override entfernt, Settings-Row gelöscht
-      (`SELECT key FROM settings WHERE key LIKE 'content_columns%'`
-      ist leer).
-- [x] Tree-Mode („Tasks"): `c` zeigt die Spalten der Cursor-Ebene;
-      die `tree_label`-Spalte (Task) ist fix (`Space` ohne Wirkung);
-      andere Spalte (Created) togglen wirkt sofort + Reset wie oben.
-- [x] Native Tabs (Tasks/Trackings): Popup unverändert (Display-Namen,
-      Toggle, Persistenz in `tree_columns`/`tracking_columns`).
-- [ ] Auto-Fallback-Level (Postgres-Rows): `c` → Notification „This
-      level has no configurable columns" (Unit-Test vorhanden, live
-      ungetestet — braucht verbundene Postgres-Instanz).
+- [x] Adapter tab (for example "Trackings"): `c` shows the columns of the
+      active view (not the tasks columns); `Space` hides a column (taskpath,
+      say) → the table is rebuilt without it immediately.
+- [x] Persistence: restart the app → the column stays hidden (the settings row
+      `content_columns:<Tab>` as a JSON map).
+- [x] Reset: re-enable the column and move it back to its YAML position with
+      `Ctrl+D` → the override is removed and the settings row deleted
+      (`SELECT key FROM settings WHERE key LIKE 'content_columns%'` comes back
+      empty).
+- [x] Tree mode ("Tasks"): `c` shows the columns of the cursor's level; the
+      `tree_label` column (task) is fixed (`Space` has no effect); toggling
+      another column (created) takes effect immediately, and reset works as
+      above.
+- [x] Native tabs (tasks/trackings): the popup is unchanged (display names,
+      toggling, persistence in `tree_columns`/`tracking_columns`).
+- [ ] Auto-fallback level (Postgres rows): `c` → the notification "This level
+      has no configurable columns" (there is a unit test, untested live — it
+      needs a connected Postgres instance).
 
-## Default-Query + Query-Menü-Styling
+## The default query + query-menu styling
 
-Das Query-Menü (`q`) teilt sich jetzt das Popup-Chrome mit dem
-Column-Config-Popup (SearchablePopup rendert über `popup_utils`), und
-`ctrl+t` markiert die selektierte Saved Query als Default, die beim
-App-Start automatisch angewendet wird.
+The query menu (`q`) now shares its popup chrome with the column-config popup
+(SearchablePopup renders via `popup_utils`), and `ctrl+t` marks the selected
+saved query as the default, which is applied automatically at app startup.
 
-- [x] Optik: Query-Menü (Content + nativ), Script- und Tag-Menü zeigen
-      das einheitliche Chrome (abgerundeter Rahmen, gewrappte
-      Hint-Zeile, Cursor-Zeile hinterlegt statt Farbbalken);
-      Saved-Query-Shortcuts erscheinen als `[key]`-Suffix.
-- [x] Content-Tab („Trackings"): `ctrl+t` auf „2 months" →
-      Notification „Default query: 2 months", Settings-Row
-      `default_query:<scope>` angelegt; App-Neustart → Query ist aktiv
-      (Action-Bar zeigt sie), Menü zeigt `★ 2 months`.
-- [x] Toggle-Off: `ctrl+t` auf der markierten Query → „Default query
-      cleared", Settings-Row gelöscht.
-- [x] Nativer Tasks-Tab: `ctrl+t` auf „Alle" → Neustart wendet „Alle"
-      an, obwohl zuletzt „2 months" aktiv war (Default schlägt
-      Last-Active-Restore); Toggle-Off stellt das alte Verhalten
-      wieder her.
-- [x] Postgres-Script-Menü: kein `default`-Hint, `ctrl+t` ohne Wirkung
-      (Scripts sind keine Queries; via `open_without_default`).
-- [ ] Default-Query mit Pflicht-Variablen (`{var}`): wird beim Start
-      roh (ohne Variablen-Popup) angewendet — Verhalten dokumentiert,
-      live ungetestet.
+- [x] Looks: the query menu (content and native), the script menu and the tag
+      menu all show the unified chrome (rounded border, wrapped hint line, the
+      cursor line highlighted instead of a colour bar); saved-query shortcuts
+      appear as a `[key]` suffix.
+- [x] Content tab ("Trackings"): `ctrl+t` on "2 months" → the notification
+      "Default query: 2 months", the settings row `default_query:<scope>` is
+      created; restart the app → the query is active (the action bar shows it)
+      and the menu shows `★ 2 months`.
+- [x] Toggle off: `ctrl+t` on the marked query → "Default query cleared", the
+      settings row is deleted.
+- [x] Native tasks tab: `ctrl+t` on "All" → a restart applies "All" even
+      though "2 months" was active last (the default beats the last-active
+      restore); toggling it off restores the old behaviour.
+- [x] Postgres script menu: no `default` hint, `ctrl+t` has no effect (scripts
+      are not queries; via `open_without_default`).
+- [ ] A default query with mandatory variables (`{var}`): it is applied raw at
+      startup (without the variable popup) — behaviour documented, untested
+      live.
 
-## Tree-Linien + Aufklappmarker konfigurierbar (`tree_lines` / `tree_markers`)
+## Configurable tree lines and expansion markers (`tree_lines` / `tree_markers`)
 
-Pro Tree (Wurzel-`ViewDef`) sind die Box-Linien (`├──`/`└──`/`│`) und die
-Aufklappmarker (`▶`/`▼`) getrennt konfigurierbar: `tree_lines: false` ersetzt
-die Linien durch Einrückung (zwei Leerzeichen pro Tiefe), `tree_markers:`
-überschreibt (`collapsed`/`expanded`) oder versteckt (`enabled: false`) die
-Marker.
+Per tree (the root `ViewDef`) the box lines (`├──`/`└──`/`│`) and the expansion
+markers (`▶`/`▼`) are configurable separately: `tree_lines: false` replaces the
+lines with indentation (two spaces per depth level), and `tree_markers:`
+overrides (`collapsed`/`expanded`) or hides (`enabled: false`) the markers.
 
-- [x] Postgres-Tab (`tree_lines: false` in der User-Config): Datenbank
-      vier Ebenen tief aufklappen → Schema/Tabellen-Ebenen sind nur
-      eingerückt, ohne `├──`/`└──`-Linien; die `▶`/`▼`-Marker
-      erscheinen weiterhin.
-- [x] Tab ohne Konfiguration („Tasks"): unverändert Linien +
-      Marker wie bisher (Default-Verhalten).
-- [ ] `tree_markers.enabled: false` (temporär setzen): Linien bleiben,
-      Marker verschwinden; Aufklappen per Enter funktioniert weiter
-      (unit-getestet, live offen).
-- [x] Connector-Farbe färbt bei `tree_lines: false` weiterhin den
-      Marker-Lauf (im Capture: Marker in `tree_connector`-Farbe).
+- [x] Postgres tab (`tree_lines: false` in the user config): expand a database
+      four levels deep → the schema and table levels are merely indented,
+      without `├──`/`└──` lines; the `▶`/`▼` markers are still there.
+- [x] A tab without any configuration ("Tasks"): lines and markers unchanged
+      (the default behaviour).
+- [ ] `tree_markers.enabled: false` (set temporarily): the lines stay, the
+      markers disappear; expanding with Enter still works (unit-tested, open
+      live).
+- [x] With `tree_lines: false` the connector colour still colours the marker
+      run (in the capture: markers in the `tree_connector` colour).
 
-## Initiale Aufklapptiefe (`expand_depth`) + Listenansicht (`task:flat`)
+## Initial expansion depth (`expand_depth`) + list view (`task:flat`)
 
-Tasks-Adapter-Parität mit dem nativen Tab: `expand_depth: 2` auf dem
-Wurzel-`ViewDef` klappt nach dem Laden Tiefe 0 und 1 automatisch auf
-(One-Shot-Kaskade über den normalen Expand-Pfad, spiegelt
-`tasks.tree.default_expand_depth: 2`); die zweite View `list`
-(`node_type: task:flat`, Subtab-Key `v`, zurück `t`) zeigt den ganzen
-Forest als flache Tabelle in DFS-Reihenfolge.
+Tasks-adapter parity with the native tab: `expand_depth: 2` on the root
+`ViewDef` expands depths 0 and 1 automatically after loading (a one-shot
+cascade over the normal expand path, mirroring
+`tasks.tree.default_expand_depth: 2`); the second view `list` (`node_type:
+task:flat`, subtab key `v`, back with `t`) shows the whole forest as a flat
+table in DFS order.
 
-- [x] „Tasks" öffnen: drei Ebenen sind direkt sichtbar (Wurzeln +
-      Kinder + Enkel aufgeklappt), tiefere Ebenen bleiben zu.
-- [x] Einen Knoten manuell zuklappen, dann `r` (Reload): der Knoten
-      bleibt zu — die Kaskade ist one-shot und klappt nach Abschluss
-      nichts mehr gegen den User auf.
-- [x] `v` drücken: flache Liste aller Tasks (alle Tiefen, keine
-      Marker/Einrückung, DFS-Reihenfolge); `t` wechselt zurück zum Tree,
-      Aufklappstand bleibt erhalten.
-- [x] In der Listenansicht: `e` öffnet die Edit-Session der selektierten
-      Zeile wie im Tree (`s` toggle-tracking nutzt denselben
-      invoke-Pfad; bewusst nicht live gedrückt — würde ein echtes
-      Tracking starten/stoppen).
-- [ ] Saved Query in der Listenansicht anwenden (`q`): nur die Treffer
-      selbst erscheinen, keine Vorfahren-Zeilen (unit-getestet, live
-      offen).
+- [x] Open "Tasks": three levels are visible right away (roots, children and
+      grandchildren expanded), deeper levels stay closed.
+- [x] Collapse a node manually, then press `r` (reload): the node stays
+      collapsed — the cascade is one-shot and expands nothing against the user
+      once it has finished.
+- [x] Press `v`: a flat list of all tasks (every depth, no markers or
+      indentation, DFS order); `t` switches back to the tree with the expansion
+      state preserved.
+- [x] In the list view: `e` opens the edit session of the selected row just as
+      in the tree (`s` toggle-tracking uses the same invoke path; deliberately
+      not pressed live — it would start or stop a real tracking).
+- [ ] Apply a saved query in the list view (`q`): only the matches themselves
+      appear, no ancestor rows (unit-tested, open live).
 
-## Default-Query auf allen Trackings-Subtabs (`query.inherit_default`)
+## The default query on all trackings subtabs (`query.inherit_default`)
 
-Der User-Default (★ im q-Menü) wird beim Start nur auf die Default-View
-des Tabs gestempelt. `query.inherit_default: true` (condensed + tree in
-trackings.yaml) stempelt ihn zusätzlich auf den jeweiligen Subtab; der
-Tree filtert dabei adapter-seitig (Projektion wird aus den sichtbaren
-Trackings neu gefaltet, `propagates_query_to_subtree`).
+The user default (★ in the q menu) is only stamped onto the tab's default view
+at startup. `query.inherit_default: true` (condensed and tree in
+trackings.yaml) stamps it onto the respective subtab as well; the tree filters
+adapter-side there (the projection is re-folded from the visible trackings,
+`propagates_query_to_subtree`).
 
-- [x] App mit ★-Default starten: Normal-, Condensed- UND Tree-Subtab
-      zeigen den Default-Query-Namen als aktive Query in der Action-Bar
-      (Grenze unverändert: ein Default mit `{var}`-Variable wird roh,
-      d. h. effektiv ungefiltert, angewendet — wie auf der Default-View).
-- [ ] Subtab ohne `inherit_default` (z. B. Tasks Listenansicht):
-      Default-Query greift dort weiterhin NICHT (Opt-in-Verhalten;
-      unit-getestet, live offen).
-- [x] Im Tree-Subtab `q` → Saved Query anwenden: Wurzel zeigt die
-      gefilterte Summe; Expand der Äste bleibt gefiltert (nur Äste mit
-      sichtbarer Zeit, identische Summen die Kette hoch bei
-      Einzel-Ast-Treffern).
-- [x] Nach Anwendung zurück zur flachen Liste (`a`): deren eigene Query
-      unverändert (Pane-State bleibt getrennt; geteilt ist nur der
-      Start-Default).
+- [x] Start the app with a ★ default: the normal, condensed AND tree subtabs
+      all show the default query's name as the active query in the action bar
+      (the limitation is unchanged: a default with a `{var}` variable is
+      applied raw, i.e. effectively unfiltered — as on the default view).
+- [ ] A subtab without `inherit_default` (the tasks list view, say): the
+      default query still does NOT apply there (opt-in behaviour; unit-tested,
+      open live).
+- [x] In the tree subtab, `q` → apply a saved query: the root shows the
+      filtered sum; expanding the branches stays filtered (only branches with
+      visible time, and identical sums all the way up the chain when a single
+      branch matches).
+- [x] Back to the flat list after applying (`a`): its own query is unchanged
+      (the pane state stays separate; only the startup default is shared).
 
-## Group-by-Menü (`u`) auf Content-Tabs (`content.group_menu`)
+## The group-by menu (`u`) on content tabs (`content.group_menu`)
 
-Direktsprung-Parität zum nativen Trackings-`u`: ein Hotkey-Popup über die
-fünf `zg`-Zustände (No grouping/Day/Week/Month/Year). Nur aktiv, wenn die
-Ebene ein `group_by:` konfiguriert; Wahl ist View-State (nicht
-persistiert, wie `zg` — nativ persistierte via `SaveTrackingGrouping`).
+Direct-jump parity with the native trackings `u`: a hotkey popup over the five
+`zg` states (no grouping/day/week/month/year). Only active when the level
+configures a `group_by:`; the choice is view state (not persisted, like `zg` —
+the native one persisted via `SaveTrackingGrouping`).
 
-- [x] Trackings, Normal-Subtab: Action-Bar zeigt `u group`; `u`
-      öffnet das Popup „Group by" in der nativen Optik (Standard-Chrome,
-      `●` markiert den aktuellen Zustand (Day), Hotkey-Buchstabe im Label
-      unterstrichen, Keybinding-Legende unten).
-- [x] `w` springt direkt auf Wochen-Gruppierung (Header `── W24 2026`),
-      Summen pro Woche; `u` → `n` entfernt die Gruppierung (flache
-      Liste; Aggregat-Spalte + Σ-Footer verschwinden, wie bei `zg` auf
-      „ungruppiert").
-- [x] Pfeile + Enter/Space wählen ebenfalls; Esc schließt ohne Änderung.
-- [x] Condensed-Subtab: `u` → `m` rotiert nur die Tag-Bucket-Ebene auf
-      Monat (`── 2026-06`), die adapter-seitige Pro-Task-Aufschlüsselung
-      bleibt.
-- [x] Auf einer Ebene ohne `group_by` (z. B. Tasks): kein
-      `u group`-Hint, `u` bleibt frei für YAML-`shortcuts:`.
+- [x] Trackings, normal subtab: the action bar shows `u group`; `u` opens the
+      "Group by" popup in the native look (standard chrome, `●` marks the
+      current state (day), the hotkey letter underlined in the label, the
+      keybinding legend at the bottom).
+- [x] `w` jumps straight to weekly grouping (the header `── W24 2026`) with
+      per-week sums; `u` → `n` removes the grouping (a flat list; the aggregate
+      column and the Σ footer disappear, as with `zg` on "ungrouped").
+- [x] Arrows plus Enter/Space select as well; Esc closes without a change.
+- [x] Condensed subtab: `u` → `m` rotates only the day-bucket level to month
+      (`── 2026-06`), the adapter-side per-task breakdown stays.
+- [x] On a level without a `group_by` (tasks, say): no `u group` hint, `u`
+      stays free for YAML `shortcuts:`.
 
-## Trackings-Tree: immer ausgeklappt + ohne Marker (`expand_depth: all`)
+## The trackings tree: always expanded, no markers (`expand_depth: all`)
 
-Native Parität für den Tree-Subtab von Trackings: der Legacy-Tree war
-immer komplett offen und hatte keine Aufklappmarker. `expand_depth: all`
-(neuer Wert, Kaskade läuft bis nichts Aufklappbares übrig ist) +
+Native parity for the trackings tree subtab: the legacy tree was always fully
+open and had no expansion markers. `expand_depth: all` (a new value; the
+cascade runs until nothing expandable is left) plus
 `tree_markers.enabled: false` in trackings.yaml.
 
-- [x] Trackings → `t` (Tree): der gesamte Baum ist sofort komplett
-      ausgeklappt — alle Ebenen sichtbar, ohne manuelles Enter.
-- [x] Keine `▶`/`▼`-Marker vor den Zeilen; die Box-Connectors
-      (`├──`/`└──`) bleiben.
-- [x] Manuell einen Ast zuklappen (Enter), dann Subtab wechseln und
-      zurück: Zustand bleibt — die Kaskade ist one-shot und klappt nichts
-      gegen den User wieder auf.
-- [x] Saved Query anwenden (`q`): der gefilterte Baum ist ebenfalls
-      sofort voll ausgeklappt (neue Query re-armiert die Kaskade).
-      Auch mit Cursor tief im Baum + vorherigem manuellen Auf-/Zuklappen
-      (Regression: Out-of-Range-Cursor brach den Tabellen-Rebuild ab →
-      stale Anzeige).
+- [x] Trackings → `t` (tree): the whole tree is fully expanded right away —
+      every level visible, without pressing Enter.
+- [x] No `▶`/`▼` markers in front of the rows; the box connectors
+      (`├──`/`└──`) stay.
+- [x] Collapse a branch manually (Enter), then switch subtabs and come back:
+      the state holds — the cascade is one-shot and expands nothing against the
+      user again.
+- [x] Apply a saved query (`q`): the filtered tree is fully expanded right
+      away too (a new query re-arms the cascade). That holds with the cursor
+      deep in the tree and after manual expanding and collapsing as well (a
+      regression: an out-of-range cursor aborted the table rebuild → a stale
+      display).
 
-### Tiefe Bäume klappen vollständig auf (Kaskade bleibt scharf)
+### Deep trees expand completely (the cascade stays armed)
 
-Bugfix: die `expand_depth: all`-Kaskade wird pro asynchron eintreffender
-Kind-Ebene einmal gepumpt. Bei mehreren Geschwister-Ästen, die parallel
-laden, konnte ein Ast „auslaufen" (ein Blatt landet) **während** ein anderer
-noch in der Luft war — der Pump für das Blatt fand nichts mehr und
-ent-schärfte die Kaskade voreilig. Folge: nur die obersten ein/zwei Ebenen
-klappten auf, tiefere Äste blieben zu. Fix: die Kaskade ent­schärft erst,
-wenn keine bereits-expandierte Ebene mehr auf ihre Kinder wartet.
+Bugfix: the `expand_depth: all` cascade is pumped once per asynchronously
+arriving child level. With several sibling branches loading in parallel, one
+branch could run out (hit a leaf) **while** another was still in flight — the
+pump for that leaf found nothing left and disarmed the cascade prematurely.
+The consequence: only the top one or two levels expanded, deeper branches
+stayed closed. Fix: the cascade only disarms once no already-expanded level is
+still waiting for its children.
 
-- [ ] Trackings → `t` (Tree) mit einem **mehrstufigen** Task-Baum
-      (≥3 Ebenen, mehrere Geschwister mit unterschiedlich tiefen Ästen):
-      der Baum ist nach dem Laden **komplett** offen bis zum letzten
-      getrackten Blatt — nicht nur die obersten beiden Ebenen. Gleichviel
-      sichtbar wie im nativen Trackings-Tab.
-- [ ] Auch der gruppierte Tree (Tages-Buckets) klappt jeden Bucket-Teilbaum
-      vollständig auf, nicht nur die erste Task-Ebene.
+- [ ] Trackings → `t` (tree) with a **multi-level** task tree (≥3 levels,
+      several siblings with branches of differing depth): after loading, the
+      tree is **completely** open down to the last tracked leaf — not just the
+      top two levels. Exactly as much is visible as in the native trackings
+      tab.
+- [ ] The grouped tree (day buckets) also expands every bucket subtree
+      completely, not just the first task level.
 
-### `s` (toggle-tracking) aktualisiert die Ansicht sofort
+### `s` (toggle-tracking) refreshes the view immediately
 
-Bugfix: `s` aktualisierte die TUI in den Trackings-Tabs (flach / condensed /
-Tree) meist **nicht** sofort. Grund: der Toggle gab `Noop` zurück und
-verließ sich auf Bridge-Row-Patches bzw. (im Tree) auf einen
-`PatchRow`-Dispatch. Beide trafen die sichtbare Zeile oft nicht — ein
-_Start_ erzeugt ein neues, noch unsichtbares Intervall (keine Zeile zum
-Patchen), und `patch_row` durchsucht nur die Tiefe-0-Zeilen, sodass tiefere
-Tree-Knoten gar nicht aktualisiert wurden. Die `Noop`/`PatchRow`-Lösung
-existierte nur, weil ein voller `Reload` früher die O(N²)-Expand-Kaskade
-auslöste (langsam, blockierte Eingabe).
+Bugfix: `s` mostly did **not** refresh the TUI in the trackings tabs (flat /
+condensed / tree) right away. The reason: the toggle returned `Noop` and
+relied on bridge row patches, or (in the tree) on a `PatchRow` dispatch.
+Neither often hit the visible row — a _start_ creates a new, still invisible
+interval (no row to patch), and `patch_row` only searches the depth-0 rows, so
+deeper tree nodes were not refreshed at all. The `Noop`/`PatchRow` solution
+only existed because a full `Reload` used to trigger the O(N²) expand cascade
+(slow, and it blocked input).
 
-Fix: Mit der Eager-Subtree-Verbesserung (`supports_eager_subtree`) erneuert
-ein `Reload` den ganzen aufgeklappten Baum in **einem** `list_subtree`-Call.
-Der Toggle gibt deshalb in allen drei Views schlicht `Reload` zurück
-(identisch zur Tasks-Logik) — re-foldet Own/Cumulated, Vorfahren-Aggregate
-und Marker konsistent. Der `PatchRow`-Dispatch entfällt ganz.
+Fix: with the eager-subtree improvement (`supports_eager_subtree`) a `Reload`
+renews the entire expanded tree in **one** `list_subtree` call. The toggle
+therefore simply returns `Reload` in all three views (identical to the tasks
+logic) — re-folding own/cumulated values, ancestor aggregates and markers
+consistently. The `PatchRow` dispatch is gone entirely.
 
-> Beim Smoke-Test **kein** echtes Tracking auf echten Zeilen togglen —
-> eine Wegwerf-Aufgabe anlegen und auf der tracken.
+> During the smoke test do **not** toggle a real tracking on real rows —
+> create a throwaway task and track on that one.
 
-- [ ] Trackings → Tree, tiefer/voll aufgeklappter Baum: `s` auf einer
-      **verschachtelten** Zeile flippt deren `⏱`-Marker **sofort** (an beim
-      Start, weg beim Stopp); der Baum bleibt voll aufgeklappt, der Reload
-      ist flott (kein sekundenlanges Zusammenklappen/Eingabe-Freeze), die
-      Selektion bleibt auf der Zeile stehen. Kumulierte Sekunden der
-      Vorfahren stimmen ohne extra `r`.
-- [ ] Trackings → flache Liste (`a`) und condensed (`v`): `s` auf einer
-      laufenden Zeile stoppt sie (`⏱` weg, Dauer eingefroren); `s` auf einer
-      gestoppten Zeile startet ein neues Intervall, das sofort sichtbar wird.
-- [ ] Tasks → Tree: `t` (toggle-tracking) flippt den `⏱`-Marker der
-      Zeile sofort (unverändert — nutzte schon `Reload`).
+- [ ] Trackings → tree, deeply and fully expanded: `s` on a **nested** row
+      flips that row's `⏱` marker **immediately** (on when starting, off when
+      stopping); the tree stays fully expanded, the reload is quick (no
+      seconds-long collapse or input freeze), and the selection stays on the
+      row. The ancestors' cumulated seconds are correct without an extra `r`.
+- [ ] Trackings → flat list (`a`) and condensed (`v`): `s` on a running row
+      stops it (`⏱` gone, the duration frozen); `s` on a stopped row starts a
+      new interval that becomes visible immediately.
+- [ ] Tasks → tree: `t` (toggle-tracking) flips the row's `⏱` marker
+      immediately (unchanged — it already used `Reload`).
 
-## Trackings-Tree: Gruppierung via Adapter (`group_by_via_adapter`)
+## The trackings tree: grouping via the adapter (`group_by_via_adapter`)
 
-Native Parität, Punkt (3): der Legacy-Tree gruppierte nach Tag (ein
-Gruppenkopf pro Tag, darunter der Task-Baum mit den Durations nur dieses
-Tages). Generischer Mechanismus: Engine reicht das aktive `group_by` im
-Root-`list()` durch, Adapter liefert `tracking:tree-group`-Bucket-Knoten
-mit per-Bucket gefalteten Teilbäumen; `zg`/`u` = Reload.
+Native parity, point (3): the legacy tree grouped by day (one group header per
+day, with the task tree below it showing only that day's durations). The
+generic mechanism: the engine passes the active `group_by` through in the root
+`list()`, the adapter returns `tracking:tree-group` bucket nodes with subtrees
+folded per bucket; `zg`/`u` mean a reload.
 
-- [ ] Trackings → `t` (Tree): Tages-Gruppen als `── label`-Header-Zeilen
-      (nicht selektierbar, Header-Style, Label wie in der gruppierten
-      Flat-List: `W24 2026-06-08 Mon`), neuester Tag zuerst. Die Task-Zeilen
-      darunter starten bei Einrückung 0 (keine Extra-Ebene unter dem
-      Header). Voll aufgeklappt (expand_depth-Kaskade), Aufbau flott (kein
-      sekundenlanger Aufbau — Folds + Query-Auflösung pro Snapshot
-      memoisiert).
-- [ ] Teilbaum unter einem Header: Durations sind die des jeweiligen
-      Tages (derselbe Task unter zwei Tagen zeigt unterschiedliche
-      Werte). Spalten wie nativ: `⏱`, Task, Own, Cumulated; zusätzlich
-      schließt eine **Total**-Spalte jeden Tag auf seiner letzten Zeile
-      (Stundenzettel-Layout). Cursor überspringt die Header-Zeilen.
-- [ ] `zg` rotiert Day → Week → Month → Year → No grouping → Day; jeder
-      Schritt lädt neu. „No grouping" zeigt den ungebucketeten Task-Baum
-      ohne Header und ohne Total-Spalte (wie vor diesem Feature). `u`-Menü
-      springt direkt, `●` markiert den aktiven Zustand.
-- [ ] Saved Query (`q`) auf gruppiertem Tree: Buckets + Teilbäume
-      re-falten aus den sichtbaren Trackings; leere Buckets verschwinden.
-      Gruppierungszustand überlebt das Query-Apply.
-- [ ] `s` (toggle-tracking) auf einer Task-Zeile im Bucket funktioniert;
-      auf einer Bucket-Zeile ist `s` nicht belegt (read-only Aggregat).
-      ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen.
+- [ ] Trackings → `t` (tree): day groups as `── label` header rows (not
+      selectable, header style, the label as in the grouped flat list:
+      `W24 2026-06-08 Mon`), newest day first. The task rows below them start
+      at indentation 0 (no extra level under the header). Fully expanded (the
+      expand_depth cascade), and quick to build (no seconds-long build — folds
+      and query resolution are memoized per snapshot).
+- [ ] The subtree under a header: the durations are those of the respective
+      day (the same task under two days shows different values). The columns
+      are as in the native tab: `⏱`, task, own, cumulated; on top of that a
+      **total** column closes each day on its last row (the timesheet layout).
+      The cursor skips the header rows.
+- [ ] `zg` rotates day → week → month → year → no grouping → day; every step
+      reloads. "No grouping" shows the unbucketed task tree without headers and
+      without the total column (as before this feature). The `u` menu jumps
+      directly, `●` marks the active state.
+- [ ] A saved query (`q`) on the grouped tree: buckets and subtrees are
+      re-folded from the visible trackings; empty buckets disappear. The
+      grouping state survives applying the query.
+- [ ] `s` (toggle-tracking) works on a task row inside a bucket; on a bucket
+      row `s` is unbound (a read-only aggregate). ⚠ during the smoke test only
+      toggle on a throwaway task.
 
-### `s` im gruppierten Tree aktualisiert nur den Now-Bucket
+### `s` in the grouped tree refreshes only the now bucket
 
-Im **gruppierten** Tree (z. B. nach Tag) ist jeder Bucket ein eigenständig
-aggregierter Teilbaum. Ein `s` (Start/Stopp) verschiebt nur die Totals des
-Buckets, in den **„jetzt"** fällt — bei Tages-Gruppierung der heutige Tag,
-generell der Bucket der gerade laufenden/zuletzt berührten Buchung. Statt
-den ganzen Forst neu zu falten lädt das Frontend deshalb **nur diesen einen
-Bucket** neu: Der Adapter sendet das payload-freie `Invalidation::NowAnchored`,
-das Frontend fragt `bucket_for_now(spec)` (jüngstes Tracking → dessen Bucket),
-holt Header + Teilbaum dieses Buckets und spleißt sie in-place ein; alle
-anderen Buckets (inkl. deren Auf-/Zugeklappt-Zustand) bleiben unangetastet.
-Ein _Start_, der den ersten Eintrag der Periode anlegt, erzeugt einen
-brandneuen Bucket → das Frontend fällt dann auf einen vollen Pane-Reload
-zurück (damit der neue Bucket in Sortier-Position erscheint).
+In the **grouped** tree (by day, for instance) every bucket is a subtree
+aggregated on its own. An `s` (start/stop) only moves the totals of the bucket
+that **"now"** falls into — with day grouping that is today, and generally the
+bucket of the currently running or most recently touched entry. Instead of
+re-folding the whole forest, the frontend therefore reloads **only that one
+bucket**: the adapter sends the payload-free `Invalidation::NowAnchored`, the
+frontend asks `bucket_for_now(spec)` (the most recent tracking → its bucket),
+fetches that bucket's header and subtree and splices them in place; all other
+buckets (including their expanded/collapsed state) are left untouched. A
+_start_ that creates the period's first entry produces a brand-new bucket → the
+frontend then falls back to a full pane reload (so the new bucket appears in
+its sort position).
 
-> ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen, nie auf echten Zeilen.
+> ⚠ during the smoke test only toggle on a throwaway task, never on real rows.
 
-- [ ] Trackings → `t` (Tree), nach Tag gruppiert, mehrere Tage
-      aufgeklappt: `s` auf einer Task-Zeile im **heutigen** Bucket flippt
-      deren `⏱`-Marker und aktualisiert das Tages-Total dieses Buckets
-      **sofort** — die **anderen** Tages-Buckets flackern nicht, klappen
-      nicht zu und ihre Totals bleiben unverändert. Selektion bleibt stehen.
-- [ ] Ein `s`, das die **erste** Buchung des heutigen Tages anlegt (vorher
-      kein heutiger Bucket sichtbar): der neue Tages-Header erscheint in
-      korrekter Sortier-Position (Fallback voller Reload), restliche Buckets
-      bleiben aufgeklappt.
-- [ ] „No grouping" (ungebucketeter Tree): `s` lädt wie gehabt den ganzen
-      (einen) Baum neu — kein Now-Bucket-Spezialfall, keine Regression.
+- [ ] Trackings → `t` (tree), grouped by day, several days expanded: `s` on a
+      task row in **today's** bucket flips that row's `⏱` marker and updates
+      that bucket's daily total **immediately** — the **other** day buckets do
+      not flicker, do not collapse, and their totals stay unchanged. The
+      selection stays put.
+- [ ] An `s` that creates the **first** entry of the current day (with no
+      bucket for today visible before): the new day header appears in the
+      correct sort position (the full-reload fallback), the remaining buckets
+      stay expanded.
+- [ ] "No grouping" (the unbucketed tree): `s` reloads the whole (single) tree
+      as before — no now-bucket special case, no regression.
 
-### Live-Tick im gruppierten Tree zählt nur den Now-Bucket hoch
+### The live tick in the grouped tree counts up only the now bucket
 
-Der **statische** Tree-Fold bäckt alle Dauern gegen den Snapshot-Zeitpunkt —
-ein bloßes Neuladen desselben Snapshots tickt also _nicht_. Damit die Dauern
-im gruppierten Tree live hochzählen, faltet der Adapter pro Timer-Tick **nur
-den Now-Bucket** frisch gegen die aktuelle Uhrzeit: der neue Hook
-`live_group_rows(spec, query)` liefert den Bucket-Header (Total neu aufsummiert)
-plus die **laufende Kette** (laufende Task + ihre Vorfahren, deren kumulierte
-Dauer mitwächst) als `Invalidation::Row`-Patches — nur Zeilen, die sich
-tatsächlich bewegen, alle übrigen bleiben unberührt. Der Framework-Timer
-feuert dabei nur noch ein payload-freies `LiveTick`; die Faltung passiert erst
-im Frontend.
+The **static** tree fold bakes all durations against the snapshot's timestamp —
+merely reloading the same snapshot therefore does _not_ tick. To make the
+durations in the grouped tree count up live, the adapter folds **only the now
+bucket** freshly against the current time on every timer tick: the new hook
+`live_group_rows(spec, query)` returns the bucket header (with the total summed
+up anew) plus the **running chain** (the running task and its ancestors, whose
+cumulated durations grow along) as `Invalidation::Row` patches — only rows that
+actually move, everything else is left alone. The framework timer now merely
+fires a payload-free `LiveTick`; the folding happens in the frontend.
 
-**Hintergrund-Tab-Verhalten (bewusst):** Ein Tick eines _nicht aktiven_ Tabs
-hat **keine** Auswirkung auf den aktuellen Tab — er wird nicht neu gezeichnet.
-Der Tick wird nur als Flag (`pending_live_refresh`) vermerkt und **erst beim
-Zurückschalten** auf seinen Tab ausgewertet, und zwar **coalesced**: egal wie
-viele Ticks in der Abwesenheit anfielen, beim Zurückschalten läuft genau eine
-Faltung gegen den dann aktuellen Stand.
+**Background-tab behaviour (deliberate):** a tick from a tab that is _not_
+active has **no** effect on the current tab — it is not redrawn. The tick is
+only noted as a flag (`pending_live_refresh`) and evaluated **when you switch
+back** to its tab, and then **coalesced**: however many ticks piled up while
+you were away, switching back runs exactly one fold against the state as of
+then.
 
-> ⚠ im Smoke-Test nur auf einem Wegwerf-Task togglen, nie auf echten Zeilen.
+> ⚠ during the smoke test only toggle on a throwaway task, never on real rows.
 
-- [ ] Trackings → `t` (Tree), nach Tag gruppiert: auf einem Wegwerf-Task
-      `s` starten. Im **heutigen** Bucket zählen Task-Zeile, deren Vorfahren
-      und das Tages-Total **sekündlich/live hoch** — die **anderen** Buckets
-      stehen still, flackern nicht und klappen nicht zu. Selektion bleibt.
-- [ ] Während die Buchung läuft, auf einen **anderen** Tab wechseln und ein
-      paar Sekunden bleiben: der aktuelle Tab zeichnet **nicht** wegen des
-      Trackings-Ticks neu. Zurückschalten → die Dauern springen **in einem
-      Schritt** auf den jetzt korrekten Wert (kein Nachholen jedes einzelnen
-      verpassten Ticks).
-- [ ] Idle (keine laufende Buchung): es passieren **keine** Live-Patches —
-      der Tree bleibt ruhig, kein unnötiges Neuzeichnen.
+- [ ] Trackings → `t` (tree), grouped by day: start an `s` on a throwaway
+      task. In **today's** bucket the task row, its ancestors and the daily
+      total **count up live, second by second** — the **other** buckets stand
+      still, do not flicker and do not collapse. The selection stays.
+- [ ] While the entry is running, switch to a **different** tab and stay there
+      for a few seconds: the current tab does **not** redraw because of the
+      trackings tick. Switch back → the durations jump to the now-correct value
+      **in one step** (no catching up on every single missed tick).
+- [ ] Idle (no running entry): **no** live patches happen — the tree stays
+      quiet, no unnecessary redrawing.
 
-## Live-Frische Tasks/Trackings: Marker sofort, externe Starts, adaptives Ticken
+## Live freshness for tasks/trackings: instant markers, external starts, adaptive ticking
 
-Drei Frische-Fixes für die Adapter-Tabs: (1) ein Root-Reload erneuert jetzt
-auch alle **aufgeklappten** Tree-Ebenen (vorher blieben deren gecachte
-Children stehen → `⏱` erschien auf verschachtelten Tasks nicht sofort);
-(2) neuer Trait-Hook `revalidate()` — beim Tab-Wechsel diffen Task-/
-Tracking-Adapter die laufenden Trackings gegen die DB und laden bei Drift
-neu (externe Starts/Stops via CLI/waybar); (3) die Live-Dauer tickt
-adaptiv statt sekündlich (5 s → 10 s → 30 s → 60 s, native Parität).
+Three freshness fixes for the adapter tabs: (1) a root reload now renews all
+**expanded** tree levels too (their cached children used to stay put → `⏱` did
+not appear on nested tasks right away); (2) the new trait hook `revalidate()` —
+on a tab switch the task and tracking adapters diff the running trackings
+against the database and reload on drift (external starts and stops via the
+CLI or waybar); (3) the live duration ticks adaptively instead of every second
+(5 s → 10 s → 30 s → 60 s, native parity).
 
-- [ ] Tasks, Baum aufgeklappt: `s` auf einem **verschachtelten** Task
-      → `⏱` erscheint sofort auf der Zeile (kein Zuklappen/Neuladen
-      nötig); nochmal `s` → Marker sofort weg.
-      ⚠ nur auf einem Wegwerf-Task togglen.
-- [ ] Trackings Flat-List: laufende Zeile tickt erst alle 5 s, nach
-      einer Minute spürbar seltener (10 s-Sprünge); CPU bleibt ruhig.
-      Nach Stop hört das Ticken auf.
-- [ ] Extern ein Tracking starten (z. B. CLI `task track …` / waybar),
-      während ein anderer Tab aktiv ist → auf Tasks wechseln: `⏱`
-      ist da; auf Trackings wechseln: neue laufende Zeile da und
-      tickt. Extern stoppen → Tab-Wechsel zeigt den Stop.
-- [ ] `r` auf Tasks bzw. Trackings holt dieselbe externe Änderung
-      manuell — auch im **Tree** mit aufgeklappten Ebenen (vorher blieb
-      dort alter Stand stehen).
-- [ ] Trackings Tree/Condensed nach Toggle/Reload: Durations
-      konsistent frisch (auch unter Gruppen-Headern).
+- [ ] Tasks, tree expanded: `s` on a **nested** task → `⏱` appears on the row
+      immediately (no collapsing or reloading needed); `s` again → the marker
+      is gone immediately. ⚠ only toggle on a throwaway task.
+- [ ] Trackings flat list: a running row first ticks every 5 s, and after a
+      minute noticeably less often (10 s jumps); the CPU stays quiet. After a
+      stop the ticking ends.
+- [ ] Start a tracking externally (via the CLI `task track …` or waybar, say)
+      while another tab is active → switch to tasks: `⏱` is there; switch to
+      trackings: the new running row is there and ticks. Stop it externally →
+      a tab switch shows the stop.
+- [ ] `r` on tasks or trackings picks up the same external change manually —
+      in the **tree** with expanded levels as well (where the old state used to
+      stay put).
+- [ ] Trackings tree/condensed after a toggle or reload: durations are
+      consistently fresh (under group headers too).
 
 ## Eager-Subtree (`supports_eager_subtree`, `list_subtree`)
 
