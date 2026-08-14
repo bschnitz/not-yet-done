@@ -955,7 +955,7 @@ keys of the default window bindings) → effective alphabet `adfghjkl`.
       bar shows, in bold and in the accent colour, the label `WINDOW`
       followed by the hints `v split right`, `s split down` and
       `q close pane` (with several panes open also `<a/d/…> switch
-    pane`).
+  pane`).
 - [ ] Resolve any chord (for example `wv`) → the action bar falls back to
       the normal hint list (without the `WINDOW` label).
 - [ ] Press `w` while an input is active (`f` fuzzy / `/` search / `:`
@@ -1026,7 +1026,7 @@ Precondition: a chain is defined at ChildDef level in a content-tab YAML
 - [ ] Abort on error: the chain consists of `window.focus_parent`
       followed by `content.open`, and no parent pane can be linked from
       the focus → a notification reading `chain ctrl+x: step N aborted:
-    …`, the following steps are not executed.
+  …`, the following steps are not executed.
 - [ ] Validation at config load: `[global.quit]` as a chain entry → the
       app start aborts with a `not chainable in V1` error.
 - [ ] Validation at config load: `[content.warp]` as a chain entry → the
@@ -1383,31 +1383,31 @@ and `actions.search` (key `/`) — both defined on exactly ONE tree level
       `content.open`, `window.focus_child` — navigates from the rows pane
       to the next row of the table above. The tree pane stays unchanged.
 
-## Multi-Tree-Continuation + DB-Level Scripts (MT-1 … MT-4)
+## Multi-tree continuation + DB-level scripts (MT-1 … MT-4)
 
-Voraussetzung: `~/.config/not_yet_done/views/postgres.yaml` hat unter
-der `databases`-View **zwei** tree-continuing Children:
+Precondition: `~/.config/not_yet_done/views/postgres.yaml` has **two**
+tree-continuing children below the `databases` view:
 
 - `Schema` (`node_type: "postgres:schema"`, `tree_label: name`)
 - `DB Script` (`node_type: "postgres:db_script"`, `tree_label: script`)
 
-Beide auf gleicher Ebene, unterschiedliche `node_type`s → Validator
-akzeptiert (Rule 3 der MT-1a).
+Both on the same level, with different `node_type`s → the validator
+accepts them (rule 3 of MT-1a).
 
-### Validator-Check (MT-1a)
+### Validator check (MT-1a)
 
-- [ ] App-Start mit obiger Config → kein Validator-Fehler, Tab lädt
-      normal.
-- [ ] Zwei tree-Children mit **identischem** `node_type` in eine View
-      kopieren (z. B. zweimal `node_type: "postgres:schema"`) → App
-      lehnt Reload ab mit Fehler _"ambiguous tree continuation —
-      duplicate node_type 'postgres:schema' used by both
-      tree-continuing children …"_.
+- [ ] App start with the config above → no validator error, the tab loads
+      normally.
+- [ ] Copy two tree children with an **identical** `node_type` into one
+      view (for example `node_type: "postgres:schema"` twice) → the app
+      refuses the reload with the error **"ambiguous tree continuation —
+      duplicate node_type 'postgres:schema' used by both tree-continuing
+      children …"**.
 
-### Multi-Branch Expand (MT-1b/c/d + MT-2)
+### Multi-branch expand (MT-1b/c/d + MT-2)
 
-Vorbereitung: lege per Hand mindestens ein DB-Script an, damit der
-DB-Scripts-Branch beim Expand etwas Sichtbares hat:
+Preparation: create at least one DB script by hand, so that the DB
+scripts branch has something visible when expanded:
 
 ```sh
 mkdir -p ~/.local/share/not_yet_done/postgres/<instance_id>/db_scripts/<db>
@@ -1415,48 +1415,46 @@ printf '%s\n%s\n%s\n' '-- scratch' '-- ▼ THIS SQL WILL BE EXECUTED ON SAVE ▼
   > ~/.local/share/not_yet_done/postgres/<instance_id>/db_scripts/<db>/hello.sql
 ```
 
-- [ ] App-Start, Postgres-Tab → `databases`-Subtab → DB expanden
-      (`Enter`/`l`). **Zwei** Branches erscheinen unter der DB,
-      Reihenfolge wie in YAML: zuerst Schemas, dann das DB-Script
-      `hello`. Beide jeweils mit eigenem `▶`-Glyph.
-- [ ] Während des Loads (kurz) → Banner zeigt _"loading"_ bis beide
-      Branches geladen sind. Erscheinen erst beide gleichzeitig, nicht
-      nur einer.
-- [ ] Branches in der Reihenfolge der YAML-Children (Schema vor DB
-      Script), unabhängig davon, welcher Adapter-Call früher fertig
-      war.
-- [ ] Schema-Zeile weiter expanden → klassischer Schema → Table-Pfad
-      funktioniert weiterhin.
-- [ ] DB-Script-Zeile ist Leaf → kein weiteres `▶`, `Enter` macht
-      nichts (kein Drilldown definiert).
-- [ ] DB collapsen (`c` oder `gh`) → **beide** Branches verschwinden.
-- [ ] DB erneut expanden → beide Branches kommen wieder, gleicher
-      Inhalt.
+- [ ] App start, Postgres tab → `databases` subtab → expand a database
+      (`Enter`/`l`). **Two** branches appear below the database, in the
+      order given in the YAML: schemas first, then the DB script `hello`.
+      Each with its own `▶` glyph.
+- [ ] During the load (briefly) → the banner shows **"loading"** until
+      both branches are loaded. They only appear together, not one at a
+      time.
+- [ ] The branches follow the order of the YAML children (schema before
+      DB script), regardless of which adapter call finished first.
+- [ ] Expand the schema row further → the classic schema → table path
+      still works.
+- [ ] The DB script row is a leaf → no further `▶`, `Enter` does nothing
+      (no drill-down defined).
+- [ ] Collapse the database (`c` or `gh`) → **both** branches disappear.
+- [ ] Expand the database again → both branches come back, same content.
 
-### Mixed Scripts-Subtab (MT-3)
+### Mixed scripts subtab (MT-3)
 
-- [ ] `s` (scripts-Subtab) → Liste enthält sowohl Table-Level-Scripts
-      (z. B. `default` aus `queries/<db>/<schema>/<table>/`) als auch
-      DB-Level-Scripts (z. B. `hello` aus `db_scripts/<db>/`).
-- [ ] DB-Level-Zeile hat die `Schema`/`Table`-Spalten **leer**,
-      `Database` und `Script` sind gefüllt.
-- [ ] Table-Level-Zeile hat alle vier Spalten gefüllt.
+- [ ] `s` (scripts subtab) → the list contains both table-level scripts
+      (for example `default` from `queries/<db>/<schema>/<table>/`) and
+      DB-level scripts (for example `hello` from `db_scripts/<db>/`).
+- [ ] A DB-level row has the `Schema`/`Table` columns **empty**,
+      `Database` and `Script` are filled.
+- [ ] A table-level row has all four columns filled.
 
-### Storage-Layout (MT-2)
+### Storage layout (MT-2)
 
-- [ ] Auf Disk: DB-Scripts liegen unter
-      `<instance_data_dir>/db_scripts/<db>/<script>.sql`, separat
-      vom existierenden `queries/<db>/<schema>/<table>/<script>.sql`.
-- [ ] Nicht-`.sql` Dateien im DB-Scripts-Verzeichnis (`notes.txt`
-      o. ä.) werden ignoriert, keine Crash.
-- [ ] Fehlendes `db_scripts/`-Verzeichnis ⇒ leerer DB-Scripts-Branch
-      (kein Fehler).
+- [ ] On disk: DB scripts live under
+      `<instance_data_dir>/db_scripts/<db>/<script>.sql`, separate from
+      the existing `queries/<db>/<schema>/<table>/<script>.sql`.
+- [ ] Non-`.sql` files in the DB scripts directory (`notes.txt` or
+      similar) are ignored, no crash.
+- [ ] A missing `db_scripts/` directory ⇒ an empty DB scripts branch (no
+      error).
 
 ## Cursor pagination & per-node actions (CP-1 … CP-9)
 
-Voraussetzung: ein konfigurierter Postgres-Tab mit der DB-Scripts-
-Branch wie in [Multi-Tree-Continuation](#multi-tree-continuation--db-level-scripts-mt-1--mt-4).
-Im `postgres.yaml` sind die per-node Shortcuts gesetzt:
+Precondition: a configured Postgres tab with the DB scripts branch as in
+[multi-tree continuation](#multi-tree-continuation--db-level-scripts-mt-1--mt-4).
+The per-node shortcuts are set in `postgres.yaml`:
 
 ```yaml
 - name: Scripts
@@ -1481,259 +1479,265 @@ Im `postgres.yaml` sind die per-node Shortcuts gesetzt:
 
 ### Add + edit (CP-9)
 
-- [ ] Cursor auf den **Scripts**-Gruppen-Node (oder direkt auf einen
-      bestehenden DB-Script-Eintrag) setzen, `a` drücken → Cmdline
-      öffnet sich pre-filled mit `:db-script-new <database> ` (mit
-      Trailing-Space). User tippt nur den Namen, drückt Enter →
-      Notification "Created DB script '<name>'", Editor öffnet sich
-      automatisch auf die neue Datei.
-- [ ] Datei landet unter
-      `<instance_data_dir>/db_scripts/<database>/<name>.sql` mit dem
-      Default-Template (Scratch-Hinweis, `▼ THIS SQL WILL BE EXECUTED
-ON SAVE ▼` Marker, `SELECT 1;` Body).
-- [ ] `:db-script-new` mit ungültigem Namen (mit `/`, `\`,
-      Whitespace, führendem `.`, leer) → Modal-Fehler, kein File
-      angelegt.
-- [ ] `:db-script-new <db> <vorhandener-name>` → Modal-Fehler
-      "already exists"; File auf Disk unverändert.
+- [ ] Put the cursor on the **Scripts** group node (or directly on an
+      existing DB script entry) and press `a` → the cmdline opens
+      pre-filled with `:db-script-new <database> ` (with a trailing
+      space). The user only types the name and presses Enter → a
+      notification "Created DB script '<name>'", the editor opens on the
+      new file automatically.
+- [ ] The file ends up at
+      `<instance_data_dir>/db_scripts/<database>/<name>.sql` with the
+      default template (the scratch note, the marker line reading
+      "THIS SQL WILL BE EXECUTED ON SAVE" between the two `▼`, and
+      `SELECT 1;` as the body).
+- [ ] `:db-script-new` with an invalid name (containing `/`, `\`,
+      whitespace, a leading `.`, or empty) → a modal error, no file is
+      created.
+- [ ] `:db-script-new <db> <existing-name>` → a modal error "already
+      exists"; the file on disk is unchanged.
 
 ### Execute + cursor result pane (CP-8 + CP-4 … CP-6)
 
-- [ ] Auf einem DB-Script `x` drücken → rechts daneben öffnet sich
-      ein Result-Pane (80/20 split). Spalten ergeben sich dynamisch
-      aus dem SELECT.
-- [ ] Body mit `INSERT … SELECT * FROM generate_series(1, 500)` o.ä.
-      bauen, dann SELECT, `x` → erste 100 Zeilen erscheinen. `>` →
-      nächste 100. `<` → Cursor re-opened auf Start (NO SCROLL).
-- [ ] Multi-Statement-Body: `CREATE TEMP TABLE t(x int); INSERT INTO
-t VALUES (1),(2),(3); SELECT * FROM t;` → läuft, paginiert über
-      den finalen SELECT.
-- [ ] DDL-only Body (`VACUUM`, `ANALYZE`) → derzeit Notify
-      "unpaged ExecuteQuery not implemented yet" (CP-9 nicht
-      ausgeliefert).
-- [ ] Result-Pane schließen (`wq`/`Esc` auf Pane) → `pg_stat_activity`
-      zeigt **keinen** verbleibenden idle-in-tx Eintrag mit dem
-      Cursor-Statement.
-- [ ] Während ein Cursor-Pane offen ist eine andere Long-Running-
-      Query starten → Timeout (`query_timeout_secs`) räumt den
-      gesamten Pool ab; Cursor-Pane zeigt beim nächsten `>` einen
-      "cursor lost"-Banner (kein Crash).
-- [ ] Auf einem DB-Script `Enter` drücken (statt `x`) → identisches
-      Verhalten wie `x`: Result-Pane öffnet, Pagination greift.
-      Funktioniert sowohl im Flat-Mode (Scripts-Subtab) als auch im
-      Tree-Mode (databases → Database → DB Scripts → Script-Row).
-      Regression-Bait: vor dem Fix wurde der synthetische Child
-      `postgres:db_script_result` durch den generischen Drill-Pfad
-      angesteuert und endete mit `Fetch failed: Node type
-'postgres:db_script_result' not available on …`. Routing
-      jetzt via `enter_action: execute` auf der `DB Script`
-      ChildDef in `postgres.yaml`. Zusätzlich nutzt `current_children`
-      im Tree-Mode jetzt den `node_type_chain` der selektierten
-      Row (statt First-Chain-Walk), sonst würde der Split in den
-      falschen Branch (z. B. Schemas → Schema → Table) abbiegen.
+- [ ] Press `x` on a DB script → a result pane opens next to it on the
+      right (80/20 split). The columns follow dynamically from the
+      SELECT.
+- [ ] Build a body with `INSERT … SELECT * FROM generate_series(1, 500)`
+      or similar, then a SELECT, `x` → the first 100 rows appear. `>` →
+      the next 100. `<` → the cursor is re-opened at the start (NO
+      SCROLL).
+- [ ] Multi-statement body: a `CREATE TEMP TABLE t(x int)`, then an
+      `INSERT INTO t VALUES (1),(2),(3)`, then `SELECT * FROM t;` → it
+      runs and paginates over the final SELECT.
+- [ ] DDL-only body (`VACUUM`, `ANALYZE`) → currently a notification
+      "unpaged ExecuteQuery not implemented yet" (CP-9 not shipped).
+- [ ] Close the result pane (`wq`/`Esc` on the pane) →
+      `pg_stat_activity` shows **no** leftover idle-in-tx entry with the
+      cursor statement.
+- [ ] Start another long-running query while a cursor pane is open → the
+      timeout (`query_timeout_secs`) tears down the whole pool; on the
+      next `>` the cursor pane shows a "cursor lost" banner (no crash).
+- [ ] Press `Enter` on a DB script (instead of `x`) → identical
+      behaviour to `x`: the result pane opens, pagination works. This
+      works both in flat mode (the scripts subtab) and in tree mode
+      (databases → database → DB scripts → script row). Regression bait:
+      before the fix the synthetic child `postgres:db_script_result` was
+      reached through the generic drill path and ended in a
+      `Fetch failed` error saying the node type
+      `postgres:db_script_result` was not available. The routing now goes
+      through `enter_action: execute` on the `DB Script` ChildDef in
+      `postgres.yaml`. On top of that, `current_children` in tree mode
+      now uses the `node_type_chain` of the selected row (instead of
+      walking the first chain), otherwise the split would branch off into
+      the wrong branch (for example schemas → schema → table).
 
 ### Edit (CP-8)
 
-- [ ] Auf DB-Script `e` drücken → SQL-Editor öffnet sich mit dem
-      gespeicherten Body. `:w` persistiert **ohne** Re-Execute; ein
-      eventuell offenes Result-Pane ändert sich nicht. User muss
-      explizit `x` drücken, um die neue Version zu sehen.
-- [ ] Im **Tree-Mode** (über `databases` → Database expandiert →
-      `DB Scripts`-Branch expandiert → Cursor auf einzelner
-      Script-Row) ebenfalls `e` drücken → derselbe Editor öffnet
-      sich. Während der kurzen Adapter-Vorabfrage zeigt die
-      Status-Bar evtl. den `list databases (Ns/Ms)`-Busy-Banner
-      (das ist erwartet — `get_by_id` validiert den DB-Namen);
-      der Editor öffnet sich **danach**, nicht stattdessen.
-      Regression-Bait: vor dem Fix wurde der vom Async-Dispatch
-      zurückgegebene `EditorRequest` in `poll_load` verschluckt.
+- [ ] Press `e` on a DB script → the SQL editor opens with the stored
+      body. `:w` persists it **without** re-executing; a result pane that
+      may be open does not change. The user has to press `x` explicitly
+      to see the new version.
+- [ ] Press `e` in **tree mode** as well (via `databases` → database
+      expanded → the `DB Scripts` branch expanded → cursor on an
+      individual script row) → the same editor opens. During the brief
+      adapter pre-query the status bar may show the
+      `list databases (Ns/Ms)` busy banner (that is expected —
+      `get_by_id` validates the database name); the editor opens
+      **afterwards**, not instead. Regression bait: before the fix the
+      `EditorRequest` returned by the async dispatch was swallowed in
+      `poll_load`.
 
 ### Delete (CP-9)
 
-- [ ] Auf einem DB-Script `d` drücken → Confirm-Popup "Delete DB
-      script '<name>' in database '<db>'? (y/n)". `y` → Notify
-      "Deleted DB script '<name>'", Row verschwindet (Pane reloaded),
-      Datei ist von Disk entfernt.
-- [ ] Wiederholtes `d` auf eine bereits gelöschte/vermisste Datei
-      ist idempotent — kein Fehler, Notify trotzdem.
-- [ ] `n`/`Esc` im Confirm-Popup → Datei bleibt, Row bleibt sichtbar.
+- [ ] Press `d` on a DB script → a confirmation popup "Delete DB script
+      '<name>' in database '<db>'? (y/n)". `y` → a notification "Deleted
+      DB script '<name>'", the row disappears (the pane is reloaded), the
+      file is removed from disk.
+- [ ] Pressing `d` again on an already deleted or missing file is
+      idempotent — no error, the notification appears anyway.
+- [ ] `n`/`Esc` in the confirmation popup → the file stays, the row
+      stays visible.
 
-### DB-Script Folders (DSF)
+### DB script folders (DSF)
 
-Voraussetzungen: Postgres-Tab, Tree-Mode (`d` auf Tab), Database
-expandiert → `Scripts`-Branch sichtbar. `postgres.yaml` enthält den
-DSF-Cutover (DB Script Dir + recursive: true). User-Config:
+Preconditions: a Postgres tab, tree mode (`d` on the tab), a database
+expanded → the `Scripts` branch visible. `postgres.yaml` contains the DSF
+cutover (DB Script Dir plus `recursive: true`). User config:
 `~/.config/not_yet_done/views/postgres.yaml`.
 
-#### DSF-1/2 Adapter
+#### DSF-1/2 adapter
 
-- [ ] Auf `Scripts` `a` → Cmdline pre-filled `db-script new ` —
-      Skript-Name tippen + Enter → Notify "Created DB script
-      '<name>'", neue Row erscheint unter Scripts.
-- [ ] Auf `Scripts` `A` → Cmdline `db-script new-dir ` — Ordnername
-      tippen + Enter → Notify "Created DB-script folder '<name>'",
-      neue Folder-Row mit `▶`-Glyph erscheint unter Scripts.
-- [ ] Folder-Row mit `Enter`/`l` expandieren → leer (keine Children).
-      `a` → Cmdline `db-script new ` — Skript erstellen unter dem
-      Folder. Filesystem-Check: `<instance_data_dir>/db_scripts/<db>/<folder>/<script>.sql`.
+- [ ] `a` on `Scripts` → the cmdline is pre-filled with
+      `db-script new ` — type a script name and press Enter → a
+      notification "Created DB script '<name>'", a new row appears below
+      Scripts.
+- [ ] `A` on `Scripts` → the cmdline shows `db-script new-dir ` — type a
+      folder name and press Enter → a notification "Created DB-script
+      folder '<name>'", a new folder row with a `▶` glyph appears below
+      Scripts.
+- [ ] Expand the folder row with `Enter`/`l` → empty (no children). `a` →
+      the cmdline shows `db-script new ` — create a script below the
+      folder. Filesystem check:
+      `<instance_data_dir>/db_scripts/<db>/<folder>/<script>.sql`.
 
-#### DSF-3 Recursive ChildDef
+#### DSF-3 recursive ChildDef
 
-- [ ] Folder-Row → `A` → neuen Sub-Folder erstellen. Sub-Folder ist
-      seinerseits expandierbar (`▶`). `A` darin → noch eine Ebene.
-      Tiefen ≥ 3 funktionieren ohne YAML-Änderung — `recursive: true`
-      auf der `DB Script Dir`-ChildDef macht sie zu ihrem eigenen
-      Tree-fortsetzenden Kind.
+- [ ] Folder row → `A` → create a new subfolder. The subfolder is
+      expandable itself (`▶`). `A` inside it → one more level. Depths
+      ≥ 3 work without a YAML change — `recursive: true` on the
+      `DB Script Dir` ChildDef makes it its own tree-continuing child.
 
-#### DSF-4 Mark/Paste-Move
+#### DSF-4 mark/paste move
 
-- [ ] Auf einem Skript `m` → Status-Bar Pill "⚓ marked: move:
-      <db>/db_scripts/.../script" + Notify "Marked '...' for move".
-- [ ] Cursor auf eine Folder-Row → `p` → Notify "Moved '<src>' →
-      '<dst>' in <db>"; die Source-Row verschwindet aus ihrem alten
-      Parent, die Folder-Row enthält jetzt das verschobene Skript.
-      Pill verschwindet.
-- [ ] Esc nach `m` → Notify "DB-script move cancelled", Pill weg.
-- [ ] Folder mit `m` markieren, auf anderen Folder `p` → ganzer
-      Folder-Subtree wird verschoben (rekursiv, mit Inhalt).
-- [ ] Cross-DB-Paste-Versuch (Skript aus DB1 marken, in DB2 paste-en)
-      → Notify-Error "Cross-database move not supported (DB1 → DB2)".
-      Mark bleibt erhalten, damit der User einen passenden Target
-      wählen kann.
+- [ ] `m` on a script → a status-bar pill "⚓ marked: move:
+      <db>/db_scripts/.../script" plus a notification "Marked '...' for
+      move".
+- [ ] Cursor on a folder row → `p` → a notification "Moved '<src>' →
+      '<dst>' in <db>"; the source row disappears from its old parent,
+      the folder row now contains the moved script. The pill disappears.
+- [ ] Esc after `m` → a notification "DB-script move cancelled", the pill
+      is gone.
+- [ ] Mark a folder with `m` and `p` onto another folder → the whole
+      folder subtree is moved (recursively, with its content).
+- [ ] Attempt a cross-database paste (mark a script in DB1, paste it into
+      DB2) → the error notification "Cross-database move not supported
+      (DB1 → DB2)". The mark is kept, so that the user can pick a
+      suitable target.
 
-#### DSF-4 Delete-Dir
+#### DSF-4 delete dir
 
-- [ ] Auf einer leeren Folder-Row `d` → Confirm-Popup "Delete empty
-      DB-script folder '<rel_path>' in '<db>'? (y/n)". `y` → Notify
-      "Deleted DB-script folder '<rel_path>'", Row verschwindet.
-- [ ] Auf einer **nicht-leeren** Folder-Row `d` → Confirm `y` →
-      Notify-Error "Delete folder failed: not empty (N entries)".
-      Folder + Inhalt bleiben unverändert.
-- [ ] `n`/`Esc` im Confirm → Folder bleibt.
+- [ ] `d` on an empty folder row → a confirmation popup "Delete empty
+      DB-script folder '<rel_path>' in '<db>'? (y/n)". `y` → a
+      notification "Deleted DB-script folder '<rel_path>'", the row
+      disappears.
+- [ ] `d` on a **non-empty** folder row → confirm with `y` → the error
+      notification "Delete folder failed: not empty (N entries)". The
+      folder and its content stay unchanged.
+- [ ] `n`/`Esc` in the confirmation → the folder stays.
 
-#### DSF-5 Cmdline-Namespace
+#### DSF-5 cmdline namespace
 
-- [ ] `:db-script` ohne Subcommand → Modal-Error "expects a
+- [ ] `:db-script` without a subcommand → the modal error "expects a
       subcommand (new | new-dir | rename | move | delete)".
-- [ ] `:db-script unknown` → Modal-Error mit Liste der gültigen
-      Subcommands.
-- [ ] `:db-script new` ohne Name → Modal-Error "expects <name>".
-- [ ] `:db-script rename foo/bar` → Modal-Error "invalid name
+- [ ] `:db-script unknown` → a modal error listing the valid
+      subcommands.
+- [ ] `:db-script new` without a name → the modal error "expects
+      <name>".
+- [ ] `:db-script rename foo/bar` → the modal error "invalid name
       'foo/bar' (no slashes or leading dot)".
-- [ ] `:db-script move /` (absolut-root) auf markiertes Skript →
-      verschiebt das Skript an die Wurzel des `db_scripts/<db>/`-
-      Verzeichnisses.
-- [ ] `:db-script move foo` (relativ) bei Cursor in Folder `bar` →
-      Zieldir wird `bar/foo`.
-- [ ] `:db-script delete` mit Cursor auf der `Scripts`-Group-Row
-      → Modal-Error "selected row is the group node".
+- [ ] `:db-script move /` (absolute root) on a marked script → moves the
+      script to the root of the `db_scripts/<db>/` directory.
+- [ ] `:db-script move foo` (relative) with the cursor in the folder
+      `bar` → the target directory becomes `bar/foo`.
+- [ ] `:db-script delete` with the cursor on the `Scripts` group row →
+      the modal error "selected row is the group node".
 
-#### DSF-3 Validator
+#### DSF-3 validator
 
-- [ ] In `postgres.yaml` `recursive: true` ohne `tree_label` setzen
-      und Tab reloaden → Validator-Fehler "recursive: true requires
-      tree_label" (granular reload, alter Stand bleibt aktiv bis
-      gefixt).
+- [ ] Set `recursive: true` without a `tree_label` in `postgres.yaml` and
+      reload the tab → the validator error "recursive: true requires
+      tree_label" (granular reload, the previous state stays active until
+      it is fixed).
 
 ### DB-Script Table-Name Completions (TC-1 … TC-5)
 
-Bedingung: Postgres-Tab, mindestens eine DB mit ein paar Basis-Tabellen
-(`pg_class.relkind = 'r'`, schemas außer `pg_catalog`/`information_schema`).
+Condition: a Postgres tab, at least one database with a few base tables
+(`pg_class.relkind = 'r'`, schemas other than
+`pg_catalog`/`information_schema`).
 
-- [ ] Auf einem DB-Script `e` drücken → Editor öffnet sich. Am Ende des
-      Buffers steht eine einzelne Zeile der Form
+- [ ] Press `e` on a DB script → the editor opens. At the end of the
+      buffer there is a single line of the form
       `-- table completions: tt_public__users, tt_public__orders, …`.
-      Reihenfolge: alphabetisch nach `(schema, table)`. Keine Tabelle
-      aus `pg_catalog`/`information_schema`/`pg_…` ist gelistet.
-- [ ] Token kopieren oder von Hand tippen: `SELECT * FROM tt_public__users;`
-      über den `QUERY_MARKER` schreiben, `:w`, dann `x` auf der Row →
-      Result-Pane zeigt die Zeilen der `public.users`. Substitution
-      hat `tt_public__users` zu `"public"."users"` ersetzt.
-- [ ] Tabelle mit einfachem Unterstrich im Namen (z. B. `user_orders`)
-      verifiziert Boundary-Match: `tt_public__user_orders` wird zu
-      `"public"."user_orders"`. `tt_public__user` (falls existent)
-      würde **nicht** den `user_orders`-Token partial mitkonsumieren
-      (Regex-`\b` an `_`-Boundaries).
-- [ ] Unbekannter Token (`tt_xxx__yyy` mit nicht-existenter Tabelle)
-      bleibt unverändert. Postgres meldet `syntax error at or near
-"tt_xxx__yyy"` — der literale Token ist im Fehler-Banner
-      sichtbar, sodass der User den Tippfehler sofort findet.
-- [ ] `:w` ohne Änderung → Datei auf Disk enthält **keine**
-      `-- table completions:` Zeile (cat `<instance_data_dir>/db_scripts/<db>/<script>.sql`
-      verifizieren). Beim erneuten Open mit `e` ist der Completion-Block
-      wieder am Ende — aus der aktuellen Tabellen-Liste neu generiert,
-      nicht aus dem File gelesen.
-- [ ] Completion-Zeile manuell im Editor verändern oder löschen, dann
-      `:w` → das beeinflusst die Persistenz nicht (Strip arbeitet auf
-      Prefix-Match `-- table completions: `). Nächstes Open zeigt die
-      frisch berechnete Zeile.
-- [ ] Adapter ohne Tabellen (leere DB) → Completion-Zeile wird gar
-      nicht angehängt (kein orphaner Header). Editor öffnet sich wie
-      gewohnt.
-- [ ] Substitution feuert nur, wenn der Query-Body `tt_` enthält
-      (Fast-Path) — die Schritte oben sollen keinen messbaren Mehr-
-      Round-Trip gegen die DB triggern, wenn der User Tokens nicht
-      benutzt. Regression-Bait: vor dem Feature gab es überhaupt
-      keinen `tt_`-Pfad, der Adapter führte die Query 1:1 aus.
+      Order: alphabetical by `(schema, table)`. No table from
+      `pg_catalog`/`information_schema`/`pg_…` is listed.
+- [ ] Copy a token or type it by hand: write
+      `SELECT * FROM tt_public__users;` above the `QUERY_MARKER`, `:w`,
+      then `x` on the row → the result pane shows the rows of
+      `public.users`. The substitution replaced `tt_public__users` with
+      `"public"."users"`.
+- [ ] A table with a single underscore in its name (for example
+      `user_orders`) verifies the boundary match:
+      `tt_public__user_orders` becomes `"public"."user_orders"`.
+      `tt_public__user` (if it exists) would **not** partially consume
+      the `user_orders` token (the regex `\b` at `_` boundaries).
+- [ ] An unknown token (`tt_xxx__yyy` with a non-existent table) stays
+      unchanged. Postgres reports a syntax error at or near
+      `"tt_xxx__yyy"` — the literal token is visible in the error banner,
+      so that the user spots the typo immediately.
+- [ ] `:w` without a change → the file on disk contains **no**
+      `-- table completions:` line (verify with `cat` on
+      `<instance_data_dir>/db_scripts/<db>/<script>.sql`). When opening
+      it again with `e` the completion block is at the end again —
+      regenerated from the current table list, not read from the file.
+- [ ] Change or delete the completion line manually in the editor, then
+      `:w` → that does not affect the persistence (the strip works on the
+      prefix match `-- table completions: `). The next open shows the
+      freshly computed line.
+- [ ] An adapter without tables (an empty database) → the completion line
+      is not appended at all (no orphaned header). The editor opens as
+      usual.
+- [ ] The substitution only fires if the query body contains `tt_` (fast
+      path) — the steps above must not trigger a measurable extra round
+      trip against the database when the user does not use tokens.
+      Regression bait: before the feature there was no `tt_` path at all,
+      the adapter executed the query verbatim.
 
-### Shortcut-Resolver (CP-1)
+### Shortcut resolver (CP-1)
 
-- [ ] In einem Rows-Pane (`postgres:row`) `Q` drücken → öffnet den
-      Q-SQL-Editor des Eltern-Table-Nodes (via
+- [ ] Press `Q` in a rows pane (`postgres:row`) → it opens the Q SQL
+      editor of the parent table node (via
       `shortcuts: { Q: "parent:edit_sql" }`).
-- [ ] Tasten, die _kein_ Shortcut sind und _keine_ View-Aktion
-      sind, gehen wie gehabt durch (Cursor-Movement, etc.).
-- [ ] YAML mit leerer Action-ID (`shortcuts: { x: "" }`) oder mit
-      Key-Kollision zur `actions:`-Liste → Validator-Fehler beim
-      Reload, der Tab geht in den Broken-State.
+- [ ] Keys that are **not** a shortcut and **not** a view action pass
+      through as before (cursor movement, and so on).
+- [ ] YAML with an empty action ID (`shortcuts: { x: "" }`) or with a key
+      collision against the `actions:` list → a validator error on
+      reload, the tab goes into the broken state.
 
 ## Cross-app Linking (L1–L11)
 
-Voraussetzungen: mindestens ein konfigurierter Jira-View und ein
-Taiga-View, ein paar Tasks in der Tasks-DB. Default-Keybinds für die
-Aktionen (alle unter dem `gl`-Prefix): `glm` (mark), `glp` (paste),
-`glo` (popup öffnen), `glb` / `glf` (jump back/forward), `:linkprune`
-(cmdline).
+Preconditions: at least one configured Jira view and one Taiga view, a
+few tasks in the tasks database. Default key bindings for the actions
+(all under the `gl` prefix): `glm` (mark), `glp` (paste), `glo` (open the
+popup), `glb` / `glf` (jump back/forward), `:linkprune` (cmdline).
 
-### Mark + Paste (L5/L6)
+### Mark + paste (L5/L6)
 
-- [ ] In Tasks-Tab Cursor auf eine Task → `glm` → Status-Bar zeigt
-      links den Pill _"⚓ marked: tasks/<uuid>"_; Notification _"Link
-      mark armed: tasks/<uuid>"_.
-- [ ] Tab wechseln (z. B. nach Jira) → Pill bleibt sichtbar.
-- [ ] In Jira auf ein Issue → `glp` → Notification _"Linked:
-      jira/<inst>/<KEY> → tasks/<uuid>"_; DB-Check `select * from
-link;` zeigt die Zeile.
-- [ ] Nochmal `glp` auf eine andere Jira-Zeile → zweite Link-Row,
-      Mark bleibt erhalten.
-- [ ] `Esc` (außerhalb von Popups/Modals) → Pill verschwindet,
-      Notification _"Link mark cleared"_.
-- [ ] `glp` ohne Mark → _"No link mark armed (press M on a row first)"_;
-      kein DB-Write. (Die Notification-Wording stammt aus L5 vor dem
-      Rebind; Funktion stimmt.)
-- [ ] `glm` + `glp` auf dieselbe Zeile → _"Cannot link a node to
-      itself"_; kein DB-Write.
-- [ ] Postgres-Tab + `glm` → _"Nothing to mark for linking"_ (Postgres
-      hat keine stabilen IDs).
+- [ ] Cursor on a task in the tasks tab → `glm` → on the left the status
+      bar shows the pill "⚓ marked: tasks/<uuid>"; a notification "Link
+      mark armed: tasks/<uuid>".
+- [ ] Switch tabs (to Jira, say) → the pill stays visible.
+- [ ] On an issue in Jira → `glp` → a notification "Linked:
+      jira/<inst>/<KEY> → tasks/<uuid>"; a database check with
+      `select * from link;` shows the row.
+- [ ] `glp` again on another Jira row → a second link row, the mark is
+      kept.
+- [ ] `Esc` (outside of popups and modals) → the pill disappears, a
+      notification "Link mark cleared".
+- [ ] `glp` without a mark → "No link mark armed (press M on a row
+      first)"; no database write. (The notification wording is left over
+      from L5, before the rebind; the behaviour is correct.)
+- [ ] `glm` and `glp` on the same row → "Cannot link a node to itself";
+      no database write.
+- [ ] Postgres tab plus `glm` → "Nothing to mark for linking" (Postgres
+      has no stable IDs).
 
-### `glo`-Popup (L7)
+### The `glo` popup (L7)
 
-- [ ] Auf der zuvor gepasteten Jira-Zeile `glo` → Popup _"Links ·
-      jira/…"_; eine Zeile _"← tasks/<uuid>"_ (incoming).
-- [ ] `Enter` darauf → Tab springt nach Tasks, gepastete Task ist
-      fokussiert.
-- [ ] Wieder dort `glo` → Popup zeigt _"→ jira/<inst>/<KEY>"_
+- [ ] `glo` on the Jira row pasted earlier → the popup "Links ·
+      jira/…"; one line "← tasks/<uuid>" (incoming).
+- [ ] `Enter` on it → the tab jumps to tasks, the pasted task is
+      focused.
+- [ ] `glo` there again → the popup shows "→ jira/<inst>/<KEY>"
       (outgoing).
-- [ ] Tippen filtert die Liste; `↑`/`↓` bewegt; `Esc` schließt; `d`
-      löscht die Selektierte und refresht das Popup. Wenn nichts übrig
-      bleibt → Popup schließt + Notification _"No more links for this
-      node"_.
-- [ ] `glo` auf einer Zeile ohne Links → Notification _"No links for
-      this node"_.
+- [ ] Typing filters the list; `↑`/`↓` move; `Esc` closes; `d` deletes
+      the selected entry and refreshes the popup. If nothing is left →
+      the popup closes and a notification "No more links for this node"
+      appears.
+- [ ] `glo` on a row without links → a notification "No links for this
+      node".
 
-### Stale-Link Confirm (L8)
+### Stale link confirmation (L8)
 
-Vorbereitung: einen kaputten Link manuell einfügen, z. B.
+Preparation: insert a broken link by hand, for example
 
 ```sh
 sqlite3 ~/.local/share/not_yet_done/not_yet_done.db <<SQL
@@ -1745,125 +1749,133 @@ VALUES (lower(hex(randomblob(4)))||'-1111-1111-1111-111111111111',
 SQL
 ```
 
-- [ ] `glo` auf der Live-Task → Popup zeigt _"→
-      jira/<inst>/MISSING-9999"_.
-- [ ] `Enter` → Confirm-Modal _"Stale link …\n(no content tab … oder
-      Stale: ticket not found … etc.)\nDelete from link table? (y/n)"_.
-- [ ] `y` → Notification _"Stale link deleted"_, DB-Row weg,
-      `🔗`-Marker verschwindet bei nächstem Rebuild.
-- [ ] Mit zweitem Stale-Insert (z. B. `target_ref = 'nope/whatever'`):
-      `glo` + `Enter` → Confirm-Modal, `n` (oder beliebige andere
-      Taste) → Notification _"Cancelled"_; Zeile bleibt.
-- [ ] Mit `target_ref = 'postgres/main/qrow:1'`: `glo` + `Enter` →
-      _kein_ Confirm-Modal, sondern Notification _"Link open failed:
-      …NotSupported…"_ (Postgres ist v1-NotSupported, kein Stale).
+- [ ] `glo` on the live task → the popup shows
+      "→ jira/<inst>/MISSING-9999".
+- [ ] `Enter` → a confirmation modal reading "Stale link …", then on its
+      own line either "no content tab …" or "Stale: ticket not found …"
+      or similar, and finally "Delete from link table? (y/n)".
+- [ ] `y` → a notification "Stale link deleted", the database row is
+      gone, the `🔗` marker disappears on the next rebuild.
+- [ ] With a second stale insert (for example
+      `target_ref = 'nope/whatever'`): `glo` and `Enter` → the
+      confirmation modal, `n` (or any other key) → a notification
+      "Cancelled"; the row stays.
+- [ ] With `target_ref = 'postgres/main/qrow:1'`: `glo` and `Enter` →
+      **no** confirmation modal, but a notification "Link open failed:
+      …NotSupported…" instead (Postgres is NotSupported in v1, not
+      stale).
 
-### Has-Links Column (L9)
+### Has-links column (L9)
 
-- [ ] Nach erfolgreichem Mark+Paste oben: Tasks-Tab hat in der
-      `🔗`-Spalte für die gelinkte Task einen Haken, andere Tasks nicht.
-- [ ] Trackings-Tab: laufende/historische Trackings _dieser_ Task
-      zeigen ebenfalls `🔗` (Fallback über `tasks/<uuid>`).
-- [ ] Trackings-Tab Tree-Mode: Task-Knoten leuchtet, Eintrags-Knoten
-      ebenfalls (gleicher Fallback-Lookup).
-- [ ] Jira-View ohne `source: has_links` Spalte → nichts ändert sich.
-- [ ] In `~/.config/not_yet_done/views/jira.yaml` einer Issue-Liste
-      eine Spalte ergänzen:
-      `yaml
+- [ ] After a successful mark and paste above: in the tasks tab the `🔗`
+      column carries a check mark for the linked task, other tasks do
+      not.
+- [ ] Trackings tab: running and historical trackings of **that** task
+      show `🔗` as well (a fallback via `tasks/<uuid>`).
+- [ ] Trackings tab in tree mode: the task node lights up, so does the
+      entry node (the same fallback lookup).
+- [ ] A Jira view without a `source: has_links` column → nothing
+      changes.
+- [ ] Add a column to an issue list in
+      `~/.config/not_yet_done/views/jira.yaml`:
+
+  ```yaml
   - key: links
     label: "🔗"
     source: has_links
     sizing: fixed(2)
-    `  TUI neu starten → gelinktes Jira-Issue zeigt`🔗`, andere nicht.
-- [ ] `glo` + `d` auf der gelinkten Row → `🔗`-Marker verschwindet
-      beim nächsten Rebuild (Tab-Switch reicht).
-- [ ] Postgres-Tab: `🔗`-Spalte leuchtet nie auf, egal ob Stale-Row in
-      der DB steht (Postgres ist excluded by design).
+  ```
 
-### Jump-History `glb` / `glf` (L10)
+  Restart the TUI → the linked Jira issue shows `🔗`, others do not.
 
-- [ ] In Tasks-Tab `glo` → `Enter` auf einer outgoing Jira-Link →
-      Tab wechselt nach Jira, Issue fokussiert, Notification fehlt
-      (kein expliziter "jumped"-Toast — gewollt).
-- [ ] `glb` → Tab wechselt zurück nach Tasks, Cursor steht auf der
-      ursprünglichen Task, Notification _"← tasks/<uuid>"_.
-- [ ] `glf` → Tab wechselt wieder zu Jira, Issue fokussiert,
-      Notification _"→ jira/<inst>/<KEY>"_.
-- [ ] `glb` aus dem "Anfangszustand" (keine Link-Jumps gemacht) →
-      Notification _"No back-history"_; kein Tab-Wechsel.
-- [ ] Mehrere Hops: `glo`/`Enter` von A→B, dann von B→C → `glb`
-      zurück nach B, `glb` nochmal zurück nach A; `glf` zweimal
-      bringt wieder C.
-- [ ] Nach `glb` zu B: dort _neuen_ Link-Jump B→D ausführen →
-      Forward-Branch (C) ist verworfen, `glf` von D bringt _kein_ C
-      mehr (_"No forward-history"_).
-- [ ] Tab-Wechsel über `1`/`2`/`3` schiebt _nichts_ in die History.
-- [ ] Stale Jump (vorher gelinktes Issue serverseitig gelöscht oder
-      Adapter-Instance umbenannt): `glb` darauf → Notification
-      _"Back-jump failed: …"_, Eintrag wird aus dem Stack verworfen
-      (nächstes `glb` greift den darunter liegenden Eintrag).
+- [ ] `glo` and `d` on the linked row → the `🔗` marker disappears on
+      the next rebuild (a tab switch is enough).
+- [ ] Postgres tab: the `🔗` column never lights up, no matter whether a
+      stale row sits in the database (Postgres is excluded by design).
+
+### Jump history `glb` / `glf` (L10)
+
+- [ ] `glo` in the tasks tab → `Enter` on an outgoing Jira link → the
+      tab switches to Jira, the issue is focused, there is no
+      notification (no explicit "jumped" toast — intentional).
+- [ ] `glb` → the tab switches back to tasks, the cursor sits on the
+      original task, a notification "← tasks/<uuid>".
+- [ ] `glf` → the tab switches to Jira again, the issue is focused, a
+      notification "→ jira/<inst>/<KEY>".
+- [ ] `glb` from the "initial state" (no link jumps made) → a
+      notification "No back-history"; no tab switch.
+- [ ] Several hops: `glo`/`Enter` from A→B, then from B→C → `glb` goes
+      back to B, another `glb` back to A; `glf` twice brings C back.
+- [ ] After `glb` to B: perform a **new** link jump B→D there → the
+      forward branch (C) is discarded, `glf` from D no longer brings C
+      ("No forward-history").
+- [ ] Switching tabs via `1`/`2`/`3` pushes **nothing** into the history.
+- [ ] A stale jump (a previously linked issue deleted on the server, or
+      an adapter instance renamed): `glb` onto it → a notification
+      "Back-jump failed: …", the entry is discarded from the stack (the
+      next `glb` picks up the entry below it).
 
 ### `:linkprune` (L11)
 
-Vorbereitung: 2–3 Live-Links plus mindestens einen offensichtlich
-staleen (z. B. wie in L8, oder einen tasks-Link auf eine soft-gelöschte
-Task).
+Preparation: 2–3 live links plus at least one obviously stale one (as in
+L8, say, or a tasks link onto a soft-deleted task).
 
-- [ ] `:` → Cmdline öffnet sich, `linkprune` tippen, `Enter`.
-- [ ] Modal erscheint: _"N of M link(s) are stale:\n tasks/… → jira/…
-      (reason)\n …\nDelete all? (y/n)"_; Liste enthält max. 5
-      Sample-Refs, danach _"… and X more"_.
-- [ ] `y` → Modal schließt, Notification _"Pruned N stale link(s)"_;
-      DB-Check zeigt nur noch die Live-Links; `🔗`-Spalte aktualisiert
-      sich sofort (kein Tab-Switch nötig).
-- [ ] `:linkprune` erneut → Modal _"Scanned M link(s). None are stale."_
-      (mit M = aktuelle Live-Anzahl).
-- [ ] Bei leerer link-Table: `:linkprune` → Modal _"No links in the
-      database."_.
-- [ ] `:linkprune extra-arg` → Modal _":linkprune takes no arguments"_,
-      keine Aktion.
-- [ ] Mit absichtlich kaputter DB-Connection (oder dem link*repo
-      offline): `:linkprune` → Modal *"link scan failed: …"\_,
-      kein Confirm-Modal, kein Delete.
-- [ ] Soft-deleted Tasks/Trackings zählen als stale: Task löschen
-      (lower-d) → `:linkprune` listet die Links darauf; nach `y`
-      verschwinden sie.
+- [ ] `:` → the cmdline opens, type `linkprune`, press `Enter`.
+- [ ] A modal appears: "N of M link(s) are stale:", then one line per
+      link of the form "tasks/… → jira/… (reason)", and finally "Delete
+      all? (y/n)"; the list contains at most 5 sample refs, followed by
+      "… and X more".
+- [ ] `y` → the modal closes, a notification "Pruned N stale link(s)";
+      the database check shows only the live links; the `🔗` column
+      updates immediately (no tab switch needed).
+- [ ] `:linkprune` again → the modal "Scanned M link(s). None are
+      stale." (with M = the current live count).
+- [ ] With an empty link table: `:linkprune` → the modal "No links in
+      the database.".
+- [ ] `:linkprune extra-arg` → the modal ":linkprune takes no
+      arguments", no action.
+- [ ] With a deliberately broken database connection (or the `link_repo`
+      offline): `:linkprune` → the modal "link scan failed: …", no
+      confirmation modal, no delete.
+- [ ] Soft-deleted tasks and trackings count as stale: delete a task
+      (lower-case `d`) → `:linkprune` lists the links pointing at it;
+      after `y` they are gone.
 
-### Deep-Link in einen zugeklappten Subtree (Confluence)
+### Deep link into a collapsed subtree (Confluence)
 
-Hintergrund: ein Link zeigt auf eine Seite, die gerade nicht geladen
-ist. Der Host fragt dann den Adapter über `locate_node_path`, wo der
-Knoten liegt, und klappt den Pfad auf. Confluence liefert dafür
-`[<space key>, <ancestor ids…>, <page id>]` — genau die Pfadform, die
-auch `tree find` benutzt.
+Background: a link points at a page that is not loaded at the moment. The
+host then asks the adapter via `locate_node_path` where the node sits and
+expands the path. Confluence returns
+`[<space key>, <ancestor ids…>, <page id>]` for that — exactly the path
+shape that `tree find` uses as well.
 
-Voraussetzung: Confluence-Tab im Tree-Mode, eine Seite mindestens zwei
-Ebenen unter dem Space-Homepage.
+Precondition: a Confluence tab in tree mode, a page at least two levels
+below the space home page.
 
-- [ ] Tiefe Confluence-Seite ansteuern, `glm` → Pill _"⚓ marked:
-      confluence/<inst>/<pageid>"_ (Confluence hat stabile IDs, also
-      **kein** _"Nothing to mark"_ wie bei Postgres/SQLite).
-- [ ] In Tasks auf eine Task → `glp` → Link angelegt.
-- [ ] Confluence-Tab: **alles zuklappen** (`zm`) und Tab wechseln, damit
-      die Zielzeile sicher nicht geladen ist.
-- [ ] Auf der Task `glo` → `Enter` → Confluence-Tab wird aktiv, Space
-      und alle Ancestor-Seiten klappen auf, Cursor steht auf der
-      Zielseite. Kein _"is not among the loaded rows"_.
-- [ ] Gegenprobe flache Ansicht: im Confluence-Tab auf einen Sub-Tab
-      ohne Tree-Mode wechseln, dann demselben Link folgen →
-      Notification _"… is not on the current page (flat view — no path
-      to expand)"_.
-- [ ] Space-Whitelist: in `views/confluence-adapter.yaml` die
-      `space_keys` so setzen, dass der Space der Zielseite **fehlt** →
-      TUI neu starten, Link folgen → kein Aufklappen, Notification
-      _"…can't locate it"_ (der Baum hat dort keinen Knoten). Whitelist
-      danach zurücksetzen.
-- [ ] Seite im Confluence-Web in den Trash verschieben → Link folgen →
-      Stale-Confirm-Modal (nicht _NotSupported_), `n` lässt die Zeile
-      stehen.
-- [ ] Kommentar-Ziel: auf einem Kommentar einer tiefen Seite `glm` →
-      linken → folgen → Pfad endet auf der Seite, der Kommentar selbst
-      wird nur fokussiert, wenn der Sub-Tab Kommentare als Kinder zeigt.
+- [ ] Navigate to a deep Confluence page, `glm` → the pill "⚓ marked:
+      confluence/<inst>/<pageid>" (Confluence has stable IDs, so **no**
+      "Nothing to mark" as with Postgres/SQLite).
+- [ ] Onto a task in tasks → `glp` → the link is created.
+- [ ] Confluence tab: **collapse everything** (`zm`) and switch tabs, so
+      that the target row is definitely not loaded.
+- [ ] `glo` on the task → `Enter` → the Confluence tab becomes active,
+      the space and all ancestor pages expand, the cursor sits on the
+      target page. No "is not among the loaded rows".
+- [ ] Counter-check with a flat view: switch to a subtab without tree
+      mode in the Confluence tab, then follow the same link → a
+      notification "… is not on the current page (flat view — no path to
+      expand)".
+- [ ] Space whitelist: set `space_keys` in
+      `views/confluence-adapter.yaml` so that the space of the target
+      page is **missing** → restart the TUI, follow the link → no
+      expansion, a notification "…can't locate it" (the tree has no node
+      there). Reset the whitelist afterwards.
+- [ ] Move the page to the trash in the Confluence web UI → follow the
+      link → the stale confirmation modal (not NotSupported), `n` leaves
+      the row in place.
+- [ ] A comment as the target: `glm` on a comment of a deep page → link
+      it → follow it → the path ends on the page, the comment itself is
+      only focused if the subtab shows comments as children.
 
 ## In-App Config-Editor (`:config`)
 
