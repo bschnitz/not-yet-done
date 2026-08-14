@@ -25,7 +25,7 @@ use super::mentions;
 use super::message::{StoatMessageNode, composite_id};
 use super::types::{channel_type, message_type};
 use super::{form_field, other_err};
-use crate::client::StoatClient;
+use crate::client::{MessageView, StoatClient};
 use crate::gateway::StoatState;
 
 /// How many messages to pull for the latest page.
@@ -350,20 +350,26 @@ pub(super) async fn list_channel_messages(
         .filter(|&l| l > 0)
         .unwrap_or(DEFAULT_MESSAGE_LIMIT);
 
-    let views = client
+    let mut views = client
         .list_messages(channel_id, limit, None)
         .await
         .map_err(super::other_err)?;
 
     // This is always the NEWEST page (`before = None`), so its last entry is
     // the channel's true newest message — and an empty page means the channel
-    // is empty. Heal the snapshot with it: Stoat leaves `last_message_id`
-    // pointing at a deleted message, which would otherwise keep the tree
-    // showing an expand arrow for an empty channel and flag it unread forever.
-    state
-        .write()
+    // holds none. Anything the channel's `last_message_id` still names beyond
+    // that was deleted (Stoat leaves the field standing), so show it as a
+    // tombstone rather than dropping it: the row is the truth about the
+    // channel, and reading it acks the channel past the deleted id — which is
+    // what finally clears the unread marker for good. Deletions further back
+    // in the history leave no trace in the API and stay invisible.
+    let deleted_tail = state
+        .read()
         .await
-        .reconcile_last_message(channel_id, views.last().map(|v| v.id.as_str()));
+        .deleted_tail(channel_id, views.last().map(|v| v.id.as_str()));
+    if let Some(id) = deleted_tail {
+        views.push(MessageView::tombstone(channel_id, &id));
+    }
 
     // Resolve the channel's mentionable users once for the whole
     // page; each message node renders `<@ID>` → `@username` against it.

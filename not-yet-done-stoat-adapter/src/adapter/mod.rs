@@ -32,6 +32,7 @@ use not_yet_done_content::{
     Invalidation, MetadataField, Node, NodeType, Result,
 };
 
+use crate::client::MessageView;
 use crate::gateway::{StoatGateway, StoatState};
 use attachment::StoatAttachmentNode;
 use auth_bridge::AuthBridge;
@@ -321,10 +322,26 @@ impl ContentAdapter for StoatAdapter {
             // Single-fetch has no `users[]` array; the preview only reads
             // the body, so author resolution is deferred (falls back to
             // the raw id in metadata).
-            let view = client
-                .fetch_message(channel_id, message_id, None)
-                .await
-                .map_err(other_err)?;
+            let view = match client.fetch_message(channel_id, message_id, None).await {
+                Ok(view) => view,
+                // The one id that legitimately fails to resolve is a
+                // tombstone row's: the deleted message a channel's
+                // `last_message_id` still names. Rebuild the same stand-in
+                // the message list shows, so preview and `get_by_id` agree
+                // instead of the preview raising a 404 on a visible row.
+                Err(err) => {
+                    let is_tombstone = self
+                        .state
+                        .read()
+                        .await
+                        .deleted_tail(channel_id, None)
+                        .is_some_and(|tail| tail == message_id);
+                    if !is_tombstone {
+                        return Err(other_err(err));
+                    }
+                    MessageView::tombstone(channel_id, message_id)
+                }
+            };
             // Server-scoped user map so `<@ID>` mentions render as
             // `@username` and the edit path can build `@uu_…` slugs.
             let users =

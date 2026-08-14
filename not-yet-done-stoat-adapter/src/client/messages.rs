@@ -37,6 +37,40 @@ pub struct MessageView {
     /// lines in the body (the terminal can't show the image inline); each
     /// image/file is openable via link-hop when its `url` resolved.
     pub attachments: Vec<Attachment>,
+    /// True for a **tombstone**: not a message the server returned, but one
+    /// we know existed and is gone (see [`MessageView::tombstone`]).
+    pub deleted: bool,
+}
+
+/// Body text of a tombstone row. Also what the tree label / preview show.
+pub const DELETED_BODY: &str = "[deleted message]";
+
+impl MessageView {
+    /// A stand-in row for a message that no longer exists.
+    ///
+    /// Built for the one deleted message we can still name: the id a
+    /// channel's `last_message_id` points at after the message behind it
+    /// was deleted (Stoat leaves the field standing — see
+    /// [`StoatState::deleted_tail`](crate::gateway::StoatState::deleted_tail)).
+    /// Deletions further back in the history leave no trace in the API and
+    /// therefore no row.
+    ///
+    /// Author is unknown — the server keeps nothing about a deleted message
+    /// — but the timestamp still decodes from the ULID, so the row lands in
+    /// chronological place at the bottom of the history.
+    pub fn tombstone(channel_id: &str, message_id: &str) -> Self {
+        Self {
+            timestamp_ms: ulid_timestamp_ms(message_id),
+            id: message_id.to_string(),
+            channel_id: channel_id.to_string(),
+            content: DELETED_BODY.to_string(),
+            author_id: String::new(),
+            author_name: String::new(),
+            edited: false,
+            attachments: Vec::new(),
+            deleted: true,
+        }
+    }
 }
 
 /// One uploaded file on a message, resolved for display.
@@ -187,6 +221,7 @@ impl RawMessage {
             edited: self.edited.is_some(),
             timestamp_ms,
             attachments,
+            deleted: false,
         }
     }
 }
@@ -461,6 +496,20 @@ mod tests {
         assert!(ulid_timestamp_ms("short").is_none());
         // 'I' / 'L' / 'O' / 'U' are excluded from Crockford base32.
         assert!(ulid_timestamp_ms("IIIIIIIIII0000000000000000").is_none());
+    }
+
+    #[test]
+    fn tombstone_keeps_the_id_and_decodes_its_timestamp() {
+        let view = MessageView::tombstone("C1", "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        // The id must survive verbatim — the `mark-read` ack sends exactly
+        // it to get the channel's read marker past the deleted message.
+        assert_eq!(view.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(view.channel_id, "C1");
+        assert!(view.deleted);
+        assert_eq!(view.content, DELETED_BODY);
+        // The author is unrecoverable, the post time is not.
+        assert!(view.author_name.is_empty());
+        assert_eq!(view.timestamp_ms, Some(1469922850259));
     }
 
     #[test]

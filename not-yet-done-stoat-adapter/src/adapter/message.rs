@@ -177,6 +177,10 @@ pub(super) struct StoatMessageNode {
     /// read marker locally so the unread highlight clears immediately,
     /// without waiting for the server's `ChannelAck` WS echo.
     state: Arc<RwLock<StoatState>>,
+    /// True for a tombstone row (see [`MessageView::tombstone`]): there is
+    /// no message behind it, so every action but `mark-read` is refused
+    /// here instead of being sent off to earn a 404.
+    deleted: bool,
     metadata: Metadata,
 }
 
@@ -239,6 +243,15 @@ impl StoatMessageNode {
                 allowed_values: None,
             });
         }
+        if view.deleted {
+            fields.push(MetadataField {
+                key: "deleted".into(),
+                value: "true".into(),
+                display_label: "Deleted".into(),
+                editable: false,
+                allowed_values: None,
+            });
+        }
         // The list column shows `content`; collapse newlines so a
         // multi-line message stays a single table row (the full body is
         // available via preview / `content()`). Built from the display
@@ -254,8 +267,14 @@ impl StoatMessageNode {
             users,
             attachments: view.attachments,
             state,
+            deleted: view.deleted,
             metadata: Metadata { fields },
         }
+    }
+
+    /// The error every action but `mark-read` gets on a tombstone row.
+    fn deleted_err() -> ContentError {
+        ContentError::Other("this message was deleted".into())
     }
 
     /// Download every image attachment on this message into one temp dir and
@@ -339,6 +358,11 @@ impl Node for StoatMessageNode {
             // hiccup just leaves the channel flagged until the next ack or
             // `Ready` resync. Not listed in `actions()`: it carries no hint
             // and is never a user keybinding, only the automatic hook.
+            //
+            // Runs on a tombstone row too — that is the whole point of
+            // rendering one. The API takes an ack for a message it no longer
+            // has, which is the only way to get the read marker past a
+            // `last_message_id` left pointing at a deleted message.
             "mark-read" => {
                 let _ = self.client.ack(&self.channel_id, &self.message_id).await;
                 self.state
@@ -352,6 +376,9 @@ impl Node for StoatMessageNode {
     }
 
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if self.deleted {
+            return Err(Self::deleted_err());
+        }
         match action_id {
             // Edit opens the body with mentions as `@uu_…` slugs plus the
             // CACHE section. No header is stripped — chat messages are
@@ -393,6 +420,10 @@ impl Node for StoatMessageNode {
     }
 
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        // Nothing behind a tombstone to edit, delete, react to or download.
+        if self.deleted {
+            return Err(Self::deleted_err());
+        }
         match (action_id, input) {
             ("edit_message", ActionInput::Edited { text, .. }) => {
                 // Drop the CACHE section, then translate `@uu_slug`
@@ -504,6 +535,7 @@ mod tests {
             attachments: vec![],
             edited: true,
             timestamp_ms: Some(1469918176385),
+            deleted: false,
         }
     }
 
@@ -538,6 +570,52 @@ mod tests {
         assert!(matches!(dispatch, ActionDispatch::Reload));
         // The read marker now reaches the channel's newest message → read.
         assert!(!state.read().await.is_channel_unread("C1"));
+    }
+
+    #[tokio::test]
+    async fn tombstone_row_acks_the_deleted_id_but_refuses_every_other_action() {
+        use crate::gateway::protocol::Channel;
+        let state = no_state();
+        // The stale-pointer channel: `last_message_id` names a message the
+        // server no longer has, so no real message can ever out-sort it and
+        // the channel would stay unread forever.
+        let ghost = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        state.write().await.channels.insert(
+            "C1".into(),
+            Channel {
+                id: "C1".into(),
+                channel_type: "TextChannel".into(),
+                server: Some("S1".into()),
+                name: Some("general".into()),
+                last_message_id: Some(ghost.into()),
+                recipients: None,
+            },
+        );
+        state.write().await.mark_read("C1", &sample_view().id);
+        assert!(state.read().await.is_channel_unread("C1"));
+
+        let mut node = StoatMessageNode::new(
+            test_client(),
+            MessageView::tombstone("C1", ghost),
+            no_users(),
+            Arc::clone(&state),
+        );
+        assert_eq!(node.label(), crate::client::DELETED_BODY);
+
+        // Reading the row moves the marker onto the deleted id — the only
+        // way past it (the HTTP ack targets `.invalid` and is swallowed).
+        node.invoke_action("mark-read", &ActionContext::default())
+            .await
+            .unwrap();
+        assert!(!state.read().await.is_channel_unread("C1"));
+
+        // Nothing behind the row to act on.
+        assert!(node.prepare("edit_message").await.is_err());
+        assert!(
+            node.execute("delete_message", ActionInput::None)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -665,6 +743,7 @@ mod tests {
             attachments: vec![],
             edited: false,
             timestamp_ms: Some(1469918176385),
+            deleted: false,
         }
     }
 
