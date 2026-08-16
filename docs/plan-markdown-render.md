@@ -3,10 +3,11 @@
 > **Status: phases 0–4 implemented** (core done, installed). The optional
 > phases 5 (MarkdownView pane component) and 6 (tree-sitter highlighting) are
 > still open. Builds on the multi-line row engine
-> (`docs/plan-multiline-rows.md`). Runs on **ratatui 0.29** with
-> **`ratatui-markdown 0.3.6`** (the last 0.29 release). The ratatui 0.30 +
-> tuirealm 4 upgrade is deliberately a _separate, later_ project — this feature
-> is not blocked by it. Eval demo (compiles, smoke green):
+> (`docs/plan-multiline-rows.md`). Written against **ratatui 0.29** with
+> **`ratatui-markdown 0.3.6`** (the last 0.29 release); that upgrade has since
+> happened — the workspace is on **ratatui 0.30 + tuirealm 4** and the renderer
+> comes from our own fork (see `not-yet-done-tui/Cargo.toml`), because upstream
+> never released for 0.30. Eval demo (compiles, smoke green):
 > `../ratatui-markdown-demo` (outside the repo).
 
 ## Goal
@@ -48,11 +49,12 @@ flowchart LR
 
 ## Phase 0 — dependency + theme bridge
 
-- `not-yet-done-tui/Cargo.toml`: `ratatui-markdown = { version = "=0.3.6",
-default-features = false, features = ["markdown"] }`. **Exact pin** (`=`),
-  because `0.3.7` jumps to ratatui 0.30. `default-features = false` drops
-  image/mermaid/tree/preview/viewer/tree-sitter → leaner build; we only need the
-  core renderer (soft wrapping is part of it).
+- `not-yet-done-tui/Cargo.toml`: pull in `ratatui-markdown` with
+  `default-features = false` — that drops mermaid/tree/preview/viewer/tree-sitter
+  → leaner build; we only need the core renderer (soft wrapping is part of it).
+  As shipped this is a `git` dependency on our fork pinned to a rev, plus the
+  `image` feature for inline pictures; the Cargo.toml comment records why and
+  when to go back to the crates.io crate.
 - **Theme bridge** (new small module, e.g. `views/markdown/theme_bridge.rs`):
   the newtype `MdTheme<'a>(&'a Theme)` implements
   `ratatui_markdown::theme::RichTextTheme`. Each of the 15+ slots is mapped onto
