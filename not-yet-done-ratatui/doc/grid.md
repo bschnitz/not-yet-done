@@ -88,7 +88,7 @@ Result:
 
 ## 1. Feature overview
 
-The grid is a `MockComponent`-based layout component that arranges any number of child components in an n×m raster.
+The grid is a `Component`-based layout component (tuirealm 4; the trait was called `MockComponent` up to tuirealm 3) that arranges any number of child components in an n×m raster.
 
 | Feature                           | Description                                                                                                                   |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -196,14 +196,14 @@ The focused cell is rendered **last**, so that overlay widgets (e.g. dropdowns) 
 ### 2.5 GridChild trait
 
 ```rust
-pub trait GridChild: MockComponent {
+pub trait GridChild: tuirealm::component::Component {
     /// Returns `true` if the key was consumed by the child.
     /// Returns `false` if the key was not handled — the grid then checks it as a navigation key.
     fn on_key(&mut self, key: KeyEvent) -> bool;
 }
 ```
 
-Every component inserted into a grid cell must implement `GridChild`. The `MockComponent` supertrait is used by the grid for `render()` and `attr()`/`state()`. The grid never calls `MockComponent::on()` on child components — keyboard routing runs exclusively through `on_key()`. `on()` is only needed if the component is also to be used outside a grid in the tui-realm event loop.
+Every component inserted into a grid cell must implement `GridChild`. The `Component` supertrait is what the grid uses for `view()`, `attr()`/`state()` and `perform()`. The grid never calls `AppComponent::on()` on child components — keyboard routing runs exclusively through `on_key()`. `on()` is only needed if the component is also to be used outside a grid in the tui-realm event loop.
 
 Existing components implement it trivially:
 
@@ -1244,7 +1244,7 @@ Rendering the focused cell late enables overlay widgets (e.g. MultiChoice dropdo
    └── No match → ignore the event
 ```
 
-The grid does **not** call `MockComponent::on()` on children — only `GridChild::on_key()`.
+The grid does **not** call `AppComponent::on()` on children — only `GridChild::on_key()`.
 
 ### 5.4 Corner computation at gap crossings
 
@@ -1405,9 +1405,7 @@ Applies the configured style to all gap areas:
 
 #### Step 5 — border characters
 
-> **Status: placeholder** (`render_borders` is currently a no-op.)
-
-It is meant to write the actual box-drawing characters into the gap areas. To be implemented:
+Writes the actual box-drawing characters into the gap areas. `render_borders` translates the grid into the crate-independent `GridConfig`/`GridLayout` pair and hands it, together with a buffer target, to `not_yet_done_grid_core::render::draw_borders` — which draws the outer frame, the horizontal and vertical lines, the crossings and the border texts. What ends up on screen:
 
 | Area                                | Characters              |
 | ----------------------------------- | ----------------------- |
