@@ -1329,7 +1329,7 @@ Precondition: a database with more schemas than the configured
 `page_size` (or a schema with more tables than `page_size`).
 
 - [ ] Expand a database with many schemas → below the loaded schemas the
-      placeholder `… N weitere` appears as the last row (glyph `…`).
+      placeholder `… load more` appears as the last row (glyph `…`).
 - [ ] Cursor on the placeholder → `Enter` loads the next page and appends
       it **above** the placeholder. If further pages are available, the
       placeholder stays visible as the last row; otherwise it disappears.

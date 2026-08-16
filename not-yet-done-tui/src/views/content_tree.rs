@@ -139,7 +139,7 @@ impl TreeState {
     /// adapter-load path to feed depth-0 entries (parent path is
     /// `vec![]`) and, in later phases, the children of an expanded
     /// node. `next_page` arms the pagination placeholder: when `Some`,
-    /// the renderer emits a `… N weitere` row at the end of this
+    /// the renderer emits a `… load more` row at the end of this
     /// parent's children that loads the next slice on activation.
     pub fn set_cached_children(
         &mut self,
@@ -155,7 +155,7 @@ impl TreeState {
 
     /// Append a new slice to an already-loaded parent's children and
     /// re-arm (or clear) the pagination placeholder. Used by the
-    /// `… N weitere` activation path. No-op when the parent has not
+    /// `… load more` activation path. No-op when the parent has not
     /// been loaded yet — the caller should `set_cached_children`
     /// first.
     pub fn extend_cached_children(
@@ -357,7 +357,7 @@ impl TreeState {
     }
 }
 
-/// Build the synthetic `… N weitere` row for the tail of a paginated
+/// Build the synthetic `… load more` row for the tail of a paginated
 /// parent. `parent_path` is the parent's own path (which becomes the
 /// placeholder's `parent_path`, since the placeholder lives among the
 /// parent's children). `depth` is the children's depth.
@@ -372,7 +372,7 @@ fn more_placeholder_entry(parent_path: Vec<String>, depth: usize) -> TreeEntry {
         node_type_chain: Vec::new(),
         node: NodeSummary {
             id: "__tree_more__".into(),
-            label: "weitere laden".into(),
+            label: "load more".into(),
             node_type: NodeType {
                 type_id: "__tree_more__".into(),
                 mime_type: "text/plain".into(),

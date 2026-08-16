@@ -3161,7 +3161,7 @@ impl ContentPane {
         };
         let view_def = self.view_def(view_defs)?;
         if is_placeholder {
-            // "… weitere laden" pagination row: parent_path is the
+            // "… load more" pagination row: parent_path is the
             // path of the parent whose children we're paginating.
             // Pagination is only armed in single-load mode (multi-load
             // doesn't paginate), so the first-chain lookup at
@@ -6878,7 +6878,7 @@ impl ContentPane {
             // Tree mode: iterate visible (post-fuzzy-filter) entries so
             // `/`-search only steps over what the user can actually see.
             // Pagination placeholders are skipped — searching the
-            // literal "weitere laden" string would only ever land the
+            // literal "load more" string would only ever land the
             // cursor on the loader row.
             let vd = self.view_def(view_defs);
             let mut out = Vec::new();

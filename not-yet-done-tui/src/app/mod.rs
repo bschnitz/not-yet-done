@@ -452,7 +452,7 @@ where
 
 /// Successful payload for [`LoadMsg::TreeChildren`]. The pane uses
 /// `page_info` (when `Some`) to derive a `next_page` cache hint so the
-/// tree renderer can emit a `… N weitere` placeholder under the
+/// tree renderer can emit a `… load more` placeholder under the
 /// expanded parent. `child_node_type` lets the receiver route the
 /// items into the right per-type bucket when the parent is in
 /// multi-load mode (heterogeneous fan-out).
