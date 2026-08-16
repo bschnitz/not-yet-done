@@ -12328,35 +12328,112 @@ fn build_grouped_table(
 ///
 /// **Angle-bracket form (Taiga and other adapters that consume YAML
 /// query templates):**
-/// - `<input>` → escaped user input.
-/// - `<input_if_numeric>` → escaped input if it's all ASCII digits;
-///   otherwise the sentinel `__OMIT__` so the adapter can drop the
-///   containing query entry.
+/// - `<input>` → the user input.
+/// - `<input_if_numeric>` → the input if it's all ASCII digits; otherwise
+///   the sentinel `__OMIT__` so the adapter can drop the containing query
+///   entry.
+///
+/// A template that parses as a YAML mapping or sequence is substituted
+/// *inside the parsed value* and re-serialized, never textually. Textual
+/// replacement would hand the input YAML's own syntax: `q: <input>` with
+/// the input `#294` renders `q: #294`, where `#` opens a comment and the
+/// filter silently becomes `null` — which Taiga answers with the complete
+/// unfiltered list. Re-serializing lets serde quote the value instead.
+/// Plain-string templates (Jira's JQL) keep the textual path, where the
+/// quotes belong to the template and `{q}` is escaped for a JQL literal.
 fn render_text_search(template: &str, input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            other => escaped.push(other),
+    let subst = TextSearchSubstitutions::new(input);
+    if let Ok(mut value) = serde_yaml::from_str::<serde_yaml::Value>(template) {
+        if matches!(
+            value,
+            serde_yaml::Value::Mapping(_) | serde_yaml::Value::Sequence(_)
+        ) {
+            subst.apply_to_yaml(&mut value);
+            if let Ok(rendered) = serde_yaml::to_string(&value) {
+                return rendered;
+            }
         }
     }
-    let trimmed = input.trim();
-    let key_or = if looks_like_issue_key(trimmed) {
-        format!(r#"issuekey = "{}" OR "#, escaped.trim())
-    } else {
-        String::new()
-    };
-    let input_if_numeric = if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-        trimmed.to_string()
-    } else {
-        "__OMIT__".to_string()
-    };
-    template
-        .replace("{key_or}", &key_or)
-        .replace("{q}", &escaped)
-        .replace("<input_if_numeric>", &input_if_numeric)
-        .replace("<input>", &escaped)
+    subst.apply_to_text(template)
+}
+
+/// The four placeholder expansions of [`render_text_search`], resolved once
+/// so the textual and the YAML path cannot drift apart.
+struct TextSearchSubstitutions {
+    /// Raw input — what the YAML path substitutes, since serde applies the
+    /// quoting.
+    raw: String,
+    /// Input with `\` and `"` escaped, for a JQL string literal.
+    escaped: String,
+    key_or: String,
+    input_if_numeric: String,
+}
+
+impl TextSearchSubstitutions {
+    fn new(input: &str) -> Self {
+        let mut escaped = String::with_capacity(input.len());
+        for ch in input.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                other => escaped.push(other),
+            }
+        }
+        let trimmed = input.trim();
+        let key_or = if looks_like_issue_key(trimmed) {
+            format!(r#"issuekey = "{}" OR "#, escaped.trim())
+        } else {
+            String::new()
+        };
+        let input_if_numeric = if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit())
+        {
+            trimmed.to_string()
+        } else {
+            "__OMIT__".to_string()
+        };
+        Self {
+            raw: input.to_string(),
+            escaped,
+            key_or,
+            input_if_numeric,
+        }
+    }
+
+    /// Substitute in a plain-text template (JQL and friends).
+    fn apply_to_text(&self, template: &str) -> String {
+        template
+            .replace("{key_or}", &self.key_or)
+            .replace("{q}", &self.escaped)
+            .replace("<input_if_numeric>", &self.input_if_numeric)
+            .replace("<input>", &self.escaped)
+    }
+
+    /// Substitute inside every string scalar of a parsed YAML template. The
+    /// curly-brace placeholders keep their JQL escaping (they sit inside a
+    /// JQL literal that happens to live in a YAML scalar); the angle-bracket
+    /// ones take the raw input, because re-serializing quotes it.
+    fn apply_to_yaml(&self, value: &mut serde_yaml::Value) {
+        match value {
+            serde_yaml::Value::String(s) => {
+                *s = s
+                    .replace("{key_or}", &self.key_or)
+                    .replace("{q}", &self.escaped)
+                    .replace("<input_if_numeric>", &self.input_if_numeric)
+                    .replace("<input>", &self.raw);
+            }
+            serde_yaml::Value::Sequence(seq) => {
+                for item in seq {
+                    self.apply_to_yaml(item);
+                }
+            }
+            serde_yaml::Value::Mapping(map) => {
+                for (_, v) in map.iter_mut() {
+                    self.apply_to_yaml(v);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// True if `s` parses as a Jira issue-key shape: one or more letters/digits/`_`
@@ -13427,34 +13504,77 @@ mod tests {
         );
     }
 
+    /// The `q` value of the first entry of a rendered YAML template, as the
+    /// adapter's own parser would read it.
+    fn rendered_q(rendered: &str) -> serde_yaml::Value {
+        let v: serde_yaml::Value = serde_yaml::from_str(rendered).expect("renders valid YAML");
+        let first = v.as_sequence().expect("sequence template")[0].clone();
+        first.get("q").cloned().unwrap_or(serde_yaml::Value::Null)
+    }
+
     #[test]
     fn render_text_search_taiga_input_placeholder() {
         let tpl = "- { type: task,  q: \"<input>\" }\n- { type: issue, q: \"<input>\" }";
         let rendered = render_text_search(tpl, "memory leak");
-        assert!(rendered.contains(r#"q: "memory leak""#));
-        assert!(rendered.contains("type: task"));
-        assert!(rendered.contains("type: issue"));
+        assert_eq!(rendered_q(&rendered), serde_yaml::Value::from("memory leak"));
+        assert!(rendered.contains("task"));
+        assert!(rendered.contains("issue"));
+    }
+
+    /// The bug this rendering path exists for: textual substitution turned
+    /// `q: <input>` plus the input `#294` into `q: #294`, where the `#`
+    /// opens a YAML comment and the filter arrives as `null` — Taiga then
+    /// ignores it and answers with the full unfiltered list.
+    #[test]
+    fn render_text_search_input_with_hash_stays_a_value() {
+        let tpl = r#"- { type: task, q: "<input>" }"#;
+        let rendered = render_text_search(tpl, "#294");
+        assert_eq!(rendered_q(&rendered), serde_yaml::Value::from("#294"));
+    }
+
+    /// Same class of bug for the other YAML metacharacters an input may
+    /// carry: a leading `-`, a `:` inside the text, quotes.
+    #[test]
+    fn render_text_search_input_with_yaml_metacharacters_stays_a_value() {
+        let tpl = r#"- { type: task, q: "<input>" }"#;
+        for input in ["- dash", "key: value", r#"the "real" issue"#, "* star"] {
+            let rendered = render_text_search(tpl, input);
+            assert_eq!(rendered_q(&rendered), serde_yaml::Value::from(input), "input {input:?}");
+        }
     }
 
     #[test]
     fn render_text_search_input_if_numeric_substitutes_when_digits() {
         let tpl = "- { type: task,  ref: <input_if_numeric> }";
         let rendered = render_text_search(tpl, "42");
-        assert_eq!(rendered, "- { type: task,  ref: 42 }");
+        let v: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(
+            v.as_sequence().unwrap()[0].get("ref").unwrap(),
+            &serde_yaml::Value::from("42")
+        );
     }
 
     #[test]
     fn render_text_search_input_if_numeric_emits_omit_for_non_digits() {
         let tpl = "- { type: task,  ref: <input_if_numeric> }";
         let rendered = render_text_search(tpl, "hello");
-        assert_eq!(rendered, "- { type: task,  ref: __OMIT__ }");
+        let v: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(
+            v.as_sequence().unwrap()[0].get("ref").unwrap(),
+            &serde_yaml::Value::from("__OMIT__")
+        );
     }
 
+    /// A JQL template is a plain string, not a YAML structure: it keeps the
+    /// textual path, where the quotes belong to the template and the input
+    /// is escaped for the string literal.
     #[test]
-    fn render_text_search_input_escapes_quotes_for_yaml() {
-        let tpl = r#"- { type: task,  q: "<input>" }"#;
-        let rendered = render_text_search(tpl, r#"the "real" issue"#);
-        assert_eq!(rendered, r#"- { type: task,  q: "the \"real\" issue" }"#);
+    fn render_text_search_jql_template_keeps_literal_escaping() {
+        let tpl = r#"text ~ "{q}""#;
+        assert_eq!(
+            render_text_search(tpl, r#"the "real" issue"#),
+            r#"text ~ "the \"real\" issue""#,
+        );
     }
 
     #[test]
@@ -18770,9 +18890,11 @@ mod tests {
             "hint must stay lit after the input closes — the result is still on screen"
         );
         assert!(!view.resolve_active(&ActiveSurface::Search));
+        // A YAML template is rendered structurally, so the body the pane runs
+        // is serde's re-serialization with the input as a quoted scalar.
         assert_eq!(
             view.active_pane().active_query.as_deref(),
-            Some("queries:\n  - { type: task, q: \"112\" }")
+            Some("queries:\n- type: task\n  q: '112'\n")
         );
 
         // Any other query ends the search — no explicit reset needed.

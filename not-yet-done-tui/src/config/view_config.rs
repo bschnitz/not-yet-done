@@ -2379,7 +2379,10 @@ pub struct TextSearchConfig {
     /// the input matches `PROJECT-123` and to the empty string otherwise.
     ///
     /// Accepts either a string or a YAML structure (re-serialized to a string
-    /// for the adapter) — see `deserialize_query_source`.
+    /// for the adapter) — see `deserialize_query_source`. Re-serializing drops
+    /// the template's quotes (`q: "<input>"` becomes `q: <input>`), so a YAML
+    /// structure gets its placeholders substituted *structurally* at search
+    /// time, not textually; see `render_text_search`.
     #[serde(deserialize_with = "deserialize_query_source")]
     pub query_template: String,
     /// Optional UI prompt shown in the action bar while the search input is
