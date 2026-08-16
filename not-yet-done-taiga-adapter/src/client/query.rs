@@ -27,6 +27,10 @@
 //! Verify a new filter key against the live API before shipping it in a
 //! view config. For ref lookups use `q`, Taiga's full-text filter, which
 //! matches the ref as well as the subject.
+//!
+//! The same holds for a filter that *is* known but arrives without a value
+//! (`?q=`), which is why [`expand_queries`] rejects an empty filter value
+//! outright rather than passing it on.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -190,6 +194,16 @@ fn expand_queries(raw: Vec<RawQuerySpec>) -> Result<Vec<QuerySpec>, String> {
             let values = flatten_value(&value);
             if values.iter().any(|v| v == OMIT_SENTINEL) {
                 continue 'next;
+            }
+            // A filter without a value is never what the caller meant, and
+            // Taiga doesn't say so: `?q=` is ignored like an unknown param
+            // and the endpoint answers with the complete unfiltered list.
+            // Fail loudly instead of flooding the view.
+            if values.iter().any(|v| v.trim().is_empty()) {
+                return Err(format!(
+                    "filter `{key_str}` has no value — Taiga ignores empty filters and \
+                     would answer with the complete unfiltered list"
+                ));
             }
             dimensions.push((key_str, values));
         }
@@ -802,6 +816,22 @@ queries:
         assert_eq!(s_scalar.len(), 1);
         assert_eq!(s_list.len(), 1);
         assert_eq!(s_scalar[0].params, s_list[0].params);
+    }
+
+    /// An empty filter value is rejected: Taiga treats `?q=` like an unknown
+    /// param and answers with the complete unfiltered list, so silently
+    /// passing it on floods the view instead of searching.
+    #[test]
+    fn parse_rejects_a_filter_without_a_value() {
+        for yaml in [
+            "queries:\n  - { type: task, q: }\n",
+            "queries:\n  - { type: task, q: \"\" }\n",
+            "queries:\n  - { type: task, q: \"   \" }\n",
+        ] {
+            let err = parse_query_yaml(yaml).unwrap_err();
+            assert!(err.contains('q'), "{err}");
+            assert!(err.contains("no value"), "{err}");
+        }
     }
 
     #[test]

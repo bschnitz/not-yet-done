@@ -4660,17 +4660,26 @@ worker down with it.
 
 ## Free-text search (Taiga `text_search`) — matches and the active marker
 
-Two regressions: (1) the query template did not cover `userstory` and
+Three regressions: (1) the query template did not cover `userstory` and
 contained a `ref:` block that Taiga ignores (so the response was the complete
-unfiltered list); (2) the search's hint went out as soon as it took effect.
+unfiltered list); (2) the search's hint went out as soon as it took effect;
+(3) the input was substituted into the template as text, so an input carrying
+YAML syntax (`#294` — `#` opens a comment) turned the filter into `null`,
+which Taiga again answers with the complete unfiltered list.
 
 - [ ] Open the free-text search (the key of the `text_search` action, `s` in
       the example config) and enter a plain ref number (`112`, say) → exactly
       the items with that ref appear, across all types including user stories;
       **no** flood of non-matching rows.
-- [ ] The same number with a leading `#` (`#112`) → an identical result.
+- [ ] The same number with a leading `#` (`#112`) → an identical result. The
+      HTTP log (`NYD_DEBUG=1`) shows `?q=%23112`, not `?q=`.
+- [ ] Other YAML metacharacters in the input (a leading `-`, a `:`, a `"`) →
+      still a search, never a flood and never a parse error.
 - [ ] Enter a word from a subject → a full-text search across tasks, issues,
       epics and user stories.
+- [ ] A view query with a valueless filter (`q:` with nothing behind it) →
+      the view reports the filter as having no value instead of listing
+      everything.
 - [ ] While typing: the free-text search's hint is marked, the local `/`
       search's hint is **not**.
 - [ ] After Enter (with the result list up): the hint stays marked for as long
