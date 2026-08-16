@@ -206,6 +206,12 @@ field instead of a parameterized `elapsed_since(...)` — consistent with the
 other companion fields `format:`/`separator:` and without a mini parser in
 the YAML.)
 
+> **Superseded for the tracking duration column by M9.** A render-side
+> `kind: elapsed` cannot show one column live for running rows and static for
+> finished ones, so the trackings view drives that column through
+> adapter-pushed rows instead. `kind: elapsed` stays as the cheap mechanism
+> wherever a column is live for _every_ row.
+
 ### M6 — generic form InputSpec (E5)
 
 New `InputSpec::Form { fields: Vec<FormFieldSpec> }` (text, select with
@@ -361,9 +367,9 @@ unit tests → commit. Smoke tests centrally in `docs/smoke-tests.md`.
   adapters. Tests: event → invalidation → dirty flag.
 - **E1 — typed column values (M2).** `value_kind` on `MetadataField`,
   `kind`/`format` on `ColumnDef`, engine formatter + path styling. Tests.
-- **E4b — live elapsed column (M5).** `kind: elapsed_since`, per-frame
-  recompute, repaint-driven ticking. Tests (deterministic via an injected
-  `now`).
+- **E4b — live elapsed column (M5).** `kind: elapsed` (plus `elapsed_from:`),
+  per-frame recompute, repaint-driven ticking. Tests (deterministic via an
+  injected `now`).
 - **E2 — grouping + aggregation (M3).** `group_by` (incl. date buckets,
   switchable at runtime), `aggregates`, group header/total, grand total,
   `summary_only`. Tests on three levels: engine mechanism
@@ -665,7 +671,8 @@ unit tests → commit. Smoke tests centrally in `docs/smoke-tests.md`.
 
 ## Parity (cutover gate)
 
-Before C2 the following must work over the adapter path:
+Before the cutover (C1, which subsumes C2) the following must work over the
+adapter path:
 
 - Tasks: tree expand/collapse, `/` search through collapsed nodes,
   add/edit/reparent, delete + undelete, notes, scripts, tracking toggle,
@@ -692,6 +699,9 @@ Before C2 the following must work over the adapter path:
 ## Decided micro-decisions (2026-06-09)
 
 1. **Task edit:** generic form InputSpec (M6/E5). Uniform and reusable.
+   — **superseded during A1b:** add/edit run through `InputSpec::Editor`
+   (markdown buffer with frontmatter), because a single-line form would be a
+   regression for multi-line descriptions plus notes. See the A1b box above.
 2. **Reparent:** mark/paste move (M7/E6) — one mechanism for tasks and DB
    script folders.
 3. **Undelete/restore-all:** root-level view actions on the root node (no
