@@ -165,9 +165,11 @@ action, no longer a domain call in the host.
   shell command on an event still uses the TUI's `:script` paths; hooks are
   for adapter actions.
 - **The top-level `hooks:` block is harmless for the TUI.** The TUI parses
-  the _whole_ view file (`ViewFileConfig`), but without
-  `deny_unknown_fields` at the top level — the extra key is simply ignored
-  there, while the host reads only `adapter:` + `hooks:`.
+  the _whole_ view file (`ViewFileConfig`) and reports keys it does not know
+  (`parse_reporting_unknown_fields`), so `hooks:` is declared there as an
+  opaque `Option<serde_yaml::Value>` — accepted, never read, and never
+  reported as a stray key. The host reads the same file through its own
+  narrow `ViewFileHead` (`adapter:` + `hooks:` only).
 - **The throttle state is a pure cache.** If it is missing or corrupt, the
   rule is "never fired" → the hook fires once and stamps anew. No data
   loss, at most one extra backup.
