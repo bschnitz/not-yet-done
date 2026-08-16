@@ -288,11 +288,11 @@ User constraint reminders (CLAUDE.md):
 
 - HARD RULE: no real customer/user/host/DB data in repo
 - Never `git push` without explicit permission
-- Klärungsfragen in Prosa, not AskUserQuestion-Tool
+- Clarifying questions in prose, not via the AskUserQuestion tool
 - `cargo install --path not-yet-done-tui --offline` after TUI changes
 - `npx prettier --write` after markdown edits
 
-User-Setup:
+User setup:
 
 - nvim 0.12.2 with `postgres_lsp` configured via Mason
   (`postgres-language-server` v0.25.0 at

@@ -3216,8 +3216,8 @@ channel.
       break the layout — the body line stays empty, the spacer is intact.
 - [ ] **Scrolling with tall rows:** very long messages (many body lines) scroll
       cleanly; the selected message stays fully visible.
-- [ ] **Andere Tabs unberührt:** Spalten ohne `markdown:` (Jira/Taiga/Postgres)
-      rendern weiter einzeilig.
+- [ ] **Other tabs untouched:** columns without `markdown:`
+      (Jira/Taiga/Postgres) keep rendering on a single line.
 
 > Known cut-offs: the `/` search does **not** highlight matches inside the
 > rendered body; code blocks have no background; syntax highlighting is
@@ -5000,41 +5000,42 @@ credentials on the terminal. An empty list afterwards really does mean
 - [ ] `nyd adapter <instance> help` works **without** a connection and without
       a credential prompt.
 
-## CLI: Auth-Mechanismen im Config-Assistenten (`config auth` / `config build`)
+## CLI: auth mechanisms in the config wizard (`config auth` / `config build`)
 
-Welche Mechanismen es gibt, weiß seit dem Deskriptor-Umbau nur noch der
-Adapter. Assistent und Auflistung lesen dieselbe Tabelle wie die Validierung —
-was hier angeboten wird, muss die Factory also auch akzeptieren.
+Since the descriptor rework, only the adapter knows which mechanisms exist.
+The wizard and the listing read the same table as the validation — so whatever
+is offered here has to be accepted by the factory as well.
 
-- [ ] `nyd config auth jira` → `cookie` und `basic-auth` mit Label, Doku und
-      Feldern; keine Verbindung, keine Credential-Abfrage.
-- [ ] `nyd config auth tasks` → „has no authentication", kein leeres Menü.
-- [ ] `nyd config auth gibtsnicht` → Fehler mit der Liste der bekannten Typen.
-- [ ] `nyd config build kimai` im Terminal → nach den normalen Feldern eine
-      Legende + Menü für `auth.mechanism` (kein Freitext), danach je Feld ein
-      Provider-Menü mit dem Feldnamen im Prompt (`auth.token: choose variant`).
-- [ ] Das erzeugte YAML hat `auth:` an der Stelle, an der der Config-Typ es
-      deklariert (bei kimai direkt nach `url:`), nicht angehängt am Ende.
-- [ ] Ein Feld, dessen Label die Namensheuristik verfehlt (kimai `token` →
-      „API password"), bekommt ein `label:`; `masked:` fehlt, wo die Heuristik
-      ohnehin richtig liegt.
-- [ ] Mechanismus mit optionalem Feld → Abfrage „bind the optional field …?"
-      mit Default **nein**; abgelehnt taucht das Feld nicht im YAML auf.
-- [ ] Escape/Ctrl-C in der Mechanismus-Auswahl → „aborted — no config
-      written.", **nichts** auf stdout (auch nicht die schon beantworteten
-      Felder).
-- [ ] Das erzeugte YAML als `adapter.config` einer View eintragen → Adapter
-      startet ohne Beanstandung der Auth-Sektion.
-- [ ] `nyd config template kimai` → Hinweiszeile auf `nyd config auth kimai`
-      auf stderr, stdout bleibt reines YAML.
+- [ ] `nyd config auth jira` → `cookie` and `basic-auth` with label, docs and
+      fields; no connection, no credential prompt.
+- [ ] `nyd config auth tasks` → "has no authentication", not an empty menu.
+- [ ] `nyd config auth doesnotexist` → error with the list of known types.
+- [ ] `nyd config build kimai` in a terminal → after the normal fields, a
+      legend plus a menu for `auth.mechanism` (no free text), then a provider
+      menu per field with the field name in the prompt
+      (`auth.token: choose variant`).
+- [ ] The generated YAML has `auth:` where the config type declares it (for
+      kimai directly after `url:`), not appended at the end.
+- [ ] A field whose label the name heuristic gets wrong (kimai `token` → "API
+      password") gets a `label:`; `masked:` is absent where the heuristic is
+      right anyway.
+- [ ] Mechanism with an optional field → the question "bind the optional field
+      …?" with default **no**; if declined, the field does not appear in the
+      YAML.
+- [ ] Escape/Ctrl-C in the mechanism selection → "aborted — no config
+      written.", **nothing** on stdout (not even the fields already answered).
+- [ ] Put the generated YAML into a view as `adapter.config` → the adapter
+      starts without complaining about the auth section.
+- [ ] `nyd config template kimai` → a hint line pointing at
+      `nyd config auth kimai` on stderr, stdout stays pure YAML.
 
-## Skriptgetriebene Credentials (`auth.script` + `script-result`)
+## Script-driven credentials (`auth.script` + `script-result`)
 
-Ein Skript liefert **mehrere** Felder auf einmal und fragt nur dann etwas,
-wenn es muss. Pro Runde ein frischer Prozess: `{"request": […], "input": {…}}`
-auf stdin, genau eines von `result` / `form` / `error` auf stdout; `input`
-sammelt die Antworten über die Runden hinweg. Testskript (ohne Server, nur das
-Protokoll — erste Runde fragt, zweite liefert):
+A script delivers **several** fields at once and only asks when it has to. One
+fresh process per round: `{"request": […], "input": {…}}` on stdin, exactly one
+of `result` / `form` / `error` on stdout; `input` accumulates the answers
+across rounds. Test script (no server, just the protocol — the first round
+asks, the second delivers):
 
 ```sh
 #!/bin/sh
@@ -5045,155 +5046,154 @@ case "$in" in
 esac
 ```
 
-- [ ] `auth.script: <pfad>` + zwei Bindings mit `provider: { type:
-script-result }` in einer View → beim Verbinden erscheinen **die Felder
-      des Skripts** (Account, Pin), nicht die Mechanismus-Felder.
-- [ ] Der Formular-`header` steht als Popup-Titel da (TUI) bzw. über den
-      Fragen (CLI), nicht der generische „Login: <tab>".
-- [ ] TUI: Pin leer lassen (`optional`) → Enter reicht ab; Account leer →
-      „Required: Account", kein Absenden.
-- [ ] Beide Felder aus einer einzigen Skript-Antwort → das Skript läuft
-      **einmal** pro Runde, nicht je Binding einmal (am `$$`-Suffix im Token
-      bzw. am Skript-Log erkennbar).
-- [ ] CLI (`nyd adapter …`) im Terminal → dieselben Fragen, Pin darf leer
-      bleiben, Account nicht.
-- [ ] CLI in einer Pipe (`nyd adapter … | cat`) → „no terminal to ask on" mit
-      den Feldnamen, kein stilles leeres Ergebnis.
-- [ ] Skript antwortet `{"error":"…"}` → Login scheitert mit genau dieser
-      Meldung, kein Formular.
-- [ ] Skript liefert ein `result`, in dem ein angefragtes Feld fehlt → Login
-      scheitert mit dem fehlenden Namen, kein Login mit leerem Wert.
-- [ ] Skript wiederholt sein Formular mit `error: "…"` → dasselbe Formular
-      kommt erneut, die Meldung steht dran, und die vorherigen Antworten
-      sind im `input` der nächsten Runde enthalten.
-- [ ] Skript, das **immer** ein Formular schickt → nach 5 Runden Abbruch mit
-      Hinweis auf das Rundenlimit, keine Endlosschleife.
-- [ ] Escape im Formular (TUI) bzw. Abbruch (CLI) → Login scheitert sofort
-      mit „cancelled"; ein **zweiter** Verbindungsversuch danach kommt wieder
-      bis zum Formular (der Auth-Mutex hängt nicht).
-- [ ] Reconnect nach 401 → das Skript läuft erneut, das Formular kommt erneut
-      (der Wert ist bewusst kurzlebig), nicht der gecachte alte Wert.
-- [ ] Konfig-Prüfung: `script-result` ohne `auth.script` **und** `auth.script`
-      ohne `script-result`-Binding werden beide beim Lesen der View
-      abgelehnt — mit Nennung der fehlenden Hälfte.
-- [ ] `nyd config auth <typ>` listet `script-result` in der Provider-Liste;
-      `nyd config build <typ>` bietet es im Provider-Menü und fragt danach
-      **genau einmal** nach `auth.script`, egal wie viele Felder es nutzen.
+- [ ] An `auth.script: <path>` plus two bindings whose provider type is
+      `script-result`, in one view → connecting shows **the script's fields**
+      (Account, Pin), not the mechanism's fields.
+- [ ] The form `header` appears as the popup title (TUI) or above the
+      questions (CLI), not the generic "Login: <tab>".
+- [ ] TUI: leave the pin empty (`optional`) → Enter submits; empty account →
+      "Required: Account", no submit.
+- [ ] Both fields from a single script answer → the script runs **once** per
+      round, not once per binding (visible from the `$$` suffix in the token
+      or from the script log).
+- [ ] CLI (`nyd adapter …`) in a terminal → the same questions, the pin may
+      stay empty, the account may not.
+- [ ] CLI in a pipe (`nyd adapter … | cat`) → "no terminal to ask on" with the
+      field names, not a silent empty result.
+- [ ] The script answers `{"error":"…"}` → the login fails with exactly that
+      message, no form.
+- [ ] The script returns a `result` that is missing a requested field → the
+      login fails naming the missing field, no login with an empty value.
+- [ ] The script repeats its form with `error: "…"` → the same form comes up
+      again, the message is attached to it, and the previous answers are
+      contained in the next round's `input`.
+- [ ] A script that **always** sends a form → abort after 5 rounds with a
+      pointer to the round limit, no endless loop.
+- [ ] Escape in the form (TUI) or abort (CLI) → the login fails immediately
+      with "cancelled"; a **second** connection attempt afterwards gets to the
+      form again (the auth mutex does not stay locked).
+- [ ] Reconnect after a 401 → the script runs again and the form comes up
+      again (the value is deliberately short-lived), not the cached old value.
+- [ ] Config check: `script-result` without `auth.script` **and** `auth.script`
+      without a `script-result` binding are both rejected when the view is
+      read — naming the missing half.
+- [ ] `nyd config auth <type>` lists `script-result` among the providers;
+      `nyd config build <type>` offers it in the provider menu and then asks
+      for `auth.script` **exactly once**, no matter how many fields use it.
 
-## Abgelaufener Cookie mitten in der Sitzung (Jira / Confluence)
+## Expired cookie in the middle of a session (Jira / Confluence)
 
-`session_cache: until-rejected` heißt: die Session gilt, bis der Server sie
-ablehnt. Ein 401 (oder ein SSO-Bounce in den Login-Flow) markiert den Client
-als abgelehnt; der nächste Zugriff wirft ihn weg und loggt neu ein — beim
-`command`-Provider läuft dabei das Cookie-Skript erneut.
+`session_cache: until-rejected` means: the session is valid until the server
+rejects it. A 401 (or an SSO bounce into the login flow) marks the client as
+rejected; the next access throws it away and logs in again — with the
+`command` provider the cookie script runs again in the process.
 
-- [ ] Verbinden, Liste laden, dann den Cookie serverseitig ungültig machen
-      (im Browser ausloggen / Session beenden) → nächster Zugriff meldet
-      einmal den 401.
-- [ ] Danach Reload (`r`) → Adapter loggt neu ein und liefert Daten, ohne
-      dass `invalidate_session` von Hand aufgerufen werden muss.
-- [ ] Provider `command`: das Skript wird beim Neuanmelden erneut ausgeführt
-      (am Skript-Log / an einer Passwort-Abfrage erkennbar), nicht der alte
-      Wert wiederverwendet.
-- [ ] Seite ohne Berechtigung öffnen (403) → normale Fehlermeldung, **kein**
-      Neuanmelden, kein erneuter Skript-/Passwort-Prompt.
+- [ ] Connect, load a list, then invalidate the cookie server-side (log out in
+      the browser / end the session) → the next access reports the 401 once.
+- [ ] Then reload (`r`) → the adapter logs in again and delivers data without
+      `invalidate_session` having to be called by hand.
+- [ ] Provider `command`: the script is run again on re-login (visible from
+      the script log or from a password prompt), the old value is not reused.
+- [ ] Open a page you are not allowed to see (403) → normal error message,
+      **no** re-login, no second script or password prompt.
 
-## Sortier-Menü (`c s`) und Spalten-Menü auf `c c`
+## Sort menu (`c s`) and column menu on `c c`
 
-Das Sortier-Menü ist ein zweiter UI-Pfad auf dieselbe Sortierung wie `S`;
-`c` ist jetzt Chord-Leader für beide Tabellen-Menüs.
+The sort menu is a second UI path to the same sorting as `S`; `c` is now the
+chord leader for both table menus.
 
-- [ ] `c c` öffnet das Spalten-Menü (vorher `c`), `c s` das Sortier-Menü.
-      Ein einzelnes `c` tut nichts und wartet auf den zweiten Anschlag.
-- [ ] Im Sortier-Menü stehen **alle** sortierbaren Spalten: die sortierten
-      oben in Sortierreihenfolge mit `asc`/`desc`, die unsortierten darunter.
-- [ ] `j`/`k` bewegen den Cursor, `ctrl+j`/`ctrl+k` verschieben den markierten
-      Eintrag **innerhalb** des sortierten Blocks; auf einem unsortierten
-      Eintrag passiert nichts.
-- [ ] `a`/`d` auf einer unsortierten Spalte hängt sie hinten an den sortierten
-      Block an, `0` nimmt sie wieder heraus (sie landet an ihrer natürlichen
-      Position darunter).
-- [ ] `Enter` wendet an: genau **ein** Reload, Notification nennt die Spalten;
-      `Esc` verwirft, die Tabelle bleibt unverändert.
-- [ ] Mit `S` gesetzte Sortierung ist im Menü sichtbar und umgekehrt — die
-      Sortierung überlebt einen Tab-Wechsel (wird wie bisher gespeichert).
-- [ ] Ebene ohne sortierbare Spalten: `c s` meldet „No sortable columns"
-      statt ein leeres Popup zu zeigen.
-- [ ] View-YAML mit einer `actions:`-Bindung auf `c` wird beim Laden als
-      Konflikt gemeldet (Prefix-Kollision mit `c c`/`c s`), `force: true`
-      unterdrückt sie weiterhin.
+- [ ] `c c` opens the column menu (formerly `c`), `c s` the sort menu. A
+      single `c` does nothing and waits for the second keystroke.
+- [ ] The sort menu lists **all** sortable columns: the sorted ones at the top
+      in sort order with `asc`/`desc`, the unsorted ones below.
+- [ ] `j`/`k` move the cursor, `ctrl+j`/`ctrl+k` move the highlighted entry
+      **within** the sorted block; on an unsorted entry nothing happens.
+- [ ] `a`/`d` on an unsorted column appends it to the end of the sorted block,
+      `0` takes it out again (it ends up at its natural position below).
+- [ ] `Enter` applies: exactly **one** reload, the notification names the
+      columns; `Esc` discards, the table stays unchanged.
+- [ ] Sorting set with `S` is visible in the menu and vice versa — the sorting
+      survives a tab switch (it is persisted as before).
+- [ ] Level without sortable columns: `c s` reports "No sortable columns"
+      instead of showing an empty popup.
+- [ ] A view YAML with an `actions:` binding on `c` is reported as a conflict
+      at load time (prefix collision with `c c`/`c s`); `force: true` still
+      suppresses it.
 
-## Unbekannte Keys in `views/*.yaml` (Warnung statt Stille)
+## Unknown keys in `views/*.yaml` (a warning instead of silence)
 
-Serde verwirft unbekannte Keys wortlos — die Zeile steht in der Datei und
-tut nichts. Sie werden jetzt gemeldet, ohne dass der Tab kaputtgeht.
+Serde discards unknown keys without a word — the line sits in the file and
+does nothing. They are now reported without breaking the tab.
 
-- [ ] In `views/jira.yaml` unter einem `children:`-Eintrag ein `key: x`
-      ergänzen → beim Start erscheint **ein** Modal „View configuration
-      warnings" mit dem Pfad (`views.0.children.0.key`); der Jira-Tab lädt
-      normal und alle Zeilen sind da.
-- [ ] Zeile wieder entfernen → Start ohne Modal.
-- [ ] Dieselbe Zeile bei laufender TUI per `:config jira` ergänzen und
-      speichern → Notification „Reloaded view jira.yaml — ignored unknown
-      keys: …", der Tab bleibt bedienbar.
-- [ ] Ein `hooks:`-Block (siehe `docs/examples/views/tasks.yaml`) löst
-      **keine** Warnung aus — er wird vom Host gelesen, nicht vom TUI.
-- [ ] Echter YAML-Syntaxfehler verhält sich unverändert: der Tab wird
-      `Broken` mit Fehlerpanel, kein Warn-Modal.
+- [ ] Add a `key: x` under a `children:` entry in `views/jira.yaml` → on
+      startup **one** modal "View configuration warnings" appears with the
+      path (`views.0.children.0.key`); the Jira tab loads normally and all
+      rows are there.
+- [ ] Remove the line again → startup without the modal.
+- [ ] Add the same line while the TUI is running, via `:config jira`, and save
+      → notification "Reloaded view jira.yaml — ignored unknown keys: …", the
+      tab stays usable.
+- [ ] A `hooks:` block (see `docs/examples/views/tasks.yaml`) triggers **no**
+      warning — it is read by the host, not by the TUI.
+- [ ] A real YAML syntax error behaves as before: the tab becomes `Broken`
+      with an error panel, no warning modal.
 
-## Custom-Spalten als Aufzählung (`set-column-options`)
+## Custom columns as an enumeration (`set-column-options`)
 
-Eine Custom-Spalte auf einen geschlossenen Wertesatz einschränken. Über das
-Aktions-Menü oder per CLI (`nyd <inst> do set-column-options <ID> --field
-column_key=<key> --field options=a,b,c`).
+Restrict a custom column to a closed set of values. Via the action menu or
+from the CLI:
 
-- [ ] Auf einer Spalte mit gemischten Werten einen Satz setzen, der nicht alle
-      abdeckt → Fehler nennt die störenden Row-Ids, und die Spalte bleibt frei
-      (nichts wurde geschrieben).
-- [ ] Werte korrigieren, denselben Satz nochmal setzen → geht durch, Meldung
-      nennt die Anzahl abgedeckter Zellen.
-- [ ] Danach eine Zelle auf einen Wert **außerhalb** des Satzes setzen → wird
-      abgelehnt, der alte Wert steht noch da. Ein Wert aus dem Satz geht.
-- [ ] Zelle leeren bleibt erlaubt (leer = „unbelegt", keine Verletzung).
-- [ ] In der Edit-Form (die im View gebundene `edit-cells`-Action) erscheint
-      die Spalte als **Select** mit genau diesen Werten; eine unrestringierte
-      Custom-Spalte daneben bleibt ein Textfeld.
-- [ ] Im Select lässt sich „nichts" wählen (leerer `(none)`-Zustand) → Zelle
-      wird geleert.
-- [ ] `options` leer setzen → Spalte ist wieder frei, beliebige Werte gehen.
-- [ ] Auf einer `number`-Spalte einen Satz mit einem Wort setzen → abgelehnt
-      (Optionen müssen zum `value_type` passen).
-- [ ] Leerzeichen/Dubletten im Satz (`1 , , 2 , 1`) werden getrimmt,
-      entdoppelt und blank-frei gespeichert.
+```sh
+nyd <inst> do set-column-options <ID> --field column_key=<key> --field options=a,b,c
+```
 
-## Stoat: Kanal mit gelöschter letzter Nachricht
+- [ ] Set a value set on a column with mixed values that does not cover all of
+      them → the error names the offending row ids and the column stays
+      unrestricted (nothing was written).
+- [ ] Fix the values, set the same set again → it goes through, the message
+      names the number of covered cells.
+- [ ] Afterwards set a cell to a value **outside** the set → rejected, the old
+      value is still there. A value from the set works.
+- [ ] Clearing a cell stays allowed (empty = "unset", not a violation).
+- [ ] In the edit form (the `edit-cells` action bound in the view) the column
+      appears as a **select** with exactly those values; an unrestricted
+      custom column next to it stays a text field.
+- [ ] "Nothing" can be chosen in the select (the empty `(none)` state) → the
+      cell is cleared.
+- [ ] Set `options` to empty → the column is unrestricted again, arbitrary
+      values work.
+- [ ] Set a set containing a word on a `number` column → rejected (options
+      have to match the `value_type`).
+- [ ] Whitespace and duplicates in the set (`1 , , 2 , 1`) are trimmed,
+      deduplicated and stored without blanks.
 
-Der tote `last_message_id` hielt den Kanal früher dauerhaft ungelesen.
+## Stoat: channel whose last message was deleted
 
-- [ ] Kanal öffnen, dessen letzte Nachricht gelöscht wurde: die Liste endet auf
-      einer Zeile `[deleted message]` an chronologisch korrekter Stelle.
-- [ ] Der Cursor landet beim Öffnen direkt darauf (`cursor_on_open`) und die
-      Glocke in der Tab-Leiste verschwindet **ohne** einen Tastendruck.
-- [ ] Nach TUI-Neustart bleibt der Kanal gelesen (das Ack ging serverseitig
-      durch, nicht nur lokal).
-- [ ] Auf der Tombstone-Zeile schlagen `edit`/`delete`/Reaktion/Download mit
-      „this message was deleted" fehl statt mit einem 404.
-- [ ] Vorschau/Detail derselben Zeile zeigt denselben Stand-in, kein Fehler.
+The dead `last_message_id` used to keep the channel permanently unread.
 
-## Refinements / Deferred Tasks
+- [ ] Open a channel whose last message was deleted: the list ends on a
+      `[deleted message]` row at the chronologically correct position.
+- [ ] The cursor lands right on it when opening (`cursor_on_open`) and the
+      bell in the tab bar disappears **without** a keystroke.
+- [ ] After a TUI restart the channel stays read (the ack went through
+      server-side, not just locally).
+- [ ] On the tombstone row, `edit`/`delete`/reaction/download fail with "this
+      message was deleted" instead of a 404.
+- [ ] Preview/detail of the same row shows the same stand-in, no error.
 
-Punkte, die in Smoke-Tests aufkamen aber nicht zum jeweiligen Refactor
-gehören. Werden in eigenen Sessions adressiert.
+## Refinements / deferred tasks
 
-- Validator (keymap.rs) kennt die Autonummerierungs-Ziffern noch nicht;
-  in Konstellations-Modus könnten feste `tab_*`-Bindings als
-  Schein-Kollision auftauchen bzw. eine View-Ziffer-Bindung wird nicht
-  als global geclaimt geführt. Niedrige Priorität (Ziffern als
-  View-Action-Keys sind selten).
-- Persistenz des Tab-Set-Wechsels: aktuell session-only (nicht zurück in
-  `tui.yaml` geschrieben). Falls gewünscht, optionaler Write-back.
+Points that came up during smoke tests but do not belong to the refactor in
+question. They are addressed in sessions of their own.
 
-## Quellen
+- The validator (keymap.rs) does not know about the auto-numbering digits yet;
+  in constellation mode, fixed `tab_*` bindings could show up as a phantom
+  collision, or a view digit binding is not tracked as globally claimed. Low
+  priority (digits as view action keys are rare).
+- Persistence of the tab set switch: currently session-only (not written back
+  into `tui.yaml`). Optional write-back if wanted.
 
-- Plan Content-Actions: [`plan-content-actions-unification.md`](plan-content-actions-unification.md)
-- Plan EditSession-Refactor: [`plan-edit-session-refactor.md`](plan-edit-session-refactor.md)
+## Sources
+
+- Content actions plan: [`plan-content-actions-unification.md`](plan-content-actions-unification.md)
+- EditSession refactor plan: [`plan-edit-session-refactor.md`](plan-edit-session-refactor.md)
