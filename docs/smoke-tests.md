@@ -4834,165 +4834,171 @@ but the proof that the wiring is right.
       branch.
 - [ ] The table completions in the database script editor list views as well.
 
-## Datenzeilen editieren (`e` → `edit_row`, SQLite + Postgres)
+## Editing data rows (`e` → `edit_row`, SQLite + Postgres)
 
-`e` auf einer Zeile öffnet den konfigurierten Editor mit der Zeile als
-YAML-Mapping — eine `spaltenname: wert`-Zeile pro Zelle. Speichern baut aus den
-Spalten, die sich tatsächlich geändert haben, **ein** `UPDATE` und führt sonst
-nichts aus. Scheitert das Statement, öffnet sich der Editor wieder mit der
-Fehlermeldung **und** dem gebauten `UPDATE` als Banner über dem eigenen Text.
+`e` on a row opens the configured editor with the row as a YAML mapping — one
+`column: value` line per cell. Saving builds **one** `UPDATE` from the columns
+that actually changed, and runs nothing else. If the statement fails, the
+editor reopens with the error message **and** the generated `UPDATE` as a
+banner above your own text.
 
-Voraussetzung: die `e`-Bindung auf den `Rows`-Ebenen aus
-`docs/examples/views/{sqlite,postgres}.yaml`, und für SQLite `read_only: false`
-in `sqlite-adapter.yaml`. Wie beim View-Editor ist es eine `actions:`-Zeile mit
-`type: edit, id: edit_row` und **keine** `shortcuts:`-Zeile.
+Prerequisite: the `e` binding on the `Rows` levels from
+`docs/examples/views/{sqlite,postgres}.yaml`, and for SQLite `read_only: false`
+in `sqlite-adapter.yaml`. As with the view editor it is an `actions:` entry
+with `type: edit, id: edit_row` and **no** `shortcuts:` entry.
 
-Der Kern des Tests: die Zeile wird über die **Schlüsselwerte adressiert, die
-beim Öffnen gelesen wurden** — nicht über den Offset in der Baumzeile. Der
-Offset ist nur, _wie_ die Zeile gefunden wurde; eine Seite, die sich darunter
-verschiebt, darf das Schreiben nicht umlenken.
+The core of the test: the row is addressed by the **key values that were read
+when it was opened** — not by the offset in the tree row. The offset is only
+_how_ the row was found; a page shifting underneath must not redirect the
+write.
 
-### Gemeinsam (beide Adapter)
+### Common to both adapters
 
-- [ ] `e` auf einer Tabellenzeile → Editor mit allen Zellen als YAML, Endung
-      `.yaml` (Syntax-Highlighting im Editor-Profil). Kopfkommentar nennt
-      Tabelle, Offset und **wodurch** die Zeile adressiert wird.
-- [ ] Ohne Änderung speichern → "no changes", kein Statement läuft.
-- [ ] Eine Zelle ändern → Meldung nennt die Tabelle und "1 column"; die
-      Tabellenansicht zeigt den neuen Wert nach `r`. Von außen prüfen
-      (`sqlite3` / `psql`): **nur** diese Spalte wurde geschrieben.
-- [ ] Zwei Zellen ändern → "2 columns", ein einziges `UPDATE`.
-- [ ] Eine Zelle auf `null` setzen (YAML-`null`, nicht die Zeichenkette) → die
-      Spalte ist danach SQL-NULL. Umgekehrt: `"null"` in Anführungszeichen
-      schreibt den Text.
-- [ ] Eine Zeile aus dem Puffer **löschen** → diese Spalte bleibt unangetastet
-      (Auslassen heißt "nicht ändern", nicht "auf NULL setzen").
-- [ ] Spaltenname vertippen → Ablehnung im Puffer, die echten Spaltennamen
-      stehen in der Meldung, der eigene Text bleibt erhalten.
-- [ ] Kaputtes YAML → Ablehnung mit Zeilenangabe, Text erhalten.
-- [ ] Mehrzeiligen Text schreiben (Block-Scalar `|`), Sonderzeichen
-      (`: `, `#`, führende Leerzeichen, Emoji) → kommt unverändert in der
-      Datenbank an und beim nächsten `e` unverändert zurück.
-- [ ] **Schlüsselspalte selbst ändern** (z. B. `id`) → das `UPDATE` adressiert
-      die Zeile über den **alten** Wert, benennt sie also um statt eine zweite
-      anzulegen.
-- [ ] Zeile parallel von außen ändern, dann speichern → Konflikt-Hinweis mit
-      dem eigenen Text unverändert im Puffer; **erneutes** Speichern
-      überschreibt bewusst.
-- [ ] Zeile von außen löschen, dann speichern → nachvollziehbare Meldung
-      ("nothing was written"), kein Panic.
-- [ ] Statement scheitert (Unique-Verletzung, Typfehler, Trigger) → Banner
-      enthält die Fehlermeldung **und** darunter "The statement that failed:"
-      mit dem `UPDATE`. Nach der Korrektur speichern → das Banner ist weg und
-      wird nicht mitgeschrieben.
-- [ ] Cursor auf eine Zeile stellen, dann von außen eine Zeile **davor**
-      löschen, dann `e` → es wird die Zeile editiert, die der Editor gelesen
-      hat (bzw. sauber abgelehnt), nie eine benachbarte.
-- [ ] Im Record-Detail-Pane (`o`) → `e` editiert dieselbe Zeile (das Pane ist
-      dieselbe Zeile transponiert).
-- [ ] Flache `tables`-Ansicht → `e` funktioniert dort genauso.
-- [ ] `Rows` einer **View**: `e` ist dort bewusst **nicht** gebunden. Wird es
-      testweise gebunden, lehnt der Adapter mit dem Hinweis auf die
-      zugrundeliegende Tabelle ab — kein Editor öffnet sich.
+- [ ] `e` on a table row → editor with all cells as YAML, extension `.yaml`
+      (syntax highlighting from the editor profile). The header comment names
+      the table, the offset and **what** the row is addressed by.
+- [ ] Save without a change → "no changes", no statement runs.
+- [ ] Change one cell → the message names the table and "1 column"; the table
+      view shows the new value after `r`. Check from the outside (`sqlite3` /
+      `psql`): **only** that column was written.
+- [ ] Change two cells → "2 columns", a single `UPDATE`.
+- [ ] Set a cell to `null` (YAML `null`, not the string) → the column is
+      SQL NULL afterwards. Conversely, `"null"` in quotes writes the text.
+- [ ] **Delete** a line from the buffer → that column stays untouched (omitting
+      means "do not change", not "set to NULL").
+- [ ] Mistype a column name → rejected in the buffer, the real column names are
+      in the message, your own text is preserved.
+- [ ] Broken YAML → rejected with a line number, text preserved.
+- [ ] Write multi-line text (block scalar `|`) and special characters
+      (`: `, `#`, leading spaces, emoji) → they arrive unchanged in the
+      database and come back unchanged on the next `e`.
+- [ ] **Change the key column itself** (e.g. `id`) → the `UPDATE` addresses the
+      row by its **old** value, i.e. it renames the row instead of creating a
+      second one.
+- [ ] Change the row from the outside in parallel, then save → conflict notice
+      with your own text unchanged in the buffer; saving **again** deliberately
+      overwrites.
+- [ ] Delete the row from the outside, then save → comprehensible message
+      ("nothing was written"), no panic.
+- [ ] The statement fails (unique violation, type error, trigger) → the banner
+      contains the error message **and** below it "The statement that failed:"
+      with the `UPDATE`. Save after fixing it → the banner is gone and is not
+      written along.
+- [ ] Put the cursor on a row, then delete a row **above** it from the outside,
+      then `e` → the row the editor read is the one being edited (or it is
+      cleanly rejected), never a neighbouring one.
+- [ ] In the record detail pane (`o`) → `e` edits the same row (the pane is
+      that same row transposed).
+- [ ] Flat `tables` view → `e` works there in exactly the same way.
+- [ ] `Rows` of a **view**: `e` is deliberately **not** bound there. If it is
+      bound for a test, the adapter rejects it with a pointer to the underlying
+      table — no editor opens.
 
-### Nur SQLite
+### SQLite only
 
-- [ ] `read_only: true` (Default) → `e` öffnet, Speichern scheitert mit dem
-      Hinweis auf `read_only: false`; die Zeile bleibt unverändert.
-- [ ] Tabelle **ohne** Primary Key → Kopfkommentar sagt, dass über den
-      impliziten `rowid` adressiert wird; Schreiben funktioniert.
-- [ ] Tabelle mit zusammengesetztem Primary Key → `WHERE` nennt alle Spalten.
-- [ ] **BLOB-Zelle** → im Puffer nur als Kommentar (`#   spalte: <blob, N
-bytes>`). Zeile einkommentieren und speichern → Ablehnung ("cannot be
-      written from here"); die Bytes bleiben unangetastet.
-- [ ] Zeile mit `NULL` in einer Schlüsselspalte einer PK-losen Tabelle → über
-      `rowid` adressiert, funktioniert trotzdem.
+- [ ] `read_only: true` (the default) → `e` opens, saving fails with a pointer
+      to `read_only: false`; the row stays unchanged.
+- [ ] Table **without** a primary key → the header comment says that the
+      implicit `rowid` is used for addressing; writing works.
+- [ ] Table with a composite primary key → `WHERE` names all columns.
+- [ ] **BLOB cell** → in the buffer only as a comment:
 
-### Nur Postgres
+  ```
+  #   column: <blob, N bytes>
+  ```
 
-- [ ] Tabelle mit Primary Key → Kopf nennt ihn; Schreiben funktioniert.
-- [ ] Tabelle **ohne** PK, aber mit Unique-Index über NOT-NULL-Spalten → Kopf
-      nennt den Index **namentlich**; Schreiben funktioniert.
-- [ ] Tabelle ohne PK und ohne solchen Index → `e` lehnt mit der Begründung ab
-      (kein Editor). `ctid` wird bewusst **nicht** als Ersatz benutzt, weil er
-      sich bei jedem `UPDATE` verschiebt.
-- [ ] Unique-Index über eine **NULLable** Spalte zählt nicht als Schlüssel
-      (zwei NULLs kollidieren nicht) → dieselbe Ablehnung.
-- [ ] Nicht-Text-Typen (`int`, `numeric`, `timestamptz`, `jsonb`, `bytea`,
-      Array) → der Wert kommt als Text im Puffer, wird als Text-Literal
-      geschrieben und vom Spaltentyp konvertiert; Round-Trip verändert nichts.
-      `bytea` erscheint als `\x…` und kommt als dieselben Bytes zurück.
-- [ ] Nach einer Ablehnung **weiterarbeiten**: eine normale Query auf demselben
-      Tab läuft noch (keine Session in aborted state).
+  Uncomment the line and save → rejected ("cannot be written from here"); the
+  bytes stay untouched.
 
-## View-Skripte auf den SQL-Zeilenebenen (`x`), DB-Skripte auf `X`
+- [ ] Row with `NULL` in a key column of a table without a primary key →
+      addressed via `rowid`, works anyway.
 
-Auf den SQL-Tabs treffen drei verschiedene "Skript"-Begriffe aufeinander. Der
-Test soll vor allem belegen, dass sie sich nicht mehr in die Quere kommen:
+### Postgres only
 
-| Sorte            | was es ist                          | Taste     |
-| ---------------- | ----------------------------------- | --------- |
-| Node-Skripte     | SQL, gehört der Tabelle/View        | `Q` / `q` |
-| DB-Skripte       | SQL, gehört der Datenbankdatei      | `X`/Enter |
-| **View-Skripte** | beliebiges Programm, JSON auf stdin | `x`       |
+- [ ] Table with a primary key → the header names it; writing works.
+- [ ] Table **without** a PK but with a unique index over NOT NULL columns →
+      the header names the index **by name**; writing works.
+- [ ] Table without a PK and without such an index → `e` rejects with the
+      reason (no editor). `ctid` is deliberately **not** used as a substitute,
+      because it moves on every `UPDATE`.
+- [ ] A unique index over a **nullable** column does not count as a key (two
+      NULLs do not collide) → the same rejection.
+- [ ] Non-text types (`int`, `numeric`, `timestamptz`, `jsonb`, `bytea`,
+      array) → the value arrives as text in the buffer, is written as a text
+      literal and converted by the column type; a round trip changes nothing.
+      `bytea` shows up as `\x…` and comes back as the same bytes.
+- [ ] **Keep working** after a rejection: a normal query on the same tab still
+      runs (no session in aborted state).
 
-`x` liegt jetzt auf **jeder** Zeilenebene (Baum-`Table`, Baum-`View`, und in den
-flachen `tables`/`views`-Ansichten). Weil alle diese Ebenen denselben Node-Type
-haben (`sqlite:row` / `postgres:row`), teilen sie **ein** Skript-Verzeichnis:
-`~/.local/share/not_yet_done/scripts/<tab>/<root>/<row-type>/`. Die flachen
-Ansichten brauchen dafür `script_source: databases`, sonst wäre ihr eigener
-Node-Type die Wurzel und dieselben Skripte müssten dreimal existieren.
+## View scripts on the SQL row levels (`x`), DB scripts on `X`
 
-- [ ] `x` auf einem **Datenbank**-Knoten (Wurzelebene) öffnet das Menü für
-      `scripts/sqlite/sqlite_database/`. Leeres Verzeichnis → Hinweis "No
-      scripts in …, Type +name then Enter to create one", kein stilles
-      Nichts. Nutzlast ist `{"node": {…}}` mit `fields.path` auf die Datei.
-- [ ] Dank `inherit: true` liegt dasselbe `x` auch auf den Ebenen **unter**
-      der Datenbank (`Tables`, eine Tabelle, `Views`, eine View, der
-      `Scripts`-Ast) — und zwar auf demselben Verzeichnis, nicht auf einem
-      pro Ebene. Ohne `inherit` gilt eine `actions:`-Zeile nur für ihre
-      eigene Ebene; das war der Grund, warum `x` erst nur auf der obersten
-      Zeile ansprang.
-- [ ] Ein ausführbares Test-Skript in
+Three different notions of "script" meet on the SQL tabs. Above all, the test
+is meant to show that they no longer get in each other's way:
+
+| Kind             | what it is                        | key       |
+| ---------------- | --------------------------------- | --------- |
+| Node scripts     | SQL, belongs to the table/view    | `Q` / `q` |
+| DB scripts       | SQL, belongs to the database file | `X`/Enter |
+| **View scripts** | any program, JSON on stdin        | `x`       |
+
+`x` now sits on **every** row level (tree `Table`, tree `View`, and in the flat
+`tables`/`views` listings). Because all of these levels share the same node
+type (`sqlite:row` / `postgres:row`), they share **one** script directory:
+`~/.local/share/not_yet_done/scripts/<tab>/<root>/<row-type>/`. The flat
+listings need `script_source: databases` for that, otherwise their own node
+type would be the root and the same scripts would have to exist three times.
+
+- [ ] `x` on a **database** node (root level) opens the menu for
+      `scripts/sqlite/sqlite_database/`. Empty directory → the notice "No
+      scripts in …, Type +name then Enter to create one", not a silent
+      nothing. The payload is `{"node": {…}}` with `fields.path` pointing at
+      the file.
+- [ ] Thanks to `inherit: true` the same `x` is also present on the levels
+      **below** the database (`Tables`, a table, `Views`, a view, the
+      `Scripts` branch) — and on the same directory, not one per level.
+      Without `inherit` an `actions:` entry only applies to its own level;
+      that was why `x` initially only fired on the topmost row.
+- [ ] Put an executable test script into
       `~/.local/share/not_yet_done/scripts/sqlite/sqlite_database/sqlite_row/`
-      ablegen, das stdin nach `/tmp` schreibt. `x` auf einer Tabellenzeile →
-      Menü zeigt es, Auswahl führt es aus.
-- [ ] Die Nutzlast enthält die angezeigte Seite plus Cursor-Kontext:
-      `rows[]` (`id`, `label`, `fields`), `query`, `selected_index`,
-      `selected_field` — `selected_field` folgt dem Spalten-Cursor.
-- [ ] Dasselbe Skript erscheint ohne Zutun auch unter `x` auf einer
-      **View**-Zeile und in den flachen `tables`/`views`-Ansichten (ein
-      Verzeichnis, nicht drei).
-- [ ] Postgres-Tab: `x` auf einer Zeile im `Views`-Ast zeigt dieselben Skripte
-      wie im `Table`-Ast.
-- [ ] Im `Scripts`-Ast: Cursor auf einem DB-Skript → Action-Bar zeigt
-      `X: execute` (nicht `x`), `X` führt aus, Enter genauso. `x` dort tut
-      **nichts** Falsches (kein Ausführen des Skripts als Nebeneffekt).
-- [ ] Kein Kollisions-Warnhinweis beim Config-Laden (`f10`-Log leer bzgl.
-      Keybindings auf den SQL-Tabs).
+      that writes stdin to `/tmp`. `x` on a table row → the menu shows it,
+      selecting it runs it.
+- [ ] The payload contains the displayed page plus cursor context: `rows[]`
+      (`id`, `label`, `fields`), `query`, `selected_index`, `selected_field` —
+      `selected_field` follows the column cursor.
+- [ ] The same script shows up without further work under `x` on a **view**
+      row and in the flat `tables`/`views` listings (one directory, not
+      three).
+- [ ] Postgres tab: `x` on a row in the `Views` branch shows the same scripts
+      as in the `Table` branch.
+- [ ] In the `Scripts` branch: cursor on a DB script → the action bar shows
+      `X: execute` (not `x`), `X` runs it, Enter does the same. `x` does
+      **nothing** wrong there (no running the script as a side effect).
+- [ ] No collision warning when the config is loaded (the `f10` log is empty
+      as far as keybindings on the SQL tabs are concerned).
 
-## CLI: Verbindungsstatus und Credential-Prompt
+## CLI: connection status and credential prompt
 
-Die CLI verhält sich wie die TUI, nur ohne `r`: sie verbindet sofort, meldet
-den Fortschritt auf **stderr** (stdout bleibt pipebar) und fragt Credentials
-auf dem Terminal ab. Eine leere Liste heißt danach wirklich „nichts da".
+The CLI behaves like the TUI, only without `r`: it connects right away,
+reports progress on **stderr** (stdout stays pipeable) and asks for
+credentials on the terminal. An empty list afterwards really does mean
+"nothing there".
 
-- [ ] `nyd adapter <chat-instanz> ls` im Terminal → `nyd: Connecting…` auf
-      stderr, danach die Server-Zeilen. **Nie** eine leere Liste mit Exit 0,
-      während die Verbindung noch steht.
-- [ ] Dasselbe gepipet (`… ls | cat`) → die Statuszeile landet auf stderr,
-      die Tabelle unverändert auf stdout.
-- [ ] Lokaler Adapter ohne Hintergrund-Verbindung (`nyd adapter tasks ls`) →
-      keine Statuszeile, keine spürbare Verzögerung.
-- [ ] Instanz mit `provider: { type: prompt }` und gelöschter Session im
-      Terminal → Passwort-Abfrage (maskiert, auf stderr), danach das Ergebnis.
-- [ ] Dieselbe Instanz ohne TTY (`… ls < /dev/null | cat`) → Fehlermeldung,
-      die die fehlenden Felder nennt und auf env/file/command/keyring
-      verweist, Exit ≠ 0 — keine leere Liste.
-- [ ] Backend nicht erreichbar → `Connection failed: …` und Exit ≠ 0; hängt
-      die Verbindung, bricht der Befehl nach 60 s mit Timeout-Meldung ab.
-- [ ] `nyd adapter <instanz> help` funktioniert **ohne** Verbindung und ohne
-      Credential-Abfrage.
+- [ ] `nyd adapter <chat-instance> ls` in a terminal → `nyd: Connecting…` on
+      stderr, then the server rows. **Never** an empty list with exit 0 while
+      the connection is still coming up.
+- [ ] The same thing piped (`… ls | cat`) → the status line ends up on stderr,
+      the table unchanged on stdout.
+- [ ] Local adapter without a background connection (`nyd adapter tasks ls`) →
+      no status line, no noticeable delay.
+- [ ] Instance with `provider: { type: prompt }` and a deleted session, in a
+      terminal → password prompt (masked, on stderr), then the result.
+- [ ] The same instance without a TTY (`… ls < /dev/null | cat`) → an error
+      message naming the missing fields and pointing at env/file/command/
+      keyring, exit ≠ 0 — not an empty list.
+- [ ] Backend unreachable → `Connection failed: …` and exit ≠ 0; if the
+      connection hangs, the command aborts after 60 s with a timeout message.
+- [ ] `nyd adapter <instance> help` works **without** a connection and without
+      a credential prompt.
 
 ## CLI: Auth-Mechanismen im Config-Assistenten (`config auth` / `config build`)
 
