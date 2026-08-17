@@ -55,6 +55,7 @@
 //! everything else is tried as a `cli.yaml` alias before falling through to the
 //! remaining `tusks` built-ins (`tag`/`backup`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -256,6 +257,13 @@ fn run_adapter(args: &[String]) -> Result<()> {
         // to print local file names would be a connection nobody asked for.
         if inv.verb == "queries" {
             return cmd_queries(adapter.as_ref(), &inv).await;
+        }
+
+        // An action the adapter declares `local` is answered from the row's
+        // address — the type from the command's level, the id from the command
+        // line — so there is nothing to connect to and nothing to look up.
+        if cmd_do_local(adapter.as_ref(), &inv).await? {
+            return Ok(());
         }
 
         // Everything else talks to the backend. Watch the connection for the
@@ -954,6 +962,59 @@ async fn cmd_values(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()
 /// adapter root when omitted (so container-level actions like `add` work
 /// without an id). The action's [`InputSpec`] selects how input is sourced
 /// and which protocol entry point fires (`execute` vs `invoke_action`).
+/// Run the invocation without a connection if it names an action the adapter
+/// declares [`NodeAction::local`] — one that needs nothing from the node but
+/// its address. Returns `false` when this is not such a case, leaving the
+/// caller to take the ordinary connect-and-resolve path.
+///
+/// The level must be addressed explicitly (`jira:issue <id> set-cell`, not
+/// `jira <id> set-cell`): the node type is half the address, and without it the
+/// only honest source is the fetched node — which is exactly what this path
+/// avoids. Guessing the root's type instead would file the write under the
+/// wrong type, so an id-only invocation deliberately falls through to the
+/// resolving path rather than being served fast and wrong.
+async fn cmd_do_local(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<bool> {
+    if inv.verb != "do" || inv.child_path.is_empty() {
+        return Ok(false);
+    }
+    let (Some(action_id), Some(id)) = (inv.positionals.first(), inv.positionals.get(1)) else {
+        return Ok(false);
+    };
+    // Reading the level's types is part of the adapter's static description —
+    // the same walk `help` does before any connection exists.
+    let (node_type, _) = resolve_type_level(adapter, &inv.child_path).await?;
+    let Some(action) = find_action_for_type(adapter, &node_type, action_id) else {
+        return Ok(false);
+    };
+    if !action.local {
+        return Ok(false);
+    }
+    // Only form input can be assembled from the command line alone; an editor
+    // or picker flow would need the node's template or option list.
+    let InputSpec::Form { fields } = &action.input else {
+        return Ok(false);
+    };
+    let values = form_values(HashMap::new(), fields, inv)?;
+    let outcome = adapter
+        .execute_addressed(&node_type, id, action_id, ActionInput::Form(values))
+        .await?;
+    report_outcome(outcome, action_id)?;
+    Ok(true)
+}
+
+/// Find an action by id in a *type's* action set — the id-free half of
+/// [`find_action`], for the paths that have no node in hand.
+fn find_action_for_type(
+    adapter: &dyn ContentAdapter,
+    node_type: &NodeType,
+    id: &str,
+) -> Option<NodeAction> {
+    adapter
+        .actions_for_type(node_type)
+        .into_iter()
+        .find(|a| a.id == id)
+}
+
 async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     let action_id = inv
         .positionals
@@ -1073,7 +1134,21 @@ async fn do_form(
     specs: &[FormFieldSpec],
     inv: &Invocation,
 ) -> Result<()> {
-    let mut values = node.form_prep(action_id).await.unwrap_or_default();
+    let prep = node.form_prep(action_id).await.unwrap_or_default();
+    let values = form_values(prep, specs, inv)?;
+    let outcome = node.execute(action_id, ActionInput::Form(values)).await?;
+    report_outcome(outcome, action_id)
+}
+
+/// Layer the form's values: what the node prefilled, then each field's static
+/// default for the keys it left open, then the `--field` flags, which the user
+/// typed and so win. Every required field must be filled by the time the last
+/// layer is on.
+fn form_values(
+    mut values: HashMap<String, String>,
+    specs: &[FormFieldSpec],
+    inv: &Invocation,
+) -> Result<HashMap<String, String>> {
     for spec in specs {
         if !values.contains_key(&spec.key) {
             if let Some(d) = &spec.default {
@@ -1093,8 +1168,7 @@ async fn do_form(
             ));
         }
     }
-    let outcome = node.execute(action_id, ActionInput::Form(values)).await?;
-    report_outcome(outcome, action_id)
+    Ok(values)
 }
 
 /// `InputSpec::Picker`: the chosen value comes from `--value` (enumerate the

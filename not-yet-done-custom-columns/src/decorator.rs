@@ -74,6 +74,11 @@ fn custom_column_actions() -> Vec<NodeAction> {
             "edit custom cells",
             InputSpec::ColumnForm,
         ),
+        // The four below are `local`: a cell is addressed by the row's type
+        // and id, both of which the caller must already know to name the row
+        // at all, and the write lands in the store next door. `edit-cells`
+        // above is deliberately not — it prefills from the row's current
+        // cells, so it needs the node it was opened on.
         NodeAction::new(
             SET_CELL_ACTION_ID,
             "set custom cell",
@@ -89,14 +94,16 @@ fn custom_column_actions() -> Vec<NodeAction> {
                     .with_default("text"),
                 ],
             },
-        ),
+        )
+        .local(),
         NodeAction::new(
             CLEAR_CELL_ACTION_ID,
             "clear custom cell",
             InputSpec::Form {
                 fields: vec![FormFieldSpec::text("column_key", "Column key")],
             },
-        ),
+        )
+        .local(),
         // Changing a column's type is deliberately its own action rather than
         // a relaxation of `set-cell`. `set-cell`'s type select defaults to
         // `text`, and every value validates as text — folding a retype into it
@@ -116,7 +123,8 @@ fn custom_column_actions() -> Vec<NodeAction> {
                     ),
                 ],
             },
-        ),
+        )
+        .local(),
         // Making a column an enumeration is likewise a column-level decision,
         // not something a cell write may do in passing: `set-cell` can only
         // pick from the set, never widen it. An empty `options` clears the
@@ -130,7 +138,8 @@ fn custom_column_actions() -> Vec<NodeAction> {
                     FormFieldSpec::text("options", "Allowed values (comma-separated)").optional(),
                 ],
             },
-        ),
+        )
+        .local(),
     ]
 }
 
@@ -142,6 +151,102 @@ fn split_options(raw: &str) -> Vec<String> {
         .map(|o| o.trim().to_string())
         .filter(|o| !o.is_empty())
         .collect()
+}
+
+/// The cell actions that need nothing from the node but its **address**
+/// (`node_type` + `row_id`) — the ones marked [`NodeAction::local`].
+///
+/// Everything else falls through to the caller:
+/// [`CustomColumnsNode::execute`] to `edit-cells` and the inner node,
+/// `CustomColumnsAdapter::execute_addressed` to the inner adapter.
+fn is_addressed_cell_action(action_id: &str) -> bool {
+    matches!(
+        action_id,
+        SET_CELL_ACTION_ID
+            | CLEAR_CELL_ACTION_ID
+            | RETYPE_COLUMN_ACTION_ID
+            | SET_COLUMN_OPTIONS_ACTION_ID
+    )
+}
+
+/// The bodies behind [`is_addressed_cell_action`]. All four are keyed by a
+/// `column_key`, so it is read once up front; the two column-level ones
+/// (`retype-column`, `set-column-options`) ignore `row_id` entirely because a
+/// column's type and its allowed set belong to the column, not to a row.
+async fn run_cell_action(
+    store: &LocalColumnStore,
+    scope: &str,
+    node_type: &str,
+    row_id: &str,
+    action_id: &str,
+    input: ActionInput,
+) -> Result<ActionOutcome> {
+    let fields = form_fields(input)?;
+    let column_key = required(&fields, "column_key")?;
+    match action_id {
+        SET_CELL_ACTION_ID => {
+            let value = fields.get("value").cloned().unwrap_or_default();
+            let value_type = match fields.get("value_type") {
+                Some(t) if !t.trim().is_empty() => t.clone(),
+                _ => "text".to_string(),
+            };
+            store
+                .set_cell(scope, node_type, row_id, &column_key, &value, &value_type)
+                .await?;
+            Ok(ActionOutcome::Done {
+                message: Some(format!("Set custom column `{column_key}` = {value}")),
+            })
+        }
+        CLEAR_CELL_ACTION_ID => {
+            store.clear_cell(scope, row_id, &column_key).await?;
+            Ok(ActionOutcome::Done {
+                message: Some(format!("Cleared custom column `{column_key}`")),
+            })
+        }
+        // Scope-wide, despite being invoked from a row: a column's type
+        // belongs to the column, so this touches every row's cell for it.
+        // The store either migrates them all or refuses and names the ones
+        // in the way — the error travels back to the front-end verbatim.
+        RETYPE_COLUMN_ACTION_ID => {
+            let value_type = required(&fields, "value_type")?;
+            let migrated = store
+                .retype_column(scope, node_type, &column_key, &value_type)
+                .await?;
+            Ok(ActionOutcome::Done {
+                message: Some(format!(
+                    "Custom column `{column_key}` is now `{value_type}` ({migrated} cell(s) migrated)"
+                )),
+            })
+        }
+        // Also scope-wide: the allowed set belongs to the column, so the
+        // store checks it against every stored cell and refuses — naming
+        // the ones in the way — rather than leaving values behind that it
+        // would no longer accept.
+        SET_COLUMN_OPTIONS_ACTION_ID => {
+            let options = split_options(
+                fields
+                    .get("options")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            );
+            let covered = store
+                .set_column_options(scope, node_type, &column_key, &options)
+                .await?;
+            Ok(ActionOutcome::Done {
+                message: Some(if options.is_empty() {
+                    format!("Custom column `{column_key}` accepts any value again")
+                } else {
+                    format!(
+                        "Custom column `{column_key}` is now one of: {} ({covered} stored cell(s))",
+                        options.join(", ")
+                    )
+                }),
+            })
+        }
+        other => Err(ContentError::NotSupported(format!(
+            "'{other}' is not a custom-column action"
+        ))),
+    }
 }
 
 /// Append each stored cell as a metadata field, unless a field with that key
@@ -375,6 +480,35 @@ impl ContentAdapter for CustomColumnsAdapter {
         }
         actions
     }
+
+    /// Serve the cell actions from the address alone — the same bodies
+    /// [`CustomColumnsNode::execute`] runs, just handed the type and id
+    /// directly instead of reading them off a fetched node. Anything this
+    /// layer does not own goes on to the inner adapter, which may have local
+    /// actions of its own.
+    async fn execute_addressed(
+        &self,
+        node_type: &NodeType,
+        id: &str,
+        action_id: &str,
+        input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        if is_addressed_cell_action(action_id) {
+            return run_cell_action(
+                &self.store,
+                &self.scope,
+                &node_type.type_id,
+                id,
+                action_id,
+                input,
+            )
+            .await;
+        }
+        self.inner
+            .execute_addressed(node_type, id, action_id, input)
+            .await
+    }
+
     fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
         self.inner.child_process_env(node)
     }
@@ -636,95 +770,21 @@ impl Node for CustomColumnsNode {
     }
 
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        // The address-only actions share their implementation with
+        // `CustomColumnsAdapter::execute_addressed`, so a cell written from a
+        // node and one written from an address cannot drift apart.
+        if is_addressed_cell_action(action_id) {
+            return run_cell_action(
+                &self.store,
+                &self.scope,
+                &self.inner.node_type().type_id,
+                self.inner.id(),
+                action_id,
+                input,
+            )
+            .await;
+        }
         match action_id {
-            SET_CELL_ACTION_ID => {
-                let fields = form_fields(input)?;
-                let column_key = required(&fields, "column_key")?;
-                let value = fields.get("value").cloned().unwrap_or_default();
-                let value_type = match fields.get("value_type") {
-                    Some(t) if !t.trim().is_empty() => t.clone(),
-                    _ => "text".to_string(),
-                };
-                self.store
-                    .set_cell(
-                        &self.scope,
-                        &self.inner.node_type().type_id,
-                        self.inner.id(),
-                        &column_key,
-                        &value,
-                        &value_type,
-                    )
-                    .await?;
-                Ok(ActionOutcome::Done {
-                    message: Some(format!("Set custom column `{column_key}` = {value}")),
-                })
-            }
-            CLEAR_CELL_ACTION_ID => {
-                let fields = form_fields(input)?;
-                let column_key = required(&fields, "column_key")?;
-                self.store
-                    .clear_cell(&self.scope, self.inner.id(), &column_key)
-                    .await?;
-                Ok(ActionOutcome::Done {
-                    message: Some(format!("Cleared custom column `{column_key}`")),
-                })
-            }
-            // Scope-wide, despite being invoked from a row: a column's type
-            // belongs to the column, so this touches every row's cell for it.
-            // The store either migrates them all or refuses and names the ones
-            // in the way — the error travels back to the front-end verbatim.
-            RETYPE_COLUMN_ACTION_ID => {
-                let fields = form_fields(input)?;
-                let column_key = required(&fields, "column_key")?;
-                let value_type = required(&fields, "value_type")?;
-                let migrated = self
-                    .store
-                    .retype_column(
-                        &self.scope,
-                        &self.inner.node_type().type_id,
-                        &column_key,
-                        &value_type,
-                    )
-                    .await?;
-                Ok(ActionOutcome::Done {
-                    message: Some(format!(
-                        "Custom column `{column_key}` is now `{value_type}` ({migrated} cell(s) migrated)"
-                    )),
-                })
-            }
-            // Also scope-wide: the allowed set belongs to the column, so the
-            // store checks it against every stored cell and refuses — naming
-            // the ones in the way — rather than leaving values behind that it
-            // would no longer accept.
-            SET_COLUMN_OPTIONS_ACTION_ID => {
-                let fields = form_fields(input)?;
-                let column_key = required(&fields, "column_key")?;
-                let options = split_options(
-                    fields
-                        .get("options")
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                );
-                let covered = self
-                    .store
-                    .set_column_options(
-                        &self.scope,
-                        &self.inner.node_type().type_id,
-                        &column_key,
-                        &options,
-                    )
-                    .await?;
-                Ok(ActionOutcome::Done {
-                    message: Some(if options.is_empty() {
-                        format!("Custom column `{column_key}` accepts any value again")
-                    } else {
-                        format!(
-                            "Custom column `{column_key}` is now one of: {} ({covered} stored cell(s))",
-                            options.join(", ")
-                        )
-                    }),
-                })
-            }
             EDIT_CELLS_ACTION_ID => {
                 let node_type = self.inner.node_type().type_id.clone();
                 let current: HashMap<&str, &str> = self
@@ -1197,5 +1257,86 @@ mod tests {
         let order: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(order, vec!["ISS-1", "ISS-2"], "untouched, ranks 30 then 10");
         assert!(result.applied_sort.is_empty());
+    }
+
+    fn form(pairs: &[(&str, &str)]) -> ActionInput {
+        ActionInput::Form(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        )
+    }
+
+    /// The address-only path writes the cell for a row the adapter cannot
+    /// resolve at all — which is the point: the type and the id *are* the
+    /// address, so nothing has to be fetched to act on them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_addressed_writes_without_resolving_the_node() {
+        let store = mem_store("cc_addressed").await;
+        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        assert!(adapter.get_by_id("ISS-404").await.is_err(), "unknown row");
+
+        let outcome = adapter
+            .execute_addressed(
+                &issue_type(),
+                "ISS-404",
+                SET_CELL_ACTION_ID,
+                form(&[
+                    ("column_key", "estimate"),
+                    ("value", "5"),
+                    ("value_type", "number"),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ActionOutcome::Done { .. }));
+
+        let cells = store.get_for_row("taiga/t1", "ISS-404").await.unwrap();
+        assert_eq!(
+            cells
+                .iter()
+                .find(|c| c.column_key == "estimate")
+                .map(|c| c.value.as_str()),
+            Some("5")
+        );
+    }
+
+    /// Only the actions this layer declares `local` are served from an
+    /// address. Anything else travels on to the inner adapter, which has not
+    /// opted in and says so rather than guessing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_addressed_passes_a_foreign_action_to_the_inner_adapter() {
+        let adapter = CustomColumnsAdapter::new(taiga_adapter(), mem_store("cc_foreign").await);
+        let refused = adapter
+            .execute_addressed(&issue_type(), "ISS-1", "delete", ActionInput::None)
+            .await
+            .err();
+        assert!(
+            matches!(refused, Some(ContentError::NotSupported(_))),
+            "expected a refusal"
+        );
+    }
+
+    /// `edit-cells` is not local: it prefills from the row's stored cells, so
+    /// it needs the node it was opened on. The declaration must say so, or a
+    /// front-end would route it past the very state it depends on.
+    #[test]
+    fn only_the_address_only_actions_are_declared_local() {
+        let local: Vec<String> = custom_column_actions()
+            .into_iter()
+            .filter(|a| a.local)
+            .map(|a| a.id)
+            .collect();
+        assert!(!local.contains(&EDIT_CELLS_ACTION_ID.to_string()));
+        for id in [
+            SET_CELL_ACTION_ID,
+            CLEAR_CELL_ACTION_ID,
+            RETYPE_COLUMN_ACTION_ID,
+            SET_COLUMN_OPTIONS_ACTION_ID,
+        ] {
+            assert!(local.contains(&id.to_string()), "{id} should be local");
+            assert!(is_addressed_cell_action(id));
+        }
     }
 }

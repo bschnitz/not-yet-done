@@ -1068,6 +1068,21 @@ pub struct NodeAction {
     pub label: String,
     /// What kind of input the action needs from the user.
     pub input: InputSpec,
+    /// The action needs nothing from the node but its **address** — its type
+    /// and its id — and is served by a layer that does not talk to the
+    /// backend (today: the custom-column cells, which live in a local store).
+    ///
+    /// A front-end that already holds the node ignores this and runs the
+    /// action through [`Node::execute`] as usual. A front-end that would have
+    /// to *fetch* the node first may instead hand the address to
+    /// [`ContentAdapter::execute_addressed`], skipping the connection
+    /// entirely: annotating a row must not depend on the remote system being
+    /// reachable, and a script that writes many rows should not pay a lookup
+    /// per row that returns what it already knows.
+    ///
+    /// Only set this where it is literally true. An action that reads *any*
+    /// node state — even to prefill a form — is not local.
+    pub local: bool,
 }
 
 impl NodeAction {
@@ -1077,7 +1092,15 @@ impl NodeAction {
             id: id.into(),
             label: label.into(),
             input,
+            local: false,
         }
+    }
+
+    /// Mark the action as servable from the node's address alone — see
+    /// [`NodeAction::local`].
+    pub fn local(mut self) -> Self {
+        self.local = true;
+        self
     }
 }
 
@@ -2006,6 +2029,31 @@ pub trait ContentAdapter: Send + Sync {
     /// adapters with no shortcuts don't need to override.
     fn actions_for_type(&self, _node_type: &NodeType) -> Vec<NodeAction> {
         Vec::new()
+    }
+
+    /// Run an action against a node's **address** — its type and its id —
+    /// without fetching the node.
+    ///
+    /// Only actions the adapter declares [`NodeAction::local`] may be routed
+    /// here; for anything else the default below refuses, because an adapter
+    /// that has not opted in cannot act on an address it never resolved.
+    ///
+    /// This exists for the layers that annotate rows locally: the address is
+    /// the whole input, so resolving the node would fetch a value the caller
+    /// already typed — and would make a local write fail whenever the backend
+    /// is unreachable. A wrapping adapter MUST forward this to its inner
+    /// adapter for actions it does not serve itself; otherwise the default
+    /// refusal would shadow the inner layer's local actions.
+    async fn execute_addressed(
+        &self,
+        _node_type: &NodeType,
+        _id: &str,
+        action_id: &str,
+        _input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        Err(ContentError::NotSupported(format!(
+            "action '{action_id}' cannot run without resolving the node"
+        )))
     }
 
     /// Environment variables to propagate to child processes (editors,

@@ -514,6 +514,19 @@ impl ContentAdapter for AnonymizingAdapter {
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         self.inner.actions_for_type(node_type)
     }
+    /// Passed through unmasked: an address-only action carries no content to
+    /// scrub, and the id it addresses is the one the caller already holds.
+    async fn execute_addressed(
+        &self,
+        node_type: &NodeType,
+        id: &str,
+        action_id: &str,
+        input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        self.inner
+            .execute_addressed(node_type, id, action_id, input)
+            .await
+    }
     fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
         self.inner.child_process_env(node)
     }
