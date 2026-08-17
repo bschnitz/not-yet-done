@@ -678,7 +678,11 @@ fn print_level_usage(
 
     // Collection actions — the ones addressed by the level itself. Listed
     // apart because the difference is visible in the command line: no id.
-    if !collection.is_empty() {
+    // Not on the root level: a collection action names the row type it acts on,
+    // and the root has none to name (`cmd_do_collection` requires a child path
+    // for the same reason), so advertising it there would print a command that
+    // cannot run.
+    if !is_root && !collection.is_empty() {
         println!("Actions on this level as a whole (no node id):");
         let w = collection.iter().map(|a| a.id.len()).max().unwrap_or(0);
         for a in collection {

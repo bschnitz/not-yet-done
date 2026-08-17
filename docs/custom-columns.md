@@ -101,7 +101,9 @@ EOF
 ```
 
 Note there is **no id**: `set-cells` is addressed by the level, and the rows it
-writes come out of the document. It is tab-separated,
+writes come out of the document. The level must be a row level — the child path
+(`jira:issue`) is what names the type the cells belong to, so the bare instance
+(`jira`) has no `set-cells`. It is tab-separated,
 `row_id⇥column_key⇥value[⇥value_type]`, one cell per line. Blank lines are
 skipped; there is no comment syntax, because the first field is a row id and no
 prefix could be reserved without one day eating a real line. Fields are

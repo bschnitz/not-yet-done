@@ -173,7 +173,14 @@ pub async fn render_level(adapter: &dyn ContentAdapter, node: &dyn Node, is_root
     let _ = writeln!(out);
 
     render_capabilities(&mut out, adapter, is_root);
-    render_body(&mut out, adapter, node, level_actions(adapter, node)).await;
+    render_body(
+        &mut out,
+        adapter,
+        node,
+        level_actions(adapter, node),
+        is_root,
+    )
+    .await;
     out
 }
 
@@ -203,6 +210,7 @@ pub async fn render_level_for_type(
         adapter,
         &proto,
         level_actions_for_type(adapter, nt),
+        is_root,
     )
     .await;
     out
@@ -262,6 +270,7 @@ async fn render_body(
     adapter: &dyn ContentAdapter,
     node: &dyn Node,
     actions: Vec<NodeAction>,
+    is_root: bool,
 ) {
     // --- Actions here ----------------------------------------------------
     let _ = writeln!(out, "## Actions here");
@@ -274,7 +283,16 @@ async fn render_body(
     // --- Actions on the level as a whole ---------------------------------
     // Kept in their own section rather than merged above: these take no node,
     // so listing them among the row actions would misstate how to call them.
-    let collection = adapter.collection_actions(node.node_type());
+    //
+    // Never on the root level: a collection action is addressed by the row type
+    // it acts on, and the root's type is the instance itself, not a row type —
+    // the rows below it each carry their own. Listing them there would offer a
+    // command that has no level to name.
+    let collection = if is_root {
+        Vec::new()
+    } else {
+        adapter.collection_actions(node.node_type())
+    };
     if !collection.is_empty() {
         let _ = writeln!(out, "## Actions on this level as a whole");
         let _ = writeln!(out, "_No node id — the level is the address._");
