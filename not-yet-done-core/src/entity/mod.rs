@@ -2,4 +2,5 @@
 // not-yet-done-task-core (C3 of the DB-split).
 pub mod link;
 pub mod query_shortcut;
+pub mod script_hook;
 pub mod settings;

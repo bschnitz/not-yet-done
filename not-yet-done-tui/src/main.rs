@@ -69,6 +69,11 @@ async fn main() -> Result<()> {
                 db: Some(db_conn.clone()),
             },
         )
+        .with_component_parameters::<not_yet_done_core::repository::ScriptHookRepositoryImpl>(
+            not_yet_done_core::repository::ScriptHookRepositoryImplParameters {
+                db: Some(db_conn.clone()),
+            },
+        )
         .with_component_parameters::<not_yet_done_core::repository::LinkRepositoryImpl>(
             not_yet_done_core::repository::LinkRepositoryImplParameters {
                 db: Some(db_conn.clone()),
@@ -77,6 +82,8 @@ async fn main() -> Result<()> {
         .build();
 
     let query_shortcut_repo: Arc<dyn not_yet_done_core::repository::QueryShortcutRepository> =
+        core_module.resolve();
+    let script_hook_repo: Arc<dyn not_yet_done_core::repository::ScriptHookRepository> =
         core_module.resolve();
     let settings_repo: Arc<dyn not_yet_done_core::repository::SettingsRepository> =
         core_module.resolve();
@@ -111,6 +118,7 @@ async fn main() -> Result<()> {
         tui_config,
         theme,
         query_shortcut_repo,
+        script_hook_repo,
         settings_repo,
         link_repo,
         factory_builder,

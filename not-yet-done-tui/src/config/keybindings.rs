@@ -981,6 +981,10 @@ pub enum ScriptMenuAction {
     /// directly from the owning pane without opening the menu. Default
     /// Ctrl+S (mirrors the query menu's [`QueryMenuAction::EditShortcut`]).
     EditShortcut,
+    /// Bind an automatic trigger to the selected script, so it runs
+    /// without anyone pressing a key. Opens a picker over the available
+    /// hooks (today: none / after a reload of the view). Default Ctrl+H.
+    EditHook,
     Next,
     Prev,
     /// Delete the selected entry from disk.
@@ -994,6 +998,7 @@ impl ScriptMenuAction {
             Self::Run => "run",
             Self::Edit => "edit",
             Self::EditShortcut => "edit_shortcut",
+            Self::EditHook => "edit_hook",
             Self::Next => "next",
             Self::Prev => "prev",
             Self::Delete => "delete",
@@ -1015,6 +1020,7 @@ impl FromStr for ScriptMenuAction {
             "run" => Ok(Self::Run),
             "edit" => Ok(Self::Edit),
             "edit_shortcut" => Ok(Self::EditShortcut),
+            "edit_hook" => Ok(Self::EditHook),
             "next" => Ok(Self::Next),
             "prev" => Ok(Self::Prev),
             "delete" => Ok(Self::Delete),
@@ -1346,6 +1352,7 @@ impl Default for KeyBindingSection<ScriptMenuAction> {
         m.insert(ScriptMenuAction::Run, KeyBinding::new("enter"));
         m.insert(ScriptMenuAction::Edit, KeyBinding::new("ctrl+e"));
         m.insert(ScriptMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
+        m.insert(ScriptMenuAction::EditHook, KeyBinding::new("ctrl+h"));
         m.insert(ScriptMenuAction::Next, KeyBinding::new("ctrl+j"));
         m.insert(ScriptMenuAction::Prev, KeyBinding::new("ctrl+k"));
         m.insert(ScriptMenuAction::Delete, KeyBinding::new("ctrl+d"));
@@ -1518,7 +1525,7 @@ mod tests {
         check!(WindowAction, 5);
         check!(QueryMenuAction, 9);
         check!(TagMenuAction, 7);
-        check!(ScriptMenuAction, 7);
+        check!(ScriptMenuAction, 8);
         check!(PopupAction, 5);
         check!(FormAction, 4);
     }

@@ -209,6 +209,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.script_menu.render(frame, popup_area);
     }
 
+    // Overlay: script hook picker (ctrl+h in the script menu).
+    if let Some(picker) = &mut app.script_hook_picker {
+        picker.popup.view(frame, popup_area);
+    }
+
     // Overlay: generic option menu (a `type: option_menu` action).
     if app.option_menu.is_open() {
         app.option_menu.render(frame, popup_area);

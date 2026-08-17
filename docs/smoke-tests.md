@@ -5190,6 +5190,52 @@ The dead `last_message_id` used to keep the channel permanently unread.
       message was deleted" instead of a 404.
 - [ ] Preview/detail of the same row shows the same stand-in, no error.
 
+## View scripts on a reload hook (`ctrl+h` in the script menu)
+
+The same script contract as `:script`, only the TUI pulls the trigger after a
+load instead of the user. The point of the test is the loop protection: a
+script that reloads its own view must not restart itself.
+
+Preparation — a `commands`-mode script in the view's script directory that
+appends a line to a log file and hands `reload` back to the TUI:
+
+```python
+#!/usr/bin/env python3
+# mode: commands
+import json, os, sys
+with open("/tmp/nyd-hook.log", "a") as f:
+    f.write("fired\n")
+with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
+    json.dump({"commands": ["reload"]}, f)
+```
+
+- [ ] `:script` → cursor on the script → `ctrl+h` opens the picker `Hook ·
+    <name>` with `none` (marked) and `reload`. Picking `reload` reports
+      "Script '…' now runs after the view's rows (re)loaded".
+- [ ] The menu entry now carries both bindings as a suffix, e.g. `[x]
+    [reload]`; a script without a chord shows only `[reload]`.
+- [ ] `r` on the view: the log grows by **exactly one** line per reload — the
+      `reload` the script itself emits does **not** fire the hook again.
+      Watch it a few seconds; the count must stand still afterwards.
+- [ ] Drill into a child level and back: the hook fires on the drill-down load
+      too (same script directory only if the view path matches — a deeper
+      level has its own scope, so it stays silent there).
+- [ ] Pull the plug on the load (no connection / an adapter error): the hook
+      does **not** run on a failed load.
+- [ ] With a split open, reloading the **unfocused** pane fires that pane's
+      hook, not the focused pane's.
+- [ ] `ctrl+h` on an `interactive` or `capture` script is refused with "Cannot
+      hook '…': …" — nothing is stored.
+- [ ] Re-open `ctrl+h`, pick `none`: "Hook removed from script '…'", the
+      suffix disappears, `r` no longer grows the log.
+- [ ] Restart the TUI: the binding is still there (it lives in the DB, not in
+      the YAML).
+- [ ] Delete the script with `ctrl+d` and create a new one with the same name:
+      it starts **without** a hook (no orphan row left behind).
+- [ ] On a terminal without the kitty keyboard protocol, check whether
+      `ctrl+h` arrives at all — some terminals deliver it as `backspace`. If
+      so, rebind `script_menu.edit_hook` in `tui.yaml`.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
