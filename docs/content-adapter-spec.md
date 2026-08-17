@@ -654,6 +654,14 @@ timestamp of the whole node is sufficient.
    decorator is the reference implementation of both (`set-cell` etc. as local
    row actions, `set-cells` as a collection action).
 
+   A collection action is addressed by the **row type** it acts on, so it does
+   not exist on an instance's root level — the root's type is the instance, and
+   the rows below it carry their own types. Front-ends therefore offer these
+   actions from the first child level downwards; the CLI wants a child path
+   (`adapter jira:issue set-cells`, never `adapter jira set-cells`) and both
+   help renderers hide the section at the root rather than print a command that
+   cannot run.
+
 ---
 
 ## Open Questions
