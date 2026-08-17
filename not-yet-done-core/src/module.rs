@@ -1,6 +1,9 @@
 use shaku::module;
 
-use crate::repository::{LinkRepositoryImpl, QueryShortcutRepositoryImpl, SettingsRepositoryImpl};
+use crate::repository::{
+    LinkRepositoryImpl, QueryShortcutRepositoryImpl, ScriptHookRepositoryImpl,
+    SettingsRepositoryImpl,
+};
 use crate::service::BackupServiceImpl;
 
 // The app-shell domain (link / settings / query_shortcut +
@@ -12,6 +15,7 @@ module! {
     pub CoreModule {
         components = [
             QueryShortcutRepositoryImpl,
+            ScriptHookRepositoryImpl,
             SettingsRepositoryImpl,
             LinkRepositoryImpl,
             BackupServiceImpl,

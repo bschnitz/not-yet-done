@@ -36,6 +36,9 @@ pub struct ScriptMenuEntry {
     /// Key chord bound to this script (shown as a `[chord]` suffix), or
     /// `None` when no shortcut is assigned.
     pub shortcut: Option<String>,
+    /// Automatic trigger bound to this script (shown as a second
+    /// `[hook]` suffix), or `None` when the script only runs on demand.
+    pub hook: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +61,11 @@ pub enum ScriptMenuMessage {
         path: String,
         label: String,
     },
+    /// Ctrl+H on a selected entry — pick the automatic trigger that runs it.
+    EditHook {
+        path: String,
+        label: String,
+    },
     /// Ctrl+D on a selected entry — delete the script file.
     Delete {
         path: String,
@@ -69,6 +77,17 @@ pub enum ScriptMenuMessage {
     CreateNew {
         name: String,
     },
+}
+
+/// Trailing `[chord] [hook]` badge for one row — either half may be
+/// absent, and a script with neither gets no suffix at all.
+fn entry_suffix(entry: &ScriptMenuEntry) -> Option<String> {
+    let parts: Vec<String> = [entry.shortcut.as_ref(), entry.hook.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|s| format!("[{s}]"))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 pub struct ScriptMenuComponent {
@@ -110,7 +129,7 @@ impl ScriptMenuComponent {
             .map(|e| PopupItem {
                 label: e.label.clone(),
                 value: e.path.clone(),
-                suffix: e.shortcut.as_ref().map(|s| format!("[{s}]")),
+                suffix: entry_suffix(e),
                 ..Default::default()
             })
             .collect();
@@ -122,6 +141,7 @@ impl ScriptMenuComponent {
             (kb.label(&ScriptMenuAction::Run), "run / new".into()),
             (kb.label(&ScriptMenuAction::Edit), "edit".into()),
             (kb.label(&ScriptMenuAction::EditShortcut), "shortcut".into()),
+            (kb.label(&ScriptMenuAction::EditHook), "hook".into()),
             (kb.label(&ScriptMenuAction::Delete), "delete".into()),
             (kb.label(&ScriptMenuAction::Close), "close".into()),
         ]);
@@ -209,6 +229,21 @@ impl ScriptMenuComponent {
             return ScriptMenuMessage::Handled;
         }
         if kb
+            .get(&ScriptMenuAction::EditHook)
+            .is_some_and(|b| b.matches(key))
+        {
+            let popup = self.popup.as_ref().unwrap();
+            if let Some(item) = popup.selected_item() {
+                let msg = ScriptMenuMessage::EditHook {
+                    path: item.value.clone(),
+                    label: item.label.clone(),
+                };
+                self.popup = None;
+                return msg;
+            }
+            return ScriptMenuMessage::Handled;
+        }
+        if kb
             .get(&ScriptMenuAction::Next)
             .is_some_and(|b| b.matches(key))
         {
@@ -262,6 +297,7 @@ mod tests {
         m.insert(ScriptMenuAction::Run, KeyBinding::new("enter"));
         m.insert(ScriptMenuAction::Edit, KeyBinding::new("ctrl+e"));
         m.insert(ScriptMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
+        m.insert(ScriptMenuAction::EditHook, KeyBinding::new("ctrl+h"));
         m.insert(ScriptMenuAction::Next, KeyBinding::new("ctrl+j"));
         m.insert(ScriptMenuAction::Prev, KeyBinding::new("ctrl+k"));
         m.insert(ScriptMenuAction::Delete, KeyBinding::new("ctrl+d"));
@@ -275,11 +311,13 @@ mod tests {
                 path: "/x/alpha.py".into(),
                 label: "alpha.py".into(),
                 shortcut: None,
+                hook: None,
             },
             ScriptMenuEntry {
                 path: "/x/beta.py".into(),
                 label: "beta.py".into(),
                 shortcut: Some("1".into()),
+                hook: Some("reload".into()),
             },
         ]
     }
@@ -354,6 +392,30 @@ mod tests {
             matches!(msg, ScriptMenuMessage::EditShortcut { ref path, .. } if path == "/x/alpha.py")
         );
         assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn ctrl_h_emits_edit_hook() {
+        let mut menu = ScriptMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        let msg = menu.handle_key("ctrl+h", &kb);
+        assert!(matches!(msg, ScriptMenuMessage::EditHook { ref path, .. } if path == "/x/alpha.py"));
+        assert!(!menu.is_open());
+    }
+
+    /// Chord and hook are independent badges: either, both or neither.
+    #[test]
+    fn suffix_combines_shortcut_and_hook() {
+        let e = entries();
+        assert_eq!(entry_suffix(&e[0]), None);
+        assert_eq!(entry_suffix(&e[1]), Some("[1] [reload]".to_string()));
+        let hook_only = ScriptMenuEntry {
+            hook: Some("reload".into()),
+            shortcut: None,
+            ..e[0].clone()
+        };
+        assert_eq!(entry_suffix(&hook_only), Some("[reload]".to_string()));
     }
 
     #[test]

@@ -9057,7 +9057,17 @@ impl ContentView {
     pub fn active_script_action(
         &self,
     ) -> Option<(crate::config::view_config::ScriptScope, Option<String>)> {
-        self.active_pane()
+        self.pane_script_action(self.active_pane_id())
+    }
+
+    /// Same as [`Self::active_script_action`] for an explicitly named pane.
+    /// Hook runs need this: they fire for the pane whose load just landed,
+    /// which is not necessarily the focused one.
+    pub fn pane_script_action(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<(crate::config::view_config::ScriptScope, Option<String>)> {
+        self.find_pane(pane_id)?
             .current_actions(&self.view_defs)
             .into_iter()
             .find(|a| a.action_type == "script")
@@ -9080,9 +9090,16 @@ impl ContentView {
     }
 
     pub fn focused_script_scope(&self) -> Option<String> {
-        self.active_script_action()?;
+        self.pane_script_scope(self.active_pane_id())
+    }
+
+    /// Script scope of an explicitly named pane. The cheap half of a hook
+    /// run: it answers "are any scripts bound here?" without building the
+    /// (possibly whole-table) script payload first.
+    pub fn pane_script_scope(&self, pane_id: PaneId) -> Option<String> {
+        self.pane_script_action(pane_id)?;
         let tab = self.adapter.as_ref()?.adapter_type().to_string();
-        let view_path = self.active_pane().script_scope_path(&self.view_defs);
+        let view_path = self.find_pane(pane_id)?.script_scope_path(&self.view_defs);
         Some(format!("script:{tab}/{}", view_path.join("/")))
     }
 

@@ -4,7 +4,9 @@ use std::time::Instant;
 use std::collections::HashSet;
 
 use not_yet_done_content::{DefaultQuery, QueryKind};
-use not_yet_done_core::repository::{LinkRepository, QueryShortcutRepository, SettingsRepository};
+use not_yet_done_core::repository::{
+    LinkRepository, QueryShortcutRepository, ScriptHookRepository, SettingsRepository,
+};
 use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
 
 use uuid::Uuid;
@@ -50,6 +52,12 @@ pub enum LoadMsg {
         page: Option<not_yet_done_content::PageInfo>,
         columns: Vec<not_yet_done_content::ColumnSchema>,
         error: Option<String>,
+        /// Provenance of the load: `0` when a person (or a timer) asked for
+        /// it, one more than the triggering load when a hook script caused
+        /// it. Travels with the message rather than being read off the App
+        /// at arrival time — by then the run that caused it is long over.
+        /// See [`crate::app::script_hook`].
+        hook_depth: u8,
     },
     /// The columns the adapter *describes* for a node type
     /// ([`ContentAdapter::describe_columns`]), fetched off-thread after a load
@@ -487,6 +495,7 @@ mod link;
 pub mod node_actions;
 pub mod option_menu;
 pub mod script;
+pub mod script_hook;
 
 pub use editor::EditorRequest;
 
@@ -950,6 +959,10 @@ pub struct App {
     pub fullscreen: bool,
 
     pub query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
+    /// `(scope, name) → hook` for view scripts that run on their own —
+    /// today only `reload`. Sibling of [`Self::query_shortcut_repo`], which
+    /// holds the key chords for the very same scripts.
+    pub script_hook_repo: Arc<dyn ScriptHookRepository>,
     settings_repo: Arc<dyn SettingsRepository>,
     pub link_repo: Arc<dyn LinkRepository>,
 
@@ -1071,6 +1084,23 @@ pub struct App {
     /// dir and JSON construction when the user picks an entry. `None`
     /// whenever the menu is closed.
     pub script_menu_ctx: Option<crate::app::script::ScriptContext>,
+
+    /// Hook picker (Ctrl+H in the script menu) — binds the selected script
+    /// to an automatic trigger. `None` whenever it is closed.
+    pub script_hook_picker: Option<crate::app::script_hook::ScriptHookPicker>,
+
+    /// Hook depth stamped onto every load spawned right now. `0` for
+    /// everything the user or a timer starts; raised while a hook script
+    /// (and the commands it emits) runs, so the loads it causes can be
+    /// told apart from the ones a person asked for. See
+    /// [`crate::app::script_hook`].
+    pub load_hook_depth: u8,
+
+    /// Panes currently executing their reload hooks, keyed
+    /// `(view_index, pane_id)`. Belt to the depth guard's braces: with the
+    /// synchronous runner a pane cannot re-enter its own hook run, and
+    /// this keeps that true if a hook ever completes asynchronously.
+    pub hook_runs_in_flight: std::collections::HashSet<(usize, crate::views::content_view::PaneId)>,
 
     /// Shortcut/action menu (`global.shortcut_menu`, default `ctrl+y`).
     /// Lists every configurable keyboard shortcut as name → keys, toggling
@@ -1266,6 +1296,7 @@ impl App {
         config: TuiConfig,
         theme: Theme,
         query_shortcut_repo: Arc<dyn QueryShortcutRepository>,
+        script_hook_repo: Arc<dyn ScriptHookRepository>,
         settings_repo: Arc<dyn SettingsRepository>,
         link_repo: Arc<dyn LinkRepository>,
         adapter_factory_builder: Box<
@@ -1340,6 +1371,7 @@ impl App {
             should_quit: false,
             fullscreen: false,
             query_shortcut_repo,
+            script_hook_repo,
             settings_repo,
             link_repo,
             load_rx,
@@ -1374,6 +1406,9 @@ impl App {
             )
             .with_popup_kb(popup_kb, popup_icons),
             script_menu_ctx: None,
+            script_hook_picker: None,
+            load_hook_depth: 0,
+            hook_runs_in_flight: std::collections::HashSet::new(),
             shortcut_menu: crate::components::shortcut_menu::ShortcutMenu::new(
                 Arc::clone(&shared_theme),
                 shortcut_menu_execute,
@@ -2256,6 +2291,9 @@ impl App {
             .get(pane.view_def_index())
             .map(|v| v.retries)
             .unwrap_or(0);
+        // Stamp the load with its provenance *now*, while the hook run that
+        // may have caused it is still on the stack.
+        let hook_depth = self.load_hook_depth;
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             // Hard reload: let the adapter tear down in-flight work and caches
@@ -2328,6 +2366,7 @@ impl App {
                         page: list.page,
                         columns,
                         error: None,
+                        hook_depth,
                     });
                 }
                 Err(e) => {
@@ -2339,6 +2378,7 @@ impl App {
                         page: None,
                         columns: Vec::new(),
                         error: Some(e),
+                        hook_depth,
                     });
                 }
             }
@@ -3420,6 +3460,9 @@ impl App {
             .get(pane.view_def_index())
             .map(|v| v.retries)
             .unwrap_or(0);
+        // See `spawn_content_load_inner`: provenance is captured at spawn
+        // time and travels with the message.
+        let hook_depth = self.load_hook_depth;
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             let result = run_with_retries(retries, &tx, view_index, pane_id, || {
@@ -3495,6 +3538,7 @@ impl App {
                         page: list.page,
                         columns,
                         error: None,
+                        hook_depth,
                     });
                 }
                 Err(e) => {
@@ -3506,6 +3550,7 @@ impl App {
                         page: None,
                         columns: Vec::new(),
                         error: Some(e),
+                        hook_depth,
                     });
                 }
             }
@@ -4078,11 +4123,16 @@ impl App {
                     page,
                     columns,
                     error,
+                    hook_depth,
                 } => {
                     if let Some(err) = error.as_ref() {
                         not_yet_done_content::http_log::log_error("content_load", err);
                         self.last_error = Some(err.clone());
                     }
+                    // Hooks run on a load that produced rows, not on a
+                    // failed fetch — a script must not act on an empty view
+                    // that only looks empty because the request died.
+                    let load_ok = error.is_none();
                     let item_count = items.len();
                     // Distinct node types present, captured before `items` is
                     // moved — used to fetch the backend-described column schema
@@ -4159,6 +4209,11 @@ impl App {
                         .and_then(|cv| cv.pending_preview_request(view_index, pane_id));
                     if let Some(req) = preview_req {
                         let _ = self.process_view_request(req);
+                    }
+                    // Last: the view is fully settled, so a hook script sees
+                    // the same rows the user does.
+                    if load_ok {
+                        self.fire_reload_hooks(view_index, pane_id, hook_depth);
                     }
                 }
                 LoadMsg::TreeChildren {
@@ -5052,6 +5107,15 @@ impl App {
             return EditorRequest::None;
         }
 
+        // Hook picker (Ctrl+H on a script) intercepts keys while open. Sits
+        // in front of the script menu: opening it closes the menu, so the
+        // two are never open at once.
+        if self.script_hook_picker.is_some() {
+            self.handle_script_hook_picker_key(key);
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
         // Script management menu (:script / `x` / per-view) intercepts
         // keys while open.
         if self.script_menu.is_open() {
@@ -5452,6 +5516,7 @@ impl App {
     /// don't pre-empt critical popup interaction.
     fn has_input_popup(&self) -> bool {
         self.script_menu.is_open()
+            || self.script_hook_picker.is_some()
             || self.column_config_popup.is_some()
             || self.sort_menu_popup.is_some()
             || self.adapter_creds_popup.is_some()

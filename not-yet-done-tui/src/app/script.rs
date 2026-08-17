@@ -343,7 +343,7 @@ impl App {
     /// Build the single-node script context for the focused row, or
     /// `None` (with a notification) when the view/pane/selection is
     /// unavailable. Shared by the menu-open path and the shortcut-run path.
-    fn build_content_node_ctx(
+    pub(super) fn build_content_node_ctx(
         &mut self,
         view_index: usize,
         pane_id: PaneId,
@@ -422,7 +422,7 @@ impl App {
 
     /// Build the batch (`scope: filtered_set`) script context, or `None`
     /// (with a notification) when the view/pane is unavailable.
-    fn build_content_batch_ctx(
+    pub(super) fn build_content_batch_ctx(
         &mut self,
         view_index: usize,
         pane_id: PaneId,
@@ -494,7 +494,7 @@ impl App {
 
     /// Build the table (`scope: table`) script context, or `None` (with a
     /// notification) when the view/pane is unavailable.
-    fn build_content_table_ctx(
+    pub(super) fn build_content_table_ctx(
         &mut self,
         view_index: usize,
         pane_id: PaneId,
@@ -594,6 +594,9 @@ impl App {
                         .collect()
                 })
             });
+        // Second lookup on the same scope key: the automatic triggers, shown
+        // as a `[reload]` badge next to the chord.
+        let hooks = self.hook_labels_for_scope(&scope);
         // `ScriptRepo::list` already returns files only, sorted
         // case-insensitively by name — the same order the menu wants.
         let entries: Vec<ScriptMenuEntry> = repo
@@ -603,6 +606,7 @@ impl App {
             .map(|e| ScriptMenuEntry {
                 path: e.path.to_string_lossy().to_string(),
                 shortcut: shortcuts.get(&e.name).cloned(),
+                hook: hooks.get(&e.name).cloned(),
                 label: e.name,
             })
             .collect();
@@ -675,6 +679,16 @@ impl App {
                 });
                 EditorRequest::None
             }
+            ScriptMenuMessage::EditHook { path, label } => {
+                // Same scope key as the chord — a script's two bindings are
+                // found by one and the same lookup.
+                let ctx = self.script_menu_ctx.take();
+                let Some(ctx) = ctx else {
+                    return EditorRequest::None;
+                };
+                self.open_script_hook_picker(ctx.shortcut_scope(), label, &path);
+                EditorRequest::None
+            }
             ScriptMenuMessage::Edit { path, label } => {
                 let ctx = self.script_menu_ctx.take();
                 let Some(ctx) = ctx else {
@@ -702,7 +716,12 @@ impl App {
                     return EditorRequest::None;
                 };
                 match ScriptRepo::default().delete(&ctx.script_scope(), &label) {
-                    Ok(_) => self.notify(format!("Deleted script {label}")),
+                    Ok(_) => {
+                        // Drop the hook with the file, or the binding would
+                        // keep pointing at a script that no longer exists.
+                        self.clear_script_hook(&ctx.shortcut_scope(), &label);
+                        self.notify(format!("Deleted script {label}"))
+                    }
                     Err(e) => self.notify_error(format!("Failed to delete {label}: {e}")),
                 }
                 EditorRequest::None
@@ -801,7 +820,7 @@ impl App {
     /// `# mode:` header into background / capture / interactive paths;
     /// each path also chooses between detached (`interactive_command`
     /// template) and inline (TUI yields its terminal).
-    fn run_script(&mut self, ctx: &ScriptContext, script_path: &str) -> EditorRequest {
+    pub(super) fn run_script(&mut self, ctx: &ScriptContext, script_path: &str) -> EditorRequest {
         let path = std::path::Path::new(script_path);
         if !path.exists() {
             self.notify_error(format!("Script not found: {script_path}"));

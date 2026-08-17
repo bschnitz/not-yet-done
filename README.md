@@ -14,7 +14,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **CLI** — full command-line interface for scripting and automation
 - **Waybar module** — CFFI module showing the active tracking in your status bar
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
-- **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes
+- **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes — or automatically after a reload via a hook binding
 - **Filter DSL** — YAML-based query language with natural-language date expressions
 - **Anonymization** — `NYD_ANON=1` masks real customer/ticket/person names with deterministic, format-preserving fakes across every adapter, for safe screenshots and screencasts of a production instance
 - **Daily backups** — the core DB (`nyd.db`) is backed up once a day on startup; the split-out `tasks.db` is backed up through a configurable [lifecycle hook](#lifecycle-hooks) (`backup` bound to the adapter's `connected` event with a 24h throttle), so it happens however you launch — TUI or any `nyd tasks …` command. The Tasks/Trackings tabs also expose a manual `backup` action (`B`), and `nyd-t backup` manages them from the CLI
@@ -851,6 +851,7 @@ After drilling from items into comments, scripts live in
 | `enter`  | run       | Run the highlighted script. With a typed name that doesn't match: create a new script. |
 | `ctrl+e` | edit      | Open the highlighted script in `$EDITOR`.                                              |
 | `ctrl+d` | delete    | Delete the highlighted script file.                                                    |
+| `ctrl+h` | edit_hook | Bind the highlighted script to an event (see [Reload hooks](#reload-hooks)).           |
 | `esc`    | close     | Close the menu.                                                                        |
 | `+name`  | force-new | Force "create new" even when `name` fuzzy-matches an existing script.                  |
 
@@ -998,6 +999,66 @@ the `tickets` folder. `-i` is mandatory here: task folder names in the
 tree are typically capitalised (`Acme`) while Taiga's `ref` column
 is always lower-case (`acme#43`), so without case-folding the
 cross-system jump silently misses.
+
+### Reload hooks
+
+A script can be bound to an **event** instead of (or in addition to) a
+key. The contract is unchanged — same JSON payload, same modes, same
+`$NYD_OUTPUT_FILE` return channel — only the trigger differs: the TUI
+runs the script itself, without a keypress.
+
+Bind it in the script menu with `ctrl+h` on the highlighted entry. The
+picker offers:
+
+| Entry    | Meaning                                                    |
+| -------- | ---------------------------------------------------------- |
+| `none`   | Run manually only (the default) — clears an existing hook. |
+| `reload` | Run after the view's rows (re)loaded.                      |
+
+The binding is stored in the database next to the script's keybinding,
+keyed by the same script scope (`<tab>/<view-path>`), so it survives
+restarts and follows the script directory rather than a single view
+instance. The menu entry shows both bindings as a suffix, e.g.
+`ticket_overview.py [x] [reload]`. Deleting the script also drops its
+hook.
+
+**Only unattended modes may hook.** `background` and `commands` are
+allowed; `capture`, `interactive` and their combinations are rejected
+both when binding and when firing. A hook runs while a load lands —
+there is nobody there to hand a terminal or an editor to.
+
+`reload` fires at the very end of a successful load, when the pane has
+settled, so the script sees the same rows the user does. It fires for
+the pane whose load landed, which need not be the focused one. A load
+that ended in an error fires nothing. Root loads and drill-downs both
+count; lazily expanding a single tree level does not.
+
+The typical shape is the mirror image of the manual flow — the view
+reloads, the hook script reconciles something via the CLI, and hands a
+command back to the TUI:
+
+`reload → hook script → nyd/nyd-t calls → {"commands": [...]} → cmdline`
+
+#### Loop protection
+
+A hook script that emits `:reload` (directly, or implicitly by running
+in a mode that refreshes the pane) would otherwise trigger itself
+forever. Two guards prevent that:
+
+1. **Load provenance.** Every content load carries a hook depth. Loads
+   the user triggers start at 0; loads that happen while a hook script
+   runs are stamped 1. Hooks only fire at depth 0 — so _a reload caused
+   by a reload script runs no reload scripts_. The depth is ambient for
+   the whole hook run, which also covers the reload the TUI performs by
+   itself after a `commands`-mode script.
+2. **In-flight guard.** A pane that is currently running its hooks will
+   not start them again.
+
+The depth limit is deliberately 1, not a larger budget: a hook that
+needs several rounds of its own reloads is doing orchestration, and
+that belongs in the script (which can issue as many CLI calls as it
+likes before returning a single command) rather than in a chain of TUI
+loads.
 
 ### Input / Output
 
