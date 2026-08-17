@@ -76,6 +76,17 @@ The address is `<instance>[:child…] [ID] <action>` — the child path picks th
 level, which matters because a column is defined per node type. Run
 `nyd adapter <instance> actions` to see the actions available at a level.
 
+Name the level and these writes need **no connection at all**: the type and the
+id are the whole address of a cell, and the value lands in the local store, so
+there is nothing to log into and nothing to look up. Annotating a row keeps
+working while the remote system is down, and a script that writes many rows
+does not pay a lookup per row that would return the id it just passed in.
+
+Leave the level off (`nyd adapter jira PROJ-1 set-cell …`) and the command
+still works, but the old way: it connects and resolves `PROJ-1` to learn its
+type. That is not a fallback worth relying on — the node type is half the
+address, so state it.
+
 ### Change a column's type
 
 Retyping is its own action, not a side effect of a cell write:
@@ -177,6 +188,28 @@ from now, and that a new adapter cannot forget to support it.
 
 The write side is symmetric: the actions live on the node, so both the CLI and
 the TUI menu reach them with no front-end code.
+
+### Why a cell write needs no connection
+
+Hanging the write on `Node::actions` has one cost: an action is dispatched
+_on a node_, so a front-end that does not already hold one has to fetch it
+first. The TUI always holds the row it is standing on. The CLI does not — it
+was given a string — so it connected the adapter and called `get_by_id` before
+every single cell write. For a Jira issue that lookup returns a node built from
+nothing but the key that was passed in: the caller already knew the answer.
+
+So the action set says when that detour is pointless.
+`NodeAction::local` marks an action that needs nothing from the node but its
+**address** — its type and its id — and
+`ContentAdapter::execute_addressed(node_type, id, …)` runs one. The cell
+actions are marked local; `edit-cells` is not, because it prefills from the
+row's stored cells and therefore does need the node it was opened on.
+
+The point is not speed — building the adapter dominates either way — but that
+a local annotation stops depending on the remote system: it can be written
+while the backend is down, unauthenticated, or simply not worth waking up. A
+wrapping adapter must forward `execute_addressed` to its inner adapter, or the
+default refusal would shadow the local actions of the layers below.
 
 ### Why it costs nothing when unused
 

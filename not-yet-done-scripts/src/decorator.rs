@@ -211,6 +211,20 @@ impl ContentAdapter for ScriptsAdapter {
         }
         actions
     }
+    /// This layer owns no address-only actions — the script actions all read
+    /// the node they run on — so it only has to keep the path open to the
+    /// layers below.
+    async fn execute_addressed(
+        &self,
+        node_type: &NodeType,
+        id: &str,
+        action_id: &str,
+        input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        self.inner
+            .execute_addressed(node_type, id, action_id, input)
+            .await
+    }
     fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
         self.inner.child_process_env(node)
     }
