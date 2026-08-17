@@ -271,6 +271,21 @@ async fn render_body(
     }
     let _ = writeln!(out);
 
+    // --- Actions on the level as a whole ---------------------------------
+    // Kept in their own section rather than merged above: these take no node,
+    // so listing them among the row actions would misstate how to call them.
+    let collection = adapter.collection_actions(node.node_type());
+    if !collection.is_empty() {
+        let _ = writeln!(out, "## Actions on this level as a whole");
+        let _ = writeln!(out, "_No node id — the level is the address._");
+        let _ = writeln!(out);
+        for a in &collection {
+            let suffix = format!("input: {}", input_kind(&a.input));
+            let _ = writeln!(out, "- `{}` — {} _({suffix})_", a.id, a.label);
+        }
+        let _ = writeln!(out);
+    }
+
     // The child types reachable from here. Snapshot them before the awaits
     // below: a `Child` borrows `node` and carries a non-`Sync` list closure.
     let kid_types: Vec<NodeType> = adapter

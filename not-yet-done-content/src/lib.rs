@@ -2056,6 +2056,60 @@ pub trait ContentAdapter: Send + Sync {
         )))
     }
 
+    /// The actions that belong to a node type's **whole collection of rows**
+    /// rather than to one row — no node in play, and none resolved.
+    ///
+    /// [`Self::actions_for_type`] answers "what can I do *with a row of this
+    /// type*"; this answers "what can I do *with this type's rows as a set*".
+    /// The distinction matters for anything that writes many rows at once: a
+    /// bulk write is addressed by the type and carries its row addresses in its
+    /// own input, so hanging it on one arbitrary row would misstate its scope —
+    /// and force a front-end to pick a row it does not need.
+    ///
+    /// (Named "collection", not "level", because
+    /// [`describe::level_actions`](crate::describe::level_actions) already
+    /// means the row-scoped set a front-end offers at a point in the tree.)
+    ///
+    /// Front-ends surface these where a type is addressed and no row is: the
+    /// CLI when the invocation names a child type but no id, the TUI from a
+    /// level's own menu. Default is empty; a wrapping adapter MUST concatenate
+    /// its own with the inner adapter's, or the inner ones disappear.
+    fn collection_actions(&self, _node_type: &NodeType) -> Vec<NodeAction> {
+        Vec::new()
+    }
+
+    /// Render the initial buffer for an `InputSpec::Editor` collection action —
+    /// the counterpart of [`Node::prepare`] for a flow that has no node.
+    ///
+    /// The default returns an empty template, which is enough for the scripted
+    /// path (the caller supplies the whole document on stdin or in a file). An
+    /// adapter that wants the interactive `$EDITOR` flow to be usable SHOULD
+    /// override it with a template that documents the expected format.
+    async fn collection_prepare(
+        &self,
+        _node_type: &NodeType,
+        _action_id: &str,
+    ) -> Result<EditorPrep> {
+        Ok(EditorPrep::default())
+    }
+
+    /// Run a collection action — see [`Self::collection_actions`]. There is no
+    /// node and no id: everything the action operates on comes out of `input`.
+    ///
+    /// The default refuses, so an adapter that declares no collection actions
+    /// cannot be talked into one. A wrapping adapter MUST forward actions it
+    /// does not serve itself, exactly as for [`Self::execute_addressed`].
+    async fn execute_collection(
+        &self,
+        _node_type: &NodeType,
+        action_id: &str,
+        _input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        Err(ContentError::NotSupported(format!(
+            "'{action_id}' is not a collection action of this type"
+        )))
+    }
+
     /// Environment variables to propagate to child processes (editors,
     /// scripts) spawned in this adapter's context. Default is empty —
     /// adapters without connection state (or that don't expose their
