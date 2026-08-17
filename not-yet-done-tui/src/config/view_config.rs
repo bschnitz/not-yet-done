@@ -2139,17 +2139,17 @@ pub struct ActionDef {
     /// overrides for the form's **layout and behaviour** (column count,
     /// explicit column assignment, whether the focused field draws a filled
     /// bar, inline-radio vs dropdown selects). Colours live in the theme's
-    /// `form:` block, not here. Absent → the global `form_defaults` (else the
-    /// classic single-column, no-bar, dropdown look). Ignored by actions that
-    /// don't open a form.
+    /// `form:` block, not here. Absent → the house defaults (one column,
+    /// panel chrome, dropdown selects). Ignored by actions that don't open a
+    /// form.
     #[serde(default)]
     pub form: Option<ActionFormConfig>,
 }
 
 /// Per-action layout/behaviour overrides for an [`InputSpec::Form`] popup.
-/// Every field is optional; an absent field falls back to the global
-/// `form_defaults` and finally to the driver's classic defaults (1 column,
-/// no field bar, dropdown selects). See [`ActionDef::form`].
+/// Every field is optional; an absent field falls back to the house defaults
+/// resolved in `App::build_form_options` (one column, panel chrome, dropdown
+/// selects). See [`ActionDef::form`].
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionFormConfig {
@@ -2164,8 +2164,11 @@ pub struct ActionFormConfig {
     /// in the first column. `None` → the driver auto-balances by height.
     #[serde(default)]
     pub column_assignment: Option<Vec<Vec<String>>>,
-    /// Draw a filled bar behind the focused field (needs `form.field_bg` set
-    /// in the theme to be visible). `None` → default (off).
+    /// Chrome and focus highlight in one: `true` (the default) draws the form
+    /// as a centred, borderless, content-sized panel with a filled bar behind
+    /// the focused field (needs `form.field_bg` in the theme to be visible);
+    /// `false` opts back into the classic bordered box filling the whole popup
+    /// area.
     #[serde(default)]
     pub field_bar: Option<bool>,
     /// Render selects as an inline radio list (`inline`) or a collapsed

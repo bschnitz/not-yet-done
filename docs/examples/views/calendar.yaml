@@ -260,8 +260,10 @@ views:
           column_assignment:
             - [title, account, start, end, all_day]
             - [show_as, location, body]
-          # Draw a filled bar behind the focused field (needs theme
-          # `form.field_bg` to be visible).
+          # Panel chrome (centred, borderless, content-sized) plus a filled
+          # bar behind the focused field — needs theme `form.field_bg` to be
+          # visible. This is the default; `false` opts back into the classic
+          # bordered box that fills the whole popup area.
           field_bar: true
           # `inline` = radio list, every option visible (Show as / Calendar
           # render as inline radios); `dropdown` (default) = collapsed.
