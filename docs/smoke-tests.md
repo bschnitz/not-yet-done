@@ -5210,10 +5210,10 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
 ```
 
 - [ ] `:script` → cursor on the script → `ctrl+h` opens the picker `Hook ·
-    <name>` with `none` (marked) and `reload`. Picking `reload` reports
+  <name>` with `none` (marked) and `reload`. Picking `reload` reports
       "Script '…' now runs after the view's rows (re)loaded".
 - [ ] The menu entry now carries both bindings as a suffix, e.g. `[x]
-    [reload]`; a script without a chord shows only `[reload]`.
+  [reload]`; a script without a chord shows only `[reload]`.
 - [ ] `r` on the view: the log grows by **exactly one** line per reload — the
       `reload` the script itself emits does **not** fire the hook again.
       Watch it a few seconds; the count must stand still afterwards.
@@ -5235,6 +5235,66 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
 - [ ] On a terminal without the kitty keyboard protocol, check whether
       `ctrl+h` arrives at all — some terminals deliver it as `backspace`. If
       so, rebind `script_menu.edit_hook` in `tui.yaml`.
+
+## A script declares its own payload scope (`# scope:`)
+
+The level's `scope:` setting says what a script is handed; a `# scope:` header
+in the script itself overrides that for this one script. The point of the test
+is that all three run paths agree — a script that gets a different payload
+depending on how it was started is broken from the menu.
+
+Preparation — a script in a level whose configured scope is `node`, which just
+writes its payload out:
+
+```python
+#!/usr/bin/env python3
+# mode: commands
+# scope: table
+import json, os, sys
+with open("/tmp/nyd-scope.json", "w") as f:
+    f.write(sys.argv[1] if len(sys.argv) > 1 else "{}")
+with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
+    json.dump({"commands": []}, f)
+```
+
+- [ ] Run it from `:script`: the file holds `{"rows": [...]}` with **every**
+      visible row, not the `{"node": …}` the level would have handed over.
+- [ ] Bind a chord (`ctrl+s`) and run it that way: same payload.
+- [ ] Bind it as a `reload` hook (`ctrl+h`) and reload: same payload again.
+- [ ] Remove the header, re-run all three ways: the payload falls back to the
+      level's setting (`{"node": …}`). Scripts written before the header
+      existed keep working unchanged.
+- [ ] `# scope: filtered_set` gives the filtered set, `# scope: node` the
+      single node — also on a level configured as `table`, i.e. the header
+      narrows as well as widens.
+- [ ] A garbage value (`# scope: nonsense`) is ignored, the level decides.
+- [ ] The script **directory** and the chord stay tied to the level: the
+      header only moves the payload, the script does not migrate to another
+      view's folder.
+
+## A computed column maintained by a reload hook
+
+The combination: a `scope: table` script on a `reload` hook computes a custom
+column for the rows that are on screen and writes them back in one go with the
+`set-cells` collection action. Use a throwaway custom column for the test.
+
+- [ ] Reload the view: only the **visible** rows are computed. Rows that the
+      current query does not show are untouched — check a row that scrolled
+      out of the query and see that its cell keeps its old value.
+- [ ] The script diffs against the cell values in its own payload: with the
+      view already up to date it writes **nothing** and hands back
+      `{"commands": []}` — no reload, no flicker.
+- [ ] Change a source value so one row goes stale, reload: exactly that one
+      cell is written, the notification names the count, and the view reloads
+      once. A second reload right after is a no-op (the loop settles).
+- [ ] An empty payload (a query with no hits) still writes the answer file —
+      `{"commands": []}` — instead of leaving the TUI waiting.
+- [ ] Switch to a query showing a different row set: the cells of the newly
+      visible rows are refreshed by the very load that shows them; the
+      previously visible rows keep their stored values.
+- [ ] A failing write (a value that violates the column's `value_type`) leaves
+      **all** cells unchanged — `set-cells` is all-or-nothing — and the error
+      names the offending row.
 
 ## Refinements / deferred tasks
 
