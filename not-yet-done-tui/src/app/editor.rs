@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::config::view_config::ScriptScope;
 use crate::edit_session::{CommitOutcome, EditSession, EditorSpawnContext, FollowUp};
 
 /// Result of an asynchronously running commit. Sent from the spawned task
@@ -138,24 +139,48 @@ impl ScriptMode {
     }
 }
 
-/// Parse `# mode: <mode>` from the first few lines of a script.
-pub fn parse_script_mode(content: &str) -> ScriptMode {
-    for line in content.lines().take(10) {
+/// The value of a `# <key>: <value>` header line, searched in the first few
+/// lines of a script and accepting every comment prefix the supported script
+/// languages use. The one place the header syntax is defined; the typed
+/// parsers below differ only in the key they ask for.
+fn script_header_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+    content.lines().take(10).find_map(|line| {
         let trimmed = line.trim();
         let after = trimmed
             .strip_prefix('#')
             .or_else(|| trimmed.strip_prefix("//"))
             .or_else(|| trimmed.strip_prefix("--"))
-            .or_else(|| trimmed.strip_prefix(";;"));
-        if let Some(rest) = after {
-            if let Some(mode_str) = rest.trim().strip_prefix("mode:") {
-                if let Some(mode) = ScriptMode::from_str(mode_str) {
-                    return mode;
-                }
-            }
-        }
+            .or_else(|| trimmed.strip_prefix(";;"))?;
+        after.trim().strip_prefix(key).map(str::trim)
+    })
+}
+
+/// Parse `# mode: <mode>` from the first few lines of a script.
+pub fn parse_script_mode(content: &str) -> ScriptMode {
+    script_header_value(content, "mode:")
+        .and_then(ScriptMode::from_str)
+        .unwrap_or(ScriptMode::Background)
+}
+
+/// Parse `# scope: <node|filtered_set|table>` from the script header — the
+/// payload the script wants.
+///
+/// The level's `type: script` action carries a `script_scope`, but that is one
+/// setting for *every* script reachable there: a script that needs the visible
+/// rows would otherwise force the whole level onto `scope: table` and break its
+/// siblings, which expect a `{"node": …}` payload. The header makes the choice
+/// per script, where it belongs — what a script needs is a property of the
+/// script, not of the menu it hangs in.
+///
+/// `None` when the script declares nothing, which keeps the action's setting
+/// authoritative for every script written before this existed.
+pub fn parse_script_scope(content: &str) -> Option<ScriptScope> {
+    match script_header_value(content, "scope:")? {
+        "node" => Some(ScriptScope::Node),
+        "filtered_set" => Some(ScriptScope::FilteredSet),
+        "table" => Some(ScriptScope::Table),
+        _ => None,
     }
-    ScriptMode::Background
 }
 
 /// Parse `# output: <ext>` from the script header — the file extension the
@@ -165,23 +190,11 @@ pub fn parse_script_mode(content: &str) -> ScriptMode {
 /// than plain text. The leading dot is optional (`md` and `.md` both work).
 /// Defaults to `.txt`. Only meaningful for capture-mode scripts.
 pub fn parse_script_output_suffix(content: &str) -> String {
-    for line in content.lines().take(10) {
-        let trimmed = line.trim();
-        let after = trimmed
-            .strip_prefix('#')
-            .or_else(|| trimmed.strip_prefix("//"))
-            .or_else(|| trimmed.strip_prefix("--"))
-            .or_else(|| trimmed.strip_prefix(";;"));
-        if let Some(rest) = after {
-            if let Some(ext) = rest.trim().strip_prefix("output:") {
-                let ext = ext.trim().trim_start_matches('.');
-                if !ext.is_empty() {
-                    return format!(".{ext}");
-                }
-            }
-        }
-    }
-    ".txt".to_string()
+    script_header_value(content, "output:")
+        .map(|ext| ext.trim_start_matches('.'))
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_else(|| ".txt".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,5 +1130,49 @@ impl App {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn a_script_declares_its_own_payload_scope() {
+        let script = "#!/usr/bin/env python3\n# mode: commands\n# scope: table\n";
+        assert_eq!(parse_script_scope(script), Some(ScriptScope::Table));
+        assert_eq!(parse_script_mode(script), ScriptMode::Commands);
+    }
+
+    #[test]
+    fn a_script_without_the_header_leaves_the_level_setting_alone() {
+        // `None`, not a default: the action's `scope:` stays authoritative for
+        // every script written before the header existed.
+        assert_eq!(parse_script_scope("#!/bin/sh\n# mode: background\n"), None);
+        assert_eq!(parse_script_scope("# scope: nonsense\n"), None);
+    }
+
+    #[test]
+    fn every_comment_prefix_carries_a_header() {
+        for prefix in ["#", "//", "--", ";;"] {
+            assert_eq!(
+                parse_script_scope(&format!("{prefix} scope: filtered_set\n")),
+                Some(ScriptScope::FilteredSet),
+                "prefix {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_below_the_first_ten_lines_is_not_a_header() {
+        let script = "\n".repeat(12) + "# scope: table\n";
+        assert_eq!(parse_script_scope(&script), None);
+    }
+
+    #[test]
+    fn the_output_suffix_still_parses_after_sharing_the_scanner() {
+        assert_eq!(parse_script_output_suffix("# output: md\n"), ".md");
+        assert_eq!(parse_script_output_suffix("# output: .md\n"), ".md");
+        assert_eq!(parse_script_output_suffix("# mode: capture\n"), ".txt");
     }
 }

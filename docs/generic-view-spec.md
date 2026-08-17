@@ -2390,6 +2390,28 @@ collects:
   cursor is off, the action's configured **`default_field`** applies (otherwise
   `null`).
 
+**`# scope:` — a script overrides the level's setting.** The action's `scope:`
+applies to every script of the level, which is one setting too coarse as soon as
+two scripts there want different payloads. A script therefore declares its own in
+its header, next to `# mode:`:
+
+```python
+#!/usr/bin/env python3
+# mode: commands
+# scope: table
+```
+
+Accepted values are the same three (`node`, `filtered_set`, `table`). Without
+the header the action's `scope:` continues to apply, so existing scripts are
+unaffected. The header wins on every run path — menu, shortcut and reload hook
+alike — so a script gets the same payload however it was started. It only
+changes the **payload**: the script directory and the shortcut scope stay tied
+to the level, because all three shapes are built from the same pane.
+
+A reload hook is the case that needs this most: it fires with no cursor intent
+behind it, so a script maintaining a column wants the rows that just landed
+rather than whatever row the cursor happens to sit on.
+
 **Script shortcuts (`ctrl+s` in the menu).** As in the query menu, a key can be
 assigned to a script in the script menu via **`ctrl+s`**. The captured chord is
 stored in the DB table `query_shortcut(scope, name, shortcut)` under the scope

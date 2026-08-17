@@ -85,9 +85,8 @@ impl App {
         let repo = Arc::clone(&self.script_hook_repo);
         let scope = scope.to_string();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                repo.list_by_scope(&scope).await.unwrap_or_default()
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async move { repo.list_by_scope(&scope).await.unwrap_or_default() })
         })
         .into_iter()
         .map(|m| (m.name, m.hook))
@@ -295,6 +294,10 @@ impl App {
             self.notify_error(format!("Hook script '{name}' not run: {reason}"));
             return;
         }
+        // A hook fires with no cursor intent behind it, so the script's own
+        // `# scope:` matters most here: a reload hook that maintains a column
+        // wants the rows that just landed, not whatever row the cursor sits on.
+        let ctx = self.apply_script_scope_header(ctx, &path);
         let request = self.run_script(&ctx, &path.to_string_lossy());
         // The modes a hook is allowed to use never open an editor; a
         // request here would mean the header changed after binding.

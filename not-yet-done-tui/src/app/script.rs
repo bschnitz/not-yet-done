@@ -143,6 +143,36 @@ impl ScriptContext {
             } => new_script_template,
         }
     }
+
+    /// Which payload shape this context carries, and the pane it was built
+    /// from — everything needed to rebuild it in a different shape when the
+    /// script asks for one (`# scope:`, see
+    /// [`parse_script_scope`](crate::app::editor::parse_script_scope)).
+    ///
+    /// Named `payload_*` to stay apart from [`Self::script_scope`], which is
+    /// the *directory* scope (`<tab>/<view…>`) and unaffected by this: all
+    /// three shapes are built from the same pane, so a script keeps its place
+    /// on disk and its shortcut no matter which payload it asks for.
+    pub fn payload_target(&self) -> (crate::config::view_config::ScriptScope, usize, PaneId) {
+        use crate::config::view_config::ScriptScope as Payload;
+        match self {
+            ScriptContext::ContentNode {
+                view_index,
+                pane_id,
+                ..
+            } => (Payload::Node, *view_index, *pane_id),
+            ScriptContext::ContentBatch {
+                view_index,
+                pane_id,
+                ..
+            } => (Payload::FilteredSet, *view_index, *pane_id),
+            ScriptContext::ContentTable {
+                view_index,
+                pane_id,
+                ..
+            } => (Payload::Table, *view_index, *pane_id),
+        }
+    }
 }
 
 impl ScriptContext {
@@ -656,7 +686,13 @@ impl App {
             ScriptMenuMessage::Run { path, label: _ } => {
                 let ctx = self.script_menu_ctx.take();
                 match ctx {
-                    Some(ctx) => self.run_script(&ctx, &path),
+                    Some(ctx) => {
+                        // The menu's context was built before the user picked a
+                        // script, so the picked script's `# scope:` is only
+                        // known now.
+                        let ctx = self.apply_script_scope_header(ctx, std::path::Path::new(&path));
+                        self.run_script(&ctx, &path)
+                    }
                     None => EditorRequest::None,
                 }
             }
@@ -746,6 +782,49 @@ impl App {
         }
     }
 
+    /// Honour a script's own `# scope:` header: if `script_path` asks for a
+    /// payload other than the one `ctx` carries, rebuild the context in that
+    /// shape from the same pane. Returns `ctx` unchanged when the script
+    /// declares nothing, declares what it already got, or cannot be read.
+    ///
+    /// Every run path goes through here (menu, shortcut, reload hook), so the
+    /// same script gets the same payload however it was started — a script that
+    /// worked from the menu must not break when a hook fires it.
+    ///
+    /// A failed rebuild (no selected row for `node`, say) falls back to `ctx`
+    /// rather than refusing to run: the builders already notify, and dropping
+    /// the run would leave a hook silently doing nothing.
+    pub(super) fn apply_script_scope_header(
+        &mut self,
+        ctx: ScriptContext,
+        script_path: &std::path::Path,
+    ) -> ScriptContext {
+        use crate::config::view_config::ScriptScope;
+        let (current, view_index, pane_id) = ctx.payload_target();
+        let Ok(content) = std::fs::read_to_string(script_path) else {
+            return ctx;
+        };
+        let Some(wanted) = crate::app::editor::parse_script_scope(&content) else {
+            return ctx;
+        };
+        if wanted == current {
+            return ctx;
+        }
+        // `default_field` belongs to the level's action, not to the payload the
+        // script asked for, so it is read here rather than threaded through
+        // every call site.
+        let default_field = self
+            .content_view(view_index)
+            .and_then(|cv| cv.pane_script_action(pane_id))
+            .and_then(|(_, field)| field);
+        let rebuilt = match wanted {
+            ScriptScope::Node => self.build_content_node_ctx(view_index, pane_id),
+            ScriptScope::FilteredSet => self.build_content_batch_ctx(view_index, pane_id),
+            ScriptScope::Table => self.build_content_table_ctx(view_index, pane_id, default_field),
+        };
+        rebuilt.unwrap_or(ctx)
+    }
+
     /// Run a `:script`-menu script directly via its bound shortcut
     /// ([`crate::views::ViewRequest::RunScriptShortcut`]). Resolves the
     /// focused level's `type: script` action for its payload scope +
@@ -769,16 +848,21 @@ impl App {
         let ctx = match scope {
             ScriptScope::Node => self.build_content_node_ctx(view_index, pane_id),
             ScriptScope::FilteredSet => self.build_content_batch_ctx(view_index, pane_id),
-            ScriptScope::Table => self.build_content_table_ctx(view_index, pane_id, default_field),
+            ScriptScope::Table => {
+                self.build_content_table_ctx(view_index, pane_id, default_field.clone())
+            }
         };
         let Some(ctx) = ctx else {
             return EditorRequest::None;
         };
+        // The scripts directory is the same for all three payload shapes, so
+        // the path resolves before the script's own `# scope:` is known.
         let path = ctx.scripts_dir().join(&name);
         if !path.exists() {
             self.notify_error(format!("Script not found: {}", path.display()));
             return EditorRequest::None;
         }
+        let ctx = self.apply_script_scope_header(ctx, &path);
         self.run_script(&ctx, &path.to_string_lossy())
     }
 
