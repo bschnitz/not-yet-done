@@ -66,8 +66,8 @@ use crate::adapter_connect;
 use crate::adapter_query;
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, ContentError,
-    FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction, NodeSummary,
-    NodeType, SortDirection, SortKey, Subtree, ValueOption, children,
+    EditorPrep, FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction,
+    NodeSummary, NodeType, SortDirection, SortKey, Subtree, ValueOption, children,
 };
 
 /// Output format for the read verbs.
@@ -263,6 +263,13 @@ fn run_adapter(args: &[String]) -> Result<()> {
         // address — the type from the command's level, the id from the command
         // line — so there is nothing to connect to and nothing to look up.
         if cmd_do_local(adapter.as_ref(), &inv).await? {
+            return Ok(());
+        }
+
+        // Same for a collection action the adapter declares `local` — a bulk
+        // write over a whole node type, addressed by the type and carrying its
+        // row addresses in its own input.
+        if cmd_do_collection(adapter.as_ref(), &inv, true).await? {
             return Ok(());
         }
 
@@ -584,12 +591,13 @@ async fn cmd_help(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
             );
         } else {
             let actions = not_yet_done_content::level_actions(adapter, node.as_ref());
+            let collection = adapter.collection_actions(node.node_type());
             let kids: Vec<String> = adapter
                 .childs(node.as_ref())
                 .iter()
                 .map(|c| type_local_name(&c.node_type.type_id).to_string())
                 .collect();
-            print_level_usage(inv, &actions, &kids, false);
+            print_level_usage(inv, &actions, &collection, &kids, false);
         }
     } else {
         let (nt, is_root) = resolve_type_level(adapter, &inv.child_path).await?;
@@ -599,11 +607,12 @@ async fn cmd_help(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
             );
         } else {
             let actions = not_yet_done_content::level_actions_for_type(adapter, &nt);
+            let collection = adapter.collection_actions(&nt);
             let kids: Vec<String> = not_yet_done_content::child_types_of_type(adapter, &nt)
                 .iter()
                 .map(|k| type_local_name(&k.type_id).to_string())
                 .collect();
-            print_level_usage(inv, &actions, &kids, is_root);
+            print_level_usage(inv, &actions, &collection, &kids, is_root);
         }
     }
     Ok(())
@@ -616,6 +625,7 @@ async fn cmd_help(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
 fn print_level_usage(
     inv: &Invocation,
     actions: &[NodeAction],
+    collection: &[NodeAction],
     child_locals: &[String],
     is_root: bool,
 ) {
@@ -657,6 +667,23 @@ fn print_level_usage(
         for a in &acts {
             println!(
                 "  {base} {target}{id:<w$}   {label}  [{hint}]",
+                id = a.id,
+                label = a.label,
+                hint = action_flag_hint(a),
+                w = w,
+            );
+        }
+        println!();
+    }
+
+    // Collection actions — the ones addressed by the level itself. Listed
+    // apart because the difference is visible in the command line: no id.
+    if !collection.is_empty() {
+        println!("Actions on this level as a whole (no node id):");
+        let w = collection.iter().map(|a| a.id.len()).max().unwrap_or(0);
+        for a in collection {
+            println!(
+                "  {base} {id:<w$}   {label}  [{hint}]",
                 id = a.id,
                 label = a.label,
                 hint = action_flag_hint(a),
@@ -1015,7 +1042,80 @@ fn find_action_for_type(
         .find(|a| a.id == id)
 }
 
+/// `nyd <inst>:<type> ACTION [input flags]` — run a **collection** action: one
+/// that belongs to the node type's whole row set rather than to a row, so no id
+/// is given and none is resolved.
+///
+/// `only_local` is what separates the two call sites: the pre-connect one takes
+/// only the actions the adapter declares [`NodeAction::local`], the one inside
+/// [`cmd_do`] takes the rest, once a connection exists. Returns `false` when the
+/// invocation names no collection action at all, leaving the caller on its
+/// ordinary path.
+///
+/// The type has to be addressed (`jira:issue set-cells`) for the same reason
+/// [`cmd_do_local`] requires it: the node type *is* the address here, and the
+/// adapter root's type is not a stand-in for it.
+async fn cmd_do_collection(
+    adapter: &dyn ContentAdapter,
+    inv: &Invocation,
+    only_local: bool,
+) -> Result<bool> {
+    if inv.verb != "do" || inv.child_path.is_empty() {
+        return Ok(false);
+    }
+    // Exactly one positional: the action. A second one would be a node id, and
+    // a collection action has no node to take it for.
+    let [action_id] = inv.positionals.as_slice() else {
+        return Ok(false);
+    };
+    let (node_type, _) = resolve_type_level(adapter, &inv.child_path).await?;
+    let Some(action) = adapter
+        .collection_actions(&node_type)
+        .into_iter()
+        .find(|a| a.id == *action_id)
+    else {
+        return Ok(false);
+    };
+    if only_local && !action.local {
+        return Ok(false);
+    }
+    let input = match &action.input {
+        InputSpec::Editor => {
+            let prep = adapter.collection_prepare(&node_type, action_id).await?;
+            let text = edited_text(&prep, inv)?;
+            ActionInput::Edited {
+                text,
+                original: prep.template,
+                version: prep.version,
+            }
+        }
+        InputSpec::Form { fields } => ActionInput::Form(form_values(HashMap::new(), fields, inv)?),
+        InputSpec::None => ActionInput::None,
+        other => {
+            return Err(anyhow!(
+                "collection action '{action_id}' takes {} input, which the CLI cannot source without a node",
+                match other {
+                    InputSpec::Picker => "picker",
+                    InputSpec::FilePicker { .. } => "file-picker",
+                    _ => "column-form",
+                }
+            ));
+        }
+    };
+    let outcome = adapter
+        .execute_collection(&node_type, action_id, input)
+        .await?;
+    report_outcome(outcome, action_id)?;
+    Ok(true)
+}
+
 async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+    // A non-local collection action lands here: the connection is up, but there
+    // is still no node to resolve.
+    if cmd_do_collection(adapter, inv, false).await? {
+        return Ok(());
+    }
+
     let action_id = inv
         .positionals
         .first()
@@ -1095,6 +1195,21 @@ fn find_action(node: &dyn Node, adapter: &dyn ContentAdapter, id: &str) -> Optio
         .find(|a| a.id == id)
 }
 
+/// Source the text for an editor action, in order: `-m -` reads stdin,
+/// `-m <text>` is the inline value, `--file <path>` reads that file, and with
+/// none of them `$EDITOR` opens on the template. Shared by the node-scoped
+/// ([`do_editor`]) and level-scoped ([`cmd_do_level`]) paths so a document can
+/// be piped into either the same way.
+fn edited_text(prep: &EditorPrep, inv: &Invocation) -> Result<String> {
+    match (&inv.message, inv.files.first()) {
+        (Some(m), _) if m == "-" => read_stdin_to_string(),
+        (Some(m), _) => Ok(m.clone()),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading edited text from {}", path.display())),
+        (None, None) => edit_in_editor(&prep.template, &prep.suffix),
+    }
+}
+
 /// `InputSpec::Editor`: seed a buffer from [`Node::prepare`], let the user
 /// fill it, then [`Node::execute`] with [`ActionInput::Edited`]. The template
 /// is passed back as `original` so the adapter can diff/merge exactly as it
@@ -1109,13 +1224,7 @@ async fn do_editor(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Re
         .prepare(action_id)
         .await
         .with_context(|| format!("preparing editor for '{action_id}'"))?;
-    let text = match (&inv.message, inv.files.first()) {
-        (Some(m), _) if m == "-" => read_stdin_to_string()?,
-        (Some(m), _) => m.clone(),
-        (None, Some(path)) => std::fs::read_to_string(path)
-            .with_context(|| format!("reading edited text from {}", path.display()))?,
-        (None, None) => edit_in_editor(&prep.template, &prep.suffix)?,
-    };
+    let text = edited_text(&prep, inv)?;
     let input = ActionInput::Edited {
         text,
         original: prep.template,

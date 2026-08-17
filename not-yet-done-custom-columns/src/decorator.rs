@@ -22,6 +22,10 @@
 //! (`do set-cell … --field column_key=… --field value=…`) and the TUI menu
 //! reach them with no front-end change.
 //!
+//! One write is *not* a node action: `set-cells` ([`SET_CELLS_ACTION_ID`])
+//! fills many rows from one document, so it hangs on the node **type**
+//! ([`ContentAdapter::collection_actions`]) rather than on any row of it.
+//!
 //! # Inert by default
 //!
 //! The wrapper is applied to *every* adapter unconditionally, but does nothing
@@ -44,7 +48,7 @@ use async_trait::async_trait;
 
 use not_yet_done_content::*;
 
-use crate::store::{Cell, LocalColumnStore, VALUE_TYPES};
+use crate::store::{Cell, CellWrite, LocalColumnStore, VALUE_TYPES};
 
 /// Stable id of the synthetic "set a custom cell" action every node carries.
 pub const SET_CELL_ACTION_ID: &str = "set-cell";
@@ -58,6 +62,10 @@ pub const RETYPE_COLUMN_ACTION_ID: &str = "retype-column";
 /// Stable id of the synthetic "restrict a custom column to a set of values"
 /// action — the enumeration counterpart to [`RETYPE_COLUMN_ACTION_ID`].
 pub const SET_COLUMN_OPTIONS_ACTION_ID: &str = "set-column-options";
+/// Stable id of the synthetic bulk write. Unlike the five above this one is a
+/// **collection** action: it addresses a node type, and the rows it writes come
+/// out of its own document.
+pub const SET_CELLS_ACTION_ID: &str = "set-cells";
 
 /// The synthetic actions injected onto every node's [`Node::actions`]. Menu- /
 /// form-driven (no default key), so they surface in the CLI `do`/`actions`
@@ -247,6 +255,117 @@ async fn run_cell_action(
             "'{other}' is not a custom-column action"
         ))),
     }
+}
+
+/// The actions this layer hangs on a type's **whole row set** rather than on
+/// one row.
+///
+/// A bulk write is addressed by the node type and carries its row addresses in
+/// its own document, so there is no row it could honestly belong to. It is
+/// [`NodeAction::local`] for the same reason the single-cell writes are: the
+/// store is next door, and nothing here reads the backend.
+fn custom_column_collection_actions() -> Vec<NodeAction> {
+    vec![
+        NodeAction::new(
+            SET_CELLS_ACTION_ID,
+            "set custom cells (bulk)",
+            InputSpec::Editor,
+        )
+        .local(),
+    ]
+}
+
+/// The starting buffer for an interactive `set-cells` session.
+///
+/// Deliberately empty. The document has no comment syntax — its first field is
+/// a row id, and a row id may legitimately start with any character, so there
+/// is no prefix that could be reserved without one day eating a real line.
+/// Rather than ship a header that the parser would then have to reject, the
+/// format is documented by the action, by `docs/custom-columns.md`, and by the
+/// parse errors, which name the expected shape on the offending line.
+fn set_cells_template() -> EditorPrep {
+    EditorPrep {
+        suffix: ".tsv".into(),
+        ..EditorPrep::default()
+    }
+}
+
+/// Parse the bulk document: one cell per line, tab-separated, as
+/// `row_id<TAB>column_key<TAB>value[<TAB>value_type]`.
+///
+/// Blank lines are skipped. Fields are trimmed, so a value can contain spaces
+/// but neither leading/trailing whitespace nor a tab — the optional fourth
+/// field is what costs the tab. A malformed line aborts the whole parse before
+/// anything is written, naming its number.
+fn parse_cell_document(text: &str) -> Result<Vec<CellWrite>> {
+    let mut writes = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(4, '\t');
+        let (Some(row_id), Some(column_key), Some(value)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(ContentError::Other(
+                format!(
+                    "line {n}: expected `row_id<TAB>column_key<TAB>value[<TAB>value_type]`, \
+                     got `{line}`"
+                )
+                .into(),
+            ));
+        };
+        let (row_id, column_key) = (row_id.trim(), column_key.trim());
+        if row_id.is_empty() || column_key.is_empty() {
+            return Err(ContentError::Other(
+                format!("line {n}: row id and column key must both be non-empty").into(),
+            ));
+        }
+        writes.push(CellWrite {
+            row_id: row_id.to_string(),
+            column_key: column_key.to_string(),
+            value: value.trim().to_string(),
+            value_type: parts
+                .next()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
+        });
+    }
+    Ok(writes)
+}
+
+/// The body behind the `set-cells` level action: parse the document, then hand
+/// the whole batch to the store, which writes all of it or none.
+async fn run_set_cells(
+    store: &LocalColumnStore,
+    scope: &str,
+    node_type: &str,
+    input: ActionInput,
+) -> Result<ActionOutcome> {
+    let ActionInput::Edited { text, .. } = input else {
+        return Err(ContentError::Other(
+            "`set-cells` expects an edited document".into(),
+        ));
+    };
+    let writes = parse_cell_document(&text)?;
+    if writes.is_empty() {
+        return Ok(ActionOutcome::Done {
+            message: Some("set-cells: nothing to write".into()),
+        });
+    }
+    let written = store.set_cells(scope, node_type, &writes).await?;
+    let mut columns: Vec<&str> = writes.iter().map(|w| w.column_key.as_str()).collect();
+    columns.sort_unstable();
+    columns.dedup();
+    Ok(ActionOutcome::Done {
+        message: Some(format!(
+            "set-cells: {written} cell(s) in {} column(s) ({})",
+            columns.len(),
+            columns.join(", ")
+        )),
+    })
 }
 
 /// Append each stored cell as a metadata field, unless a field with that key
@@ -506,6 +625,44 @@ impl ContentAdapter for CustomColumnsAdapter {
         }
         self.inner
             .execute_addressed(node_type, id, action_id, input)
+            .await
+    }
+
+    /// The bulk write belongs to the type's whole row set, not to a row — see
+    /// [`custom_column_collection_actions`]. Layered on top of the inner
+    /// adapter's own, exactly as `actions_for_type` layers the cell ones.
+    fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        let mut actions = self.inner.collection_actions(node_type);
+        for a in custom_column_collection_actions() {
+            if !actions.iter().any(|x| x.id == a.id) {
+                actions.push(a);
+            }
+        }
+        actions
+    }
+
+    async fn collection_prepare(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+    ) -> Result<EditorPrep> {
+        if action_id == SET_CELLS_ACTION_ID {
+            return Ok(set_cells_template());
+        }
+        self.inner.collection_prepare(node_type, action_id).await
+    }
+
+    async fn execute_collection(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+        input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        if action_id == SET_CELLS_ACTION_ID {
+            return run_set_cells(&self.store, &self.scope, &node_type.type_id, input).await;
+        }
+        self.inner
+            .execute_collection(node_type, action_id, input)
             .await
     }
 
@@ -1338,5 +1495,118 @@ mod tests {
             assert!(local.contains(&id.to_string()), "{id} should be local");
             assert!(is_addressed_cell_action(id));
         }
+    }
+
+    fn edited(text: &str) -> ActionInput {
+        ActionInput::Edited {
+            text: text.to_string(),
+            original: String::new(),
+            version: String::new(),
+        }
+    }
+
+    /// The bulk write goes through the collection surface: no id on the call,
+    /// the row addresses come out of the document, and none of the rows is
+    /// resolvable by the inner adapter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_cells_writes_a_whole_document_without_any_node() {
+        let store = mem_store("cc_bulk").await;
+        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+
+        let outcome = adapter
+            .execute_collection(
+                &issue_type(),
+                SET_CELLS_ACTION_ID,
+                edited(
+                    "ISS-901\tbooked\t3.5\tnumber\n\
+                     ISS-902\tbooked\t0\n\
+                     \n\
+                     ISS-903\tnote\tstill open\n",
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ActionOutcome::Done { .. }));
+
+        let cell = |row: &'static str, key: &'static str| {
+            let store = store.clone();
+            async move {
+                store
+                    .get_for_row("taiga/t1", row)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|c| c.column_key == key)
+                    .map(|c| c.value)
+            }
+        };
+        assert_eq!(cell("ISS-901", "booked").await.as_deref(), Some("3.5"));
+        // The second line declares no type and adopts the `number` the first
+        // line pinned the column to.
+        assert_eq!(cell("ISS-902", "booked").await.as_deref(), Some("0"));
+        assert_eq!(
+            cell("ISS-903", "note").await.as_deref(),
+            Some("still open"),
+            "a value may contain spaces"
+        );
+    }
+
+    /// All of it or none: a value that does not fit its column's type aborts
+    /// the batch, and the lines before it stay unwritten. That is what makes a
+    /// bulk write safe to retry after fixing the input.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bad_line_leaves_the_whole_batch_unwritten() {
+        let store = mem_store("cc_bulk_atomic").await;
+        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+
+        let failed = adapter
+            .execute_collection(
+                &issue_type(),
+                SET_CELLS_ACTION_ID,
+                edited("ISS-911\tbooked\t1\tnumber\nISS-912\tbooked\tnot-a-number\n"),
+            )
+            .await
+            .err();
+        assert!(failed.is_some(), "expected the bad value to be refused");
+        assert!(
+            store
+                .get_for_row("taiga/t1", "ISS-911")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the good line before it must not have been written either"
+        );
+    }
+
+    /// A malformed line is reported with its number instead of being skipped —
+    /// silently dropping a row of a bulk write would look like success.
+    #[test]
+    fn a_malformed_line_names_its_number() {
+        let err = parse_cell_document("ISS-1\tbooked\t1\nnonsense\n")
+            .err()
+            .expect("expected a parse error");
+        assert!(
+            format!("{err}").contains("line 2"),
+            "error should name the line: {err}"
+        );
+    }
+
+    /// The bulk write is a collection action, not a row action — it must not
+    /// appear in the per-row set, or a front-end would offer it on a row whose
+    /// id it then ignores.
+    #[test]
+    fn the_bulk_write_lives_only_on_the_collection_surface() {
+        assert!(
+            !custom_column_actions()
+                .iter()
+                .any(|a| a.id == SET_CELLS_ACTION_ID),
+            "set-cells must not be a row action"
+        );
+        let bulk = custom_column_collection_actions()
+            .into_iter()
+            .find(|a| a.id == SET_CELLS_ACTION_ID)
+            .expect("set-cells is a collection action");
+        assert!(bulk.local, "nothing here reads the backend");
+        assert!(matches!(bulk.input, InputSpec::Editor));
     }
 }

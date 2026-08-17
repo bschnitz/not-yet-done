@@ -16,6 +16,7 @@ use std::sync::Arc;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
+    TransactionTrait,
 };
 
 use not_yet_done_content::{ColumnSchema, ContentError, Result};
@@ -28,6 +29,17 @@ pub struct Cell {
     pub column_key: String,
     pub value: String,
     pub value_type: String,
+}
+
+/// One requested cell write in a batch — see [`LocalColumnStore::set_cells`].
+/// `value_type` is what the caller *declared*, not what will be stored: the
+/// column's own schema stays authoritative wherever it exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellWrite {
+    pub row_id: String,
+    pub column_key: String,
+    pub value: String,
+    pub value_type: Option<String>,
 }
 
 /// The value types the store understands. `text` is the permissive default;
@@ -485,6 +497,162 @@ impl LocalColumnStore {
             .map_err(|e| ContentError::Other(Box::new(e)))?;
 
         Ok(cells.len())
+    }
+
+    /// Write many cells at once — all of them or none.
+    ///
+    /// Every write is resolved and validated *before* anything is stored, and
+    /// the storing then happens in one transaction. A single bad line therefore
+    /// leaves the store exactly as it was, which is what makes a bulk write
+    /// safe to retry after fixing the input. This is only honest because the
+    /// store is local; a fan-out against a backend could not promise it.
+    ///
+    /// Typing follows [`Self::set_cell`]: a [`CellWrite::value_type`] of `None`
+    /// adopts the column's stored type (or `text` for a column this call
+    /// introduces), and a declared type that contradicts the stored one is an
+    /// error rather than a coercion. Two writes introducing the *same* new
+    /// column with different declared types are likewise rejected.
+    ///
+    /// Returns the number of cells written.
+    pub async fn set_cells(
+        &self,
+        scope: &str,
+        node_type: &str,
+        writes: &[CellWrite],
+    ) -> Result<usize> {
+        let Some(conn) = &self.conn else {
+            return Ok(0);
+        };
+        if writes.is_empty() {
+            return Ok(0);
+        }
+
+        // The schemas of every column this batch touches, read once.
+        let keys: Vec<String> = {
+            let mut k: Vec<String> = writes.iter().map(|w| w.column_key.clone()).collect();
+            k.sort();
+            k.dedup();
+            k
+        };
+        let stored: HashMap<String, custom_column::Model> = custom_column::Entity::find()
+            .filter(custom_column::Column::Scope.eq(scope))
+            .filter(custom_column::Column::NodeType.eq(node_type))
+            .filter(custom_column::Column::ColumnKey.is_in(keys))
+            .all(conn.as_ref())
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?
+            .into_iter()
+            .map(|m| (m.column_key.clone(), m))
+            .collect();
+
+        // Pin the type of every column this batch *introduces*, before
+        // validating anything. A line that declares no type adopts whatever the
+        // batch settles on — it must not pin the column to `text` just by
+        // coming first — so only two *declared*, differing types are a
+        // conflict, and `text` stays the fallback for a column nobody typed.
+        let mut introduced: HashMap<String, String> = HashMap::new();
+        for w in writes {
+            if stored.contains_key(&w.column_key) {
+                continue;
+            }
+            let Some(declared) = w.value_type.as_deref() else {
+                continue;
+            };
+            match introduced.get(&w.column_key) {
+                Some(pinned) if pinned != declared => {
+                    return Err(ContentError::Other(
+                        format!(
+                            "custom column `{}` is introduced twice in this batch, \
+                             as `{pinned}` and as `{declared}`",
+                            w.column_key
+                        )
+                        .into(),
+                    ));
+                }
+                _ => {
+                    introduced.insert(w.column_key.clone(), declared.to_string());
+                }
+            }
+        }
+        for w in writes {
+            if !stored.contains_key(&w.column_key) {
+                introduced
+                    .entry(w.column_key.clone())
+                    .or_insert_with(|| "text".to_string());
+            }
+        }
+
+        // Resolve every write against its column's effective type and validate
+        // its value. Nothing is written until all of this passed.
+        let mut resolved: Vec<(&CellWrite, String)> = Vec::with_capacity(writes.len());
+        for w in writes {
+            let effective = match stored.get(&w.column_key) {
+                Some(schema) => {
+                    if let Some(d) = w.value_type.as_deref() {
+                        if d != schema.value_type {
+                            return Err(ContentError::Other(
+                                format!(
+                                    "custom column `{}` is type `{}`; cannot store a `{d}` value \
+                                     (use the `retype-column` action to change the column's type)",
+                                    w.column_key, schema.value_type
+                                )
+                                .into(),
+                            ));
+                        }
+                    }
+                    schema.value_type.clone()
+                }
+                None => introduced[&w.column_key].clone(),
+            };
+            let options =
+                parse_options(stored.get(&w.column_key).and_then(|s| s.options.as_deref()));
+            validate_cell(&effective, &options, &w.value)
+                .map_err(|e| ContentError::Other(format!("row `{}`: {e}", w.row_id).into()))?;
+            resolved.push((w, effective));
+        }
+
+        let txn = conn
+            .begin()
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+        for (column_key, value_type) in &introduced {
+            custom_column::Entity::insert(custom_column::ActiveModel {
+                scope: Set(scope.to_string()),
+                node_type: Set(node_type.to_string()),
+                column_key: Set(column_key.clone()),
+                value_type: Set(value_type.clone()),
+                label: Set(None),
+                options: Set(None),
+            })
+            .exec(&txn)
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+        }
+        for (w, value_type) in &resolved {
+            custom_cell::Entity::insert(custom_cell::ActiveModel {
+                scope: Set(scope.to_string()),
+                row_id: Set(w.row_id.clone()),
+                column_key: Set(w.column_key.clone()),
+                value: Set(w.value.clone()),
+                value_type: Set(value_type.clone()),
+            })
+            .on_conflict(
+                OnConflict::columns([
+                    custom_cell::Column::Scope,
+                    custom_cell::Column::RowId,
+                    custom_cell::Column::ColumnKey,
+                ])
+                .update_columns([custom_cell::Column::Value, custom_cell::Column::ValueType])
+                .to_owned(),
+            )
+            .exec(&txn)
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+        }
+        txn.commit()
+            .await
+            .map_err(|e| ContentError::Other(Box::new(e)))?;
+        Ok(resolved.len())
     }
 
     /// Remove one cell. Missing cells are not an error (idempotent). The
@@ -1149,5 +1317,90 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no custom column `nope`"), "{err}");
+    }
+
+    fn write(row: &str, col: &str, value: &str, ty: Option<&str>) -> CellWrite {
+        CellWrite {
+            row_id: row.into(),
+            column_key: col.into(),
+            value: value.into(),
+            value_type: ty.map(str::to_string),
+        }
+    }
+
+    /// A batch introducing a column settles its type from the line that
+    /// *declares* one, wherever it sits. An earlier undeclared line must not
+    /// pin the column to `text` just by coming first — that would make the
+    /// outcome depend on the document's order.
+    #[tokio::test]
+    async fn a_batch_pins_a_new_columns_type_from_whichever_line_declares_it() {
+        let store = mem_store("cc_batch_type").await;
+        let (scope, nt) = ("jira/acme", "jira:issue");
+        store
+            .set_cells(
+                scope,
+                nt,
+                &[
+                    write("ISS-1", "booked", "1", None),
+                    write("ISS-2", "booked", "2.5", Some("number")),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.columns(scope, nt).await.unwrap()[0].value_type,
+            "number"
+        );
+    }
+
+    /// Two lines *declaring* different types for the same new column is a
+    /// genuine conflict — the batch has no way to choose, so it refuses rather
+    /// than letting the last one win.
+    #[tokio::test]
+    async fn two_declared_types_for_one_new_column_are_refused() {
+        let store = mem_store("cc_batch_conflict").await;
+        let err = store
+            .set_cells(
+                "jira/acme",
+                "jira:issue",
+                &[
+                    write("ISS-1", "booked", "1", Some("number")),
+                    write("ISS-2", "booked", "x", Some("text")),
+                ],
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("introduced twice"), "{err}");
+    }
+
+    /// All or nothing, checked at the store: the failing write is the last one,
+    /// and the ones before it must not survive it.
+    #[tokio::test]
+    async fn a_batch_that_fails_writes_nothing() {
+        let store = mem_store("cc_batch_atomic").await;
+        let (scope, nt) = ("jira/acme", "jira:issue");
+        store
+            .set_cell(scope, nt, "ISS-0", "booked", "1", "number")
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .set_cells(
+                    scope,
+                    nt,
+                    &[
+                        write("ISS-1", "booked", "2", None),
+                        write("ISS-2", "booked", "not-a-number", None),
+                    ],
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store.get_for_row(scope, "ISS-1").await.unwrap().is_empty(),
+            "the good write must have been rolled back with the bad one"
+        );
     }
 }

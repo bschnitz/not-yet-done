@@ -636,6 +636,24 @@ timestamp of the whole node is sufficient.
    again for their level. This is the reference example of a _framework-level_
    action: shared, DRY, and adapter-agnostic by construction.
 
+8. **Actions that need no node** — an action is normally dispatched _on a node_
+   (`actions_for_type` finds it, `Node::execute` runs it), which forces a
+   front-end holding only a string to fetch the node first. Two escapes exist,
+   both opt-in and both refusing by default:
+   - `NodeAction::local` + `ContentAdapter::execute_addressed(node_type, id, …)`
+     — the action needs nothing from the node but its **address**. Set it only
+     where that is literally true; an action that reads any node state, even to
+     prefill a form, is not local.
+   - `ContentAdapter::collection_actions(node_type)` +
+     `collection_prepare` + `execute_collection(node_type, …)` — the action
+     belongs to the type's whole row set and takes no id at all. This is the
+     home of bulk writes, which address rows from their own input.
+
+   A **wrapping adapter must forward both**, or its default refusal shadows the
+   local and collection actions of every layer beneath it. The custom-columns
+   decorator is the reference implementation of both (`set-cell` etc. as local
+   row actions, `set-cells` as a collection action).
+
 ---
 
 ## Open Questions

@@ -225,6 +225,28 @@ impl ContentAdapter for ScriptsAdapter {
             .execute_addressed(node_type, id, action_id, input)
             .await
     }
+    /// Likewise for the collection surface: this layer's actions are all scoped
+    /// to a script file, so the three collection methods only pass through.
+    fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        self.inner.collection_actions(node_type)
+    }
+    async fn collection_prepare(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+    ) -> Result<EditorPrep> {
+        self.inner.collection_prepare(node_type, action_id).await
+    }
+    async fn execute_collection(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+        input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        self.inner
+            .execute_collection(node_type, action_id, input)
+            .await
+    }
     fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
         self.inner.child_process_env(node)
     }
@@ -619,7 +641,7 @@ fn required(fields: &HashMap<String, String>, key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use not_yet_done_content::mock::{issue_type, MockAdapterBuilder, MockNodeData};
+    use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
 
     fn adapter(repo: ScriptRepo) -> ScriptsAdapter {
         let inner = MockAdapterBuilder::new("jira")

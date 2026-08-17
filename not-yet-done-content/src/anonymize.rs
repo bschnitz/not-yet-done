@@ -527,6 +527,29 @@ impl ContentAdapter for AnonymizingAdapter {
             .execute_addressed(node_type, id, action_id, input)
             .await
     }
+    fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        self.inner.collection_actions(node_type)
+    }
+    /// Passed through unmasked for the same reason as `execute_addressed`: a
+    /// collection action's input is what the caller typed, not content we read
+    /// out of the backend.
+    async fn collection_prepare(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+    ) -> Result<EditorPrep> {
+        self.inner.collection_prepare(node_type, action_id).await
+    }
+    async fn execute_collection(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+        input: ActionInput,
+    ) -> Result<ActionOutcome> {
+        self.inner
+            .execute_collection(node_type, action_id, input)
+            .await
+    }
     fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
         self.inner.child_process_env(node)
     }

@@ -87,6 +87,42 @@ still works, but the old way: it connects and resolves `PROJ-1` to learn its
 type. That is not a fallback worth relying on — the node type is half the
 address, so state it.
 
+### Fill many cells at once
+
+One process, one document, any number of rows — the route for a script that
+computes a column for a whole list:
+
+```sh
+nyd adapter jira:issue set-cells -m - <<'EOF'
+PROJ-101	estimate	3.5
+PROJ-102	estimate	0
+PROJ-103	estimate	12
+EOF
+```
+
+Note there is **no id**: `set-cells` is addressed by the level, and the rows it
+writes come out of the document. It is tab-separated,
+`row_id⇥column_key⇥value[⇥value_type]`, one cell per line. Blank lines are
+skipped; there is no comment syntax, because the first field is a row id and no
+prefix could be reserved without one day eating a real line. Fields are
+trimmed, so a value may contain spaces but not tabs.
+
+The optional fourth field types a column this document **introduces**; for a
+column that already exists the stored type wins, and a contradicting
+declaration is an error rather than a silent coercion. Leave the field off and
+the column adopts the type another line declares, or `text` if none does.
+Alternatively type the column once up front with `retype-column`.
+
+Instead of stdin, `--file cells.tsv` reads a file, and with neither flag
+`$EDITOR` opens on an empty buffer.
+
+**All or nothing.** The whole document is parsed and validated before anything
+is stored, then written in one transaction: a bad line leaves the store exactly
+as it was and the error names the line. That is what makes a bulk write safe to
+retry after fixing the input.
+
+Like the single-cell writes, this needs no connection.
+
 ### Change a column's type
 
 Retyping is its own action, not a side effect of a cell write:
@@ -132,16 +168,18 @@ Every node carries these, whatever adapter produced it. They appear in the TUI
 action menu and under `nyd adapter <instance> actions` without any per-adapter
 wiring.
 
-| Action id            | Fields                                    | Scope  |
-| -------------------- | ----------------------------------------- | ------ |
-| `edit-cells`         | one per `source: custom` column           | Row    |
-| `set-cell`           | `column_key`, `value`, `value_type`       | Row    |
-| `clear-cell`         | `column_key`                              | Row    |
-| `retype-column`      | `column_key`, `value_type`                | Column |
-| `set-column-options` | `column_key`, `options` (comma-separated) | Column |
+| Action id            | Fields                                    | Scope      |
+| -------------------- | ----------------------------------------- | ---------- |
+| `edit-cells`         | one per `source: custom` column           | Row        |
+| `set-cell`           | `column_key`, `value`, `value_type`       | Row        |
+| `clear-cell`         | `column_key`                              | Row        |
+| `retype-column`      | `column_key`, `value_type`                | Column     |
+| `set-column-options` | `column_key`, `options` (comma-separated) | Column     |
+| `set-cells`          | a TSV document (editor input)             | Collection |
 
 "Column" scope means: invoked from a row, but it changes the column for every
-row in the scope.
+row in the scope. "Collection" means it is not invoked from a row at all — it
+hangs on the node type, and takes no id.
 
 ### Value types
 
@@ -210,6 +248,30 @@ a local annotation stops depending on the remote system: it can be written
 while the backend is down, unauthenticated, or simply not worth waking up. A
 wrapping adapter must forward `execute_addressed` to its inner adapter, or the
 default refusal would shadow the local actions of the layers below.
+
+### Why the bulk write is not a row action
+
+`execute_addressed` removed the lookup but not the scope: the action still
+belongs to one row. A bulk write does not. It is addressed by the node type and
+carries its row addresses in its own document, so hanging it on an arbitrary
+row would misstate what it does and force a front-end to pick a row it has no
+use for.
+
+The contract therefore has a second, smaller surface for actions with no node
+at all: `ContentAdapter::collection_actions(node_type)` declares them,
+`collection_prepare` seeds an editor buffer for one, and `execute_collection`
+runs it. Same forwarding obligation for wrappers as above. (The name is
+"collection" rather than "level" because `describe::level_actions` already means
+the row-scoped set a front-end offers at a point in the tree.)
+
+This is where the saving actually is. A single cell write is barely cheaper
+without the connection, because constructing the adapter dominates; the price
+of writing N rows was N processes. `set-cells` makes that one.
+
+What this deliberately is **not** is a fan-out — "apply this action to the N
+rows I marked". That is a different contract (partial failure, progress,
+per-item input) with a different guarantee: against a remote backend, nobody
+can promise all-or-nothing. `set-cells` can, because the store is local.
 
 ### Why it costs nothing when unused
 
