@@ -9914,27 +9914,27 @@ impl App {
                 return;
             }
         };
-        // Resolve the per-action layout/style (columns, field bar, inline vs
-        // dropdown selects) from the pane's `ActionDef.form` block — matched by
-        // the adapter-side action `id`, the same identifier the popup carries.
-        // Absent (or no matching action) → the driver's classic single-column,
-        // no-bar, dropdown defaults, so existing forms are unchanged.
-        let form_cfg = self.content_view(view_index).and_then(|cv| {
+        // Resolve the view's own take on this action — matched by the
+        // adapter-side action `id`, the same identifier the popup carries:
+        // the heading it should wear (`name`, the wording the action bar and
+        // the shortcut menu use) and the per-action layout/style overrides
+        // (columns, field bar, inline vs dropdown selects). Absent (or no
+        // matching action) → the raw id as the heading and the house defaults.
+        let action_def = self.content_view(view_index).and_then(|cv| {
             let pane = cv.find_pane(pane_id)?;
             let vd = cv.view_defs.get(pane.view_def_index())?;
-            vd.actions
+            let a = vd
+                .actions
                 .iter()
-                .find(|a| a.id.as_deref() == Some(action_id.as_str()))
-                .and_then(|a| a.form.clone())
+                .find(|a| a.id.as_deref() == Some(action_id.as_str()))?;
+            Some((a.name.clone(), a.form.clone()))
         });
+        let (title, form_cfg) = match action_def {
+            Some((name, cfg)) => (name, cfg),
+            None => (action_id.clone(), None),
+        };
         let form_options = Self::build_form_options(form_cfg.as_ref(), &fields);
-        let popup = ContentFormPopup::new(
-            action_id.clone(),
-            fields,
-            &prefill,
-            &self.theme,
-            &form_options,
-        );
+        let popup = ContentFormPopup::new(title, fields, &prefill, &self.theme, &form_options);
         self.content_form_popup = Some(ContentFormPopupState {
             popup,
             view_index,
@@ -9946,11 +9946,17 @@ impl App {
     }
 
     /// Translate a per-action [`ActionFormConfig`] (view YAML) into the
-    /// driver-level [`FormOptions`]. Absent config → today's defaults
-    /// (1 column, no bar, dropdown selects). `column_assignment` lists field
-    /// **keys** per column; they're resolved to per-field column indices
-    /// (`column_of`) against the actual `fields`, with unlisted fields left in
-    /// column 0.
+    /// driver-level [`FormOptions`]. Absent config → the house defaults below.
+    /// `column_assignment` lists field **keys** per column; they're resolved to
+    /// per-field column indices (`column_of`) against the actual `fields`, with
+    /// unlisted fields left in column 0.
+    ///
+    /// A content form defaults to the driver's **panel** chrome (`field_bar`):
+    /// a centred, borderless, content-sized panel over a solid fill — the same
+    /// look the shortcut menu and the event form already have. The classic
+    /// full-area bordered box is what a view opts *into* with
+    /// `form: { field_bar: false }`; sized to the whole popup area, it strands
+    /// a handful of fields in the top-left corner of an empty frame.
     fn build_form_options(
         cfg: Option<&crate::config::view_config::ActionFormConfig>,
         fields: &[not_yet_done_content::FormFieldSpec],
@@ -9958,7 +9964,10 @@ impl App {
         use crate::config::view_config::SelectStyleConfig;
         use not_yet_done_ratatui::{FormOptions, SelectStyle};
 
-        let mut opts = FormOptions::default();
+        let mut opts = FormOptions {
+            field_bar: true,
+            ..FormOptions::default()
+        };
         let Some(cfg) = cfg else {
             return opts;
         };
@@ -12588,10 +12597,30 @@ mod tests {
     }
 
     #[test]
-    fn form_options_default_when_no_config() {
+    fn form_options_default_to_the_panel_chrome() {
         let fields = vec![not_yet_done_content::FormFieldSpec::text("a", "A")];
         let opts = App::build_form_options(None, &fields);
-        assert_eq!(opts, not_yet_done_ratatui::FormOptions::default());
+        // Panel chrome by default; everything else stays the driver's default.
+        assert!(opts.field_bar);
+        assert_eq!(
+            opts,
+            not_yet_done_ratatui::FormOptions {
+                field_bar: true,
+                ..not_yet_done_ratatui::FormOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn form_options_let_a_view_opt_back_into_the_classic_box() {
+        use crate::config::view_config::ActionFormConfig;
+        let fields = vec![not_yet_done_content::FormFieldSpec::text("a", "A")];
+        let cfg = ActionFormConfig {
+            field_bar: Some(false),
+            ..Default::default()
+        };
+        let opts = App::build_form_options(Some(&cfg), &fields);
+        assert!(!opts.field_bar);
     }
 
     #[test]
