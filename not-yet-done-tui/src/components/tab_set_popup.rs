@@ -8,22 +8,25 @@
 //! a shortcut and aid discovery; Esc cancels. The currently active entry
 //! is marked (`●`), and the shortcut letter is underlined in the label.
 //!
-//! Renders on the shared `popup_utils` chrome — including the standard
-//! keybinding legend at the bottom — like every other menu popup.
+//! Renders on the shared panel chrome ([`crate::ui::panel_chrome`]) —
+//! including the standard keybinding legend at the bottom — like every
+//! other menu popup.
 //!
 //! [`SearchablePopup`]: crate::components::searchable_popup::SearchablePopup
 
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
-use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
+use crate::ui::panel_chrome::{PanelChrome, cursor_bg, pad_row};
 use crate::ui::theme::Theme;
 
 /// Keybinding legend shown at the bottom of the popup — part of the
-/// standard popup chrome (`popup_utils`), like the other menu popups.
+/// standard panel chrome, like the other menu popups.
 const HINTS: &[(&str, &str)] = &[("↑↓", "nav"), ("↵/Spc", "select"), ("Esc", "close")];
 
 /// One selectable entry in the popup.
@@ -189,80 +192,65 @@ impl TabSetPopup {
         }
         let t = Arc::clone(&self.theme);
 
-        // marker (2) + text, 1 cell indent each side inside the frame.
+        // marker (2) + text.
         let text_w = self
             .entries
             .iter()
             .map(|e| Self::row_text(e).chars().count() + 2)
             .max()
             .unwrap_or(0);
-        let popup_w = ((text_w as u16) + 4)
-            .max(28)
-            .min(area.width.saturating_sub(4));
-        let hh = hints_height(HINTS, popup_w.saturating_sub(2));
-        let popup_h = self.entries.len() as u16 + 2 + hh;
-
-        let inner = render_popup_frame(frame, area, &t, &self.title, popup_w, popup_h);
-        if inner.height == 0 || inner.width == 0 {
+        let heading = Line::from(vec![Span::styled(
+            format!("\u{2726} {}", self.title),
+            Style::default()
+                .fg(t.form_accent())
+                .add_modifier(Modifier::BOLD),
+        )]);
+        let body = PanelChrome::new(heading)
+            .hints(HINTS.to_vec())
+            .body(text_w, self.entries.len() as u16)
+            .render(frame, area, &t);
+        let Some(body) = body else {
             return;
-        }
+        };
 
-        let buf = frame.buffer_mut();
-        let items_height = inner.height.saturating_sub(hh) as usize;
-
-        for (i, entry) in self.entries.iter().enumerate() {
-            if i >= items_height {
-                break;
-            }
-            let row_y = inner.y + i as u16;
-            let is_cursor = i == self.selected;
-            let bg = if is_cursor { t.surface_2() } else { t.bg() };
-
-            for cx in inner.left()..inner.right() {
-                if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                    cell.set_char(' ');
-                    cell.set_style(Style::default().bg(bg));
-                }
-            }
-
-            let marker = if entry.active { "● " } else { "  " };
-            let mut cx = inner.left() + 1;
-            for ch in marker.chars() {
-                if cx >= inner.right() {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(t.accent()).bg(bg));
-                }
-                cx += 1;
-            }
-
-            let text = Self::row_text(entry);
-            let hl_pos = Self::shortcut_pos(entry);
-            let label_style = Style::default().fg(t.text_high()).bg(bg);
-            let hl_style = Style::default()
-                .fg(t.text_high())
-                .bg(bg)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-            for (ci, ch) in text.chars().enumerate() {
-                if cx >= inner.right() {
-                    break;
-                }
-                let style = if hl_pos == Some(ci) {
-                    hl_style
+        let sel_bg = cursor_bg(&t);
+        let lines: Vec<Line> = self
+            .entries
+            .iter()
+            .enumerate()
+            .take(body.height as usize)
+            .map(|(i, entry)| {
+                let row_style = if i == self.selected {
+                    Style::default().bg(sel_bg)
                 } else {
-                    label_style
+                    Style::default()
                 };
-                if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(style);
+                let mut spans = vec![Span::styled(
+                    if entry.active { "\u{25cf} " } else { "  " },
+                    row_style.fg(t.form_accent()),
+                )];
+                // The shortcut letter inside the label is underlined, so the
+                // key that jumps to this tab set reads off the row.
+                let text = Self::row_text(entry);
+                let label_style = row_style.fg(t.form_text());
+                match Self::shortcut_pos(entry) {
+                    Some(pos) => {
+                        let before: String = text.chars().take(pos).collect();
+                        let hl: String = text.chars().skip(pos).take(1).collect();
+                        let after: String = text.chars().skip(pos + 1).collect();
+                        spans.push(Span::styled(before, label_style));
+                        spans.push(Span::styled(
+                            hl,
+                            label_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                        ));
+                        spans.push(Span::styled(after, label_style));
+                    }
+                    None => spans.push(Span::styled(text, label_style)),
                 }
-                cx += 1;
-            }
-        }
-
-        render_hints_bar(frame, inner, &t, HINTS, hh);
+                pad_row(spans, body.width, row_style)
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), body);
     }
 }
 

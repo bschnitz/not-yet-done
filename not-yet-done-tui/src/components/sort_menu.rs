@@ -19,13 +19,15 @@
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use not_yet_done_content::{ColumnSchema, SortDirection, SortKey};
 
 use crate::config::{CommonAction, KeyBindingConfig};
-use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
+use crate::ui::panel_chrome::{PanelChrome, cursor_bg, pad_row};
 use crate::ui::theme::Theme;
 
 /// One row: a sortable column, plus its place in the sort if it has one.
@@ -289,78 +291,55 @@ impl SortMenu {
             .map(|e| Self::row_text(e).chars().count() + 4)
             .max()
             .unwrap_or(0);
-        let popup_w = ((text_w as u16) + 4)
-            .max(34)
-            .min(area.width.saturating_sub(4));
         let hint_refs = self.hints_as_refs();
-        let hints_h = hints_height(&hint_refs, popup_w.saturating_sub(2));
-        let popup_h = self.entries.len() as u16 + 2 + hints_h;
-
-        let inner = render_popup_frame(frame, area, &t, "Sort", popup_w, popup_h);
-        if inner.height == 0 || inner.width == 0 {
+        let heading = Line::from(vec![Span::styled(
+            "\u{2726} Sort",
+            Style::default()
+                .fg(t.form_accent())
+                .add_modifier(Modifier::BOLD),
+        )]);
+        let body = PanelChrome::new(heading)
+            .hints(hint_refs)
+            .body(text_w, self.entries.len() as u16)
+            .render(frame, area, &t);
+        let Some(body) = body else {
             return;
-        }
+        };
 
-        {
-            let buf = frame.buffer_mut();
-            let items_height = inner.height.saturating_sub(hints_h) as usize;
-
-            for (i, entry) in self.entries.iter().enumerate() {
-                if i >= items_height {
-                    break;
-                }
-                let row_y = inner.y + i as u16;
-                let is_cursor = i == self.cursor;
-                let bg = if is_cursor { t.surface_2() } else { t.bg() };
-
-                for cx in inner.left()..inner.right() {
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(bg));
-                    }
-                }
-
+        let sel_bg = cursor_bg(&t);
+        let lines: Vec<Line> = self
+            .entries
+            .iter()
+            .enumerate()
+            .take(body.height as usize)
+            .map(|(i, entry)| {
+                let row_style = if i == self.cursor {
+                    Style::default().bg(sel_bg)
+                } else {
+                    Style::default()
+                };
                 // Rank column: the sort position for sorted entries, blank
                 // for the rest — so the block reads as an ordered list.
                 let rank = match entry.direction {
                     Some(_) => format!("{}. ", i + 1),
                     None => "   ".to_string(),
                 };
-                let mut cx = inner.left() + 1;
-                let rank_style = Style::default().fg(t.text_dim()).bg(bg);
-                for ch in rank.chars() {
-                    if cx >= inner.right() {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(ch);
-                        cell.set_style(rank_style);
-                    }
-                    cx += 1;
-                }
-
-                let style = if entry.direction.is_some() {
-                    Style::default()
-                        .fg(t.text_high())
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD)
+                let label_style = if entry.direction.is_some() {
+                    row_style.fg(t.form_text()).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(t.text_med()).bg(bg)
+                    row_style.fg(t.form_hint())
                 };
-                for ch in Self::row_text(entry).chars() {
-                    if cx >= inner.right() {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(ch);
-                        cell.set_style(style);
-                    }
-                    cx += 1;
-                }
-            }
-        } // drop buf borrow
-
-        render_hints_bar(frame, inner, &t, &hint_refs, hints_h);
+                pad_row(
+                    vec![
+                        Span::styled(rank, row_style.fg(t.form_hint())),
+                        Span::styled(Self::row_text(entry), label_style),
+                    ],
+                    body.width,
+                    row_style,
+                )
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), body);
     }
 }
 

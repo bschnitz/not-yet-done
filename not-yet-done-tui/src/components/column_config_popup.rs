@@ -3,8 +3,10 @@
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::Component;
@@ -12,7 +14,7 @@ use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
 use crate::config::{CommonAction, KeyBindingConfig};
-use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
+use crate::ui::panel_chrome::{PanelChrome, cursor_bg, pad_row};
 use crate::ui::theme::Theme;
 
 /// One configurable column, already resolved to display data. The popup
@@ -198,130 +200,92 @@ impl ColumnConfigPopup {
 
 impl Component for ColumnConfigPopup {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        let t = &self.theme;
+        let t = Arc::clone(&self.theme);
 
-        let popup_w = 40u16;
         let hint_refs = self.hints_as_refs();
-        let hints_h = hints_height(&hint_refs, popup_w.saturating_sub(2));
-        let popup_h = self.order.len() as u16 + 2 + hints_h;
-
-        let inner = render_popup_frame(frame, area, t, "Column Config", popup_w, popup_h);
-        if inner.height == 0 || inner.width == 0 {
+        let heading = Line::from(vec![Span::styled(
+            "\u{2726} Column Config",
+            Style::default()
+                .fg(t.form_accent())
+                .add_modifier(Modifier::BOLD),
+        )]);
+        let digits = if self.order.is_empty() {
+            1
+        } else {
+            (self.order.len() as f64).log10() as usize + 1
+        };
+        // Row width: number + `[x] ` marker + the widest display name.
+        let name_w = self
+            .order
+            .iter()
+            .map(|id| {
+                self.entry(id)
+                    .map(|e| e.display_name.chars().count())
+                    .unwrap_or_else(|| id.chars().count())
+            })
+            .max()
+            .unwrap_or(0);
+        let body = PanelChrome::new(heading)
+            .hints(hint_refs)
+            .body(digits + 2 + 4 + name_w, self.order.len() as u16)
+            .render(frame, area, &t);
+        let Some(body) = body else {
             return;
-        }
+        };
 
-        {
-            let buf = frame.buffer_mut();
-
-            let digits = if self.order.is_empty() {
-                1
-            } else {
-                (self.order.len() as f64).log10() as usize + 1
-            };
-            let items_height = inner.height.saturating_sub(hints_h) as usize;
-
-            for (i, col_id) in self.order.iter().enumerate() {
-                if i >= items_height {
-                    break;
-                }
-                let row_y = inner.y + i as u16;
+        let sel_bg = cursor_bg(&t);
+        let lines: Vec<Line> = self
+            .order
+            .iter()
+            .enumerate()
+            .take(body.height as usize)
+            .map(|(i, col_id)| {
                 let is_sel = self.selected[i];
-                let is_cursor = i == self.cursor;
                 let entry = self.entry(col_id);
-                let is_fixed = entry.map_or(false, |e| !e.hideable);
-
-                let bg = if is_cursor { t.surface_2() } else { t.bg() };
-
-                for cx in inner.left()..inner.right() {
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(bg));
-                    }
-                }
+                let is_fixed = entry.is_some_and(|e| !e.hideable);
+                let row_style = if i == self.cursor {
+                    Style::default().bg(sel_bg)
+                } else {
+                    Style::default()
+                };
 
                 let display_name = entry
                     .map(|e| e.display_name.as_str())
                     .unwrap_or(col_id.as_str());
                 let header = entry.map(|e| e.header.as_str()).unwrap_or("");
-                let col_color = entry.map(|e| e.color).unwrap_or(t.text_med());
+                let col_color = entry.map(|e| e.color).unwrap_or_else(|| t.form_hint());
 
-                let num = format!("{:>w$}. ", i + 1, w = digits);
-                let marker = if is_fixed || is_sel { "[x] " } else { "[ ] " };
-                let text_fg = t.text_high();
-
-                let mut cx = inner.left() + 1;
-
-                let num_style = Style::default().fg(t.text_dim()).bg(bg);
-                for ch in num.chars() {
-                    if cx >= inner.right() {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(ch);
-                        cell.set_style(num_style);
-                    }
-                    cx += 1;
-                }
-
-                let marker_style = Style::default().fg(text_fg).bg(bg);
-                for ch in marker.chars() {
-                    if cx >= inner.right() {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(ch);
-                        cell.set_style(marker_style);
-                    }
-                    cx += 1;
-                }
-
+                let mut spans = vec![
+                    Span::styled(
+                        format!("{:>w$}. ", i + 1, w = digits),
+                        row_style.fg(t.form_hint()),
+                    ),
+                    Span::styled(
+                        if is_fixed || is_sel { "[x] " } else { "[ ] " },
+                        row_style.fg(t.form_text()),
+                    ),
+                ];
+                // The header prefix keeps the column's own colour, the rest
+                // of the display name reads as plain text.
                 if !header.is_empty() && display_name.starts_with(header) {
-                    let hl = Style::default()
-                        .fg(col_color)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD);
-                    let rest = Style::default().fg(text_fg).bg(bg);
-                    for ch in header.chars() {
-                        if cx >= inner.right() {
-                            break;
-                        }
-                        if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                            cell.set_char(ch);
-                            cell.set_style(hl);
-                        }
-                        cx += 1;
-                    }
-                    for ch in display_name[header.len()..].chars() {
-                        if cx >= inner.right() {
-                            break;
-                        }
-                        if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                            cell.set_char(ch);
-                            cell.set_style(rest);
-                        }
-                        cx += 1;
-                    }
+                    spans.push(Span::styled(
+                        header.to_string(),
+                        row_style.fg(col_color).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        display_name[header.len()..].to_string(),
+                        row_style.fg(t.form_text()),
+                    ));
                 } else {
-                    let style = Style::default()
-                        .fg(col_color)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD);
-                    for ch in display_name.chars() {
-                        if cx >= inner.right() {
-                            break;
-                        }
-                        if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                            cell.set_char(ch);
-                            cell.set_style(style);
-                        }
-                        cx += 1;
-                    }
+                    spans.push(Span::styled(
+                        display_name.to_string(),
+                        row_style.fg(col_color).add_modifier(Modifier::BOLD),
+                    ));
                 }
-            }
-        } // drop buf borrow
-
-        // Hints bar with auto-wrap.
-        render_hints_bar(frame, inner, t, &hint_refs, hints_h);
+                pad_row(spans, body.width, row_style)
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), body);
     }
 
     fn query(&self, _attr: Attribute) -> Option<QueryResult<'_>> {
