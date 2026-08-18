@@ -36,29 +36,20 @@ use tuirealm::props::{AttrValue, Attribute};
 
 use not_yet_done_ratatui::{LeaderList, LeaderListStyle};
 
+use crate::components::key_conflict::{
+    self, CONFLICT_HINTS, ConflictPrompt, ConflictReply, conflict_heading, conflict_lines,
+};
+use crate::components::key_recorder::{
+    KeyRecorder, RECORDING_HINTS, RecorderStep, recording_heading,
+};
 use crate::config::ShortcutScope;
 use crate::keymap::{KeySource, ShortcutRow};
-use crate::ui::panel_chrome::{PanelChrome, panel_leader_style};
+use crate::ui::panel_chrome::{PanelChrome, cursor_bg, panel_leader_style};
 use crate::ui::theme::Theme;
 
-/// One existing binding that collides with a proposed new binding. Carries
-/// everything the app needs to drop the colliding alternative, plus the
-/// display metadata the prompt shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConflictItem {
-    /// The conflicting shortcut's source (so the app can edit its file).
-    pub source: KeySource,
-    /// All current bindings of the conflicting shortcut (surface forms).
-    pub current: Vec<String>,
-    /// The specific alternative of `source` that collides.
-    pub drop: String,
-    /// Friendly name of the conflicting shortcut, for the prompt text.
-    pub name: String,
-    /// Whether this binding is editable (and thus removable). If any
-    /// conflict is not removable the collision cannot be resolved and the
-    /// new binding is refused.
-    pub removable: bool,
-}
+/// One colliding binding, re-exported from the shared conflict prompt so the
+/// app keeps addressing it through the menu that raises the prompt.
+pub use key_conflict::ConflictItem;
 
 /// Outcome of a key press while the menu is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,16 +131,15 @@ pub enum ShortcutMenuMessage {
     },
 }
 
-/// In-progress key recording started by Ctrl-N. Steps accumulate until Return
-/// (never itself a valid step); Esc cancels, Backspace drops the last step.
+/// In-progress key recording started by Ctrl-N, plus the menu's own target
+/// bookkeeping. The recording itself is the shared [`KeyRecorder`], so the
+/// chord grammar here is identical to the query and script menus'.
 #[derive(Debug, Clone)]
 struct Recorder {
     /// Index into the current scope's `rows()` of the row being (re)bound.
     row_index: usize,
-    /// Recorded steps in canonical key-string form (each may carry modifiers).
-    steps: Vec<String>,
-    /// Ctrl-U (replace all bindings) vs Ctrl-N (add an alternative).
-    overwrite: bool,
+    /// The recorded steps and the record mode (Ctrl-U replaces, Ctrl-N adds).
+    keys: KeyRecorder,
     /// Batch mode: apply the recorded binding to every tagged row at once
     /// (started by Ctrl-N/Ctrl-U while rows are tagged). `row_index` is unused
     /// then — the targets are the tagged set resolved at save time.
@@ -188,30 +178,11 @@ enum PromptKind {
     },
 }
 
-/// A pending y/n prompt shown when a change collides with one or more existing
-/// shortcuts. It lists every colliding binding. Confirming (y) drops each
-/// colliding alternative and applies the pending change — but only when every
-/// item is removable; if any is read-only the collision cannot be resolved and
-/// the prompt only offers to dismiss. Declining leaves everything unchanged.
-#[derive(Debug, Clone)]
-struct ConflictPrompt {
-    /// The change to apply once the collisions are cleared.
-    kind: PromptKind,
-    /// Every existing binding that collides with the pending change.
-    items: Vec<ConflictItem>,
-}
-
-impl ConflictPrompt {
-    /// The collision can be resolved only if every colliding binding can be
-    /// removed (all owning shortcuts are editable).
-    fn resolvable(&self) -> bool {
-        self.items.iter().all(|i| i.removable)
-    }
-
+impl PromptKind {
     /// The bound key the prompt is about (for the single-bind case), else the
     /// count of defaults being restored — used to phrase the heading.
     fn summary(&self) -> String {
-        match &self.kind {
+        match self {
             PromptKind::Bind { binding, .. } => format!("'{binding}'"),
             PromptKind::RestoreBatch { rows } => match rows.len() {
                 1 => "Restoring 1 default".to_string(),
@@ -220,6 +191,15 @@ impl ConflictPrompt {
             PromptKind::BindBatch { binding, rows, .. } => {
                 format!("Binding '{binding}' on {} shortcut(s)", rows.len())
             }
+        }
+    }
+
+    /// What confirming the prompt will do, as the question's wording.
+    fn question(&self) -> &'static str {
+        match self {
+            PromptKind::Bind { .. } => "Remove and bind here? (y/n)",
+            PromptKind::RestoreBatch { .. } => "Remove and restore defaults? (y/n)",
+            PromptKind::BindBatch { .. } => "Remove and bind all tagged? (y/n)",
         }
     }
 }
@@ -232,27 +212,6 @@ fn row_bindings(row: &ShortcutRow) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-/// Render one recorded step in its YAML surface form (a literal space becomes
-/// the word `space` so the step is legible and re-parseable).
-fn step_to_surface(step: &str) -> String {
-    if step == " " {
-        "space".to_string()
-    } else if let Some(mods) = step.strip_suffix("+ ") {
-        format!("{mods}+space")
-    } else {
-        step.to_string()
-    }
-}
-
-/// The full surface form of a recorded sequence: steps joined by spaces.
-fn surface_form(steps: &[String]) -> String {
-    steps
-        .iter()
-        .map(|s| step_to_surface(s))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub struct ShortcutMenu {
@@ -279,7 +238,7 @@ pub struct ShortcutMenu {
     deleter: Option<Deleter>,
     /// Pending conflict prompt (a recorded binding collided), if any. While
     /// `Some`, only y/n (Esc) are accepted.
-    conflict: Option<ConflictPrompt>,
+    conflict: Option<ConflictPrompt<PromptKind>>,
     /// Tagged rows, identified by their [`KeySource`] so a tag survives scope
     /// toggles (the same action shows up in Context and All). Ctrl-L toggles a
     /// tag; while any row is tagged the batch ops (Ctrl-N/Ctrl-U bind, Ctrl-D
@@ -324,14 +283,14 @@ impl ShortcutMenu {
         items: Vec<ConflictItem>,
         overwrite: bool,
     ) {
-        self.conflict = Some(ConflictPrompt {
-            kind: PromptKind::Bind {
+        self.conflict = Some(ConflictPrompt::new(
+            PromptKind::Bind {
                 row,
                 binding,
                 overwrite,
             },
             items,
-        });
+        ));
     }
 
     /// Raise the aggregated conflict prompt for a batch restore: restoring the
@@ -339,10 +298,10 @@ impl ShortcutMenu {
     /// `items`. Confirming drops them all and restores every row; declining
     /// aborts the whole batch (no partial execution).
     pub fn show_restore_conflicts(&mut self, rows: Vec<ShortcutRow>, items: Vec<ConflictItem>) {
-        self.conflict = Some(ConflictPrompt {
-            kind: PromptKind::RestoreBatch { rows },
+        self.conflict = Some(ConflictPrompt::new(
+            PromptKind::RestoreBatch { rows },
             items,
-        });
+        ));
     }
 
     /// Raise the aggregated conflict prompt for a batch bind: binding `binding`
@@ -355,14 +314,14 @@ impl ShortcutMenu {
         overwrite: bool,
         items: Vec<ConflictItem>,
     ) {
-        self.conflict = Some(ConflictPrompt {
-            kind: PromptKind::BindBatch {
+        self.conflict = Some(ConflictPrompt::new(
+            PromptKind::BindBatch {
                 rows,
                 binding,
                 overwrite,
             },
             items,
-        });
+        ));
     }
 
     /// Open the menu with the two row sets, starting in `scope`.
@@ -532,9 +491,8 @@ impl ShortcutMenu {
         // only when every colliding binding is removable; an unresolvable
         // collision (a read-only conflict) accepts only dismissal.
         if let Some(c) = self.conflict.as_ref() {
-            let resolvable = c.resolvable();
-            match key {
-                "y" | "enter" if resolvable => {
+            match c.handle_key(key) {
+                ConflictReply::Apply => {
                     let c = self.conflict.take().expect("conflict present");
                     return match c.kind {
                         PromptKind::Bind {
@@ -565,34 +523,26 @@ impl ShortcutMenu {
                         },
                     };
                 }
-                "n" | "esc" => {
+                ConflictReply::Dismiss => {
                     self.conflict = None;
                     return ShortcutMenuMessage::Handled;
                 }
-                _ => return ShortcutMenuMessage::Handled,
+                ConflictReply::Pending => return ShortcutMenuMessage::Handled,
             }
         }
         // While recording (Ctrl-N), every key feeds the recorder — the list
         // and scope toggle are frozen until the recording ends.
-        if self.recorder.is_some() {
-            match key {
-                "esc" => {
+        if let Some(rec) = self.recorder.as_mut() {
+            let step = rec.keys.feed(key);
+            match step {
+                RecorderStep::Recording => return ShortcutMenuMessage::Handled,
+                RecorderStep::Cancelled => {
                     self.recorder = None;
                     return ShortcutMenuMessage::Handled;
                 }
-                "backspace" => {
-                    if let Some(rec) = self.recorder.as_mut() {
-                        rec.steps.pop();
-                    }
-                    return ShortcutMenuMessage::Handled;
-                }
-                // Return ends the recording; it is never itself a valid step.
-                "enter" => {
+                RecorderStep::Saved(binding) => {
                     let rec = self.recorder.take().expect("recorder present");
-                    if rec.steps.is_empty() {
-                        return ShortcutMenuMessage::Handled;
-                    }
-                    let binding = surface_form(&rec.steps);
+                    let overwrite = rec.keys.overwrite();
                     // Batch mode: apply to every tagged row at once, then drop
                     // the tags (they are consumed by the op, like delete/restore).
                     if rec.batch {
@@ -604,7 +554,7 @@ impl ShortcutMenu {
                         return ShortcutMenuMessage::BindTagged {
                             rows,
                             binding,
-                            overwrite: rec.overwrite,
+                            overwrite,
                         };
                     }
                     // `take()` freed the borrow, so `rows()` is available now.
@@ -612,16 +562,10 @@ impl ShortcutMenu {
                         Some(row) => ShortcutMenuMessage::AddBinding {
                             row,
                             binding,
-                            overwrite: rec.overwrite,
+                            overwrite,
                         },
                         None => ShortcutMenuMessage::Handled,
                     };
-                }
-                other => {
-                    if let Some(rec) = self.recorder.as_mut() {
-                        rec.steps.push(other.to_string());
-                    }
-                    return ShortcutMenuMessage::Handled;
                 }
             }
         }
@@ -671,16 +615,14 @@ impl ShortcutMenu {
             if self.has_tags() {
                 self.recorder = Some(Recorder {
                     row_index: 0,
-                    steps: Vec::new(),
-                    overwrite: key == "ctrl+u",
+                    keys: KeyRecorder::new(key == "ctrl+u"),
                     batch: true,
                 });
             } else if let Some(idx) = self.list.selected_index() {
                 if self.rows().get(idx).is_some_and(|r| r.source.is_some()) {
                     self.recorder = Some(Recorder {
                         row_index: idx,
-                        steps: Vec::new(),
-                        overwrite: key == "ctrl+u",
+                        keys: KeyRecorder::new(key == "ctrl+u"),
                         batch: false,
                     });
                 }
@@ -863,9 +805,9 @@ impl ShortcutMenu {
         let deleting = self.deleter.is_some();
         let prompting = self.conflict.is_some();
         let hints: Vec<(&str, &str)> = if prompting {
-            vec![("y", "apply"), ("n/Esc", "cancel")]
+            CONFLICT_HINTS.to_vec()
         } else if recording {
-            vec![("↵", "save"), ("⌫", "del"), ("Esc", "cancel")]
+            RECORDING_HINTS.to_vec()
         } else if deleting {
             vec![("↑↓", "pick"), ("↵", "delete"), ("Esc", "cancel")]
         } else if self.has_tags() {
@@ -908,33 +850,9 @@ impl ShortcutMenu {
         // or a "delete which?" prompt while picking a binding to remove, or a
         // conflict warning while a resolve prompt is pending.
         let heading = if self.conflict.is_some() {
-            Line::from(vec![Span::styled(
-                "\u{26a0} binding conflict",
-                Style::default()
-                    .fg(t.form_accent())
-                    .add_modifier(Modifier::BOLD),
-            )])
+            conflict_heading(&t)
         } else if let Some(rec) = self.recorder.as_ref() {
-            let so_far = surface_form(&rec.steps);
-            let label = if rec.overwrite {
-                "\u{25cf} rec (replace) "
-            } else {
-                "\u{25cf} rec "
-            };
-            Line::from(vec![
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(t.form_accent())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{so_far}\u{258f}"),
-                    Style::default()
-                        .fg(t.form_text())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
+            recording_heading(&rec.keys, "", &t)
         } else if deleting {
             Line::from(vec![Span::styled(
                 "\u{2717} delete which binding?",
@@ -960,50 +878,14 @@ impl ShortcutMenu {
 
         {
             if let Some(c) = self.conflict.as_ref() {
-                // Explain the collision(s) and what confirming will do. Each
-                // colliding binding gets its own line; read-only ones are
-                // tagged since they cannot be removed.
-                let text = Style::default().fg(t.form_text());
-                let accent = Style::default()
-                    .fg(t.form_accent())
-                    .add_modifier(Modifier::BOLD);
-                let dim = Style::default().fg(t.form_hint());
-                let resolvable = c.resolvable();
-                let mut lines: Vec<Line> = Vec::new();
-                lines.push(Line::from(vec![
-                    Span::styled(c.summary(), accent),
-                    Span::styled(" conflicts with:", text),
-                ]));
-                for item in &c.items {
-                    let mut spans = vec![
-                        Span::styled("  • ", dim),
-                        Span::styled(item.drop.clone(), accent),
-                        Span::styled(" — ", dim),
-                        Span::styled(item.name.clone(), text),
-                    ];
-                    if !item.removable {
-                        spans.push(Span::styled("  (read-only)", dim));
-                    }
-                    lines.push(Line::from(spans));
-                }
-                let apply_prompt = match &c.kind {
-                    PromptKind::Bind { .. } => "Remove and bind here? (y/n)",
-                    PromptKind::RestoreBatch { .. } => "Remove and restore defaults? (y/n)",
-                    PromptKind::BindBatch { .. } => "Remove and bind all tagged? (y/n)",
-                };
-                lines.push(Line::from(Span::styled(
-                    if resolvable {
-                        apply_prompt.to_string()
-                    } else {
-                        "Read-only bindings can't be removed — press n/Esc.".to_string()
-                    },
-                    text,
-                )));
+                // Explain the collision(s) and what confirming will do — the
+                // same body every host of the shared prompt renders.
+                let lines = conflict_lines(&c.kind.summary(), &c.items, c.kind.question(), &t);
                 frame.render_widget(Paragraph::new(lines), list_area);
             } else if let Some(d) = self.deleter.as_ref() {
                 // Vertical list of the row's bindings; the cursor row is
                 // highlighted on the form field background.
-                let cursor_bg = t.form_field_bg().unwrap_or_else(|| t.surface_2());
+                let cursor_bg = cursor_bg(&t);
                 let lines: Vec<Line> = d
                     .bindings
                     .iter()
@@ -1276,7 +1158,7 @@ mod tests {
     fn ctrl_u_records_in_overwrite_mode() {
         let mut m = rec_menu();
         m.handle_key("ctrl+u");
-        assert!(m.recorder.as_ref().is_some_and(|r| r.overwrite));
+        assert!(m.recorder.as_ref().is_some_and(|r| r.keys.overwrite()));
         m.handle_key("f");
         m.handle_key("f");
         assert_eq!(
@@ -1329,18 +1211,6 @@ mod tests {
         m.handle_key("tab"); // recorded as a step, not a scope toggle
         assert_eq!(m.scope, ShortcutScope::Context);
         assert!(!m.list.search_active());
-    }
-
-    #[test]
-    fn step_surface_forms() {
-        assert_eq!(step_to_surface("a"), "a");
-        assert_eq!(step_to_surface("ctrl+k"), "ctrl+k");
-        assert_eq!(step_to_surface(" "), "space");
-        assert_eq!(step_to_surface("ctrl+ "), "ctrl+space");
-        assert_eq!(
-            surface_form(&["ctrl+k".into(), "l".into()]),
-            "ctrl+k l".to_string()
-        );
     }
 
     #[test]
@@ -1532,7 +1402,11 @@ mod tests {
         );
         m.handle_key("ctrl+a");
         m.handle_key("ctrl+u");
-        assert!(m.recorder.as_ref().is_some_and(|r| r.batch && r.overwrite));
+        assert!(
+            m.recorder
+                .as_ref()
+                .is_some_and(|r| r.batch && r.keys.overwrite())
+        );
         m.handle_key("x");
         match m.handle_key("enter") {
             ShortcutMenuMessage::BindTagged {

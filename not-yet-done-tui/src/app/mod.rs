@@ -1146,14 +1146,6 @@ pub struct App {
     /// q-menu mutation, so without this an unresolved conflict would
     /// re-notify dozens of times per session instead of once.
     warned_saved_query_conflicts: std::collections::HashSet<String>,
-    /// Pending shortcut capture for a Postgres per-table script. Carries
-    /// the addressing tuple so the captured key chord lands in the right
-    /// `<table_dir>/.shortcuts.yaml`. Reset on capture or Esc.
-    pub awaiting_node_script_shortcut: Option<NodeScriptCoords>,
-    /// Pending shortcut capture for a `:script`-menu script. Carries the
-    /// script scope + filename so the captured key chord is persisted via
-    /// the `query_shortcut` table. Reset on capture or Esc.
-    pub awaiting_script_shortcut: Option<ScriptShortcutCoords>,
     /// Modal message popup — blocks input until dismissed.
     pub modal_message: Option<String>,
 
@@ -1427,8 +1419,6 @@ impl App {
             which_key_deadline: None,
             awaiting_favorite_shortcut: None,
             warned_saved_query_conflicts: std::collections::HashSet::new(),
-            awaiting_node_script_shortcut: None,
-            awaiting_script_shortcut: None,
             modal_message: None,
             pending_confirmation: None,
             content_views,
@@ -4738,8 +4728,6 @@ impl App {
         // Modal message: dismiss on any key (but not when awaiting shortcut/confirm).
         if self.modal_message.is_some()
             && self.awaiting_favorite_shortcut.is_none()
-            && self.awaiting_node_script_shortcut.is_none()
-            && self.awaiting_script_shortcut.is_none()
             && self.pending_confirmation.is_none()
         {
             self.modal_message = None;
@@ -4774,54 +4762,9 @@ impl App {
             return EditorRequest::None;
         }
 
-        // Postgres script shortcut capture mode.
-        if let Some(coords) = self.awaiting_node_script_shortcut.take() {
-            self.modal_message = None;
-            if key == "esc" {
-                // Cancelled.
-            } else if self.is_shortcut_taken(key) {
-                self.modal_message = Some(format!(
-                    "Shortcut '{}' is already taken!\n\nPress another key for '{}'\nEsc to cancel",
-                    key, coords.script
-                ));
-                self.awaiting_node_script_shortcut = Some(coords);
-            } else {
-                let chord = key.to_string();
-                let script_label = coords.script.clone();
-                self.bind_node_script_shortcut(coords, &chord);
-                self.modal_message =
-                    Some(format!("Script '{}' bound to [{}]", script_label, chord));
-            }
-            self.sync_components();
-            return EditorRequest::None;
-        }
-
-        // `:script`-menu shortcut capture mode.
-        if let Some(coords) = self.awaiting_script_shortcut.take() {
-            self.modal_message = None;
-            if key == "esc" {
-                // Cancelled.
-            } else if let Some(conflict) = self
-                .content_view(coords.view_index)
-                .and_then(|cv| cv.script_shortcut_conflict(&self.keybindings, &coords.name, key))
-            {
-                self.modal_message = Some(format!(
-                    "Shortcut '{}' is already taken by {}!\n\nPress another key for '{}'\nEsc to cancel",
-                    key, conflict, coords.name
-                ));
-                self.awaiting_script_shortcut = Some(coords);
-            } else {
-                let chord = key.to_string();
-                let script_label = coords.name.clone();
-                self.bind_script_shortcut(coords, &chord);
-                self.modal_message =
-                    Some(format!("Script '{}' bound to [{}]", script_label, chord));
-            }
-            self.sync_components();
-            return EditorRequest::None;
-        }
-
-        // Favorite shortcut capture mode.
+        // Favorite shortcut capture mode. The query and script menus record
+        // their chord in the popup itself; this branch only serves the one
+        // path with no popup open — right after the editor saved a new query.
         if let Some(pending) = self.awaiting_favorite_shortcut.take() {
             self.modal_message = None;
             if key == "esc" {
@@ -8960,13 +8903,14 @@ impl App {
                 self.delete_node_script(view_index, pane_id, node_id, script);
                 EditorRequest::None
             }
-            ViewRequest::PromptNodeScriptShortcut {
+            ViewRequest::BindNodeScriptShortcut {
                 view_index,
                 pane_id: _,
                 node_id,
                 script,
+                chord,
             } => {
-                self.prompt_node_script_shortcut(view_index, node_id, script);
+                self.bind_node_script_chord(view_index, node_id, script, chord);
                 EditorRequest::None
             }
             ViewRequest::ClearNodeScriptShortcut {
@@ -9102,25 +9046,23 @@ impl App {
                 self.set_default_content_query(view_index, &name);
                 EditorRequest::None
             }
-            ViewRequest::PromptContentQueryShortcut {
+            ViewRequest::BindContentQueryShortcut {
                 view_index,
                 scope,
                 name,
                 query,
+                chord,
             } => {
                 let kind = self.content_query_kind(view_index, &name);
-                self.save_content_query_body(view_index, &name, &query, kind);
-                self.reload_content_saved_queries(view_index);
-                self.modal_message = Some(format!(
-                    "Press a shortcut key for '{}'\n\nEsc to cancel",
-                    name
-                ));
-                self.awaiting_favorite_shortcut = Some(PendingFavorite {
-                    scope,
-                    name,
-                    query,
-                    kind,
-                });
+                self.bind_favorite_chord(
+                    PendingFavorite {
+                        scope,
+                        name,
+                        query,
+                        kind,
+                    },
+                    &chord,
+                );
                 EditorRequest::None
             }
             ViewRequest::ClearContentQueryShortcut {
@@ -11440,6 +11382,47 @@ impl App {
         self.content_views_indexed()
             .find(|(_, cv)| cv.query_scope == scope)
             .and_then(|(_, cv)| cv.saved_query_shortcut_conflict(&self.keybindings, name, shortcut))
+    }
+
+    /// Bind a chord recorded in the query menu to a saved query: refuse the
+    /// collision, else write body + chord and report the result. The chord
+    /// arrives finished (and may be a sequence), so there is nothing to
+    /// capture here — only to check and to write.
+    fn bind_favorite_chord(&mut self, pending: PendingFavorite, chord: &str) {
+        if let Some(conflict) = self.favorite_shortcut_conflict(&pending.scope, &pending.name, chord)
+        {
+            self.notify_error(format!("'{chord}' is already taken by {conflict}"));
+            return;
+        }
+        let name = pending.name.clone();
+        match self.add_favorite(pending, chord.to_string()) {
+            Ok(()) => self.notify(format!("Query '{name}' bound to [{chord}]")),
+            Err(e) => self.notify_error(format!("Could not bind '{name}': {e}")),
+        }
+    }
+
+    /// Bind a chord recorded in the node-script menu to that script.
+    fn bind_node_script_chord(
+        &mut self,
+        view_index: usize,
+        node_id: String,
+        script: String,
+        chord: String,
+    ) {
+        if self.is_shortcut_taken(&chord) {
+            self.notify_error(format!("Shortcut '{chord}' is already taken"));
+            return;
+        }
+        let label = script.clone();
+        self.bind_node_script_shortcut(
+            NodeScriptCoords {
+                view_index,
+                node_id,
+                script,
+            },
+            &chord,
+        );
+        self.notify(format!("Script '{label}' bound to [{chord}]"));
     }
 
     fn is_shortcut_taken(&self, shortcut: &str) -> bool {

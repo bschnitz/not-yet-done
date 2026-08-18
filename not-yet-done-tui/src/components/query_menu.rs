@@ -16,6 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use tuirealm::component::Component;
 
+use crate::components::key_recorder::RecorderStep;
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
 use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction, QueryMenuAction};
 use crate::ui::theme::Theme;
@@ -47,8 +48,13 @@ pub enum QueryMenuMessage {
     EditExisting { name: String, query: String },
     /// Delete the selected entry from the persistent store.
     Delete { name: String },
-    /// Prompt for a new shortcut for the selected entry.
-    EditShortcut { name: String, query: String },
+    /// Bind `chord` — recorded in the popup itself, so it may be a
+    /// multi-key sequence like `"f f"` — to the selected entry.
+    EditShortcut {
+        name: String,
+        query: String,
+        chord: String,
+    },
     /// Remove the shortcut bound to the selected entry (query kept).
     ClearShortcut { name: String },
     /// Toggle the selected entry as the default query (embedder decides
@@ -73,6 +79,10 @@ pub struct QueryMenuComponent {
     /// query. Set per `open*` call — saved-query menus do, repurposed
     /// menus (e.g. the Postgres script picker) don't.
     set_default_enabled: bool,
+    /// The `(name, query)` a running in-popup shortcut recording binds to,
+    /// pinned when the recording starts so the emitted message can't drift
+    /// with the selection.
+    recording_target: Option<(String, String)>,
 }
 
 impl QueryMenuComponent {
@@ -84,6 +94,7 @@ impl QueryMenuComponent {
             popup_kb: None,
             key_icons: None,
             set_default_enabled: false,
+            recording_target: None,
         }
     }
 
@@ -102,6 +113,7 @@ impl QueryMenuComponent {
 
     pub fn close(&mut self) {
         self.popup = None;
+        self.recording_target = None;
     }
 
     /// Open the menu for saved queries — supports marking a default
@@ -127,6 +139,7 @@ impl QueryMenuComponent {
         set_default_enabled: bool,
     ) {
         self.set_default_enabled = set_default_enabled;
+        self.recording_target = None;
         let items: Vec<PopupItem> = entries
             .iter()
             .map(|e| PopupItem {
@@ -167,6 +180,25 @@ impl QueryMenuComponent {
     ) -> QueryMenuMessage {
         if self.popup.is_none() {
             return QueryMenuMessage::Unhandled;
+        }
+
+        // A running shortcut recording owns every key — including Esc and
+        // Return, which end it — so the menu's own bindings stay recordable.
+        if let Some(step) = self.popup.as_mut().unwrap().feed_recorder(key) {
+            return match step {
+                RecorderStep::Recording => QueryMenuMessage::Handled,
+                RecorderStep::Cancelled => {
+                    self.recording_target = None;
+                    QueryMenuMessage::Handled
+                }
+                RecorderStep::Saved(chord) => match self.recording_target.take() {
+                    Some((name, query)) => {
+                        self.popup = None;
+                        QueryMenuMessage::EditShortcut { name, query, chord }
+                    }
+                    None => QueryMenuMessage::Handled,
+                },
+            };
         }
 
         if kb
@@ -265,14 +297,16 @@ impl QueryMenuComponent {
             .get(&QueryMenuAction::EditShortcut)
             .is_some_and(|b| b.matches(key))
         {
-            let popup = self.popup.as_ref().unwrap();
-            if let Some(item) = popup.selected_item() {
-                let msg = QueryMenuMessage::EditShortcut {
-                    name: item.label.clone(),
-                    query: item.value.clone(),
-                };
-                self.popup = None;
-                return msg;
+            // Record the chord right here instead of handing the capture to
+            // the app: the popup stays open, and the recorder takes whole
+            // sequences (`f f`), not just a single key.
+            let popup = self.popup.as_mut().unwrap();
+            if let Some((name, query)) = popup
+                .selected_item()
+                .map(|i| (i.label.clone(), i.value.clone()))
+            {
+                popup.start_recording(format!("'{name}'"));
+                self.recording_target = Some((name, query));
             }
             return QueryMenuMessage::Handled;
         }
@@ -469,12 +503,38 @@ mod tests {
     }
 
     #[test]
-    fn edit_shortcut_emits_edit_shortcut() {
+    fn edit_shortcut_records_a_chord_in_the_popup() {
         let mut menu = QueryMenuComponent::new(theme(), "T");
         let kb = make_kb();
         menu.open(&entries(), &kb);
-        let msg = menu.handle_key("ctrl+s", &kb);
-        assert!(matches!(msg, QueryMenuMessage::EditShortcut { ref name, .. } if name == "alpha"));
+        // The shortcut key only starts the recording — the popup stays open.
+        assert_eq!(menu.handle_key("ctrl+s", &kb), QueryMenuMessage::Handled);
+        assert!(menu.is_open());
+        // Multi-key sequences are recordable; the keys never reach the filter.
+        assert_eq!(menu.handle_key("f", &kb), QueryMenuMessage::Handled);
+        assert_eq!(menu.handle_key("f", &kb), QueryMenuMessage::Handled);
+        assert_eq!(
+            menu.handle_key("enter", &kb),
+            QueryMenuMessage::EditShortcut {
+                name: "alpha".into(),
+                query: "Q1".into(),
+                chord: "f f".into(),
+            }
+        );
+        assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn esc_cancels_a_recording_without_closing_the_menu() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        menu.handle_key("ctrl+s", &kb);
+        menu.handle_key("g", &kb);
+        assert_eq!(menu.handle_key("esc", &kb), QueryMenuMessage::Handled);
+        assert!(menu.is_open());
+        // The filter is untouched — the recorded keys were swallowed.
+        assert_eq!(menu.handle_key("esc", &kb), QueryMenuMessage::Closed);
     }
 
     #[test]

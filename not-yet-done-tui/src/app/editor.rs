@@ -601,25 +601,6 @@ impl App {
         }
     }
 
-    /// Set up shortcut-capture state for a node script. The next
-    /// non-Esc keypress is bound by [`App::handle_key`]'s capture branch.
-    pub fn prompt_node_script_shortcut(
-        &mut self,
-        view_index: usize,
-        node_id: String,
-        script: String,
-    ) {
-        self.modal_message = Some(format!(
-            "Press a shortcut key for script '{}'\n\nEsc to cancel",
-            script
-        ));
-        self.awaiting_node_script_shortcut = Some(crate::app::NodeScriptCoords {
-            view_index,
-            node_id,
-            script,
-        });
-    }
-
     /// Persist a captured key chord into the `query_shortcut` DB table
     /// for the script identified by `coords`. Called after the user
     /// presses a non-Esc, non-conflicting key while

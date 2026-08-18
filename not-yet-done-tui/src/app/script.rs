@@ -696,23 +696,35 @@ impl App {
                     None => EditorRequest::None,
                 }
             }
-            ScriptMenuMessage::EditShortcut { path: _, label } => {
-                // Arm shortcut-capture: the next keypress (handled by the
-                // capture branch in `App::handle_key`) is persisted as this
-                // script's chord under the level's script scope.
+            ScriptMenuMessage::EditShortcut {
+                path: _,
+                label,
+                chord,
+            } => {
+                // The chord was recorded in the menu itself, so all that is
+                // left is the conflict check and the write under the level's
+                // script scope.
                 let ctx = self.script_menu_ctx.take();
                 let Some(ctx) = ctx else {
                     return EditorRequest::None;
                 };
-                self.modal_message = Some(format!(
-                    "Press a shortcut key for script '{}'\n\nEsc to cancel",
-                    label
-                ));
-                self.awaiting_script_shortcut = Some(crate::app::ScriptShortcutCoords {
-                    view_index: ctx.view_index(),
-                    scope: ctx.shortcut_scope(),
-                    name: label,
-                });
+                let view_index = ctx.view_index();
+                if let Some(conflict) = self
+                    .content_view(view_index)
+                    .and_then(|cv| cv.script_shortcut_conflict(&self.keybindings, &label, &chord))
+                {
+                    self.notify_error(format!("'{chord}' is already taken by {conflict}"));
+                    return EditorRequest::None;
+                }
+                self.bind_script_shortcut(
+                    crate::app::ScriptShortcutCoords {
+                        view_index,
+                        scope: ctx.shortcut_scope(),
+                        name: label.clone(),
+                    },
+                    &chord,
+                );
+                self.notify(format!("Script '{label}' bound to [{chord}]"));
                 EditorRequest::None
             }
             ScriptMenuMessage::EditHook { path, label } => {

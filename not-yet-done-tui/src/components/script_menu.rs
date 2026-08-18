@@ -22,6 +22,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use tuirealm::component::Component;
 
+use crate::components::key_recorder::RecorderStep;
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
 use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction, ScriptMenuAction};
 use crate::ui::theme::Theme;
@@ -56,10 +57,12 @@ pub enum ScriptMenuMessage {
         path: String,
         label: String,
     },
-    /// Ctrl+S on a selected entry — prompt for a key chord to bind to it.
+    /// Ctrl+S on a selected entry — bind `chord`, recorded in the popup
+    /// itself, so it may be a multi-key sequence like `"f f"`.
     EditShortcut {
         path: String,
         label: String,
+        chord: String,
     },
     /// Ctrl+H on a selected entry — pick the automatic trigger that runs it.
     EditHook {
@@ -96,6 +99,10 @@ pub struct ScriptMenuComponent {
     popup: Option<SearchablePopup>,
     popup_kb: Option<KeyBindingSection<PopupAction>>,
     key_icons: Option<KeyIconMap>,
+    /// The `(path, label)` a running in-popup shortcut recording binds to,
+    /// pinned when the recording starts so the emitted message can't drift
+    /// with the selection.
+    recording_target: Option<(String, String)>,
 }
 
 impl ScriptMenuComponent {
@@ -106,6 +113,7 @@ impl ScriptMenuComponent {
             popup: None,
             popup_kb: None,
             key_icons: None,
+            recording_target: None,
         }
     }
 
@@ -121,9 +129,11 @@ impl ScriptMenuComponent {
 
     pub fn close(&mut self) {
         self.popup = None;
+        self.recording_target = None;
     }
 
     pub fn open(&mut self, entries: &[ScriptMenuEntry], kb: &KeyBindingSection<ScriptMenuAction>) {
+        self.recording_target = None;
         let items: Vec<PopupItem> = entries
             .iter()
             .map(|e| PopupItem {
@@ -155,6 +165,25 @@ impl ScriptMenuComponent {
     ) -> ScriptMenuMessage {
         if self.popup.is_none() {
             return ScriptMenuMessage::Unhandled;
+        }
+
+        // A running shortcut recording owns every key — including Esc and
+        // Return, which end it — so the menu's own bindings stay recordable.
+        if let Some(step) = self.popup.as_mut().unwrap().feed_recorder(key) {
+            return match step {
+                RecorderStep::Recording => ScriptMenuMessage::Handled,
+                RecorderStep::Cancelled => {
+                    self.recording_target = None;
+                    ScriptMenuMessage::Handled
+                }
+                RecorderStep::Saved(chord) => match self.recording_target.take() {
+                    Some((path, label)) => {
+                        self.popup = None;
+                        ScriptMenuMessage::EditShortcut { path, label, chord }
+                    }
+                    None => ScriptMenuMessage::Handled,
+                },
+            };
         }
 
         if kb
@@ -217,14 +246,16 @@ impl ScriptMenuComponent {
             .get(&ScriptMenuAction::EditShortcut)
             .is_some_and(|b| b.matches(key))
         {
-            let popup = self.popup.as_ref().unwrap();
-            if let Some(item) = popup.selected_item() {
-                let msg = ScriptMenuMessage::EditShortcut {
-                    path: item.value.clone(),
-                    label: item.label.clone(),
-                };
-                self.popup = None;
-                return msg;
+            // Record the chord right here instead of handing the capture to
+            // the app: the popup stays open, and the recorder takes whole
+            // sequences (`f f`), not just a single key.
+            let popup = self.popup.as_mut().unwrap();
+            if let Some((path, label)) = popup
+                .selected_item()
+                .map(|i| (i.value.clone(), i.label.clone()))
+            {
+                popup.start_recording(format!("'{label}'"));
+                self.recording_target = Some((path, label));
             }
             return ScriptMenuMessage::Handled;
         }
@@ -383,15 +414,37 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_emits_edit_shortcut() {
+    fn ctrl_s_records_a_chord_in_the_popup() {
         let mut menu = ScriptMenuComponent::new(theme(), "T");
         let kb = make_kb();
         menu.open(&entries(), &kb);
-        let msg = menu.handle_key("ctrl+s", &kb);
-        assert!(
-            matches!(msg, ScriptMenuMessage::EditShortcut { ref path, .. } if path == "/x/alpha.py")
+        // The shortcut key only starts the recording — the popup stays open.
+        assert_eq!(menu.handle_key("ctrl+s", &kb), ScriptMenuMessage::Handled);
+        assert!(menu.is_open());
+        // Multi-key sequences are recordable; the keys never reach the filter.
+        menu.handle_key("ctrl+k", &kb);
+        menu.handle_key("l", &kb);
+        assert_eq!(
+            menu.handle_key("enter", &kb),
+            ScriptMenuMessage::EditShortcut {
+                path: "/x/alpha.py".into(),
+                label: "alpha.py".into(),
+                chord: "ctrl+k l".into(),
+            }
         );
         assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn esc_cancels_a_recording_without_closing_the_menu() {
+        let mut menu = ScriptMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        menu.handle_key("ctrl+s", &kb);
+        menu.handle_key("g", &kb);
+        assert_eq!(menu.handle_key("esc", &kb), ScriptMenuMessage::Handled);
+        assert!(menu.is_open());
+        assert_eq!(menu.handle_key("esc", &kb), ScriptMenuMessage::Closed);
     }
 
     #[test]
@@ -400,7 +453,9 @@ mod tests {
         let kb = make_kb();
         menu.open(&entries(), &kb);
         let msg = menu.handle_key("ctrl+h", &kb);
-        assert!(matches!(msg, ScriptMenuMessage::EditHook { ref path, .. } if path == "/x/alpha.py"));
+        assert!(
+            matches!(msg, ScriptMenuMessage::EditHook { ref path, .. } if path == "/x/alpha.py")
+        );
         assert!(!menu.is_open());
     }
 
