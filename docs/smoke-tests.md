@@ -4954,7 +4954,7 @@ is meant to show that they no longer get in each other's way:
 | ---------------- | --------------------------------- | --------- |
 | Node scripts     | SQL, belongs to the table/view    | `Q` / `q` |
 | DB scripts       | SQL, belongs to the database file | `X`/Enter |
-| **View scripts** | any program, JSON on stdin        | `x`       |
+| **View scripts** | any program, payload as `argv[1]` | `x`       |
 
 `x` now sits on **every** row level (tree `Table`, tree `View`, and in the flat
 `tables`/`views` listings). Because all of these levels share the same node
@@ -5256,9 +5256,9 @@ writes its payload out:
 #!/usr/bin/env python3
 # mode: commands
 # scope: table
-import json, os, sys
-with open("/tmp/nyd-scope.json", "w") as f:
-    f.write(sys.argv[1] if len(sys.argv) > 1 else "{}")
+import json, os, shutil, sys
+# argv[1] is the *path* to the payload file, not the JSON itself.
+shutil.copy(sys.argv[1], "/tmp/nyd-scope.json")
 with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
     json.dump({"commands": []}, f)
 ```

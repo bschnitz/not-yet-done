@@ -2198,7 +2198,7 @@ The view YAML knows the following generic action types:
 | `navigate`     | switch into the child node level                  | ❌         |
 | `open_url`     | open a URL from the metadata in the browser       | ❌         |
 | `download`     | `node.content().read()` → save to a file          | ❌         |
-| `script`       | start an external script with node JSON on stdin  | ❌         |
+| `script`       | run an external script, payload file as `argv[1]` | ❌         |
 | `tag`          | tag management menu for the selected task         | ✅ (modal) |
 | `custom`       | adapter-specific action (via `custom_action`)     | ❌         |
 | `delete`       | delete the node (with confirmation)               | ❌         |
@@ -2334,16 +2334,30 @@ actions:
 
 A `script` action collects the scripts from the directory conventional for tab +
 view level and offers them as a selection menu. The chosen script is started as
-a foreign process and gets a **JSON on stdin**. Mutating scripts
-(non-interactive) trigger a pane reload afterwards.
+a foreign process. Mutating scripts (non-interactive) trigger a pane reload
+afterwards.
 
-**`scope:` — what the script gets on stdin.** The default is `node`:
+**The payload is a file, and its path is the script's first argument.** The
+engine writes the JSON to a temp file and passes that path as `argv[1]` — it
+does **not** pipe anything to stdin, so a script that parses `argv[1]` as JSON
+text fails on the very first character. In Python:
+
+```python
+with open(sys.argv[1]) as f:
+    payload = json.load(f)
+```
+
+The same path fills the `{json_file}` placeholder in an interactive script's
+command line. Every run path — menu, chord, reload hook — hands it over the same
+way.
+
+**`scope:` — what is in that payload.** The default is `node`:
 
 ```yaml
 - { name: script, key: x, type: script } # scope: node (default)
 ```
 
-| `scope`        | stdin JSON                                                                                                                                             |
+| `scope`        | payload JSON                                                                                                                                           |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — the **one** selected node                                                                        |
 | `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **all** currently filtered row ids + the date bounds of the active query         |
@@ -2364,7 +2378,7 @@ engine collects:
   active saved query (relative specifications such as `last month` are resolved
   at run time, RFC 3339; `null` if there is no bound).
 
-For backwards compatibility the stdin key is named `tracking_ids` — the engine
+For backwards compatibility the payload key is named `tracking_ids` — the engine
 path itself is generic, so that the historical trackings scripts
 (`daily_report.py`, `hours_report.py`, …) run unchanged through the adapter tab.
 
