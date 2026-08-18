@@ -4455,6 +4455,12 @@ of both bars.
       (`[Z] dismiss  [f10] open`) and follows a rebind of the two actions.
 - [ ] A `:config` reload (saving tui.yaml) loses neither the open messages nor
       the log.
+- [ ] Rebind both to a **chord** (`show_notifications: z l`,
+      `dismiss_notifications: z c`) and reload: `z l` opens the log in a
+      `pause_tui` editor profile just like `f10` did. This is the regression —
+      the chord branch used to swallow the editor request, so every
+      editor-opening global action was a silent no-op on a chord while the
+      same action worked on a single key.
 
 ## The builtin editor (`builtin: true`, the `vimrealm` crate)
 
@@ -5210,10 +5216,10 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
 ```
 
 - [ ] `:script` → cursor on the script → `ctrl+h` opens the picker `Hook ·
-  <name>` with `none` (marked) and `reload`. Picking `reload` reports
+<name>` with `none` (marked) and `reload`. Picking `reload` reports
       "Script '…' now runs after the view's rows (re)loaded".
 - [ ] The menu entry now carries both bindings as a suffix, e.g. `[x]
-  [reload]`; a script without a chord shows only `[reload]`.
+[reload]`; a script without a chord shows only `[reload]`.
 - [ ] `r` on the view: the log grows by **exactly one** line per reload — the
       `reload` the script itself emits does **not** fire the hook again.
       Watch it a few seconds; the count must stand still afterwards.
