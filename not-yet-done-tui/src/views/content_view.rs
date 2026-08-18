@@ -11,7 +11,7 @@
 //! recursive `Leaf | Branch` structure. `active_subtab` selects the
 //! tree; the tree's own `focus` selects the focused leaf.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1161,6 +1161,20 @@ pub struct ContentView {
     /// state only while this is [`LoadBannerRoute::Tab`]; the other two routes
     /// are the App's business, which owns the cross-tab surface.
     load_banner_route: LoadBannerRoute,
+    /// How many table loads the App currently has out for this tab, counted
+    /// by [`Self::begin_load`] / [`Self::end_load`]. Drives the frontend's
+    /// own load banner, which is what every adapter gets — only three of them
+    /// publish [`AdapterStatus::Busy`] themselves.
+    ///
+    /// A [`Cell`] rather than an ordinary field because the App spawns loads
+    /// from `&self` methods; the count is bookkeeping about the view, not a
+    /// change to what it shows.
+    loads_in_flight: Cell<u32>,
+    /// Wall-clock start of the *oldest* load still in flight — the instant the
+    /// banner's second counter runs from. Only meaningful while
+    /// `loads_in_flight > 0`; a load that starts while another is still out
+    /// does not restart the clock, so the number never jumps backwards.
+    load_started_at_unix_ms: Cell<u64>,
     /// Tab id within the App's `content_views` vector. Set by App
     /// after construction. Used as the `view_index` field on the
     /// outgoing `ViewRequest`s.
@@ -7309,6 +7323,8 @@ impl ContentView {
             // Without an override this is the config default; App replaces it
             // with the user's `notifications.load_banner` when it wires the view.
             load_banner_route: config.tab.load_banner.unwrap_or_default(),
+            loads_in_flight: Cell::new(0),
+            load_started_at_unix_ms: Cell::new(0),
             view_index: 0, // set by App after construction
             adapter,
             view_defs: config.views.clone(),
@@ -9618,6 +9634,62 @@ impl ContentView {
         self.load_banner_route
     }
 
+    /// Count one table load into this tab's banner. The App calls this as it
+    /// spawns a root load, a drill-down or a subtree fetch, and pairs it with
+    /// [`Self::end_load`] when the result lands.
+    ///
+    /// The clock starts with the *first* concurrent load: a subtree fetch that
+    /// joins a root load already in flight extends the same banner instead of
+    /// resetting its counter.
+    pub fn begin_load(&self) {
+        if self.loads_in_flight.get() == 0 {
+            self.load_started_at_unix_ms.set(now_unix_ms());
+        }
+        self.loads_in_flight.set(self.loads_in_flight.get() + 1);
+    }
+
+    /// Drop one load from the count. Saturating on purpose: a result that
+    /// arrives for a view rebuilt by a config reload (its counter back at
+    /// zero) must not wrap the count into a banner that never clears.
+    pub fn end_load(&self) {
+        self.loads_in_flight
+            .set(self.loads_in_flight.get().saturating_sub(1));
+    }
+
+    /// True while this tab has a banner whose text advances with wall-clock
+    /// time — an adapter `Busy` or a load the frontend is counting itself.
+    /// The main loop polls this to keep the second counter ticking when
+    /// nothing else would repaint.
+    pub fn has_live_load_banner(&self) -> bool {
+        self.is_busy() || self.loads_in_flight.get() > 0
+    }
+
+    /// The banner for a load the *frontend* knows about, as opposed to one the
+    /// adapter announced. The App counts its own in-flight fetches per tab, so
+    /// every adapter gets a progress line — not just the three that publish
+    /// [`AdapterStatus::Busy`] themselves.
+    ///
+    /// Indeterminate by nature: the App knows a request is out, not how far
+    /// along it is and not what deadline it runs under. The elapsed seconds
+    /// are the whole cue, which is why this passes `timeout_secs: 0` and no
+    /// progress fraction to the shared formatter.
+    ///
+    /// Yields to a real `Busy` — an adapter reporting its own label, timeout
+    /// and percentage says strictly more than this can.
+    fn generic_load_banner(&self) -> Option<LoadBanner> {
+        if self.loads_in_flight.get() == 0 || self.is_busy() {
+            return None;
+        }
+        let started_at_unix_ms = self.load_started_at_unix_ms.get();
+        if elapsed_ms(started_at_unix_ms) < GENERIC_LOAD_BANNER_DELAY_MS {
+            return None;
+        }
+        Some(LoadBanner {
+            text: busy_banner(GENERIC_LOAD_LABEL, started_at_unix_ms, 0, None),
+            started_at_unix_ms,
+        })
+    }
+
     /// This tab's load banner for the *global* surface, or `None` when the
     /// tab is not loading or does not route there. The text carries no tab
     /// name — the caller adds it, since only it knows whether the surface
@@ -9636,7 +9708,9 @@ impl ContentView {
                 text: busy_banner(label, *started_at_unix_ms, *timeout_secs, *progress),
                 started_at_unix_ms: *started_at_unix_ms,
             }),
-            _ => None,
+            // No adapter-announced load — the frontend's own count still may
+            // have one, and it routes exactly the same way.
+            _ => self.generic_load_banner(),
         }
     }
 
@@ -9651,8 +9725,9 @@ impl ContentView {
     /// Precedence (top → bottom): adapter init error, Connecting /
     /// NeedsCreds / Failed auth states, in-flight pane retry
     /// (combined with adapter Busy countdown when both apply), bare
-    /// adapter Busy, `manual_connect` not-yet-loaded hint, sticky
-    /// `fetch_error`.
+    /// adapter Busy, the frontend's own load counter
+    /// ([`Self::generic_load_banner`]), `manual_connect` not-yet-loaded
+    /// hint, sticky `fetch_error`.
     ///
     /// Only the `Busy` part is routable ([`ContentView::load_banner_route`]) —
     /// everything else here is a state the user must act on *in this tab*, so
@@ -9701,6 +9776,15 @@ impl ContentView {
                         "Retrying ({}/{}): {}",
                         rs.attempt, rs.max_attempts, rs.last_error
                     ));
+                }
+                // Ahead of both lines below on purpose. "Press r to connect"
+                // is exactly wrong while that load is already running, and a
+                // fetch error from the previous attempt is stale the moment a
+                // new one is out.
+                if self.load_banner_route == LoadBannerRoute::Tab {
+                    if let Some(banner) = self.generic_load_banner() {
+                        return Some(banner.text);
+                    }
                 }
                 if let Some(banner) = self.manual_connect_banner() {
                     return Some(banner);
@@ -12711,12 +12795,37 @@ pub fn collapsed_load_banner(count: usize, oldest_started_at_unix_ms: u64) -> St
 /// Whole seconds since a wall-clock instant, clamped at 0 if the clock has
 /// gone backwards (NTP step, suspend) — a giant number would read as a bug.
 fn elapsed_secs(started_at_unix_ms: u64) -> u64 {
-    let now_ms = std::time::SystemTime::now()
+    elapsed_ms(started_at_unix_ms) / 1000
+}
+
+/// Milliseconds since a wall-clock instant, clamped at 0 like
+/// [`elapsed_secs`]. Separate because the load banner's grace period is
+/// shorter than the counter's resolution.
+fn elapsed_ms(started_at_unix_ms: u64) -> u64 {
+    now_unix_ms().saturating_sub(started_at_unix_ms)
+}
+
+/// Wall-clock now, in the same unit the [`AdapterStatus::Busy`] timestamps
+/// use — so the frontend's own load banner and an adapter's are measured
+/// against one clock.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(started_at_unix_ms);
-    now_ms.saturating_sub(started_at_unix_ms) / 1000
+        .unwrap_or(0)
 }
+
+/// How long a load must run before the frontend's own banner appears. A local
+/// tab (tasks, sqlite) is usually done inside a frame or two, and a line that
+/// flashes up and vanishes reads as a glitch rather than as progress. Adapters
+/// that publish their own `Busy` are unaffected — they decide when to speak.
+const GENERIC_LOAD_BANNER_DELAY_MS: u64 = 300;
+
+/// Wording of the frontend's own load banner. Deliberately says nothing about
+/// *what* is being loaded: the App knows only that a request is out, and a
+/// made-up specific label would be worse than an honest generic one. An
+/// adapter with something better to say publishes `Busy` and wins.
+const GENERIC_LOAD_LABEL: &str = "Loading";
 
 fn busy_banner(
     label: &str,
@@ -19504,6 +19613,135 @@ mod tests {
                 .global_load_banner()
                 .is_none()
         );
+    }
+
+    /// Helper: a view with one frontend-counted load in flight, started
+    /// `ms_ago` milliseconds ago and routed as given.
+    fn loading_view(route: LoadBannerRoute, ms_ago: u64) -> ContentView {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_load_banner_default(route);
+        view.begin_load();
+        view.load_started_at_unix_ms
+            .set(now_unix_ms().saturating_sub(ms_ago));
+        view
+    }
+
+    #[test]
+    fn a_counted_load_banners_after_the_grace_period() {
+        // Just started: nothing yet — a line that flashes up and vanishes on
+        // a fast local tab reads as a glitch, not as progress.
+        assert!(
+            loading_view(LoadBannerRoute::Tab, 0)
+                .auth_status_banner()
+                .is_none(),
+            "inside the grace period the banner stays silent"
+        );
+
+        let banner = loading_view(LoadBannerRoute::Tab, 2_000)
+            .auth_status_banner()
+            .expect("a load past the grace period banners");
+        assert!(banner.contains("Loading"), "got: {banner}");
+        assert!(
+            banner.contains("(2s)"),
+            "the second counter is the whole cue, got: {banner}"
+        );
+    }
+
+    #[test]
+    fn an_adapter_busy_beats_the_frontends_own_counter() {
+        let mut view = loading_view(LoadBannerRoute::Tab, 2_000);
+        view.set_auth_status(AdapterStatus::Busy {
+            label: "Running query".into(),
+            started_at_unix_ms: 0,
+            timeout_secs: 7,
+            progress: None,
+        });
+        let banner = view.auth_status_banner().expect("Busy banners");
+        assert!(
+            banner.contains("Running query"),
+            "an adapter that names its work says more than we can, got: {banner}"
+        );
+        assert!(
+            view.generic_load_banner().is_none(),
+            "and the generic line must not double up behind it"
+        );
+    }
+
+    #[test]
+    fn the_counted_banner_clears_when_the_result_lands() {
+        let view = loading_view(LoadBannerRoute::Tab, 2_000);
+        view.end_load();
+        assert!(view.auth_status_banner().is_none());
+
+        // Unpaired ends saturate instead of wrapping: a result for a view that
+        // a config reload rebuilt must not pin the banner forever.
+        view.end_load();
+        view.begin_load();
+        view.load_started_at_unix_ms
+            .set(now_unix_ms().saturating_sub(2_000));
+        assert!(
+            view.auth_status_banner().is_some(),
+            "one begin after two ends is one load, not a negative count"
+        );
+    }
+
+    #[test]
+    fn overlapping_loads_share_the_older_clock() {
+        // An eager tab fires the root list and the subtree fetch together.
+        let view = loading_view(LoadBannerRoute::Tab, 5_000);
+        view.begin_load();
+        let banner = view.auth_status_banner().expect("still loading");
+        assert!(
+            banner.contains("(5s)"),
+            "the counter runs from the oldest load, got: {banner}"
+        );
+        // …and only the last one to land clears the line.
+        view.end_load();
+        assert!(view.auth_status_banner().is_some());
+        view.end_load();
+        assert!(view.auth_status_banner().is_none());
+    }
+
+    #[test]
+    fn a_counted_load_routes_like_an_adapter_busy() {
+        let global = loading_view(LoadBannerRoute::Global, 2_000);
+        assert!(
+            global.auth_status_banner().is_none(),
+            "routed away, so not on the tab's own line"
+        );
+        assert!(
+            global.global_load_banner().is_some(),
+            "the App's shared slot gets it instead"
+        );
+
+        let off = loading_view(LoadBannerRoute::Off, 2_000);
+        assert!(off.auth_status_banner().is_none());
+        assert!(off.global_load_banner().is_none(), "`off` means nowhere");
+    }
+
+    #[test]
+    fn loading_beats_the_manual_connect_hint() {
+        let mut view = loading_view(LoadBannerRoute::Tab, 2_000);
+        view.manual_connect = true;
+        let banner = view.auth_status_banner().expect("banner while loading");
+        assert!(
+            banner.contains("Loading"),
+            "telling the user to press the connect key while that very load \
+             is running is exactly wrong, got: {banner}"
+        );
+    }
+
+    #[test]
+    fn a_counted_load_keeps_the_second_counter_ticking() {
+        let view = loading_view(LoadBannerRoute::Tab, 0);
+        assert!(
+            view.has_live_load_banner(),
+            "the main loop must keep repainting, grace period included — \
+             otherwise the banner appears late and the seconds jump"
+        );
+        view.end_load();
+        assert!(!view.has_live_load_banner());
     }
 
     #[test]

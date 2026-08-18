@@ -1153,6 +1153,35 @@ bar instead of the top strip, exactly as a prominent `notify` action does.
 Only the progress line is routed. Errors, retries and login prompts stay in the
 tab they happened in — they name a place the user has to go.
 
+**Every tab gets the line, whatever its adapter does.** There are two sources,
+and the richer one wins:
+
+| Source                                                               | Renders                       |
+| -------------------------------------------------------------------- | ----------------------------- |
+| The engine's own count of the fetches it has out for that tab        | `Loading… (3s)`               |
+| An adapter that publishes its state (Postgres, SQLite, the calendar) | `Loading calendar… 40 % (3s)` |
+
+The engine knows a request is out — it spawned it — but not what the backend is
+doing, how far along it is, or what deadline it runs under. So its own line is
+honestly indeterminate: a generic label and the elapsed seconds, nothing
+invented. An adapter that reports its own label, timeout countdown and progress
+fraction says strictly more, so its state replaces the generic line rather than
+stacking with it. Adding that to an adapter is therefore an improvement, never
+a prerequisite: a tab whose adapter says nothing still tells the user that it is
+working and for how long.
+
+The engine's line waits a moment (300 ms) before it appears. A local tab is
+usually finished inside a frame or two, and a line that flashes up and vanishes
+reads as a glitch rather than as progress. Counted are the fetches that build a
+table: the level load behind a reload, a drill-down into a child level, and the
+eager subtree fetch. Lazily expanding a single tree node is not — it has its own
+inline marker and does not make the tab as a whole busy.
+
+While loading, the line also outranks the `manual_connect` hint and the previous
+attempt's error: telling the user to press the connect key while that very load
+is running, or showing an error a running fetch may be about to replace, is
+worse than saying nothing.
+
 #### The `deleted` metadata field — soft-deleted rows dimmed
 
 An adapter that keeps deleted records around as context (instead of removing

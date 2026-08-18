@@ -2295,6 +2295,10 @@ impl App {
         // may have caused it is still on the stack.
         let hook_depth = self.load_hook_depth;
         let tx = self.load_tx.clone();
+        // Past every early return: the banner counts loads that actually go
+        // out. Cleared in the `ContentItems` handler, which both arms below
+        // reach — including the failing one.
+        cv.begin_load();
         tokio::spawn(async move {
             // Hard reload: let the adapter tear down in-flight work and caches
             // first, so the list below runs against a clean slate. No-op for
@@ -2440,6 +2444,9 @@ impl App {
             .map(|v| v.retries)
             .unwrap_or(0);
         let tx = self.load_tx.clone();
+        // Counted like the root load; cleared in the `Subtree` handler. An
+        // eager tab fires both at once, and the banner spans the pair.
+        cv.begin_load();
         tokio::spawn(async move {
             let result = run_with_retries(retries, &tx, view_index, pane_id, || {
                 let adapter = Arc::clone(&adapter);
@@ -3464,6 +3471,9 @@ impl App {
         // time and travels with the message.
         let hook_depth = self.load_hook_depth;
         let tx = self.load_tx.clone();
+        // Drilling into a level is a fetch like any other — a slow child list
+        // should say so rather than leave the pane looking frozen.
+        cv.begin_load();
         tokio::spawn(async move {
             let result = run_with_retries(retries, &tx, view_index, pane_id, || {
                 let adapter = Arc::clone(&adapter);
@@ -4125,6 +4135,12 @@ impl App {
                     error,
                     hook_depth,
                 } => {
+                    // Before anything that can fail or return early: the load
+                    // is over either way, and a counter left standing would
+                    // pin the banner for the rest of the session.
+                    if let Some(cv) = self.content_view(view_index) {
+                        cv.end_load();
+                    }
                     if let Some(err) = error.as_ref() {
                         not_yet_done_content::http_log::log_error("content_load", err);
                         self.last_error = Some(err.clone());
@@ -4265,6 +4281,7 @@ impl App {
                     result,
                 } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
+                        cv.end_load();
                         if let Some(pane) = cv.find_pane_mut(pane_id) {
                             pane.retry_state = None;
                         }
@@ -12064,13 +12081,14 @@ impl App {
         true
     }
 
-    /// True while any content adapter is in a `Busy` state whose banner is
-    /// actually shown — the only banner whose text advances purely with
-    /// wall-clock time. A tab with `load_banner: off` has nothing to repaint,
-    /// so it must not keep the loop awake for a second counter nobody sees.
+    /// True while any tab shows a load banner whose text advances purely with
+    /// wall-clock time — an adapter `Busy` or a load this App is counting
+    /// itself. A tab with `load_banner: off` has nothing to repaint, so it
+    /// must not keep the loop awake for a second counter nobody sees.
     fn has_live_banner(&self) -> bool {
-        self.content_views_indexed()
-            .any(|(_, cv)| cv.is_busy() && cv.load_banner_route() != LoadBannerRoute::Off)
+        self.content_views_indexed().any(|(_, cv)| {
+            cv.has_live_load_banner() && cv.load_banner_route() != LoadBannerRoute::Off
+        })
     }
 
     /// Resolve where this view's load banner goes: its own `tab.load_banner`
