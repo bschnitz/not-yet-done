@@ -477,14 +477,16 @@ pub enum ViewRequest {
         node_id: String,
         script: String,
     },
-    /// Prompt the user for a key chord to bind to a node script; the
-    /// captured key is written to the `query_shortcut` table under the
-    /// node's scope.
-    PromptNodeScriptShortcut {
+    /// Bind a key chord to a node script. The chord was recorded in the
+    /// script menu itself (so it may be a sequence like `"f f"`); the App
+    /// only checks it for conflicts and writes it to the `query_shortcut`
+    /// table under the node's scope.
+    BindNodeScriptShortcut {
         view_index: usize,
         pane_id: PaneId,
         node_id: String,
         script: String,
+        chord: String,
     },
     /// Remove the key chord bound to a node script (script kept).
     ClearNodeScriptShortcut {
@@ -570,12 +572,15 @@ pub enum ViewRequest {
         scope: String,
         name: String,
     },
-    /// Prompt the user for a shortcut key for a content query.
-    PromptContentQueryShortcut {
+    /// Bind a key chord to a content query. The chord was recorded in the
+    /// query menu itself (so it may be a sequence like `"f f"`); the App
+    /// only checks it for conflicts and writes it.
+    BindContentQueryShortcut {
         view_index: usize,
         scope: String,
         name: String,
         query: String,
+        chord: String,
     },
     /// Remove the shortcut key bound to a content query (query kept).
     ClearContentQueryShortcut {

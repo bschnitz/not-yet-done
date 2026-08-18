@@ -8872,14 +8872,18 @@ impl ContentView {
                     name,
                 }))
             }
-            (QueryMenuMode::SavedQueries, QueryMenuMessage::EditShortcut { name, query }) => {
+            (
+                QueryMenuMode::SavedQueries,
+                QueryMenuMessage::EditShortcut { name, query, chord },
+            ) => {
                 let scope = self.query_scope.clone();
                 Some(SubViewMessage::Request(
-                    ViewRequest::PromptContentQueryShortcut {
+                    ViewRequest::BindContentQueryShortcut {
                         view_index,
                         scope,
                         name,
                         query,
+                        chord,
                     },
                 ))
             }
@@ -8933,13 +8937,14 @@ impl ContentView {
             }
             (
                 QueryMenuMode::NodeScripts { node_id },
-                QueryMenuMessage::EditShortcut { name, .. },
+                QueryMenuMessage::EditShortcut { name, chord, .. },
             ) => Some(SubViewMessage::Request(
-                ViewRequest::PromptNodeScriptShortcut {
+                ViewRequest::BindNodeScriptShortcut {
                     view_index,
                     pane_id,
                     node_id,
                     script: name,
+                    chord,
                 },
             )),
             (QueryMenuMode::NodeScripts { node_id }, QueryMenuMessage::ClearShortcut { name }) => {

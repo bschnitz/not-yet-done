@@ -20,6 +20,9 @@ use tuirealm::state::{State, StateValue};
 
 use not_yet_done_ratatui::LeaderList;
 
+use crate::components::key_recorder::{
+    KeyRecorder, RECORDING_HINTS, RecorderStep, recording_heading,
+};
 use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction};
 use crate::ui::panel_chrome::{PanelChrome, panel_leader_style};
 use crate::ui::theme::Theme;
@@ -64,6 +67,13 @@ pub struct SearchablePopup {
     /// Icon map used when rendering intrinsic hints; if `None`, raw key
     /// strings are shown.
     key_icons: Option<KeyIconMap>,
+    /// Live shortcut recording, if the embedder started one (the query and
+    /// script menus bind a chord to the selected entry without closing).
+    /// While `Some`, the heading and hints turn into the recorder's, and the
+    /// embedder feeds every key through [`Self::feed_recorder`].
+    recorder: Option<KeyRecorder>,
+    /// What the running recording binds, shown dim in the recorder heading.
+    record_subject: String,
 }
 
 impl SearchablePopup {
@@ -84,6 +94,8 @@ impl SearchablePopup {
             hints: Vec::new(),
             popup_kb: None,
             key_icons: None,
+            recorder: None,
+            record_subject: String::new(),
         }
     }
 
@@ -176,6 +188,33 @@ impl SearchablePopup {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Start recording a key chord for `subject` (the entry being bound).
+    /// The popup stays open and keeps showing its list; only the heading and
+    /// the hint line switch to the recorder's. The chord replaces whatever the
+    /// subject is bound to, so the recording always runs in overwrite mode —
+    /// the DB-stored shortcuts hold exactly one binding.
+    pub fn start_recording(&mut self, subject: impl Into<String>) {
+        self.recorder = Some(KeyRecorder::new(true));
+        self.record_subject = subject.into();
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recorder.is_some()
+    }
+
+    /// Feed a key into a running recording. Returns `None` when nothing is
+    /// being recorded, so embedders can call this first in their key handler
+    /// and fall through to normal dispatch. A finished recording (saved or
+    /// cancelled) clears itself.
+    pub fn feed_recorder(&mut self, key: &str) -> Option<RecorderStep> {
+        let step = self.recorder.as_mut()?.feed(key);
+        if !matches!(step, RecorderStep::Recording) {
+            self.recorder = None;
+            self.record_subject.clear();
+        }
+        Some(step)
     }
 
     /// Handle list navigation + search-text input.
@@ -276,20 +315,28 @@ impl Component for SearchablePopup {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let t = Arc::clone(&self.theme);
 
-        // Intrinsic hints render in front of embedder-supplied ones.
+        // While recording, the recorder owns the heading and the hint line —
+        // the list stays visible underneath, exactly as in the shortcut menu.
         let intrinsic = self.intrinsic_hints();
-        let hints: Vec<(&str, &str)> = intrinsic
-            .iter()
-            .chain(self.hints.iter())
-            .map(|(k, d)| (k.as_str(), d.as_str()))
-            .collect();
+        let hints: Vec<(&str, &str)> = if self.recorder.is_some() {
+            RECORDING_HINTS.to_vec()
+        } else {
+            intrinsic
+                .iter()
+                .chain(self.hints.iter())
+                .map(|(k, d)| (k.as_str(), d.as_str()))
+                .collect()
+        };
 
-        let heading = Line::from(vec![Span::styled(
-            format!("\u{2726} {}", self.title),
-            Style::default()
-                .fg(t.form_accent())
-                .add_modifier(Modifier::BOLD),
-        )]);
+        let heading = match self.recorder.as_ref() {
+            Some(rec) => recording_heading(rec, &self.record_subject, &t),
+            None => Line::from(vec![Span::styled(
+                format!("\u{2726} {}", self.title),
+                Style::default()
+                    .fg(t.form_accent())
+                    .add_modifier(Modifier::BOLD),
+            )]),
+        };
 
         // Body rows: the visible entries plus the filter prompt and the
         // status line. Long lists are capped at 60% of the available height

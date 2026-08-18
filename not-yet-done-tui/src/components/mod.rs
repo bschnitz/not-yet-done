@@ -8,6 +8,8 @@ pub mod cmdline;
 pub mod column_config_popup;
 pub mod content_form_popup;
 pub mod data_table;
+pub mod key_conflict;
+pub mod key_recorder;
 pub mod notification_bar;
 pub mod option_menu;
 pub mod query_error_bar;
