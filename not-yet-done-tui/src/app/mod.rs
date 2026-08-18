@@ -4967,9 +4967,15 @@ impl App {
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
             if let Some(action) = global_chord {
-                let _ = self.handle_global_action(action);
+                // Hand the request on instead of swallowing it: an action that
+                // opens an editor (`show_notifications`, `show_last_error`)
+                // only reaches the terminal because the main loop acts on the
+                // returned `Launch`/`Inline`. Dropping it here made every such
+                // action a silent no-op the moment it was bound to a chord
+                // rather than a single key.
+                let request = self.handle_global_action(action);
                 self.sync_components();
-                return EditorRequest::None;
+                return request;
             }
             let common_chord = self
                 .keybindings
@@ -4979,9 +4985,9 @@ impl App {
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
             if let Some(action) = common_chord {
-                let _ = self.handle_common_action(action);
+                let request = self.handle_common_action(action);
                 self.sync_components();
-                return EditorRequest::None;
+                return request;
             }
             // Content-tab chords (e.g. `zm` → TreeCollapseAll). Route
             // through the active ContentView's central dispatcher so the
@@ -4996,18 +5002,19 @@ impl App {
                 .map(|(a, _)| a.clone());
             if let Some(action) = content_chord {
                 let Tab::Content(idx) = self.active_tab;
+                let mut request = EditorRequest::None;
                 if let Some(cv) = self.content_view_mut(idx) {
                     let msg = cv.dispatch_content_action(action);
                     match msg {
                         SubViewMessage::Unhandled => {}
                         other => {
-                            let _ = self.process_sub_view_message(other);
+                            request = self.process_sub_view_message(other);
                         }
                     }
                     self.drain_content_cursor_closes(idx);
                 }
                 self.sync_components();
-                return EditorRequest::None;
+                return request;
             }
             // Content-tab YAML `actions:` chords (e.g. `al` → new
             // channel). These keys live in the ContentView's pane/view
@@ -5022,10 +5029,10 @@ impl App {
                     .map(|cv| cv.handle_key(&chord))
                     .filter(|m| !matches!(m, SubViewMessage::Unhandled));
                 if let Some(msg) = msg {
-                    let _ = self.process_sub_view_message(msg);
+                    let request = self.process_sub_view_message(msg);
                     self.drain_content_cursor_closes(idx);
                     self.sync_components();
-                    return EditorRequest::None;
+                    return request;
                 }
             }
             // Chord matches a user-defined cmdline shortcut?
