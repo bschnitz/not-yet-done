@@ -32,13 +32,15 @@
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use tuirealm::component::Component;
 
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
 use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction, TagMenuAction};
-use crate::ui::popup_utils::render_popup_frame;
+use crate::ui::panel_chrome::PanelChrome;
 use crate::ui::theme::Theme;
 
 /// One selectable option. `value` is the adapter's stable id (handed back on
@@ -331,17 +333,31 @@ impl OptionMenuComponent {
         if let Some(popup) = &mut self.popup {
             popup.view(frame, area);
         }
-        // Sub-flows render a small box on top of the (frozen) menu.
+        // Sub-flows render a small panel on top of the (frozen) menu.
         if let Some(prompt) = &self.prompt {
-            let body = format!("{}▏", prompt.buffer);
-            self.render_box(frame, area, &prompt.title, &body, self.theme.text_high());
+            let body = format!("{}\u{258f}", prompt.buffer);
+            self.render_box(
+                frame,
+                area,
+                &prompt.title,
+                &body,
+                self.theme.form_text(),
+                &[("\u{21b5}", "save"), ("Esc", "cancel")],
+            );
         } else if let Some((_, label)) = &self.confirm_delete {
-            let body = format!("Delete '{label}'?  (y/n)");
-            self.render_box(frame, area, "Confirm", &body, self.theme.error());
+            let body = format!("Delete '{label}'?");
+            self.render_box(
+                frame,
+                area,
+                "Confirm",
+                &body,
+                self.theme.error(),
+                &[("y", "delete"), ("n/Esc", "cancel")],
+            );
         }
     }
 
-    /// Render a small centred box with a single body line — used for the
+    /// Render a small centred panel with a single body line — used for the
     /// create/rename prompt and the delete confirmation.
     fn render_box(
         &self,
@@ -350,33 +366,30 @@ impl OptionMenuComponent {
         title: &str,
         body: &str,
         body_fg: ratatui::style::Color,
+        hints: &[(&'static str, &'static str)],
     ) {
         let t: &Theme = &self.theme;
-        let width = (body.chars().count() as u16 + 6)
-            .max(28)
-            .min(area.width.saturating_sub(4));
-        let inner = render_popup_frame(frame, area, t, title, width, 3);
-        if inner.height == 0 || inner.width == 0 {
+        let heading = Line::from(vec![Span::styled(
+            format!("\u{2726} {title}"),
+            Style::default()
+                .fg(t.form_accent())
+                .add_modifier(Modifier::BOLD),
+        )]);
+        let inner = PanelChrome::new(heading)
+            .hints(hints.to_vec())
+            .body(body.chars().count(), 1)
+            .min_width(28)
+            .render(frame, area, t);
+        let Some(inner) = inner else {
             return;
-        }
-        let buf = frame.buffer_mut();
-        let y = inner.y;
-        let mut x = inner.left() + 1;
-        for ch in body.chars() {
-            if x >= inner.right() {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
-                cell.set_char(ch);
-                cell.set_style(
-                    Style::default()
-                        .fg(body_fg)
-                        .bg(t.bg())
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-            x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
-        }
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                body.to_string(),
+                Style::default().fg(body_fg).add_modifier(Modifier::BOLD),
+            ))),
+            inner,
+        );
     }
 }
 

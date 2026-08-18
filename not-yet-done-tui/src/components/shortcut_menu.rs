@@ -29,15 +29,16 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, NoUserEvent};
 use tuirealm::props::{AttrValue, Attribute};
 
-use not_yet_done_ratatui::{LeaderList, LeaderListStyle, LeaderListStyleType};
+use not_yet_done_ratatui::{LeaderList, LeaderListStyle};
 
 use crate::config::ShortcutScope;
 use crate::keymap::{KeySource, ShortcutRow};
+use crate::ui::panel_chrome::{PanelChrome, panel_leader_style};
 use crate::ui::theme::Theme;
 
 /// One existing binding that collides with a proposed new binding. Carries
@@ -834,44 +835,7 @@ impl ShortcutMenu {
     }
 
     fn style(&self) -> LeaderListStyle {
-        let t = &self.theme;
-        let cursor_bg = t.form_field_bg().unwrap_or_else(|| t.surface_2());
-        LeaderListStyle::new()
-            .set_style(
-                LeaderListStyleType::Left,
-                Style::default().fg(t.form_text()),
-            )
-            .set_style(
-                LeaderListStyleType::Filler,
-                Style::default().fg(t.form_hint()),
-            )
-            .set_style(
-                LeaderListStyleType::Right,
-                Style::default()
-                    .fg(t.form_accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .set_style(LeaderListStyleType::Cursor, Style::default().bg(cursor_bg))
-            .set_style(
-                LeaderListStyleType::Status,
-                Style::default()
-                    .fg(t.form_hint())
-                    .add_modifier(Modifier::ITALIC),
-            )
-            .set_style(
-                LeaderListStyleType::Search,
-                Style::default()
-                    .fg(t.form_accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-            // Tagged rows glow in the warning colour (amber) and bold, so a
-            // batch selection reads at a glance as "staged for an action".
-            .set_style(
-                LeaderListStyleType::Marked,
-                Style::default()
-                    .fg(t.warning())
-                    .add_modifier(Modifier::BOLD),
-            )
+        panel_leader_style(&self.theme)
     }
 
     /// Borderless floating panel matching the calendar "add event" form:
@@ -940,42 +904,6 @@ impl ShortcutMenu {
             h.push(("Esc", "close"));
             h
         };
-        let help_w: usize = hints
-            .iter()
-            .map(|(k, d)| k.chars().count() + 1 + d.chars().count() + 2)
-            .sum();
-
-        // Panel geometry: pad(2) + heading + search + keys line, content-sized
-        // and centred within `area` (already bounded by the caller so the
-        // panel never touches the top/bottom chrome). Width fits the widest of
-        // content / title / help.
-        let inner_w_needed = content_w.max(tab_bar_w).max(help_w);
-        let panel_w = ((inner_w_needed as u16) + 4).max(36).min(area.width);
-        // heading(1) + gap(1) + search(1) + list(count+status) + gap(1)
-        // + help(1) + pad(2).
-        let wanted_h = count as u16 + 1 + 7;
-        let panel_h = wanted_h.min(area.height).max(8);
-
-        let px = area.x + area.width.saturating_sub(panel_w) / 2;
-        let py = area.y + area.height.saturating_sub(panel_h) / 2;
-        let panel = Rect::new(px, py, panel_w, panel_h);
-
-        // Floating panel: clear behind, then fill (no border).
-        frame.render_widget(Clear, panel);
-        if let Some(bg) = t.form_panel_bg() {
-            frame.render_widget(Block::default().style(Style::default().bg(bg)), panel);
-        }
-
-        let inner = Rect::new(
-            panel.x + 2,
-            panel.y + 1,
-            panel.width.saturating_sub(4),
-            panel.height.saturating_sub(2),
-        );
-        if inner.height == 0 || inner.width == 0 {
-            return;
-        }
-
         // Heading: `✦ {title}`, or the live recording prompt while recording,
         // or a "delete which?" prompt while picking a binding to remove, or a
         // conflict warning while a resolve prompt is pending.
@@ -1017,22 +945,20 @@ impl ShortcutMenu {
         } else {
             Line::from(tab_spans)
         };
-        frame.render_widget(Paragraph::new(heading), Rect { height: 1, ..inner });
 
-        // Help line on the last inner row; the list (which draws its own
-        // search prompt on its first row) fills the space between the heading
-        // (with a one-row gap) and a one-row gap above the help.
-        let help_y = inner.bottom().saturating_sub(1);
-        let list_y = inner.y + 2;
-        let list_h = help_y.saturating_sub(1).saturating_sub(list_y);
+        // Panel geometry and chrome are shared with every other panel popup;
+        // the body rows are the list plus its own search prompt and status
+        // line, the width the widest of content / tab bar (the chrome folds
+        // in the heading and hint widths itself).
+        let list_area = PanelChrome::new(heading)
+            .hints(hints)
+            .body(content_w.max(tab_bar_w), count as u16 + 2)
+            .render(frame, area, &t);
+        let Some(list_area) = list_area else {
+            return;
+        };
 
-        if list_h > 0 {
-            let list_area = Rect {
-                x: inner.x,
-                y: list_y,
-                width: inner.width,
-                height: list_h,
-            };
+        {
             if let Some(c) = self.conflict.as_ref() {
                 // Explain the collision(s) and what confirming will do. Each
                 // colliding binding gets its own line; read-only ones are
@@ -1097,21 +1023,6 @@ impl ShortcutMenu {
                 self.list.view(frame, list_area);
             }
         }
-
-        // Compact help line, form palette.
-        let key = Style::default()
-            .fg(t.form_accent())
-            .add_modifier(Modifier::BOLD);
-        let dim = Style::default().fg(t.form_hint());
-        let mut spans: Vec<Span> = Vec::new();
-        for (k, d) in &hints {
-            spans.push(Span::styled(*k, key));
-            spans.push(Span::styled(format!(" {d}  "), dim));
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect::new(inner.x, help_y, inner.width, 1),
-        );
     }
 }
 

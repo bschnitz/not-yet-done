@@ -1,20 +1,27 @@
 //! Generic searchable list popup — reusable overlay with fuzzy search.
 //!
-//! Used for saved filter selection, script picker, etc.
+//! Used for saved query selection, the script picker, the `gl` link popup,
+//! the config picker and the option menu. Chrome is the shared floating
+//! panel ([`crate::ui::panel_chrome`]) and the list itself is a
+//! [`LeaderList`], so a popup looks and behaves like the shortcut menu:
+//! label on the left, an optional dim suffix flush right, a fuzzy filter
+//! prompt on the first row, a status line with the page counter — and
+//! scrolling once there are more entries than rows.
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Widget;
 
-use tuirealm::command::{Cmd, CmdResult};
+use tuirealm::command::{Cmd, CmdResult, Direction};
 use tuirealm::component::Component;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::{State, StateValue};
 
+use not_yet_done_ratatui::LeaderList;
+
 use crate::config::keybindings::{KeyBindingSection, KeyIconMap, PopupAction};
-use crate::ui::popup_utils::{hints_height, render_hints_bar, render_popup_frame};
+use crate::ui::panel_chrome::{PanelChrome, panel_leader_style};
 use crate::ui::theme::Theme;
 use std::sync::Arc;
 
@@ -46,11 +53,9 @@ pub enum PopupKeyOutcome {
 pub struct SearchablePopup {
     theme: Arc<Theme>,
     title: String,
-    query: String,
-    cursor: usize,
     items: Vec<PopupItem>,
-    filtered: Vec<usize>,
-    selected: usize,
+    /// Renders the items and owns the live filter, cursor and scroll state.
+    list: LeaderList,
     hints: Vec<(String, String)>, // (key_label, description) — embedder-supplied
     /// Popup-intrinsic key bindings (Next/Prev/Backspace/Cursor). When set,
     /// the navigation hints render automatically in the hint bar in front
@@ -63,19 +68,43 @@ pub struct SearchablePopup {
 
 impl SearchablePopup {
     pub fn new(theme: Arc<Theme>, title: impl Into<String>, items: Vec<PopupItem>) -> Self {
-        let filtered: Vec<usize> = (0..items.len()).collect();
+        let mut list = LeaderList::default()
+            .with_entries(Self::entries(&items))
+            .with_affixes(" ", " ", " ")
+            .with_selectable(true)
+            .with_status_line(true)
+            .with_search(true)
+            .with_style(panel_leader_style(&theme));
+        list.attr(Attribute::Focus, AttrValue::Flag(true));
         Self {
             theme,
             title: title.into(),
-            query: String::new(),
-            cursor: 0,
             items,
-            filtered,
-            selected: 0,
+            list,
             hints: Vec::new(),
             popup_kb: None,
             key_icons: None,
         }
+    }
+
+    /// The `(left, right)` pairs handed to the [`LeaderList`]: the label
+    /// (with the `★` marker in front when any item carries one, so marked and
+    /// unmarked rows stay aligned) and the dim suffix.
+    fn entries(items: &[PopupItem]) -> Vec<(String, String)> {
+        let any_marked = items.iter().any(|i| i.marked);
+        items
+            .iter()
+            .map(|item| {
+                let label = if !any_marked {
+                    item.label.clone()
+                } else if item.marked {
+                    format!("\u{2605} {}", item.label)
+                } else {
+                    format!("  {}", item.label)
+                };
+                (label, item.suffix.clone().unwrap_or_default())
+            })
+            .collect()
     }
 
     pub fn with_hints(mut self, hints: Vec<(String, String)>) -> Self {
@@ -92,61 +121,27 @@ impl SearchablePopup {
         self
     }
 
+    /// Append a character to the filter. The filter is append-only (the
+    /// [`LeaderList`] prompt has no text cursor), so this always types at the
+    /// end.
     pub fn insert_char(&mut self, c: char) {
-        let byte_pos = self
-            .query
-            .char_indices()
-            .nth(self.cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.query.len());
-        self.query.insert(byte_pos, c);
-        self.cursor += 1;
-        self.apply_filter();
+        self.list.push_search(c);
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 || self.query.is_empty() {
-            return;
-        }
-        let byte_pos = self
-            .query
-            .char_indices()
-            .nth(self.cursor - 1)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        self.query.remove(byte_pos);
-        self.cursor -= 1;
-        self.apply_filter();
-    }
-
-    pub fn cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-        }
-    }
-
-    pub fn cursor_right(&mut self) {
-        let max = self.query.chars().count();
-        if self.cursor < max {
-            self.cursor += 1;
-        }
+        self.list.backspace_search();
     }
 
     pub fn select_next(&mut self) {
-        if self.selected + 1 < self.filtered.len() {
-            self.selected += 1;
-        }
+        self.list.perform(Cmd::Move(Direction::Down));
     }
 
     pub fn select_prev(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
+        self.list.perform(Cmd::Move(Direction::Up));
     }
 
     pub fn selected_item(&self) -> Option<&PopupItem> {
-        let &idx = self.filtered.get(self.selected)?;
-        self.items.get(idx)
+        self.items.get(self.list.selected_index()?)
     }
 
     /// Flip the `★` marker on the currently selected item. Used by the
@@ -154,21 +149,29 @@ impl SearchablePopup {
     /// toggle action async and reflects the new state in the open popup
     /// immediately, without rebuilding it.
     pub fn toggle_selected_marked(&mut self) {
-        if let Some(&idx) = self.filtered.get(self.selected) {
-            if let Some(item) = self.items.get_mut(idx) {
-                item.marked = !item.marked;
-            }
+        let Some(idx) = self.list.selected_index() else {
+            return;
+        };
+        if let Some(item) = self.items.get_mut(idx) {
+            item.marked = !item.marked;
         }
+        // The marker lives in the rendered label, so the entries have to be
+        // rebuilt — carry the live filter and cursor across it.
+        let query = self.list.search_query().to_string();
+        let cursor = self.list.selected();
+        self.list.set_entries(Self::entries(&self.items));
+        self.list.set_search_query(query);
+        self.list.attr(Attribute::Value, AttrValue::Length(cursor));
     }
 
     /// The current search query text.
     pub fn query_text(&self) -> &str {
-        &self.query
+        self.list.search_query()
     }
 
     /// Whether the filtered list is empty (no matches for current query).
     pub fn filtered_is_empty(&self) -> bool {
-        self.filtered.is_empty()
+        self.list.selected_index().is_none()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -204,18 +207,15 @@ impl SearchablePopup {
                 self.backspace();
                 return PopupKeyOutcome::Handled;
             }
+            // The filter prompt has no text cursor; the keys stay bound so
+            // they are swallowed here instead of leaking to the embedder.
             if kb
                 .get(&PopupAction::CursorLeft)
                 .is_some_and(|b| b.matches(key))
+                || kb
+                    .get(&PopupAction::CursorRight)
+                    .is_some_and(|b| b.matches(key))
             {
-                self.cursor_left();
-                return PopupKeyOutcome::Handled;
-            }
-            if kb
-                .get(&PopupAction::CursorRight)
-                .is_some_and(|b| b.matches(key))
-            {
-                self.cursor_right();
                 return PopupKeyOutcome::Handled;
             }
         } else {
@@ -235,14 +235,7 @@ impl SearchablePopup {
                     self.backspace();
                     return PopupKeyOutcome::Handled;
                 }
-                "left" => {
-                    self.cursor_left();
-                    return PopupKeyOutcome::Handled;
-                }
-                "right" => {
-                    self.cursor_right();
-                    return PopupKeyOutcome::Handled;
-                }
+                "left" | "right" => return PopupKeyOutcome::Handled,
                 _ => {}
             }
         }
@@ -269,7 +262,7 @@ impl SearchablePopup {
             (kb.hint_label(&PopupAction::Next, icons), "next".to_string()),
             (kb.hint_label(&PopupAction::Prev, icons), "prev".to_string()),
         ];
-        if !self.query.is_empty() {
+        if !self.query_text().is_empty() {
             hints.push((
                 kb.hint_label(&PopupAction::Backspace, icons),
                 "erase".to_string(),
@@ -277,173 +270,39 @@ impl SearchablePopup {
         }
         hints
     }
-
-    fn apply_filter(&mut self) {
-        let q = self.query.to_lowercase();
-        self.filtered = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| q.is_empty() || item.label.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect();
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
-        }
-    }
 }
 
 impl Component for SearchablePopup {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
-        let t: &Theme = &self.theme;
+        let t = Arc::clone(&self.theme);
 
         // Intrinsic hints render in front of embedder-supplied ones.
         let intrinsic = self.intrinsic_hints();
-        let all_hints: Vec<(&str, &str)> = intrinsic
+        let hints: Vec<(&str, &str)> = intrinsic
             .iter()
             .chain(self.hints.iter())
             .map(|(k, d)| (k.as_str(), d.as_str()))
             .collect();
 
-        let popup_w = (area.width * 50 / 100)
-            .max(30)
-            .min(area.width.saturating_sub(4));
-        let hints_h = if all_hints.is_empty() {
-            0u16
-        } else {
-            hints_height(&all_hints, popup_w.saturating_sub(2))
-        };
-        let max_items = self.filtered.len() as u16;
-        let popup_h = (max_items + 3 + hints_h).min(area.height * 60 / 100).max(5);
+        let heading = Line::from(vec![Span::styled(
+            format!("\u{2726} {}", self.title),
+            Style::default()
+                .fg(t.form_accent())
+                .add_modifier(Modifier::BOLD),
+        )]);
 
-        // Shared popup chrome — same frame + hint bar as the column
-        // config popup, so all pickers look alike.
-        let inner = render_popup_frame(frame, area, t, &self.title, popup_w, popup_h);
-        if inner.height == 0 || inner.width == 0 {
-            return;
-        }
+        // Body rows: the visible entries plus the filter prompt and the
+        // status line. Long lists are capped at 60% of the available height
+        // and scroll from there.
+        let rows = self.list.visible_indices().len() as u16 + 2;
+        let cap = (area.height * 3 / 5).max(5);
+        let body = PanelChrome::new(heading)
+            .hints(hints)
+            .body(self.list.min_width() as usize, rows.min(cap))
+            .render(frame, area, &t);
 
-        let input_y = inner.y;
-        let input_bg = t.surface();
-        let cursor_pos;
-
-        {
-            let buf = frame.buffer_mut();
-
-            // Search input row.
-            for cx in inner.left()..inner.right() {
-                if let Some(cell) = buf.cell_mut(Position::new(cx, input_y)) {
-                    cell.set_char(' ');
-                    cell.set_style(Style::default().bg(input_bg));
-                }
-            }
-
-            let prefix = " 󰈲 ";
-            let mut px = inner.left();
-            for ch in prefix.chars() {
-                if px >= inner.right() {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut(Position::new(px, input_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(t.accent()).bg(input_bg));
-                }
-                px += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
-            }
-
-            let text_start_x = px;
-            let max_w = inner.right().saturating_sub(text_start_x) as usize;
-            let chars: Vec<char> = self.query.chars().collect();
-            let view_start = if self.cursor >= max_w {
-                self.cursor + 1 - max_w
-            } else {
-                0
-            };
-
-            for (screen_idx, char_idx) in (view_start..chars.len()).enumerate() {
-                if screen_idx >= max_w {
-                    break;
-                }
-                let cx = text_start_x + screen_idx as u16;
-                let ch = chars[char_idx];
-                let style = Style::default().fg(t.text_high()).bg(input_bg);
-                if let Some(cell) = buf.cell_mut(Position::new(cx, input_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(style);
-                }
-            }
-
-            cursor_pos = if !chars.is_empty() {
-                let screen_pos = self.cursor.saturating_sub(view_start);
-                let cx = text_start_x + screen_pos as u16;
-                if cx < inner.right() {
-                    Some(Position::new(cx, input_y))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Items list. The cursor row gets a `surface_2` background
-            // (matching the column config popup) instead of a colored
-            // selection bar.
-            let list_y = inner.y + 1;
-            let list_h = inner.height.saturating_sub(1 + hints_h);
-            let any_marked = self.items.iter().any(|i| i.marked);
-
-            for (i, &item_idx) in self.filtered.iter().enumerate() {
-                if i as u16 >= list_h {
-                    break;
-                }
-                let item = &self.items[item_idx];
-                let is_selected = i == self.selected;
-                let bg = if is_selected { t.surface_2() } else { t.bg() };
-                let row_y = list_y + i as u16;
-
-                for cx in inner.left()..inner.right() {
-                    if let Some(cell) = buf.cell_mut(Position::new(cx, row_y)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(bg));
-                    }
-                }
-
-                let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default().bg(bg))];
-                if any_marked {
-                    let (glyph, style) = if item.marked {
-                        ("★ ", Style::default().fg(t.accent()).bg(bg))
-                    } else {
-                        ("  ", Style::default().bg(bg))
-                    };
-                    spans.push(Span::styled(glyph, style));
-                }
-                spans.push(Span::styled(
-                    item.label.clone(),
-                    Style::default().fg(t.text_high()).bg(bg),
-                ));
-                if let Some(suffix) = &item.suffix {
-                    spans.push(Span::styled(
-                        format!(" {suffix}"),
-                        Style::default().fg(t.text_dim()).bg(bg),
-                    ));
-                }
-                let row_area = Rect {
-                    x: inner.x,
-                    y: row_y,
-                    width: inner.width,
-                    height: 1,
-                };
-                Line::from(spans).render(row_area, buf);
-            }
-        }
-
-        // Hints bar with auto-wrap — shared with the column config popup.
-        if hints_h > 0 {
-            render_hints_bar(frame, inner, t, &all_hints, hints_h);
-        }
-
-        if let Some(pos) = cursor_pos {
-            frame.set_cursor_position(pos);
+        if let Some(body) = body {
+            self.list.view(frame, body);
         }
     }
 
@@ -452,7 +311,7 @@ impl Component for SearchablePopup {
     }
     fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
     fn state(&self) -> State {
-        State::Single(StateValue::String(self.query.clone()))
+        State::Single(StateValue::String(self.query_text().to_string()))
     }
     fn perform(&mut self, _cmd: Cmd) -> CmdResult {
         CmdResult::NoChange
@@ -490,8 +349,8 @@ mod tests {
     #[test]
     fn new_shows_all() {
         let popup = SearchablePopup::new(theme(), "Test", items());
-        assert_eq!(popup.filtered.len(), 3);
-        assert_eq!(popup.selected, 0);
+        assert_eq!(popup.list.visible_indices().len(), 3);
+        assert_eq!(popup.list.selected(), 0);
     }
 
     #[test]
@@ -499,8 +358,7 @@ mod tests {
         let mut popup = SearchablePopup::new(theme(), "Test", items());
         popup.insert_char('h');
         popup.insert_char('i');
-        assert_eq!(popup.filtered.len(), 1);
-        assert_eq!(popup.items[popup.filtered[0]].label, "high priority");
+        assert_eq!(popup.selected_item().unwrap().label, "high priority");
     }
 
     #[test]
@@ -508,24 +366,24 @@ mod tests {
         let mut popup = SearchablePopup::new(theme(), "Test", items());
         popup.insert_char('h');
         popup.insert_char('i');
-        assert_eq!(popup.filtered.len(), 1);
+        assert_eq!(popup.list.visible_indices().len(), 1);
         popup.backspace();
         popup.backspace();
-        assert_eq!(popup.filtered.len(), 3);
+        assert_eq!(popup.list.visible_indices().len(), 3);
     }
 
     #[test]
     fn select_next_prev() {
         let mut popup = SearchablePopup::new(theme(), "Test", items());
-        assert_eq!(popup.selected, 0);
+        assert_eq!(popup.list.selected(), 0);
         popup.select_next();
-        assert_eq!(popup.selected, 1);
+        assert_eq!(popup.list.selected(), 1);
         popup.select_next();
-        assert_eq!(popup.selected, 2);
+        assert_eq!(popup.list.selected(), 2);
         popup.select_next();
-        assert_eq!(popup.selected, 2);
+        assert_eq!(popup.list.selected(), 2);
         popup.select_prev();
-        assert_eq!(popup.selected, 1);
+        assert_eq!(popup.list.selected(), 1);
     }
 
     #[test]
@@ -541,7 +399,7 @@ mod tests {
         popup.select_next();
         popup.insert_char('h');
         popup.insert_char('i');
-        assert_eq!(popup.selected, 0);
+        assert_eq!(popup.list.selected(), 0);
     }
 
     #[test]
@@ -559,6 +417,18 @@ mod tests {
         popup.insert_char('z');
         popup.insert_char('z');
         assert!(popup.filtered_is_empty());
+    }
+
+    #[test]
+    fn toggle_marked_keeps_filter_and_cursor() {
+        let mut popup = SearchablePopup::new(theme(), "Test", items());
+        popup.insert_char('t');
+        popup.select_next();
+        let before = popup.selected_item().unwrap().label.clone();
+        popup.toggle_selected_marked();
+        assert_eq!(popup.query_text(), "t");
+        assert_eq!(popup.selected_item().unwrap().label, before);
+        assert!(popup.selected_item().unwrap().marked);
     }
 
     #[test]
