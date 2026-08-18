@@ -190,7 +190,7 @@ views:
         type: custom
         id: transition # InputSpec::Picker — adapter supplies options
       - name: toggle watch
-        key: w
+        key: W
         type: custom
         id: toggle_watch # InputSpec::None — toggles current user's watch state
       - name: bookmark
