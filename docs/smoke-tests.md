@@ -5302,6 +5302,34 @@ column for the rows that are on screen and writes them back in one go with the
       **all** cells unchanged — `set-cells` is all-or-nothing — and the error
       names the offending row.
 
+## The load banner on every tab (`Loading… (3s)`)
+
+The engine counts the fetches it has out per tab, so a tab reports that it is
+loading even when its adapter never publishes a status of its own. Test on a
+slow remote tab (Jira, Taiga, Confluence) — a local one finishes too fast to
+watch.
+
+- [ ] Reload a slow tab: the banner line appears with a **second counter that
+      advances** while the fetch runs (`Loading… (1s)`, `(2s)`, …) and
+      disappears the moment the rows land. It also ticks while the tab sits
+      untouched — no keypress needed to move the number.
+- [ ] The same on a failed load: kill the connection first, reload, and the
+      banner gives way to the error rather than counting forever.
+- [ ] A fast local tab (tasks, SQLite) does **not** flash a banner — it is done
+      inside the grace period.
+- [ ] Drill into a slow child level: the banner runs for that fetch too.
+- [ ] On a tab whose adapter reports its own state (Postgres, SQLite over a
+      tunnel, the calendar), the richer line still wins — a label, a timeout
+      countdown (`(3s/30s)`) or a percentage, **not** the generic `Loading…`,
+      and never both at once.
+- [ ] `notifications.load_banner: global` moves the generic line to the shared
+      bar with the tab's name in front, and two tabs loading at once collapse
+      to `2 tabs loading… (4s)`. With `off`, no line appears anywhere while the
+      load still runs normally.
+- [ ] A `manual_connect: true` tab shows `Loading…` while connecting, not the
+      "press the key to connect" hint, and reverts to the hint if the load
+      fails.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
