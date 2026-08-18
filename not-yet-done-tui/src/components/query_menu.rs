@@ -193,7 +193,7 @@ impl QueryMenuComponent {
                 }
                 RecorderStep::Saved(chord) => match self.recording_target.take() {
                     Some((name, query)) => {
-                        self.popup = None;
+                        self.close();
                         QueryMenuMessage::EditShortcut { name, query, chord }
                     }
                     None => QueryMenuMessage::Handled,
@@ -205,7 +205,7 @@ impl QueryMenuComponent {
             .get(&QueryMenuAction::Close)
             .is_some_and(|b| b.matches(key))
         {
-            self.popup = None;
+            self.close();
             return QueryMenuMessage::Closed;
         }
         if kb
@@ -226,7 +226,7 @@ impl QueryMenuComponent {
                     Some(rest) => (QueryKind::Extended, rest.trim().to_string()),
                     None => (QueryKind::Saved, rest.trim().to_string()),
                 };
-                self.popup = None;
+                self.close();
                 if name.is_empty() {
                     return QueryMenuMessage::Closed;
                 }
@@ -238,10 +238,10 @@ impl QueryMenuComponent {
                     name: item.label.clone(),
                     query: item.value.clone(),
                 };
-                self.popup = None;
+                self.close();
                 return msg;
             }
-            self.popup = None;
+            self.close();
             if typed.is_empty() {
                 return QueryMenuMessage::Closed;
             }
@@ -274,7 +274,7 @@ impl QueryMenuComponent {
                     name: item.label.clone(),
                     query: item.value.clone(),
                 };
-                self.popup = None;
+                self.close();
                 return msg;
             }
             return QueryMenuMessage::Handled;
@@ -288,7 +288,7 @@ impl QueryMenuComponent {
                 let msg = QueryMenuMessage::Delete {
                     name: item.label.clone(),
                 };
-                self.popup = None;
+                self.close();
                 return msg;
             }
             return QueryMenuMessage::Handled;
@@ -319,7 +319,7 @@ impl QueryMenuComponent {
                 let msg = QueryMenuMessage::ClearShortcut {
                     name: item.label.clone(),
                 };
-                self.popup = None;
+                self.close();
                 return msg;
             }
             return QueryMenuMessage::Handled;
@@ -334,7 +334,7 @@ impl QueryMenuComponent {
                 let msg = QueryMenuMessage::SetDefault {
                     name: item.label.clone(),
                 };
-                self.popup = None;
+                self.close();
                 return msg;
             }
             return QueryMenuMessage::Handled;

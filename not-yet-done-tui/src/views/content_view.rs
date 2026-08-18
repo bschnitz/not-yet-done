@@ -10340,9 +10340,13 @@ impl ContentView {
     /// original if-chain — claims are emitted only when their dynamic
     /// guards are satisfied, so the dispatcher itself can stay
     /// condition-free.
-    fn build_view_claims(&self) -> KeyMap {
+    pub(crate) fn build_view_claims(&self) -> KeyMap {
         let mut km = KeyMap::new();
-        let scope = KeyScope::Tab(TabRef::new(""));
+        // The real tab name, not a placeholder: these claims are what the
+        // conflict check compares against, and `KeyScope::overlaps_with`
+        // only matches equal `TabRef`s — an empty one would silently never
+        // collide with anything.
+        let scope = KeyScope::Tab(TabRef::new(&self.tab_name));
 
         // Subtab switch — active in every leaf of the focused pane
         // (root or drilldown). The validator (Phase 3) guarantees no

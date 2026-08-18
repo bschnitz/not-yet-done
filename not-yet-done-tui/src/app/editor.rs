@@ -601,52 +601,10 @@ impl App {
         }
     }
 
-    /// Persist a captured key chord into the `query_shortcut` DB table
-    /// for the script identified by `coords`. Called after the user
-    /// presses a non-Esc, non-conflicting key while
-    /// `awaiting_node_script_shortcut` is set.
-    pub fn bind_node_script_shortcut(&mut self, coords: crate::app::NodeScriptCoords, chord: &str) {
-        let Some(adapter) = self
-            .content_view(coords.view_index)
-            .and_then(|cv| cv.adapter.as_ref())
-            .map(Arc::clone)
-        else {
-            self.notify("No adapter for this view".to_string());
-            return;
-        };
-        let scope = crate::app::node_actions::node_script_scope(
-            adapter.adapter_type(),
-            adapter.instance_id(),
-            &coords.node_id,
-        );
-        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-        let chord_owned = chord.to_string();
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                // Script row — see `App::bind_script_shortcut` on the kind.
-                shortcut_repo
-                    .set(
-                        &scope,
-                        &coords.script,
-                        not_yet_done_content::QueryKind::Saved.as_str(),
-                        &chord_owned,
-                    )
-                    .await
-            })
-        });
-        if let Err(e) = result {
-            self.notify_error(format!("Failed to persist shortcut: {e}"));
-        }
-        // Drop the cached chord-claim entry so the next keypress on
-        // this node refetches from `query_shortcut` (SQ-8d).
-        if let Some(cv) = self.content_view_mut(coords.view_index) {
-            cv.node_script_shortcuts.remove(&coords.node_id);
-        }
-    }
-
     /// Remove the key chord bound to a node script, leaving the script
-    /// file itself in place. Mirrors [`Self::bind_node_script_shortcut`]
-    /// but calls `unset` instead of `set`.
+    /// file itself in place. The counterpart write goes through
+    /// `App::write_shortcut_target` / `set_db_shortcut`, which every
+    /// DB-stored shortcut shares.
     pub fn clear_node_script_shortcut(
         &mut self,
         view_index: usize,

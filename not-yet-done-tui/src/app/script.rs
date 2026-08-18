@@ -702,29 +702,21 @@ impl App {
                 chord,
             } => {
                 // The chord was recorded in the menu itself, so all that is
-                // left is the conflict check and the write under the level's
-                // script scope.
+                // left is the shared check-then-write under the level's script
+                // scope — a collision raises the same prompt every other
+                // shortcut does.
                 let ctx = self.script_menu_ctx.take();
                 let Some(ctx) = ctx else {
                     return EditorRequest::None;
                 };
-                let view_index = ctx.view_index();
-                if let Some(conflict) = self
-                    .content_view(view_index)
-                    .and_then(|cv| cv.script_shortcut_conflict(&self.keybindings, &label, &chord))
-                {
-                    self.notify_error(format!("'{chord}' is already taken by {conflict}"));
-                    return EditorRequest::None;
-                }
-                self.bind_script_shortcut(
-                    crate::app::ScriptShortcutCoords {
-                        view_index,
+                self.begin_shortcut_bind(
+                    crate::app::ShortcutTarget::Script(crate::app::ScriptShortcutCoords {
+                        view_index: ctx.view_index(),
                         scope: ctx.shortcut_scope(),
-                        name: label.clone(),
-                    },
-                    &chord,
+                        name: label,
+                    }),
+                    chord,
                 );
-                self.notify(format!("Script '{label}' bound to [{chord}]"));
                 EditorRequest::None
             }
             ScriptMenuMessage::EditHook { path, label } => {

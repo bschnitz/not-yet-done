@@ -871,6 +871,38 @@ pub struct ScriptShortcutCoords {
     pub name: String,
 }
 
+/// What a pending shortcut assignment will bind. All three live in the
+/// `query_shortcut` table and share one check-then-write path, so the capture
+/// overlay only has to carry which of them is meant.
+#[derive(Debug, Clone)]
+pub enum ShortcutTarget {
+    /// A saved/extended query — binding it also (re-)writes its body.
+    Favorite(PendingFavorite),
+    /// A `:script`-menu script in the focused script scope.
+    Script(ScriptShortcutCoords),
+    /// A per-node script (e.g. a Postgres table's).
+    NodeScript(NodeScriptCoords),
+}
+
+impl ShortcutTarget {
+    /// The name shown in the recorder heading and the result notification.
+    fn label(&self) -> &str {
+        match self {
+            Self::Favorite(f) => &f.name,
+            Self::Script(c) => &c.name,
+            Self::NodeScript(c) => &c.script,
+        }
+    }
+
+    /// What kind of thing is being bound, for the notification wording.
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Favorite(_) => "Query",
+            Self::Script(_) | Self::NodeScript(_) => "Script",
+        }
+    }
+}
+
 pub enum ContentSlot {
     Working(ContentView),
     Broken {
@@ -1139,8 +1171,12 @@ pub struct App {
     /// the popup is already shown.
     which_key_deadline: Option<std::time::Instant>,
 
-    /// When set, the next keypress is captured as a shortcut for a new favorite.
-    pub awaiting_favorite_shortcut: Option<PendingFavorite>,
+    /// Pending shortcut assignment with no popup to host it: either a live
+    /// chord recording (right after the editor saved a new query) or the
+    /// conflict prompt raised by a chord that the query/script menu already
+    /// recorded in its own popup. Blocks input while shown.
+    pub shortcut_capture:
+        Option<crate::components::shortcut_capture::ShortcutCapture<ShortcutTarget>>,
     /// Saved-query shortcut conflicts already surfaced as notifications
     /// this session. Saved queries reload on every tab switch and
     /// q-menu mutation, so without this an unresolved conflict would
@@ -1417,7 +1453,7 @@ impl App {
             pending_key: None,
             which_key: crate::components::which_key::WhichKeyMenu::new(Arc::clone(&shared_theme)),
             which_key_deadline: None,
-            awaiting_favorite_shortcut: None,
+            shortcut_capture: None,
             warned_saved_query_conflicts: std::collections::HashSet::new(),
             modal_message: None,
             pending_confirmation: None,
@@ -4727,7 +4763,7 @@ impl App {
 
         // Modal message: dismiss on any key (but not when awaiting shortcut/confirm).
         if self.modal_message.is_some()
-            && self.awaiting_favorite_shortcut.is_none()
+            && self.shortcut_capture.is_none()
             && self.pending_confirmation.is_none()
         {
             self.modal_message = None;
@@ -4762,35 +4798,11 @@ impl App {
             return EditorRequest::None;
         }
 
-        // Favorite shortcut capture mode. The query and script menus record
-        // their chord in the popup itself; this branch only serves the one
-        // path with no popup open — right after the editor saved a new query.
-        if let Some(pending) = self.awaiting_favorite_shortcut.take() {
-            self.modal_message = None;
-            if key == "esc" {
-                // Cancelled — no modal needed.
-            } else if let Some(conflict) =
-                self.favorite_shortcut_conflict(&pending.scope, &pending.name, key)
-            {
-                // Show error and re-prompt.
-                self.modal_message = Some(format!(
-                    "Shortcut '{}' is already taken by {}!\n\nPress another key for '{}'\nEsc to cancel",
-                    key, conflict, pending.name
-                ));
-                self.awaiting_favorite_shortcut = Some(pending);
-            } else {
-                let name = pending.name.clone();
-                match self.add_favorite(pending, key.to_string()) {
-                    Ok(()) => {
-                        self.modal_message =
-                            Some(format!("Favorite '{}' added with shortcut [{}]", name, key));
-                    }
-                    Err(e) => {
-                        self.modal_message =
-                            Some(format!("Could not add favorite '{}': {}", name, e));
-                    }
-                }
-            }
+        // Shortcut capture overlay: a chord being recorded with no popup on
+        // screen, or the conflict prompt for one the query/script menu already
+        // recorded. It owns the keyboard while up.
+        if self.shortcut_capture.is_some() {
+            self.handle_shortcut_capture_key(key);
             self.sync_components();
             return EditorRequest::None;
         }
@@ -5494,6 +5506,7 @@ impl App {
             || self.link_popup.is_some()
             || self.config_picker_popup.is_some()
             || self.shortcut_menu.is_open()
+            || self.shortcut_capture.is_some()
     }
 
     /// Execute a single chainable action through the Phase-2 dispatch
@@ -5888,73 +5901,14 @@ impl App {
             return;
         }
 
-        // 1. Drop the colliding alternatives, grouped by conflicting source so
-        //    each file is edited once even if it owns several collisions.
-        let mut touched: Vec<std::path::PathBuf> = Vec::new();
-        let mut by_source: Vec<(crate::keymap::KeySource, Vec<String>, Vec<String>)> = Vec::new();
-        for item in &items {
-            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
-                entry.2.push(item.drop.clone());
-            } else {
-                by_source.push((
-                    item.source.clone(),
-                    item.current.clone(),
-                    vec![item.drop.clone()],
-                ));
-            }
-        }
-        for (other_source, current, drops) in &by_source {
-            // DB-stored shortcuts (saved query / `:script` menu / Postgres
-            // table script) keep their chord in the `query_shortcut` table,
-            // not YAML — free them via the repository, then skip the file path.
-            match self.free_db_shortcut(other_source) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(e) => {
-                    self.notify_error(e);
-                    return;
-                }
-            }
-            let (loc, path) = match self.resolve_binding_target(other_source) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.notify_error(e);
-                    return;
-                }
-            };
-            // Single-slot bindings (a per-node `shortcuts:` map key, a subtab
-            // `key`, the query `menu_key`, a `preview.keybinding`, or a child
-            // keybinding override) carry no alternatives list to trim — freeing
-            // the key means deleting the whole entry line, not rewriting a
-            // `key:` value.
-            let is_slot = matches!(
-                other_source,
-                crate::keymap::KeySource::NodeShortcut { .. }
-                    | crate::keymap::KeySource::YamlSubtab { .. }
-                    | crate::keymap::KeySource::YamlMenuKey { .. }
-                    | crate::keymap::KeySource::YamlPreviewKey { .. }
-                    | crate::keymap::KeySource::YamlChildKeybinding { .. }
-                    | crate::keymap::KeySource::AppActionChain { .. }
-                    | crate::keymap::KeySource::PaneSearchJump { .. }
-            );
-            let res = if is_slot {
-                self.remove_binding_file(&path, &loc)
-            } else {
-                let new: Vec<String> = current
-                    .iter()
-                    .filter(|b| !drops.contains(b))
-                    .cloned()
-                    .collect();
-                self.edit_binding_file(&path, &loc, &new)
-            };
-            if let Err(e) = res {
+        // 1. Drop the colliding alternatives.
+        let mut touched = match self.free_conflicting_bindings(&items) {
+            Ok(t) => t,
+            Err(e) => {
                 self.notify_error(e);
                 return;
             }
-            if !touched.contains(&path) {
-                touched.push(path);
-            }
-        }
+        };
 
         // 2. Bind the new key on the target action. A DB-stored target writes
         //    the chord to the `query_shortcut` table (single chord, replaces);
@@ -6487,6 +6441,11 @@ impl App {
                 &cv.tab_name,
                 &cv.view_defs,
             ));
+            // View-level claims — this is where the DB-stored shortcuts
+            // (saved query / `:script` menu / per-table script) live; without
+            // them a conflict check would happily hand out a key another
+            // shortcut already owns.
+            claims.extend(cv.build_view_claims().claims);
         }
         claims
     }
@@ -6530,6 +6489,74 @@ impl App {
             });
         }
         items
+    }
+
+    /// Drop the colliding alternatives collected in `items`, so the key they
+    /// occupy is free for the caller's own write. Collisions are grouped by
+    /// their owning source, so a source holding several of them has its file
+    /// edited exactly once. Returns the config files touched, for the caller
+    /// to reload in one batch; a DB-stored shortcut is freed via the
+    /// repository and contributes no path.
+    ///
+    /// The caller is expected to have refused read-only items already — this
+    /// would fail on them anyway, but only after freeing the removable ones.
+    fn free_conflicting_bindings(
+        &mut self,
+        items: &[crate::components::shortcut_menu::ConflictItem],
+    ) -> Result<Vec<std::path::PathBuf>, String> {
+        use crate::keymap::KeySource;
+        let mut touched: Vec<std::path::PathBuf> = Vec::new();
+        let mut by_source: Vec<(KeySource, Vec<String>, Vec<String>)> = Vec::new();
+        for item in items {
+            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
+                entry.2.push(item.drop.clone());
+            } else {
+                by_source.push((
+                    item.source.clone(),
+                    item.current.clone(),
+                    vec![item.drop.clone()],
+                ));
+            }
+        }
+        for (other_source, current, drops) in &by_source {
+            // DB-stored shortcuts (saved query / `:script` menu / Postgres
+            // table script) keep their chord in the `query_shortcut` table,
+            // not YAML — free them via the repository, then skip the file path.
+            match self.free_db_shortcut(other_source)? {
+                true => continue,
+                false => {}
+            }
+            let (loc, path) = self.resolve_binding_target(other_source)?;
+            // Single-slot bindings (a per-node `shortcuts:` map key, a subtab
+            // `key`, the query `menu_key`, a `preview.keybinding`, or a child
+            // keybinding override) carry no alternatives list to trim — freeing
+            // the key means deleting the whole entry line, not rewriting a
+            // `key:` value.
+            let is_slot = matches!(
+                other_source,
+                KeySource::NodeShortcut { .. }
+                    | KeySource::YamlSubtab { .. }
+                    | KeySource::YamlMenuKey { .. }
+                    | KeySource::YamlPreviewKey { .. }
+                    | KeySource::YamlChildKeybinding { .. }
+                    | KeySource::AppActionChain { .. }
+                    | KeySource::PaneSearchJump { .. }
+            );
+            if is_slot {
+                self.remove_binding_file(&path, &loc)?;
+            } else {
+                let new: Vec<String> = current
+                    .iter()
+                    .filter(|b| !drops.contains(b))
+                    .cloned()
+                    .collect();
+                self.edit_binding_file(&path, &loc, &new)?;
+            }
+            if !touched.contains(&path) {
+                touched.push(path);
+            }
+        }
+        Ok(touched)
     }
 
     /// The compiled-in default binding for a source that has one (the four
@@ -6724,7 +6751,6 @@ impl App {
         rows: Vec<crate::keymap::ShortcutRow>,
         items: Vec<crate::components::shortcut_menu::ConflictItem>,
     ) {
-        use crate::keymap::KeySource;
         if let Some(ro) = items.iter().find(|i| !i.removable) {
             self.notify_error(format!(
                 "Restore collides with read-only '{}' — not applied",
@@ -6732,66 +6758,14 @@ impl App {
             ));
             return;
         }
-        let mut touched: Vec<std::path::PathBuf> = Vec::new();
-
-        // 1. Drop colliding bindings, grouped by source so each file is edited
-        //    once even if it owns several collisions.
-        let mut by_source: Vec<(KeySource, Vec<String>, Vec<String>)> = Vec::new();
-        for item in &items {
-            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
-                entry.2.push(item.drop.clone());
-            } else {
-                by_source.push((
-                    item.source.clone(),
-                    item.current.clone(),
-                    vec![item.drop.clone()],
-                ));
-            }
-        }
-        for (other_source, current, drops) in &by_source {
-            match self.free_db_shortcut(other_source) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(e) => {
-                    self.notify_error(e);
-                    return;
-                }
-            }
-            let (loc, path) = match self.resolve_binding_target(other_source) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.notify_error(e);
-                    return;
-                }
-            };
-            let is_slot = matches!(
-                other_source,
-                KeySource::NodeShortcut { .. }
-                    | KeySource::YamlSubtab { .. }
-                    | KeySource::YamlMenuKey { .. }
-                    | KeySource::YamlPreviewKey { .. }
-                    | KeySource::YamlChildKeybinding { .. }
-                    | KeySource::AppActionChain { .. }
-                    | KeySource::PaneSearchJump { .. }
-            );
-            let res = if is_slot {
-                self.remove_binding_file(&path, &loc)
-            } else {
-                let new: Vec<String> = current
-                    .iter()
-                    .filter(|b| !drops.contains(b))
-                    .cloned()
-                    .collect();
-                self.edit_binding_file(&path, &loc, &new)
-            };
-            if let Err(e) = res {
+        // 1. Drop colliding bindings.
+        let mut touched = match self.free_conflicting_bindings(&items) {
+            Ok(t) => t,
+            Err(e) => {
                 self.notify_error(e);
                 return;
             }
-            if !touched.contains(&path) {
-                touched.push(path);
-            }
-        }
+        };
 
         // 2. Restore each row: drop its override entry (read fresh so it
         //    composes with any drop above in the same file).
@@ -7032,7 +7006,6 @@ impl App {
         items: Vec<crate::components::shortcut_menu::ConflictItem>,
         overwrite: bool,
     ) {
-        use crate::keymap::KeySource;
         if let Some(ro) = items.iter().find(|i| !i.removable) {
             self.notify_error(format!(
                 "Bind collides with read-only '{}' — not applied",
@@ -7040,65 +7013,14 @@ impl App {
             ));
             return;
         }
-        let mut touched: Vec<std::path::PathBuf> = Vec::new();
-
-        // 1. Drop colliding bindings, grouped by source (each file edited once).
-        let mut by_source: Vec<(KeySource, Vec<String>, Vec<String>)> = Vec::new();
-        for item in &items {
-            if let Some(entry) = by_source.iter_mut().find(|(s, _, _)| *s == item.source) {
-                entry.2.push(item.drop.clone());
-            } else {
-                by_source.push((
-                    item.source.clone(),
-                    item.current.clone(),
-                    vec![item.drop.clone()],
-                ));
-            }
-        }
-        for (other_source, current, drops) in &by_source {
-            match self.free_db_shortcut(other_source) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(e) => {
-                    self.notify_error(e);
-                    return;
-                }
-            }
-            let (loc, path) = match self.resolve_binding_target(other_source) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.notify_error(e);
-                    return;
-                }
-            };
-            let is_slot = matches!(
-                other_source,
-                KeySource::NodeShortcut { .. }
-                    | KeySource::YamlSubtab { .. }
-                    | KeySource::YamlMenuKey { .. }
-                    | KeySource::YamlPreviewKey { .. }
-                    | KeySource::YamlChildKeybinding { .. }
-                    | KeySource::AppActionChain { .. }
-                    | KeySource::PaneSearchJump { .. }
-            );
-            let res = if is_slot {
-                self.remove_binding_file(&path, &loc)
-            } else {
-                let new: Vec<String> = current
-                    .iter()
-                    .filter(|b| !drops.contains(b))
-                    .cloned()
-                    .collect();
-                self.edit_binding_file(&path, &loc, &new)
-            };
-            if let Err(e) = res {
+        // 1. Drop colliding bindings.
+        let mut touched = match self.free_conflicting_bindings(&items) {
+            Ok(t) => t,
+            Err(e) => {
                 self.notify_error(e);
                 return;
             }
-            if !touched.contains(&path) {
-                touched.push(path);
-            }
-        }
+        };
 
         // 2. Bind each row (read fresh so it composes with any drop above).
         let mut done = 0usize;
@@ -8910,7 +8832,14 @@ impl App {
                 script,
                 chord,
             } => {
-                self.bind_node_script_chord(view_index, node_id, script, chord);
+                self.begin_shortcut_bind(
+                    ShortcutTarget::NodeScript(NodeScriptCoords {
+                        view_index,
+                        node_id,
+                        script,
+                    }),
+                    chord,
+                );
                 EditorRequest::None
             }
             ViewRequest::ClearNodeScriptShortcut {
@@ -9054,14 +8983,14 @@ impl App {
                 chord,
             } => {
                 let kind = self.content_query_kind(view_index, &name);
-                self.bind_favorite_chord(
-                    PendingFavorite {
+                self.begin_shortcut_bind(
+                    ShortcutTarget::Favorite(PendingFavorite {
                         scope,
                         name,
                         query,
                         kind,
-                    },
-                    &chord,
+                    }),
+                    chord,
                 );
                 EditorRequest::None
             }
@@ -11342,137 +11271,171 @@ impl App {
         }
     }
 
-    /// Persist a captured key chord for a `:script`-menu script into the
-    /// `query_shortcut` table, then drop the cached scope entry so the
-    /// next keypress refetches and the new claim goes live.
-    pub fn bind_script_shortcut(&mut self, coords: ScriptShortcutCoords, chord: &str) {
-        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-        let scope = coords.scope.clone();
-        let name = coords.name.clone();
-        let chord_owned = chord.to_string();
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                // Script rows share the query_shortcut table but are resolved
-                // through their scope, so the kind column stays at its default.
-                .block_on(async {
-                    shortcut_repo
-                        .set(&scope, &name, QueryKind::Saved.as_str(), &chord_owned)
-                        .await
-                })
-        });
-        if let Err(e) = result {
-            self.notify_error(format!("Failed to persist shortcut: {e}"));
-        }
-        if let Some(cv) = self.content_view_mut(coords.view_index) {
-            cv.script_shortcuts.remove(&coords.scope);
-        }
-    }
-
-    /// Conflict description for binding `shortcut` to the saved query
-    /// `name` in `scope`, or `None` when the key is free. Content-view
-    /// scopes route through the keymap-based check so a saved-query
-    /// shortcut can never shadow any key active in its tab (the
-    /// `j`-shadows-list-navigation class of bug).
-    fn favorite_shortcut_conflict(
+    /// The claim identity of a pending shortcut assignment: the [`KeySource`]
+    /// it will own and the scope it will be active in. `None` when the target
+    /// addresses no live content view (a stale capture, e.g. after the tab was
+    /// closed) — the caller then refuses the write.
+    ///
+    /// [`KeySource`]: crate::keymap::KeySource
+    fn shortcut_target_claim(
         &self,
-        scope: &str,
-        name: &str,
-        shortcut: &str,
-    ) -> Option<String> {
-        self.content_views_indexed()
-            .find(|(_, cv)| cv.query_scope == scope)
-            .and_then(|(_, cv)| cv.saved_query_shortcut_conflict(&self.keybindings, name, shortcut))
-    }
-
-    /// Bind a chord recorded in the query menu to a saved query: refuse the
-    /// collision, else write body + chord and report the result. The chord
-    /// arrives finished (and may be a sequence), so there is nothing to
-    /// capture here — only to check and to write.
-    fn bind_favorite_chord(&mut self, pending: PendingFavorite, chord: &str) {
-        if let Some(conflict) = self.favorite_shortcut_conflict(&pending.scope, &pending.name, chord)
-        {
-            self.notify_error(format!("'{chord}' is already taken by {conflict}"));
-            return;
-        }
-        let name = pending.name.clone();
-        match self.add_favorite(pending, chord.to_string()) {
-            Ok(()) => self.notify(format!("Query '{name}' bound to [{chord}]")),
-            Err(e) => self.notify_error(format!("Could not bind '{name}': {e}")),
-        }
-    }
-
-    /// Bind a chord recorded in the node-script menu to that script.
-    fn bind_node_script_chord(
-        &mut self,
-        view_index: usize,
-        node_id: String,
-        script: String,
-        chord: String,
-    ) {
-        if self.is_shortcut_taken(&chord) {
-            self.notify_error(format!("Shortcut '{chord}' is already taken"));
-            return;
-        }
-        let label = script.clone();
-        self.bind_node_script_shortcut(
-            NodeScriptCoords {
-                view_index,
-                node_id,
-                script,
-            },
-            &chord,
-        );
-        self.notify(format!("Script '{label}' bound to [{chord}]"));
-    }
-
-    fn is_shortcut_taken(&self, shortcut: &str) -> bool {
-        self.keybindings
-            .global
-            .bindings
-            .values()
-            .any(|b| b.matches(shortcut))
-    }
-
-    /// Bind `shortcut` to the saved query `name` in `scope`: write the
-    /// body to the adapter store and the key chord to the DB, then reload.
-    /// Returns `Err` with a user-facing message when the scope matches no
-    /// content view or the DB write fails — the caller must not report
-    /// success blindly (a swallowed `set` error here is exactly what made
-    /// a failed bind look like it worked).
-    fn add_favorite(&mut self, favorite: PendingFavorite, shortcut: String) -> Result<(), String> {
-        let PendingFavorite {
-            scope,
-            name,
-            query,
-            kind,
-        } = favorite;
-        // Content view scope — body in adapter store, shortcut in DB.
-        let target_idx = self
-            .content_views_indexed()
-            .find(|(_, cv)| cv.query_scope == scope)
-            .map(|(idx, _)| idx);
-        let Some(idx) = target_idx else {
-            return Err(format!("no content view matches scope '{scope}'"));
+        target: &ShortcutTarget,
+    ) -> Option<(crate::keymap::KeySource, crate::keymap::KeyScope)> {
+        use crate::keymap::{KeyScope, KeySource, TabRef};
+        let (idx, source) = match target {
+            ShortcutTarget::Favorite(f) => {
+                let (idx, cv) = self
+                    .content_views_indexed()
+                    .find(|(_, cv)| cv.query_scope == f.scope)?;
+                (
+                    idx,
+                    KeySource::SavedQueryShortcut {
+                        view: cv.active_view_name(),
+                        name: f.name.clone(),
+                    },
+                )
+            }
+            ShortcutTarget::Script(c) => (
+                c.view_index,
+                KeySource::ScriptShortcut {
+                    scope: c.scope.clone(),
+                    name: c.name.clone(),
+                },
+            ),
+            ShortcutTarget::NodeScript(c) => (
+                c.view_index,
+                KeySource::NodeScriptShortcut {
+                    node_id: c.node_id.clone(),
+                    script: c.script.clone(),
+                },
+            ),
         };
-        self.save_content_query_body(idx, &name, &query, kind);
-        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-        let scope_owned = scope.to_string();
-        let name_owned = name.clone();
-        let shortcut_owned = shortcut.clone();
-        let set_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                // The row records the kind so a shortcut press can go
-                // straight to the owning store.
-                shortcut_repo
-                    .set(&scope_owned, &name_owned, kind.as_str(), &shortcut_owned)
-                    .await
-            })
-        });
-        if let Err(e) = set_result {
-            return Err(format!("could not save shortcut: {e}"));
+        let cv = self.content_view(idx)?;
+        Some((source, KeyScope::Tab(TabRef::new(&cv.tab_name))))
+    }
+
+    /// Make sure the chord cache a script target resolves through is
+    /// populated. Both the conflict check (which reads the claims built from
+    /// these caches) and the write (which resolves the `query_shortcut` row
+    /// through them) would otherwise silently miss a target whose level came
+    /// into focus without a shortcut ever being pressed there.
+    fn ensure_shortcut_caches(&mut self, target: &ShortcutTarget) {
+        match target {
+            ShortcutTarget::Script(c) => self.ensure_script_shortcuts_loaded(c.view_index),
+            ShortcutTarget::NodeScript(c) => self.ensure_node_script_shortcuts_loaded(c.view_index),
+            ShortcutTarget::Favorite(_) => {}
         }
-        self.reload_content_saved_queries(idx);
-        Ok(())
+    }
+
+    /// Every live binding that collides with `chord` for `target`, as prompt
+    /// items — the one conflict check all three DB-stored shortcut kinds use.
+    /// It is claim-based, so it catches the same collisions the shortcut menu
+    /// catches (prefixes, chords, node `shortcuts:`), not just literal key
+    /// equality, and it skips the target's own current chord so rebinding a
+    /// shortcut onto itself is not a conflict.
+    fn shortcut_conflict_items(
+        &self,
+        target: &ShortcutTarget,
+        chord: &str,
+    ) -> Vec<crate::components::key_conflict::ConflictItem> {
+        let Some((source, scope)) = self.shortcut_target_claim(target) else {
+            return Vec::new();
+        };
+        let claims = self.all_live_claims();
+        let proposed = crate::config::keybindings::KeyBinding(vec![chord.to_string()]);
+        let conflicts = crate::keymap::binding_conflicts(&proposed, &scope, &claims, Some(&source));
+        self.build_conflict_items(&conflicts, &claims)
+    }
+
+    /// Check `chord` for `target` and either bind it or raise the shared
+    /// conflict prompt in the capture overlay. Entry point for every finished
+    /// chord — recorded in the query menu, in the script menu, or in the
+    /// overlay itself.
+    fn begin_shortcut_bind(&mut self, target: ShortcutTarget, chord: String) {
+        self.ensure_shortcut_caches(&target);
+        let items = self.shortcut_conflict_items(&target, &chord);
+        if items.is_empty() {
+            self.write_shortcut_target(&target, &chord);
+            return;
+        }
+        let subject = format!("'{}'", target.label());
+        self.shortcut_capture = Some(
+            crate::components::shortcut_capture::ShortcutCapture::conflicting(
+                target, subject, chord, items,
+            ),
+        );
+    }
+
+    /// Write a settled shortcut: the query body first where there is one, then
+    /// the chord into the `query_shortcut` table. All three kinds go through
+    /// [`Self::set_db_shortcut`], which also invalidates the right cache.
+    fn write_shortcut_target(&mut self, target: &ShortcutTarget, chord: &str) {
+        self.ensure_shortcut_caches(target);
+        let label = target.label().to_string();
+        let Some((source, _)) = self.shortcut_target_claim(target) else {
+            self.notify_error(format!("Could not bind '{label}': its view is gone"));
+            return;
+        };
+        // A favorite carries its body: binding a freshly written query has to
+        // persist the text too, into the store its `kind` names.
+        let kind = match target {
+            ShortcutTarget::Favorite(f) => {
+                let Some((idx, _)) = self
+                    .content_views_indexed()
+                    .find(|(_, cv)| cv.query_scope == f.scope)
+                else {
+                    self.notify_error(format!("no content view matches scope '{}'", f.scope));
+                    return;
+                };
+                self.save_content_query_body(idx, &f.name, &f.query, f.kind);
+                Some(f.kind)
+            }
+            _ => None,
+        };
+        match self.set_db_shortcut_as(&source, chord, kind) {
+            Ok(true) => self.notify(format!("{} '{label}' bound to [{chord}]", target.noun())),
+            Ok(false) => self.notify_error(format!("Could not bind '{label}': unknown shortcut")),
+            Err(e) => self.notify_error(format!("Could not bind '{label}': {e}")),
+        }
+    }
+
+    /// Drive the capture overlay: record, prompt, bind, close.
+    fn handle_shortcut_capture_key(&mut self, key: &str) {
+        use crate::components::shortcut_capture::CaptureMessage;
+        let (msg, target) = match self.shortcut_capture.as_mut() {
+            Some(c) => (c.handle_key(key), c.target().clone()),
+            None => return,
+        };
+        // The overlay replaces whatever modal explained it (the "query saved"
+        // message); from here on it speaks for itself.
+        self.modal_message = None;
+        match msg {
+            CaptureMessage::Handled => {}
+            CaptureMessage::Cancelled => {
+                self.shortcut_capture = None;
+            }
+            CaptureMessage::Recorded(chord) => {
+                let items = self.shortcut_conflict_items(&target, &chord);
+                if items.is_empty() {
+                    self.shortcut_capture = None;
+                    self.write_shortcut_target(&target, &chord);
+                } else if let Some(capture) = self.shortcut_capture.as_mut() {
+                    capture.raise_conflicts(chord, items);
+                }
+            }
+            CaptureMessage::Apply { chord, drop } => {
+                self.shortcut_capture = None;
+                match self.free_conflicting_bindings(&drop) {
+                    Ok(touched) => {
+                        for p in &touched {
+                            let _ = self.reload_config(p);
+                        }
+                        self.write_shortcut_target(&target, &chord);
+                    }
+                    Err(e) => self.notify_error(e),
+                }
+            }
+        }
     }
 
     /// Which store owns the query named `name` in this view, according to
@@ -11688,19 +11651,37 @@ impl App {
         source: &crate::keymap::KeySource,
         chord: &str,
     ) -> Result<bool, String> {
+        self.set_db_shortcut_as(source, chord, None)
+    }
+
+    /// [`Self::set_db_shortcut`] with an explicit [`QueryKind`] for the row.
+    /// A query's kind decides which store a shortcut press reads its body
+    /// from, so binding a *new* query — whose name the menu list doesn't know
+    /// yet — must pass the kind the caller holds. `None` keeps whatever the
+    /// existing entry says (scripts always read as `Saved`).
+    fn set_db_shortcut_as(
+        &mut self,
+        source: &crate::keymap::KeySource,
+        chord: &str,
+        kind: Option<QueryKind>,
+    ) -> Result<bool, String> {
         let Some(target) = self.resolve_db_shortcut(source) else {
             return Ok(false);
         };
+        let kind = kind.unwrap_or_else(|| match source {
+            crate::keymap::KeySource::SavedQueryShortcut { name, .. } => {
+                self.content_query_kind(target.view_index, name)
+            }
+            // Script rows share the query_shortcut table but resolve through
+            // their scope, so their kind column stays at the default.
+            _ => QueryKind::Saved,
+        });
         let repo = Arc::clone(&self.query_shortcut_repo);
         let (scope, name, chord_owned) =
             (target.scope.clone(), target.name.clone(), chord.to_string());
         let res = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
-                // Script row — see `bind_script_shortcut` on the kind.
-                .block_on(async {
-                    repo.set(&scope, &name, QueryKind::Saved.as_str(), &chord_owned)
-                        .await
-                })
+                .block_on(async { repo.set(&scope, &name, kind.as_str(), &chord_owned).await })
         });
         res.map_err(|e| format!("could not save shortcut: {e}"))?;
         self.invalidate_db_shortcut(&target);
@@ -12335,7 +12316,10 @@ fn load_content_views(
                         .and_then(|s| s.to_str())
                         .unwrap_or("?")
                         .to_string();
-                    let w = format!("{file}: ignored unknown config keys: {}", unknown.join(", "));
+                    let w = format!(
+                        "{file}: ignored unknown config keys: {}",
+                        unknown.join(", ")
+                    );
                     not_yet_done_content::http_log::log_error("view_config", &w);
                     warnings.push(w);
                 }

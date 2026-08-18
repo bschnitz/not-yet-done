@@ -18,11 +18,8 @@ use crate::ui::theme::Theme;
 
 /// Key hints shown while a recording is in progress. Every host renders the
 /// same line, so the recorder looks identical wherever it is embedded.
-pub const RECORDING_HINTS: &[(&str, &str)] = &[
-    ("\u{21b5}", "save"),
-    ("\u{232b}", "del"),
-    ("Esc", "cancel"),
-];
+pub const RECORDING_HINTS: &[(&str, &str)] =
+    &[("\u{21b5}", "save"), ("\u{232b}", "del"), ("Esc", "cancel")];
 
 /// What a key press did to the recording.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,10 +53,6 @@ impl KeyRecorder {
 
     pub fn overwrite(&self) -> bool {
         self.overwrite
-    }
-
-    pub fn steps(&self) -> &[String] {
-        &self.steps
     }
 
     /// The sequence recorded so far, in its YAML surface form.

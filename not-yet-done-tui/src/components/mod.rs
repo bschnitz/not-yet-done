@@ -18,6 +18,7 @@ pub mod query_var_popup;
 pub mod script_menu;
 pub mod search;
 pub mod searchable_popup;
+pub mod shortcut_capture;
 pub mod shortcut_menu;
 pub mod sort_header;
 pub mod sort_menu;
