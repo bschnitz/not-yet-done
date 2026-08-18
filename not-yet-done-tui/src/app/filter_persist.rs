@@ -81,16 +81,22 @@ impl App {
             self.save_content_query_body(view_index, &name, &query, kind);
             self.reload_content_saved_queries(view_index);
             if is_new {
-                self.modal_message = Some(format!(
-                    "Query '{}' saved.\n\nPress a shortcut key or Esc to skip",
-                    name
-                ));
-                self.awaiting_favorite_shortcut = Some(super::PendingFavorite {
-                    scope,
-                    name,
-                    query,
-                    kind,
-                });
+                // No popup is open here, so the capture overlay hosts the
+                // recording itself — same recorder as the menus, so this path
+                // takes multi-key chords too.
+                self.notify(format!("Query '{name}' saved"));
+                let subject = format!("'{name}'");
+                self.shortcut_capture = Some(
+                    crate::components::shortcut_capture::ShortcutCapture::recording(
+                        super::ShortcutTarget::Favorite(super::PendingFavorite {
+                            scope,
+                            name,
+                            query,
+                            kind,
+                        }),
+                        subject,
+                    ),
+                );
             } else {
                 self.notify(format!("Query '{}' updated", name));
             }

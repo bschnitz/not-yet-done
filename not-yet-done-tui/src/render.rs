@@ -230,6 +230,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.which_key.render(frame, popup_area);
     }
 
+    // Overlay: shortcut capture (chord recording / conflict prompt with no
+    // menu to host it).
+    if let Some(capture) = &app.shortcut_capture {
+        capture.render(frame, popup_area, &app.shared_theme);
+    }
+
     // Overlay: adapter prompt (e.g. MFA challenge). Drawn near the top so it is
     // never hidden behind a lower popup; it blocks input while shown.
     if let Some(ref mut popup) = app.adapter_prompt_popup {
