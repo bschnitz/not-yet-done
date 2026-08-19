@@ -1862,6 +1862,49 @@ navigation:
   jump_chars: "abcdefghijklmnopqrstuvwxyz" # characters for jump labels
 ```
 
+### Which-key
+
+```yaml
+which_key:
+  enabled: true # off by default
+  delay_ms: 300 # how long the half-typed chord waits before the popup shows
+  prefixes: [g, z] # only these first steps trigger it (empty = every prefix)
+  groups: # optional naming/folding per chord prefix
+    - prefix: o
+      title: "Open ..."
+      collapse_in_bars: true # default false
+```
+
+Press the first step of a multi-step chord (`g`, `z`, `ctrl+k`, …) and, after
+`delay_ms`, a popup lists every binding that continues it — the remaining key
+and the action it runs. The popup is purely informational: the keys still flow
+through the normal chord dispatch, so completing the chord runs its action and
+an unmapped key aborts the chord and closes the popup.
+
+**Why `delay_ms`:** a chord typed at speed would otherwise flash the popup for
+a few frames on every use. Only a chord left hanging — because you forgot the
+second step — waits long enough to show it.
+
+**Why `prefixes`:** an empty list makes every chord prefix eligible, which is
+the discovery-friendly setting but also pops the menu on chords you know by
+heart. Naming the prefixes explicitly keeps the popup to the corners you
+actually want reminders in.
+
+**Groups** name a prefix and, optionally, fold it in the bars:
+
+- `title` replaces the popup's bare `✦ o…` heading. Without one the heading
+  stays the prefix itself.
+- `collapse_in_bars: true` drops every hint, saved-query favorite and script
+  shortcut bound under `prefix` from the action and status bar, and puts a
+  single `o Open ...` entry where the first of them stood. Without a `title`
+  that entry reads `o …`.
+
+`groups` is independent of `prefixes` — naming a group neither restricts nor
+widens which prefixes pop the menu. Both group options are inert while
+`enabled: false`: without the popup there would be no way left to discover the
+folded keys. The bindings themselves are edited in the shortcut menu, see
+[`docs/keybinding-editor.md`](docs/keybinding-editor.md).
+
 ### Inline images
 
 ```yaml
