@@ -32,6 +32,9 @@ pub struct WhichKeyMenu {
     open: bool,
     /// The surface form of the chord typed so far (e.g. `g` or `g l`).
     prefix: String,
+    /// The configured name of the group the prefix opens
+    /// (`which_key.groups[].title`), shown instead of the bare `✦ g…`.
+    title: Option<String>,
     /// (action name, full combo) pairs that continue `prefix`.
     rows: Vec<(String, String)>,
     list: LeaderList,
@@ -43,6 +46,7 @@ impl WhichKeyMenu {
             theme,
             open: false,
             prefix: String::new(),
+            title: None,
             rows: Vec::new(),
             list: LeaderList::default(),
         }
@@ -58,9 +62,11 @@ impl WhichKeyMenu {
 
     /// Show (or refresh) the popup for `prefix` with the given continuation
     /// rows. Called both on the reveal timer and on every subsequent chord
-    /// step so the list narrows live as the user types deeper.
-    pub fn open(&mut self, prefix: String, rows: Vec<(String, String)>) {
+    /// step so the list narrows live as the user types deeper. `title` is the
+    /// group name configured for exactly this prefix, if any.
+    pub fn open(&mut self, prefix: String, title: Option<String>, rows: Vec<(String, String)>) {
         self.prefix = prefix;
+        self.title = title;
         self.rows = rows;
         self.rebuild_list();
         self.open = true;
@@ -110,7 +116,12 @@ impl WhichKeyMenu {
         let count = self.rows.len();
 
         let content_w = self.list.min_width() as usize;
-        let heading_text = format!("\u{2726} {}\u{2026}", self.prefix);
+        // A named group speaks for itself; without a name the pending prefix
+        // plus an ellipsis is all there is to head the list with.
+        let heading_text = match self.title.as_deref() {
+            Some(title) => format!("\u{2726} {title}"),
+            None => format!("\u{2726} {}\u{2026}", self.prefix),
+        };
         let heading_w = heading_text.chars().count();
         let hint = "unmapped key cancels";
         let hint_w = hint.chars().count();

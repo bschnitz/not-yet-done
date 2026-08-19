@@ -1495,6 +1495,7 @@ impl App {
 
         // Configure nav chars on all tables.
         app.apply_nav_chars();
+        app.apply_key_groups();
 
         app.reload_link_refs();
 
@@ -1520,6 +1521,25 @@ impl App {
         }
     }
 
+    /// Apply the which-key groups that fold their chords away in the action
+    /// bar (`which_key.groups` with `collapse_in_bars`) to every content
+    /// view. Same lifecycle as [`Self::apply_nav_chars`]: startup and every
+    /// config reload that rebuilds views.
+    pub fn apply_key_groups(&mut self) {
+        let groups = self.config.which_key.collapsing_groups().to_vec();
+        for cv in self.content_views_iter_mut() {
+            cv.set_key_groups(&groups);
+        }
+    }
+
+    /// [`Self::apply_key_groups`] for a single slot.
+    pub fn apply_key_groups_to(&mut self, view_index: usize) {
+        let groups = self.config.which_key.collapsing_groups().to_vec();
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.set_key_groups(&groups);
+        }
+    }
+
     /// Everything a freshly constructed [`ContentView`] needs before it can
     /// render and fetch: the jump alphabet, its DB-persisted state (column
     /// overrides, saved queries, default query, sort spec) and the async
@@ -1532,6 +1552,7 @@ impl App {
     pub fn wire_content_view(&mut self, view_index: usize) {
         self.apply_load_banner_route(view_index);
         self.apply_nav_chars_to(view_index);
+        self.apply_key_groups_to(view_index);
         self.load_column_config_for(view_index);
         self.load_card_mode_for(view_index);
         self.reload_content_saved_queries(view_index);
@@ -5806,7 +5827,8 @@ impl App {
             if rows.is_empty() {
                 self.which_key.close();
             } else {
-                self.which_key.open(prefix, rows);
+                let title = self.which_key_title(&prefix);
+                self.which_key.open(prefix, title, rows);
             }
         } else if self.which_key_deadline.is_none() {
             self.which_key_deadline = Some(
@@ -5831,8 +5853,18 @@ impl App {
         if rows.is_empty() {
             return false;
         }
-        self.which_key.open(prefix, rows);
+        let title = self.which_key_title(&prefix);
+        self.which_key.open(prefix, title, rows);
         true
+    }
+
+    /// The name configured for exactly this chord prefix
+    /// (`which_key.groups[].title`), if the user gave it one.
+    fn which_key_title(&self, prefix: &str) -> Option<String> {
+        self.config
+            .which_key
+            .title_for(prefix)
+            .map(|t| t.to_string())
     }
 
     /// Is a pending chord `prefix` eligible for the popup? True when the
@@ -8439,6 +8471,15 @@ impl App {
                 self.keybindings.common.label(&CommonAction::SortMode),
                 "sort".to_string(),
             ));
+            // Fold collapsing which-key groups last, so the global frame, the
+            // view's hints and the sort entry are all candidates — the group
+            // takes the place of whichever of them it swallows first.
+            let hints = crate::key_groups::collapse(
+                self.config.which_key.collapsing_groups(),
+                hints,
+                |(k, _): &(String, String)| k.as_str(),
+                |g| (g.prefix.clone(), crate::key_groups::group_label(g)),
+            );
             self.status_bar.set_custom_hints(hints);
         }
 
