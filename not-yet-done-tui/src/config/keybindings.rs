@@ -520,15 +520,9 @@ pub enum CommonAction {
     ScrollHalfDown,
     ScrollPageUp,
     ScrollPageDown,
-    FuzzyFilterOpen,
     FuzzyFilterAccept,
     FuzzyFilterClear,
     FuzzyFilterCancel,
-    SearchOpen,
-    SearchNext,
-    SearchPrev,
-    SavedFilterSelect,
-    FormFilter,
     ColumnConfig,
     FormClose,
     FavoriteToggle,
@@ -558,15 +552,9 @@ impl CommonAction {
             Self::ScrollHalfDown => "scroll_half_down",
             Self::ScrollPageUp => "scroll_page_up",
             Self::ScrollPageDown => "scroll_page_down",
-            Self::FuzzyFilterOpen => "fuzzy_filter_open",
             Self::FuzzyFilterAccept => "fuzzy_filter_accept",
             Self::FuzzyFilterClear => "fuzzy_filter_clear",
             Self::FuzzyFilterCancel => "fuzzy_filter_cancel",
-            Self::SearchOpen => "search_open",
-            Self::SearchNext => "search_next",
-            Self::SearchPrev => "search_prev",
-            Self::SavedFilterSelect => "saved_filter_select",
-            Self::FormFilter => "form_filter",
             Self::ColumnConfig => "column_config",
             Self::FormClose => "form_close",
             Self::FavoriteToggle => "favorite_toggle",
@@ -598,17 +586,11 @@ impl FromStr for CommonAction {
             "scroll_half_down" => Ok(Self::ScrollHalfDown),
             "scroll_page_up" => Ok(Self::ScrollPageUp),
             "scroll_page_down" => Ok(Self::ScrollPageDown),
-            "fuzzy_filter_open" => Ok(Self::FuzzyFilterOpen),
             "fuzzy_filter_accept" => Ok(Self::FuzzyFilterAccept),
             "fuzzy_filter_clear" => Ok(Self::FuzzyFilterClear),
             "fuzzy_filter_cancel" => Ok(Self::FuzzyFilterCancel),
-            "search_open" => Ok(Self::SearchOpen),
-            "search_next" => Ok(Self::SearchNext),
-            "search_prev" => Ok(Self::SearchPrev),
-            "saved_filter_select" => Ok(Self::SavedFilterSelect),
             "column_left" => Ok(Self::ColumnLeft),
             "column_right" => Ok(Self::ColumnRight),
-            "form_filter" => Ok(Self::FormFilter),
             "column_config" => Ok(Self::ColumnConfig),
             "form_close" => Ok(Self::FormClose),
             "favorite_toggle" => Ok(Self::FavoriteToggle),
@@ -1248,14 +1230,9 @@ impl Default for KeyBindingSection<CommonAction> {
         m.insert(CommonAction::ScrollHalfDown, KeyBinding::new("ctrl+d"));
         m.insert(CommonAction::ScrollPageUp, KeyBinding::new("ctrl+b"));
         m.insert(CommonAction::ScrollPageDown, KeyBinding::new("ctrl+f"));
-        m.insert(CommonAction::FuzzyFilterOpen, KeyBinding::new("f"));
         m.insert(CommonAction::FuzzyFilterAccept, KeyBinding::new("enter"));
         m.insert(CommonAction::FuzzyFilterClear, KeyBinding::new("ctrl+u"));
         m.insert(CommonAction::FuzzyFilterCancel, KeyBinding::new("esc"));
-        m.insert(CommonAction::SearchOpen, KeyBinding::new("/"));
-        m.insert(CommonAction::SearchNext, KeyBinding::new("n"));
-        m.insert(CommonAction::SearchPrev, KeyBinding::new("N"));
-        m.insert(CommonAction::SavedFilterSelect, KeyBinding::new("q"));
         // Column config and sort menu share the `c` leader: both configure
         // *how the table reads*, and the chord keeps single-key `c` free on
         // views that want it.
@@ -1534,7 +1511,7 @@ mod tests {
             }};
         }
         check!(GlobalAction, 16);
-        check!(CommonAction, 26);
+        check!(CommonAction, 20);
         check!(ContentAction, 19);
         check!(WindowAction, 5);
         check!(QueryMenuAction, 9);

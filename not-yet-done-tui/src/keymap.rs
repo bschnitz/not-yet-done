@@ -1832,7 +1832,7 @@ mod tests {
                 tab("postgres"),
                 PaneStateProfile::InputMode(InputMode::Fuzzy),
             ),
-            KeySource::Common(CommonAction::FuzzyFilterOpen),
+            KeySource::Common(CommonAction::FuzzyFilterCancel),
         ));
         km.push(KeyClaim::handler(
             KeyBinding::new("f"),

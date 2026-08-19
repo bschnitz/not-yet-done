@@ -692,7 +692,6 @@ pub enum SearchKeyResult {
 pub trait Searchable {
     fn search_active(&self) -> bool;
     fn search_state(&self) -> SearchState;
-    fn search_open(&mut self);
     fn search_close(&mut self);
     fn search_clear(&mut self);
     fn search_handle_key(&mut self, key: &str) -> SearchKeyResult;
