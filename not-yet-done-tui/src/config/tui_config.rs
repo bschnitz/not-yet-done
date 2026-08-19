@@ -246,7 +246,9 @@ pub struct WhichKeyGroup {
     pub title: Option<String>,
     /// Fold the group in the bars: every hint, favorite and script shortcut
     /// under `prefix` is dropped and one `prefix title` entry takes the place
-    /// of the first of them. Default `false`.
+    /// of the first of them. A binding that *is* the bare prefix key (a view
+    /// that uses plain `o` for an action of its own) never opens the group's
+    /// menu and therefore keeps its entry. Default `false`.
     #[serde(default)]
     pub collapse_in_bars: bool,
 }

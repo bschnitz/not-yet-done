@@ -17,8 +17,10 @@ use crate::config::tui_config::WhichKeyGroup;
 
 /// Does the bar label `label` sit under the chord prefix `prefix`?
 ///
-/// True for the prefix key itself (`o` under `o` — that entry *is* the group)
-/// and for every deeper chord (`o f`, `o d`). Both sides are parsed with
+/// True for every deeper chord (`o f`, `o d`) and **false for the prefix key
+/// on its own**: a view that binds plain `o` to an action of its own does not
+/// open the group's menu there, so folding that entry away would hide a key
+/// the popup could never explain. Both sides are parsed with
 /// [`binding_steps`], the parser the dispatcher itself uses, so the legacy
 /// concatenated form matches just as well: `zm` sits under `z`.
 ///
@@ -37,7 +39,7 @@ pub fn label_in_group(label: &str, prefix: &str) -> bool {
         .unwrap_or(label);
     label.split('/').any(|alt| {
         let keys = binding_steps(alt);
-        keys.len() >= steps.len() && keys[..steps.len()] == steps[..]
+        keys.len() > steps.len() && keys[..steps.len()] == steps[..]
     })
 }
 
@@ -147,7 +149,6 @@ mod tests {
 
     #[test]
     fn a_label_belongs_to_its_prefix_and_to_nothing_else() {
-        assert!(label_in_group("o", "o"));
         assert!(label_in_group("o f", "o"));
         assert!(label_in_group("ctrl+k l", "ctrl+k"));
         assert!(!label_in_group("p", "o"));
@@ -159,6 +160,33 @@ mod tests {
         assert!(!label_in_group("enter", "e"));
         // Bracketed labels (the app-global status hints) match too.
         assert!(label_in_group("[zr]", "z"));
+    }
+
+    /// A view may bind the prefix key on its own — `o` opens the notes in the
+    /// tasks view. That binding runs on press instead of opening the group's
+    /// menu, so it keeps its own bar entry.
+    #[test]
+    fn the_bare_prefix_key_is_a_binding_of_its_own_not_part_of_the_group() {
+        assert!(!label_in_group("o", "o"));
+        assert!(!label_in_group("ctrl+k", "ctrl+k"));
+        let groups = vec![group("o", Some("Open ..."), true)];
+        let items = vec![
+            ("o".to_string(), "notes".to_string()),
+            ("o f".to_string(), "open file".to_string()),
+        ];
+        let out = collapse(
+            &groups,
+            items,
+            |(k, _): &(String, String)| k.as_str(),
+            |g| (g.prefix.clone(), group_label(g)),
+        );
+        assert_eq!(
+            out,
+            vec![
+                ("o".to_string(), "notes".to_string()),
+                ("o".to_string(), "Open ...".to_string()),
+            ]
+        );
     }
 
     #[test]
