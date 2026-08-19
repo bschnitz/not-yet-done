@@ -10325,18 +10325,12 @@ impl App {
                     table.scroll_by(n);
                 }
             }
-            CommonAction::FuzzyFilterOpen => {}
+            // The fuzzy input is driven by `ContentView::handle_fuzzy_key`,
+            // not from here — these arms only exist because the keys are
+            // still resolvable through `InputMode::Fuzzy`.
             CommonAction::FuzzyFilterAccept => {}
             CommonAction::FuzzyFilterClear => {}
             CommonAction::FuzzyFilterCancel => {}
-            CommonAction::SearchOpen => {}
-            CommonAction::SearchNext => {}
-            CommonAction::SearchPrev => {}
-            CommonAction::SavedFilterSelect => {}
-            CommonAction::FormFilter => {
-                // Deprecated — was a separate edit/create popup; the unified
-                // query menu (q) now covers create/edit/delete/shortcut.
-            }
             CommonAction::ColumnConfig => {
                 self.open_column_config_popup();
             }

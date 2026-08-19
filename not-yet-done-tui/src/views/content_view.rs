@@ -11565,9 +11565,6 @@ impl Searchable for ContentView {
     fn search_state(&self) -> SearchState {
         self.active_pane().search.state()
     }
-    fn search_open(&mut self) {
-        self.active_pane_mut().search.open();
-    }
     fn search_close(&mut self) {
         self.active_pane_mut().search.close();
     }
