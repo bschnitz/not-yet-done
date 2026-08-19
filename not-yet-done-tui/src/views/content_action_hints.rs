@@ -91,11 +91,11 @@ fn content_nav_hint(action: &ContentAction) -> Option<NavHint> {
         TreeExpandAll => ("expand all", HintBar::Status),
         CycleGrouping => ("cycle group", HintBar::Status),
         ToggleTreeAggregate => ("aggregate", HintBar::Status),
-        // Record-detail split (toggle / value-wrap) and group-order toggle:
-        // claimed at the view level (`build_view_claims`), so this
-        // pane-claim-driven resolver never sees them — their status-bar
-        // hints are emitted directly by `ContentView::status_bar_hints`
-        // under the same gate.
+        // Claimed at the view level (`build_view_claims`) rather than by the
+        // pane, so this resolver never sees them. They are derived from that
+        // claim set by `ContentView::view_nav_hint`, which exists because
+        // their labels depend on live state (`detail` vs `close detail`,
+        // `order ↓` vs `order ↑`) and so cannot be a `&'static str` here.
         ToggleRecordDetail | ToggleDetailWrap | ToggleGroupOrder | ToggleLongText
         | ToggleCardMode => return None,
         // Activatable / richer-path sources: surfaced (with their

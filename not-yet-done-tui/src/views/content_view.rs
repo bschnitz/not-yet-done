@@ -11267,67 +11267,24 @@ impl ContentView {
             &self.key_icons,
             self.adapter.as_deref(),
         );
-        // Record-detail toggle / wrap hints. These derive from the view-level
-        // claim (`build_view_claims`), so the pane's nav-hint loop — which
-        // only sees the pane's own `build_claims` — can't surface them; we
-        // add them here under the very same gate as the claim. The label
-        // flips to reflect the live toggle state (open vs close, wrap vs
-        // no-wrap) so the bar reads as the action the key performs next.
-        let pane = self.active_pane();
-        let can_open = pane.record_detail_enabled(&self.view_defs);
-        let detail_in_play = pane.detail_child.is_some() || pane.is_detail_pane();
-        if can_open || detail_in_play {
-            if let Some(b) = self.content_kb.get(&ContentAction::ToggleRecordDetail) {
-                let label = if detail_in_play {
-                    "close detail"
-                } else {
-                    "detail"
-                };
-                hints.push((b.hint_label(&self.key_icons), label.to_string()));
-            }
-        }
-        if detail_in_play {
-            if let Some(b) = self.content_kb.get(&ContentAction::ToggleDetailWrap) {
-                let label = if pane.detail_wrap { "no-wrap" } else { "wrap" };
-                hints.push((b.hint_label(&self.key_icons), label.to_string()));
-            }
-        }
-        // Group-order toggle (`o`) — same view-level claim/gate as
-        // `build_view_claims` (groupable level, and `o` not owned by a
-        // record-detail split). The label carries the *current* group order
-        // direction so the bar reflects state at a glance (↓ newest-first /
-        // ↑ oldest-first); pressing `o` flips it.
-        let detail_owns_o = can_open || detail_in_play;
-        if pane.level_has_group_by(&self.view_defs) && !detail_owns_o {
-            if let Some(gb) = pane.current_group_by(&self.view_defs) {
-                if let Some(b) = self.content_kb.get(&ContentAction::ToggleGroupOrder) {
-                    let arrow = match gb.order {
-                        GroupOrder::Desc => "↓",
-                        GroupOrder::Asc => "↑",
-                    };
-                    hints.push((b.hint_label(&self.key_icons), format!("order {arrow}")));
-                }
-            }
-        }
-        // Long-text toggle (`v`) — offered only when a column declares
-        // `long_source`. The label reflects the current mode so the bar shows
-        // state at a glance.
-        if pane.long_text_available(&self.view_defs) {
-            if let Some(b) = self.content_kb.get(&ContentAction::ToggleLongText) {
-                let label = if pane.long_text { "short" } else { "long" };
-                hints.push((b.hint_label(&self.key_icons), label.to_string()));
-            }
-        }
-        // Card-mode toggle — same gate and key as the view-level claim. The
-        // label names the mode the key switches *to*, so the bar reads as the
-        // action rather than the state.
-        if let Some(b) = pane.card_toggle_binding(&self.view_defs, &self.content_kb) {
-            let label = if pane.card_mode_active(&self.view_defs) {
-                "table"
-            } else {
-                "cards"
+        // View-level toggles (record detail, value wrap, group order, long
+        // text, card mode), derived from `build_view_claims` exactly as the
+        // pane derives its nav hints from `build_claims`. These live at view
+        // level because they touch view-owned state, so the pane's resolver
+        // never sees them — but their gate is still written **once**: it sits
+        // on the claim, and the claim being present is what puts the key in
+        // the bar. `view_nav_hint` contributes only the label, which reflects
+        // live state (open vs close, wrap vs no-wrap, ↓ vs ↑) so the bar reads
+        // as the action the key performs next.
+        for claim in self.build_view_claims().claims {
+            let Some(label) = self.view_nav_hint(&claim.source) else {
+                continue;
             };
-            hints.push((b.hint_label(&self.key_icons), label.to_string()));
+            let key = claim.key.hint_label(&self.key_icons);
+            if hints.iter().any(|(k, _)| k == &key) {
+                continue;
+            }
+            hints.push((key, label));
         }
         // Window/split chords (`wv` / `ws` / `wq` / `wh` / `wl` by default),
         // listed with their full chord just like the tree-fold chords. Until
@@ -11361,6 +11318,82 @@ impl ContentView {
             }
         }
         hints
+    }
+
+    /// Status-bar label for a claim in [`Self::build_view_claims`], or `None`
+    /// when the source has no place in the status bar.
+    ///
+    /// The view-level counterpart of
+    /// [`crate::views::content_action_hints::nav_hint_for_source`], and it
+    /// exists for one reason that resolver cannot cover: these labels depend
+    /// on live state (`detail` vs `close detail`, `wrap` vs `no-wrap`,
+    /// `order ↓` vs `order ↑`), so they cannot be a `&'static str` table.
+    ///
+    /// It deliberately answers *only* the label. Whether the key belongs in
+    /// the bar at all is decided by `build_view_claims` alone — no gate is
+    /// repeated here, which is what keeps the bar from drifting away from
+    /// what actually dispatches.
+    ///
+    /// The match over [`ContentAction`] is exhaustive on purpose: a new
+    /// action must state whether it has a view-level status hint instead of
+    /// silently going missing from the bar. `None` here means one of three
+    /// things — the source is not a typed content action (YAML subtabs, menu
+    /// keys, saved-query and script shortcuts, all rendered through their own
+    /// richer path), the action is claimed by the *pane* and already handled
+    /// by `nav_hint_for_source`, or it is activatable and belongs in the
+    /// action bar with its own `ActiveSurface`.
+    fn view_nav_hint(&self, source: &KeySource) -> Option<String> {
+        let KeySource::Content(action) = source else {
+            return None;
+        };
+        let pane = self.active_pane();
+        use ContentAction::*;
+        let label = match action {
+            ToggleRecordDetail => {
+                if pane.detail_child.is_some() || pane.is_detail_pane() {
+                    "close detail"
+                } else {
+                    "detail"
+                }
+            }
+            ToggleDetailWrap => {
+                if pane.detail_wrap {
+                    "no-wrap"
+                } else {
+                    "wrap"
+                }
+            }
+            // ↓ newest-first / ↑ oldest-first — the direction the buckets
+            // currently run, which `o` flips.
+            ToggleGroupOrder => match pane.current_group_by(&self.view_defs)?.order {
+                GroupOrder::Desc => "order ↓",
+                GroupOrder::Asc => "order ↑",
+            },
+            ToggleLongText => {
+                if pane.long_text {
+                    "short"
+                } else {
+                    "long"
+                }
+            }
+            // Names the mode the key switches *to*, so the bar reads as the
+            // action rather than the state.
+            ToggleCardMode => {
+                if pane.card_mode_active(&self.view_defs) {
+                    "table"
+                } else {
+                    "cards"
+                }
+            }
+            // Claimed by the pane, not the view — `nav_hint_for_source` owns
+            // these labels.
+            Back | Open | PrevPage | NextPage | TreeCollapse | TreeCollapseAll | TreeExpandAll
+            | CycleGrouping | ToggleTreeAggregate => return None,
+            // Activatable: the action-bar builder surfaces them with an
+            // `ActiveSurface` so they can light up.
+            EditQuery | OpenScriptsMenu | GroupMenu | JumpMode | LinkHop => return None,
+        };
+        Some(label.to_string())
     }
 }
 
@@ -13691,7 +13724,10 @@ mod tests {
     fn render_text_search_taiga_input_placeholder() {
         let tpl = "- { type: task,  q: \"<input>\" }\n- { type: issue, q: \"<input>\" }";
         let rendered = render_text_search(tpl, "memory leak");
-        assert_eq!(rendered_q(&rendered), serde_yaml::Value::from("memory leak"));
+        assert_eq!(
+            rendered_q(&rendered),
+            serde_yaml::Value::from("memory leak")
+        );
         assert!(rendered.contains("task"));
         assert!(rendered.contains("issue"));
     }
@@ -13714,7 +13750,11 @@ mod tests {
         let tpl = r#"- { type: task, q: "<input>" }"#;
         for input in ["- dash", "key: value", r#"the "real" issue"#, "* star"] {
             let rendered = render_text_search(tpl, input);
-            assert_eq!(rendered_q(&rendered), serde_yaml::Value::from(input), "input {input:?}");
+            assert_eq!(
+                rendered_q(&rendered),
+                serde_yaml::Value::from(input),
+                "input {input:?}"
+            );
         }
     }
 
@@ -18818,6 +18858,46 @@ mod tests {
     }
 
     #[test]
+    fn detail_hints_come_from_the_view_claim() {
+        // The status bar derives these from `build_view_claims`, so the gate
+        // lives in exactly one place: `o` is listed because the level opted
+        // into the split, `X` only once a follower actually exists, and both
+        // labels name what the key does *next*. A view that never opted in
+        // gets neither — without a second gate saying so.
+        let labels = |v: &ContentView| -> Vec<String> {
+            v.status_bar_hints().into_iter().map(|(_, d)| d).collect()
+        };
+
+        let plain = {
+            let config = test_config_with_query();
+            let mut view =
+                ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+            view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+            labels(&view)
+        };
+        assert!(
+            !plain.iter().any(|d| d == "detail"),
+            "no opt-in, no hint: {plain:?}"
+        );
+
+        let config = record_detail_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+
+        let closed = labels(&view);
+        assert!(closed.iter().any(|d| d == "detail"), "got: {closed:?}");
+        assert!(
+            !closed.iter().any(|d| d == "wrap"),
+            "wrap needs a follower: {closed:?}"
+        );
+
+        view.toggle_record_detail();
+        let open = labels(&view);
+        assert!(open.iter().any(|d| d == "close detail"), "got: {open:?}");
+        assert!(open.iter().any(|d| d == "wrap"), "got: {open:?}");
+    }
+
+    #[test]
     fn toggle_record_detail_refused_without_opt_in() {
         // Plain config (record_detail = false) → toggle is a no-op.
         let config = test_config_with_query();
@@ -22139,6 +22219,35 @@ views:
         let binding = kb.content.get(&ContentAction::JumpMode).unwrap();
         assert!(binding.matches("J"));
         assert!(!binding.matches("p"));
+    }
+
+    #[test]
+    fn group_order_hint_shows_the_live_direction() {
+        // Same claim-derived path as the detail hints, and the reason their
+        // labels cannot be a static table: the arrow has to follow the
+        // bucket order the level currently runs in.
+        let labels = |v: &ContentView| -> Vec<String> {
+            v.status_bar_hints().into_iter().map(|(_, d)| d).collect()
+        };
+
+        let ungrouped = {
+            let config = test_config_with_children();
+            let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+            labels(&view)
+        };
+        assert!(
+            !ungrouped.iter().any(|d| d.starts_with("order ")),
+            "no group_by, no order hint: {ungrouped:?}"
+        );
+
+        let config = test_config_with_group_by();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let asc = labels(&view);
+        assert!(asc.iter().any(|d| d == "order ↑"), "got: {asc:?}");
+
+        view.dispatch_content_action(ContentAction::ToggleGroupOrder);
+        let desc = labels(&view);
+        assert!(desc.iter().any(|d| d == "order ↓"), "got: {desc:?}");
     }
 
     #[test]
