@@ -199,27 +199,27 @@ impl Default for ShortcutMenuConfig {
 ///
 /// ```yaml
 /// shortcut_overview:
-///   max_width: 50   # widest the popup body may get, in cells
+///   min_width: 50   # narrowest the popup body may get, in cells
+///   max_width: 80   # widest it may get
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Both are unset by default: the popup is then sized by its content alone,
+/// as every other popup is.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShortcutOverviewConfig {
+    /// How wide the popup body is at least, in cells. Keeps a short section
+    /// (or a view with few shortcuts) from collapsing into a narrow column
+    /// that re-flows every time the overview is opened somewhere else. Unset
+    /// by default.
+    #[serde(default)]
+    pub min_width: Option<u16>,
     /// How wide the popup body may grow, in cells. Long shortcut names are
     /// truncated at this width instead of stretching the popup across the
-    /// terminal. Default `50`.
-    #[serde(default = "default_overview_max_width")]
-    pub max_width: u16,
-}
-
-fn default_overview_max_width() -> u16 {
-    50
-}
-
-impl Default for ShortcutOverviewConfig {
-    fn default() -> Self {
-        Self {
-            max_width: default_overview_max_width(),
-        }
-    }
+    /// terminal. Unset by default. A [`min_width`](Self::min_width) larger
+    /// than this one wins — the popup never ends up narrower than its
+    /// minimum.
+    #[serde(default)]
+    pub max_width: Option<u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -619,22 +619,31 @@ which_key:
         assert!(!wk.groups[1].collapse_in_bars);
     }
 
-    /// Same guard for the two width options — and for their documented
-    /// defaults, which the popups fall back to when the blocks are absent.
+    /// Same guard for the width options: the overview's two are optional (no
+    /// bound at all unless asked for), the shared hint cap has a default.
     #[test]
-    fn the_documented_popup_widths_parse_and_default_to_50() {
+    fn the_documented_popup_widths_parse_with_their_defaults() {
         let yaml = "
 shortcut_overview:
+  min_width: 50
   max_width: 72
 popups:
   hint_width: 0
 ";
         let config: TuiConfig = serde_yaml::from_str(yaml).expect("width blocks parse");
-        assert_eq!(config.shortcut_overview.max_width, 72);
+        assert_eq!(config.shortcut_overview.min_width, Some(50));
+        assert_eq!(config.shortcut_overview.max_width, Some(72));
         assert_eq!(config.popups.hint_width, 0);
 
+        // One bound on its own is a valid config — the other stays unset.
+        let only_min: TuiConfig = serde_yaml::from_str("shortcut_overview:\n  min_width: 50\n")
+            .expect("min alone parses");
+        assert_eq!(only_min.shortcut_overview.min_width, Some(50));
+        assert_eq!(only_min.shortcut_overview.max_width, None);
+
         let bare: TuiConfig = serde_yaml::from_str("{}").expect("empty config parses");
-        assert_eq!(bare.shortcut_overview.max_width, 50);
+        assert_eq!(bare.shortcut_overview.min_width, None);
+        assert_eq!(bare.shortcut_overview.max_width, None);
         assert_eq!(bare.popups.hint_width, 50);
     }
 }

@@ -1911,7 +1911,8 @@ folded keys. The bindings themselves are edited in the shortcut menu, see
 
 ```yaml
 shortcut_overview:
-  max_width: 50 # widest the popup body may get, in cells
+  min_width: 50 # narrowest the popup body may get, in cells
+  max_width: 80 # widest it may get
 ```
 
 `F1` (the `shortcut_overview` action) opens a read-only list of every shortcut
@@ -1930,10 +1931,14 @@ Longer than the terminal, it scrolls: `j`/`k` (or the arrows) a line,
 `Ctrl+D`/`Ctrl+U` and the page keys a screen, `g`/`G` to the ends. **Every
 other key closes it** — it is a glance, not a mode.
 
-**Why `max_width`:** a shortcut name plus its keys can be far wider than the
-list needs to be readable, and a popup stretched across a wide terminal is
-harder to scan than a narrow column. Names longer than the cap are elided; the
-keys are never cut.
+**Why the width bounds:** both are unset by default, which sizes the popup by
+its content like every other popup. `max_width` is for the other extreme — a
+shortcut name plus its keys can be far wider than the list needs to be
+readable, and a popup stretched across a wide terminal is harder to scan than a
+narrow column. Names longer than the cap are elided; the keys are never cut.
+`min_width` keeps a view with few shortcuts from opening as a narrow column, so
+the overview sits at the same width wherever you press it. A `min_width` larger
+than `max_width` wins.
 
 The grouping reads `which_key.groups` directly, so sections work even with
 `which_key.enabled: false` or `collapse_in_bars: false` — naming a group is
