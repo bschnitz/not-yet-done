@@ -307,6 +307,11 @@ fn resolve_popup_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action 
     }
 }
 
+/// Unreachable today: the only caller of [`input_mode`] passes
+/// `fuzzy_active: false`, because the content panes own their fuzzy input and
+/// resolve the same three actions themselves (`ContentView::handle_fuzzy_key`).
+/// Kept as the mode-based counterpart of the other resolvers — but it is *not*
+/// the live mapping, so don't reason about the fuzzy keys from here.
 fn resolve_fuzzy_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action {
     // Configurable fuzzy keys from common section.
     for (action, binding) in &kb.common.bindings {

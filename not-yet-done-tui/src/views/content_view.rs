@@ -6148,7 +6148,7 @@ impl ContentPane {
         // sense — the active component absorbs every keystroke until it
         // exits, so they live outside the keymap.
         if self.table.fuzzy_active {
-            return self.handle_fuzzy_key(key, view_defs);
+            return self.handle_fuzzy_key(key, view_defs, common_kb);
         }
         if self.search.active() {
             return self.handle_search_key(key, view_index, pane_id, view_defs);
@@ -6775,9 +6775,26 @@ impl ContentPane {
         SubViewMessage::SelectionChanged(None)
     }
 
-    fn handle_fuzzy_key(&mut self, key: &str, view_defs: &[ViewDef]) -> SubViewMessage {
-        match key {
-            "enter" => {
+    fn handle_fuzzy_key(
+        &mut self,
+        key: &str,
+        view_defs: &[ViewDef],
+        common_kb: &KeyBindingSection<CommonAction>,
+    ) -> SubViewMessage {
+        // The three fuzzy actions are configurable (`common.fuzzy_filter_*`),
+        // so they must be resolved *before* the printable-character arm
+        // below — a binding on a plain letter would otherwise land in the
+        // query buffer instead of firing. First match wins, hence the
+        // explicit order.
+        let action = [
+            CommonAction::FuzzyFilterAccept,
+            CommonAction::FuzzyFilterCancel,
+            CommonAction::FuzzyFilterClear,
+        ]
+        .into_iter()
+        .find(|a| common_kb.get(a).is_some_and(|b| b.matches(key)));
+        match action {
+            Some(CommonAction::FuzzyFilterAccept) => {
                 self.table.fuzzy_close();
                 self.rebuild_table(view_defs);
                 // Closing with an empty query is a cancel: restore the
@@ -6786,26 +6803,27 @@ impl ContentPane {
                 if self.table.filter_text.is_empty() {
                     self.restore_tree_filter_expand(view_defs);
                 }
+                return SubViewMessage::SelectionChanged(None);
             }
-            "esc" => {
-                if self.table.fuzzy_query.is_empty() {
-                    self.table.fuzzy_close();
-                    self.restore_tree_filter_expand(view_defs);
-                } else {
-                    self.table.fuzzy_query.clear();
-                    self.table.fuzzy_cursor = 0;
-                    self.table.filter_text.clear();
-                    self.rebuild_table(view_defs);
-                    self.restore_tree_filter_expand(view_defs);
-                }
+            // Cancel on an empty query closes the input; with text in it, it
+            // wipes the query first and leaves the input open — one press to
+            // start over, a second one to leave.
+            Some(CommonAction::FuzzyFilterCancel) if self.table.fuzzy_query.is_empty() => {
+                self.table.fuzzy_close();
+                self.restore_tree_filter_expand(view_defs);
+                return SubViewMessage::SelectionChanged(None);
             }
-            "ctrl+u" => {
+            Some(CommonAction::FuzzyFilterCancel) | Some(CommonAction::FuzzyFilterClear) => {
                 self.table.fuzzy_query.clear();
                 self.table.fuzzy_cursor = 0;
                 self.table.filter_text.clear();
                 self.rebuild_table(view_defs);
                 self.restore_tree_filter_expand(view_defs);
+                return SubViewMessage::SelectionChanged(None);
             }
+            _ => {}
+        }
+        match key {
             "backspace" => {
                 self.table.fuzzy_backspace();
                 self.rebuild_table(view_defs);
@@ -16265,6 +16283,33 @@ mod tests {
         let mut view = open_with(false);
         assert_eq!(view.active_pane().table.selected_row(), 1);
         assert!(view.take_pending_mark_read().is_none(), "read row → no ack");
+    }
+
+    #[test]
+    fn fuzzy_input_follows_the_configured_keys() {
+        // The keys that close/clear the fuzzy input used to be hardcoded in
+        // `handle_fuzzy_key`, which made `common.fuzzy_filter_*` look
+        // configurable while it did nothing. A rebind has to take effect —
+        // and the old default has to stop working.
+        let config = uniform_recursive_config();
+        let mut kb = KeyBindingConfig::default();
+        kb.common
+            .bindings
+            .insert(CommonAction::FuzzyFilterCancel, KeyBinding::new("ctrl+q"));
+        let mut view = ContentView::new(test_theme(), &config, None, &kb);
+        view.active_pane_mut().table.fuzzy_active = true;
+
+        view.handle_key("esc");
+        assert!(
+            view.active_pane().table.fuzzy_active,
+            "esc is no longer bound to cancel"
+        );
+
+        view.handle_key("ctrl+q");
+        assert!(
+            !view.active_pane().table.fuzzy_active,
+            "the rebound cancel key closes the input"
+        );
     }
 
     #[test]
