@@ -632,8 +632,18 @@ If `window_ops` is active, the **status bar** lists the chords with their full
 mnemonic (`wv split right`, `ws split down`, `wq close pane`, `wh focus
 parent`, `wl focus child`) — the same treatment as the tree fold chords
 `zm`/`zr`. What is _not_ in the bar is `w<tag>`: the tag letter is assigned by
-the current split layout and is therefore not a fixed binding; it only appears
-in the WINDOW mode display of the action bar while the `w` leader is held.
+the current split layout and is therefore not a fixed binding; in the bar it
+only appears in the WINDOW mode display of the action bar while the `w` leader
+is held.
+
+The **shortcut menu, the shortcut overview and the which-key popup** do list
+`w<tag>`, because those are where you go when you have forgotten which pane is
+which. Each tag is named after the pane it focuses — the subtab, plus the level
+that pane is drilled into — and the pane you are already in is marked
+`(current)`. The rows are read-only: the letter is handed out by the layout,
+not bound to an action, so there is nothing to rebind. Naming `w` as a
+[which-key group](../README.md#which-key) gives the popup a heading and folds
+the five static chords into a single bar entry.
 
 #### `group_by:` / `aggregates:` — grouping & totals (M3)
 

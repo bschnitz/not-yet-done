@@ -50,7 +50,7 @@ use crate::components::search::SearchComponent;
 use crate::components::tab_set_popup::{TabSetEntry, TabSetPopup, TabSetPopupMessage};
 use crate::config::keybindings::{
     CommonAction, ContentAction, KeyBinding, KeyBindingConfig, KeyBindingSection, KeyIconMap,
-    QueryMenuAction, WindowAction,
+    QueryMenuAction, WindowAction, binding_steps,
 };
 use crate::config::tui_config::LoadBannerRoute;
 use crate::config::view_config::{
@@ -10805,7 +10805,124 @@ impl ContentView {
                 });
             }
         }
+
+        rows.extend(self.window_shortcut_rows());
         rows
+    }
+
+    /// The rows for the window leader (`w` by default), live only where the
+    /// view opts into window/split operations — elsewhere the leader never
+    /// engages (see [`Self::handle_window_chord`]) and listing it would
+    /// advertise keys that do nothing.
+    ///
+    /// Two kinds, and the second is the reason this can't come from the
+    /// keymap like everything else:
+    ///
+    /// * the static [`WindowAction`] bindings (`w v` split right, `w q` close,
+    ///   …), which are tab-wide claims and therefore editable;
+    /// * one row per **currently tagged pane**. Those tags are handed out at
+    ///   split time from the pane alphabet, so they exist in no config file
+    ///   and only this view knows them. They name the pane they focus — which
+    ///   is what makes `w a` legible in the popup instead of a bare letter —
+    ///   and are read-only, since there is nothing to rebind: the letter
+    ///   belongs to the pane, not to an action.
+    ///
+    /// Only emitted while the subtab actually holds more than one pane, the
+    /// same gate the action bar's `switch pane` hint uses.
+    pub fn window_shortcut_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
+        let mut rows = Vec::new();
+        if !self
+            .active_view_def()
+            .map(|v| v.window_ops)
+            .unwrap_or(false)
+        {
+            return rows;
+        }
+        let scope = KeyScope::Tab(TabRef::new(&self.tab_name));
+        let label = self.tab_name.clone();
+
+        // `bindings` is a HashMap — sort so the popup and the overview don't
+        // reshuffle between openings.
+        let mut actions: Vec<(&WindowAction, &KeyBinding)> =
+            self.window_kb.bindings.iter().collect();
+        actions.sort_by(|a, b| a.1.0.cmp(&b.1.0));
+        for (action, binding) in actions {
+            let source = KeySource::Window(action.clone());
+            rows.push(crate::keymap::ShortcutRow {
+                // Same name the "All tabs" scope gives these (it projects them
+                // from the tab-wide claims), so the two lists agree and the
+                // menu's dedup sees one shortcut rather than two.
+                name: source.action_name(),
+                keys: binding
+                    .0
+                    .iter()
+                    .map(|alt| spaced_steps(alt))
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                scope: label.clone(),
+                source: Some(source),
+                key_scope: Some(scope.clone()),
+            });
+        }
+
+        let tree = &self.pane_trees[self.active_subtab];
+        if tree.pane_tags.len() < 2 {
+            return rows;
+        }
+        // Whatever the window bindings are prefixed with — the same thing
+        // `handle_window_chord` stashes when it sees a leader. Several leaders
+        // become several alternatives on one row rather than duplicate rows.
+        let mut leaders: Vec<String> = Vec::new();
+        for binding in self.window_kb.bindings.values() {
+            for alt in &binding.0 {
+                if let Some(first) = binding_steps(alt).into_iter().next() {
+                    if !leaders.contains(&first) {
+                        leaders.push(first);
+                    }
+                }
+            }
+        }
+        leaders.sort();
+
+        let mut tagged: Vec<(char, PaneId)> =
+            tree.pane_tags.iter().map(|(&id, &c)| (c, id)).collect();
+        tagged.sort();
+        for (tag, id) in tagged {
+            let Some(leaf) = tree.root.find_leaf(id) else {
+                continue;
+            };
+            let mut name = format!("Focus {}", self.pane_label(&leaf.pane));
+            if id == tree.focus {
+                name.push_str(" (current)");
+            }
+            rows.push(crate::keymap::ShortcutRow {
+                name,
+                keys: leaders
+                    .iter()
+                    .map(|l| format!("{l} {tag}"))
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                scope: label.clone(),
+                source: None,
+                key_scope: None,
+            });
+        }
+        rows
+    }
+
+    /// How a pane is named where the user has to tell two of them apart: its
+    /// subtab, plus the level it is drilled into when that says more than the
+    /// subtab alone. Deliberately the *pane's* path, not the selected row —
+    /// the label has to stay put while the cursor moves.
+    fn pane_label(&self, pane: &ContentPane) -> String {
+        let view = pane
+            .view_def(&self.view_defs)
+            .map(|vd| vd.name.clone())
+            .unwrap_or_else(|| "pane".to_string());
+        match pane.breadcrumbs().last() {
+            Some(crumb) => format!("{view} › {crumb}"),
+            None => view,
+        }
     }
 
     /// Every node-shortcut row across *all* declared levels of this view's
@@ -11627,6 +11744,14 @@ impl Component for ContentView {
 /// Call sites that build render rows special-case `"has_links"`
 /// upstream of the call to this function (see flat-mode and tree-mode
 /// row builders inside `rebuild_table_with` / `build_tree_data_rows`).
+/// A binding's steps written out with spaces (`wv` → `w v`). The window
+/// defaults use the legacy concatenated form, which would read oddly next to
+/// the pane-tag rows this view synthesises in the documented `w a` shape —
+/// and next to the `w` group prefix itself.
+fn spaced_steps(binding: &str) -> String {
+    binding_steps(binding).join(" ")
+}
+
 fn column_value<'a>(item: &'a NodeSummary, col: &ColumnDef) -> &'a str {
     if col.source.as_deref() == Some("label") {
         return &item.label;
@@ -19638,6 +19763,91 @@ mod tests {
         assert!(
             !hints.iter().any(|(k, _)| k.starts_with('w')),
             "no window chord may show without window_ops, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn window_rows_name_every_pane_the_tag_can_reach() {
+        // The which-key popup and the shortcut overview both read the context
+        // rows, so `w` has to explain itself there — including the pane tags,
+        // which are handed out at split time and appear in no config file. A
+        // bare `w a` would be unreadable; the row has to name the pane.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.view_defs[0].window_ops = true;
+        view.split_focused(SplitOrientation::Horizontal);
+
+        let rows = view.window_shortcut_rows();
+        let by_key = |k: &str| {
+            rows.iter()
+                .find(|r| r.keys == k)
+                .unwrap_or_else(|| panic!("expected a row on '{k}', got: {rows:?}"))
+        };
+        // Static bindings, written in the documented spaced form even though
+        // the compiled-in default is the concatenated `wv`.
+        assert_eq!(by_key("w v").name, "Split right");
+        assert!(
+            by_key("w v").source.is_some(),
+            "a window action stays rebindable"
+        );
+        // Two panes → two tags off the filtered alphabet (`s`, `v`, `q`, `h`,
+        // `l` are reserved by the chords themselves), each naming its subtab.
+        for key in ["w a", "w d"] {
+            let row = by_key(key);
+            assert!(
+                row.name.starts_with("Focus issues"),
+                "'{key}' must name the pane it focuses, got: {}",
+                row.name
+            );
+            assert!(
+                row.source.is_none() && row.key_scope.is_none(),
+                "a pane tag belongs to the layout, not to a binding — read-only"
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.name.ends_with("(current)"))
+                .count(),
+            1,
+            "exactly one pane is the focused one, got: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn window_rows_stay_out_of_a_view_that_has_no_window_ops() {
+        // Same gate as the bars: where the leader never engages, the popup
+        // must not offer keys that do nothing.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(!view.view_defs[0].window_ops, "fixture must default to off");
+        view.split_focused(SplitOrientation::Horizontal);
+
+        assert!(view.window_shortcut_rows().is_empty());
+        assert!(
+            !view
+                .context_shortcut_rows()
+                .iter()
+                .any(|r| r.keys.starts_with('w')),
+            "and none of them leak into the context rows either"
+        );
+    }
+
+    #[test]
+    fn a_single_pane_has_no_tag_row_to_offer() {
+        // One pane means the tag switch is a no-op — the same reason the
+        // action bar's `switch pane` hint stays away.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.view_defs[0].window_ops = true;
+
+        let rows = view.window_shortcut_rows();
+        assert!(
+            rows.iter().all(|r| !r.name.starts_with("Focus issues")),
+            "no pane-tag row on an unsplit view, got: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.keys == "w v"),
+            "the split/close chords are still listed"
         );
     }
 

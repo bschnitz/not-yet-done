@@ -1901,6 +1901,17 @@ actually want reminders in.
   of its own — plain `o` in the tasks view — is left alone: that key runs its
   action instead of opening the menu, so folding it away would hide it.
 
+**The window leader is a group like any other.** Naming `w` covers the
+split/close/focus chords _and_ the pane tags: a split hands each pane a letter
+off the `pane_tags` alphabet, so `w a`, `w d`, … exist in no config file and
+only the running layout knows them. They are listed anyway,
+each naming the pane it focuses (its subtab, plus the level it is drilled into)
+and marking the one you are already in — a bare letter would be unreadable in
+the popup. Those rows are read-only: the letter belongs to the pane, not to an
+action, so there is nothing to rebind. All of it appears only on a view with
+[`window_ops: true`](docs/generic-view-spec.md#window_ops--windowsplit-operations-w-leader);
+elsewhere the leader never engages and the group stays empty.
+
 `groups` is independent of `prefixes` — naming a group neither restricts nor
 widens which prefixes pop the menu. Both group options are inert while
 `enabled: false`: without the popup there would be no way left to discover the

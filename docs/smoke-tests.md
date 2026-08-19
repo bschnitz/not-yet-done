@@ -939,6 +939,25 @@ keys of the default window bindings) → effective alphabet `adfghjkl`.
       tree does not affect the other (each tree has its own allocation,
       starting at `a`).
 
+### Pane tags in the shortcut surfaces
+
+- [ ] Split a Jira/Postgres/SQLite pane with `wv`, then `o s` (shortcut
+      overview) → a `Window ...` section listing `w v`/`w s`/`w q`/`w
+    h`/`w l` **and** one row per pane (`w a`, `w d`, …) named after the
+      pane it focuses; the pane you are in reads `(current)`.
+- [ ] Drill the right pane into a child level → its row's name gains the
+      level (`… › <level>`), and it stays put while the cursor moves
+      within that pane.
+- [ ] `o k` (shortcut menu) → the same rows in the context scope; try to
+      rebind a `w <tag>` row → refused as read-only, while `w v` is
+      rebindable as before.
+- [ ] Hold `w` → the which-key popup is headed `Window ...` and lists the
+      tags with their pane names.
+- [ ] On a view **without** `window_ops: true` (for example Tasks) none
+      of these rows appear in the overview, the menu's context scope or
+      the popup.
+- [ ] Unsplit pane → the static chords are listed, but no tag row.
+
 ### Phase 4 follow-up — chord precedence + action-bar mode
 
 - [ ] **Chord precedence over other handlers**: a pane `s` (with tag `s`)
