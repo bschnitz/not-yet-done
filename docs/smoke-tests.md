@@ -943,7 +943,7 @@ keys of the default window bindings) → effective alphabet `adfghjkl`.
 
 - [ ] Split a Jira/Postgres/SQLite pane with `wv`, then `o s` (shortcut
       overview) → a `Window ...` section listing `w v`/`w s`/`w q`/`w
-    h`/`w l` **and** one row per pane (`w a`, `w d`, …) named after the
+  h`/`w l` **and** one row per pane (`w a`, `w d`, …) named after the
       pane it focuses; the pane you are in reads `(current)`.
 - [ ] Drill the right pane into a child level → its row's name gains the
       level (`… › <level>`), and it stays put while the cursor moves
@@ -5348,6 +5348,24 @@ watch.
 - [ ] A `manual_connect: true` tab shows `Loading…` while connecting, not the
       "press the key to connect" hint, and reverts to the hint if the load
       fails.
+
+## The fuzzy-input keys read the config (`common.fuzzy_filter_*`)
+
+They used to be hardcoded in the view, which made the config look like it
+worked. Test on any tab with a `fuzzy_filter` action.
+
+- [ ] With the defaults untouched, the filter behaves as before: `enter` closes
+      the input and keeps the filter, `ctrl+u` wipes the query but stays in the
+      input, `esc` on a filled query wipes it, `esc` on an empty one closes the
+      input and restores the tree shape.
+- [ ] Set `common.fuzzy_filter_cancel: ctrl+q` in `tui.yaml`, restart, open the
+      filter: `ctrl+q` cancels and **`esc` does nothing at all** (the keystroke
+      is simply ignored, the input stays open).
+- [ ] Type into the filter afterwards — the letters still arrive; only the
+      three bound keys are intercepted.
+- [ ] Bind cancel to a plain letter (`common.fuzzy_filter_cancel: x`) and
+      confirm the documented consequence: `x` fires instead of being typed into
+      the query. Undo afterwards.
 
 ## Refinements / deferred tasks
 
