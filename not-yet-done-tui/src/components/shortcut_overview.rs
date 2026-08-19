@@ -11,13 +11,16 @@
 //!
 //! It scrolls rather than filters: `j`/`k` (and the arrows) move a line,
 //! `ctrl+d`/`ctrl+u` and the page keys move a screen, `g`/`G` jump to the
-//! ends, any other key closes it. The body never grows wider than
-//! [`ShortcutOverviewConfig::max_width`] — long names are truncated instead of
-//! stretching the popup across the terminal.
+//! ends, any other key closes it. The body is content-sized between
+//! [`ShortcutOverviewConfig::min_width`] and
+//! [`ShortcutOverviewConfig::max_width`] where those are configured — long
+//! names are truncated at the maximum instead of stretching the popup across
+//! the terminal.
 //!
 //! [shortcut menu]: crate::components::shortcut_menu::ShortcutMenu
 //! [`GlobalAction::ShortcutOverview`]: crate::config::keybindings::GlobalAction::ShortcutOverview
 //! [`WhichKeyGroup`]: crate::config::tui_config::WhichKeyGroup
+//! [`ShortcutOverviewConfig::min_width`]: crate::config::tui_config::ShortcutOverviewConfig::min_width
 //! [`ShortcutOverviewConfig::max_width`]: crate::config::tui_config::ShortcutOverviewConfig::max_width
 
 use std::sync::Arc;
@@ -57,8 +60,11 @@ enum Row {
 pub struct ShortcutOverview {
     theme: Arc<Theme>,
     open: bool,
-    /// Widest the body may get, from `shortcut_overview.max_width`.
-    max_width: u16,
+    /// Narrowest and widest the body may get, from
+    /// `shortcut_overview.min_width` / `.max_width`. Both unset by default:
+    /// the list is then sized by its content alone.
+    min_width: Option<u16>,
+    max_width: Option<u16>,
     /// Every line, sections already flattened.
     rows: Vec<Row>,
     /// First row shown — the scroll offset.
@@ -68,10 +74,11 @@ pub struct ShortcutOverview {
 }
 
 impl ShortcutOverview {
-    pub fn new(theme: Arc<Theme>, max_width: u16) -> Self {
+    pub fn new(theme: Arc<Theme>, min_width: Option<u16>, max_width: Option<u16>) -> Self {
         Self {
             theme,
             open: false,
+            min_width,
             max_width,
             rows: Vec::new(),
             offset: 0,
@@ -155,7 +162,9 @@ impl ShortcutOverview {
         }
     }
 
-    /// The width the body asks for: the widest line, capped at `max_width`.
+    /// The width the body asks for: the widest line, then the configured
+    /// bounds. `min_width` is applied last, so a minimum wider than the
+    /// maximum still holds rather than leaving the two to fight.
     fn content_width(&self) -> usize {
         let widest = self
             .rows
@@ -169,7 +178,14 @@ impl ShortcutOverview {
             })
             .max()
             .unwrap_or(0);
-        widest.min(self.max_width as usize)
+        let capped = match self.max_width {
+            Some(max) => widest.min(max as usize),
+            None => widest,
+        };
+        match self.min_width {
+            Some(min) => capped.max(min as usize),
+            None => capped,
+        }
     }
 }
 
@@ -325,7 +341,7 @@ mod tests {
     }
 
     fn overview(rows: Vec<ShortcutRow>, groups: &[WhichKeyGroup]) -> ShortcutOverview {
-        let mut o = ShortcutOverview::new(Arc::new(Theme::new(ThemeConfig::default())), 50);
+        let mut o = ShortcutOverview::new(Arc::new(Theme::new(ThemeConfig::default())), None, None);
         o.open(rows, groups);
         o
     }
@@ -449,12 +465,38 @@ mod tests {
         assert!(!o.is_open());
     }
 
+    /// Unbounded by default (the popup is then content-sized like every
+    /// other one); `max_width` cuts a long list down, `min_width` pads a
+    /// short one out, and a minimum wider than the maximum still wins.
     #[test]
-    fn the_body_never_grows_past_the_configured_width() {
-        let mut o = overview(vec![row(&"n".repeat(200), "ctrl+alt+shift+f12")], &[]);
-        assert_eq!(o.content_width(), 50);
-        o.max_width = 20;
+    fn the_width_bounds_are_optional_and_the_minimum_has_the_last_word() {
+        let long = "n".repeat(200);
+        let mut o = overview(vec![row(&long, "ctrl+alt+shift+f12")], &[]);
+        let natural = o.content_width();
+        assert!(natural > 200, "unbounded: the widest line wins");
+
+        o.max_width = Some(20);
         assert_eq!(o.content_width(), 20);
+
+        o.max_width = None;
+        o.min_width = Some(50);
+        assert_eq!(
+            o.content_width(),
+            natural,
+            "a wide list ignores the minimum"
+        );
+
+        let mut short = overview(vec![row("edit", "e")], &[]);
+        assert!(short.content_width() < 50);
+        short.min_width = Some(50);
+        assert_eq!(short.content_width(), 50);
+
+        short.max_width = Some(20);
+        assert_eq!(
+            short.content_width(),
+            50,
+            "the minimum wins over a lower cap"
+        );
     }
 
     #[test]

@@ -1346,7 +1346,8 @@ impl App {
         // Pulled out before `config` is moved into the struct literal below.
         let shortcut_menu_execute = config.shortcut_menu.execute_on_enter;
         let shortcut_menu_toggle = config.shortcut_menu.toggle_key.clone();
-        let shortcut_overview_width = config.shortcut_overview.max_width;
+        let shortcut_overview_min = config.shortcut_overview.min_width;
+        let shortcut_overview_max = config.shortcut_overview.max_width;
         // One preference for every popup at once — see `set_hint_width_cap`.
         crate::ui::panel_chrome::set_hint_width_cap(config.popups.hint_width as usize);
         // Load content views from YAML config files (must happen before tab_bar).
@@ -1452,7 +1453,8 @@ impl App {
             ),
             shortcut_overview: crate::components::shortcut_overview::ShortcutOverview::new(
                 Arc::clone(&shared_theme),
-                shortcut_overview_width,
+                shortcut_overview_min,
+                shortcut_overview_max,
             ),
             adapter_creds_popup: None,
             adapter_prompt_popup: None,
