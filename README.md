@@ -1911,8 +1911,8 @@ folded keys. The bindings themselves are edited in the shortcut menu, see
 
 ```yaml
 shortcut_overview:
-  min_width: 50 # narrowest the popup body may get, in cells
-  max_width: 80 # widest it may get
+  min_width: 50 # narrowest one column may get, in cells
+  max_width: 80 # widest one column may get
 ```
 
 `F1` (the `shortcut_overview` action) opens a read-only list of every shortcut
@@ -1927,18 +1927,22 @@ searched and _edited_ (see
 one-page reference — and the place where the chords a group folds away in the
 bars (`o b`, `o o`, …) are all readable again.
 
-Longer than the terminal, it scrolls: `j`/`k` (or the arrows) a line,
+**Too tall for the terminal, it goes wide before it goes long:** the sections
+are laid out in as many columns as the width allows, and only what still does
+not fit scrolls. A section too tall for one column spreads over several and
+takes a row of its own; the short ones sit side by side underneath, their
+headings aligned. What is left to scroll takes `j`/`k` (or the arrows) a line,
 `Ctrl+D`/`Ctrl+U` and the page keys a screen, `g`/`G` to the ends. **Every
 other key closes it** — it is a glance, not a mode.
 
-**Why the width bounds:** both are unset by default, which sizes the popup by
-its content like every other popup. `max_width` is for the other extreme — a
-shortcut name plus its keys can be far wider than the list needs to be
-readable, and a popup stretched across a wide terminal is harder to scan than a
-narrow column. Names longer than the cap are elided; the keys are never cut.
-`min_width` keeps a view with few shortcuts from opening as a narrow column, so
-the overview sits at the same width wherever you press it. A `min_width` larger
-than `max_width` wins.
+**Why the width bounds:** they size **one column**, not the whole popup, and
+both are unset by default — a column is then content-sized like every other
+popup. `max_width` is for the extreme case: a shortcut name plus its keys can
+be far wider than the list needs to be readable, and columns stretched across a
+wide terminal are harder to scan than narrow ones. Names longer than the cap
+are elided; the keys are never cut. `min_width` keeps a view with few shortcuts
+from opening as a narrow strip, so the overview sits at the same width wherever
+you press it. A `min_width` larger than `max_width` wins.
 
 The grouping reads `which_key.groups` directly, so sections work even with
 `which_key.enabled: false` or `collapse_in_bars: false` — naming a group is
