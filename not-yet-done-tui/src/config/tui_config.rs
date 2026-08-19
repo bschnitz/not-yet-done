@@ -85,6 +85,13 @@ pub struct TuiConfig {
     /// default `ctrl+y`). See [`ShortcutMenuConfig`].
     #[serde(default)]
     pub shortcut_menu: ShortcutMenuConfig,
+    /// The grouped shortcut overview (opened via `global.shortcut_overview`).
+    /// See [`ShortcutOverviewConfig`].
+    #[serde(default)]
+    pub shortcut_overview: ShortcutOverviewConfig,
+    /// Settings shared by every floating popup. See [`PopupsConfig`].
+    #[serde(default)]
+    pub popups: PopupsConfig,
     /// "Which-key" style popup that previews the possible completions of a
     /// half-typed chord (e.g. after `g` it lists `gl`, `gm`, …). Off by
     /// default. See [`WhichKeyConfig`].
@@ -117,6 +124,8 @@ impl Default for TuiConfig {
             tabs: Default::default(),
             cmdline_shortcuts: default_cmdline_shortcuts(),
             shortcut_menu: Default::default(),
+            shortcut_overview: Default::default(),
+            popups: Default::default(),
             which_key: Default::default(),
             images: Default::default(),
         }
@@ -177,6 +186,69 @@ impl Default for ShortcutMenuConfig {
             execute_on_enter: false,
             default_scope: ShortcutScope::default(),
             toggle_key: default_shortcut_toggle_key(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShortcutOverviewConfig — the grouped keyboard-shortcut popup
+// ---------------------------------------------------------------------------
+
+/// The shortcut overview: every shortcut of the current context, grouped —
+/// "General" first, then one section per [`WhichKeyGroup`].
+///
+/// ```yaml
+/// shortcut_overview:
+///   max_width: 50   # widest the popup body may get, in cells
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortcutOverviewConfig {
+    /// How wide the popup body may grow, in cells. Long shortcut names are
+    /// truncated at this width instead of stretching the popup across the
+    /// terminal. Default `50`.
+    #[serde(default = "default_overview_max_width")]
+    pub max_width: u16,
+}
+
+fn default_overview_max_width() -> u16 {
+    50
+}
+
+impl Default for ShortcutOverviewConfig {
+    fn default() -> Self {
+        Self {
+            max_width: default_overview_max_width(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PopupsConfig — settings shared by every floating popup
+// ---------------------------------------------------------------------------
+
+/// Chrome settings that apply to every popup at once.
+///
+/// ```yaml
+/// popups:
+///   hint_width: 50   # how far the key hints may widen a popup
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PopupsConfig {
+    /// How many cells the bottom key-hint line may widen a popup to before it
+    /// wraps to another row instead. Raise it for wide terminals (fewer hint
+    /// rows, wider popups), lower it to keep popups narrow. Default `50`.
+    #[serde(default = "default_popup_hint_width")]
+    pub hint_width: u16,
+}
+
+fn default_popup_hint_width() -> u16 {
+    crate::ui::panel_chrome::DEFAULT_HINT_WIDTH_CAP as u16
+}
+
+impl Default for PopupsConfig {
+    fn default() -> Self {
+        Self {
+            hint_width: default_popup_hint_width(),
         }
     }
 }
@@ -545,5 +617,24 @@ which_key:
         assert_eq!(wk.groups[1].prefix, "g l");
         assert_eq!(wk.groups[1].title, None);
         assert!(!wk.groups[1].collapse_in_bars);
+    }
+
+    /// Same guard for the two width options — and for their documented
+    /// defaults, which the popups fall back to when the blocks are absent.
+    #[test]
+    fn the_documented_popup_widths_parse_and_default_to_50() {
+        let yaml = "
+shortcut_overview:
+  max_width: 72
+popups:
+  hint_width: 0
+";
+        let config: TuiConfig = serde_yaml::from_str(yaml).expect("width blocks parse");
+        assert_eq!(config.shortcut_overview.max_width, 72);
+        assert_eq!(config.popups.hint_width, 0);
+
+        let bare: TuiConfig = serde_yaml::from_str("{}").expect("empty config parses");
+        assert_eq!(bare.shortcut_overview.max_width, 50);
+        assert_eq!(bare.popups.hint_width, 50);
     }
 }

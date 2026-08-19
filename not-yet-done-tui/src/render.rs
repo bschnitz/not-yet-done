@@ -224,6 +224,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.shortcut_menu.render(frame, popup_area);
     }
 
+    // Overlay: grouped shortcut overview (f1).
+    if app.shortcut_overview.is_open() {
+        app.shortcut_overview.render(frame, popup_area);
+    }
+
     // Overlay: which-key chord-completion preview (passive; mirrors the
     // half-typed chord).
     if app.which_key.is_open() {

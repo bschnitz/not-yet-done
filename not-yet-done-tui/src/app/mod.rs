@@ -1139,6 +1139,11 @@ pub struct App {
     /// between the current context and every tab.
     pub shortcut_menu: crate::components::shortcut_menu::ShortcutMenu,
 
+    /// Grouped shortcut overview (`global.shortcut_overview`, default `f1`).
+    /// The same context rows as the menu, read-only and sorted into "General"
+    /// plus one section per which-key group.
+    pub shortcut_overview: crate::components::shortcut_overview::ShortcutOverview,
+
     /// Adapter credentials popup (login form for adapters that surface
     /// `AdapterStatus::NeedsCreds`).
     pub adapter_creds_popup: Option<crate::components::adapter_creds_popup::AdapterCredsPopup>,
@@ -1341,6 +1346,9 @@ impl App {
         // Pulled out before `config` is moved into the struct literal below.
         let shortcut_menu_execute = config.shortcut_menu.execute_on_enter;
         let shortcut_menu_toggle = config.shortcut_menu.toggle_key.clone();
+        let shortcut_overview_width = config.shortcut_overview.max_width;
+        // One preference for every popup at once — see `set_hint_width_cap`.
+        crate::ui::panel_chrome::set_hint_width_cap(config.popups.hint_width as usize);
         // Load content views from YAML config files (must happen before tab_bar).
         let (content_views, config_warnings) = load_content_views(
             &shared_theme,
@@ -1441,6 +1449,10 @@ impl App {
                 Arc::clone(&shared_theme),
                 shortcut_menu_execute,
                 shortcut_menu_toggle,
+            ),
+            shortcut_overview: crate::components::shortcut_overview::ShortcutOverview::new(
+                Arc::clone(&shared_theme),
+                shortcut_overview_width,
             ),
             adapter_creds_popup: None,
             adapter_prompt_popup: None,
@@ -5092,6 +5104,14 @@ impl App {
             return EditorRequest::None;
         }
 
+        // Shortcut overview intercepts all keys while open: it scrolls on the
+        // navigation keys and closes on anything else.
+        if self.shortcut_overview.is_open() {
+            self.shortcut_overview.handle_key(key);
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
         // Shortcut menu intercepts all keys while open.
         if self.shortcut_menu.is_open() {
             self.handle_shortcut_menu_key(key);
@@ -5527,6 +5547,7 @@ impl App {
             || self.link_popup.is_some()
             || self.config_picker_popup.is_some()
             || self.shortcut_menu.is_open()
+            || self.shortcut_overview.is_open()
             || self.shortcut_capture.is_some()
     }
 
@@ -5619,6 +5640,7 @@ impl App {
             GlobalAction::ShowNotifications => return self.open_notifications_editor(),
             GlobalAction::ShowLastError => return self.open_last_error_editor(),
             GlobalAction::ShortcutMenu => self.open_shortcut_menu(),
+            GlobalAction::ShortcutOverview => self.open_shortcut_overview(),
             GlobalAction::ToggleFullscreen => self.fullscreen = !self.fullscreen,
             GlobalAction::LinkMark => self.link_mark_current(),
             GlobalAction::LinkPaste => self.link_paste_current(),
@@ -5661,13 +5683,7 @@ impl App {
 
         // Context: the live keymap of the currently focused content view,
         // plus its keyless actions, prefixed with the generic tab switches.
-        let Tab::Content(idx) = self.active_tab;
-        let mut context: Vec<ShortcutRow> = switch_rows.clone();
-        context.extend(
-            self.content_view(idx)
-                .map(|cv| cv.context_shortcut_rows())
-                .unwrap_or_default(),
-        );
+        let context = self.context_shortcut_rows();
 
         // All: every configured shortcut across all content tabs and levels.
         let kb = &self.config.keybindings;
@@ -5734,6 +5750,38 @@ impl App {
             self.shortcut_menu
                 .open(context, all, self.config.shortcut_menu.default_scope);
         }
+    }
+
+    /// The shortcuts that would fire right now: the generic per-tab switch
+    /// rows plus the focused content view's live keymap (its keyless actions
+    /// included). Shared by the shortcut menu's context scope and by the
+    /// overview, so the two never disagree about what "context" means.
+    fn context_shortcut_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
+        let Tab::Content(idx) = self.active_tab;
+        let mut rows = self.tab_switch_rows();
+        rows.extend(
+            self.content_view(idx)
+                .map(|cv| cv.context_shortcut_rows())
+                .unwrap_or_default(),
+        );
+        rows
+    }
+
+    /// Open the grouped shortcut overview (default `f1`).
+    ///
+    /// Same rows as the menu's context scope, but read-only and sorted into
+    /// sections: "General" for the keys that stand on their own, then one per
+    /// configured which-key group. The groups are read straight from
+    /// `which_key.groups` rather than from
+    /// [`WhichKeyConfig::collapsing_groups`] — a group names its keys here
+    /// whether or not it folds them in the bars, and even while the which-key
+    /// popup itself is switched off.
+    ///
+    /// [`WhichKeyConfig::collapsing_groups`]: crate::config::tui_config::WhichKeyConfig::collapsing_groups
+    fn open_shortcut_overview(&mut self) {
+        let rows = self.context_shortcut_rows();
+        let groups = self.config.which_key.groups.clone();
+        self.shortcut_overview.open(rows, &groups);
     }
 
     /// Dispatch a key while the shortcut menu is open. In execute mode +
@@ -8432,6 +8480,7 @@ impl App {
                 .map(|(action, key, desc)| {
                     let active = match action {
                         GlobalAction::ShortcutMenu => self.shortcut_menu.is_open(),
+                        GlobalAction::ShortcutOverview => self.shortcut_overview.is_open(),
                         _ => false,
                     };
                     crate::components::action_bar::ActionHint { key, desc, active }

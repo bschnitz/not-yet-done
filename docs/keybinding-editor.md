@@ -15,6 +15,10 @@ move, `Esc` to close (the first `Esc` clears an active filter).
 Rows without a key are shown too — those are actions you can give a
 binding to.
 
+For looking a key up rather than changing one, `F1` (the
+`shortcut_overview` action) opens the same context rows read-only and
+grouped by which-key group; see "Shortcut overview" in the README.
+
 ## What can be edited
 
 | Origin                                                                | Editable | Notes                                   |
