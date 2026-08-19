@@ -5,10 +5,10 @@
 //!
 //! The panel is content-sized and centred in the area it is given: its width
 //! fits the wider of body and heading, its height the requested body rows
-//! plus the chrome rows. The hint line does *not* widen the panel — it wraps
-//! over as many rows as that width needs, so a menu stays as wide as its
-//! entries however many keys it advertises. Callers hand over what they want
-//! shown ([`PanelChrome::heading`], [`PanelChrome::hints`],
+//! plus the chrome rows. The hint line widens the panel by at most
+//! [`HINT_WIDTH_CAP`] cells and wraps from there, so a menu stays roughly as
+//! wide as its entries however many keys it advertises. Callers hand over
+//! what they want shown ([`PanelChrome::heading`], [`PanelChrome::hints`],
 //! [`PanelChrome::body`]) and get back the body rectangle to draw into:
 //!
 //! ```ignore
@@ -41,6 +41,11 @@ const CHROME_ROWS: u16 = 5;
 
 /// Horizontal padding on each side of the body inside the panel.
 const PAD_X: u16 = 2;
+
+/// How wide the hints may push the content. Up to this many cells they widen
+/// the panel so fewer of them wrap; past it the panel keeps the width its
+/// body and heading ask for and the hints take another row instead.
+const HINT_WIDTH_CAP: usize = 50;
 
 /// A borderless floating panel in the form palette.
 pub struct PanelChrome<'a> {
@@ -103,9 +108,10 @@ impl<'a> PanelChrome<'a> {
             .iter()
             .map(|s| s.content.chars().count())
             .sum();
-        // The hints are deliberately left out: they wrap to the width the
-        // content asks for instead of stretching the panel to one long line.
-        let inner_w = self.body_width.max(heading_w);
+        // The hints get a say only up to `HINT_WIDTH_CAP` — beyond that they
+        // wrap instead of stretching the panel to one long line.
+        let hints_w = hints_width(&self.hints).min(HINT_WIDTH_CAP);
+        let inner_w = self.body_width.max(heading_w).max(hints_w);
         let panel_w = ((inner_w as u16).saturating_add(2 * PAD_X))
             .max(self.min_width)
             .min(area.width);
@@ -197,6 +203,16 @@ pub fn pad_row<'a>(spans: Vec<Span<'a>>, width: u16, style: Style) -> Line<'a> {
 /// The background a cursor row sits on, in the form palette.
 pub fn cursor_bg(theme: &Theme) -> ratatui::style::Color {
     theme.form_field_bg().unwrap_or_else(|| theme.surface_2())
+}
+
+/// Rendered width of a whole hint line, in cells.
+fn hints_width(hints: &[(&str, &str)]) -> usize {
+    // The gap after the last hint hangs over the edge and prints as blanks.
+    hints
+        .iter()
+        .map(hint_width)
+        .sum::<usize>()
+        .saturating_sub(2)
 }
 
 /// Rendered width of a single `key description` hint, trailing gap included.
@@ -308,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn long_hint_line_wraps_instead_of_widening_the_panel() {
+    fn long_hint_line_widens_only_up_to_the_cap_then_wraps() {
         let area = Rect::new(0, 0, 200, 40);
         let hints = vec![
             ("ctrl+j/\u{2193}", "next"),
@@ -325,8 +341,9 @@ mod tests {
             .hints(hints.clone())
             .body(40, 9)
             .panel_rect(area);
-        // Body plus padding — the hints, several times as wide, wrap.
-        assert_eq!(panel.width, 44);
+        // The hints are several times as wide as the body, so they widen the
+        // content to the cap and wrap from there.
+        assert_eq!(panel.width, HINT_WIDTH_CAP as u16 + 2 * PAD_X);
         let rows = wrap_hints(&hints, panel.width - 2 * PAD_X);
         assert!(rows.len() > 1, "expected the hints to wrap");
         assert_eq!(panel.height, 9 + CHROME_ROWS + rows.len() as u16);
