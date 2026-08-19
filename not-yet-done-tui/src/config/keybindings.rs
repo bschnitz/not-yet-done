@@ -329,6 +329,11 @@ pub enum GlobalAction {
     /// shortcut (name → keys). Opens scoped to the current context by
     /// default; a toggle inside the popup expands it to every tab.
     ShortcutMenu,
+    /// Open the shortcut overview — the same shortcuts the menu lists for the
+    /// current context, but read-only and grouped: "General" first, then one
+    /// section per configured which-key group. Scrolls when it outgrows the
+    /// terminal.
+    ShortcutOverview,
     /// Toggle fullscreen mode — hide all chrome bars (tab bar, the view's
     /// action/shortcut bar and the bottom status bar) so the content view
     /// fills the terminal. Message bars (alerts, notifications, inline
@@ -341,6 +346,7 @@ impl GlobalAction {
         match self {
             GlobalAction::Quit => "quit",
             GlobalAction::ShortcutMenu => "shortcut_menu",
+            GlobalAction::ShortcutOverview => "shortcut_overview",
             GlobalAction::ToggleFullscreen => "toggle_fullscreen",
             GlobalAction::TabNext => "tab_next",
             GlobalAction::TabPrev => "tab_prev",
@@ -370,6 +376,7 @@ impl FromStr for GlobalAction {
         match s {
             "quit" => Ok(GlobalAction::Quit),
             "shortcut_menu" => Ok(GlobalAction::ShortcutMenu),
+            "shortcut_overview" => Ok(GlobalAction::ShortcutOverview),
             "toggle_fullscreen" => Ok(GlobalAction::ToggleFullscreen),
             "tab_next" => Ok(GlobalAction::TabNext),
             "tab_prev" => Ok(GlobalAction::TabPrev),
@@ -435,6 +442,10 @@ impl GlobalAction {
             ShortcutMenu => BarPlacement::Active {
                 label: "menu",
                 surface: ActiveSurface::ShortcutMenu,
+            },
+            ShortcutOverview => BarPlacement::Active {
+                label: "keys",
+                surface: ActiveSurface::ShortcutOverview,
             },
             // Reachable from the shortcut menu; no permanent-bar slot.
             SubtabNext | SubtabPrev | DismissNotifications | ShowNotifications | ShowLastError
@@ -1198,6 +1209,9 @@ impl Default for KeyBindingSection<GlobalAction> {
         let mut m = HashMap::new();
         m.insert(GlobalAction::Quit, KeyBinding::new("ctrl+c"));
         m.insert(GlobalAction::ShortcutMenu, KeyBinding::new("ctrl+y"));
+        // The read-only counterpart of the menu, on the key every other
+        // program spells "help".
+        m.insert(GlobalAction::ShortcutOverview, KeyBinding::new("f1"));
         m.insert(GlobalAction::ToggleFullscreen, KeyBinding::new("f11"));
         m.insert(GlobalAction::TabNext, KeyBinding::new("tab"));
         m.insert(GlobalAction::TabPrev, KeyBinding::new("shift+tab"));
@@ -1519,7 +1533,7 @@ mod tests {
                 }
             }};
         }
-        check!(GlobalAction, 15);
+        check!(GlobalAction, 16);
         check!(CommonAction, 26);
         check!(ContentAction, 19);
         check!(WindowAction, 5);

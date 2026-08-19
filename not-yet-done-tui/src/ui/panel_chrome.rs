@@ -6,7 +6,7 @@
 //! The panel is content-sized and centred in the area it is given: its width
 //! fits the wider of body and heading, its height the requested body rows
 //! plus the chrome rows. The hint line widens the panel by at most
-//! [`HINT_WIDTH_CAP`] cells and wraps from there, so a menu stays roughly as
+//! [`hint_width_cap`] cells and wraps from there, so a menu stays roughly as
 //! wide as its entries however many keys it advertises. Callers hand over
 //! what they want shown ([`PanelChrome::heading`], [`PanelChrome::hints`],
 //! [`PanelChrome::body`]) and get back the body rectangle to draw into:
@@ -23,6 +23,8 @@
 //!
 //! Every popup in the TUI draws on this chrome — there is no second popup
 //! look to keep in sync.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -42,10 +44,29 @@ const CHROME_ROWS: u16 = 5;
 /// Horizontal padding on each side of the body inside the panel.
 const PAD_X: u16 = 2;
 
-/// How wide the hints may push the content. Up to this many cells they widen
-/// the panel so fewer of them wrap; past it the panel keeps the width its
-/// body and heading ask for and the hints take another row instead.
-const HINT_WIDTH_CAP: usize = 50;
+/// How wide the hints may push the content by default. Up to this many cells
+/// they widen the panel so fewer of them wrap; past it the panel keeps the
+/// width its body and heading ask for and the hints take another row instead.
+pub const DEFAULT_HINT_WIDTH_CAP: usize = 50;
+
+/// The live cap, settable once at startup from `popups.hint_width`.
+///
+/// A process-wide cell rather than a field on every panel: the value is one
+/// user preference that applies to *all* popups, and threading it through the
+/// dozen-odd popup constructors would put a config lookup in each of them for
+/// no added expressiveness.
+static HINT_WIDTH_CAP: AtomicUsize = AtomicUsize::new(DEFAULT_HINT_WIDTH_CAP);
+
+/// Set how wide the hint line may push a panel, in cells. Called once while
+/// the config is read; `0` keeps the hints from widening a panel at all.
+pub fn set_hint_width_cap(cells: usize) {
+    HINT_WIDTH_CAP.store(cells, Ordering::Relaxed);
+}
+
+/// The cap in force — [`DEFAULT_HINT_WIDTH_CAP`] unless configured otherwise.
+pub fn hint_width_cap() -> usize {
+    HINT_WIDTH_CAP.load(Ordering::Relaxed)
+}
 
 /// A borderless floating panel in the form palette.
 pub struct PanelChrome<'a> {
@@ -108,9 +129,9 @@ impl<'a> PanelChrome<'a> {
             .iter()
             .map(|s| s.content.chars().count())
             .sum();
-        // The hints get a say only up to `HINT_WIDTH_CAP` — beyond that they
-        // wrap instead of stretching the panel to one long line.
-        let hints_w = hints_width(&self.hints).min(HINT_WIDTH_CAP);
+        // The hints get a say only up to the configured cap — beyond that
+        // they wrap instead of stretching the panel to one long line.
+        let hints_w = hints_width(&self.hints).min(hint_width_cap());
         let inner_w = self.body_width.max(heading_w).max(hints_w);
         let panel_w = ((inner_w as u16).saturating_add(2 * PAD_X))
             .max(self.min_width)
@@ -343,7 +364,7 @@ mod tests {
             .panel_rect(area);
         // The hints are several times as wide as the body, so they widen the
         // content to the cap and wrap from there.
-        assert_eq!(panel.width, HINT_WIDTH_CAP as u16 + 2 * PAD_X);
+        assert_eq!(panel.width, hint_width_cap() as u16 + 2 * PAD_X);
         let rows = wrap_hints(&hints, panel.width - 2 * PAD_X);
         assert!(rows.len() > 1, "expected the hints to wrap");
         assert_eq!(panel.height, 9 + CHROME_ROWS + rows.len() as u16);

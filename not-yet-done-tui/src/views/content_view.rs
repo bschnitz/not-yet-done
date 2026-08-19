@@ -11216,7 +11216,7 @@ impl ContentView {
             // and are never carried on a content action-bar hint. From within a
             // view they are definitionally inactive. Kept as an explicit arm
             // (no wildcard) so a new app-native surface forces a decision here.
-            ActiveSurface::ShortcutMenu => false,
+            ActiveSurface::ShortcutMenu | ActiveSurface::ShortcutOverview => false,
         }
     }
 

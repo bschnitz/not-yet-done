@@ -20,6 +20,7 @@ pub mod search;
 pub mod searchable_popup;
 pub mod shortcut_capture;
 pub mod shortcut_menu;
+pub mod shortcut_overview;
 pub mod sort_header;
 pub mod sort_menu;
 pub mod status_bar;

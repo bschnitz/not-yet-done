@@ -108,6 +108,18 @@ where
     (kept, hit)
 }
 
+/// The group a key label belongs to, over *every* configured group — folding
+/// groups and merely-named ones alike. [`collapse`] and [`strip`] only ever
+/// look at the folding ones; the shortcut overview groups by name, so it asks
+/// here. Same longest-prefix rule.
+pub fn group_of<'a>(groups: &'a [WhichKeyGroup], label: &str) -> Option<&'a WhichKeyGroup> {
+    let named: Vec<&WhichKeyGroup> = groups
+        .iter()
+        .filter(|g| !g.prefix.trim().is_empty())
+        .collect();
+    best_group(&named, label)
+}
+
 /// The groups that actually fold something, in config order.
 fn collapsing(groups: &[WhichKeyGroup]) -> Vec<&WhichKeyGroup> {
     groups
@@ -256,6 +268,27 @@ mod tests {
                 ("o p".to_string(), "Open project ...".to_string()),
             ]
         );
+    }
+
+    /// The overview groups by name, so `group_of` must see a group the bars
+    /// ignore — and still pick the longest matching prefix.
+    #[test]
+    fn group_of_sees_every_group_not_just_the_folding_ones() {
+        let groups = vec![
+            group("o", Some("Open ..."), false),
+            group("o p", Some("Open project ..."), false),
+        ];
+        assert_eq!(
+            group_of(&groups, "o f").map(|g| g.prefix.as_str()),
+            Some("o")
+        );
+        assert_eq!(
+            group_of(&groups, "o p x").map(|g| g.prefix.as_str()),
+            Some("o p")
+        );
+        assert!(group_of(&groups, "o").is_none(), "the bare prefix key");
+        assert!(group_of(&groups, "q q").is_none());
+        assert!(group_of(&[group("", None, true)], "o f").is_none());
     }
 
     #[test]

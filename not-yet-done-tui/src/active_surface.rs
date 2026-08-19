@@ -70,4 +70,6 @@ pub enum ActiveSurface {
     // -- app-native surfaces (owned directly by `App`) -----------------------
     /// The shortcut menu popup (every configured keybinding) is open.
     ShortcutMenu,
+    /// The grouped shortcut overview popup is open.
+    ShortcutOverview,
 }

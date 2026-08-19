@@ -1907,6 +1907,55 @@ widens which prefixes pop the menu. Both group options are inert while
 folded keys. The bindings themselves are edited in the shortcut menu, see
 [`docs/keybinding-editor.md`](docs/keybinding-editor.md).
 
+### Shortcut overview
+
+```yaml
+shortcut_overview:
+  max_width: 50 # widest the popup body may get, in cells
+```
+
+`F1` (the `shortcut_overview` action) opens a read-only list of every shortcut
+that would fire in the current view, sorted into sections: **General** first —
+the keys that stand on their own — then one section per [which-key
+group](#which-key), headed by the group's `title` and the prefix it is reached
+under. A group with no shortcut in the current view is left out.
+
+It is the counterpart to the `Ctrl+Y` shortcut menu: the menu is where keys are
+searched and _edited_ (see
+[`docs/keybinding-editor.md`](docs/keybinding-editor.md)), the overview is the
+one-page reference — and the place where the chords a group folds away in the
+bars (`o b`, `o o`, …) are all readable again.
+
+Longer than the terminal, it scrolls: `j`/`k` (or the arrows) a line,
+`Ctrl+D`/`Ctrl+U` and the page keys a screen, `g`/`G` to the ends. **Every
+other key closes it** — it is a glance, not a mode.
+
+**Why `max_width`:** a shortcut name plus its keys can be far wider than the
+list needs to be readable, and a popup stretched across a wide terminal is
+harder to scan than a narrow column. Names longer than the cap are elided; the
+keys are never cut.
+
+The grouping reads `which_key.groups` directly, so sections work even with
+`which_key.enabled: false` or `collapse_in_bars: false` — naming a group is
+enough.
+
+### Popups
+
+```yaml
+popups:
+  hint_width: 50 # how far the key hints may widen a popup, in cells
+```
+
+Every popup ends in a compact `key description` hint line. Up to `hint_width`
+cells those hints are allowed to widen the popup so fewer of them wrap; past
+it the popup keeps the width its own content asks for and the hints take
+another row instead.
+
+**Why it is configurable:** the right value depends on the terminal. On a wide
+screen a larger cap keeps the hints on one line; on a narrow one, or when you
+prefer compact popups, a smaller cap trades a second hint row for a popup that
+stays as wide as its entries. `0` stops the hints from widening a popup at all.
+
 ### Inline images
 
 ```yaml
