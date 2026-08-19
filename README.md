@@ -1897,7 +1897,9 @@ actually want reminders in.
 - `collapse_in_bars: true` drops every hint, saved-query favorite and script
   shortcut bound under `prefix` from the action and status bar, and puts a
   single `o Open ...` entry where the first of them stood. Without a `title`
-  that entry reads `o …`.
+  that entry reads `o …`. A view that binds the bare prefix key to an action
+  of its own — plain `o` in the tasks view — is left alone: that key runs its
+  action instead of opening the menu, so folding it away would hide it.
 
 `groups` is independent of `prefixes` — naming a group neither restricts nor
 widens which prefixes pop the menu. Both group options are inert while
