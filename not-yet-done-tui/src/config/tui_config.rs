@@ -510,3 +510,38 @@ impl TuiConfigService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The documented `which_key` block has to survive the real deserializer —
+    /// a renamed field would otherwise only surface as a silently ignored
+    /// option in the user's config.
+    #[test]
+    fn which_key_block_from_the_docs_parses() {
+        let yaml = "
+which_key:
+  enabled: true
+  delay_ms: 300
+  prefixes: [g, z]
+  groups:
+    - prefix: o
+      title: Open ...
+      collapse_in_bars: true
+    - prefix: g l
+";
+        let config: TuiConfig = serde_yaml::from_str(yaml).expect("which_key block parses");
+        let wk = &config.which_key;
+        assert!(wk.enabled);
+        assert_eq!(wk.delay_ms, 300);
+        assert_eq!(wk.prefixes, vec!["g".to_string(), "z".to_string()]);
+        assert_eq!(wk.groups.len(), 2);
+        assert_eq!(wk.title_for("o"), Some("Open ..."));
+        assert!(wk.groups[0].collapse_in_bars);
+        // Prefix alone is enough: title and collapse_in_bars are optional.
+        assert_eq!(wk.groups[1].prefix, "g l");
+        assert_eq!(wk.groups[1].title, None);
+        assert!(!wk.groups[1].collapse_in_bars);
+    }
+}
