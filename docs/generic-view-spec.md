@@ -2351,6 +2351,15 @@ exactly its previous shape). On remote trees without that capability, the search
 stays limited to the currently loaded/expanded nodes: a hit in an unloaded
 branch only becomes visible once that branch is loaded.
 
+**The keys inside the input come from `keybindings.common` in `tui.yaml`**, not
+from the view: `fuzzy_filter_accept` (default `enter`) keeps the filter and
+closes the input, `fuzzy_filter_clear` (`ctrl+u`) wipes the query but stays in
+the input, and `fuzzy_filter_cancel` (`esc`) does the same on a non-empty query
+and closes the input on an empty one. `backspace`, `left` and `right` edit the
+query and are not configurable. Bind these to plain letters at your own risk —
+they are resolved before the keystroke reaches the query buffer, so such a
+letter can no longer be typed into the filter.
+
 **The matching substring is highlighted** (parity with the native tasks tab): in
 tree mode the matched runs in the **label** of the `tree_label` column are drawn
 in the theme `accent` color (bold) — the box connector keeps its own
