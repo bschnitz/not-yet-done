@@ -5,6 +5,7 @@ mod components;
 mod config;
 mod edit_session;
 mod events;
+mod key_groups;
 mod keymap;
 mod query_filter;
 

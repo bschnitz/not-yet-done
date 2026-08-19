@@ -1333,6 +1333,12 @@ pub struct ContentView {
     /// Applied to the focused pane's table at jump-open time, so panes
     /// created later by splits/drills pick it up without extra wiring.
     nav_chars: Vec<char>,
+
+    /// Which-key groups (`which_key.groups`), set by the App from the config
+    /// like [`Self::nav_chars`]. Only the collapsing ones ever arrive here;
+    /// they fold their chords away in the action bar — hints, query favorites
+    /// and script shortcuts alike.
+    key_groups: Vec<crate::config::tui_config::WhichKeyGroup>,
 }
 
 /// A `source: custom` column as the front-end knows it: the key it renders
@@ -7358,6 +7364,7 @@ impl ContentView {
             column_overrides: std::collections::HashMap::new(),
             card_mode_overrides: std::collections::HashMap::new(),
             nav_chars: Vec::new(),
+            key_groups: Vec::new(),
         };
         cv.sync_action_bar_hints();
         cv
@@ -7507,7 +7514,7 @@ impl ContentView {
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
         // before the mutable borrow on `action_bar` begins.
-        let hints = self.action_bar_hints();
+        let mut hints = self.action_bar_hints();
         let active_filter_name = self.active_pane().active_query_name.clone();
         let favs: Vec<(String, String)> = self
             .db_saved_queries
@@ -7530,6 +7537,24 @@ impl ContentView {
         if let Some(node_id) = self.target_node_script_node_id() {
             if let Some(entries) = self.node_script_shortcuts.get(&node_id) {
                 script_favs.extend(entries.iter().cloned());
+            }
+        }
+        // A collapsing which-key group folds these two groups as well, but
+        // its own entry belongs with the hints — one `o Open …` in the bar,
+        // not one per section. `action_bar_hints` already folded the hints,
+        // so a group that only ever showed up as a favorite is appended here.
+        let (favs, hit_favs) =
+            crate::key_groups::strip(&self.key_groups, favs, |f: &(String, String)| f.1.as_str());
+        let (script_favs, hit_scripts) =
+            crate::key_groups::strip(&self.key_groups, script_favs, |f: &(String, String)| {
+                f.1.as_str()
+            });
+        for g in hit_favs.into_iter().chain(hit_scripts) {
+            if !hints.iter().any(|h| h.key == g.prefix) {
+                hints.push(ActionHint::new(
+                    g.prefix.clone(),
+                    crate::key_groups::group_label(g),
+                ));
             }
         }
         let (fuzzy_active, fuzzy_query, fuzzy_cursor) = {
@@ -11041,6 +11066,14 @@ impl ContentView {
         self.nav_chars = chars.to_vec();
     }
 
+    /// Set the which-key groups that fold their chords away in the bars
+    /// (`which_key.groups` with `collapse_in_bars`). Handed in by the App,
+    /// which owns the config; re-applied after every reload.
+    pub fn set_key_groups(&mut self, groups: &[crate::config::tui_config::WhichKeyGroup]) {
+        self.key_groups = groups.to_vec();
+        self.sync_action_bar_hints();
+    }
+
     pub fn action_bar_hints(&self) -> Vec<ActionHint> {
         if self.window_pending.is_some() {
             return self.window_mode_hints();
@@ -11129,7 +11162,14 @@ impl ContentView {
             }
             resolved.push(gh.clone());
         }
-        resolved
+        // Last step, once every hint (view, App-global, resolved) is in: a
+        // collapsing which-key group trades its chords for a single entry.
+        crate::key_groups::collapse(
+            &self.key_groups,
+            resolved,
+            |h: &ActionHint| h.key.as_str(),
+            |g| ActionHint::new(g.prefix.clone(), crate::key_groups::group_label(g)),
+        )
     }
 
     /// Resolve whether an action-bar hint with the given [`ActiveSurface`] is

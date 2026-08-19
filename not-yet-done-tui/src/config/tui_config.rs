@@ -196,6 +196,10 @@ impl Default for ShortcutMenuConfig {
 ///   enabled: true        # off by default
 ///   delay_ms: 300        # wait this long after the prefix before showing
 ///   prefixes: [g, z]     # only these first steps trigger it (empty = all)
+///   groups:              # optional naming/folding per chord prefix
+///     - prefix: o
+///       title: "Open ..."
+///       collapse_in_bars: true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhichKeyConfig {
@@ -214,6 +218,37 @@ pub struct WhichKeyConfig {
     /// prefix is eligible. Default empty.
     #[serde(default)]
     pub prefixes: Vec<String>,
+    /// Named chord groups. Independent of [`Self::prefixes`] — naming a group
+    /// here neither restricts nor widens which prefixes pop the menu, it only
+    /// gives the group a heading and, optionally, folds its keys away in the
+    /// bars. Default empty.
+    #[serde(default)]
+    pub groups: Vec<WhichKeyGroup>,
+}
+
+/// One named chord group: everything bound under `prefix`.
+///
+/// The [`title`](Self::title) replaces the bare `✦ o…` heading of the
+/// which-key popup, and [`collapse_in_bars`](Self::collapse_in_bars) trades
+/// the group's individual entries in the action and status bars for a single
+/// `o Open …` one. Both are inert while `which_key.enabled` is `false` —
+/// without the popup there would be nothing left to discover the folded keys
+/// with.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WhichKeyGroup {
+    /// The chord prefix this group covers, written exactly as it is bound
+    /// (`o`, `g l`, `ctrl+k`).
+    pub prefix: String,
+    /// Free-form name for the group. Shown as the popup heading and as the
+    /// label of the collapsed bar entry. Optional — without it the popup
+    /// keeps its `✦ o…` heading and a collapsed group reads `o …`.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Fold the group in the bars: every hint, favorite and script shortcut
+    /// under `prefix` is dropped and one `prefix title` entry takes the place
+    /// of the first of them. Default `false`.
+    #[serde(default)]
+    pub collapse_in_bars: bool,
 }
 
 fn default_which_key_delay_ms() -> u64 {
@@ -226,7 +261,27 @@ impl Default for WhichKeyConfig {
             enabled: false,
             delay_ms: default_which_key_delay_ms(),
             prefixes: Vec::new(),
+            groups: Vec::new(),
         }
+    }
+}
+
+impl WhichKeyConfig {
+    /// The title configured for exactly this pending prefix, if any. Steps
+    /// are compared token-wise, so `g  l` in the config still matches the
+    /// `g l` the dispatcher reports.
+    pub fn title_for(&self, prefix: &str) -> Option<&str> {
+        let steps: Vec<&str> = prefix.split_whitespace().collect();
+        self.groups
+            .iter()
+            .find(|g| g.prefix.split_whitespace().collect::<Vec<_>>() == steps)
+            .and_then(|g| g.title.as_deref())
+    }
+
+    /// The groups that fold their keys away in the bars — empty while the
+    /// popup is switched off, so the bars stay complete.
+    pub fn collapsing_groups(&self) -> &[WhichKeyGroup] {
+        if self.enabled { &self.groups } else { &[] }
     }
 }
 
