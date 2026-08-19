@@ -9,13 +9,19 @@
 //! the bars fold away (`o b`, `o o`, …) are all listed under the name their
 //! group carries.
 //!
-//! It scrolls rather than filters: `j`/`k` (and the arrows) move a line,
-//! `ctrl+d`/`ctrl+u` and the page keys move a screen, `g`/`G` jump to the
-//! ends, any other key closes it. The body is content-sized between
-//! [`ShortcutOverviewConfig::min_width`] and
-//! [`ShortcutOverviewConfig::max_width`] where those are configured — long
-//! names are truncated at the maximum instead of stretching the popup across
-//! the terminal.
+//! A long list goes **wide before it goes long**: when the sections do not fit
+//! the terminal's height they are laid out in columns, as many as the width
+//! allows, and only what still overflows scrolls. A section too tall for one
+//! column spreads over several and takes a row band of its own; the short ones
+//! sit side by side in the next band, headings aligned. Reading beats
+//! scrolling — the whole point of the popup is to see the context at once.
+//!
+//! What is left to scroll takes `j`/`k` (and the arrows), `ctrl+d`/`ctrl+u`
+//! and the page keys for a screen, `g`/`G` for the ends; any other key closes
+//! it. A column is content-sized between [`ShortcutOverviewConfig::min_width`]
+//! and [`ShortcutOverviewConfig::max_width`] where those are configured — the
+//! bounds size one column, not the whole popup, so long names are truncated at
+//! the maximum instead of stretching every column across the terminal.
 //!
 //! [shortcut menu]: crate::components::shortcut_menu::ShortcutMenu
 //! [`GlobalAction::ShortcutOverview`]: crate::config::keybindings::GlobalAction::ShortcutOverview
@@ -43,8 +49,13 @@ const GENERAL: &str = "General";
 /// Smallest gap between a shortcut's name and its keys, in cells.
 const GAP: usize = 2;
 
-/// One rendered line of the overview. Building these once on open keeps
-/// scrolling a plain slice of a `Vec` instead of a walk over nested sections.
+/// Blank cells between two columns.
+const COL_GAP: usize = 4;
+
+/// Entries sit under their heading, so the sections read as blocks.
+const INDENT: &str = "  ";
+
+/// One rendered line of the overview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Row {
     /// A section heading: the group's title (or its prefix), plus the prefix
@@ -52,25 +63,31 @@ enum Row {
     Heading { title: String, prefix: String },
     /// One shortcut: name on the left, keys on the right.
     Entry { name: String, keys: String },
-    /// The blank line between two sections.
-    Gap,
 }
+
+/// A heading and the entries under it — the unit the column layout moves
+/// around. Kept as blocks rather than one flat list because a column break
+/// must know where a section starts and how tall it is.
+type Section = Vec<Row>;
 
 /// The read-only, grouped shortcut list.
 pub struct ShortcutOverview {
     theme: Arc<Theme>,
     open: bool,
-    /// Narrowest and widest the body may get, from
+    /// Narrowest and widest a *column* may get, from
     /// `shortcut_overview.min_width` / `.max_width`. Both unset by default:
-    /// the list is then sized by its content alone.
+    /// a column is then sized by its content alone.
     min_width: Option<u16>,
     max_width: Option<u16>,
-    /// Every line, sections already flattened.
-    rows: Vec<Row>,
-    /// First row shown — the scroll offset.
+    /// The sections, in display order.
+    sections: Vec<Section>,
+    /// First line shown — the scroll offset.
     offset: usize,
-    /// How many rows the last render fit, for page scrolling and clamping.
+    /// How many lines the last render fit, for page scrolling and clamping.
     viewport: usize,
+    /// How many lines the last layout produced. Not the row count: columns
+    /// make the list shorter than the sum of its sections.
+    grid_height: usize,
 }
 
 impl ShortcutOverview {
@@ -80,9 +97,10 @@ impl ShortcutOverview {
             open: false,
             min_width,
             max_width,
-            rows: Vec::new(),
+            sections: Vec::new(),
             offset: 0,
             viewport: 1,
+            grid_height: 0,
         }
     }
 
@@ -94,8 +112,12 @@ impl ShortcutOverview {
     /// (actions waiting for a binding — the menu's "unbound" view) are left
     /// out: there is nothing to look up about them here.
     pub fn open(&mut self, rows: Vec<ShortcutRow>, groups: &[WhichKeyGroup]) {
-        self.rows = build_rows(rows, groups);
+        self.sections = build_sections(rows, groups);
         self.offset = 0;
+        // Until the first render decides on a column count, the list is as
+        // tall as it would be in a single column.
+        self.grid_height = self.sections.iter().map(Vec::len).sum::<usize>()
+            + self.sections.len().saturating_sub(1);
         self.open = true;
     }
 
@@ -118,7 +140,7 @@ impl ShortcutOverview {
     /// The last offset that still fills the viewport, so the list never
     /// scrolls past its final line.
     fn max_offset(&self) -> usize {
-        self.rows.len().saturating_sub(self.viewport)
+        self.grid_height.saturating_sub(self.viewport)
     }
 
     fn scroll(&mut self, delta: isize) {
@@ -126,17 +148,31 @@ impl ShortcutOverview {
         self.offset = next.clamp(0, self.max_offset() as isize) as usize;
     }
 
-    /// Draw the panel and the visible slice of the list.
+    /// Draw the panel and the visible lines of the grid.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        if !self.open || self.rows.is_empty() {
+        if !self.open || self.sections.is_empty() {
             return;
         }
         let theme = Arc::clone(&self.theme);
-        let width = self.content_width();
         let hints = vec![("j/k", "scroll"), ("g/G", "top/bottom"), ("esc", "close")];
+        let col_w = self.column_width();
+
+        // The body's shape depends on the room it gets, so the room is asked
+        // for first — at the width of a single column, which is the narrowest
+        // the panel can end up and therefore the safe estimate.
+        let (avail_w, avail_h) = PanelChrome::new(heading(&theme))
+            .hints(hints.clone())
+            .body(col_w, 0)
+            .available(area);
+        // Borrowing the sections rather than `self` so the offset bookkeeping
+        // below can still write to the other fields.
+        let (grid, cols) = fit_columns(&self.sections, col_w, avail_w as usize, avail_h as usize);
+        let grid_h = grid.first().map(Vec::len).unwrap_or(0);
+        let grid_w = cols * col_w + (cols - 1) * COL_GAP;
+
         let body = PanelChrome::new(heading(&theme))
             .hints(hints)
-            .body(width, self.rows.len() as u16)
+            .body(grid_w, grid_h as u16)
             .render(frame, area, &theme);
         let Some(body) = body else { return };
 
@@ -145,16 +181,12 @@ impl ShortcutOverview {
         // resize that shrinks the popup must not leave it scrolled past its
         // end.
         self.viewport = body.height as usize;
+        self.grid_height = grid_h;
         self.offset = self.offset.min(self.max_offset());
 
-        for (i, row) in self
-            .rows
-            .iter()
-            .skip(self.offset)
-            .take(body.height as usize)
-            .enumerate()
-        {
-            let line = render_row(row, body.width, &theme);
+        let visible = (body.height as usize).min(grid_h.saturating_sub(self.offset));
+        for i in 0..visible {
+            let line = compose_line(&grid, self.offset + i, col_w, &theme);
             frame.render_widget(
                 Paragraph::new(line),
                 Rect::new(body.x, body.y + i as u16, body.width, 1),
@@ -162,19 +194,19 @@ impl ShortcutOverview {
         }
     }
 
-    /// The width the body asks for: the widest line, then the configured
-    /// bounds. `min_width` is applied last, so a minimum wider than the
-    /// maximum still holds rather than leaving the two to fight.
-    fn content_width(&self) -> usize {
+    /// The width of one column: the widest line, then the configured bounds.
+    /// `min_width` is applied last, so a minimum wider than the maximum still
+    /// holds rather than leaving the two to fight.
+    fn column_width(&self) -> usize {
         let widest = self
-            .rows
+            .sections
             .iter()
+            .flatten()
             .map(|row| match row {
                 Row::Heading { title, prefix } => heading_text(title, prefix).chars().count(),
                 Row::Entry { name, keys } => {
                     INDENT.len() + name.chars().count() + GAP + keys.chars().count()
                 }
-                Row::Gap => 0,
             })
             .max()
             .unwrap_or(0);
@@ -189,8 +221,89 @@ impl ShortcutOverview {
     }
 }
 
-/// Entries sit under their heading, so the sections read as blocks.
-const INDENT: &str = "  ";
+/// Lay the sections out in as few columns as fit the height, and no more than
+/// fit the width. One column is the normal case; a second is added only once
+/// the list would otherwise be cut off, so a short list keeps the compact
+/// popup it has always had. What does not fit even then still scrolls.
+fn fit_columns<'a>(
+    sections: &'a [Section],
+    col_w: usize,
+    avail_w: usize,
+    avail_h: usize,
+) -> (Vec<Vec<Option<&'a Row>>>, usize) {
+    let max_cols = ((avail_w + COL_GAP) / (col_w + COL_GAP)).max(1);
+    let mut cols = 1;
+    loop {
+        let grid = layout(sections, cols, avail_h);
+        let fits = grid.first().map(Vec::len).unwrap_or(0) <= avail_h;
+        if fits || cols >= max_cols {
+            return (grid, cols);
+        }
+        cols += 1;
+    }
+}
+
+/// Pack `sections` into `cols` columns of `col_h` lines each, and pad them to
+/// a common height so a line index addresses the same row in every column.
+///
+/// The unit of placement is the section, and sections are laid out in **row
+/// bands**: everything placed in a band starts on the same line, so headings
+/// line up across the popup instead of sitting at arbitrary heights. A section
+/// too tall for one column opens a band of its own and is spread over as many
+/// columns as it needs, balanced so the last one is not left almost empty.
+/// With `cols == 1` this degrades exactly to the single-column list: sections
+/// stacked, one blank line between them.
+fn layout<'a>(sections: &'a [Section], cols: usize, col_h: usize) -> Vec<Vec<Option<&'a Row>>> {
+    let cols = cols.max(1);
+    let col_h = col_h.max(1);
+    let mut columns: Vec<Vec<Option<&Row>>> = vec![Vec::new(); cols];
+    // Where the current band starts, and the next free column in it.
+    let mut band_top = 0usize;
+    let mut next_col = 0usize;
+
+    for section in sections {
+        let spans = section.len().div_ceil(col_h).min(cols).max(1);
+        if spans > 1 {
+            band_top = next_band(&columns);
+            let per = section.len().div_ceil(spans);
+            for (i, chunk) in section.chunks(per).enumerate() {
+                place(&mut columns[i], band_top, chunk);
+            }
+            next_col = spans;
+        } else {
+            if next_col >= cols {
+                band_top = next_band(&columns);
+                next_col = 0;
+            }
+            place(&mut columns[next_col], band_top, section);
+            next_col += 1;
+        }
+    }
+
+    let height = columns.iter().map(Vec::len).max().unwrap_or(0);
+    for column in &mut columns {
+        column.resize(height, None);
+    }
+    columns
+}
+
+/// The line the next band starts on: below everything placed so far, with one
+/// blank line of air (none at the very top).
+fn next_band(columns: &[Vec<Option<&Row>>]) -> usize {
+    match columns.iter().map(Vec::len).max().unwrap_or(0) {
+        0 => 0,
+        used => used + 1,
+    }
+}
+
+/// Put `rows` into `column` starting at line `top`, filling the gap above
+/// with blanks.
+fn place<'a>(column: &mut Vec<Option<&'a Row>>, top: usize, rows: &'a [Row]) {
+    while column.len() < top {
+        column.push(None);
+    }
+    column.extend(rows.iter().map(Some));
+}
 
 /// The panel heading.
 fn heading(theme: &Theme) -> Line<'static> {
@@ -213,10 +326,10 @@ fn heading_text(title: &str, prefix: &str) -> String {
     }
 }
 
-/// Sort `rows` into sections and flatten them into rendered lines. "General"
-/// comes first and holds everything no group claims; the groups follow in
-/// config order, each with the entries bound under its prefix.
-fn build_rows(rows: Vec<ShortcutRow>, groups: &[WhichKeyGroup]) -> Vec<Row> {
+/// Sort `rows` into sections. "General" comes first and holds everything no
+/// group claims; the groups follow in config order, each with the entries
+/// bound under its prefix. Empty sections are dropped.
+fn build_sections(rows: Vec<ShortcutRow>, groups: &[WhichKeyGroup]) -> Vec<Section> {
     // (title, prefix, entries) — General first, then one per group, so the
     // config order survives even for groups that end up empty (dropped below).
     let mut sections: Vec<(String, String, Vec<Row>)> =
@@ -252,31 +365,55 @@ fn build_rows(rows: Vec<ShortcutRow>, groups: &[WhichKeyGroup]) -> Vec<Row> {
         });
     }
 
-    let mut out: Vec<Row> = Vec::new();
-    for (title, prefix, entries) in sections {
-        if entries.is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(Row::Gap);
-        }
-        out.push(Row::Heading { title, prefix });
-        out.extend(entries);
-    }
-    out
+    sections
+        .into_iter()
+        .filter(|(_, _, entries)| !entries.is_empty())
+        .map(|(title, prefix, entries)| {
+            let mut section = vec![Row::Heading { title, prefix }];
+            section.extend(entries);
+            section
+        })
+        .collect()
 }
 
-/// One rendered line, truncated to `width`.
-fn render_row<'a>(row: &Row, width: u16, theme: &Theme) -> Line<'a> {
-    let width = width as usize;
+/// One full line of the grid: every column's cell at `idx`, separated by
+/// [`COL_GAP`] blanks. Cells are padded to `col_w`, so the columns stay
+/// aligned whatever sits in them.
+fn compose_line(
+    grid: &[Vec<Option<&Row>>],
+    idx: usize,
+    col_w: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, column) in grid.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" ".repeat(COL_GAP)));
+        }
+        match column.get(idx).copied().flatten() {
+            Some(row) => spans.extend(row_spans(row, col_w, theme)),
+            None => spans.push(Span::raw(" ".repeat(col_w))),
+        }
+    }
+    Line::from(spans)
+}
+
+/// One cell, exactly `width` cells wide.
+fn row_spans(row: &Row, width: usize, theme: &Theme) -> Vec<Span<'static>> {
     match row {
-        Row::Gap => Line::from(""),
-        Row::Heading { title, prefix } => Line::from(Span::styled(
-            truncate(&heading_text(title, prefix), width),
-            Style::default()
-                .fg(theme.form_accent())
-                .add_modifier(Modifier::BOLD),
-        )),
+        Row::Heading { title, prefix } => {
+            let text = truncate(&heading_text(title, prefix), width);
+            let pad = width.saturating_sub(text.chars().count());
+            vec![
+                Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.form_accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ".repeat(pad)),
+            ]
+        }
         Row::Entry { name, keys } => {
             let keys_w = keys.chars().count();
             // Keys are the part worth reading; the name yields when the two
@@ -286,7 +423,7 @@ fn render_row<'a>(row: &Row, width: u16, theme: &Theme) -> Line<'a> {
                 .saturating_sub(keys_w + GAP);
             let name = truncate(name, room);
             let fill = room.saturating_sub(name.chars().count()) + GAP;
-            Line::from(vec![
+            vec![
                 Span::styled(INDENT, Style::default()),
                 Span::styled(name, Style::default().fg(theme.form_text())),
                 Span::styled(
@@ -299,7 +436,7 @@ fn render_row<'a>(row: &Row, width: u16, theme: &Theme) -> Line<'a> {
                         .fg(theme.form_accent())
                         .add_modifier(Modifier::BOLD),
                 ),
-            ])
+            ]
         }
     }
 }
@@ -346,6 +483,30 @@ mod tests {
         o
     }
 
+    fn heading_row(title: &str, prefix: &str) -> Row {
+        Row::Heading {
+            title: title.to_string(),
+            prefix: prefix.to_string(),
+        }
+    }
+
+    fn entry(name: &str, keys: &str) -> Row {
+        Row::Entry {
+            name: name.to_string(),
+            keys: keys.to_string(),
+        }
+    }
+
+    /// The heading of the section a cell belongs to is not recoverable from
+    /// the cell itself, so tests read the grid as text.
+    fn cell_text(cell: Option<&Row>) -> String {
+        match cell {
+            None => String::new(),
+            Some(Row::Heading { title, prefix }) => heading_text(title, prefix),
+            Some(Row::Entry { name, .. }) => name.clone(),
+        }
+    }
+
     #[test]
     fn general_comes_first_then_the_groups_in_config_order() {
         let groups = vec![group("o", Some("Open ...")), group("q", None)];
@@ -358,34 +519,14 @@ mod tests {
             &groups,
         );
         assert_eq!(
-            o.rows,
+            o.sections,
             vec![
-                Row::Heading {
-                    title: GENERAL.to_string(),
-                    prefix: String::new()
-                },
-                Row::Entry {
-                    name: "edit".to_string(),
-                    keys: "e".to_string()
-                },
-                Row::Gap,
-                Row::Heading {
-                    title: "Open ...".to_string(),
-                    prefix: "o".to_string()
-                },
-                Row::Entry {
-                    name: "open in browser".to_string(),
-                    keys: "o b".to_string()
-                },
-                Row::Gap,
-                Row::Heading {
-                    title: "q".to_string(),
-                    prefix: "q".to_string()
-                },
-                Row::Entry {
-                    name: "queries".to_string(),
-                    keys: "q q".to_string()
-                },
+                vec![heading_row(GENERAL, ""), entry("edit", "e")],
+                vec![
+                    heading_row("Open ...", "o"),
+                    entry("open in browser", "o b")
+                ],
+                vec![heading_row("q", "q"), entry("queries", "q q")],
             ]
         );
     }
@@ -397,17 +538,8 @@ mod tests {
         let groups = vec![group("o", Some("Open ..."))];
         let o = overview(vec![row("notes", "o"), row("unbound action", "")], &groups);
         assert_eq!(
-            o.rows,
-            vec![
-                Row::Heading {
-                    title: GENERAL.to_string(),
-                    prefix: String::new()
-                },
-                Row::Entry {
-                    name: "notes".to_string(),
-                    keys: "o".to_string()
-                },
-            ]
+            o.sections,
+            vec![vec![heading_row(GENERAL, ""), entry("notes", "o")]]
         );
     }
 
@@ -415,7 +547,7 @@ mod tests {
     fn an_empty_group_gets_no_heading() {
         let groups = vec![group("o", Some("Open ...")), group("z", Some("Fold ..."))];
         let o = overview(vec![row("open in browser", "o b")], &groups);
-        assert!(!o.rows.iter().any(|r| matches!(
+        assert!(!o.sections.iter().flatten().any(|r| matches!(
             r,
             Row::Heading { title, .. } if title == "Fold ..."
         )));
@@ -425,11 +557,91 @@ mod tests {
     fn the_same_shortcut_is_listed_once() {
         let o = overview(vec![row("quit", "ctrl+c"), row("quit", "ctrl+c")], &[]);
         assert_eq!(
-            o.rows
+            o.sections
                 .iter()
+                .flatten()
                 .filter(|r| matches!(r, Row::Entry { .. }))
                 .count(),
             1
+        );
+    }
+
+    /// A list that fits keeps the single column it always had — no gratuitous
+    /// second column, and the sections still read top to bottom with a blank
+    /// line between them.
+    #[test]
+    fn a_list_that_fits_stays_one_column() {
+        let groups = vec![group("o", Some("Open ..."))];
+        let o = overview(
+            vec![row("edit", "e"), row("open in browser", "o b")],
+            &groups,
+        );
+        let (grid, cols) = fit_columns(&o.sections, 40, 200, 40);
+        assert_eq!(cols, 1);
+        let texts: Vec<String> = grid[0].iter().map(|c| cell_text(*c)).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "General".to_string(),
+                "edit".to_string(),
+                String::new(),
+                "Open ...  (o)".to_string(),
+                "open in browser".to_string(),
+            ]
+        );
+    }
+
+    /// Too tall for the terminal: a second column is added rather than
+    /// scrolling, and a section that alone outgrows a column is spread over
+    /// the columns it needs.
+    #[test]
+    fn a_tall_section_spreads_over_columns_instead_of_scrolling() {
+        let rows: Vec<ShortcutRow> = (0..30).map(|i| row(&format!("action {i}"), "a")).collect();
+        let o = overview(rows, &[]);
+        // 31 lines (heading + 30) into columns of 20.
+        let (grid, cols) = fit_columns(&o.sections, 40, 200, 20);
+        assert_eq!(cols, 2, "one more column, not a scrollbar");
+        assert!(
+            grid[0].len() <= 20,
+            "the column must fit the height: {}",
+            grid[0].len()
+        );
+        // Balanced, so the second column is not left nearly empty.
+        let filled = |c: &Vec<Option<&Row>>| c.iter().filter(|cell| cell.is_some()).count();
+        assert_eq!(filled(&grid[0]) + filled(&grid[1]), 31);
+        assert!(filled(&grid[1]) * 2 >= filled(&grid[0]));
+        // The heading stays with the first chunk; the split is a plain
+        // continuation, not a repeated heading.
+        assert_eq!(cell_text(grid[0][0]), "General");
+        assert!(
+            !grid[1]
+                .iter()
+                .any(|c| matches!(c, Some(Row::Heading { .. })))
+        );
+    }
+
+    /// Short sections that follow a spread-out one share the next band, so
+    /// their headings sit on the same line.
+    #[test]
+    fn short_sections_share_a_band_with_aligned_headings() {
+        let mut rows: Vec<ShortcutRow> =
+            (0..30).map(|i| row(&format!("action {i}"), "a")).collect();
+        rows.push(row("open in browser", "o b"));
+        rows.push(row("open preview", "o p"));
+        rows.push(row("blub one", "b b"));
+        let groups = vec![group("o", Some("Open ...")), group("b", Some("Blub ..."))];
+        let o = overview(rows, &groups);
+
+        let (grid, cols) = fit_columns(&o.sections, 40, 200, 20);
+        assert_eq!(cols, 2);
+        let band = grid[0]
+            .iter()
+            .position(|c| cell_text(*c) == "Open ...  (o)")
+            .expect("Open section placed");
+        assert_eq!(
+            cell_text(grid[1][band]),
+            "Blub ...  (b)",
+            "the next section sits beside it on the same line"
         );
     }
 
@@ -441,11 +653,11 @@ mod tests {
         o.handle_key("k");
         assert_eq!(o.offset, 0, "no scrolling above the first line");
         o.handle_key("G");
-        assert_eq!(o.offset, o.rows.len() - 5);
+        assert_eq!(o.offset, o.grid_height - 5);
         o.handle_key("j");
         assert_eq!(
             o.offset,
-            o.rows.len() - 5,
+            o.grid_height - 5,
             "no scrolling past the last line"
         );
         o.handle_key("g");
@@ -465,52 +677,56 @@ mod tests {
         assert!(!o.is_open());
     }
 
-    /// Unbounded by default (the popup is then content-sized like every
-    /// other one); `max_width` cuts a long list down, `min_width` pads a
-    /// short one out, and a minimum wider than the maximum still wins.
+    /// Unbounded by default (a column is then content-sized like every other
+    /// popup); `max_width` cuts a long list down, `min_width` pads a short one
+    /// out, and a minimum wider than the maximum still wins.
     #[test]
     fn the_width_bounds_are_optional_and_the_minimum_has_the_last_word() {
         let long = "n".repeat(200);
         let mut o = overview(vec![row(&long, "ctrl+alt+shift+f12")], &[]);
-        let natural = o.content_width();
+        let natural = o.column_width();
         assert!(natural > 200, "unbounded: the widest line wins");
 
         o.max_width = Some(20);
-        assert_eq!(o.content_width(), 20);
+        assert_eq!(o.column_width(), 20);
 
         o.max_width = None;
         o.min_width = Some(50);
-        assert_eq!(
-            o.content_width(),
-            natural,
-            "a wide list ignores the minimum"
-        );
+        assert_eq!(o.column_width(), natural, "a wide list ignores the minimum");
 
         let mut short = overview(vec![row("edit", "e")], &[]);
-        assert!(short.content_width() < 50);
+        assert!(short.column_width() < 50);
         short.min_width = Some(50);
-        assert_eq!(short.content_width(), 50);
+        assert_eq!(short.column_width(), 50);
 
         short.max_width = Some(20);
         assert_eq!(
-            short.content_width(),
+            short.column_width(),
             50,
             "the minimum wins over a lower cap"
+        );
+    }
+
+    /// Columns only go as wide as the terminal allows; what is left over
+    /// scrolls as before.
+    #[test]
+    fn the_width_caps_the_column_count() {
+        let rows: Vec<ShortcutRow> = (0..100).map(|i| row(&format!("action {i}"), "a")).collect();
+        let o = overview(rows, &[]);
+        let (grid, cols) = fit_columns(&o.sections, 40, 90, 10);
+        assert_eq!(cols, 2, "only two columns of 40 fit in 90 cells");
+        assert!(
+            grid[0].len() > 10,
+            "the rest still scrolls: {}",
+            grid[0].len()
         );
     }
 
     #[test]
     fn a_row_renders_name_dots_keys_within_the_width() {
         let theme = Theme::new(ThemeConfig::default());
-        let line = render_row(
-            &Row::Entry {
-                name: "open in browser".to_string(),
-                keys: "o b".to_string(),
-            },
-            30,
-            &theme,
-        );
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let spans = row_spans(&entry("open in browser", "o b"), 30, &theme);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().count(), 30);
         assert!(text.starts_with("  open in browser "));
         assert!(text.ends_with(" o b"));
@@ -519,17 +735,30 @@ mod tests {
     #[test]
     fn a_name_too_long_for_the_width_is_cut_not_the_keys() {
         let theme = Theme::new(ThemeConfig::default());
-        let line = render_row(
-            &Row::Entry {
-                name: "an extremely long shortcut name".to_string(),
-                keys: "ctrl+x".to_string(),
-            },
+        let spans = row_spans(
+            &entry("an extremely long shortcut name", "ctrl+x"),
             20,
             &theme,
         );
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().count(), 20);
         assert!(text.contains('\u{2026}'), "the name is elided: {text}");
         assert!(text.ends_with("ctrl+x"));
+    }
+
+    /// Every cell is padded to the column width, so the columns stay aligned
+    /// however ragged the sections are.
+    #[test]
+    fn every_line_of_the_grid_is_the_same_width() {
+        let theme = Theme::new(ThemeConfig::default());
+        let rows: Vec<ShortcutRow> = (0..30).map(|i| row(&format!("action {i}"), "a")).collect();
+        let o = overview(rows, &[]);
+        let (grid, cols) = fit_columns(&o.sections, 30, 200, 20);
+        let expected = cols * 30 + (cols - 1) * COL_GAP;
+        for idx in 0..grid[0].len() {
+            let line = compose_line(&grid, idx, 30, &theme);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text.chars().count(), expected, "line {idx}: {text:?}");
+        }
     }
 }

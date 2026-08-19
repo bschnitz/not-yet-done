@@ -119,10 +119,8 @@ impl<'a> PanelChrome<'a> {
         wrap_hints(&self.hints, inner_w).len().max(1) as u16
     }
 
-    /// The panel rectangle this chrome would occupy inside `area`, without
-    /// drawing anything. Useful for hit-testing (mouse) and for callers that
-    /// need the geometry before deciding what to render.
-    pub fn panel_rect(&self, area: Rect) -> Rect {
+    /// The width this panel would take inside `area`.
+    fn panel_width(&self, area: Rect) -> u16 {
         let heading_w: usize = self
             .heading
             .spans
@@ -133,9 +131,35 @@ impl<'a> PanelChrome<'a> {
         // they wrap instead of stretching the panel to one long line.
         let hints_w = hints_width(&self.hints).min(hint_width_cap());
         let inner_w = self.body_width.max(heading_w).max(hints_w);
-        let panel_w = ((inner_w as u16).saturating_add(2 * PAD_X))
+        ((inner_w as u16).saturating_add(2 * PAD_X))
             .max(self.min_width)
-            .min(area.width);
+            .min(area.width)
+    }
+
+    /// The room a body has inside `area`: how wide it may spread and how many
+    /// rows it may fill before the panel would clip it.
+    ///
+    /// For bodies that can *reflow* — the shortcut overview lays its sections
+    /// out in columns rather than scrolling — the usual order is backwards:
+    /// they must know the room before they can say how much they want. Such a
+    /// caller asks here first, picks a shape, and only then calls
+    /// [`Self::body`]. The height is measured at the panel's current width, so
+    /// a body that then grows wider (and whose hints therefore wrap less) only
+    /// ever gets more room than promised, never less.
+    pub fn available(&self, area: Rect) -> (u16, u16) {
+        let hint_rows = self.hint_rows(self.panel_width(area).saturating_sub(2 * PAD_X));
+        let height = area
+            .height
+            .saturating_sub(CHROME_ROWS)
+            .saturating_sub(hint_rows);
+        (area.width.saturating_sub(2 * PAD_X), height)
+    }
+
+    /// The panel rectangle this chrome would occupy inside `area`, without
+    /// drawing anything. Useful for hit-testing (mouse) and for callers that
+    /// need the geometry before deciding what to render.
+    pub fn panel_rect(&self, area: Rect) -> Rect {
+        let panel_w = self.panel_width(area);
         let hint_rows = self.hint_rows(panel_w.saturating_sub(2 * PAD_X));
         let panel_h = self
             .body_rows
@@ -374,6 +398,34 @@ mod tests {
         }
         // No hint is dropped on the way.
         assert_eq!(rows.concat(), hints);
+    }
+
+    /// What `available` promises is what `render` hands over — otherwise a
+    /// body that sizes itself from it (the shortcut overview's columns) would
+    /// lay out for room it does not get.
+    #[test]
+    fn available_room_is_what_the_body_actually_gets() {
+        let area = Rect::new(0, 0, 60, 20);
+        let hints = vec![("Esc", "close")];
+        let (w, h) = PanelChrome::new(Line::from("\u{2726} title"))
+            .hints(hints.clone())
+            .body(30, 0)
+            .available(area);
+        assert_eq!(w, area.width - 2 * PAD_X);
+
+        let t = theme();
+        let mut term =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .expect("terminal");
+        let mut body = None;
+        term.draw(|f| {
+            body = PanelChrome::new(Line::from("\u{2726} title"))
+                .hints(hints.clone())
+                .body(30, h)
+                .render(f, area, &t);
+        })
+        .expect("draw");
+        assert_eq!(body.expect("body area").height, h);
     }
 
     #[test]
