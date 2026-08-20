@@ -1942,7 +1942,10 @@ bars (`o b`, `o o`, …) are all readable again.
 are laid out in as many columns as the width allows, and only what still does
 not fit scrolls. A section too tall for one column spreads over several and
 takes a row of its own; the short ones sit side by side underneath, their
-headings aligned. What is left to scroll takes `j`/`k` (or the arrows) a line,
+headings aligned. Once a row is served, the sections that follow **stack up in
+the space left beside the tallest one** rather than starting a row below it —
+a long **General** next to a handful of short groups would otherwise leave most
+of the popup blank. What is left to scroll takes `j`/`k` (or the arrows) a line,
 `Ctrl+D`/`Ctrl+U` and the page keys a screen, `g`/`G` to the ends. **Every
 other key closes it** — it is a glance, not a mode.
 
