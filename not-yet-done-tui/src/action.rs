@@ -12,15 +12,16 @@ use crate::config::{
 };
 
 /// The input mode the app is currently in — determines how keys are resolved.
+///
+/// App-wide modes only. A content pane in a text input (fuzzy filter, `/`
+/// search) is *not* represented here: with splits, one pane can be typing
+/// while another is not, so the pane intercepts those keys itself before they
+/// reach this resolver. See `ContentPane::handle_key`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
-    /// Saved filter popup is open (intercepts all keys).
+    /// A popup is open and intercepts all keys.
     Popup,
-    /// FuzzyFilter text input is active.
-    Fuzzy,
-    /// Filter form is open.
-    FilterForm,
-    /// Normal mode — tasks or global actions.
+    /// Normal mode — global actions.
     Normal,
 }
 
@@ -247,13 +248,9 @@ impl<'de> Deserialize<'de> for ActionChains {
 }
 
 /// Determine the current input mode from app state.
-pub fn input_mode(popup_open: bool, fuzzy_active: bool, filter_form_open: bool) -> InputMode {
+pub fn input_mode(popup_open: bool) -> InputMode {
     if popup_open {
         InputMode::Popup
-    } else if fuzzy_active {
-        InputMode::Fuzzy
-    } else if filter_form_open {
-        InputMode::FilterForm
     } else {
         InputMode::Normal
     }
@@ -274,8 +271,6 @@ pub fn resolve_key(
 ) -> Action {
     match mode {
         InputMode::Popup => resolve_popup_key(key, keybindings),
-        InputMode::Fuzzy => resolve_fuzzy_key(key, keybindings),
-        InputMode::FilterForm => resolve_filter_form_key(key, keybindings),
         InputMode::Normal => resolve_normal_key(key, keybindings, form_visible),
     }
 }
@@ -302,62 +297,6 @@ fn resolve_popup_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action 
         "left" => Action::CursorLeft,
         "right" => Action::CursorRight,
         "backspace" => Action::Backspace,
-        ch if is_printable(ch) => Action::InsertChar(ch.chars().next().unwrap()),
-        _ => Action::Noop,
-    }
-}
-
-/// Unreachable today: the only caller of [`input_mode`] passes
-/// `fuzzy_active: false`, because the content panes own their fuzzy input and
-/// resolve the same three actions themselves (`ContentView::handle_fuzzy_key`).
-/// Kept as the mode-based counterpart of the other resolvers — but it is *not*
-/// the live mapping, so don't reason about the fuzzy keys from here.
-fn resolve_fuzzy_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action {
-    // Configurable fuzzy keys from common section.
-    for (action, binding) in &kb.common.bindings {
-        if binding.matches(key) {
-            match action {
-                CommonAction::FuzzyFilterAccept => {
-                    return Action::Common(CommonAction::FuzzyFilterAccept);
-                }
-                CommonAction::FuzzyFilterClear => {
-                    return Action::Common(CommonAction::FuzzyFilterClear);
-                }
-                CommonAction::FuzzyFilterCancel => {
-                    return Action::Common(CommonAction::FuzzyFilterCancel);
-                }
-                _ => {}
-            }
-        }
-    }
-    match key {
-        "backspace" => Action::Backspace,
-        "left" => Action::CursorLeft,
-        "right" => Action::CursorRight,
-        ch if is_printable(ch) => Action::InsertChar(ch.chars().next().unwrap()),
-        _ => Action::Noop,
-    }
-}
-
-fn resolve_filter_form_key(key: &str, kb: &crate::config::KeyBindingConfig) -> Action {
-    // Check form keybindings first.
-    for (action, binding) in &kb.form.bindings {
-        if binding.matches(key) {
-            return Action::Form(action.clone());
-        }
-    }
-    // Check for common-level close.
-    for (action, binding) in &kb.common.bindings {
-        if binding.matches(key) && *action == CommonAction::FormClose {
-            return Action::Common(CommonAction::FormClose);
-        }
-    }
-    match key {
-        "left" => Action::CursorLeft,
-        "right" => Action::CursorRight,
-        "backspace" => Action::Backspace,
-        "enter" | " " => Action::Toggle,
-        "ctrl+r" => Action::Reset,
         ch if is_printable(ch) => Action::InsertChar(ch.chars().next().unwrap()),
         _ => Action::Noop,
     }
@@ -460,41 +399,12 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_mode_accept_key() {
+    fn popup_mode_next_field() {
         let kb = default_kb();
-        // Default fuzzy accept is "enter".
-        let action = resolve_key("enter", InputMode::Fuzzy, &kb, false);
-        assert_eq!(action, Action::Common(CommonAction::FuzzyFilterAccept));
-    }
-
-    #[test]
-    fn fuzzy_mode_cancel_key() {
-        let kb = default_kb();
-        // Default fuzzy cancel is "esc".
-        let action = resolve_key("esc", InputMode::Fuzzy, &kb, false);
-        assert_eq!(action, Action::Common(CommonAction::FuzzyFilterCancel));
-    }
-
-    #[test]
-    fn fuzzy_mode_char_inserts() {
-        let kb = default_kb();
-        let action = resolve_key("a", InputMode::Fuzzy, &kb, false);
-        assert_eq!(action, Action::InsertChar('a'));
-    }
-
-    #[test]
-    fn filter_form_next_field() {
-        let kb = default_kb();
-        // Default form next is "ctrl+j".
-        let action = resolve_key("ctrl+j", InputMode::FilterForm, &kb, true);
+        // Default form next is "ctrl+j" — the popup mode reads the form
+        // section for navigation.
+        let action = resolve_key("ctrl+j", InputMode::Popup, &kb, false);
         assert_eq!(action, Action::Form(FormAction::Next));
-    }
-
-    #[test]
-    fn filter_form_close() {
-        let kb = default_kb();
-        let action = resolve_key("esc", InputMode::FilterForm, &kb, true);
-        assert_eq!(action, Action::Common(CommonAction::FormClose));
     }
 
     #[test]

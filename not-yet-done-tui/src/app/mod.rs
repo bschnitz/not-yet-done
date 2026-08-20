@@ -5376,11 +5376,7 @@ impl App {
             }
         }
 
-        let mode = action::input_mode(
-            self.script_menu.is_open(),
-            false, // trackings uses its own fuzzy path
-            false,
-        );
+        let mode = action::input_mode(self.script_menu.is_open());
 
         // Chord-prefix detection runs BEFORE single-key resolution: when
         // `key` is a prefix of any chord binding active in this tab,
@@ -5488,10 +5484,10 @@ impl App {
                 self.dispatch_escape();
                 EditorRequest::None
             }
-            // Text-input / form actions are only produced in Popup / Fuzzy /
-            // FilterForm input modes, which every active popup intercepts
-            // (and returns) before this dispatch path runs — so they never
-            // reach here. Listed explicitly to keep the match exhaustive.
+            // Text-input / form actions are only produced in Popup mode,
+            // which every active popup intercepts (and returns) before this
+            // dispatch path runs — so they never reach here. Listed
+            // explicitly to keep the match exhaustive.
             Action::InsertChar(_)
             | Action::Backspace
             | Action::CursorLeft
@@ -10325,12 +10321,13 @@ impl App {
                     table.scroll_by(n);
                 }
             }
-            // The fuzzy input is driven by `ContentView::handle_fuzzy_key`,
-            // not from here — these arms only exist because the keys are
-            // still resolvable through `InputMode::Fuzzy`.
-            CommonAction::FuzzyFilterAccept => {}
-            CommonAction::FuzzyFilterClear => {}
-            CommonAction::FuzzyFilterCancel => {}
+            // Never produced by `resolve_key`: the focused content pane
+            // resolves these itself while its fuzzy input is open
+            // (`ContentPane::handle_fuzzy_key`) and returns before the key
+            // ever reaches the App. Listed to keep the match exhaustive.
+            CommonAction::FuzzyFilterAccept
+            | CommonAction::FuzzyFilterClear
+            | CommonAction::FuzzyFilterCancel => {}
             CommonAction::ColumnConfig => {
                 self.open_column_config_popup();
             }
