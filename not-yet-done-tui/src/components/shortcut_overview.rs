@@ -52,7 +52,7 @@ const GENERAL: &str = "General";
 const GAP: usize = 2;
 
 /// Blank cells between two columns.
-const COL_GAP: usize = 4;
+const COL_GAP: usize = 2;
 
 /// Entries sit under their heading, so the sections read as blocks.
 const INDENT: &str = "  ";
