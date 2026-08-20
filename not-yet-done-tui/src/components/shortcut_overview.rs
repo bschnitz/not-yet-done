@@ -13,8 +13,10 @@
 //! the terminal's height they are laid out in columns, as many as the width
 //! allows, and only what still overflows scrolls. A section too tall for one
 //! column spreads over several and takes a row band of its own; the short ones
-//! sit side by side in the next band, headings aligned. Reading beats
-//! scrolling — the whole point of the popup is to see the context at once.
+//! sit side by side in the next band, headings aligned, and once that band is
+//! served they stack up in the room left beside its tallest section instead of
+//! opening another one. Reading beats scrolling — the whole point of the popup
+//! is to see the context at once.
 //!
 //! What is left to scroll takes `j`/`k` (and the arrows), `ctrl+d`/`ctrl+u`
 //! and the page keys for a screen, `g`/`G` for the ends; any other key closes
@@ -247,19 +249,26 @@ fn fit_columns<'a>(
 /// a common height so a line index addresses the same row in every column.
 ///
 /// The unit of placement is the section, and sections are laid out in **row
-/// bands**: everything placed in a band starts on the same line, so headings
-/// line up across the popup instead of sitting at arbitrary heights. A section
-/// too tall for one column opens a band of its own and is spread over as many
-/// columns as it needs, balanced so the last one is not left almost empty.
-/// With `cols == 1` this degrades exactly to the single-column list: sections
+/// bands**: the first section a column takes in a band starts on the band's
+/// top line, so headings line up across the popup instead of sitting at
+/// arbitrary heights. A section too tall for one column opens a band of its
+/// own and is spread over as many columns as it needs, balanced so the last
+/// one is not left almost empty.
+///
+/// Once every column of a band has been served, the sections that follow
+/// **stack up inside the band** rather than opening a new one below it — that
+/// is the empty space beside a tall section, and a long "General" next to a
+/// handful of short groups would otherwise waste most of the popup. Only when
+/// a section no longer fits inside the band does a new band start. With
+/// `cols == 1` this degrades exactly to the single-column list: sections
 /// stacked, one blank line between them.
 fn layout<'a>(sections: &'a [Section], cols: usize, col_h: usize) -> Vec<Vec<Option<&'a Row>>> {
     let cols = cols.max(1);
     let col_h = col_h.max(1);
     let mut columns: Vec<Vec<Option<&Row>>> = vec![Vec::new(); cols];
-    // Where the current band starts, and the next free column in it.
+    // Where the current band starts. A column still at or above this line has
+    // not been served in this band yet.
     let mut band_top = 0usize;
-    let mut next_col = 0usize;
 
     for section in sections {
         let spans = section.len().div_ceil(col_h).min(cols).max(1);
@@ -269,15 +278,30 @@ fn layout<'a>(sections: &'a [Section], cols: usize, col_h: usize) -> Vec<Vec<Opt
             for (i, chunk) in section.chunks(per).enumerate() {
                 place(&mut columns[i], band_top, chunk);
             }
-            next_col = spans;
-        } else {
-            if next_col >= cols {
-                band_top = next_band(&columns);
-                next_col = 0;
-            }
-            place(&mut columns[next_col], band_top, section);
-            next_col += 1;
+            continue;
         }
+        // A column the band has not touched yet, left to right — this is what
+        // aligns the headings.
+        if let Some(col) = columns.iter().position(|c| c.len() <= band_top) {
+            place(&mut columns[col], band_top, section);
+            continue;
+        }
+        // None left: stack into the column with the most room, as long as the
+        // section stays within the band. One blank line of air above it.
+        let band_bottom = columns.iter().map(Vec::len).max().unwrap_or(0);
+        let roomiest = columns
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, c)| c.len())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let top = columns[roomiest].len() + 1;
+        if top + section.len() <= band_bottom {
+            place(&mut columns[roomiest], top, section);
+            continue;
+        }
+        band_top = next_band(&columns);
+        place(&mut columns[0], band_top, section);
     }
 
     let height = columns.iter().map(Vec::len).max().unwrap_or(0);
@@ -642,6 +666,35 @@ mod tests {
             cell_text(grid[1][band]),
             "Blub ...  (b)",
             "the next section sits beside it on the same line"
+        );
+    }
+
+    /// The space beside a tall section is filled: once every column of the
+    /// band has a section, the ones that follow stack up in the roomiest
+    /// column instead of opening a band below the tall one.
+    #[test]
+    fn short_sections_stack_beside_a_tall_one() {
+        let mut rows: Vec<ShortcutRow> =
+            (0..30).map(|i| row(&format!("action {i}"), "a")).collect();
+        rows.push(row("open in browser", "o b"));
+        rows.push(row("blub one", "b b"));
+        let groups = vec![group("o", Some("Open ...")), group("b", Some("Blub ..."))];
+        let o = overview(rows, &groups);
+
+        // General is 31 lines and fills the first column; both short sections
+        // fit next to it in the second.
+        let (grid, cols) = fit_columns(&o.sections, 40, 200, 35);
+        assert_eq!(cols, 2);
+        assert_eq!(cell_text(grid[1][0]), "Open ...  (o)");
+        assert_eq!(
+            cell_text(grid[1][3]),
+            "Blub ...  (b)",
+            "the second short section sits under the first, not in a new band"
+        );
+        assert_eq!(
+            grid[0].len(),
+            31,
+            "the grid stays as tall as the tall section"
         );
     }
 
