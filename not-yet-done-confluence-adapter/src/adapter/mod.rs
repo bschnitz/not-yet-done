@@ -335,8 +335,12 @@ impl ContentAdapter for ConfluenceAdapter {
             .unwrap_or_default())
     }
 
-    async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
-        let trimmed = query.trim();
+    /// The pane's `view_query` (CQL) is deliberately **not** folded in:
+    /// the Confluence tree lists levels by page hierarchy, not by the
+    /// view query, so every hit inside the configured spaces stays
+    /// addressable. Only the space whitelist scopes the search.
+    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
+        let trimmed = params.query.trim();
         if trimmed.is_empty() {
             return Ok(Some(TreeSearchResults {
                 hits: Vec::new(),
@@ -345,7 +349,10 @@ impl ContentAdapter for ConfluenceAdapter {
         }
         let cql = build_tree_find_cql(trimmed, self.space_keys.as_deref());
         let client = self.auth.get_client().await.map_err(other_err)?;
-        let results = client.cql_search(&cql, 0, limit).await.map_err(other_err)?;
+        let results = client
+            .cql_search(&cql, 0, params.limit)
+            .await
+            .map_err(other_err)?;
         let hits = sort_hits_in_tree_order(
             results.items.into_iter().filter_map(row_to_hit).collect(),
             self.space_keys.as_deref(),

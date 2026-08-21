@@ -298,6 +298,33 @@ pub enum TreeFindAdvance {
     Idle,
 }
 
+/// Outcome of one walk attempt against a single hit
+/// ([`ContentPane::advance_current_hit`]).
+///
+/// Only exists to separate "this *hit* is unaddressable, try the next
+/// one" from every other outcome — the driver
+/// ([`ContentPane::advance_tree_find`]) skips the former and forwards
+/// the latter to the App unchanged.
+enum HitStep {
+    /// Hand this back to the caller verbatim.
+    Advance(TreeFindAdvance),
+    /// The tree, as it currently renders, cannot address this hit: a
+    /// level exists and is loaded but simply doesn't contain the id
+    /// (view query filtered it out, pagination cap, deleted since the
+    /// search ran), or the leaf's row is hidden. Carries a reason
+    /// fragment for the summary shown when *every* hit is dead.
+    Unreachable(String),
+}
+
+/// Which way the walk moves when it has to skip a hit it cannot
+/// reach — so a skip continues the direction the user was already
+/// travelling instead of bouncing them back where they came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeFindDirection {
+    Forward,
+    Backward,
+}
+
 /// Pane-local state for the `tree_find` action — server-side search
 /// over a tree-mode view (CT-5).
 ///
@@ -348,6 +375,18 @@ pub struct TreeFindState {
     /// of looping. Cleared whenever the walk targets a new hit
     /// (`tree_find_complete` / `next` / `prev`).
     pub refreshed_paths: std::collections::HashSet<Vec<String>>,
+    /// Indices into `hits` the walker has proven unreachable in the
+    /// tree as it currently renders — a filtered-out ancestor, a
+    /// pagination cap, a node deleted since the search ran. The walker
+    /// skips past them on its own instead of stranding the user on a
+    /// hit no amount of `n` can land on, and `next`/`prev` step over
+    /// them so a proven-dead hit is never offered twice. Cleared with
+    /// every fresh result set.
+    pub unreachable: std::collections::HashSet<usize>,
+    /// Direction of the last `next`/`prev`, so auto-skipping keeps
+    /// travelling the way the user was going. `Forward` after a fresh
+    /// search.
+    pub direction: TreeFindDirection,
 }
 
 /// Per-drill state for one navigation context. A pane shows one
@@ -1494,6 +1533,8 @@ impl ContentPane {
             truncated: false,
             settled: false,
             refreshed_paths: std::collections::HashSet::new(),
+            unreachable: std::collections::HashSet::new(),
+            direction: TreeFindDirection::Forward,
         });
     }
 
@@ -1521,6 +1562,8 @@ impl ContentPane {
             state.truncated = truncated;
             state.settled = false;
             state.refreshed_paths.clear();
+            state.unreachable.clear();
+            state.direction = TreeFindDirection::Forward;
         }
     }
 
@@ -1541,32 +1584,46 @@ impl ContentPane {
         self.tree_find = None;
     }
 
-    /// Advance the cursor to the next hit with wrap-around. Returns
-    /// the newly-selected hit (or `None` when there are no hits / no
-    /// active state — caller should no-op).
+    /// Advance the cursor to the next hit with wrap-around, stepping
+    /// over hits already proven unreachable. Returns the newly-selected
+    /// hit (or `None` when there are no hits / no active state —
+    /// caller should no-op).
     pub fn tree_find_next(&mut self) -> Option<&TreeFindHit> {
-        let state = self.tree_find.as_mut()?;
-        if state.hits.is_empty() {
-            return None;
-        }
-        state.current = (state.current + 1) % state.hits.len();
-        state.settled = false;
-        state.refreshed_paths.clear();
-        state.hits.get(state.current)
+        self.tree_find_step(TreeFindDirection::Forward)
     }
 
-    /// Step the cursor to the previous hit with wrap-around. Returns
-    /// the newly-selected hit (or `None` when empty / no state).
+    /// Step the cursor to the previous hit with wrap-around, stepping
+    /// over hits already proven unreachable. Returns the newly-selected
+    /// hit (or `None` when empty / no state).
     pub fn tree_find_prev(&mut self) -> Option<&TreeFindHit> {
+        self.tree_find_step(TreeFindDirection::Backward)
+    }
+
+    /// Shared body of [`Self::tree_find_next`] / [`Self::tree_find_prev`]:
+    /// move one hit in `dir`, wrapping, and keep moving while the
+    /// landing index is in `unreachable` — those are hits the walker
+    /// already proved the tree cannot address, so offering them again
+    /// would just replay the dead end. Stops after a full lap, which
+    /// leaves the cursor where it started when every other hit is dead.
+    fn tree_find_step(&mut self, dir: TreeFindDirection) -> Option<&TreeFindHit> {
         let state = self.tree_find.as_mut()?;
-        if state.hits.is_empty() {
+        let len = state.hits.len();
+        if len == 0 {
             return None;
         }
-        state.current = if state.current == 0 {
-            state.hits.len() - 1
-        } else {
-            state.current - 1
+        state.direction = dir;
+        let step = |i: usize| match dir {
+            TreeFindDirection::Forward => (i + 1) % len,
+            TreeFindDirection::Backward => (i + len - 1) % len,
         };
+        let mut next = step(state.current);
+        for _ in 0..len {
+            if !state.unreachable.contains(&next) {
+                break;
+            }
+            next = step(next);
+        }
+        state.current = next;
         state.settled = false;
         state.refreshed_paths.clear();
         state.hits.get(state.current)
@@ -1718,9 +1775,9 @@ impl ContentPane {
     ///   `NeedRootLoad` and the caller must dispatch
     ///   `SpawnContentLoad` (re-poll after the items land).
     /// - When an ancestor `id` isn't present in its cached parent's
-    ///   children, returns `NotInTree(reason)` — typical cause: a
-    ///   filter / pagination cap excludes it. CT-9 will retry after
-    ///   the user re-reloads.
+    ///   children, the hit is marked unreachable and the walk moves on
+    ///   to the next one by itself (see [`Self::advance_current_hit`]);
+    ///   `NotInTree` surfaces only once *no* hit is reachable.
     pub fn advance_tree_find(
         &mut self,
         view_index: usize,
@@ -1742,15 +1799,8 @@ impl ContentPane {
         if state.settled {
             return TreeFindAdvance::Idle;
         }
-        let hit = match state.hits.get(state.current) {
-            Some(h) => h.clone(),
-            None => return TreeFindAdvance::Idle,
-        };
-        let path = hit.path.clone();
-        if path.is_empty() {
-            return TreeFindAdvance::NotInTree(
-                "Tree-find hit has an empty path — adapter bug".into(),
-            );
+        if state.hits.is_empty() {
+            return TreeFindAdvance::Idle;
         }
         let view_def = match self.view_def(view_defs).cloned() {
             Some(v) => v,
@@ -1760,6 +1810,53 @@ impl ContentPane {
         let _ = pane_id;
         if view_def.tree_label.is_none() || self.tree.is_none() {
             return TreeFindAdvance::NotInTree("Tree-find requires a tree-mode view".into());
+        }
+
+        // A hit the tree cannot address is not a dead end for the
+        // *search* — only for that one hit. Walk on to the next
+        // candidate instead of stranding the user on it (they used to
+        // have to press `n` past every phantom by hand). Each lap
+        // marks one more index unreachable, so this terminates.
+        loop {
+            match self.advance_current_hit(&view_def, view_defs) {
+                HitStep::Advance(advance) => return advance,
+                HitStep::Unreachable(reason) => {
+                    let Some(state) = self.tree_find.as_mut() else {
+                        return TreeFindAdvance::Idle;
+                    };
+                    state.unreachable.insert(state.current);
+                    let total = state.hits.len();
+                    if state.unreachable.len() >= total {
+                        return TreeFindAdvance::NotInTree(format!(
+                            "none of the {total} hit{} is reachable in the current tree \
+                             — last: {reason}",
+                            if total == 1 { "" } else { "s" },
+                        ));
+                    }
+                    let dir = state.direction;
+                    self.tree_find_step(dir);
+                }
+            }
+        }
+    }
+
+    /// One walk attempt against `tree_find.current`. Split out of
+    /// [`Self::advance_tree_find`] so that caller can tell a
+    /// *this hit is unaddressable* verdict ([`HitStep::Unreachable`],
+    /// worth skipping past) apart from every other outcome, which is
+    /// handed back to the App verbatim.
+    fn advance_current_hit(&mut self, view_def: &ViewDef, view_defs: &[ViewDef]) -> HitStep {
+        let state = match self.tree_find.as_ref() {
+            Some(s) => s,
+            None => return HitStep::Advance(TreeFindAdvance::Idle),
+        };
+        let hit = match state.hits.get(state.current) {
+            Some(h) => h.clone(),
+            None => return HitStep::Advance(TreeFindAdvance::Idle),
+        };
+        let path = hit.path.clone();
+        if path.is_empty() {
+            return HitStep::Unreachable("hit has an empty path (adapter bug)".into());
         }
 
         // Walk each prefix of `path`. For depth d, the parent's
@@ -1790,7 +1887,7 @@ impl ContentPane {
             match slot {
                 Slot::Missing => {
                     if d == 0 {
-                        return TreeFindAdvance::NeedRootLoad;
+                        return HitStep::Advance(TreeFindAdvance::NeedRootLoad);
                     }
                     // We need the ChildDef whose own level *is* `d`
                     // — its `node_type` is what we'll request from
@@ -1799,19 +1896,19 @@ impl ContentPane {
                     // ChildDefs (where every depth ≥ 1 resolves to
                     // the same recursive def), unlike the
                     // depth-shifted `tree_child_def_at_depth`.
-                    let Some(child_def) = tree_self_at_depth(&view_def, d) else {
-                        return TreeFindAdvance::NotInTree(format!(
-                            "View config has no tree-continuing child at depth {d}",
+                    let Some(child_def) = tree_self_at_depth(view_def, d) else {
+                        return HitStep::Unreachable(format!(
+                            "view config has no tree-continuing child at depth {d}",
                         ));
                     };
-                    return TreeFindAdvance::NeedTreeExpand {
+                    return HitStep::Advance(TreeFindAdvance::NeedTreeExpand {
                         parent_path,
                         parent_node_id: path[d - 1].clone(),
                         child_node_type: child_def.node_type.clone(),
                         page_size: 50,
-                    };
+                    });
                 }
-                Slot::Loading => return TreeFindAdvance::Waiting,
+                Slot::Loading => return HitStep::Advance(TreeFindAdvance::Waiting),
                 Slot::LoadedHas => {}
                 Slot::LoadedMissing => {
                     // Cached + loaded, but the expected child is absent.
@@ -1834,19 +1931,19 @@ impl ContentPane {
                             state.refreshed_paths.insert(parent_path.clone());
                         }
                         if d == 0 {
-                            return TreeFindAdvance::NeedRootLoad;
+                            return HitStep::Advance(TreeFindAdvance::NeedRootLoad);
                         }
-                        if let Some(child_def) = tree_self_at_depth(&view_def, d) {
-                            return TreeFindAdvance::NeedTreeExpand {
+                        if let Some(child_def) = tree_self_at_depth(view_def, d) {
+                            return HitStep::Advance(TreeFindAdvance::NeedTreeExpand {
                                 parent_path,
                                 parent_node_id: path[d - 1].clone(),
                                 child_node_type: child_def.node_type.clone(),
                                 page_size: 50,
-                            };
+                            });
                         }
                     }
-                    return TreeFindAdvance::NotInTree(format!(
-                        "Hit's ancestor '{}' at depth {d} not in loaded children",
+                    return HitStep::Unreachable(format!(
+                        "ancestor '{}' at depth {d} not in loaded children",
                         path[d],
                     ));
                 }
@@ -1862,7 +1959,7 @@ impl ContentPane {
                 let prefix: Vec<String> = path[..d].to_vec();
                 tree.expanded.insert(prefix);
             }
-            tree.rebuild_entries(&view_def);
+            tree.rebuild_entries(view_def);
         }
         self.rebuild_table(view_defs);
         if let Some(row) = self.find_tree_find_visible_row(&hit) {
@@ -1870,13 +1967,14 @@ impl ContentPane {
             if let Some(state) = self.tree_find.as_mut() {
                 state.settled = true;
             }
-            TreeFindAdvance::Ready(row)
+            HitStep::Advance(TreeFindAdvance::Ready(row))
         } else {
             // Defensive: rebuild succeeded but the row isn't in the
             // visible-indices map. Usually means a fuzzy filter is
-            // active and hides this leaf — surface as NotInTree so
-            // the user knows to clear the filter.
-            TreeFindAdvance::NotInTree("Hit's leaf row is hidden (active fuzzy filter?)".into())
+            // active and hides this leaf. Skippable like any other
+            // unaddressable hit — if the filter hides them all, the
+            // caller's summary says so and the user knows to clear it.
+            HitStep::Unreachable("leaf row is hidden (active fuzzy filter?)".into())
         }
     }
 
@@ -5915,7 +6013,16 @@ impl ContentPane {
             } else if state.hits.is_empty() {
                 format!("Tree find \"{}\": no matches", state.query)
             } else {
-                let suffix = if state.truncated { ", truncated" } else { "" };
+                let mut suffix = String::new();
+                // Own line in the hint rather than a silent gap in the
+                // counter: without it "4/6" with two skipped hits reads
+                // as if `n` had lost two stops.
+                if !state.unreachable.is_empty() {
+                    suffix.push_str(&format!(", {} unreachable", state.unreachable.len()));
+                }
+                if state.truncated {
+                    suffix.push_str(", truncated");
+                }
                 format!(
                     "Tree find \"{}\": {}/{}{}",
                     state.query,
@@ -22102,6 +22209,100 @@ views:
             }
             other => panic!("expected Ready, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn advance_tree_find_skips_unreachable_hits_and_lands_the_next_one() {
+        // The reported bug: an adapter returns hits the pane's active
+        // query filters out of the tree (a deleted namesake of a live
+        // task). The walker used to stop on the first one and make the
+        // user press `n` past every phantom by hand — now it walks on
+        // by itself and lands the first hit the tree can address.
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        pane.tree_find_complete(
+            vec![
+                make_hit(&["SPACE", "ghost"], "Ghost", "SPACE"),
+                make_hit(&["SPACE", "p2"], "P2", "SPACE"),
+            ],
+            false,
+        );
+        let tree = pane.tree.as_mut().unwrap();
+        tree.set_cached_children(Vec::new(), vec![space_node("SPACE", "Space")], None);
+        // `ghost` is nowhere in the loaded level — only `p2` is.
+        tree.set_cached_children(vec!["SPACE".into()], vec![page_node("p2", "P2")], None);
+
+        // A loaded-but-missing level still gets its one refresh first
+        // (it might be a stale cache rather than a filtered-out node).
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::NeedTreeExpand { .. } => {}
+            other => panic!("expected NeedTreeExpand (refresh), got {other:?}"),
+        }
+        // The refresh comes back with the same children — now the hit
+        // is genuinely absent, so the walker skips it and drives on to
+        // the next one in the same call.
+        pane.tree.as_mut().unwrap().set_cached_children(
+            vec!["SPACE".into()],
+            vec![page_node("p2", "P2")],
+            None,
+        );
+        match pane.advance_tree_find(0, 0, &vds) {
+            TreeFindAdvance::Ready(_) => {}
+            other => panic!("expected Ready on the second hit, got {other:?}"),
+        }
+        let state = pane.tree_find.as_ref().unwrap();
+        assert_eq!(state.current, 1, "cursor moved to the reachable hit");
+        assert!(state.unreachable.contains(&0), "phantom hit remembered");
+
+        // And `n`/`N` step over the remembered phantom rather than
+        // replaying the dead end.
+        assert_eq!(pane.tree_find_next().unwrap().label, "P2");
+        assert_eq!(pane.tree_find_prev().unwrap().label, "P2");
+    }
+
+    #[test]
+    fn advance_tree_find_reports_not_in_tree_only_when_every_hit_is_dead() {
+        let mut pane = empty_pane();
+        let vds = vec![tree_view_def()];
+        pane.tree_find_begin("q".into());
+        pane.tree_find_complete(
+            vec![
+                make_hit(&["SPACE", "ghost1"], "G1", "SPACE"),
+                make_hit(&["SPACE", "ghost2"], "G2", "SPACE"),
+            ],
+            false,
+        );
+        let tree = pane.tree.as_mut().unwrap();
+        tree.set_cached_children(Vec::new(), vec![space_node("SPACE", "Space")], None);
+        tree.set_cached_children(vec!["SPACE".into()], vec![page_node("p2", "P2")], None);
+
+        // Each hit spends its one refresh, then is written off; only
+        // after the last one does the user see a message — and it says
+        // how many hits were dead rather than naming one id.
+        let mut seen_not_in_tree = None;
+        for _ in 0..6 {
+            match pane.advance_tree_find(0, 0, &vds) {
+                TreeFindAdvance::NeedTreeExpand { .. } => {
+                    // Refresh answers with the same (still hit-less) level.
+                    pane.tree.as_mut().unwrap().set_cached_children(
+                        vec!["SPACE".into()],
+                        vec![page_node("p2", "P2")],
+                        None,
+                    );
+                }
+                TreeFindAdvance::NotInTree(reason) => {
+                    seen_not_in_tree = Some(reason);
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        let reason = seen_not_in_tree.expect("walker must terminate on NotInTree");
+        assert!(
+            reason.contains("none of the 2 hits"),
+            "summary names the whole dead result set: {reason}"
+        );
     }
 
     #[test]

@@ -333,8 +333,8 @@ impl ContentAdapter for ScriptsAdapter {
     fn script_store(&self) -> Option<&dyn ScriptStore> {
         self.inner.script_store()
     }
-    async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
-        self.inner.search_in_tree(query, limit).await
+    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
+        self.inner.search_in_tree(params).await
     }
     async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
         self.inner.locate_node_path(node_id).await

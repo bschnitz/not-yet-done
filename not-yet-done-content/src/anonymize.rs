@@ -655,8 +655,8 @@ impl ContentAdapter for AnonymizingAdapter {
     fn script_store(&self) -> Option<&dyn ScriptStore> {
         self.inner.script_store()
     }
-    async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
-        let mut results = self.inner.search_in_tree(query, limit).await?;
+    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
+        let mut results = self.inner.search_in_tree(params).await?;
         if let Some(results) = results.as_mut() {
             for hit in results.hits.iter_mut() {
                 // `path` is addressing (node ids) — leave it; scrub display text.

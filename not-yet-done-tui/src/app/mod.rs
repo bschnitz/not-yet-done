@@ -3980,10 +3980,17 @@ impl App {
             None => return,
         };
         let tx = self.load_tx.clone();
-        let query_for_call = query.clone();
+        // The pane's active query scopes the search exactly as it scopes
+        // every tree level — without it the adapter offers hits that no
+        // level will ever yield and the expand walk dead-ends on them.
+        let params = not_yet_done_content::TreeSearchParams {
+            query: query.clone(),
+            limit,
+            view_query: self.pane_active_query(view_index, pane_id),
+        };
         tokio::spawn(async move {
             let result = adapter
-                .search_in_tree(&query_for_call, limit)
+                .search_in_tree(&params)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(LoadMsg::TreeFindResult {

@@ -943,7 +943,7 @@ keys of the default window bindings) → effective alphabet `adfghjkl`.
 
 - [ ] Split a Jira/Postgres/SQLite pane with `wv`, then `o s` (shortcut
       overview) → a `Window ...` section listing `w v`/`w s`/`w q`/`w
-  h`/`w l` **and** one row per pane (`w a`, `w d`, …) named after the
+h`/`w l` **and** one row per pane (`w a`, `w d`, …) named after the
       pane it focuses; the pane you are in reads `(current)`.
 - [ ] Drill the right pane into a child level → its row's name gains the
       level (`… › <level>`), and it stays put while the cursor moves
@@ -2860,6 +2860,37 @@ Searched with `/` at least once beforehand and jumped to a hit.
       correctly by next/prev).
 - [ ] A new search with `/` (opening the search input again) behaves as always:
       the first hit is jumped to.
+
+### CT-14 — tree find only offers hits the query leaves visible
+
+The search used to run against the adapter's whole universe while every tree
+level was filtered by the active query, so hits the query hides stranded the
+expand walk ("Tree find: Hit's ancestor '…' at depth 3 not in loaded
+children") and had to be stepped past with `n` by hand.
+
+Prerequisite (tasks tab): a task whose text also occurs in **deleted** tasks —
+create one, duplicate it, delete the duplicate. The default query
+`[deleted, =, false]` hides the duplicate.
+
+- [ ] `/` for that text in the tasks tree → the status bar reports only the
+      hits that are actually in the tree (the deleted duplicate is not
+      counted) and the cursor lands on the live task **without** pressing `n`.
+- [ ] Replace the query with `[deleted, =, true]` (`q`), search again → now
+      exactly the deleted ones are found and reachable; the live task is not
+      offered.
+- [ ] Drop the `deleted` clause entirely → both are found, `n`/`N` steps
+      through all of them.
+- [ ] The scripted jump keeps working: `:tree-find "Tasks" id:<uuid>` on a
+      **visible** task jumps to it; on a task the current query hides it
+      reports no match instead of stalling on an unreachable hit.
+- [ ] Confluence (an adapter that does not filter its levels by the view
+      query) is unchanged: tree find still finds pages across the whitelisted
+      spaces regardless of the active query.
+- [ ] Unreachable hits are skipped, not dead ends: with a fuzzy filter (`f`)
+      active that hides a hit's row, `n` walks on to the next reachable hit;
+      the status bar appends "N unreachable". Only when no hit at all is
+      reachable does the message appear — and it names the count
+      ("none of the N hits is reachable…") rather than one id.
 
 ### RD-1 — render-loop dirty gating (CPU while idle)
 
