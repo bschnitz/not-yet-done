@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 mod attachments;
 mod comments;
 mod create;
+mod delete;
 mod links;
 mod search;
 mod transitions;

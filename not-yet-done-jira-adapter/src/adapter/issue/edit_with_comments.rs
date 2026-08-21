@@ -1136,4 +1136,59 @@ mod tests {
         let unrelated = "#### CACHE OF THE ATLANTIC\nis a documentary";
         assert_eq!(rejoin_wrapped_cache_marker(unrelated), unrelated);
     }
+
+    #[test]
+    fn table_comment_survives_editor_space_collapse() {
+        // Whole-pipeline regression for the `user_changed` predicate: a foreign
+        // comment holding a Jira table with stray interior double spaces, run
+        // through an editor that collapses space runs and strips trailing
+        // spaces (what a markdown-rewriting editor does on save). Both buffers
+        // go through `comments_md_to_canonical` exactly like the save path, so
+        // an untouched comment must stay `normalize_ws`-equal to its snapshot.
+        // Fixture invented.
+        let buf = format!(
+            "Some description body.\n\
+             \n\
+             ## Comments <!-- jira comments section -->\n\
+             \n\
+             ### @tester_department_extern 2022-11-09T10:00 <!-- jira comment id=987654 -->\n\
+             \n\
+             || Case || Expectation || Result ||\n\
+             |alpha |first run |ok (/)  !shot-a.png|thumbnail!   |\n\
+             | beta | second run | failed (x)  !shot-b.png|thumbnail!  |\n\
+             \n\
+             {CACHE_MARKER}\n\
+             h1. labels: ll_alpha, ll_beta"
+        );
+        let collapsed: String = buf
+            .split('\n')
+            .map(|line| {
+                let mut out = String::new();
+                let mut prev_space = false;
+                for c in line.chars() {
+                    if c == ' ' {
+                        if !prev_space {
+                            out.push(' ');
+                        }
+                        prev_space = true;
+                    } else {
+                        out.push(c);
+                        prev_space = false;
+                    }
+                }
+                out.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let norm = super::super::wiki_md::normalize_ws;
+        let snap = comment_bodies(&comments_md_to_canonical(&buf));
+        let user = comment_bodies(&comments_md_to_canonical(&collapsed));
+        let snap_body = snap.get("987654").expect("comment present in snapshot");
+        let user_body = user.get("987654").expect("comment present in user buffer");
+        assert_eq!(
+            norm(snap_body),
+            norm(user_body),
+            "space-collapsed table comment read as edited"
+        );
+    }
 }
