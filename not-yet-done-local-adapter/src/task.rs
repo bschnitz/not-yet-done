@@ -57,7 +57,8 @@ use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
     ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec, Invalidation,
     Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
-    SortKey, Subtree, SubtreeNode, TreeFindHit, TreeSearchResults, TypedAdapterFactory, apply_sort,
+    SortKey, Subtree, SubtreeNode, TreeFindHit, TreeSearchParams, TreeSearchResults,
+    TypedAdapterFactory, apply_sort,
 };
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
@@ -493,12 +494,32 @@ impl ForestSnapshot {
     ///   AND-substring match against task descriptions, sorted into
     ///   tree-render order (parents before children) and capped at
     ///   `limit`.
-    fn tree_search(&self, query: &str, limit: u32) -> TreeSearchResults {
+    ///
+    /// Both modes are scoped by `visible` — the pane's active query
+    /// resolved through [`resolve_visible_set`], the very set
+    /// [`Self::child_summaries`] filters each level by. Without it the
+    /// search would offer hits no level ever yields (the shipped
+    /// default query hides deleted tasks, so a deleted namesake of a
+    /// live task used to strand the caller's expand walk), and the
+    /// user had to press `n` past every phantom. `None` = no active
+    /// query, whole forest addressable.
+    ///
+    /// Testing the leaf id alone is enough: the visible set is
+    /// ancestor-closed by construction, so a contained leaf has every
+    /// id on its `path_to` chain contained too.
+    fn tree_search(
+        &self,
+        query: &str,
+        limit: u32,
+        visible: Option<&HashSet<Uuid>>,
+    ) -> TreeSearchResults {
+        let addressable = |id: &Uuid| visible.map_or(true, |v| v.contains(id));
         if let Some(rest) = query.trim().strip_prefix("id:") {
             let hits = match Uuid::parse_str(rest.trim()) {
                 Ok(uuid) => self
                     .by_id
                     .get(&uuid)
+                    .filter(|_| addressable(&uuid))
                     .map(|row| TreeFindHit {
                         path: self.path_to(uuid),
                         label: row.task.description.clone(),
@@ -523,7 +544,10 @@ impl ForestSnapshot {
         let mut hits: Vec<TreeFindHit> = self
             .by_id
             .iter()
-            .filter(|(_, row)| {
+            .filter(|(id, row)| {
+                if !addressable(id) {
+                    return false;
+                }
                 let hay = row.task.description.to_lowercase();
                 tokens.iter().all(|t| hay.contains(t))
             })
@@ -2466,9 +2490,16 @@ impl ContentAdapter for TaskAdapter {
         Some(&self.saved_queries)
     }
 
-    async fn search_in_tree(&self, query: &str, limit: u32) -> Result<Option<TreeSearchResults>> {
+    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
         let snapshot = self.snapshot().await?;
-        Ok(Some(snapshot.tree_search(query, limit)))
+        // Same filter the tree levels apply — otherwise the hits and
+        // the tree disagree about what exists (see `tree_search`).
+        let visible = resolve_visible_set(&snapshot, &self.handle, &params.view_query).await?;
+        Ok(Some(snapshot.tree_search(
+            &params.query,
+            params.limit,
+            visible.as_ref(),
+        )))
     }
 
     /// Ancestor chain for a task id, so a link can be followed into a
@@ -2901,7 +2932,7 @@ mod tests {
 
         // `id:<uuid>` resolves the one node and its full root→leaf path,
         // ignoring the description entirely.
-        let res = snap.tree_search(&format!("id:{child}"), 50);
+        let res = snap.tree_search(&format!("id:{child}"), 50, None);
         assert_eq!(res.hits.len(), 1);
         assert_eq!(res.hits[0].path, vec![root.to_string(), child.to_string()]);
         assert_eq!(res.hits[0].label, "#42 - Fix the frobnicator");
@@ -2910,11 +2941,11 @@ mod tests {
         // Unknown / unparseable id → no hits (no panic, no fallback to
         // description search).
         assert!(
-            snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50)
+            snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50, None)
                 .hits
                 .is_empty()
         );
-        assert!(snap.tree_search("id:not-a-uuid", 50).hits.is_empty());
+        assert!(snap.tree_search("id:not-a-uuid", 50, None).hits.is_empty());
     }
 
     #[test]
@@ -2928,9 +2959,54 @@ mod tests {
 
         // Case-insensitive AND-substring across descriptions; both rows
         // contain "frobnicator", returned parent-before-child.
-        let res = snap.tree_search("frobnicator", 50);
+        let res = snap.tree_search("frobnicator", 50, None);
         let labels: Vec<&str> = res.hits.iter().map(|h| h.label.as_str()).collect();
         assert_eq!(labels, vec!["Frobnicator project", "Fix the Frobnicator"]);
+    }
+
+    #[test]
+    fn tree_search_is_scoped_to_the_visible_set() {
+        // Two same-named siblings under one parent, one of them outside
+        // the pane's active query (the real case: a deleted namesake,
+        // hidden by the shipped `[deleted, =, false]` default). The
+        // hidden one is not addressable in the tree — its level never
+        // yields it — so the search must not offer it either.
+        let root = Uuid::from_u128(1);
+        let live = Uuid::from_u128(2);
+        let hidden = Uuid::from_u128(3);
+        let snap = snapshot_from(vec![
+            row(root, "Work", None),
+            row(live, "Fix the Frobnicator", Some(root)),
+            row(hidden, "Fix the Frobnicator", Some(root)),
+        ]);
+        // What `resolve_visible_set` would produce for a query matching
+        // only `live`: the match plus its ancestors.
+        let visible: HashSet<Uuid> = [root, live].into_iter().collect();
+
+        let res = snap.tree_search("frobnicator", 50, Some(&visible));
+        let paths: Vec<&Vec<String>> = res.hits.iter().map(|h| &h.path).collect();
+        assert_eq!(
+            paths,
+            vec![&vec![root.to_string(), live.to_string()]],
+            "only the hit the tree can actually reach"
+        );
+
+        // Same for the `id:` mode — a scripted jump to a filtered-out
+        // task yields nothing rather than a hit that strands the walk.
+        assert!(
+            snap.tree_search(&format!("id:{hidden}"), 50, Some(&visible))
+                .hits
+                .is_empty()
+        );
+        assert_eq!(
+            snap.tree_search(&format!("id:{live}"), 50, Some(&visible))
+                .hits
+                .len(),
+            1
+        );
+
+        // No active query → the whole forest stays searchable.
+        assert_eq!(snap.tree_search("frobnicator", 50, None).hits.len(), 2);
     }
 
     #[test]

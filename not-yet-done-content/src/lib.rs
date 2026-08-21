@@ -1002,6 +1002,36 @@ pub struct CustomQueryResult {
 // Tree search
 // ---------------------------------------------------------------------------
 
+/// Request for an adapter-side tree search — the input side of
+/// [`ContentAdapter::search_in_tree`].
+///
+/// A struct rather than loose arguments so the contract can grow
+/// without breaking every adapter, mirroring [`ListParams`].
+#[derive(Debug, Clone)]
+pub struct TreeSearchParams {
+    /// Raw user-typed search string. The adapter translates it into
+    /// its native query language (CQL, JQL, SQL `ILIKE`, …).
+    pub query: String,
+    /// Cap on the returned hits; the adapter reports overflow via
+    /// [`TreeSearchResults::truncated`].
+    pub limit: u32,
+    /// The pane's currently active *view* query — the same string the
+    /// engine passes as [`ListParams::query`] when listing levels.
+    ///
+    /// A hit the view query filters out is not addressable in the
+    /// tree: every level applies that filter, so the lazy-expand walk
+    /// runs into a parent whose children simply don't contain the hit
+    /// and dead-ends. Adapters that can evaluate the view query must
+    /// therefore scope the search by it, so tree-find only ever offers
+    /// hits the tree can actually reach.
+    ///
+    /// `None` = no active query (everything visible). Adapters whose
+    /// query language can't be intersected with a text search may
+    /// ignore this — the front-end skips unreachable hits as a
+    /// fallback, it just wastes a round-trip per phantom hit.
+    pub view_query: Option<String>,
+}
+
 /// Result set for an adapter-side tree search.
 ///
 /// Returned by [`ContentAdapter::search_in_tree`] — used by tree-mode
@@ -2576,15 +2606,23 @@ pub trait ContentAdapter: Send + Sync {
     /// hit). `None` signals "not supported" — the frontend then falls
     /// back to local in-memory filtering over the already-loaded rows.
     ///
-    /// `query` is the raw user-typed string; the adapter is responsible
-    /// for translating it into its native query language (CQL, JQL,
-    /// SQL `ILIKE`, …) and for applying any per-instance scoping
-    /// (e.g. space whitelist). `limit` caps the result set; the
-    /// adapter signals truncation via [`TreeSearchResults::truncated`].
+    /// [`TreeSearchParams::query`] is the raw user-typed string; the
+    /// adapter is responsible for translating it into its native query
+    /// language (CQL, JQL, SQL `ILIKE`, …) and for applying any
+    /// per-instance scoping (e.g. space whitelist).
+    ///
+    /// Hits must be **addressable in the tree as the pane currently
+    /// renders it** — an adapter that filters its levels by
+    /// [`ListParams::query`] has to apply the same filter here (see
+    /// [`TreeSearchParams::view_query`]), otherwise the caller's
+    /// lazy-expand walk dead-ends on a hit no level will ever yield.
     ///
     /// The default impl returns `Ok(None)` — adapters opt in by
     /// overriding.
-    async fn search_in_tree(&self, _query: &str, _limit: u32) -> Result<Option<TreeSearchResults>> {
+    async fn search_in_tree(
+        &self,
+        _params: &TreeSearchParams,
+    ) -> Result<Option<TreeSearchResults>> {
         Ok(None)
     }
 

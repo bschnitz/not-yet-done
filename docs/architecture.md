@@ -197,9 +197,17 @@ factory plus YAML — no core code changes.
   (synchronous; feeds the shortcut hints in the action and status bar)
 - `execute_custom_query(query, ctx)` — adapter-native queries (SQL, for
   example), including cursor pagination
-- `search_in_tree(query, limit)` — a server-side tree search (Confluence CQL,
-  for example) that returns hits **with their ancestor path** for lazy
-  expand-to-hit
+- `search_in_tree(params)` — a server-side tree search (Confluence CQL, for
+  example) that returns hits **with their ancestor path** for lazy
+  expand-to-hit. `params.view_query` carries the pane's active query, and an
+  adapter that filters its levels by that query must apply it here too: a hit
+  the query hides is not addressable, because the expand walk asks each level
+  for its children and never gets the hit back. The tasks adapter therefore
+  intersects its matches with the same visible set `list()` uses — otherwise
+  searching for a ticket number offers the deleted namesakes the default
+  query `[deleted, =, false]` hides, and the walk strands on them. The
+  front-end still skips a hit it cannot reach (an adapter cannot always
+  predict permissions or pagination caps), it just costs a round-trip each.
 - `locate_node_path(node_id)` — where a node sits in the tree, in the same
   path shape as a search hit. Its only purpose is to let a **link** follow
   into a subtree that is not expanded yet; the default `Ok(None)` means "I
