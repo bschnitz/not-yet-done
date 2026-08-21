@@ -1581,11 +1581,61 @@ fn cell_to_wiki(raw: &str) -> String {
         .join("\n")
 }
 
+/// Byte ranges of the inline macros that carry a `|` of their own — an image
+/// embed (`!shot.png|thumbnail!`) and a link (`[text|url]`). Inside them the
+/// pipe belongs to the macro and must not be read as a cell separator.
+///
+/// Both patterns are strict enough not to fire on ordinary prose (an embed
+/// needs a file extension, a link needs a closing bracket), so a stray `!` or
+/// `[` in a cell cannot swallow a real separator.
+fn macro_pipe_spans(row: &str) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for re in [&*W_IMAGE, &*W_LINK] {
+        spans.extend(re.find_iter(row).map(|m| (m.start(), m.end())));
+    }
+    spans
+}
+
+/// Split `row` on `sep`, ignoring separators that fall inside an inline macro.
+fn split_outside_macros<'a>(row: &'a str, sep: &str) -> Vec<&'a str> {
+    let spans = macro_pipe_spans(row);
+    let mut out = Vec::new();
+    let (mut start, mut i) = (0, 0);
+    while let Some(hit) = row[i..].find(sep) {
+        let at = i + hit;
+        if spans.iter().any(|&(s, e)| at >= s && at < e) {
+            // `sep` is all ASCII pipes, so stepping one byte stays on a
+            // character boundary.
+            i = at + 1;
+            continue;
+        }
+        out.push(&row[start..at]);
+        i = at + sep.len();
+        start = i;
+    }
+    out.push(&row[start..]);
+    out
+}
+
 /// Split a Jira table row (possibly spanning several physical lines) into cell
 /// contents. `header` rows use `||` as the separator, data rows use `|`.
+///
+/// A row whose cell count disagrees with the header's makes the whole table
+/// "irregular" and [`table_to_md`] then emits it verbatim — so counting the
+/// pipe inside an `!image|thumbnail!` embed as a separator does not just
+/// mis-split one cell, it drops the entire table back to raw wiki markup.
+///
+/// The leading/trailing whitespace has to go before the outer pipes do:
+/// `trim_matches('|')` on an indented row (` | a | b |` — Jira lets an author
+/// indent a row, and our own multi-line collection preserves it) stops at the
+/// space and leaves the opening pipe in place, which then reads as an empty
+/// first cell and again makes the table irregular.
 fn split_table_cells(row: &str, header: bool) -> Vec<String> {
     let sep = if header { "||" } else { "|" };
-    row.trim_matches('|').split(sep).map(cell_to_md).collect()
+    split_outside_macros(trim_ascii_edges(row).trim_matches('|'), sep)
+        .into_iter()
+        .map(cell_to_md)
+        .collect()
 }
 
 fn split_md_cells(row: &str) -> Vec<String> {
@@ -2252,6 +2302,50 @@ a title-less panel whose sole attribute makes its opener marker long enough
         assert_roundtrip(
             "||H1||H2||\n|a|b|\n|c|d|",
             "| H1 | H2 |\n| --- | --- |\n| a | b |\n| c | d |",
+        );
+    }
+
+    #[test]
+    fn table_cell_pipes_inside_image_and_link_macros_are_not_separators() {
+        // Regression: `split_table_cells` split every `|`, including the ones
+        // *inside* Jira's own macros — `!shot.png|thumbnail!` and
+        // `[text|url]`. Those rows then counted more cells than the header, the
+        // table failed the "regular" check and was emitted verbatim, so the
+        // preview showed raw `||`-markup instead of a table.
+        assert_roundtrip(
+            "||Case||Result||\n\
+             |alpha|ok !shot-a.png|thumbnail!|\n\
+             |beta|see [the spec|https://example.invalid/spec]|",
+            "| Case | Result |\n\
+             | --- | --- |\n\
+             | alpha | ok ![shot-a.png](attachments/shot-a.png \"thumbnail\") |\n\
+             | beta | see [the spec](https://example.invalid/spec) |",
+        );
+    }
+
+    #[test]
+    fn indented_table_row_is_not_read_as_an_empty_first_cell() {
+        // Regression: cell splitting trimmed the outer `|` before the
+        // whitespace, so an indented row kept its opening pipe and counted one
+        // cell too many — enough to make the table irregular and drop it back
+        // to raw wiki markup. The indent itself is dropped, which the
+        // round-trip guard tolerates (it compares modulo whitespace).
+        assert_eq!(
+            wiki_to_md("||H1||H2||\n|a|b|\n | c | d |"),
+            "| H1 | H2 |\n| --- | --- |\n| a | b |\n| c | d |"
+        );
+        assert!(roundtrip_diff("||H1||H2||\n|a|b|\n | c | d |").is_none());
+    }
+
+    #[test]
+    fn header_cells_may_hold_a_macro_pipe() {
+        // Same rule for the `||` header separator: the single `|` of an embed
+        // must not end a header cell.
+        assert_roundtrip(
+            "||Case||Shot !head.png|thumbnail!||\n|a|b|",
+            "| Case | Shot ![head.png](attachments/head.png \"thumbnail\") |\n\
+             | --- | --- |\n\
+             | a | b |",
         );
     }
 
