@@ -379,9 +379,23 @@ pub(super) fn wiki_to_md(wiki: &str) -> String {
 
         // Table: consume the whole block (multi-line cells included) and let
         // `table_to_md` decide GFM vs. verbatim.
+        //
+        // Jira lets a table start on the line right after a paragraph;
+        // Markdown does not. Glued to the text above it the whole table reads
+        // as a lazy continuation of that paragraph — the header row becomes
+        // prose and the `---` separator an em dash — so fence the block with
+        // blank lines. Both are insignificant to [`normalize_ws`], which drops
+        // blank lines outside tables, so neither can trip the round-trip
+        // guard.
         if is_table_row(trimmed) {
             let (block, next) = collect_table_block(&lines, i);
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
             out.extend(table_to_md(&block));
+            if lines.get(next).is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
             i = next;
             continue;
         }
@@ -2346,6 +2360,27 @@ a title-less panel whose sole attribute makes its opener marker long enough
             "| Case | Shot ![head.png](attachments/head.png \"thumbnail\") |\n\
              | --- | --- |\n\
              | a | b |",
+        );
+    }
+
+    #[test]
+    fn table_glued_to_a_paragraph_is_fenced_with_blank_lines() {
+        // Regression: Jira allows a table to start on the line right after a
+        // paragraph. Emitted without a blank line the Markdown renderer read
+        // the whole table as a lazy continuation of that paragraph — visible
+        // as an em dash where the `---` separator should be.
+        assert_eq!(
+            wiki_to_md("*new ones:*\n||H1||H2||\n|a|b|\nafter"),
+            "**new ones:**\n\n| H1 | H2 |\n| --- | --- |\n| a | b |\n\nafter"
+        );
+        assert!(roundtrip_diff("*new ones:*\n||H1||H2||\n|a|b|\nafter").is_none());
+    }
+
+    #[test]
+    fn a_table_already_separated_gains_no_second_blank_line() {
+        assert_eq!(
+            wiki_to_md("intro\n\n||H1||H2||\n|a|b|"),
+            "intro\n\n| H1 | H2 |\n| --- | --- |\n| a | b |"
         );
     }
 
