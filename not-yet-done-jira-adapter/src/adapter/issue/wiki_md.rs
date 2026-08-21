@@ -935,10 +935,18 @@ fn collapse_ascii_spaces(line: &str) -> String {
 }
 
 /// Collapse the ASCII space/tab padding around each `|` in a single physical
-/// table line, leaving NBSP (content filler) intact. Applied only inside a
-/// detected table block, so prose containing a literal `|` is never touched.
+/// table line — and, like [`collapse_ascii_spaces`] does for prose, every space
+/// run *inside* a cell — leaving NBSP (content filler) intact. Applied only
+/// inside a detected table block, so prose containing a literal `|` is never
+/// touched. Cell interiors need the same treatment as prose: real tickets carry
+/// stray double spaces in table cells (typically before an `!image!` macro),
+/// and an editor that rewrites the buffer may collapse them, which would
+/// otherwise read as an edit of an untouched foreign comment.
 fn normalize_table_line(line: &str) -> String {
-    line.split('|').map(trim_cell).collect::<Vec<_>>().join("|")
+    line.split('|')
+        .map(|cell| collapse_ascii_spaces(trim_cell(cell)))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// First diverging line pair, as `- <original>` / `+ <roundtripped>`. Both
@@ -2116,6 +2124,32 @@ a title-less panel whose sole attribute makes its opener marker long enough
             "image-heavy body diverged under normalize_ws:\n{body}\n---\n{back}"
         );
         assert!(roundtrip_diff(body).is_none(), "{:?}", roundtrip_diff(body));
+    }
+
+    #[test]
+    fn table_cell_interior_space_runs_are_insignificant() {
+        // Regression: `normalize_ws` collapsed interior space runs in prose but
+        // not inside table cells, where it only trimmed the padding around each
+        // `|`. Test tables in real tickets carry stray double spaces in a cell
+        // (typically before an `!image!` macro); an editor that rewrites the
+        // buffer collapses them, and the comment-conflict detector then read an
+        // untouched foreign comment as edited ("not authored by you" on save).
+        let snapshot = "|| Case || Expectation || Result ||\n\
+                        |alpha |first run |ok (/)  !shot-a.png|thumbnail!   |\n\
+                        | beta | second run | failed (x)  !shot-b.png|thumbnail!  |";
+        let collapsed = "|| Case || Expectation || Result ||\n\
+                         |alpha |first run |ok (/) !shot-a.png|thumbnail! |\n\
+                         | beta | second run | failed (x) !shot-b.png|thumbnail! |";
+        assert_eq!(
+            normalize_ws(snapshot),
+            normalize_ws(collapsed),
+            "collapsing spaces inside a table cell must not read as an edit"
+        );
+        // A real content change in the same cell still registers.
+        let edited = "|| Case || Expectation || Result ||\n\
+                      |alpha |first run |ok (/) !shot-a.png|thumbnail! |\n\
+                      | beta | second run | passed (/) !shot-b.png|thumbnail! |";
+        assert_ne!(normalize_ws(snapshot), normalize_ws(edited));
     }
 
     #[test]
