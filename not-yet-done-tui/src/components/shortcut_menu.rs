@@ -903,6 +903,7 @@ impl ShortcutMenu {
                 frame.render_widget(Paragraph::new(lines), list_area);
             } else {
                 self.list.view(frame, list_area);
+                crate::mouse::push_list_rows(&self.list);
             }
         }
     }

@@ -96,6 +96,28 @@ pub enum Region {
     StatusBar,
     /// A floating popup panel.
     Popup,
+    /// One entry row of a popup's list, carrying how far the list's cursor
+    /// has to move to reach it. A *delta* rather than an index because no
+    /// second implementation should know which of the fifteen popups is open:
+    /// the row that was painted knows where the cursor stood when it was
+    /// painted, and moving it is what the arrow keys already do.
+    PopupRow(i16),
+}
+
+impl Region {
+    /// Whether this region is a control rather than a surface.
+    ///
+    /// Controls are pushed *on top of* the surface they sit in, so a click
+    /// finds them first — but a drag started on one should still select
+    /// across the whole popup or tab bar behind it, not be trapped in a
+    /// single row or label.
+    #[cfg(feature = "mouse")]
+    fn is_control(self) -> bool {
+        matches!(
+            self,
+            Region::PopupRow(_) | Region::Tab(_) | Region::SubTab(_)
+        )
+    }
 }
 
 #[cfg(feature = "mouse")]
@@ -130,14 +152,49 @@ pub fn push(_rect: Rect, _region: Region) {}
 /// The topmost surface covering the cell, if any.
 #[cfg(feature = "mouse")]
 pub(crate) fn hit(x: u16, y: u16) -> Option<(Rect, Region)> {
+    find(x, y, |_| true)
+}
+
+/// Like [`hit`], but skipping the controls — the region a drag started here
+/// must stay inside.
+#[cfg(feature = "mouse")]
+fn hit_surface(x: u16, y: u16) -> Option<(Rect, Region)> {
+    find(x, y, |r| !r.is_control())
+}
+
+#[cfg(feature = "mouse")]
+fn find(x: u16, y: u16, keep: impl Fn(Region) -> bool) -> Option<(Rect, Region)> {
     REGIONS.with_borrow(|regions| {
         regions
             .iter()
             .rev()
-            .find(|(rect, _)| rect.contains(Position::new(x, y)))
+            .find(|(rect, region)| keep(*region) && rect.contains(Position::new(x, y)))
             .copied()
     })
 }
+
+/// Record the rows a popup list just painted, each carrying the distance from
+/// the list's cursor to it.
+///
+/// Called right after the list's `view`, for the same reason [`push`] is
+/// called where a surface is drawn: the geometry is only correct in the frame
+/// that produced it. Lists without a cursor (the which-key display) register
+/// nothing — there is nothing for a click to move.
+#[cfg(feature = "mouse")]
+pub fn push_list_rows(list: &not_yet_done_ratatui::LeaderList) {
+    if !list.is_selectable() {
+        return;
+    }
+    let cursor = list.selected() as isize;
+    for row in list.painted_rows() {
+        let delta = (row.index as isize - cursor).clamp(i16::MIN as isize, i16::MAX as isize);
+        push(row.rect, Region::PopupRow(delta as i16));
+    }
+}
+
+#[cfg(not(feature = "mouse"))]
+#[inline]
+pub fn push_list_rows(_list: &not_yet_done_ratatui::LeaderList) {}
 
 /// Mouse state carried across frames: the drag selection in progress, or the
 /// last finished one, which stays highlighted until something invalidates it.
@@ -216,7 +273,7 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
         // Press: anchor a selection inside whichever surface was hit. A press
         // outside every registered region just drops the old selection.
         MouseEventKind::Down(MouseButton::Left) => {
-            match hit(x, y) {
+            match hit_surface(x, y) {
                 Some((bounds, _region)) => {
                     let block = ev.modifiers.contains(KeyModifiers::ALT);
                     app.mouse.selection = Some(Selection::new(bounds, x, y, block));
@@ -306,7 +363,31 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
                 return app.click_content_row(id, x, y, double);
             }
         }
+        Region::PopupRow(delta) => return popup_row(app, delta, double),
         _ => {}
+    }
+    EditorRequest::None
+}
+
+/// Walk a popup list's cursor onto the clicked row, and open it on a double
+/// click.
+///
+/// The walk goes through [`crate::app::App::handle_key`] like every other key
+/// does, so whichever popup is up receives it through its own handler — no
+/// resolver over the popups, and a list that treats the arrows specially keeps
+/// doing so. The distance is bounded by the visible window, because both the
+/// cursor and the clicked row are on screen.
+#[cfg(feature = "mouse")]
+fn popup_row(app: &mut crate::app::App, delta: i16, double: bool) -> EditorRequest {
+    let key = if delta < 0 { "up" } else { "down" };
+    for _ in 0..delta.unsigned_abs() {
+        let req = app.handle_key(key);
+        if !matches!(req, EditorRequest::None) {
+            return req;
+        }
+    }
+    if double {
+        return app.handle_key("enter");
     }
     EditorRequest::None
 }
@@ -420,6 +501,81 @@ mod tests {
             Some(Region::Tab(crate::tabs::Tab::Content(0)))
         );
         assert_eq!(hit(40, 0).map(|(_, r)| r), Some(Region::TabBar));
+    }
+
+    /// The delta a row carries is what the arrow keys have to do to reach it,
+    /// measured against the cursor as it stood when the frame was painted.
+    #[test]
+    fn list_rows_carry_the_distance_from_the_cursor() {
+        use not_yet_done_ratatui::LeaderList;
+        use ratatui::{Terminal, backend::TestBackend};
+        use tuirealm::component::Component;
+        use tuirealm::props::{AttrValue, Attribute};
+
+        let mut list = LeaderList::default()
+            .with_entries(vec![("a", "1"), ("b", "2"), ("c", "3")])
+            .with_selectable(true);
+        list.attr(Attribute::Value, AttrValue::Length(1));
+        let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
+        terminal
+            .draw(|frame| list.view(frame, frame.area()))
+            .unwrap();
+
+        begin_frame();
+        push_list_rows(&list);
+        assert_eq!(hit(0, 0).map(|(_, r)| r), Some(Region::PopupRow(-1)));
+        assert_eq!(hit(0, 1).map(|(_, r)| r), Some(Region::PopupRow(0)));
+        assert_eq!(hit(0, 2).map(|(_, r)| r), Some(Region::PopupRow(1)));
+    }
+
+    /// A list without a cursor has nothing for a click to move, so it stays
+    /// out of the map and the click reaches the panel behind it.
+    #[test]
+    fn a_display_only_list_registers_no_rows() {
+        use not_yet_done_ratatui::LeaderList;
+        use ratatui::{Terminal, backend::TestBackend};
+        use tuirealm::component::Component;
+
+        let mut list = LeaderList::default().with_entries(vec![("a", "1"), ("b", "2")]);
+        let mut terminal = Terminal::new(TestBackend::new(20, 2)).unwrap();
+        terminal
+            .draw(|frame| list.view(frame, frame.area()))
+            .unwrap();
+
+        begin_frame();
+        push(Rect::new(0, 0, 20, 2), Region::Popup);
+        push_list_rows(&list);
+        assert_eq!(hit(0, 0).map(|(_, r)| r), Some(Region::Popup));
+    }
+
+    #[test]
+    fn a_popup_row_is_found_but_a_drag_still_spans_the_popup() {
+        // Rows are pushed on top of the panel, so a click finds the row —
+        // but a text selection started on one must not be trapped in a
+        // single line.
+        begin_frame();
+        push(Rect::new(10, 5, 30, 10), Region::Popup);
+        push(Rect::new(10, 7, 30, 1), Region::PopupRow(-2));
+        push(Rect::new(10, 8, 30, 1), Region::PopupRow(-1));
+        assert_eq!(hit(15, 7).map(|(_, r)| r), Some(Region::PopupRow(-2)));
+        assert_eq!(
+            hit_surface(15, 7),
+            Some((Rect::new(10, 5, 30, 10), Region::Popup))
+        );
+    }
+
+    #[test]
+    fn a_drag_on_a_tab_label_spans_the_whole_bar() {
+        begin_frame();
+        push(Rect::new(0, 0, 80, 1), Region::TabBar);
+        push(
+            Rect::new(0, 0, 8, 1),
+            Region::Tab(crate::tabs::Tab::Content(0)),
+        );
+        assert_eq!(
+            hit_surface(3, 0),
+            Some((Rect::new(0, 0, 80, 1), Region::TabBar))
+        );
     }
 
     #[test]

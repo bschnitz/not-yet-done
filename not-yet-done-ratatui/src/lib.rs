@@ -62,5 +62,5 @@ pub use widgets::grid::{
 // --- leader_list ---
 pub use widgets::leader_list::{
     LeaderEntry, LeaderList, LeaderListEvent, LeaderListKeymap, LeaderListStyle,
-    LeaderListStyleType, LeaderWidth,
+    LeaderListStyleType, LeaderRow, LeaderWidth,
 };

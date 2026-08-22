@@ -5487,6 +5487,27 @@ one line tall or not flush with the top edge.
 - [ ] In **card mode** (no header row), click anywhere in a card: the card is
       selected, nothing tries to sort.
 
+### Clicking popup entries
+
+The cursor is walked to the clicked row with the popup's own arrow keys, so
+what has to hold is that it lands on the row under the pointer no matter what
+sits above the list.
+
+- [ ] Open the shortcut overview (`o s`) and click an entry well below the
+      cursor: the cursor lands on that entry, not one offset by the heading.
+- [ ] Type into the popup's filter first, then click a row of the narrowed
+      list: it selects the row you clicked, counted in the _filtered_ list.
+- [ ] Scroll a long popup list down a page, then click the top row: that row,
+      not the first entry of the unscrolled list.
+- [ ] **Double-click** an entry: it is picked, exactly as `Enter` would.
+- [ ] Click the entry the cursor is already on: nothing happens.
+- [ ] Hold a chord (`o`, `w`, …) until the **which-key** panel appears and
+      click one of its rows: nothing happens — and in particular the table
+      behind the panel does not move its cursor.
+- [ ] Drag across two entries of a popup list: the selection spans both lines
+      and stays inside the popup — it is not trapped in the single row the
+      drag started on.
+
 ### The wheel
 
 - [ ] Wheel over an **unfocused** pane in a split layout: that pane scrolls and

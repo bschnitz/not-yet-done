@@ -350,6 +350,7 @@ impl Component for SearchablePopup {
 
         if let Some(body) = body {
             self.list.view(frame, body);
+            crate::mouse::push_list_rows(&self.list);
         }
     }
 
