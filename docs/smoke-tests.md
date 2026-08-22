@@ -4677,6 +4677,25 @@ the field and the table simply does not show it).
       post-edit row patch uses the same key).
 - [ ] Anon mode: the creator appears pseudonymized, not in the clear.
 
+## The tags column (Taiga)
+
+Same prerequisite as the creator column: `tags` has to be listed in the
+private view YAML, otherwise the adapter delivers the field and the table
+simply does not show it.
+
+- [ ] Taiga list: the column "Tags" is filled in on tagged items, comma
+      separated when there are several, and **empty** on untagged ones — no
+      stray comma, no `[]`, no colour codes (Taiga sends `["name", "#hex"]`
+      pairs; only the name belongs in the cell).
+- [ ] All four item types show it (task, issue, epic, user story).
+- [ ] Sorting with `S` → `tags` is in the list. Ascending, untagged rows end
+      up at the **bottom**; the order ignores case (`Zeta` after `alpha`).
+      Clicking the column header sorts the same way.
+- [ ] Open an item with `e`: the `# tags:` line in the buffer lists the same
+      tags as the cell. Add one, save → the cell picks it up on the reload.
+- [ ] Anon mode: tag names appear replaced, not in the clear (they can carry
+      customer or project terms).
+
 ## The fix-versions column (Jira)
 
 The column key is `fix_versions` (plural, like Jira's field); JQL only knows

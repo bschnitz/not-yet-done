@@ -237,27 +237,9 @@ pub(super) async fn fetch_detail(
         .and_then(|x| x.as_str())
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let tags: Vec<String> = match raw.get("tags") {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|t| match t {
-                serde_json::Value::Array(pair) => pair
-                    .first()
-                    .and_then(|x| x.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
-                serde_json::Value::String(s) => {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s.clone())
-                    }
-                }
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
+    // Same reader as the list path, so a row and its ticket buffer can never
+    // disagree about which tags an item carries.
+    let tags = crate::client::tag_names(&raw);
 
     let parent_user_story_id = raw.get("user_story").and_then(|x| x.as_u64());
     let parent_user_story_subject = raw
