@@ -84,7 +84,7 @@ impl Component for LeaderList {
             query: &self.query,
             search_placeholder: &self.search_placeholder,
         };
-        render(frame.buffer_mut(), area, &data);
+        self.rows = render(frame.buffer_mut(), area, &data);
     }
 
     fn query(&self, attr: Attribute) -> Option<QueryResult<'_>> {
@@ -369,6 +369,47 @@ mod tests {
             l.on(&key(Key::Char(c)));
         }
         assert_eq!(l.matches.len(), 0);
+    }
+
+    fn paint(list: &mut LeaderList, width: u16, height: u16) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| list.view(frame, frame.area()))
+            .unwrap();
+    }
+
+    /// The rows the mouse asks about are the ones the paint produced, so the
+    /// prompt and title rows above them shift the answer — no caller has to
+    /// know how many of those there are.
+    #[test]
+    fn row_at_skips_the_prompt_and_title_rows() {
+        let mut l = searchable().with_title("Shortcuts");
+        // 1 search prompt + 1 title + 4 entries.
+        paint(&mut l, 30, 6);
+        assert_eq!(l.row_at(0), None, "the search prompt is not a row");
+        assert_eq!(l.row_at(1), None, "the title is not a row");
+        assert_eq!(l.row_at(2), Some(0));
+        assert_eq!(l.row_at(5), Some(3));
+        assert_eq!(l.row_at(9), None, "below the last painted row");
+    }
+
+    /// A scrolled list reports the index the cursor moves in, not the screen
+    /// line — otherwise clicking a row in a long list would jump to the wrong
+    /// entry by exactly the scroll offset.
+    #[test]
+    fn row_at_reports_visible_indices_not_screen_lines() {
+        let mut l = long_list(30).with_max_rows(4).with_selectable(true);
+        // Moving the cursor past the window drags the scroll along on paint.
+        for _ in 0..9 {
+            l.move_down();
+        }
+        paint(&mut l, 30, 4);
+        let top = l.scroll_offset;
+        assert!(top > 0, "the list must have scrolled");
+        assert_eq!(l.row_at(0), Some(top));
+        assert_eq!(l.row_at(3), Some(top + 3));
     }
 
     #[test]

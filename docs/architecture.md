@@ -504,7 +504,8 @@ The first use is **window-local selection**: a drag is clipped to the rectangle
 it started in, so selecting inside a popup no longer grabs whole terminal rows.
 `Alt` makes it a block selection, release copies (system clipboard, else
 OSC 52). A release on the press cell is not a drag at all but a **click**, and
-`mouse::click` routes it — tab, sub-tab, pane focus, row, column header —
+`mouse::click` routes it — tab, sub-tab, pane focus, row, column header,
+popup entry —
 through `pub(crate)`
 entry points on `App` that end in the same `sync_components()` the key paths do
 and decline the same way while an input popup owns the input. The mouse is a
@@ -522,6 +523,23 @@ paragraph. `Table::row_at` / `column_at` / `is_header_line` answer from that,
 and `ContentView` turns the answer into the same `set_selected` +
 `SelectionChanged` a `j` produces. A header click routes into `App::apply_sort`
 — the one write path the `S` hint mode and the sort menu already share.
+
+Popup lists get the same treatment with one twist. `LeaderList` records a
+`LeaderRow` per painted entry — which resolves the search prompt, the title and
+the scroll offset that sit between the panel edge and the first row — but a
+click cannot simply say "select entry 7", because there is no one popup to say
+it to: fifteen of them own a list, and a resolver over all of them would be
+exactly the second implementation this layer avoids. So the region carries a
+**delta** instead: `mouse::push_list_rows` labels each row with the distance
+from the cursor as it stood when the frame was painted, and the click walks the
+cursor there with `App::handle_key("up"/"down")`, through whichever popup
+currently holds the input. Bounded by the visible window, since both ends of
+the walk are on screen. Lists without a cursor register nothing.
+
+Rows and labels are pushed _on top of_ the panel or bar they sit in, which
+would otherwise trap a text selection in a single line, so the press that
+anchors a drag looks up `hit_surface` — the topmost region that is not a
+control — while the click uses `hit`.
 
 Why the map is recorded rather than recomputed, why it is ambient rather than
 threaded through, and why the reporting modes are written by hand instead of

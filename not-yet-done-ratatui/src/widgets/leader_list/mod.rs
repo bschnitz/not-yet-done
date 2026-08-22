@@ -6,6 +6,7 @@ mod state;
 pub mod style;
 
 pub use keymap::LeaderListKeymap;
+pub use render::LeaderRow;
 pub use state::LeaderListEvent;
 pub use style::{LeaderListStyle, LeaderListStyleType};
 
@@ -83,6 +84,10 @@ pub struct LeaderList {
     /// Number of entry rows shown in the last `view` — used by page up/down,
     /// which run without knowing the render area.
     pub(crate) page_rows: usize,
+    /// Where the last `view` put each entry row. Written by the render pass
+    /// and read by whoever has to turn a screen position back into a row (the
+    /// mouse); empty until the list has been painted once.
+    pub(crate) rows: Vec<render::LeaderRow>,
 
     // --- data ---
     pub(crate) entries: Vec<LeaderEntry>,
@@ -131,6 +136,7 @@ impl Default for LeaderList {
             cursor: 0,
             scroll_offset: 0,
             page_rows: 0,
+            rows: Vec::new(),
             entries: Vec::new(),
             matches: Vec::new(),
             marked: std::collections::BTreeSet::new(),
@@ -366,6 +372,27 @@ impl LeaderList {
     /// The cursor position within the currently visible (filtered) list.
     pub fn selected(&self) -> usize {
         self.cursor
+    }
+
+    /// Whether the list has a cursor at all (see [`with_selectable`]).
+    ///
+    /// [`with_selectable`]: LeaderList::with_selectable
+    pub fn is_selectable(&self) -> bool {
+        self.selectable
+    }
+
+    /// Where the last [`Component::view`](tuirealm::component::Component::view)
+    /// put each entry row, in paint order.
+    pub fn painted_rows(&self) -> &[render::LeaderRow] {
+        &self.rows
+    }
+
+    /// The visible-list index of the row painted on line `y`, if any.
+    pub fn row_at(&self, y: u16) -> Option<usize> {
+        self.rows
+            .iter()
+            .find(|r| y >= r.rect.y && y < r.rect.bottom())
+            .map(|r| r.index)
     }
 
     /// The index into `entries` of the currently selected row, mapping through

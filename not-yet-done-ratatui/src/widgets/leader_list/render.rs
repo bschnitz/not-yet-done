@@ -82,13 +82,30 @@ pub(super) struct RenderData<'a> {
     pub search_placeholder: &'a str,
 }
 
+/// Where one entry row was painted, and which row it shows.
+///
+/// Recorded while painting rather than recomputed afterwards, so it cannot
+/// disagree with what is on screen — the search prompt, the title and the
+/// scroll offset all shift the rows around, and every one of them is already
+/// resolved here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaderRow {
+    pub rect: Rect,
+    /// Index into the *visible* (filtered) rows — the space the cursor lives
+    /// in, not an index into `entries`.
+    pub index: usize,
+}
+
 /// Renders the leader list into `frame` at `area`.
 ///
 /// One entry per row starting at `scroll_offset`. Each line is laid out as
 /// `left + filler + right`, right-aligned so `right` ends at `line_width`.
-pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData<'_>) {
+///
+/// Returns where each entry row landed (see [`LeaderRow`]).
+pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData<'_>) -> Vec<LeaderRow> {
+    let mut painted: Vec<LeaderRow> = Vec::new();
     if area.width == 0 || area.height == 0 {
-        return;
+        return painted;
     }
 
     let line_width = data.line_width.min(area.width);
@@ -169,6 +186,10 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData<'_>) {
             break;
         };
         let y = area.y + head_rows + row as u16;
+        painted.push(LeaderRow {
+            rect: Rect::new(area.x, y, line_width, 1),
+            index: vis_idx,
+        });
 
         let is_cursor = data.selectable && data.focused && vis_idx == data.cursor;
         let cursor_overlay = if is_cursor {
@@ -295,6 +316,8 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &RenderData<'_>) {
         }
         put_str(buf, area.x, y, area.x + line_width, &text, status_style);
     }
+
+    painted
 }
 
 /// Writes `s` starting at `x0`, advancing by each glyph's display width, and

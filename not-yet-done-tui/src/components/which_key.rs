@@ -137,6 +137,9 @@ impl WhichKeyMenu {
         let panel = Rect::new(px, py, panel_w, panel_h);
 
         frame.render_widget(Clear, panel);
+        // Registered like every other panel so a click lands on the overlay
+        // instead of the pane it covers.
+        crate::mouse::push(panel, crate::mouse::Region::Popup);
         if let Some(bg) = t.form_panel_bg() {
             frame.render_widget(Block::default().style(Style::default().bg(bg)), panel);
         }
@@ -170,6 +173,9 @@ impl WhichKeyMenu {
                 height: list_h,
             };
             self.list.view(frame, list_area);
+            // A display-only list: `push_list_rows` sees no cursor and
+            // registers nothing, so a click falls through to the panel.
+            crate::mouse::push_list_rows(&self.list);
         }
 
         frame.render_widget(

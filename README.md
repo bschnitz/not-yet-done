@@ -11,7 +11,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Hierarchical task management** — organize tasks in a tree structure with unlimited nesting
 - **Time tracking** — start/stop tracking per task, with parallel tracking support
 - **Rich TUI** — keyboard-driven interface with fuzzy filter, text search, hop-style jump navigation, saved filters, favorites, and configurable columns
-- **Mouse support** — optional (`mouse` cargo feature): click tabs, panes and rows, double-click to open, sort by clicking a column header, drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
+- **Mouse support** — optional (`mouse` cargo feature): click tabs, panes, rows and popup entries, double-click to open, sort by clicking a column header, drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
 - **CLI** — full command-line interface for scripting and automation
 - **Waybar module** — CFFI module showing the active tracking in your status bar
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
@@ -192,6 +192,8 @@ The TUI understands the mouse. What it does today:
 | Click a row           | Put the cursor on it, exactly as `j` / `k` would          |
 | Double-click a row    | Do to it what `Enter` does                                |
 | Click a column header | Sort by it: ascending → descending → unsorted             |
+| Click a popup entry   | Move the popup's cursor onto it                           |
+| Double-click an entry | Pick it, exactly as `Enter` would                         |
 | Drag with left        | Select text — **clipped to the window under the pointer** |
 | `Alt` + drag          | Select a rectangle instead of flowing text                |
 | Release               | Copy the selection to the clipboard                       |
@@ -213,6 +215,12 @@ A click on a group header lands on the nearest selectable row, the same place
 `j` would stop. Sorting by header click is additive over any sort already
 set — it is the very mechanism behind `S` and the sort menu (`c s`), so the
 three stay in step.
+
+Popup lists work the same way and stay searchable while you click: the row you
+click carries how far the cursor has to travel to reach it, and the app walks
+it there with the arrow keys the popup already listens to. A list with no
+cursor — the which-key hint panel — has nothing to move, so clicking it does
+nothing rather than something surprising.
 
 **Why the app selects at all.** A popup is a box painted _inside_ the terminal
 grid; the terminal knows nothing about its border. Dragging across a popup
