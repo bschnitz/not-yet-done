@@ -11,6 +11,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Hierarchical task management** — organize tasks in a tree structure with unlimited nesting
 - **Time tracking** — start/stop tracking per task, with parallel tracking support
 - **Rich TUI** — keyboard-driven interface with fuzzy filter, text search, hop-style jump navigation, saved filters, favorites, and configurable columns
+- **Mouse support** — optional (`mouse` cargo feature): drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
 - **CLI** — full command-line interface for scripting and automation
 - **Waybar module** — CFFI module showing the active tracking in your status bar
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
@@ -179,6 +180,46 @@ Press `p` to enter jump mode:
 <!-- screenshot: jump mode active, showing yellow labels next to matched characters, non-matching rows dimmed -->
 
 ![Jump Mode](docs/screenshots/jump-mode.png)
+
+### Mouse
+
+The TUI understands the mouse. What it does today:
+
+| Input           | Effect                                                    |
+| --------------- | --------------------------------------------------------- |
+| Drag with left  | Select text — **clipped to the window under the pointer** |
+| `Alt` + drag    | Select a rectangle instead of flowing text                |
+| Release         | Copy the selection to the clipboard                       |
+| Wheel up / down | Scroll, exactly as `↑` / `↓` would                        |
+| `Shift` + drag  | Bypass the app and use the terminal's own selection       |
+
+**Why the app selects at all.** A popup is a box painted _inside_ the terminal
+grid; the terminal knows nothing about its border. Dragging across a popup
+therefore grabs whole terminal rows — the popup's text plus whatever the table
+behind it happens to show at the same height, in one useless blob. Once the
+app reads the mouse itself, it can clip the selection to the box the drag
+started in: a popup, a content pane, a bar. Lines are trimmed at the box edge,
+padding is trimmed off, and blank trailing rows are dropped, so what lands in
+the clipboard is what you circled.
+
+The copy goes to the system clipboard where one is reachable, otherwise
+through **OSC 52**, which means selecting inside a TUI running over SSH still
+copies to the clipboard of the machine you are sitting at.
+
+`Shift` + drag is the escape hatch and needs no configuration: terminals keep
+their native selection on that modifier even while an application is reading
+the mouse. Use it to grab a rectangle spanning several panes at once, or
+anything else the app's own selection deliberately refuses to do.
+
+**Turning it off.** Mouse support is the `mouse` cargo feature and is on by
+default. Built without it, the app emits not one mouse-reporting escape
+sequence and the terminal behaves exactly as it did before:
+
+```bash
+cargo install --path not-yet-done-tui --no-default-features --features clipboard
+```
+
+Colours come from `theme.mouse:` (see [Theme Colors](#theme-colors)).
 
 ### Task Operations
 
@@ -2040,13 +2081,24 @@ including the startup capability query.
 | `focused_bg`         | Focused element background       |
 | `form_bg`            | Form panel background            |
 
-Two optional sub-blocks refine individual surfaces. Every field in them is
+Three optional sub-blocks refine individual surfaces. Every field in them is
 optional: what stays unset falls back to a colour from the table above, so an
 absent block changes nothing.
 
 `theme.form:` — the spec-driven form popup: `accent`, `label_idle`, `text`,
 `text_idle`, `placeholder`, `selected`, `hint`, `error`, `field_bg`,
 `field_bg_idle`, `panel_bg`.
+
+`theme.mouse:` — the [mouse](#mouse) drag selection:
+
+| Field          | Description               | Falls back to |
+| -------------- | ------------------------- | ------------- |
+| `selection`    | Text inside the selection | `bg`          |
+| `selection_bg` | Fill behind the selection | `accent`      |
+
+The block is read regardless of how the app was built, so a `tui-theme.yaml`
+kept in sync across machines still parses against a binary without the `mouse`
+feature.
 
 `theme.vim:` — the built-in editor pane (`builtin: true` profiles):
 

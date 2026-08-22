@@ -43,6 +43,68 @@ pub fn disable_kitty_protocol() -> Result<()> {
     Ok(())
 }
 
+/// Turn on mouse reporting.
+///
+/// Deliberately *not* crossterm's `EnableMouseCapture`: that also sets 1003
+/// (any-motion tracking), which reports every cell the pointer crosses even
+/// with no button down. In a render loop that parks at ~0 % CPU while idle
+/// (see `docs/decisions/0001-render-loop-dirty-gating.md`) that would be a
+/// stream of wake-ups for nothing. We ask for exactly what we use:
+///
+/// * `1000` — button press/release,
+/// * `1002` — motion *while a button is held*, i.e. drag,
+/// * `1006` — SGR encoding, without which coordinates break past column 223.
+#[cfg(feature = "mouse")]
+pub fn enable_mouse() -> Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h")?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Turn mouse reporting back off, in the reverse order. Must run before any
+/// external program takes over the terminal — otherwise an editor that does
+/// not speak SGR mouse would receive the raw reports as garbage input.
+#[cfg(feature = "mouse")]
+pub fn disable_mouse() -> Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    out.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l")?;
+    out.flush()?;
+    Ok(())
+}
+
+#[cfg(not(feature = "mouse"))]
+pub fn enable_mouse() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(feature = "mouse"))]
+pub fn disable_mouse() -> Result<()> {
+    Ok(())
+}
+
+/// Put the terminal into the input modes the TUI runs in: kitty keyboard
+/// disambiguation plus mouse reporting.
+///
+/// The two always travel together — every point that hands the terminal to a
+/// child process has to drop both and pick both back up — so they are one
+/// call rather than two that can drift apart at the seven-odd suspend sites.
+pub fn resume_input_modes() -> Result<()> {
+    enable_kitty_protocol()?;
+    enable_mouse()?;
+    Ok(())
+}
+
+/// Inverse of [`resume_input_modes`]. Call before suspending the TUI for an
+/// editor, a script, or the final teardown.
+pub fn suspend_input_modes() -> Result<()> {
+    let _ = disable_mouse();
+    disable_kitty_protocol()?;
+    Ok(())
+}
+
 /// Convert a crossterm KeyEvent into the canonical string representation
 /// used in tui-keybindings.yaml (e.g. "q", "ctrl+c", "tab", "shift+tab").
 pub fn key_event_to_string(key: KeyEvent) -> String {

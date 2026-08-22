@@ -1017,7 +1017,7 @@ impl App {
             .replace("{output_file}", &output_path);
         let pause_tui = self.config.script.pause_tui;
         if pause_tui {
-            let _ = crate::events::disable_kitty_protocol();
+            let _ = crate::events::suspend_input_modes();
             let _ =
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
         }
@@ -1038,7 +1038,7 @@ impl App {
         if pause_tui {
             let _ =
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen);
-            let _ = crate::events::enable_kitty_protocol();
+            let _ = crate::events::resume_input_modes();
         }
         match result {
             Ok(_) => {

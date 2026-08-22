@@ -1,12 +1,14 @@
 mod action;
 mod active_surface;
 mod app;
+mod clipboard;
 mod components;
 mod config;
 mod edit_session;
 mod events;
 mod key_groups;
 mod keymap;
+mod mouse;
 mod query_filter;
 
 mod render;
@@ -170,12 +172,12 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    events::enable_kitty_protocol()?;
+    events::resume_input_modes()?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let _ = events::disable_kitty_protocol();
+    let _ = events::suspend_input_modes();
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -335,6 +337,21 @@ async fn run_loop(
                                 dispatch_editor_request(terminal, app, req).await?;
                             }
                             dirty = true;
+                        } else if let Event::Mouse(mouse_event) = event {
+                            // Same shape as the key branch above: a click can
+                            // reach an `EditorRequest` too, so it runs through
+                            // the identical dispatch. Every mouse event we ask
+                            // for (press, drag, release, wheel) changes
+                            // something visible, so the frame is always dirty.
+                            let req = app.handle_mouse(mouse_event);
+                            if req.suspends_terminal() {
+                                drop(reader);
+                                dispatch_editor_request(terminal, app, req).await?;
+                                reader = EventStream::new();
+                            } else if !matches!(req, EditorRequest::None) {
+                                dispatch_editor_request(terminal, app, req).await?;
+                            }
+                            dirty = true;
                         } else if matches!(event, Event::Resize(_, _)) {
                             dirty = true;
                         }
@@ -454,7 +471,7 @@ fn run_inline_editor_get_content(
     } else {
         Some(command)
     };
-    let _ = events::disable_kitty_protocol();
+    let _ = events::suspend_input_modes();
     let result = match not_yet_done_ratatui::open_editor_inline_in(
         cmd,
         content,
@@ -470,7 +487,7 @@ fn run_inline_editor_get_content(
             None
         }
     };
-    let _ = events::enable_kitty_protocol();
+    let _ = events::resume_input_modes();
     force_full_redraw(terminal)?;
     Ok(result)
 }
@@ -505,7 +522,7 @@ fn reopen_editor_with_errors(
         None => (".md".to_string(), Default::default()),
     };
     if pause_tui {
-        let _ = events::disable_kitty_protocol();
+        let _ = events::suspend_input_modes();
         if let Ok(handle) = not_yet_done_ratatui::open_editor_launch_in(
             command,
             error_content,
@@ -517,7 +534,7 @@ fn reopen_editor_with_errors(
         ) {
             app.detached_editor = Some(handle);
         }
-        let _ = events::enable_kitty_protocol();
+        let _ = events::resume_input_modes();
     }
     force_full_redraw(terminal)?;
     Ok(())
@@ -538,7 +555,7 @@ fn run_launch_editor(
     } else {
         Some(command)
     };
-    let _ = events::disable_kitty_protocol();
+    let _ = events::suspend_input_modes();
     match not_yet_done_ratatui::open_editor_launch_in(
         cmd,
         content,
@@ -555,7 +572,7 @@ fn run_launch_editor(
             eprintln!("Editor launch error: {e}");
         }
     }
-    let _ = events::enable_kitty_protocol();
+    let _ = events::resume_input_modes();
     force_full_redraw(terminal)?;
     Ok(())
 }
@@ -575,7 +592,7 @@ fn run_interactive_script(
     use std::process::{Command, Stdio};
 
     // Leave alternate screen so script gets the real terminal.
-    let _ = events::disable_kitty_protocol();
+    let _ = events::suspend_input_modes();
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -630,7 +647,7 @@ fn run_interactive_script(
         crossterm::terminal::EnterAlternateScreen
     )?;
     enable_raw_mode()?;
-    let _ = events::enable_kitty_protocol();
+    let _ = events::resume_input_modes();
     force_full_redraw(terminal)?;
 
     // Handle output.

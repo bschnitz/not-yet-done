@@ -250,6 +250,17 @@ impl Theme {
         }
     }
 
+    // ── Mouse selection ──────────────────────────────────────────────────
+    /// Text inside a mouse drag selection. Falls back to [`Self::bg`], which
+    /// against `selection_bg` reads as an inverted patch.
+    pub fn selection(&self) -> Color {
+        self.override_or(self.cfg.mouse.selection.as_ref(), || self.bg())
+    }
+    /// Fill behind a mouse drag selection. Falls back to [`Self::accent`].
+    pub fn selection_bg(&self) -> Color {
+        self.override_or(self.cfg.mouse.selection_bg.as_ref(), || self.accent())
+    }
+
     // ── Alert bar ────────────────────────────────────────────────────────
     pub fn alert_fg(&self) -> Color {
         self.cfg.alert_fg.to_ratatui()

@@ -5398,6 +5398,65 @@ worked. Test on any tab with a `fuzzy_filter` action.
       confirm the documented consequence: `x` fires instead of being typed into
       the query. Undo afterwards.
 
+## Mouse: window-local selection (`mouse` cargo feature)
+
+Phase 1 of mouse support. The point of the test is the **clipping**: a drag
+must never leave the box it started in. Build and install the default binary
+(the feature is on by default).
+
+- [ ] Open any popup with enough text in it (the shortcut overview on `o s`,
+      the saved-filter picker on `q`, a script menu). Drag the mouse from
+      inside the popup **out over the table behind it** and release: the
+      highlight stays inside the popup's frame, no row of the table behind it
+      is tinted, and the copied text contains popup lines only.
+- [ ] Same drag, but drag _upwards/backwards_ past the anchor: the same text
+      is selected, in the same order.
+- [ ] Drag inside a content pane in a split layout: the selection stops at the
+      pane's focus border and does not bleed into the neighbouring pane.
+- [ ] The copied text has no panel padding on it — paste it somewhere and
+      check that the lines start at the first real character and carry no
+      trailing spaces. Blank rows at the end of the selection are dropped.
+- [ ] Hold `Alt` while dragging: the selection is a **rectangle** (a column
+      block), not flowing text. Useful for taking one table column.
+- [ ] A row with a wide character in it (a tree glyph, an emoji, a CJK title)
+      survives the round trip — pasted, it looks like what was on screen.
+- [ ] Press any key after selecting: the highlight disappears. (A highlight
+      left behind over a list that has since scrolled would be a lie.)
+- [ ] Click once somewhere outside every panel: the old selection is dropped
+      without anything else happening.
+- [ ] Over SSH (no system clipboard reachable on the remote): the selection
+      still lands in the clipboard of the machine you are sitting at, via
+      OSC 52. If **no** path works at all, exactly one notification appears —
+      `Could not reach the clipboard` — and nothing else.
+
+Regressions to rule out, because mouse reporting takes things away from the
+terminal:
+
+- [ ] The **wheel** still scrolls the focused list, three lines per notch, up
+      and down. (Without reporting the terminal turned the wheel into arrow
+      keys; the app now has to do that itself.)
+- [ ] `Shift` + drag still gives the **terminal's own** selection — spanning
+      panes, whole rows, its own colours. This is the escape hatch and needs
+      no configuration.
+- [ ] Launch an external editor (`e` on a row) and quit it again: back in the
+      TUI, both selection and the wheel still work — the editor suspend/resume
+      path has to restore mouse reporting along with the keyboard protocol.
+- [ ] Run an interactive script and return: same check.
+- [ ] Quit the TUI: the terminal is not left in mouse-reporting mode —
+      selecting in the shell afterwards behaves normally.
+
+Colours and the off switch:
+
+- [ ] Set `theme.mouse.selection` / `theme.mouse.selection_bg` in
+      `tui-theme.yaml`, restart, select: the highlight uses them. Remove them
+      again and the selection falls back to background-on-accent.
+- [ ] Build without the feature
+      (`cargo build --release -p not-yet-done-tui --no-default-features --features clipboard`),
+      install and start it: dragging selects the way the terminal always did
+      (across the popup border, whole rows), no key or wheel behaviour has
+      changed, and a `tui-theme.yaml` that still carries a `mouse:` block
+      loads without a warning.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

@@ -887,6 +887,10 @@ impl PaneNode {
                 } else {
                     area
                 };
+                // The mouse addresses the pane by what it can actually click
+                // into, so the focus border is not part of it — a drag
+                // selection started here must not pick up the frame glyphs.
+                crate::mouse::push(inner, crate::mouse::Region::ContentPane(leaf.id));
                 let table_area = leaf.pane.render_table_and_preview(frame, inner);
                 if is_focused && header_overlay.is_active() {
                     let keys: Vec<&str> = leaf

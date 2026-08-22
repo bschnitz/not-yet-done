@@ -146,6 +146,15 @@ pub struct ThemeConfig {
     #[serde(default)]
     pub vim: VimThemeConfig,
 
+    /// Colours of the mouse drag selection. Both roles are optional and fall
+    /// back to a mapped app-theme colour (see the `selection*` accessors on
+    /// [`crate::ui::Theme`]), so an empty `mouse:` block is the default look.
+    /// Kept out of the `mouse` cargo feature on purpose: a `tui-theme.yaml`
+    /// written against a build with mouse support must still parse against
+    /// one without it.
+    #[serde(default)]
+    pub mouse: MouseThemeConfig,
+
     // ── Alert bar ────────────────────────────────────────────────────────
     /// Foreground + background of the prominent alert bar — the optional
     /// notification strip beneath the top chrome that carries important
@@ -250,6 +259,24 @@ pub struct VimThemeConfig {
     #[serde(default)]
     pub selection: Option<HexColor>,
     /// Fill behind a visual-mode selection.
+    #[serde(default)]
+    pub selection_bg: Option<HexColor>,
+}
+
+/// Optional colours for the mouse drag selection.
+///
+/// ```yaml
+/// mouse:
+///   selection:    "#1e1e2e"   # text inside the selection
+///   selection_bg: "#f9e2af"   # fill behind it
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MouseThemeConfig {
+    /// Text inside the selection. Falls back to the app background, so the
+    /// selection reads as an inverted patch.
+    #[serde(default)]
+    pub selection: Option<HexColor>,
+    /// Fill behind the selection. Falls back to the accent colour.
     #[serde(default)]
     pub selection_bg: Option<HexColor>,
 }
@@ -401,6 +428,7 @@ impl Default for ThemeConfig {
             form_bg: d_form_bg(),
             form: FormThemeConfig::default(),
             vim: VimThemeConfig::default(),
+            mouse: MouseThemeConfig::default(),
             alert_fg: d_alert_fg(),
             alert_bg: d_alert_bg(),
         }
