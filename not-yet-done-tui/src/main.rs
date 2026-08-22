@@ -13,6 +13,7 @@ mod query_filter;
 
 mod render;
 mod tabs;
+mod terminal;
 mod ui;
 pub mod views;
 
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::{
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use shaku::HasComponent;
@@ -155,7 +156,7 @@ async fn main() -> Result<()> {
     // a within-window launch constructs nothing extra.
     not_yet_done_host::fire_connected_hooks().await;
 
-    let mut terminal = setup_terminal()?;
+    let mut terminal = terminal::setup()?;
     // Ask the terminal which graphics protocol it speaks. Must sit between
     // entering the alternate screen and starting the event reader: the query
     // writes an escape sequence and reads the reply straight off stdin, and a
@@ -163,25 +164,9 @@ async fn main() -> Result<()> {
     // their first markdown render, so the ones built above still see it.
     views::images::init_terminal_graphics(images_cfg.enabled, images_cfg.max_height);
     let result = run_loop(&mut terminal, &mut app).await;
-    restore_terminal(&mut terminal)?;
+    terminal::restore(&mut terminal)?;
 
     result
-}
-
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    events::resume_input_modes()?;
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
-}
-
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let _ = events::suspend_input_modes();
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
 }
 
 async fn run_loop(
