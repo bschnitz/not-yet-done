@@ -504,11 +504,24 @@ The first use is **window-local selection**: a drag is clipped to the rectangle
 it started in, so selecting inside a popup no longer grabs whole terminal rows.
 `Alt` makes it a block selection, release copies (system clipboard, else
 OSC 52). A release on the press cell is not a drag at all but a **click**, and
-`mouse::click` routes it — tab, sub-tab, pane focus — through `pub(crate)`
+`mouse::click` routes it — tab, sub-tab, pane focus, row, column header —
+through `pub(crate)`
 entry points on `App` that end in the same `sync_components()` the key paths do
 and decline the same way while an input popup owns the input. The mouse is a
 second way in, never a second implementation; the wheel makes that literal by
 feeding synthetic arrow keys through `App::handle_key`.
+
+Inside a pane the same principle repeats one level down, but the map stays out
+of it. A table knows where it put its rows; the mouse module does not, and
+`not-yet-done-ratatui` must not learn about regions to say so. So the table
+widget records its own geometry while painting — one `RowSpan` per data row
+(recorded around the inner line loop, which is what makes a multiline row, a
+reserved image line and a top row clipped by smooth scroll all come out right)
+and one `ColSpan` per header column, taken from the very spans handed to the
+paragraph. `Table::row_at` / `column_at` / `is_header_line` answer from that,
+and `ContentView` turns the answer into the same `set_selected` +
+`SelectionChanged` a `j` produces. A header click routes into `App::apply_sort`
+— the one write path the `S` hint mode and the sort menu already share.
 
 Why the map is recorded rather than recomputed, why it is ambient rather than
 threaded through, and why the reporting modes are written by hand instead of

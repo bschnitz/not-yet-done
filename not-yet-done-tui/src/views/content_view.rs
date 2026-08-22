@@ -11225,6 +11225,52 @@ impl ContentView {
         true
     }
 
+    /// The data row `pane_id` painted on terminal line `y`, if any. `None`
+    /// for its header, its footer and the empty space below the last row.
+    pub fn row_at(&self, pane_id: PaneId, y: u16) -> Option<usize> {
+        self.find_pane(pane_id)?.table.row_at(y)
+    }
+
+    /// The column key of the header cell at terminal cell `(x, y)` of
+    /// `pane_id`, or `None` if that cell is not a column header. Card mode
+    /// and row layouts paint no header, so they answer `None` throughout.
+    pub fn header_column_at(&self, pane_id: PaneId, x: u16, y: u16) -> Option<String> {
+        let pane = self.find_pane(pane_id)?;
+        if !pane.table.is_header_line(y) {
+            return None;
+        }
+        let col = pane.table.column_at(x)?;
+        pane.last_column_keys.get(col).cloned()
+    }
+
+    /// Put the cursor of `pane_id` on the row painted at terminal cell
+    /// `(x, y)`, as a `j`/`k` walk to that row would.
+    ///
+    /// The row and column come from the geometry that pane's table recorded
+    /// while painting, so folded trees, multiline rows and horizontal scroll
+    /// need no separate arithmetic here. A click on a header, a footer or the
+    /// empty space below the data moves nothing. The column cursor is only
+    /// touched where a view has one — elsewhere `selected_column` stays
+    /// `None` and the row is the unit of selection.
+    ///
+    /// Returns the message the caller has to process (the preview and the
+    /// action bar hang off the selection), or `None` if nothing moved.
+    pub fn select_row_at(&mut self, pane_id: PaneId, x: u16, y: u16) -> Option<SubViewMessage> {
+        let tree = &mut self.pane_trees[self.active_subtab];
+        let pane = &mut tree.root.find_leaf_mut(pane_id)?.pane;
+        let row = pane.table.row_at(y)?;
+        let column = match pane.table.selected_column() {
+            Some(current) => Some(pane.table.column_at(x).unwrap_or(current)),
+            None => None,
+        };
+        if row == pane.table.selected_row() && column == pane.table.selected_column() {
+            return None;
+        }
+        pane.table.set_selected(row);
+        pane.table.set_selected_column(column);
+        Some(SubViewMessage::SelectionChanged(None))
+    }
+
     fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
         match source {
             KeySource::YamlSubtab { view } => {
@@ -15894,6 +15940,99 @@ mod tests {
                 event_actions: Vec::new(),
             }],
         }
+    }
+
+    /// Paint the focused pane's table into an off-screen terminal, so the
+    /// row geometry a click is resolved against exists.
+    fn paint_pane_table(view: &mut ContentView, width: u16, height: u16) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| view.active_pane_mut().table.view(frame, frame.area()))
+            .unwrap();
+    }
+
+    fn three_row_view() -> ContentView {
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![
+                tnode_val("a", "A", "1"),
+                tnode_val("b", "B", "2"),
+                tnode_val("c", "C", "3"),
+            ],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut().rebuild_table(&view_defs);
+        view
+    }
+
+    #[test]
+    fn a_click_selects_the_row_that_was_painted_under_it() {
+        let mut view = three_row_view();
+        let pane_id = view.active_pane_id();
+        paint_pane_table(&mut view, 40, 10);
+
+        // Row 0 sits below the column header, which is not a data row.
+        assert_eq!(view.row_at(pane_id, 0), None, "the header line");
+        assert_eq!(view.row_at(pane_id, 3), Some(2));
+
+        assert!(view.select_row_at(pane_id, 5, 3).is_some());
+        assert_eq!(view.active_pane().table.selected_row(), 2);
+        assert!(
+            view.select_row_at(pane_id, 5, 3).is_none(),
+            "clicking the selected row again changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_click_below_the_last_row_leaves_the_cursor_alone() {
+        let mut view = three_row_view();
+        let pane_id = view.active_pane_id();
+        view.active_pane_mut().table.set_selected(1);
+        paint_pane_table(&mut view, 40, 10);
+
+        assert_eq!(view.row_at(pane_id, 8), None);
+        assert!(view.select_row_at(pane_id, 5, 8).is_none());
+        assert_eq!(view.active_pane().table.selected_row(), 1);
+    }
+
+    #[test]
+    fn a_header_cell_names_the_column_it_belongs_to() {
+        let mut view = three_row_view();
+        let pane_id = view.active_pane_id();
+        paint_pane_table(&mut view, 40, 10);
+
+        assert_eq!(
+            view.header_column_at(pane_id, 0, 0).as_deref(),
+            Some("name")
+        );
+        let across: Vec<String> = (0..40)
+            .filter_map(|x| view.header_column_at(pane_id, x, 0))
+            .collect();
+        assert!(
+            across.iter().any(|k| k == "val"),
+            "the second column is reachable as well: {across:?}"
+        );
+        assert_eq!(
+            view.header_column_at(pane_id, 0, 1),
+            None,
+            "a data row is not a header"
+        );
+    }
+
+    #[test]
+    fn a_click_into_a_pane_of_another_subtab_is_ignored() {
+        // Stale hit map, or a click that raced a subtab switch: an id the
+        // active split tree does not know must not panic or move anything.
+        let mut view = three_row_view();
+        paint_pane_table(&mut view, 40, 10);
+        assert!(view.select_row_at(PaneId::MAX, 5, 3).is_none());
     }
 
     #[test]

@@ -11,7 +11,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Hierarchical task management** — organize tasks in a tree structure with unlimited nesting
 - **Time tracking** — start/stop tracking per task, with parallel tracking support
 - **Rich TUI** — keyboard-driven interface with fuzzy filter, text search, hop-style jump navigation, saved filters, favorites, and configurable columns
-- **Mouse support** — optional (`mouse` cargo feature): click tabs and panes, drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
+- **Mouse support** — optional (`mouse` cargo feature): click tabs, panes and rows, double-click to open, sort by clicking a column header, drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
 - **CLI** — full command-line interface for scripting and automation
 - **Waybar module** — CFFI module showing the active tracking in your status bar
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
@@ -189,6 +189,9 @@ The TUI understands the mouse. What it does today:
 | --------------------- | --------------------------------------------------------- |
 | Click a tab / sub-tab | Switch to it, exactly as its number key would             |
 | Click a pane          | Focus it, exactly as the window chords would              |
+| Click a row           | Put the cursor on it, exactly as `j` / `k` would          |
+| Double-click a row    | Do to it what `Enter` does                                |
+| Click a column header | Sort by it: ascending → descending → unsorted             |
 | Drag with left        | Select text — **clipped to the window under the pointer** |
 | `Alt` + drag          | Select a rectangle instead of flowing text                |
 | Release               | Copy the selection to the clipboard                       |
@@ -202,6 +205,14 @@ takes the focus with it, so a scrolled pane is also the pane the arrow keys
 talk to — one scrolling path, not two. Nothing the mouse reaches is
 mouse-only; every one of these has a key, and while a popup has the input a
 click on the tab bar behind it is ignored just as the number key would be.
+
+Clicking a row hits the row you see, not a row counted off the top edge: the
+table hands out the geometry it painted, so folded trees, rows that span
+several lines and a top row half-scrolled off the edge all resolve correctly.
+A click on a group header lands on the nearest selectable row, the same place
+`j` would stop. Sorting by header click is additive over any sort already
+set — it is the very mechanism behind `S` and the sort menu (`c s`), so the
+three stay in step.
 
 **Why the app selects at all.** A popup is a box painted _inside_ the terminal
 grid; the terminal knows nothing about its border. Dragging across a popup

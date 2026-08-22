@@ -5764,6 +5764,93 @@ impl App {
         }
     }
 
+    /// Sort by the column whose header was clicked, cycling
+    /// unsorted → ascending → descending → unsorted, as clicking a column
+    /// header does everywhere else.
+    ///
+    /// Goes through the same [`Self::apply_sort`] the `S` hint mode and the
+    /// sort menu use, so the click is additive over the other sort keys
+    /// exactly as they are. Returns whether the cell was a sortable header —
+    /// `false` leaves the click to the row handler.
+    pub(crate) fn click_column_header(
+        &mut self,
+        pane_id: crate::views::content_view::PaneId,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        use crate::views::SortableView;
+        use not_yet_done_content::SortDirection;
+
+        if self.has_input_popup() {
+            return false;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let Some(view) = self.content_view(idx) else {
+            return false;
+        };
+        let Some(key) = view.header_column_at(pane_id, x, y) else {
+            return false;
+        };
+        // A column the adapter does not report as sortable has no sort to
+        // cycle. The click is still a header click, so it stops here rather
+        // than falling through and selecting a row.
+        let Some(column) = SortableView::columns(view)
+            .into_iter()
+            .find(|c| c.key == key)
+        else {
+            return true;
+        };
+        let action = match SortableView::current_sort(view)
+            .iter()
+            .find(|k| k.column == key)
+            .map(|k| k.direction)
+        {
+            None => SortAction::Asc,
+            Some(SortDirection::Asc) => SortAction::Desc,
+            Some(SortDirection::Desc) => SortAction::Clear,
+        };
+        let label = column.display_label().to_string();
+        self.apply_sort(SortTarget::Content(idx), &key, action, &label);
+        true
+    }
+
+    /// Put the cursor on the row a click landed on, and — on a double click
+    /// — do to it what `enter` would.
+    ///
+    /// Only a cell that actually carries a data row counts: clicking the
+    /// column headers or the empty space below the last row selects nothing,
+    /// and double-clicking there activates nothing either. Activation goes
+    /// through the key pipeline rather than calling the view directly, so a
+    /// double click means whatever that view has bound to `enter`.
+    pub(crate) fn click_content_row(
+        &mut self,
+        pane_id: crate::views::content_view::PaneId,
+        x: u16,
+        y: u16,
+        double: bool,
+    ) -> EditorRequest {
+        if self.has_input_popup() {
+            return EditorRequest::None;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let Some(view) = self.content_view_mut(idx) else {
+            return EditorRequest::None;
+        };
+        if view.row_at(pane_id, y).is_none() {
+            return EditorRequest::None;
+        }
+        let msg = view.select_row_at(pane_id, x, y);
+        let req = match msg {
+            Some(m) => self.process_sub_view_message(m),
+            None => EditorRequest::None,
+        };
+        self.sync_components();
+        if !double || !matches!(req, EditorRequest::None) {
+            return req;
+        }
+        self.handle_key("enter")
+    }
+
     /// Open the shortcut menu (default `ctrl+y`).
     ///
     /// Collects two row sets: the *context* rows from the focused pane's

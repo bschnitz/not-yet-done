@@ -5453,6 +5453,40 @@ One button does two jobs, so the first thing to check is that they stay apart.
 - [ ] Open a popup (`o s`), then click a tab behind it: the popup keeps the
       input and nothing switches — the same refusal the number key gets.
 
+### Clicking rows and column headers
+
+The row a click lands on has to be the row that was drawn there — the geometry
+comes from the paint, so the interesting cases are the ones where a row is not
+one line tall or not flush with the top edge.
+
+- [ ] Click a row in a plain table: the cursor moves there and the preview /
+      record detail follows, exactly as walking to it with `j` would.
+- [ ] Click the row the cursor is already on: nothing reloads and nothing
+      flickers.
+- [ ] In a **tree** view with folded and expanded nodes, click a row far down:
+      the cursor lands on that row, not on a row counted off the top edge.
+- [ ] In a view with **multiline rows** (a chat log, a long-text column), click
+      the _second_ line of a row: it selects that row, not its neighbour.
+- [ ] With **smooth scrolling** on, scroll so the top row is half cut off, then
+      click the row below it: still the right row.
+- [ ] Click a **group header** row (a grouped view): the cursor lands on the
+      nearest selectable row, the same place `j` stops — it never sits on the
+      header.
+- [ ] Click into the **empty space** below the last row: nothing moves.
+- [ ] **Double-click** a row: it does what `Enter` does there — drills into a
+      tree node, opens a message, whatever the view binds. A slow second click
+      (over ~0.4 s) does not; three fast clicks activate once, not twice.
+- [ ] Click a **column header**: the table sorts by it ascending, a
+      notification names the column, and the header shows the arrow. Click it
+      again: descending. A third time: the sort is cleared.
+- [ ] Sort by one column via header click, then by a second: the second is
+      added, the first is kept — the same additive behaviour as `S` and the
+      sort menu (`c s`). Open `c s` afterwards and it shows both.
+- [ ] Click a header of a column the adapter cannot sort on: nothing happens —
+      in particular the cursor does not jump to a row.
+- [ ] In **card mode** (no header row), click anywhere in a card: the card is
+      selected, nothing tries to sort.
+
 ### The wheel
 
 - [ ] Wheel over an **unfocused** pane in a split layout: that pane scrolls and
