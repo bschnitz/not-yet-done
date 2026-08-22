@@ -302,7 +302,11 @@ impl MouseState {
     /// selected ones. Runs at the very end of the render pass, so it sees
     /// every overlay.
     ///
-    /// A press that has not moved yet is not tinted unless
+    /// This is also where a held double or triple click grows onto its word or
+    /// line: the boundaries are read out of the frame the press was drawn in,
+    /// and that frame does not exist yet when the event is handled.
+    ///
+    /// A press that is still a bare cell is not tinted unless
     /// [`highlight_press`](crate::config::tui_config::MouseConfig::highlight_press)
     /// asks for it: almost every press turns out to be a click, and a single
     /// tinted cell that lives for one frame reads as a stray cursor rather
@@ -310,9 +314,14 @@ impl MouseState {
     /// click of a double click reads the word out of it.
     #[cfg(feature = "mouse")]
     pub fn after_render(&mut self, buf: &mut Buffer, theme: &Theme, highlight_press: bool) {
-        let Some(sel) = self.selection else { return };
-        self.snapshot = Some(Snapshot::capture(buf, sel.bounds));
-        if sel.dragging && sel.is_click() && !highlight_press {
+        let Some(mut sel) = self.selection else {
+            return;
+        };
+        let snapshot = Snapshot::capture(buf, sel.bounds);
+        sel.settle(&snapshot);
+        self.selection = Some(sel);
+        self.snapshot = Some(snapshot);
+        if sel.dragging && sel.is_bare_press() && !highlight_press {
             return;
         }
         sel.paint(buf, theme);
@@ -350,8 +359,14 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
                 Some((bounds, _region)) => {
                     let block = ev.modifiers.contains(KeyModifiers::ALT);
                     let clicks = app.mouse.register_click(x, y, Instant::now());
-                    app.mouse.selection =
-                        Some(Selection::new(bounds, x, y, block).with_grain(Grain::of(clicks)));
+                    // Show the word or line straight away where the release
+                    // is going to select rather than act — the same question
+                    // `click` asks, so the two cannot drift apart.
+                    let preview =
+                        hit(x, y).is_some_and(|(_, region)| picks_text(app, region, clicks, x, y));
+                    app.mouse.selection = Some(
+                        Selection::new(bounds, x, y, block).with_grain(Grain::of(clicks), preview),
+                    );
                     app.mouse.snapshot = None;
                 }
                 None => app.mouse.clear_selection(),
@@ -442,16 +457,13 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
     // already knew what it was selecting by.
     let clicks = app.mouse.clicks;
     let double = clicks == 2;
-    // Behind a popup nothing acts, so every second click there is free for
-    // the word under it.
-    let blocked = blocked_by_popup(region);
-    if clicks == TRIPLE_CLICK || (double && (blocked || !acts_on_double(app, region, x, y))) {
-        return select_run(app, x, y, clicks == TRIPLE_CLICK);
+    if picks_text(app, region, clicks, x, y) {
+        return select_run(app, x, y, clicks >= TRIPLE_CLICK);
     }
     // A single click is a press, not a selection: whatever the last one
     // highlighted is stale the moment this one lands.
     app.mouse.clear_selection();
-    if blocked {
+    if blocked_by_popup(region) {
         return EditorRequest::None;
     }
     match region {
@@ -473,6 +485,22 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
         _ => {}
     }
     EditorRequest::None
+}
+
+/// Whether this run of clicks picks out text rather than acting on what is
+/// under it.
+///
+/// Asked twice: on the press, to decide whether the word or line shows while
+/// the button is held, and on the release, to decide what actually happens.
+/// One predicate for both, so what is highlighted is always what gets copied.
+#[cfg(feature = "mouse")]
+fn picks_text(app: &crate::app::App, region: Region, clicks: u8, x: u16, y: u16) -> bool {
+    if clicks >= TRIPLE_CLICK {
+        return true;
+    }
+    // Behind a popup nothing acts, so every second click there is free for
+    // the word under it.
+    clicks == 2 && (blocked_by_popup(region) || !acts_on_double(app, region, x, y))
 }
 
 /// Whether the second click on this cell already means something.
@@ -826,6 +854,26 @@ mod tests {
 
         state.after_render(&mut buf, &theme, true);
         assert_eq!(buf[(3, 0)].bg, theme.selection_bg());
+    }
+
+    /// Holding a double click shows the word right away — the press is what
+    /// the user is looking at, and in a terminal that is where the word
+    /// appears. It is the render pass that can do it: the boundaries are read
+    /// off the frame the press was drawn in.
+    #[test]
+    fn a_held_double_click_is_shown_as_soon_as_it_is_drawn() {
+        let theme = Theme::new(crate::config::ThemeConfig::default());
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(0, 0, "alpha beta", ratatui::style::Style::default());
+        let mut state = MouseState::default();
+        state.selection = Some(Selection::new(area, 7, 0, false).with_grain(Grain::Word, true));
+
+        state.after_render(&mut buf, &theme, false);
+        for x in 6..=9 {
+            assert_eq!(buf[(x, 0)].bg, theme.selection_bg(), "cell {x} of the word");
+        }
+        assert_ne!(buf[(5, 0)].bg, theme.selection_bg(), "the space before it");
     }
 
     #[test]
