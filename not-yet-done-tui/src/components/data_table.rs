@@ -164,6 +164,22 @@ impl DataTable {
         self.table.selected_row()
     }
 
+    /// The row painted on terminal line `y` in the last frame, if any.
+    /// `None` for the header, the footer and the empty space below the data.
+    pub fn row_at(&self, y: u16) -> Option<usize> {
+        self.table.row_at(y)
+    }
+
+    /// The logical column painted at terminal column `x` in the last frame.
+    pub fn column_at(&self, x: u16) -> Option<usize> {
+        self.table.column_at(x)
+    }
+
+    /// Whether terminal line `y` carries the table's column headers.
+    pub fn is_header_line(&self, y: u16) -> bool {
+        self.table.is_header_line(y)
+    }
+
     /// Set selected row index programmatically.
     pub fn set_selected(&mut self, row: usize) {
         self.table.set_selected(row);

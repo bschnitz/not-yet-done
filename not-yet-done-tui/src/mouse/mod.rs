@@ -50,6 +50,7 @@ use {
     ratatui::layout::Position,
     selection::{Selection, Snapshot},
     std::cell::RefCell,
+    std::time::{Duration, Instant},
 };
 
 /// How many lines one wheel notch moves.
@@ -60,6 +61,13 @@ use {
 /// things worse than before the feature existed.
 #[cfg(feature = "mouse")]
 const WHEEL_LINES: usize = 3;
+
+/// How close together two clicks on the same cell make a double click.
+///
+/// Terminals report presses and releases, never "double click", so the
+/// pairing happens here. 400 ms is the interval most desktops default to.
+#[cfg(feature = "mouse")]
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// A surface the render pass drew, in the terms a click cares about.
 ///
@@ -142,6 +150,9 @@ pub struct MouseState {
     /// makes "copy" mean *what you see*, wide characters, tree glyphs and all.
     #[cfg(feature = "mouse")]
     snapshot: Option<Snapshot>,
+    /// Cell and time of the last click, for pairing the next one with it.
+    #[cfg(feature = "mouse")]
+    last_click: Option<(u16, u16, Instant)>,
 }
 
 impl MouseState {
@@ -157,6 +168,21 @@ impl MouseState {
     #[cfg(not(feature = "mouse"))]
     #[inline]
     pub fn clear_selection(&mut self) {}
+
+    /// Record a click and report whether it completes a double click.
+    ///
+    /// A double click consumes the pair, so a third click in a row starts a
+    /// new one instead of activating again on every further click. `now` is
+    /// passed in rather than read here so the timeout is testable without
+    /// sleeping through it.
+    #[cfg(feature = "mouse")]
+    fn register_click(&mut self, x: u16, y: u16, now: Instant) -> bool {
+        let double = self.last_click.is_some_and(|(px, py, at)| {
+            (px, py) == (x, y) && now.duration_since(at) < DOUBLE_CLICK
+        });
+        self.last_click = if double { None } else { Some((x, y, now)) };
+        double
+    }
 
     /// Copy the region's cells out of the freshly drawn frame, then tint the
     /// selected ones. Runs at the very end of the render pass, so it sees
@@ -265,13 +291,21 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
     let Some((_, region)) = hit(x, y) else {
         return EditorRequest::None;
     };
+    let double = app.mouse.register_click(x, y, Instant::now());
     match region {
         Region::Tab(tab) => app.activate_tab(tab),
         Region::SubTab(idx) => return app.activate_subtab(idx),
-        // Clicking a pane focuses it. Which *row* was hit is a table
-        // question, and tables have their own geometry (folded rows, multi-
-        // line cells) — that is the next step, not this one.
-        Region::ContentPane(id) => app.focus_content_pane(id),
+        // A pane takes the focus first — the row cursor it is about to move
+        // is the one the keys act on, so the two must not end up in
+        // different panes.
+        Region::ContentPane(id) => {
+            app.focus_content_pane(id);
+            // The header row is a control, not data: it sorts. Everything
+            // below it moves the cursor.
+            if !app.click_column_header(id, x, y) {
+                return app.click_content_row(id, x, y, double);
+            }
+        }
         _ => {}
     }
     EditorRequest::None
@@ -386,6 +420,29 @@ mod tests {
             Some(Region::Tab(crate::tabs::Tab::Content(0)))
         );
         assert_eq!(hit(40, 0).map(|(_, r)| r), Some(Region::TabBar));
+    }
+
+    #[test]
+    fn two_quick_clicks_on_one_cell_are_a_double_click() {
+        let mut state = MouseState::default();
+        let t0 = Instant::now();
+        assert!(!state.register_click(4, 2, t0));
+        assert!(state.register_click(4, 2, t0 + DOUBLE_CLICK / 2));
+        // The pair is consumed: holding the button down and clicking on must
+        // not activate the row again on every further click.
+        assert!(!state.register_click(4, 2, t0 + DOUBLE_CLICK / 2));
+    }
+
+    #[test]
+    fn a_slow_second_click_or_one_on_another_cell_is_not_a_double_click() {
+        let mut state = MouseState::default();
+        let t0 = Instant::now();
+        assert!(!state.register_click(4, 2, t0));
+        assert!(!state.register_click(4, 2, t0 + DOUBLE_CLICK * 2));
+
+        let mut state = MouseState::default();
+        assert!(!state.register_click(4, 2, t0));
+        assert!(!state.register_click(4, 3, t0));
     }
 
     #[test]

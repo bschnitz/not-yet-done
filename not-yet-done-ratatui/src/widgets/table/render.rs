@@ -9,6 +9,60 @@ use ratatui::widgets::{Paragraph, Widget};
 use super::style::{TableStyle, TableStyleType as ST};
 use super::{ColumnStyles, ImageDraw, ImagePainter, StyleMap, TableWidgetCell, TableWidgetRow};
 
+/// Where a data row ended up on screen, in absolute terminal coordinates.
+///
+/// A row can span several physical lines (multiline rows, reserved image
+/// lines) and the topmost one can be clipped by smooth scrolling, so the
+/// span is recorded while painting rather than recomputed from row heights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowSpan {
+    pub y: u16,
+    pub height: u16,
+    /// Index into the widget's `rows`, not the visible index.
+    pub row: usize,
+}
+
+/// Where a logical column ended up on screen, in absolute terminal
+/// coordinates. Taken from the header row when there is one (its cells carry
+/// the column titles), otherwise from the first painted data row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColSpan {
+    pub x: u16,
+    pub width: u16,
+    /// Logical column index — the same one `selected_column` uses, so a
+    /// merged cell (`col_span > 1`) reports the first column it covers.
+    pub col: usize,
+}
+
+/// What the last paint put where. Handed back by [`render`] so the widget can
+/// answer "which row/column is under this cell?" without a second layout
+/// pass — the numbers are the ones the painter actually used.
+#[derive(Debug, Default, Clone)]
+pub struct RenderGeometry {
+    pub rows: Vec<RowSpan>,
+    pub cols: Vec<ColSpan>,
+    /// Screen line of the first fixed header row, if one was painted.
+    pub header_y: Option<u16>,
+}
+
+impl RenderGeometry {
+    /// The data row covering screen line `y`, if any.
+    pub fn row_at(&self, y: u16) -> Option<usize> {
+        self.rows
+            .iter()
+            .find(|s| y >= s.y && y < s.y + s.height)
+            .map(|s| s.row)
+    }
+
+    /// The logical column covering screen column `x`, if any.
+    pub fn col_at(&self, x: u16) -> Option<usize> {
+        self.cols
+            .iter()
+            .find(|s| x >= s.x && x < s.x + s.width)
+            .map(|s| s.col)
+    }
+}
+
 pub(super) struct RenderData<'a> {
     pub fixed_header_rows: &'a [TableWidgetRow],
     pub rows: &'a [TableWidgetRow],
@@ -53,9 +107,10 @@ pub(super) struct RenderData<'a> {
     pub image_painter: Option<&'a mut dyn ImagePainter>,
 }
 
-pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
+pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) -> RenderGeometry {
+    let mut geometry = RenderGeometry::default();
     if area.height == 0 || area.width == 0 {
-        return;
+        return geometry;
     }
 
     let fixed_top = data.fixed_header_rows.len() as u16;
@@ -80,7 +135,11 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
             height: 1,
             ..area
         };
-        render_fixed_row(buf, row_area, row, data);
+        let cols = render_fixed_row(buf, row_area, row, data);
+        if geometry.header_y.is_none() {
+            geometry.header_y = Some(y);
+            geometry.cols = cols;
+        }
         y += 1;
     }
 
@@ -118,6 +177,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
             0
         };
 
+        let row_top = y;
         for (li, line) in row.lines.iter().enumerate().skip(skip_lines) {
             if y >= data_bottom {
                 break;
@@ -130,7 +190,13 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
             // A line opts out of selection styling via `highlight_on_select`
             // (e.g. a spacer line stays "outside" the selection block).
             let line_selected = is_selected && line.highlight_on_select && !dim_row;
-            render_data_row(buf, row_area, &line.cells, row_idx, line_selected, data);
+            let cols = render_data_row(buf, row_area, &line.cells, row_idx, line_selected, data);
+            // Fallback column geometry for header-less tables. Merged cells
+            // report only the first column they cover, so this is a best
+            // effort — a real header row is always the better source.
+            if geometry.cols.is_empty() {
+                geometry.cols = cols;
+            }
 
             // First visible line of a picture: `row_in_image` says how much of
             // it already scrolled past the top, which puts the full picture's
@@ -223,6 +289,13 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
 
             y += 1;
         }
+        if y > row_top {
+            geometry.rows.push(RowSpan {
+                y: row_top,
+                height: y - row_top,
+                row: row_idx,
+            });
+        }
     }
 
     // Inline images, once the text is complete. Clipped to the scrollable
@@ -261,6 +334,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) {
     }
 
     render_scroll_indicators(buf, area, data);
+    geometry
 }
 
 /// Overlay `‹` / `›` glyphs at the pane edges in the top row whenever
@@ -297,8 +371,53 @@ fn render_scroll_indicators(buf: &mut Buffer, area: Rect, data: &RenderData) {
     }
 }
 
+/// Turn "column `col` starts at span index `i`" markers into on-screen
+/// rectangles, clipped to `area`.
+///
+/// The widths come from the very spans handed to the paragraph, so a wide
+/// glyph counts as the two terminal cells it occupies. Each column reaches to
+/// the start of the next one — the separator ends up with the column left of
+/// it, which keeps the row gap-free so a click can never fall between two
+/// columns.
+fn col_spans_from(area: Rect, spans: &[Span], starts: &[(usize, usize)]) -> Vec<ColSpan> {
+    let mut offsets: Vec<u16> = Vec::with_capacity(spans.len() + 1);
+    let mut acc: u16 = 0;
+    offsets.push(0);
+    for span in spans {
+        acc = acc.saturating_add(span.width() as u16);
+        offsets.push(acc);
+    }
+
+    let mut out = Vec::with_capacity(starts.len());
+    for (i, &(span_idx, col)) in starts.iter().enumerate() {
+        let end = match starts.get(i + 1) {
+            Some(&(next_idx, _)) => offsets[next_idx],
+            None => acc,
+        };
+        let x = area.left().saturating_add(offsets[span_idx]);
+        let right = area.left().saturating_add(end).min(area.right());
+        if x >= right {
+            continue;
+        }
+        out.push(ColSpan {
+            x,
+            width: right - x,
+            col,
+        });
+    }
+    out
+}
+
 /// Render a fixed (header/footer) row — uses Header style, no selection.
-fn render_fixed_row(buf: &mut Buffer, area: Rect, row: &TableWidgetRow, data: &RenderData) {
+///
+/// Returns where each logical column landed; the caller keeps that for the
+/// header row, which is what mouse clicks are resolved against.
+fn render_fixed_row(
+    buf: &mut Buffer,
+    area: Rect,
+    row: &TableWidgetRow,
+    data: &RenderData,
+) -> Vec<ColSpan> {
     let header_style = data.style.resolved_style(ST::Header);
     let bg = header_style.bg.unwrap_or_default();
     let hl_style = data.style.resolved_style(ST::Highlight);
@@ -311,6 +430,7 @@ fn render_fixed_row(buf: &mut Buffer, area: Rect, row: &TableWidgetRow, data: &R
     }
 
     let mut spans: Vec<Span> = Vec::new();
+    let mut starts: Vec<(usize, usize)> = Vec::new();
     let mut col_idx = 0;
     let mut first_rendered = true;
 
@@ -328,6 +448,7 @@ fn render_fixed_row(buf: &mut Buffer, area: Rect, row: &TableWidgetRow, data: &R
             ));
         }
         first_rendered = false;
+        starts.push((spans.len(), cell_col));
 
         let col_fg = resolve_cell_fg(cell, cell_col, data);
         let normal = Style::default()
@@ -350,7 +471,9 @@ fn render_fixed_row(buf: &mut Buffer, area: Rect, row: &TableWidgetRow, data: &R
             ));
         }
     }
+    let cols = col_spans_from(area, &spans, &starts);
     Paragraph::new(Line::from(spans)).render(area, buf);
+    cols
 }
 
 /// Render a single physical line of a data row with selection highlighting.
@@ -369,7 +492,7 @@ fn render_data_row(
     row_idx: usize,
     selected: bool,
     data: &RenderData,
-) {
+) -> Vec<ColSpan> {
     let row_base = if selected {
         data.style.resolved_style(ST::RowSelected)
     } else {
@@ -388,6 +511,7 @@ fn render_data_row(
     }
 
     let mut spans: Vec<Span> = Vec::new();
+    let mut starts: Vec<(usize, usize)> = Vec::new();
     let mut col_idx = 0;
     let mut first_rendered = true;
 
@@ -405,6 +529,7 @@ fn render_data_row(
             ));
         }
         first_rendered = false;
+        starts.push((spans.len(), cell_col));
 
         // Pick the cell's base style with column-cursor precedence:
         // CellSelected (intersection) > RowSelected > ColumnSelected > Row.
@@ -491,7 +616,9 @@ fn render_data_row(
             spans.push(Span::styled(cell.text.clone(), normal_style));
         }
     }
+    let cols = col_spans_from(area, &spans, &starts);
     Paragraph::new(Line::from(spans)).render(area, buf);
+    cols
 }
 
 fn resolve_cell_fg(

@@ -11,7 +11,7 @@ use tuirealm::state::{State, StateValue};
 use super::{
     ColumnStyles, ImagePainter, StyleMap, TableWidgetRow,
     keymap::TableKeymap,
-    render::{RenderData, render},
+    render::{RenderData, RenderGeometry, render},
     state::TableEvent,
     style::TableStyle,
 };
@@ -71,6 +71,9 @@ pub struct Table {
     /// fills exactly to the pane edge and trailing columns stay on-screen
     /// — matching the native render-time layout. 0 until the first paint.
     pub(crate) last_render_width: u16,
+    /// Where the last paint put its rows and columns. Empty until the first
+    /// paint; the source for the `*_at` lookups a mouse click needs.
+    pub(crate) geometry: RenderGeometry,
 
     // --- data ---
     /// Fixed rows always shown at the top (e.g. column headers).
@@ -179,6 +182,7 @@ impl Default for Table {
             scroll_col_offset: 0,
             has_more_right: false,
             last_render_width: 0,
+            geometry: RenderGeometry::default(),
             fixed_header_rows: Vec::new(),
             rows: Vec::new(),
             fixed_footer_rows: Vec::new(),
@@ -695,6 +699,27 @@ impl Table {
         self.last_render_width
     }
 
+    /// The data row painted on terminal line `y`, if any.
+    ///
+    /// Answers from the geometry the last paint recorded, so it accounts for
+    /// multiline rows, reserved image lines and a top row clipped by smooth
+    /// scrolling. `None` for the header, the footer and empty space — and
+    /// before the first paint.
+    pub fn row_at(&self, y: u16) -> Option<usize> {
+        self.geometry.row_at(y)
+    }
+
+    /// The logical column painted at terminal column `x`, if any. Same index
+    /// space as the column cursor.
+    pub fn column_at(&self, x: u16) -> Option<usize> {
+        self.geometry.col_at(x)
+    }
+
+    /// Whether terminal line `y` is the table's (first) header row.
+    pub fn is_header_line(&self, y: u16) -> bool {
+        self.geometry.header_y == Some(y)
+    }
+
     pub fn move_column_left(&mut self) {
         if let Some(c) = self.selected_column {
             if c > 0 {
@@ -1184,7 +1209,7 @@ impl Component for Table {
         let painter = self.image_painter.clone();
         let mut borrowed = painter.as_ref().map(|p| p.borrow_mut());
         data.image_painter = borrowed.as_deref_mut().map(|p| p as &mut dyn ImagePainter);
-        render(frame.buffer_mut(), area, &mut data);
+        self.geometry = render(frame.buffer_mut(), area, &mut data);
     }
 
     fn query(&self, attr: Attribute) -> Option<QueryResult<'_>> {
@@ -1289,8 +1314,84 @@ impl AppComponent<TableEvent, NoUserEvent> for Table {
 
 #[cfg(test)]
 mod tests {
-    use super::super::TableWidgetCell;
+    use super::super::{TableWidgetCell, TableWidgetLine};
     use super::*;
+
+    /// Paint `table` into an off-screen terminal of the given size so the
+    /// geometry assertions below run against a real paint.
+    fn paint(table: &mut Table, width: u16, height: u16) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| table.view(frame, frame.area()))
+            .unwrap();
+    }
+
+    #[test]
+    fn every_painted_line_of_a_multiline_row_points_back_at_that_row() {
+        let mut table = Table::default()
+            .with_fixed_headers(vec![TableWidgetRow::new(vec![TableWidgetCell::plain(
+                "Head",
+            )])])
+            .with_rows(vec![
+                TableWidgetRow::multiline(vec![
+                    TableWidgetLine::new(vec![TableWidgetCell::plain("a1")]),
+                    TableWidgetLine::new(vec![TableWidgetCell::plain("a2")]),
+                ]),
+                TableWidgetRow::new(vec![TableWidgetCell::plain("b")]),
+            ]);
+        paint(&mut table, 20, 6);
+
+        assert!(table.is_header_line(0));
+        assert_eq!(table.row_at(0), None, "the header is not a data row");
+        assert_eq!(table.row_at(1), Some(0));
+        assert_eq!(table.row_at(2), Some(0), "second line of the same row");
+        assert_eq!(table.row_at(3), Some(1));
+        assert_eq!(table.row_at(4), None, "empty space below the last row");
+    }
+
+    #[test]
+    fn a_scrolled_table_reports_data_indices_not_visible_ones() {
+        let mut table = Table::default().with_rows(
+            (0..20)
+                .map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
+                .collect(),
+        );
+        table.last_visible_data_rows = 4;
+        table.set_selected(10);
+        paint(&mut table, 20, 4);
+
+        let top = table.scroll_offset;
+        assert!(top > 0, "row 10 cannot be visible without scrolling");
+        assert_eq!(table.row_at(0), Some(top));
+        assert_eq!(table.row_at(3), Some(top + 3));
+    }
+
+    #[test]
+    fn header_columns_carry_the_separator_so_the_row_has_no_gaps() {
+        let mut table = Table::default()
+            .with_separator(" | ")
+            .with_fixed_headers(vec![TableWidgetRow::new(vec![
+                TableWidgetCell::plain("aa"),
+                TableWidgetCell::plain("bbbb"),
+            ])])
+            .with_rows(vec![TableWidgetRow::new(vec![
+                TableWidgetCell::plain("11"),
+                TableWidgetCell::plain("2222"),
+            ])]);
+        paint(&mut table, 20, 4);
+
+        // "aa | bbbb" — the separator belongs to the column left of it, so
+        // columns 0 and 1 meet without a dead cell between them.
+        for x in 0..5 {
+            assert_eq!(table.column_at(x), Some(0), "x={x}");
+        }
+        for x in 5..9 {
+            assert_eq!(table.column_at(x), Some(1), "x={x}");
+        }
+        assert_eq!(table.column_at(9), None, "past the last column");
+    }
 
     fn make_rows() -> Vec<TableWidgetRow> {
         vec![
