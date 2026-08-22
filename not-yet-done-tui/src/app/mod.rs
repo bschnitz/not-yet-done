@@ -1170,6 +1170,11 @@ pub struct App {
     /// mirrors [`Self::pending_key`] via [`Self::reconcile_which_key`].
     pub which_key: crate::components::which_key::WhichKeyMenu,
 
+    /// Where the last frame drew each surface, plus the drag selection over
+    /// it. Filled by [`crate::render::render`], read by
+    /// [`Self::handle_mouse`]. Inert when the `mouse` feature is off.
+    pub mouse: crate::mouse::MouseState,
+
     /// When the which-key popup should reveal itself: set to
     /// `now + which_key.delay_ms` when a chord prefix is first stashed, taken
     /// by the main loop's timer branch. `None` while nothing is pending or
@@ -1466,6 +1471,7 @@ impl App {
             link_refs: HashSet::new(),
             pending_key: None,
             which_key: crate::components::which_key::WhichKeyMenu::new(Arc::clone(&shared_theme)),
+            mouse: crate::mouse::MouseState::default(),
             which_key_deadline: None,
             shortcut_capture: None,
             warned_saved_query_conflicts: std::collections::HashSet::new(),
@@ -4778,7 +4784,28 @@ impl App {
     // Key routing: resolve (pure) → dispatch (mutates)
     // -----------------------------------------------------------------------
 
+    /// Route a mouse event, mirroring [`Self::handle_key`] down to the
+    /// return type — a click has to be able to reach everything a key can,
+    /// including the requests that suspend the terminal.
+    ///
+    /// The decision table itself lives in [`crate::mouse`]; keeping it there
+    /// rather than here means the whole mouse story is readable in one file.
+    #[cfg(feature = "mouse")]
+    pub fn handle_mouse(&mut self, ev: crossterm::event::MouseEvent) -> EditorRequest {
+        crate::mouse::handle(self, ev)
+    }
+
+    #[cfg(not(feature = "mouse"))]
+    pub fn handle_mouse(&mut self, _ev: crossterm::event::MouseEvent) -> EditorRequest {
+        EditorRequest::None
+    }
+
     pub fn handle_key(&mut self, key: &str) -> EditorRequest {
+        // Whatever the key does, it may move the content a selection sits
+        // on. A highlight stranded over rows that have scrolled away claims
+        // something false, so it goes before the key is acted on.
+        self.mouse.clear_selection();
+
         // The builtin editor pane owns the keyboard while it is open —
         // ahead of even the global quit binding, which would otherwise end
         // the app on a plain `q` typed into the buffer. Leaving is `:q!`,
@@ -12282,16 +12309,8 @@ impl App {
 
 /// Read text from the system clipboard. Returns `None` when the
 /// `clipboard` feature is off or no text is available.
-#[cfg(feature = "clipboard")]
 fn clipboard_text() -> Option<String> {
-    arboard::Clipboard::new()
-        .ok()
-        .and_then(|mut c| c.get_text().ok())
-}
-
-#[cfg(not(feature = "clipboard"))]
-fn clipboard_text() -> Option<String> {
-    None
+    crate::clipboard::paste()
 }
 
 /// Returns true if clipboard support is compiled in.

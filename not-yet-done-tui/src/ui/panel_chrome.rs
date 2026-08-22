@@ -181,6 +181,11 @@ impl<'a> PanelChrome<'a> {
             return None;
         }
 
+        // One line here covers every popup in the app for the mouse: they all
+        // draw on this chrome, so this is the only place that has to know a
+        // panel's true rectangle. A no-op without the `mouse` feature.
+        crate::mouse::push(panel, crate::mouse::Region::Popup);
+
         // Floating panel: clear behind, then fill (no border).
         frame.render_widget(Clear, panel);
         if let Some(bg) = theme.form_panel_bg() {

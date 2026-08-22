@@ -76,8 +76,12 @@ regex                = { workspace = true }
 marked-yaml = "0.8.0"
 
 [features]
-default = ["clipboard"]
+default = ["clipboard", "mouse"]
 clipboard = ["dep:arboard"]
+# Mouse support: terminal mouse reporting, the per-frame hit map, and
+# window-local drag selection. Off means not a single escape sequence is
+# emitted and the terminal keeps its own selection unchanged.
+mouse = []
 
 [dev-dependencies]
 sea-orm = { workspace = true }

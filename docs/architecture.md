@@ -469,6 +469,38 @@ flowchart TD
     LOOPBACK --> POLL
 ```
 
+### Mouse input
+
+Optional (`mouse` cargo feature, on by default). Mouse events enter
+`run_loop` next to the key events and take the same route — `App::handle_mouse`
+returns an `EditorRequest` and goes through the same dispatch, so nothing about
+the loop changes.
+
+What the layer adds is the missing translation from a cell coordinate back to
+a surface. It is recorded **while painting**: `render::render` calls
+`mouse::begin_frame()` and every surface it draws pushes one `(Rect, Region)`
+entry — the bars, the editor, one entry per content pane (inside its focus
+border, in `PaneNode::render`) and one per popup, the last of these covered by
+a single line in `PanelChrome::render` because every popup draws on that
+chrome. The lookup walks the list backwards, so the topmost surface wins.
+
+```mermaid
+flowchart LR
+    DRAW["render pass<br/>paints a surface"] -- "push(rect, region)" --> MAP[(frame-scoped<br/>region map)]
+    EV["MouseEvent<br/>(x, y)"] --> HIT["hit(x, y)<br/>topmost wins"]
+    MAP --> HIT
+    HIT --> DISP["handle()<br/>drag → selection<br/>wheel → arrow keys"]
+    DISP --> POST["after_render:<br/>snapshot + tint"]
+```
+
+Phase 1 uses that for **window-local selection**: a drag is clipped to the
+rectangle it started in, so selecting inside a popup no longer grabs whole
+terminal rows. `Alt` makes it a block selection, release copies (system
+clipboard, else OSC 52). Why the map is recorded rather than recomputed, why it
+is ambient rather than threaded through, and why the reporting modes are
+written by hand instead of using `EnableMouseCapture`:
+[ADR 0008](decisions/0008-mouse-hit-map-at-render-time.md).
+
 ### Message and request enums
 
 Communication between the views and the app runs exclusively over enums — no

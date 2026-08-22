@@ -8,10 +8,15 @@ use not_yet_done_ratatui::FilePicker;
 use tuirealm::component::Component;
 
 use crate::app::App;
+use crate::mouse;
 use crate::tabs::Tab;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+
+    // The mouse hit map describes exactly one frame. Everything drawn below
+    // registers itself as it goes, so the map and the screen cannot disagree.
+    crate::mouse::begin_frame();
 
     // Before any height is measured: globally routed load banners are derived
     // from the tabs' current status, and the bar they live on must already
@@ -82,6 +87,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let mut idx = 0;
     app.tab_bar.view(frame, chunks[idx]);
+    mouse::push(chunks[idx], mouse::Region::TabBar);
     idx += 1;
 
     if action_bar_height > 0 {
@@ -89,11 +95,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Some(cv) = app.content_view_mut(active_idx) {
             cv.render_action_bar(frame, bar_area);
         }
+        mouse::push(bar_area, mouse::Region::ActionBar);
         idx += 1;
     }
 
     if alert_height > 0 {
         app.alert_bar.view(frame, chunks[idx]);
+        mouse::push(chunks[idx], mouse::Region::AlertBar);
         idx += 1;
     }
 
@@ -118,9 +126,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         let mut row_idx = 0;
         if error_height > 0 {
             app.query_error_bar.view(frame, rows[row_idx]);
+            mouse::push(rows[row_idx], mouse::Region::QueryError);
             row_idx += 1;
         }
         if let Some(cv) = app.content_view_mut(content_idx) {
+            // The panes register themselves one level down, in
+            // `PaneNode::render` — only it knows where a split put them.
             cv.view(frame, rows[row_idx]);
         } else {
             // Broken content slot: show the configuration error
@@ -135,16 +146,19 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Some(pane) = app.builtin_editor.as_mut() {
             pane.render(frame, editor_area);
         }
+        mouse::push(editor_area, mouse::Region::Editor);
         idx += 1;
     }
 
     if notification_height > 0 {
         app.notification_bar.view(frame, chunks[idx]);
+        mouse::push(chunks[idx], mouse::Region::NotificationBar);
         idx += 1;
     }
 
     let status_area = chunks[idx];
     app.status_bar.view(frame, status_area);
+    mouse::push(status_area, mouse::Region::StatusBar);
 
     // Floating popups are kept at least two blank rows clear of the
     // terminal's top and bottom edge, regardless of where the surrounding
@@ -252,6 +266,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_modal(frame, area, &app.theme, msg);
     }
 
+    // Mouse drag selection: snapshot the cells under it (so a release can
+    // copy what is on screen) and tint it. Last, so it sees every overlay
+    // above — and before the VS16 pass, which only touches diff options.
+    let theme = std::sync::Arc::clone(&app.shared_theme);
+    app.mouse.after_render(frame.buffer_mut(), &theme);
+
     // Final pass: pin the diff width of VS16 emoji cells (see `force_vs16_widths`).
     force_vs16_widths(frame.buffer_mut());
 }
@@ -356,6 +376,9 @@ fn render_modal(
     let y = (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = ratatui::layout::Rect::new(x, y, popup_w, popup_h);
 
+    // Drawn by hand rather than through `PanelChrome`, so it registers itself.
+    mouse::push(popup_area, mouse::Region::Popup);
+
     frame.render_widget(Clear, popup_area);
 
     let buf = frame.buffer_mut();
@@ -457,6 +480,9 @@ fn render_file_picker_overlay(
     let x = (area.width.saturating_sub(popup_w)) / 2;
     let y = (area.height.saturating_sub(popup_h)) / 2;
     let popup = Rect::new(x, y, popup_w, popup_h);
+
+    // The picker brings its own chrome, so it too registers itself.
+    mouse::push(popup, mouse::Region::Popup);
 
     frame.render_widget(Clear, popup);
     picker.view(frame, popup);

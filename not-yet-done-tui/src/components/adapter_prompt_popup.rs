@@ -194,6 +194,9 @@ impl AdapterPromptPopup {
         )));
 
         let popup = centered_rect(area, lines.len() as u16);
+        // Own chrome rather than `PanelChrome`, so it registers itself for
+        // the mouse.
+        crate::mouse::push(popup, crate::mouse::Region::Popup);
         frame.render_widget(Clear, popup);
         let block = Block::default()
             .borders(Borders::ALL)
