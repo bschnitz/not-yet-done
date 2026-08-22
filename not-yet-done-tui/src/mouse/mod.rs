@@ -85,6 +85,15 @@ pub enum Region {
     Tab(crate::tabs::Tab),
     /// One sub-tab label of the active view, by index into its `view_defs`.
     SubTab(usize),
+    /// The breadcrumb line above a drilled-down pane.
+    Breadcrumbs,
+    /// One crumb of that line, carrying how many levels up it sits from the
+    /// level on screen — 0 for the current one, which is where you already
+    /// are. A *distance* rather than an index for the same reason
+    /// [`Region::PopupRow`] carries one: the crumb knows how deep the pane
+    /// stood when it was painted, and going up one level is what the back key
+    /// already does.
+    Crumb(u16),
     /// The tab bar's background — everything the labels do not cover.
     TabBar,
     /// The active view's action bar.
@@ -119,8 +128,14 @@ impl Region {
     fn is_control(self) -> bool {
         matches!(
             self,
-            Region::PopupRow(_) | Region::Tab(_) | Region::SubTab(_)
+            Region::PopupRow(_) | Region::Tab(_) | Region::SubTab(_) | Region::Crumb(_)
         )
+    }
+
+    /// Whether a popup, if one is open, leaves this region reachable.
+    #[cfg(feature = "mouse")]
+    fn belongs_to_popup(self) -> bool {
+        matches!(self, Region::Popup | Region::PopupRow(_))
     }
 }
 
@@ -164,6 +179,26 @@ pub(crate) fn hit(x: u16, y: u16) -> Option<(Rect, Region)> {
 #[cfg(feature = "mouse")]
 fn hit_surface(x: u16, y: u16) -> Option<(Rect, Region)> {
     find(x, y, |r| !r.is_control())
+}
+
+/// Whether a hit on this region may act, given what else is on screen.
+///
+/// A popup owns the input while it is up — the key path routes every keystroke
+/// into it — so a click that lands *behind* one must not switch a tab or move
+/// a cursor there. The frame's own map answers this: every popup draws through
+/// [`PanelChrome`](crate::ui::panel_chrome::PanelChrome) or pushes its panel
+/// itself, so "a popup is open" is exactly "this frame pushed a
+/// [`Region::Popup`]" — no second list of the fifteen popups to keep in step
+/// with `App`, and the transient overlays (the which-key hint, a modal
+/// message) are covered by the same line.
+///
+/// Only *acting* is blocked. Selecting text behind a popup stays allowed: the
+/// popup owns the input, not the screen, and copying a value you can see is
+/// the reason the whole selection exists.
+#[cfg(feature = "mouse")]
+fn blocked_by_popup(region: Region) -> bool {
+    !region.belongs_to_popup()
+        && REGIONS.with_borrow(|regions| regions.iter().any(|(_, r)| *r == Region::Popup))
 }
 
 #[cfg(feature = "mouse")]
@@ -259,10 +294,20 @@ impl MouseState {
     /// Copy the region's cells out of the freshly drawn frame, then tint the
     /// selected ones. Runs at the very end of the render pass, so it sees
     /// every overlay.
+    ///
+    /// A press that has not moved yet is not tinted unless
+    /// [`highlight_press`](crate::config::tui_config::MouseConfig::highlight_press)
+    /// asks for it: almost every press turns out to be a click, and a single
+    /// tinted cell that lives for one frame reads as a stray cursor rather
+    /// than as a selection. The snapshot is taken either way — the second
+    /// click of a double click reads the word out of it.
     #[cfg(feature = "mouse")]
-    pub fn after_render(&mut self, buf: &mut Buffer, theme: &Theme) {
+    pub fn after_render(&mut self, buf: &mut Buffer, theme: &Theme, highlight_press: bool) {
         let Some(sel) = self.selection else { return };
         self.snapshot = Some(Snapshot::capture(buf, sel.bounds));
+        if sel.dragging && sel.is_click() && !highlight_press {
+            return;
+        }
         sel.paint(buf, theme);
     }
 
@@ -272,6 +317,7 @@ impl MouseState {
         &mut self,
         _buf: &mut ratatui::buffer::Buffer,
         _theme: &crate::ui::theme::Theme,
+        _highlight_press: bool,
     ) {
     }
 }
@@ -355,8 +401,8 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
 /// Everything reachable this way is reachable by key as well — the mouse is a
 /// second way in, never a second implementation. What a click deliberately
 /// does *not* do is reach past a popup: while one is open it owns the input,
-/// so a stray click on the tab bar behind it must not switch tabs (the App
-/// guards that, in the same place the key path does).
+/// so a stray click on the tab bar behind it must not switch tabs. See
+/// [`blocked_by_popup`].
 ///
 /// Repeated clicks pick out text, the way they do in the terminal we took the
 /// mouse away from: the second click takes the word, the third the line. The
@@ -371,12 +417,18 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
     };
     let clicks = app.mouse.register_click(x, y, Instant::now());
     let double = clicks == 2;
-    if clicks == TRIPLE_CLICK || (double && !acts_on_double(app, region, x, y)) {
+    // Behind a popup nothing acts, so every second click there is free for
+    // the word under it.
+    let blocked = blocked_by_popup(region);
+    if clicks == TRIPLE_CLICK || (double && (blocked || !acts_on_double(app, region, x, y))) {
         return select_run(app, x, y, clicks == TRIPLE_CLICK);
     }
     // A single click is a press, not a selection: whatever the last one
     // highlighted is stale the moment this one lands.
     app.mouse.clear_selection();
+    if blocked {
+        return EditorRequest::None;
+    }
     match region {
         Region::Tab(tab) => app.activate_tab(tab),
         Region::SubTab(idx) => return app.activate_subtab(idx),
@@ -392,6 +444,7 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
             }
         }
         Region::PopupRow(delta) => return popup_row(app, delta, double),
+        Region::Crumb(levels) => return app.click_breadcrumb(levels),
         _ => {}
     }
     EditorRequest::None
@@ -465,7 +518,14 @@ fn popup_row(app: &mut crate::app::App, delta: i16, double: bool) -> EditorReque
 /// Send the wheel where the pointer is, rather than where the focus is.
 #[cfg(feature = "mouse")]
 fn scroll(app: &mut crate::app::App, x: u16, y: u16, key: &str, forward: bool) -> EditorRequest {
-    match hit(x, y).map(|(_, region)| region) {
+    let region = hit(x, y).map(|(_, region)| region);
+    // Behind a popup the wheel still reaches the keys — and they go to the
+    // popup, which is where they belong — but it must not walk the tabs or
+    // move the focus underneath it.
+    if region.is_some_and(blocked_by_popup) {
+        return wheel(app, key);
+    }
+    match region {
         // The bar has nothing to scroll, and walking the tabs is what a wheel
         // does on a tab strip everywhere else.
         Some(Region::Tab(_) | Region::SubTab(_) | Region::TabBar) => {
@@ -649,6 +709,41 @@ mod tests {
     }
 
     #[test]
+    fn with_no_popup_on_screen_everything_acts() {
+        begin_frame();
+        push(Rect::new(0, 0, 80, 1), Region::TabBar);
+        push(Rect::new(0, 1, 80, 23), Region::ContentPane(1));
+        assert!(!blocked_by_popup(Region::ContentPane(1)));
+        assert!(!blocked_by_popup(Region::Tab(crate::tabs::Tab::Content(0))));
+    }
+
+    #[test]
+    fn an_open_popup_blocks_everything_behind_it() {
+        // `scene` puts a popup over a pane. The popup and its rows stay
+        // reachable; the surfaces it covers — and the bars it does not, which
+        // is the point — do not.
+        scene();
+        assert!(blocked_by_popup(Region::ContentPane(1)));
+        assert!(blocked_by_popup(Region::Tab(crate::tabs::Tab::Content(0))));
+        assert!(blocked_by_popup(Region::Crumb(1)));
+        assert!(!blocked_by_popup(Region::Popup));
+        assert!(!blocked_by_popup(Region::PopupRow(-2)));
+    }
+
+    #[test]
+    fn a_drag_across_the_breadcrumbs_is_not_trapped_in_one_crumb() {
+        begin_frame();
+        push(Rect::new(0, 1, 80, 1), Region::Breadcrumbs);
+        push(Rect::new(0, 1, 6, 1), Region::Crumb(2));
+        push(Rect::new(9, 1, 5, 1), Region::Crumb(1));
+        assert_eq!(hit(10, 1).map(|(_, r)| r), Some(Region::Crumb(1)));
+        assert_eq!(
+            hit_surface(10, 1),
+            Some((Rect::new(0, 1, 80, 1), Region::Breadcrumbs))
+        );
+    }
+
+    #[test]
     fn quick_clicks_on_one_cell_count_up_to_three_and_start_over() {
         let mut state = MouseState::default();
         let mut t = Instant::now();
@@ -674,6 +769,41 @@ mod tests {
         let mut state = MouseState::default();
         assert_eq!(state.register_click(4, 2, t0), 1);
         assert_eq!(state.register_click(4, 3, t0), 1);
+    }
+
+    /// A press anchors a one-cell selection that the next event usually turns
+    /// into a click. Tinting it in the meantime puts an orange block on screen
+    /// for one frame, which is why it takes asking for.
+    #[test]
+    fn the_cell_under_a_press_is_left_alone_until_it_is_asked_for() {
+        let theme = Theme::new(crate::config::ThemeConfig::default());
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        let mut state = MouseState::default();
+        state.selection = Some(Selection::new(area, 3, 0, false));
+
+        state.after_render(&mut buf, &theme, false);
+        assert_ne!(buf[(3, 0)].bg, theme.selection_bg());
+        // The snapshot is taken either way — a double click reads its word
+        // out of the frame the press was drawn in.
+        assert!(state.snapshot.is_some());
+
+        state.after_render(&mut buf, &theme, true);
+        assert_eq!(buf[(3, 0)].bg, theme.selection_bg());
+    }
+
+    #[test]
+    fn a_selection_that_moved_is_tinted_without_being_asked() {
+        let theme = Theme::new(crate::config::ThemeConfig::default());
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        let mut state = MouseState::default();
+        let mut sel = Selection::new(area, 3, 0, false);
+        sel.extend_to(5, 0);
+        state.selection = Some(sel);
+
+        state.after_render(&mut buf, &theme, false);
+        assert_eq!(buf[(4, 0)].bg, theme.selection_bg());
     }
 
     #[test]

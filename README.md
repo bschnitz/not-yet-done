@@ -193,6 +193,7 @@ The TUI understands the mouse. What it does today:
 | Double-click a row    | Do to it what `Enter` does                                |
 | Click a fold marker   | Fold or unfold that tree row                              |
 | Click a column header | Sort by it: ascending → descending → unsorted             |
+| Click a breadcrumb    | Climb back to that level, one `Backspace` per level       |
 | Click a popup entry   | Move the popup's cursor onto it                           |
 | Double-click an entry | Pick it, exactly as `Enter` would                         |
 | Drag with left        | Select text — **clipped to the window under the pointer** |
@@ -208,8 +209,20 @@ One button does both jobs: a press and release on the same cell is a click and
 means whatever is drawn there, anything that moved is a selection. The wheel
 takes the focus with it, so a scrolled pane is also the pane the arrow keys
 talk to — one scrolling path, not two. Nothing the mouse reaches is
-mouse-only; every one of these has a key, and while a popup has the input a
-click on the tab bar behind it is ignored just as the number key would be.
+mouse-only; every one of these has a key.
+
+**A popup owns the input, for the mouse too.** While one is open, a click
+outside it acts on nothing: no tab switches, no cursor moves, no pane takes the
+focus — exactly as the number keys and `j`/`k` are ignored in favour of the
+popup. Selecting text outside it still works, because the popup owns the input,
+not the screen, and copying a value you can see from behind a dialog is half
+the reason the selection exists. Closing stays the popup's own business:
+`Esc` closes it, a click outside does not.
+
+When drilled into a level, the breadcrumb line above the table is clickable:
+each crumb goes back to that level, running the same ascent `Backspace` runs,
+once per level in between. The last crumbs are where the cursor already is, so
+clicking them does nothing.
 
 Clicking a row hits the row you see, not a row counted off the top edge: the
 table hands out the geometry it painted, so folded trees, rows that span
@@ -267,7 +280,8 @@ sequence and the terminal behaves exactly as it did before:
 cargo install --path not-yet-done-tui --no-default-features --features clipboard
 ```
 
-Colours come from `theme.mouse:` (see [Theme Colors](#theme-colors)).
+Colours come from `theme.mouse:` (see [Theme Colors](#theme-colors)), behaviour
+from `mouse:` in `tui.yaml` (see [Mouse](#mouse-1)).
 
 ### Task Operations
 
@@ -2067,6 +2081,26 @@ another row instead.
 screen a larger cap keeps the hints on one line; on a narrow one, or when you
 prefer compact popups, a smaller cap trades a second hint row for a popup that
 stays as wide as its entries. `0` stops the hints from widening a popup at all.
+
+### Mouse
+
+```yaml
+mouse:
+  highlight_press: false # tint the cell a press is anchored on
+```
+
+Behaviour of the pointer; the colours live in `theme.mouse:`. See
+[Mouse](#mouse) for what the buttons do.
+
+A press anchors a selection on the cell under it, and the app draws a frame
+before knowing whether it will become a drag or turn out to be a click. Tinting
+that single cell in the meantime puts a coloured block on the screen for one
+frame, which reads as a stray cursor rather than as a selection — so by default
+nothing is tinted until the pointer actually moves. Set `highlight_press: true`
+to see where a drag is anchored while it is being made.
+
+The block parses whatever the `mouse` cargo feature is set to, so one
+`tui.yaml` kept in sync across machines works against every build.
 
 ### Inline images
 

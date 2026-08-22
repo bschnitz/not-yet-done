@@ -100,6 +100,10 @@ pub struct TuiConfig {
     /// Inline terminal graphics in markdown bodies. See [`ImagesConfig`].
     #[serde(default)]
     pub images: ImagesConfig,
+    /// What the pointer does. Colours live in [`ThemeConfig`]; this is
+    /// behaviour. See [`MouseConfig`].
+    #[serde(default)]
+    pub mouse: MouseConfig,
 }
 
 /// Default shortcuts shipped with the app. See
@@ -128,8 +132,35 @@ impl Default for TuiConfig {
             popups: Default::default(),
             which_key: Default::default(),
             images: Default::default(),
+            mouse: Default::default(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MouseConfig — pointer behaviour (colours live in ThemeConfig)
+// ---------------------------------------------------------------------------
+
+/// Behaviour of the pointer.
+///
+/// ```yaml
+/// mouse:
+///   highlight_press: false
+/// ```
+///
+/// Kept out of the `mouse` cargo feature on purpose, like the matching colour
+/// block: a `tui.yaml` written against a build with mouse support must still
+/// parse against one without.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MouseConfig {
+    /// Tint the cell the left button went down on while nothing has been
+    /// dragged yet.
+    ///
+    /// Off by default: almost every press turns out to be a click, and the
+    /// highlight then flashes for a frame and reads as a stray cursor rather
+    /// than as a selection. Turn it on to see where a drag is anchored.
+    #[serde(default)]
+    pub highlight_press: bool,
 }
 
 // ---------------------------------------------------------------------------

@@ -4861,27 +4861,57 @@ impl ContentPane {
         })
     }
 
+    /// Draw the path to the level on screen, and register each crumb so it
+    /// can be clicked back to.
+    ///
+    /// The distance a crumb carries is worked out here rather than looked up
+    /// later, for the same reason the popup rows carry theirs: while the line
+    /// is being painted the depth is known, and a frame that is gone cannot be
+    /// asked about it. The trailing crumbs — the deepest item and the child
+    /// level named after it — describe where the cursor already is, so they
+    /// carry 0 and clicking them does nothing.
     fn render_breadcrumbs(&self, frame: &mut Frame, area: Rect, view_defs: &[ViewDef]) {
+        use unicode_width::UnicodeWidthStr;
+
         let t = &*self.theme;
-        let mut spans = Vec::new();
+        // The line itself, so a drag across the path stays on the path
+        // instead of being clipped to a single crumb.
+        crate::mouse::push(area, crate::mouse::Region::Breadcrumbs);
 
         let root_label = self
             .view_def(view_defs)
             .map(|v| v.name.as_str())
             .unwrap_or("root");
-        spans.push(Span::styled(root_label, Style::default().fg(t.accent())));
 
-        for f in &self.nav_stack {
-            spans.push(Span::styled(" › ", Style::default().fg(t.text_dim())));
-            spans.push(Span::styled(&f.label, Style::default().fg(t.text_med())));
+        // (label, colour, levels between it and the level on screen)
+        let depth = self.nav_stack.len() as u16;
+        let mut crumbs: Vec<(&str, Style, u16)> =
+            vec![(root_label, Style::default().fg(t.accent()), depth)];
+        for (i, f) in self.nav_stack.iter().enumerate() {
+            let up = depth - 1 - i as u16;
+            crumbs.push((&f.label, Style::default().fg(t.text_med()), up));
+        }
+        if let Some(ref child) = self.active_child {
+            crumbs.push((&child.name, Style::default().fg(t.text_high()), 0));
         }
 
-        if let Some(ref child) = self.active_child {
-            spans.push(Span::styled(" › ", Style::default().fg(t.text_dim())));
-            spans.push(Span::styled(
-                &child.name,
-                Style::default().fg(t.text_high()),
-            ));
+        const SEP: &str = " › ";
+        let mut spans = Vec::new();
+        let mut x = area.x;
+        for (i, (label, style, up)) in crumbs.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(SEP, Style::default().fg(t.text_dim())));
+                x = x.saturating_add(SEP.width() as u16);
+            }
+            let width = label.width() as u16;
+            // A crumb the terminal is too narrow to show is not there to be
+            // clicked either; `push` drops the empty rect on its own.
+            crate::mouse::push(
+                Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
+                crate::mouse::Region::Crumb(up),
+            );
+            x = x.saturating_add(width);
+            spans.push(Span::styled(label, style));
         }
 
         let line = Line::from(spans);
@@ -8825,6 +8855,26 @@ impl ContentView {
 
     pub fn breadcrumbs(&self) -> Vec<&str> {
         self.active_pane().breadcrumbs()
+    }
+
+    /// Climb `levels` drill-down levels out of the active pane at once — what
+    /// clicking a breadcrumb asks for.
+    ///
+    /// One [`ContentPane::nav_back`] per level rather than a shortcut through
+    /// the stack: that is the one ascent the back key runs too, and each level
+    /// restores its own snapshot (items, cursor, preview, tree state) on the
+    /// way out. `None` when there was nothing to climb.
+    pub(crate) fn nav_back_levels(&mut self, levels: usize) -> Option<SubViewMessage> {
+        let view_defs = self.view_defs.clone();
+        let pane = self.active_pane_mut();
+        let mut moved = false;
+        for _ in 0..levels {
+            if !pane.nav_back(&view_defs) {
+                break;
+            }
+            moved = true;
+        }
+        moved.then_some(SubViewMessage::SelectionChanged(None))
     }
 
     pub fn parent_node_id(&self) -> Option<&str> {
@@ -15475,6 +15525,67 @@ mod tests {
         assert_eq!(crumbs.len(), 2);
         assert_eq!(crumbs[0], "First issue");
         assert_eq!(crumbs[1], "Comments");
+    }
+
+    /// Two levels deep, so the distance a crumb carries is more than "root or
+    /// not": clicking the middle one has to climb exactly one level.
+    #[cfg(feature = "mouse")]
+    #[test]
+    fn every_breadcrumb_registers_the_climb_it_stands_for() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-2", "Second issue", &child_def, &view_defs);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        crate::mouse::begin_frame();
+        terminal
+            .draw(|frame| {
+                view.active_pane()
+                    .render_breadcrumbs(frame, frame.area(), &view_defs)
+            })
+            .unwrap();
+
+        // "issues › First issue › Second issue › Comments"
+        let at = |x| crate::mouse::hit(x, 0).map(|(_, r)| r);
+        assert_eq!(at(2), Some(crate::mouse::Region::Crumb(2)), "the root");
+        assert_eq!(at(12), Some(crate::mouse::Region::Crumb(1)));
+        assert_eq!(at(25), Some(crate::mouse::Region::Crumb(0)), "where we are");
+        assert_eq!(at(40), Some(crate::mouse::Region::Crumb(0)), "the child");
+        // A separator is not a crumb: it falls through to the line itself,
+        // which does nothing but hold a drag together.
+        assert_eq!(at(7), Some(crate::mouse::Region::Breadcrumbs));
+    }
+
+    #[test]
+    fn clicking_a_breadcrumb_climbs_that_many_levels() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-2", "Second issue", &child_def, &view_defs);
+        assert_eq!(view.nav_depth(), 2);
+
+        assert!(view.nav_back_levels(1).is_some());
+        assert_eq!(view.nav_depth(), 1);
+        // The root crumb from there.
+        assert!(view.nav_back_levels(1).is_some());
+        assert_eq!(view.nav_depth(), 0);
+        // The crumb of the level you are on asks for nothing, and asking for
+        // more levels than there are stops at the root.
+        assert!(view.nav_back_levels(0).is_none());
+        assert!(view.nav_back_levels(3).is_none());
     }
 
     #[test]
