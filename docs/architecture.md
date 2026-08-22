@@ -469,6 +469,30 @@ flowchart TD
     LOOPBACK --> POLL
 ```
 
+### Owning the terminal
+
+`terminal.rs` is the single place that claims the terminal and gives it back.
+Claiming means three independent things — raw mode, the alternate screen, and
+the input modes of `events.rs` (kitty keyboard disambiguation plus mouse
+reporting) — and every one of them survives the process. So `setup()` also
+installs a panic hook, which keeps the invariant "the alternate screen is up ⇒
+the teardown is armed" in one function instead of spread over call sites.
+
+The hook restores **before** it chains to the previous hook: the default hook
+writes the message and backtrace to stderr, and on the alternate screen that
+output dies with the process. Undoing the input modes first matters for the
+same reason it matters at the editor-suspend sites — a shell that does not
+speak SGR would read the mouse reports as garbage input. The panic also goes
+to the diagnostic log, because a terminal that scrolled away is not evidence.
+
+Two guards keep the hook from doing damage of its own. An `ACTIVE` flag makes
+it inert before `setup()` and after `restore()`, so a panic while reading the
+config does not spray escape sequences into the shell, and a panic inside
+`restore()` cannot run the teardown twice. An `OWNER` thread id restricts the
+teardown to the thread that draws: a panicking background load kills only its
+own task, the render loop carries on, and tearing the terminal down under it
+would be worse than the panic.
+
 ### Mouse input
 
 Optional (`mouse` cargo feature, on by default). Mouse events enter
