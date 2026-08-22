@@ -351,6 +351,30 @@ pub struct ItemSummary {
     pub creator: String,
     pub modified: Option<String>,
     pub total_attachments: u64,
+    /// Tag names in payload order, colours dropped. See [`tag_names`].
+    pub tags: Vec<String>,
+}
+
+/// Read Taiga's `tags` field.
+///
+/// Two shapes reach us: the list endpoints send `[["name", "#colour"], …]`
+/// (colour may be `null`), older payloads and some detail responses send a
+/// plain `["name", …]`. Both collapse to the names; empty entries are
+/// dropped, because Taiga happily stores a blank tag and a blank column cell
+/// with a stray comma in front of it is worse than no cell at all.
+pub(crate) fn tag_names(v: &serde_json::Value) -> Vec<String> {
+    let Some(arr) = v.get("tags").and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| match t {
+            serde_json::Value::Array(pair) => pair.first().and_then(|x| x.as_str()),
+            serde_json::Value::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Run all specs in parallel and merge the results, deduplicating by
@@ -476,7 +500,7 @@ pub fn default_sort() -> Vec<SortKey> {
 /// `taiga:item` and the per-type variants.
 pub fn sortable_column_keys() -> &'static [&'static str] {
     &[
-        "ref", "type", "status", "assignee", "creator", "subject", "modified", "project",
+        "ref", "type", "status", "assignee", "creator", "subject", "tags", "modified", "project",
     ]
 }
 
@@ -539,6 +563,18 @@ fn compare_on_column(column: &str, a: &ItemSummary, b: &ItemSummary) -> std::cmp
         }
         "creator" => compare_people(&a.creator, &b.creator),
         "subject" => a.subject.cmp(&b.subject),
+        // Untagged last, for the same reason unassigned sorts last: the rows
+        // with nothing to say must not push the interesting ones off screen.
+        "tags" => match (a.tags.is_empty(), b.tags.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            _ => a
+                .tags
+                .join(", ")
+                .to_lowercase()
+                .cmp(&b.tags.join(", ").to_lowercase()),
+        },
         "modified" => a.modified.cmp(&b.modified),
         "project" => a
             .project_slug
@@ -694,6 +730,7 @@ fn parse_item(item_type: ItemType, v: &serde_json::Value) -> ItemSummary {
             .and_then(|x| x.as_str())
             .map(|s| s.to_string()),
         total_attachments: u("total_attachments"),
+        tags: tag_names(v),
     }
 }
 
@@ -916,6 +953,7 @@ sort:
             creator: String::new(),
             modified: modified.map(|s| s.into()),
             total_attachments: 0,
+            tags: Vec::new(),
         }
     }
 
@@ -1034,5 +1072,49 @@ sort:
         assert_eq!(items[1].item_type, ItemType::Task);
         assert_eq!(items[1].r#ref, 8);
         assert_eq!(items[2].item_type, ItemType::Issue);
+    }
+
+    #[test]
+    fn tags_read_both_payload_shapes_and_drop_blanks() {
+        // The list endpoints pair every tag with a colour, detail payloads
+        // sometimes send bare strings, and Taiga will happily store a blank.
+        let paired = serde_json::json!({
+            "tags": [["frontend", "#729fcf"], ["bug", null], ["", "#000000"]]
+        });
+        assert_eq!(tag_names(&paired), vec!["frontend", "bug"]);
+        let bare = serde_json::json!({ "tags": ["frontend", ""] });
+        assert_eq!(tag_names(&bare), vec!["frontend"]);
+        assert!(tag_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn parsed_items_carry_their_tags() {
+        let raw = serde_json::json!({
+            "id": 5, "ref": 5, "project": 1, "subject": "s",
+            "tags": [["backend", "#8ae234"]]
+        });
+        assert_eq!(parse_item(ItemType::Task, &raw).tags, vec!["backend"]);
+    }
+
+    #[test]
+    fn sorting_by_tags_puts_untagged_rows_last() {
+        let tagged = |r: u64, tags: &[&str]| {
+            let mut i = item(ItemType::Task, r, "Open", None);
+            i.tags = tags.iter().map(|s| s.to_string()).collect();
+            i
+        };
+        let mut items = vec![tagged(1, &[]), tagged(2, &["Zeta"]), tagged(3, &["alpha"])];
+        apply_sort(
+            &mut items,
+            &[SortKey {
+                column: "tags".into(),
+                direction: SortDirection::Asc,
+            }],
+        );
+        assert_eq!(
+            items.iter().map(|i| i.r#ref).collect::<Vec<_>>(),
+            vec![3, 2, 1],
+            "case-insensitive, untagged last"
+        );
     }
 }

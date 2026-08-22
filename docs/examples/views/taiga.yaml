@@ -94,6 +94,12 @@ views:
       - key: creator
         label: Creator
         sizing: max
+      # Tag names, comma-separated (Taiga's colours are dropped). Sorts
+      # case-insensitively with untagged rows last. Edit them in the item
+      # buffer's `# tags:` line, not here.
+      - key: tags
+        label: Tags
+        sizing: max
       - key: subject
         label: Subject
         source: label

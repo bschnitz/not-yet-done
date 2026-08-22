@@ -47,7 +47,7 @@ pub use query::{
 };
 /// Crate-internal: the detail path reuses the list path's person-name
 /// resolution so a row and its ticket buffer never disagree on a name.
-pub(crate) use query::{member_display_name, owner_display_name};
+pub(crate) use query::{member_display_name, owner_display_name, tag_names};
 
 pub(crate) use project_meta::ProjectMetaCache;
 

@@ -715,6 +715,7 @@ fn column_label(key: &str) -> &'static str {
         "assignee" => "Assignee",
         "creator" => "Creator",
         "subject" => "Subject",
+        "tags" => "Tags",
         "modified" => "Modified",
         "project" => "Project",
         _ => "",
@@ -734,6 +735,7 @@ fn item_summary_to_node_summary(s: crate::client::ItemSummary) -> NodeSummary {
         creator,
         modified,
         total_attachments,
+        tags,
         ..
     } = s;
     let ref_num = r#ref;
@@ -780,6 +782,13 @@ fn item_summary_to_node_summary(s: crate::client::ItemSummary) -> NodeSummary {
                     key: "creator".into(),
                     value: creator,
                     display_label: "Creator".into(),
+                    editable: false,
+                    allowed_values: None,
+                },
+                MetadataField {
+                    key: "tags".into(),
+                    value: tags.join(", "),
+                    display_label: "Tags".into(),
                     editable: false,
                     allowed_values: None,
                 },
