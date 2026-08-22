@@ -57,6 +57,9 @@ pub struct Selection {
     anchor: (u16, u16),
     cursor: (u16, u16),
     grain: Grain,
+    /// Whether that unit is shown as soon as the button goes down, rather
+    /// than only once the pointer moves.
+    preview: bool,
     block: bool,
     /// `false` once the button came back up. The selection stays visible
     /// after that so it is obvious what was copied.
@@ -73,6 +76,7 @@ impl Selection {
             anchor: at,
             cursor: at,
             grain: Grain::Cell,
+            preview: false,
             block,
             dragging: true,
         }
@@ -80,11 +84,15 @@ impl Selection {
 
     /// Select by whole words or whole lines from here on.
     ///
-    /// Deliberately does *not* snap the anchor to that unit yet: until the
-    /// pointer moves this is still a click, and a double click on a table row
-    /// has to keep opening the row rather than highlighting its text.
-    pub fn with_grain(mut self, grain: Grain) -> Self {
+    /// `preview` shows that unit right away, while the button is still down.
+    /// It is left off where the release is going to *act* instead of select —
+    /// a table row opens, a popup entry is picked — because a word that
+    /// appears for the length of a double click reads as a glitch rather than
+    /// as a selection. The grain itself is set either way: even there, a drag
+    /// out of the press selects by words.
+    pub fn with_grain(mut self, grain: Grain, preview: bool) -> Self {
         self.grain = grain;
+        self.preview = preview;
         self
     }
 
@@ -158,14 +166,45 @@ impl Selection {
     /// third click of a run. Reports whether the line held anything.
     pub fn select_line(&mut self, snap: &Snapshot, y: u16) -> bool {
         let (_, y) = clamp_into(self.bounds, self.bounds.left(), y);
-        let filled = |x: &u16| !snap.get(*x, y).trim().is_empty();
-        let range = self.bounds.left()..self.bounds.right();
-        let (Some(first), Some(last)) = (range.clone().find(filled), range.rev().find(filled))
-        else {
+        let Some((first, last)) = line_run(snap, self.bounds, y) else {
             return false;
         };
         self.reshape((first, y), (last, y));
         true
+    }
+
+    /// Grow a press that has not moved onto the unit its click run picked, so
+    /// it is highlighted while the button is still held — what holding a
+    /// double click does in a terminal. Reports whether anything is showing.
+    ///
+    /// Runs at the end of the render pass rather than on the press itself,
+    /// because the boundaries are read off the frame the press was drawn in
+    /// and that frame does not exist yet when the event arrives.
+    pub fn settle(&mut self, snap: &Snapshot) -> bool {
+        if !self.preview || !self.is_click() {
+            return false;
+        }
+        let (x, y) = self.origin;
+        let run = match self.grain {
+            Grain::Cell => None,
+            Grain::Word => word_run(snap, self.bounds, x, y),
+            Grain::Line => line_run(snap, self.bounds, y),
+        };
+        let Some((left, right)) = run else {
+            return false;
+        };
+        // Deliberately not [`reshape`]: the button is still down, and this is
+        // where a word drag starts from.
+        self.anchor = (left, y);
+        self.cursor = (right, y);
+        self.block = false;
+        true
+    }
+
+    /// The button is down on a single cell and nothing has grown out of it:
+    /// no drag, and no unit picked out by a repeated click.
+    pub fn is_bare_press(&self) -> bool {
+        self.is_click() && self.anchor == self.cursor
     }
 
     /// Put both ends somewhere else. Always a flow selection: `Alt` shapes a
@@ -317,6 +356,15 @@ fn word_run(snap: &Snapshot, bounds: Rect, x: u16, y: u16) -> Option<(u16, u16)>
         right += 1;
     }
     Some((left, right))
+}
+
+/// The inclusive column range of what row `y` actually holds, or `None` when
+/// it holds nothing. A panel pads its rows out to its own width, and that
+/// padding is not part of the line.
+fn line_run(snap: &Snapshot, bounds: Rect, y: u16) -> Option<(u16, u16)> {
+    let filled = |x: &u16| !snap.get(*x, y).trim().is_empty();
+    let range = bounds.left()..bounds.right();
+    Some((range.clone().find(filled)?, range.rev().find(filled)?))
 }
 
 /// Whether a cell belongs to a word.
@@ -555,7 +603,7 @@ mod tests {
     /// with the grain a run of clicks would have set.
     fn dragged(text: &str, grain: Grain, from: u16, to: u16) -> String {
         let (snap, sel) = line(text);
-        let mut sel = Selection::new(sel.bounds, 5 + from, 5, false).with_grain(grain);
+        let mut sel = Selection::new(sel.bounds, 5 + from, 5, false).with_grain(grain, false);
         sel.extend_to(5 + to, 5, Some(&snap));
         sel.text(&snap)
     }
@@ -573,8 +621,61 @@ mod tests {
         // otherwise a double click on a table row would highlight its text
         // instead of opening it.
         let (_, bounds) = scene();
-        let sel = Selection::new(bounds, 7, 6, false).with_grain(Grain::Word);
+        let sel = Selection::new(bounds, 7, 6, false).with_grain(Grain::Word, false);
         assert!(sel.is_click());
+    }
+
+    #[test]
+    fn holding_a_double_click_shows_its_word_before_any_drag() {
+        // What the user sees while the button is still down, and the shape a
+        // word drag then grows out of.
+        let (snap, sel) = line("alpha beta gamma");
+        let mut sel = Selection::new(sel.bounds, 5 + 7, 5, false).with_grain(Grain::Word, true);
+        assert!(sel.settle(&snap));
+        assert_eq!(sel.text(&snap), "beta");
+        assert!(!sel.is_bare_press(), "something is showing");
+        assert!(sel.dragging, "the button is still down");
+    }
+
+    #[test]
+    fn holding_a_triple_click_shows_the_whole_line() {
+        let (snap, sel) = line("   spaced out   ");
+        let mut sel = Selection::new(sel.bounds, 5, 5, false).with_grain(Grain::Line, true);
+        assert!(sel.settle(&snap));
+        assert_eq!(sel.text(&snap), "spaced out");
+    }
+
+    #[test]
+    fn a_shown_word_keeps_growing_when_the_drag_starts() {
+        let (snap, sel) = line("alpha beta gamma");
+        let mut sel = Selection::new(sel.bounds, 5 + 2, 5, false).with_grain(Grain::Word, true);
+        sel.settle(&snap);
+        sel.extend_to(5 + 13, 5, Some(&snap));
+        assert_eq!(sel.text(&snap), "alpha beta gamma");
+    }
+
+    #[test]
+    fn a_press_with_no_word_under_it_shows_nothing() {
+        // Nothing to grow onto, so the press stays what it was — one cell,
+        // which is left untinted.
+        let (snap, sel) = line("a  b");
+        let mut sel = Selection::new(sel.bounds, 5 + 1, 5, false).with_grain(Grain::Word, true);
+        assert!(!sel.settle(&snap));
+        assert!(sel.is_bare_press());
+    }
+
+    #[test]
+    fn a_press_that_is_going_to_act_shows_nothing() {
+        // A double click on a table row opens it. Flashing the row's word for
+        // the length of the click would read as a glitch, so the grain is set
+        // for the drag but nothing is shown.
+        let (snap, sel) = line("alpha beta");
+        let mut sel = Selection::new(sel.bounds, 5 + 7, 5, false).with_grain(Grain::Word, false);
+        assert!(!sel.settle(&snap));
+        assert!(sel.is_bare_press());
+        // Dragging out of it still takes whole words.
+        sel.extend_to(5 + 2, 5, Some(&snap));
+        assert_eq!(sel.text(&snap), "alpha beta");
     }
 
     #[test]
@@ -605,7 +706,7 @@ mod tests {
         let snap = Snapshot::capture(&buf, bounds);
         // Press in the middle of the first row, pointer in the middle of the
         // second: both rows come out entire, edge to edge of the region.
-        let mut sel = Selection::new(bounds, 8, 5, false).with_grain(Grain::Line);
+        let mut sel = Selection::new(bounds, 8, 5, false).with_grain(Grain::Line, false);
         sel.extend_to(7, 6, Some(&snap));
         assert_eq!(sel.text(&snap), "aaaaaaaaaa\nbbbbbbbbbb");
     }
@@ -614,7 +715,7 @@ mod tests {
     fn a_line_drag_that_turns_around_is_symmetrical() {
         let (buf, bounds) = scene();
         let snap = Snapshot::capture(&buf, bounds);
-        let mut up = Selection::new(bounds, 7, 7, false).with_grain(Grain::Line);
+        let mut up = Selection::new(bounds, 7, 7, false).with_grain(Grain::Line, false);
         up.extend_to(8, 6, Some(&snap));
         assert_eq!(up.text(&snap), "bbbbbbbbbb\ncccccccccc");
     }
@@ -624,7 +725,7 @@ mod tests {
         // Line boundaries are the region's edges, not something read back off
         // the screen, so the first drag of a frame is already whole-line.
         let (buf, bounds) = scene();
-        let mut sel = Selection::new(bounds, 8, 5, false).with_grain(Grain::Line);
+        let mut sel = Selection::new(bounds, 8, 5, false).with_grain(Grain::Line, false);
         sel.extend_to(7, 5, None);
         let snap = Snapshot::capture(&buf, bounds);
         assert_eq!(sel.text(&snap), "aaaaaaaaaa");

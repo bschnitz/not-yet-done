@@ -5513,8 +5513,15 @@ here.
 - [ ] Click four times fast on the same cell: the run starts over at a single
       click instead of escalating further.
 
-Dragging out of a multi-click keeps the unit it picked:
+Holding a multi-click shows its unit, and dragging out of it keeps that unit:
 
+- [ ] **Double-click and hold** in a preview or detail pane, without moving:
+      the word is highlighted while the button is down.
+- [ ] **Triple-click and hold** there: the whole line is highlighted.
+- [ ] Double-click and hold on a **blank** cell: nothing is highlighted, no
+      stray tinted cell.
+- [ ] Double-click a **table row** fast: it opens as before, with no word
+      flashing up first. Same for a popup entry.
 - [ ] **Double-click and hold**, then drag sideways: the selection grows word by
       word — the word you pressed in stays whole, and so does the one under the
       pointer, even with the pointer in the middle of it.

@@ -250,12 +250,18 @@ second click already means something it keeps its meaning: a table row opens, a
 popup entry is picked. The third click never does, so a row's text is always
 one triple-click away without dragging across it.
 
-Holding the button down after that keeps the unit: dragging out of a double
-click grows the selection word by word, out of a triple click line by line —
-the word the press landed in and the word under the pointer are both taken
-whole, and a drag that turns back gives up exactly what it took. Dragging
-straight off a single press stays character-precise, which is what the plain
-drag has always been.
+Keep the button down on that second or third click and the word — or the line
+— is highlighted straight away, before any dragging; carry on dragging and the
+selection grows by whole words or whole lines. The word the press landed in and
+the word under the pointer are both taken whole, and a drag that turns back
+gives up exactly what it took. Dragging straight off a single press stays
+character-precise, which is what the plain drag has always been.
+
+Where the release is going to _act_ rather than select — a table row that
+opens, a popup entry that gets picked — nothing is highlighted on the press,
+because a highlight is a promise about what will land on the clipboard.
+Dragging there still selects by words, and the third click still takes the
+line: those do end in a selection.
 
 Popup lists work the same way and stay searchable while you click: the row you
 click carries how far the cursor has to travel to reach it, and the app walks

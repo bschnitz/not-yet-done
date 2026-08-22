@@ -565,9 +565,19 @@ press cell and the pointer cell and derives its two visible ends from them on
 every move — at word grain each end grows to its own word boundary, at line
 grain to the region's edges, and reading order decides which end grows which
 way. Deriving instead of accumulating is what makes a drag that reverses give
-back exactly what it took. The press itself deliberately does not snap yet: a
-double click on a table row still has to open the row, and `is_click()` asks
-whether the pointer ever moved.
+back exactly what it took.
+
+Holding such a click shows its unit before any dragging, and the render pass is
+what can do it: the boundaries are read off the frame the press was drawn in,
+which does not exist yet while the event is being handled. So `after_render`
+captures the snapshot and then lets the selection `settle` onto its word or
+line — that also keeps "what is highlighted" and "what a release copies" reading
+the same buffer. Whether to show it at all is one predicate, `picks_text`, asked
+on the press and again on the release: where the release acts instead of
+selecting (a row opens, an entry is picked) nothing is shown, because a
+highlight is a promise about the clipboard. `is_click()` asks whether the
+pointer ever moved and is therefore unaffected by the snap, which is what lets
+the press grow visibly and still open the row.
 
 Breadcrumbs reuse the delta trick a third time, and for the same reason: while
 `render_breadcrumbs` paints the path the pane's depth is known, and a frame that
