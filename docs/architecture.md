@@ -548,6 +548,15 @@ cursor there with `App::handle_key("up"/"down")`, through whichever popup
 currently holds the input. Bounded by the visible window, since both ends of
 the walk are on screen. Lists without a cursor register nothing.
 
+Taking the mouse away from the terminal also takes away its word and line
+selection, so the app owes both back. `MouseState::register_click` counts a run
+of clicks on one cell (1, 2, 3, then over) instead of answering yes/no to
+"double", and the second and third reshape the selection the press already
+anchored — clipped to the same region, read back from the same snapshot, copied
+by the same path. The second click yields where it is already spoken for
+(`acts_on_double`: a popup entry, a data row or a column header), the third
+never does, so no surface is left without a way to grab its text.
+
 Rows and labels are pushed _on top of_ the panel or bar they sit in, which
 would otherwise trap a text selection in a single line, so the press that
 anchors a drag looks up `hit_surface` — the topmost region that is not a

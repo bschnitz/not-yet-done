@@ -196,6 +196,8 @@ The TUI understands the mouse. What it does today:
 | Click a popup entry   | Move the popup's cursor onto it                           |
 | Double-click an entry | Pick it, exactly as `Enter` would                         |
 | Drag with left        | Select text — **clipped to the window under the pointer** |
+| Double-click text     | Select the word under the pointer and copy it             |
+| Triple-click          | Select the whole line and copy it                         |
 | `Alt` + drag          | Select a rectangle instead of flowing text                |
 | Release               | Copy the selection to the clipboard                       |
 | Wheel up / down       | Scroll the pane under the pointer, as `↑` / `↓` would     |
@@ -223,6 +225,15 @@ click, because on a tree row `Enter` is that toggle. Only rows that can
 actually expand answer to it: a leaf's indentation is plain surface and
 selects like the rest of the row, and so does the label text next to the
 arrow. Double-clicking the marker is still one toggle, not two.
+
+Repeated clicks pick out text the way the terminal did before the app took the
+mouse: the second takes the word under the pointer, the third the whole line,
+and both land on the clipboard right away. A "word" holds an identifier
+together — `PROJ-1234`, a path, a URL, a `snake_case` name each come out in one
+click — while quotes, brackets and the tree connectors separate. Where the
+second click already means something it keeps its meaning: a table row opens, a
+popup entry is picked. The third click never does, so a row's text is always
+one triple-click away without dragging across it.
 
 Popup lists work the same way and stay searchable while you click: the row you
 click carries how far the cursor has to travel to reach it, and the app walks
