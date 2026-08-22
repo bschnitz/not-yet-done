@@ -96,6 +96,8 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
                 fields: vec![FormFieldSpec::text("dir", "Workspace base directory")],
             },
         ),
+        // Last on purpose: the only irreversible one.
+        NodeAction::new("delete", "delete", InputSpec::None),
     ]
 }
 
@@ -538,8 +540,35 @@ impl Node for JiraIssueNode {
     /// `confirmed: true` and we drop the bookmark, then reload so the row
     /// vanishes from the bookmarks subtab. The normal tickets subtab keeps
     /// using `toggle-bookmark` via [`Node::execute`] (no confirmation).
+    ///
+    /// `delete` opts into the frontend's generic delete plumbing (same
+    /// contract as the comment node): [`ActionDispatch::DeleteSelf`] makes
+    /// the TUI ask `(y/n)` and the CLI demand `--yes`, and only the
+    /// confirmed path reaches [`Node::execute`]. The prompt names the key
+    /// *and* the summary, because a bare key is easy to mistake.
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
+            "delete" => {
+                // Name the summary, not just the key. A node built by
+                // `from_key` carries none yet, so hydrate for it; if that
+                // fails (no issue-level read permission) the key alone still
+                // identifies the target.
+                let summary = self
+                    .detail()
+                    .await
+                    .map(|d| d.summary.clone())
+                    .unwrap_or_default();
+                let target = if summary.is_empty() {
+                    self.key.clone()
+                } else {
+                    format!("{} — {summary}", self.key)
+                };
+                Ok(ActionDispatch::DeleteSelf {
+                    confirm: Some(format!(
+                        "Delete issue {target}? This cannot be undone. (y/n)"
+                    )),
+                })
+            }
             "remove-bookmark" => {
                 let store = self.bookmarks.as_ref().ok_or_else(|| {
                     other_err("bookmark store unavailable for this node".to_string())
@@ -672,6 +701,16 @@ impl Node for JiraIssueNode {
             ("export_workspace", ActionInput::Form(values)) => {
                 let dir = values.get("dir").map(String::as_str).unwrap_or("");
                 self.export_workspace(dir).await
+            }
+            // Only reachable through the confirmed `DeleteSelf` path above.
+            ("delete", ActionInput::None) => {
+                self.client
+                    .delete_issue(&self.key)
+                    .await
+                    .map_err(other_err)?;
+                Ok(ActionOutcome::Done {
+                    message: Some(format!("{} deleted", self.key)),
+                })
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"
@@ -1628,6 +1667,7 @@ mod tests {
                 "download-attachments",
                 "export-bundle",
                 "export_workspace",
+                "delete",
             ]
         );
         assert!(matches!(actions[0].input, InputSpec::Editor)); // edit_full
@@ -1646,6 +1686,24 @@ mod tests {
         assert!(matches!(actions[13].input, InputSpec::Form { .. })); // download-attachments
         assert!(matches!(actions[14].input, InputSpec::None)); // export-bundle
         assert!(matches!(actions[15].input, InputSpec::Form { .. })); // export_workspace
+        assert!(matches!(actions[16].input, InputSpec::None)); // delete
+    }
+
+    #[tokio::test]
+    async fn delete_requests_confirmation_with_key_and_summary() {
+        let node = test_node(sample_detail());
+        let dispatch = node
+            .invoke_action("delete", &ActionContext::default())
+            .await
+            .unwrap();
+        match dispatch {
+            ActionDispatch::DeleteSelf { confirm: Some(p) } => {
+                assert!(p.contains("PROJ-42"), "{p}");
+                assert!(p.contains("Fix login bug"), "{p}");
+                assert!(p.contains("cannot be undone"), "{p}");
+            }
+            other => panic!("expected DeleteSelf with a prompt, got {other:?}"),
+        }
     }
 
     #[test]
