@@ -273,7 +273,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // copy what is on screen) and tint it. Last, so it sees every overlay
     // above — and before the VS16 pass, which only touches diff options.
     let theme = std::sync::Arc::clone(&app.shared_theme);
-    app.mouse.after_render(frame.buffer_mut(), &theme);
+    let highlight_press = app.config.mouse.highlight_press;
+    app.mouse
+        .after_render(frame.buffer_mut(), &theme, highlight_press);
 
     // Final pass: pin the diff width of VS16 emoji cells (see `force_vs16_widths`).
     force_vs16_widths(frame.buffer_mut());

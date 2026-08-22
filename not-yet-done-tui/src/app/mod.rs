@@ -5764,6 +5764,27 @@ impl App {
         }
     }
 
+    /// Climb back to the breadcrumb that was clicked, `levels` above the one
+    /// on screen.
+    ///
+    /// The crumb of the current level carries 0 and is a no-op: it is where
+    /// the cursor already is, and a click there should not reload it.
+    pub(crate) fn click_breadcrumb(&mut self, levels: u16) -> EditorRequest {
+        if levels == 0 || self.has_input_popup() {
+            return EditorRequest::None;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let msg = self
+            .content_view_mut(idx)
+            .and_then(|cv| cv.nav_back_levels(levels as usize));
+        let req = match msg {
+            Some(m) => self.process_sub_view_message(m),
+            None => EditorRequest::None,
+        };
+        self.sync_components();
+        req
+    }
+
     /// Whether a click on this cell of `pane_id` does something of its own —
     /// it is a column header or a data row.
     ///

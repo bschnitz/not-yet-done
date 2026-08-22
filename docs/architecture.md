@@ -557,10 +557,34 @@ by the same path. The second click yields where it is already spoken for
 (`acts_on_double`: a popup entry, a data row or a column header), the third
 never does, so no surface is left without a way to grab its text.
 
-Rows and labels are pushed _on top of_ the panel or bar they sit in, which
-would otherwise trap a text selection in a single line, so the press that
+Breadcrumbs reuse the delta trick a third time, and for the same reason: while
+`render_breadcrumbs` paints the path the pane's depth is known, and a frame that
+is gone cannot be asked about it. Each crumb is pushed carrying **how many
+levels up it sits** — 0 for the level on screen, so its own crumb is inert — and
+`App::click_breadcrumb` runs `ContentView::nav_back_levels`, which is one
+`nav_back` per level. Not a shortcut through the stack: each level restores its
+own snapshot (items, cursor, preview, stashed tree) on the way out, and that is
+the ascent `Backspace` runs too.
+
+Rows, labels and crumbs are pushed _on top of_ the panel or bar they sit in,
+which would otherwise trap a text selection in a single line, so the press that
 anchors a drag looks up `hit_surface` — the topmost region that is not a
 control — while the click uses `hit`.
+
+**Modality** is read off the map rather than off `App`. Every popup draws
+through `PanelChrome` or pushes its own panel, so "a popup is open" is exactly
+"this frame pushed a `Region::Popup`" — `blocked_by_popup` needs no list of the
+fifteen popups to keep in step with the key path, and it covers the overlays
+`has_input_popup()` does not know (a modal message, the adapter prompt, the
+which-key hint). A blocked hit acts on nothing; it still selects text, since the
+popup owns the input and not the screen. The wheel behind a popup keeps feeding
+arrow keys — they reach the popup, which is where they belong — but skips the
+focus and tab-walking side effects.
+
+What a press must _not_ do is announce itself. It anchors a one-cell selection
+before anyone knows whether it will become a drag or a click, so `after_render`
+takes the snapshot but leaves the cell untinted unless `mouse.highlight_press`
+asks otherwise: a highlight that lives for one frame reads as a stray cursor.
 
 Why the map is recorded rather than recomputed, why it is ambient rather than
 threaded through, and why the reporting modes are written by hand instead of

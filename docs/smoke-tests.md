@@ -5542,6 +5542,54 @@ connectors and the `▶` / `▼` arrow. A single click there is the same toggle
 - [ ] Double-click a fold marker fast: the row toggles **once** and stays that
       way — it does not spring back.
 
+### The breadcrumb line
+
+Only shown once you are drilled into a level. Each crumb goes back to that
+level, running the same ascent `Backspace` runs.
+
+- [ ] Drill two levels deep (twice `Enter` on a row that has children). Click
+      the **root** crumb: you are back at the top level, with the cursor and
+      the scroll position the level had when you left it — the same state the
+      back key restores.
+- [ ] Drill two levels again and click the **middle** crumb: exactly one level
+      up, not all the way out.
+- [ ] Click the **last** crumb (the level you are on) and the child-type crumb
+      behind it: nothing happens, nothing reloads.
+- [ ] Click a **separator** (`›`) between two crumbs: nothing happens.
+- [ ] Drag across the whole path and release: the breadcrumb text is copied and
+      the selection stays on that line — it is not trapped in one crumb and
+      does not reach into the table below.
+- [ ] Narrow the terminal until the path is cut off: the crumbs still on screen
+      work, and clicking past the end of the line does nothing.
+- [ ] At the top level there is no breadcrumb line at all — clicking that row
+      hits whatever is drawn there instead.
+
+### Popup modality
+
+A popup owns the input. For the mouse that means the same refusal the keys
+already get, everywhere outside the panel.
+
+- [ ] Open a popup (`o s`, `q`, the sort menu `c s`) and click a **tab** behind
+      it: nothing switches.
+- [ ] Click a **row of the table** behind it: the cursor does not move, no
+      preview loads, nothing drills.
+- [ ] Click a **column header** behind it: nothing sorts.
+- [ ] Click an **unfocused pane** behind it in a split layout: the focus stays
+      where it is.
+- [ ] Click a **breadcrumb** behind it: the level does not change.
+- [ ] Wheel over the table behind it: the popup's own list scrolls; in
+      particular the pane under the pointer does not take the focus.
+- [ ] Wheel over the **tab bar** behind it: the tabs do not walk.
+- [ ] Selecting still works: drag across the table behind the popup and
+      release — the text is copied. Double-click a word there: it is selected
+      (behind a popup even the second click is free, since nothing there acts).
+- [ ] The popup itself is unaffected: its entries still take a click, a double
+      click still picks.
+- [ ] Close the popup (`Esc`) and click the same spot again: now it acts.
+      Clicking outside is _not_ a way to close the popup.
+- [ ] Hold a chord until the **which-key** panel appears and click the table:
+      nothing happens there either — the chord is still waiting for a key.
+
 ### Clicking popup entries
 
 The cursor is walked to the clicked row with the popup's own arrow keys, so
@@ -5588,8 +5636,15 @@ terminal:
 - [ ] Quit the TUI: the terminal is not left in mouse-reporting mode —
       selecting in the shell afterwards behaves normally.
 
-Colours and the off switch:
+Colours, settings and the off switch:
 
+- [ ] Click anywhere once, slowly: **no coloured block** appears under the
+      pointer while the button is down, and none is left behind afterwards.
+      (This is `mouse.highlight_press`, off by default.)
+- [ ] Set `mouse.highlight_press: true` in `tui.yaml`, restart: now the cell
+      under a press is tinted while the button is down, which shows where a
+      drag is anchored. A drag and a double click look the same as before in
+      both settings.
 - [ ] Set `theme.mouse.selection` / `theme.mouse.selection_bg` in
       `tui-theme.yaml`, restart, select: the highlight uses them. Remove them
       again and the selection falls back to background-on-accent.
@@ -5597,8 +5652,9 @@ Colours and the off switch:
       (`cargo build --release -p not-yet-done-tui --no-default-features --features clipboard`),
       install and start it: dragging selects the way the terminal always did
       (across the popup border, whole rows), no key or wheel behaviour has
-      changed, and a `tui-theme.yaml` that still carries a `mouse:` block
-      loads without a warning.
+      changed, and a `tui-theme.yaml` that still carries a `mouse:` block —
+      or a `tui.yaml` with a `mouse.highlight_press` in it — loads without a
+      warning.
 
 ## Refinements / deferred tasks
 
