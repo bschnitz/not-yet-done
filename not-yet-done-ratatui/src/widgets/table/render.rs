@@ -20,6 +20,11 @@ pub struct RowSpan {
     pub height: u16,
     /// Index into the widget's `rows`, not the visible index.
     pub row: usize,
+    /// Whether the span starts at the row's own first line. False when smooth
+    /// scrolling clipped the leading lines off the top — what is on `y` then
+    /// is the middle of the row, without the glyphs that only the first line
+    /// carries.
+    pub first_line: bool,
 }
 
 /// Where a logical column ended up on screen, in absolute terminal
@@ -60,6 +65,21 @@ impl RenderGeometry {
             .iter()
             .find(|s| x >= s.x && x < s.x + s.width)
             .map(|s| s.col)
+    }
+
+    /// Where logical column `col` was painted, if it was on screen at all
+    /// (horizontal scrolling can take it off).
+    pub fn col_span(&self, col: usize) -> Option<ColSpan> {
+        self.cols.iter().find(|s| s.col == col).copied()
+    }
+
+    /// Whether `y` is the *first* painted line of the row it belongs to.
+    ///
+    /// A row that spans several lines, or one whose top is cut off by smooth
+    /// scrolling, only carries its leading glyphs — the tree connector — on
+    /// that line.
+    pub fn is_row_top(&self, y: u16) -> bool {
+        self.rows.iter().any(|s| s.y == y && s.first_line)
     }
 }
 
@@ -294,6 +314,7 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) -> Ren
                 y: row_top,
                 height: y - row_top,
                 row: row_idx,
+                first_line: skip_lines == 0,
             });
         }
     }

@@ -5822,6 +5822,10 @@ impl App {
     /// and double-clicking there activates nothing either. Activation goes
     /// through the key pipeline rather than calling the view directly, so a
     /// double click means whatever that view has bound to `enter`.
+    ///
+    /// A *single* click on a tree row's fold marker activates too: on such a
+    /// row `enter` is exactly the fold toggle, so the marker needs no handler
+    /// of its own. Double-clicking it stays one toggle.
     pub(crate) fn click_content_row(
         &mut self,
         pane_id: crate::views::content_view::PaneId,
@@ -5839,13 +5843,21 @@ impl App {
         if view.row_at(pane_id, y).is_none() {
             return EditorRequest::None;
         }
+        let marker = view.fold_marker_at(pane_id, x, y);
+        // Both clicks of a pair arrive here, so a double click on the marker
+        // would toggle twice and leave the row where it started. The first
+        // click has already folded it; the second is dropped.
+        if double && marker {
+            return EditorRequest::None;
+        }
+        let activate = double || marker;
         let msg = view.select_row_at(pane_id, x, y);
         let req = match msg {
             Some(m) => self.process_sub_view_message(m),
             None => EditorRequest::None,
         };
         self.sync_components();
-        if !double || !matches!(req, EditorRequest::None) {
+        if !activate || !matches!(req, EditorRequest::None) {
             return req;
         }
         self.handle_key("enter")

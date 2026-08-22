@@ -504,8 +504,8 @@ The first use is **window-local selection**: a drag is clipped to the rectangle
 it started in, so selecting inside a popup no longer grabs whole terminal rows.
 `Alt` makes it a block selection, release copies (system clipboard, else
 OSC 52). A release on the press cell is not a drag at all but a **click**, and
-`mouse::click` routes it — tab, sub-tab, pane focus, row, column header,
-popup entry —
+`mouse::click` routes it — tab, sub-tab, pane focus, row, fold marker, column
+header, popup entry —
 through `pub(crate)`
 entry points on `App` that end in the same `sync_components()` the key paths do
 and decline the same way while an input popup owns the input. The mouse is a
@@ -523,6 +523,18 @@ paragraph. `Table::row_at` / `column_at` / `is_header_line` answer from that,
 and `ContentView` turns the answer into the same `set_selected` +
 `SelectionChanged` a `j` produces. A header click routes into `App::apply_sort`
 — the one write path the `S` hint mode and the sort menu already share.
+
+The fold marker is the same idea split over the two halves that each already
+know their part. The rebuild that projects a tree row's connector — indent, box
+glyphs, arrow, clamped to the label column — is the only place its width is
+known, so it records that one number per row in `ContentPane::last_fold_zones`,
+and only for rows that can actually expand. Where the label column ended up is
+the table's business: `Table::column_bounds`. `ContentView::fold_marker_at`
+multiplies the two, guarded by `is_row_top` so continuation lines of a
+multiline row and a top row clipped by smooth scroll — neither of which carries
+a connector — stay out. It needs no handler of its own: on a tree row `Enter`
+is the fold toggle, so `App::click_content_row` simply takes the double-click
+path for a single click that lands on the marker.
 
 Popup lists get the same treatment with one twist. `LeaderList` records a
 `LeaderRow` per painted entry — which resolves the search prompt, the title and

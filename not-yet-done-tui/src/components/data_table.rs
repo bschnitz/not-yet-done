@@ -180,6 +180,16 @@ impl DataTable {
         self.table.is_header_line(y)
     }
 
+    /// Where logical column `col` was painted in the last frame.
+    pub fn column_bounds(&self, col: usize) -> Option<(u16, u16)> {
+        self.table.column_bounds(col)
+    }
+
+    /// Whether terminal line `y` is a row's first line.
+    pub fn is_row_top(&self, y: u16) -> bool {
+        self.table.is_row_top(y)
+    }
+
     /// Set selected row index programmatically.
     pub fn set_selected(&mut self, row: usize) {
         self.table.set_selected(row);
